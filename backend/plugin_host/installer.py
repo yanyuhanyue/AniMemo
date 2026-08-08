@@ -73,10 +73,12 @@ class PluginPackageInstaller:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(archive.read(relative.as_posix()))
 
-    def _assert_growth_allowed(self):
+    def _assert_growth_allowed(self, expanded_bytes, *, peak_multiplier=2):
         self.storage.ensure()
         minimum = int(getattr(settings, "PLUGIN_MIN_FREE_DISK_MB", 2048)) * 1024 * 1024
-        if shutil.disk_usage(self.storage.root).free < minimum:
+        peak_growth = max(0, int(expanded_bytes)) * max(1, int(peak_multiplier))
+        free = shutil.disk_usage(self.storage.root).free
+        if free - peak_growth < minimum:
             raise PluginInstallError("插件存储空间不足，无法发布。")
 
     def _payload_for(self, plugin_version):
@@ -107,7 +109,6 @@ class PluginPackageInstaller:
 
         slug = plugin.slug
         version = plugin_version.version
-        self._assert_growth_allowed()
         with _PluginFilesystemLock(self.storage.root, slug):
             deployment = PluginDeployment.objects.select_related("current_version").filter(plugin=plugin).first()
             old_version = deployment.current_version if deployment else None
@@ -117,6 +118,11 @@ class PluginPackageInstaller:
                 runtime_registry.ensure_current(slug)
 
             payload, inspected = self._payload_for(plugin_version)
+            expanded_bytes = sum(item["size"] for item in inspected["files"])
+            # Publish keeps both the extracted staging tree and a temporary
+            # runtime tree before the atomic replacement, so reserve 2x the
+            # expanded package size in addition to the configured free floor.
+            self._assert_growth_allowed(expanded_bytes, peak_multiplier=2)
             runtime_target = self.storage.runtime / slug / version
             staging = self.storage.staging / f"{slug}-{version}-{uuid4().hex}"
             runtime_temp = runtime_target.with_name(f".{version}.staged-{uuid4().hex}")
@@ -211,6 +217,9 @@ class PluginPackageInstaller:
                 runtime_registry.ensure_current(slug)
             runtime_target = self.storage.runtime / slug / target_version.version
             if not runtime_target.is_dir():
+                _, inspected = self._payload_for(target_version)
+                expanded_bytes = sum(item["size"] for item in inspected["files"])
+                self._assert_growth_allowed(expanded_bytes, peak_multiplier=2)
                 self.storage.rollback(slug, target_version.version, target_version.package_blob.sha256)
             candidate = runtime_registry.load_candidate(runtime_target, expected_slug=slug, expected_version=target_version.version)
             previous_candidate = None

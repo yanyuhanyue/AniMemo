@@ -7,9 +7,12 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from plugin_host.installer import PluginInstallError, PluginPackageInstaller
 from plugin_host.models import PluginProject, PluginVersion
+from plugin_host.package import inspect_package
 from plugin_host.services import store_package_blob
 
 
@@ -65,3 +68,27 @@ class PluginInstallerTests(TestCase):
                 installer.publish(broken, actor=self.user)
             self.assertTrue(current.is_file())
             self.assertEqual(current.read_bytes(), b"runtime")
+
+    def test_publish_rejects_staging_and_runtime_peak_growth(self):
+        with tempfile.TemporaryDirectory() as directory, override_settings(
+            PLUGIN_ROOT=Path(directory), PLUGIN_MIN_FREE_DISK_MB=1,
+        ):
+            first = self._version(payload=b"first")
+            installer = PluginPackageInstaller(Path(directory))
+            installer.publish(first, actor=self.user)
+            current = Path(directory) / "runtime" / "installer-test" / "1.0.0" / "frontend" / "plugin.js"
+            self.assertEqual(current.read_bytes(), b"first")
+
+            second = self._version("1.1.0", payload=b"second")
+            inspected_bytes = sum(item["size"] for item in inspect_package(
+                (Path(directory) / second.package_blob.storage_path).read_bytes()
+            )["files"])
+            free = 1024 * 1024 + (inspected_bytes * 2) - 1
+            with patch("plugin_host.installer.shutil.disk_usage", return_value=SimpleNamespace(free=free)):
+                with self.assertRaises(PluginInstallError):
+                    installer.publish(second, actor=self.user)
+
+            deployment = PluginVersion.objects.get(pk=first.pk).plugin.deployment
+            self.assertEqual(deployment.current_version_id, first.pk)
+            self.assertEqual(current.read_bytes(), b"first")
+            self.assertFalse((Path(directory) / "runtime" / "installer-test" / "1.1.0").exists())

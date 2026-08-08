@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DEBUG: "true"
+      DJANGO_SECRET_KEY: ci-only-django-secret-key-for-local-github-actions-validation
+      CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
+      FRONTEND_URL: http://localhost:5173
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: python -m pip install -r backend/requirements.txt
+      - run: python -m compileall -q backend
+      - run: python manage.py check
+        working-directory: backend
+      - run: python manage.py makemigrations --check
+        working-directory: backend
+      - run: python manage.py test
+        working-directory: backend
+
+  postgres:
+    name: postgres
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEBUG: "true"
+      DJANGO_SECRET_KEY: ci-only-django-secret-key-for-local-github-actions-validation
+      CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
+      FRONTEND_URL: http://localhost:5173
+      DATABASE_URL: postgresql://anime_journal:ci-password@127.0.0.1:5432/anime_journal
+      POSTGRES_DB: anime_journal
+      POSTGRES_USER: anime_journal
+      POSTGRES_PASSWORD: ci-password
+      REDIS_URL: redis://127.0.0.1:6379/0
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: anime_journal
+          POSTGRES_USER: anime_journal
+          POSTGRES_PASSWORD: ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U anime_journal -d anime_journal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: python -m pip install -r backend/requirements.txt
+      - run: python -c "import os, psycopg; psycopg.connect(os.environ['DATABASE_URL']).close(); print('PostgreSQL service is reachable')"
+      - run: python manage.py shell -c "from django.db import connection; assert connection.vendor == 'postgresql', connection.vendor; print(connection.vendor)"
+        working-directory: backend
+      - run: python manage.py test
+        working-directory: backend
+      - run: python manage.py test plugin_host.tests.test_concurrency --verbosity 2
+        working-directory: backend
+
+  plugins:
+    name: plugins
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: npm run test:plugins
+      - run: python scripts/pluginctl.py validate
+      - run: python scripts/pluginctl.py build watch-history-importer
+      - run: python scripts/pluginctl.py pack watch-history-importer

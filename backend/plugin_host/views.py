@@ -304,7 +304,7 @@ class StaffPluginInstallView(APIView):
             version.review_status = PluginVersion.ReviewStatus.APPROVED
             version.save(update_fields=["review_status"])
             result = PluginPackageInstaller().publish(version, actor=request.user)
-        except (PluginWorkflowError, PluginInstallError, RuntimeLoadError, OSError) as error:
+        except (PluginWorkflowError, PluginPackageError, PluginInstallError, RuntimeLoadError, OSError) as error:
             return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
         record_audit(request, action="plugin.staff_publish_upload", target=version, after={"sha256": version.package_blob.sha256, "runtime_types": version.runtime_types})
         return Response({"detail": "插件已发布并部署。", "project": serialize_developer_project(project), "scan": report, **result}, status=status.HTTP_201_CREATED)

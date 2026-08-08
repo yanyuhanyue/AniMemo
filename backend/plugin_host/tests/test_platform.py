@@ -18,6 +18,8 @@ from plugin_host.models import (
     UserPluginInstallation,
 )
 from plugin_host.runtime import runtime_registry
+from plugin_host.package import PluginPackageError
+from plugin_host.services import PluginWorkflowError, upload_plugin_version
 from plugin_host.tests.test_runtime_e2e import make_package
 
 
@@ -248,6 +250,76 @@ class PluginPlatformApiTests(APITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("上传过于频繁", str(response.data))
         self.assertEqual(PluginUploadAttempt.objects.filter(user=self.owner).count(), 3)
+        self.assertEqual(self._cas_files(), [])
+
+    @override_settings(PLUGIN_UPLOADS_PER_HOUR=0)
+    def test_rate_limited_upload_does_not_read_or_scan_package(self):
+        project = self._create_project("early-rate-limit")
+        payload, _ = make_package(project.slug, "1.0.0", runtimes=["frontend"])
+
+        class UnreadUpload:
+            name = "early-rate-limit.ajplugin"
+            size = len(payload)
+
+            def read(self):
+                raise AssertionError("rate-limited upload must not read the body")
+
+        with patch("plugin_host.services.inspect_package") as inspect, \
+                patch("plugin_host.services.static_security_scan") as scan, \
+                patch("plugin_host.services.store_package_blob") as store:
+            with self.assertRaises(PluginWorkflowError):
+                upload_plugin_version(project, UnreadUpload(), actor=self.owner)
+
+        inspect.assert_not_called()
+        scan.assert_not_called()
+        store.assert_not_called()
+        attempt = PluginUploadAttempt.objects.get(user=self.owner)
+        self.assertEqual(attempt.outcome, "rate_limited")
+        self.assertEqual(self._cas_files(), [])
+
+    def test_declared_oversize_upload_does_not_read_or_inspect_package(self):
+        project = self._create_project("early-size-limit")
+
+        class UnreadUpload:
+            name = "early-size-limit.ajplugin"
+            size = 1025
+
+            def read(self):
+                raise AssertionError("oversized upload must not read the body")
+
+        with override_settings(PLUGIN_MAX_PACKAGE_BYTES=1024), \
+                patch("plugin_host.services.inspect_package") as inspect, \
+                patch("plugin_host.services.store_package_blob") as store:
+            with self.assertRaises(PluginPackageError) as raised:
+                upload_plugin_version(project, UnreadUpload(), actor=self.owner)
+
+        self.assertIn("超过大小限制", str(raised.exception))
+        inspect.assert_not_called()
+        store.assert_not_called()
+        self.assertEqual(self._cas_files(), [])
+
+    def test_wrong_slug_upload_skips_static_security_scan(self):
+        project = self._create_project("cheap-identity")
+        payload, _ = make_package("different-slug", "1.0.0", runtimes=["frontend"])
+
+        with patch("plugin_host.services.static_security_scan") as scan:
+            response = self._upload(project, payload)
+
+        self.assertEqual(response.status_code, 400)
+        scan.assert_not_called()
+
+    def test_staff_invalid_package_returns_400_without_publish(self):
+        admin_client = APIClient()
+        admin_client.force_authenticate(self.admin)
+        response = admin_client.post(
+            "/api/staff/plugins/install/",
+            {"archive": SimpleUploadedFile("broken.ajplugin", b"not-a-zip", content_type="application/zip")},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(PluginVersion.objects.count(), 0)
+        self.assertEqual(PluginDeployment.objects.count(), 0)
         self.assertEqual(self._cas_files(), [])
 
     @override_settings(PLUGIN_MIN_FREE_DISK_MB=1)

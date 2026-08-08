@@ -171,3 +171,7 @@ python backend/manage.py test journal
 ```
 
 生产前另需：换掉示例媒体、创建 Django 超级管理员、在 Admin 中设定专栏审核状态，并将域名 DNS/HTTPS 配置完成。
+
+## GitHub Actions CI
+
+每次 `main` push、针对 `main` 的 Pull Request 或手动触发都会运行 `frontend`、`backend`、`postgres` 和 `plugins` 检查；其中 `postgres` 使用真实 PostgreSQL 执行插件并发测试。`docker` Release Gate 只在 `main` push 或手动触发时运行，使用临时 CI 凭据进行 Compose 配置、镜像构建和健康检查。

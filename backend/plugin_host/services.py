@@ -219,15 +219,27 @@ def _finish_upload_attempt(attempt, *, accepted=False, outcome):
 def upload_plugin_version(project, uploaded_file, *, actor):
     if not uploaded_file or not str(getattr(uploaded_file, "name", "")).lower().endswith(".ajplugin"):
         raise PluginWorkflowError("只支持上传 .ajplugin 插件包。")
-    raw = uploaded_file.read()
     policy = package_policy()
-    attempt, rate_limited = _record_upload_attempt(actor, len(raw))
+    declared_size = getattr(uploaded_file, "size", None)
     try:
+        declared_size = max(0, int(declared_size)) if declared_size is not None else None
+    except (TypeError, ValueError):
+        declared_size = None
+    attempt, rate_limited = _record_upload_attempt(actor, declared_size or 0)
+    try:
+        # Reject throttled and obviously oversized uploads before touching the
+        # request body. UploadedFile.size is populated by Django's multipart
+        # parser; the payload length remains a second-line guard for callers
+        # that do not provide a reliable declared size.
+        if rate_limited:
+            raise PluginWorkflowError("上传过于频繁，请稍后再试。")
+        if declared_size is not None and declared_size > policy["max_package_bytes"]:
+            raise PluginPackageError("插件包超过大小限制")
+        raw = uploaded_file.read()
         if len(raw) > policy["max_package_bytes"]:
             raise PluginPackageError("插件包超过大小限制")
         inspected = inspect_package(raw)
         manifest = inspected["manifest"]
-        report = static_security_scan(raw, inspected)
         with transaction.atomic():
             locked_project = PluginProject.objects.select_for_update().get(pk=project.pk)
             if locked_project.owner_id != actor.pk and not actor.is_superuser:
@@ -242,10 +254,9 @@ def upload_plugin_version(project, uploaded_file, *, actor):
             if existing:
                 if existing.package_blob.sha256 != inspected["sha256"]:
                     raise PluginWorkflowError("同一插件版本的 Package SHA-256 不可改变；请提升版本号。")
+                report = static_security_scan(raw, inspected)
                 _finish_upload_attempt(attempt, accepted=True, outcome="duplicate")
                 return existing, report, False
-            if rate_limited:
-                raise PluginWorkflowError("上传过于频繁，请稍后再试。")
             if not actor.is_superuser:
                 draft_limit = int(getattr(settings, "PLUGIN_DRAFT_LIMIT", 20))
                 if PluginVersion.objects.filter(
@@ -253,6 +264,9 @@ def upload_plugin_version(project, uploaded_file, *, actor):
                     review_status=PluginVersion.ReviewStatus.DRAFT,
                 ).count() >= draft_limit:
                     raise PluginWorkflowError("未审核草稿数量已达上限。")
+            # Identity, ownership and draft/version constraints are cheap and
+            # must pass before the AST/CSS security scan does any work.
+            report = static_security_scan(raw, inspected)
             minimum_free = int(getattr(settings, "PLUGIN_MIN_FREE_DISK_MB", 2048)) * 1024 * 1024
             blob, _, _, _ = store_package_blob(raw, minimum_free_bytes=minimum_free)
             locked_blob = PluginPackageBlob.objects.select_for_update().get(pk=blob.pk)
