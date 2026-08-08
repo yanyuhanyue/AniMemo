@@ -1,0 +1,6 @@
+plugins/**/*.css text eol=lf
+plugins/**/*.js text eol=lf
+plugins/**/*.json text eol=lf
+plugins/**/*.md text eol=lf
+plugins/**/*.mjs text eol=lf
+plugins/**/*.py text eol=lf

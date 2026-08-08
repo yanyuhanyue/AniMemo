@@ -3,7 +3,14 @@ name: Release Gate
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      upgrade_base_sha:
+        description: Optional known production/base SHA for BASE -> CURRENT validation
+        required: false
+        type: string
 
 concurrency:
   group: release-gate-${{ github.ref }}
@@ -77,3 +84,48 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker compose --env-file .env.production -f deploy/docker-compose.yml down -v
+
+  stateful-upgrade:
+    name: stateful-upgrade
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: animemo-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+      STATEFUL_UPGRADE_TEMP_ROOT: ${{ runner.temp }}/animemo-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+      COMPOSE_HTTP_TIMEOUT: "120"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Resolve audited upgrade refs
+        id: refs
+        run: python scripts/ci_refs.py --github-output "$GITHUB_OUTPUT"
+      - name: Run BASE to CURRENT stateful production upgrade gate
+        shell: bash
+        run: >-
+          bash scripts/stateful-upgrade-gate.sh
+          --base "${{ steps.refs.outputs.base }}"
+          --head "${{ steps.refs.outputs.head }}"
+          --current-root "$GITHUB_WORKSPACE"
+      - name: Print scoped upgrade logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          docker ps -a --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME"
+          for container in $(docker ps -aq --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME"); do
+            docker logs "$container" || true
+          done
+      - name: Scoped fallback cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker ps -aq --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" | xargs -r docker rm -f
+          docker network ls -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" | xargs -r docker network rm
+          if [[ -d "$STATEFUL_UPGRADE_TEMP_ROOT/base" ]]; then
+            git worktree remove --force "$STATEFUL_UPGRADE_TEMP_ROOT/base" || true
+          fi
+          git worktree prune
+          rm -rf -- "$STATEFUL_UPGRADE_TEMP_ROOT"
