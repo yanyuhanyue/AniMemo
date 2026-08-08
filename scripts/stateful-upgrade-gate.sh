@@ -119,6 +119,19 @@ print_logs() {
   compose "$source_root" logs --no-color >&2 || true
 }
 
+remove_temp_root() {
+  [[ -e "$TEMP_ROOT" ]] || return 0
+  if rm -rf -- "$TEMP_ROOT" 2>/dev/null; then
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    sudo -n rm -rf -- "$TEMP_ROOT"
+    return
+  fi
+  echo "Unable to remove container-owned temp data: $TEMP_ROOT" >&2
+  return 1
+}
+
 cleanup() {
   local exit_code=$?
   set +e
@@ -130,7 +143,7 @@ cleanup() {
   if [[ "$KEEP_TEMP" == true ]]; then
     echo "Stateful upgrade temp root retained: $TEMP_ROOT"
   else
-    rm -rf -- "$TEMP_ROOT"
+    remove_temp_root
   fi
   exit "$exit_code"
 }

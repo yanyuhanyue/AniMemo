@@ -130,4 +130,6 @@ jobs:
             git worktree remove --force "$STATEFUL_UPGRADE_TEMP_ROOT/base" || true
           fi
           git worktree prune
-          rm -rf -- "$STATEFUL_UPGRADE_TEMP_ROOT"
+          if ! rm -rf -- "$STATEFUL_UPGRADE_TEMP_ROOT" 2>/dev/null; then
+            sudo -n rm -rf -- "$STATEFUL_UPGRADE_TEMP_ROOT"
+          fi
