@@ -35,6 +35,7 @@ jobs:
           POSTGRES_USER=anime_journal
           POSTGRES_PASSWORD=ci-password
           DATABASE_URL=postgresql://anime_journal:ci-password@postgres:5432/anime_journal
+          DATABASE_SSL_REQUIRE=false
           REDIS_URL=redis://redis:6379/0
           ALLOWED_HOSTS=ci.example.test
           FRONTEND_URL=https://ci.example.test
