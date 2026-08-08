@@ -1,0 +1,48 @@
+{
+  "packageVersion": 1,
+  "pluginId": "com.anime-journal.watch-history-importer",
+  "slug": "watch-history-importer",
+  "version": "0.2.0",
+  "files": [
+    {
+      "path": "backend/plugin.py",
+      "size": 15978,
+      "sha256": "83d720887f2fd0ee79be2f11f317ba92fbd65b5067afbaddfc12a08ebdbec42b"
+    },
+    {
+      "path": "backend/src/__init__.py",
+      "size": 64,
+      "sha256": "4c64d4c48900eb0bef4eb02ba3379bc48c698fc9c8f8e4fc9c9d24234c6f06a9"
+    },
+    {
+      "path": "backend/src/anime_journal_watch_history_importer/__init__.py",
+      "size": 57,
+      "sha256": "0cbbd09cc5deb53457480c27f237874d2a5cd72997b36bc57af06242dc1c6913"
+    },
+    {
+      "path": "backend/src/anime_journal_watch_history_importer/bangumi.py",
+      "size": 12003,
+      "sha256": "2317140fdb85d09bcfd0b89682a1335653724ba8e7e8a10fd1d68edd4e049063"
+    },
+    {
+      "path": "backend/src/anime_journal_watch_history_importer/parser.py",
+      "size": 9051,
+      "sha256": "69bce731e3bd9a1d77fe42b86d4797f7aef4bd0f859bca20ebaef69c078f5287"
+    },
+    {
+      "path": "frontend/plugin.css",
+      "size": 12641,
+      "sha256": "3af7fd0d836ffdb8c20e85ff9eb4b98fd2294df13f63ba986391af843105dfa1"
+    },
+    {
+      "path": "frontend/plugin.js",
+      "size": 29753,
+      "sha256": "e0226cddcf6a743bef94f1911edbc2d7a747d6f4ff093302849db7b29ea56ba9"
+    },
+    {
+      "path": "manifest.json",
+      "size": 1490,
+      "sha256": "bfc89a8212570a25eefd2b4357761c2c3b95a98e8a34fe6e2b4ccfa32f633e0d"
+    }
+  ]
+}

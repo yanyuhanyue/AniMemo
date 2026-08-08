@@ -1,0 +1,37 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Run as root / sudo: sudo sh deploy/prepare-host.sh" >&2
+    exit 1
+fi
+
+DATA_ROOT=${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}
+APP_UID=10001
+APP_GID=10001
+
+case "$DATA_ROOT" in
+    /*) ;;
+    *)
+        echo "ANIME_JOURNAL_DATA_ROOT must be an absolute path." >&2
+        exit 1
+        ;;
+esac
+if [ "$DATA_ROOT" = "/" ]; then
+    echo "ANIME_JOURNAL_DATA_ROOT must not be /." >&2
+    exit 1
+fi
+
+umask 022
+mkdir -p "$DATA_ROOT" "$DATA_ROOT/postgres" "$DATA_ROOT/redis"
+chmod 0755 "$DATA_ROOT" "$DATA_ROOT/postgres" "$DATA_ROOT/redis"
+
+for name in plugins logs backups media; do
+    directory="$DATA_ROOT/$name"
+    mkdir -p "$directory"
+    chown -R "$APP_UID:$APP_GID" "$directory"
+    chmod 0755 "$directory"
+done
+
+echo "Anime Journal host directories are ready under $DATA_ROOT."
+echo "Writable API directories use owner $APP_UID:$APP_GID and mode 0755."

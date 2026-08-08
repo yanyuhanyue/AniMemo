@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anime-journal.local/schemas/plugin-manifest-v2.json",
+  "title": "Anime Journal Plugin Manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "sdkApi", "id", "slug", "name", "version", "description",
+    "author", "license", "runtimes", "extensions", "permissions", "hooks", "settings", "dataPolicy"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 2 },
+    "sdkApi": { "const": 2 },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$" },
+    "slug": { "$ref": "#/$defs/slug" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "version": { "$ref": "#/$defs/semver" },
+    "description": { "type": "string", "minLength": 1, "maxLength": 240 },
+    "author": {
+      "type": "object", "additionalProperties": false, "required": ["name"],
+      "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 80 }, "url": { "type": "string", "format": "uri" } }
+    },
+    "license": { "type": "string", "minLength": 1, "maxLength": 40 },
+    "runtimes": {
+      "type": "array", "uniqueItems": true, "items": { "enum": ["frontend", "backend"] }
+    },
+    "frontend": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "exposure": { "enum": ["public", "authenticated", "staff"] } }
+    },
+    "backend": {
+      "type": "object", "additionalProperties": false, "required": ["entry"],
+      "properties": { "entry": { "const": "backend/plugin.py" } }
+    },
+    "extensions": {
+      "type": "array", "uniqueItems": true,
+      "items": { "enum": [
+        "frontend.page", "frontend.navigation", "backend.api", "settings", "hooks", "storage",
+        "catalog.importer", "catalog.metadata"
+      ] }
+    },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["code", "roles"],
+        "properties": {
+          "code": { "type": "string", "pattern": "^[a-z][a-z0-9-]*\\.[a-z][a-z0-9-]*$" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "roles": { "type": "array", "uniqueItems": true, "items": { "enum": ["reviewer", "user_manager", "operator", "administrator"] } }
+        }
+      }
+    },
+    "hooks": {
+      "type": "array", "uniqueItems": true,
+      "items": { "enum": [
+        "registration.before_request", "registration.before_complete", "registration.after_complete",
+        "journal.after_create", "journal.after_update", "journal.after_delete",
+        "column.after_publish", "column.after_delete", "user.after_created", "user.before_delete", "user.after_delete"
+      ] }
+    },
+    "settings": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["key", "label", "type", "default"],
+        "properties": {
+          "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "description": { "type": "string", "maxLength": 240 },
+          "type": { "enum": ["text", "textarea", "boolean", "number", "select"] },
+          "required": { "type": "boolean" }, "default": {},
+          "min": { "type": "number" }, "max": { "type": "number" },
+          "choices": { "type": "array", "items": { "oneOf": [
+            { "type": "string" },
+            { "type": "object", "additionalProperties": false, "required": ["value", "label"], "properties": { "value": { "type": "string" }, "label": { "type": "string" } } }
+          ] } }
+        }
+      }
+    },
+    "dataPolicy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["storesPersonalData", "usesExternalNetwork", "acceptsFileUploads", "retainsDataOnDisable"],
+      "properties": {
+        "storesPersonalData": { "type": "boolean" }, "usesExternalNetwork": { "type": "boolean" },
+        "acceptsFileUploads": { "type": "boolean" }, "retainsDataOnDisable": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "semver": { "type": "string", "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]+)?$" },
+    "slug": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" }
+  }
+}

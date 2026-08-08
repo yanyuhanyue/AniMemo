@@ -1,0 +1,41 @@
+{
+  "name": "anime-journal",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test:plugins": "node scripts/validate-plugins.mjs",
+    "test": "npm run test:plugins && node --test tests/*.test.mjs",
+    "qa:watch-history": "python qa/watch_history_import.py",
+    "qa:watch-history:bangumi": "python qa/resolve_watch_history_bangumi.py",
+    "qa:watch-history:selection": "node qa/watch_history_importer_selection.mjs",
+    "qa:watch-history:runtime": "node qa/watch_history_runtime_e2e.mjs",
+    "qa:install-browser": "node scripts/install-playwright-browser.mjs",
+    "qa:record": "node scripts/record-webm.mjs",
+    "qa:record:featured": "node scripts/record-webm.mjs home-to-featured featured-open featured-tabs featured-tabs-rapid",
+    "qa:record:home": "node scripts/record-webm.mjs home-list-open"
+  },
+  "dependencies": {
+    "@fontsource/noto-sans-sc": "^5.2.8",
+    "@fortawesome/fontawesome-svg-core": "^6.7.2",
+    "@fortawesome/free-solid-svg-icons": "^6.7.2",
+    "@fortawesome/react-fontawesome": "^3.1.1",
+    "@vitejs/plugin-react": "5.0.4",
+    "autoprefixer": "^10.4.21",
+    "axios": "^1.11.0",
+    "gsap": "^3.13.0",
+    "postcss": "8.5.26",
+    "qrcode.react": "^4.2.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-router-dom": "7.18.2",
+    "tailwindcss": "^3.4.17",
+    "vite": "6.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
+  }
+}

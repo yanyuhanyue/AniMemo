@@ -1,0 +1,18 @@
+# Locked production dependencies. Update backend/requirements.in first, then re-lock and test.
+Django==5.2.16
+djangorestframework==3.16.1
+djangorestframework-simplejwt==5.5.1
+django-cors-headers==4.9.0
+django-redis==5.4.0
+redis==8.1.0
+dj-database-url==2.3.0
+psycopg[binary]==3.3.4
+django-storages[s3]==1.14.6
+boto3==1.43.62
+gunicorn==23.0.0
+whitenoise==6.12.0
+requests==2.33.0
+python-dotenv==1.2.2
+Pillow==12.3.0
+cryptography==50.0.0
+packaging==25.0

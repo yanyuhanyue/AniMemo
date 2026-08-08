@@ -1,0 +1,98 @@
+.ajp-icon { display: inline-flex; min-width: 1em; align-items: center; justify-content: center; font-style: normal; font-weight: 900; line-height: 1; }
+.ajp-icon.is-spinning { animation: ajp-icon-spin .8s linear infinite; }
+@keyframes ajp-icon-spin { to { transform: rotate(360deg); } }
+.ajp-watch-import { min-height: 100vh; padding: 28px; background: #f5f3ed; color: #111; font-family: "Noto Sans SC", sans-serif; }
+.ajp-watch-import__header { max-width: 1500px; margin: 0 auto 24px; display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.ajp-watch-import__header span, .ajp-watch-import__review header span { font-size: 11px; font-weight: 900; letter-spacing: 1.2px; color: #e11d48; }
+.ajp-watch-import__header h1 { margin: 4px 0; font-size: 32px; line-height: 1.25; }
+.ajp-watch-import__header p { margin: 0; color: #64748b; }
+.ajp-watch-import__header a { display: inline-flex; align-items: center; gap: 8px; padding: 11px 16px; border: 3px solid #111; background: #ffe66d; box-shadow: 5px 5px 0 #111; color: #111; font-weight: 800; text-decoration: none; }
+.ajp-watch-import__workspace { max-width: 1500px; margin: 0 auto; display: grid; grid-template-columns: minmax(320px, 0.8fr) minmax(520px, 1.4fr); border: 3px solid #111; box-shadow: 10px 10px 0 #111; background: #fff; }
+.ajp-watch-import__source, .ajp-watch-import__flow { padding: 26px; }
+.ajp-watch-import__source { background: #4ecdc4; border-right: 3px solid #111; }
+.ajp-watch-import__source > label:first-child { display: grid; gap: 7px; font-size: 12px; font-weight: 900; }
+.ajp-watch-import select, .ajp-watch-import input { width: 100%; box-sizing: border-box; border: 3px solid #111; border-radius: 0; background: #fff; padding: 11px 12px; font: inherit; font-weight: 700; }
+.ajp-watch-import__drop { min-height: 176px; margin: 20px 0; padding: 24px; display: flex; box-sizing: border-box; flex-direction: column; align-items: center; justify-content: center; text-align: center; border: 4px dashed #111; background: #ffe66d; cursor: pointer; }
+.ajp-watch-import__drop.is-dragging { transform: translate(3px, 3px) rotate(-0.5deg); background: #ff6b9d; }
+.ajp-watch-import__drop input { display: none; }
+.ajp-watch-import__drop svg { font-size: 34px; margin-bottom: 10px; }
+.ajp-watch-import__drop strong { font-size: 15px; }
+.ajp-watch-import__drop small { margin-top: 6px; color: #475569; line-height: 1.6; }
+.ajp-watch-import button { border: 3px solid #111; border-radius: 0; padding: 10px 14px; background: #fff; box-shadow: 4px 4px 0 #111; font: inherit; font-weight: 900; cursor: pointer; }
+.ajp-watch-import button:active:not(:disabled), .ajp-watch-import__header a:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 #111; }
+.ajp-watch-import button:disabled { cursor: not-allowed; opacity: .45; }
+.ajp-watch-import button.is-primary { width: 100%; background: #ff6b9d; }
+.ajp-watch-import__recent { margin-top: 20px; display: grid; gap: 8px; }
+.ajp-watch-import__recent > strong { font-size: 12px; }
+.ajp-watch-import__recent button { display: flex; justify-content: space-between; gap: 12px; padding: 9px 10px; text-align: left; background: #fff; }
+.ajp-watch-import__recent button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ajp-watch-import__recent button small { flex: 0 0 auto; color: #64748b; }
+.ajp-watch-import__flow ol { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 0; margin: 0 0 22px; list-style: none; }
+.ajp-watch-import__flow li { padding: 10px 8px; border: 2px solid #111; background: #e2e8f0; text-align: center; font-size: 11px; font-weight: 900; }
+.ajp-watch-import__flow li.is-active { background: #ffe66d; }
+.ajp-watch-import__flow li.is-done { background: #4ecdc4; }
+.ajp-watch-import__summary { display: grid; grid-template-columns: repeat(5, minmax(80px, 1fr)); border: 3px solid #111; }
+.ajp-watch-import__summary article { min-width: 0; padding: 15px 10px; border-right: 2px solid #111; text-align: center; }
+.ajp-watch-import__summary article:last-child { border-right: 0; }
+.ajp-watch-import__summary span { display: block; font-size: 10px; color: #64748b; font-weight: 800; }
+.ajp-watch-import__summary strong { display: block; margin-top: 5px; font-size: 25px; }
+.ajp-watch-import__actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 22px; }
+.ajp-watch-import__actions .is-commit { background: #ffe66d; }
+.ajp-watch-import__empty { min-height: 180px; display: grid; place-content: center; text-align: center; color: #64748b; }
+.ajp-watch-import__empty svg { margin: auto; font-size: 34px; }
+.ajp-watch-import__preview { max-width: 1500px; margin: 30px auto 0; border: 3px solid #111; background: #fff; box-shadow: 8px 8px 0 #111; }
+.ajp-watch-import__preview > header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 18px 22px; border-bottom: 3px solid #111; background: #ffe66d; }
+.ajp-watch-import__preview h2 { margin: 2px 0 0; font-size: 20px; }
+.ajp-watch-import__preview header p { margin: 4px 0 0; color: #475569; font-size: 12px; }
+.ajp-watch-import__preview header label { width: min(360px, 100%); display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 9px; }
+.ajp-watch-import__selection { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 11px 18px; border-bottom: 3px solid #111; background: #fff; }
+.ajp-watch-import__selection > div:first-child { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
+.ajp-watch-import__selection strong { font-size: 13px; }
+.ajp-watch-import__selection span { color: #475569; font-size: 12px; font-weight: 700; }
+.ajp-watch-import__selection-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.ajp-watch-import__selection-actions button { padding: 7px 10px; box-shadow: 3px 3px 0 #111; font-size: 12px; transition: background-color 180ms ease, color 180ms ease, transform 180ms ease, box-shadow 180ms ease; }
+.ajp-watch-import__selection-actions button.is-include { background: #4ecdc4; }
+.ajp-watch-import__selection-actions button.is-exclude { background: #ff6b9d; }
+.ajp-watch-import__selection-actions button:active:not(:disabled) { transform: translate(2px, 2px); box-shadow: 1px 1px 0 #111; }
+.ajp-watch-import__preview-table { max-height: 540px; overflow: auto; }
+.ajp-watch-import__preview-row { display: grid; grid-template-columns: 76px minmax(220px, 1.2fr) minmax(150px, .7fr) minmax(250px, 1.4fr) 112px; gap: 16px; align-items: center; min-width: 980px; padding: 12px 18px; border-bottom: 2px solid #111; transition: background-color 180ms ease; }
+.ajp-watch-import__preview-row.is-header { position: sticky; top: 0; z-index: 1; background: #111; color: #fff; font-size: 11px; font-weight: 900; }
+.ajp-watch-import__preview-row.is-excluded { background: #fff1f2; }
+.ajp-watch-import__selection-control { min-height: 44px; display: inline-flex; align-items: center; gap: 7px; color: #047857; font-size: 11px; font-weight: 900; cursor: pointer; }
+.ajp-watch-import__selection-control input { width: 20px; height: 20px; margin: 0; padding: 0; accent-color: #10b981; cursor: pointer; }
+.ajp-watch-import__preview-row.is-excluded .ajp-watch-import__selection-control { color: #be123c; }
+.ajp-watch-import__selection-control input:focus-visible { outline: 3px solid #111; outline-offset: 3px; }
+.ajp-watch-import__preview-row strong, .ajp-watch-import__preview-row small { display: block; }
+.ajp-watch-import__preview-row strong { font-size: 13px; }
+.ajp-watch-import__preview-row small { margin-top: 3px; color: #64748b; font-size: 11px; }
+.ajp-watch-import__bangumi-link { width: fit-content; max-width: 100%; display: inline-flex; align-items: center; gap: 7px; color: #111; text-decoration: none; }
+.ajp-watch-import__bangumi-link strong { min-width: 0; overflow-wrap: anywhere; }
+.ajp-watch-import__bangumi-link svg { flex: 0 0 auto; color: #e11d48; font-size: 10px; }
+.ajp-watch-import__bangumi-link:hover { color: #e11d48; text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.ajp-watch-import__bangumi-link:focus-visible { outline: 3px solid #111; outline-offset: 4px; background: #ffe66d; }
+.ajp-watch-import__no-result { padding: 42px; text-align: center; color: #64748b; }
+.ajp-watch-import__excluded { border-top: 3px solid #111; }
+.ajp-watch-import__excluded summary { padding: 13px 18px; cursor: pointer; font-weight: 900; background: #ffefef; }
+.ajp-watch-import__excluded article { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) auto; gap: 18px; padding: 11px 18px; border-top: 1px solid #cbd5e1; font-size: 12px; }
+.ajp-watch-import__excluded article span { color: #dc2626; }
+.ajp-watch-import__excluded article small { color: #64748b; }
+.ajp-watch-import__review { max-width: 1500px; margin: 30px auto 0; border: 3px solid #111; background: #fff; box-shadow: 8px 8px 0 #111; }
+.ajp-watch-import__review header { padding: 18px 22px; display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #111; background: #ffefef; }
+.ajp-watch-import__review h2 { margin: 2px 0 0; font-size: 20px; }
+.ajp-watch-import__review header b { display: grid; width: 42px; height: 42px; place-items: center; border: 3px solid #111; background: #ffe66d; }
+.ajp-watch-import__review article { display: grid; grid-template-columns: minmax(260px, 1fr) 120px 230px 112px; gap: 14px; align-items: center; padding: 14px 20px; border-bottom: 2px solid #111; }
+.ajp-watch-import__review article:last-child { border-bottom: 0; }
+.ajp-watch-import__review article strong, .ajp-watch-import__review article small { display: block; }
+.ajp-watch-import__review article small { color: #64748b; }
+.ajp-watch-import__review .ajp-watch-import__candidate { margin-top: 5px; color: #334155; font-weight: 700; }
+.ajp-watch-import__review label { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: center; font-size: 11px; font-weight: 800; }
+.ajp-watch-import__review article > button { min-width: 112px; white-space: nowrap; }
+.ajp-watch-import__status { padding: 6px 8px; border: 2px solid #111; text-align: center; font-size: 11px; font-weight: 900; background: #fff; }
+.ajp-watch-import__status.is-episode_mismatch, .ajp-watch-import__status.is-season_mismatch, .ajp-watch-import__status.is-network_error { background: #ff6b6b; }
+.ajp-watch-import__status.is-ambiguous, .ajp-watch-import__status.is-low_confidence { background: #ffe66d; }
+.ajp-watch-import__loading { max-width: 1500px; margin: auto; padding: 60px; text-align: center; font-weight: 900; }
+.ajp-watch-import__message { position: fixed; right: 24px; bottom: 24px; z-index: 50; max-width: 520px; padding: 14px 18px; border: 3px solid #111; box-shadow: 6px 6px 0 #111; font-weight: 800; }
+.ajp-watch-import__message.is-error { background: #ff6b6b; }
+.ajp-watch-import__message.is-success { background: #4ecdc4; }
+@media (max-width: 900px) { .ajp-watch-import { padding: 16px; } .ajp-watch-import__header { flex-direction: column; } .ajp-watch-import__workspace { grid-template-columns: 1fr; } .ajp-watch-import__source { border-right: 0; border-bottom: 3px solid #111; } .ajp-watch-import__summary { grid-template-columns: repeat(2, 1fr); } .ajp-watch-import__summary article { border-bottom: 2px solid #111; } .ajp-watch-import__preview > header { align-items: stretch; flex-direction: column; } .ajp-watch-import__preview header label { width: 100%; } .ajp-watch-import__selection { align-items: stretch; flex-direction: column; } .ajp-watch-import__selection-actions { justify-content: stretch; } .ajp-watch-import__selection-actions button { flex: 1 1 180px; } .ajp-watch-import__excluded article { grid-template-columns: 1fr; gap: 4px; } .ajp-watch-import__review article { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .ajp-watch-import__selection-actions button, .ajp-watch-import__preview-row { transition: none; } }
