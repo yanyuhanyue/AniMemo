@@ -38,13 +38,24 @@ class OfficialPluginImmutabilityTests(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(source, encoding="utf-8")
 
-    def _write_plugin(self, slug, version="0.3.0", *, frontend="front", backend="back", description="fixture"):
+    def _write_plugin(
+        self,
+        slug,
+        version="0.3.0",
+        *,
+        frontend="front",
+        backend="back",
+        asset=b"asset",
+        description="fixture",
+    ):
         root = self.repo / "plugins" / slug
         (root / "frontend").mkdir(parents=True, exist_ok=True)
+        (root / "frontend" / "assets").mkdir(parents=True, exist_ok=True)
         (root / "backend").mkdir(parents=True, exist_ok=True)
         manifest = {"id": f"com.example.{slug}", "slug": slug, "version": version, "description": description}
         (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
         (root / "frontend" / "plugin.js").write_text(frontend, encoding="utf-8")
+        (root / "frontend" / "assets" / "fixture.bin").write_bytes(asset)
         (root / "backend" / "plugin.py").write_text(backend, encoding="utf-8")
         (root / "README.md").write_text("docs", encoding="utf-8")
 
@@ -75,7 +86,21 @@ class OfficialPluginImmutabilityTests(unittest.TestCase):
         head = self._commit("changed")
         report = self._report(base, head)
         self.assertFalse(report.ok)
-        self.assertEqual(report.violations[0].code, "immutable_package_changed")
+        self.assertEqual(report.violations[0].code, "immutable_content_changed")
+
+    def test_same_content_with_different_archive_compression_passes(self):
+        base = self._base()
+        module = self.repo / "backend" / "plugin_host" / "official_packages.py"
+        source = module.read_text(encoding="utf-8").replace("ZIP_DEFLATED", "ZIP_STORED")
+        module.write_text(source, encoding="utf-8")
+        head = self._commit("compression implementation changed")
+
+        report = self._report(base, head)
+
+        self.assertTrue(report.ok)
+        result = report.results[0]
+        self.assertNotEqual(result.base.package_sha, result.current.package_sha)
+        self.assertEqual(result.base.content_digest, result.current.content_digest)
 
     def test_changed_package_with_patch_bump_passes(self):
         base = self._base()
@@ -136,6 +161,12 @@ class OfficialPluginImmutabilityTests(unittest.TestCase):
         base = self._base()
         self._write_plugin("alpha", backend="changed")
         head = self._commit("backend")
+        self.assertFalse(self._report(base, head).ok)
+
+    def test_asset_only_package_change_is_detected(self):
+        base = self._base()
+        self._write_plugin("alpha", asset=b"changed")
+        head = self._commit("asset")
         self.assertFalse(self._report(base, head).ok)
 
     def test_manifest_package_change_is_detected(self):

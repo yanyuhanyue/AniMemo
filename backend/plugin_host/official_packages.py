@@ -7,6 +7,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 OFFICIAL_PLUGIN_SLUGS = ("watch-history-importer",)
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+CONTENT_IDENTITY_VERSION = 1
 
 
 def _zip_info(name):
@@ -17,9 +18,8 @@ def _zip_info(name):
     return info
 
 
-def build_official_package(source_root):
+def collect_official_package_files(source_root):
     source_root = Path(source_root)
-    manifest = json.loads((source_root / "manifest.json").read_text(encoding="utf-8"))
     paths = [source_root / "manifest.json"]
     frontend = source_root / "frontend"
     for name in ("plugin.js", "plugin.css"):
@@ -36,23 +36,64 @@ def build_official_package(source_root):
             if path.is_file() and not path.is_symlink() and "__pycache__" not in path.parts and "tests" not in path.parts
         )
     paths = sorted(set(paths), key=lambda path: path.relative_to(source_root).as_posix())
-    files = []
-    for path in paths:
-        relative = path.relative_to(source_root).as_posix()
-        payload = path.read_bytes()
-        files.append({"path": relative, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()})
+    return tuple((path.relative_to(source_root).as_posix(), path.read_bytes()) for path in paths)
+
+
+def _content_descriptor(files):
+    return [
+        {"path": path, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+        for path, payload in files
+    ]
+
+
+def build_official_content_descriptor(source_root):
+    return _content_descriptor(collect_official_package_files(source_root))
+
+
+def canonical_content_digest_from_descriptor(files):
+    descriptor = sorted(
+        (
+            {"path": item["path"], "size": item["size"], "sha256": item["sha256"]}
+            for item in files
+        ),
+        key=lambda item: item["path"],
+    )
+    canonical_json = json.dumps(
+        {"contentIdentityVersion": CONTENT_IDENTITY_VERSION, "files": descriptor},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical_json).hexdigest()
+
+
+def canonical_content_digest_from_source(source_root):
+    return canonical_content_digest_from_descriptor(build_official_content_descriptor(source_root))
+
+
+def canonical_content_digest_from_package(payload):
+    from .package import inspect_package
+
+    inspected = inspect_package(payload)
+    return canonical_content_digest_from_descriptor(inspected["files"])
+
+
+def build_official_package(source_root):
+    source_root = Path(source_root)
+    files = collect_official_package_files(source_root)
+    manifest = json.loads(dict(files)["manifest.json"].decode("utf-8"))
+    descriptor = _content_descriptor(files)
     package_index = {
         "packageVersion": 1,
         "pluginId": manifest["id"],
         "slug": manifest["slug"],
         "version": manifest["version"],
-        "files": files,
+        "files": descriptor,
     }
     output = BytesIO()
     with ZipFile(output, "w", ZIP_DEFLATED) as archive:
-        for path in paths:
-            name = path.relative_to(source_root).as_posix()
-            archive.writestr(_zip_info(name), path.read_bytes())
+        for name, payload in files:
+            archive.writestr(_zip_info(name), payload)
         index_payload = json.dumps(
             package_index,
             ensure_ascii=False,
