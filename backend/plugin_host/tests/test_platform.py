@@ -8,6 +8,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from rest_framework.test import APIClient, APITestCase
 
+from journal.models import AdminAuditLog
 from plugin_host.models import (
     PluginData,
     PluginDeployment,
@@ -321,6 +322,8 @@ class PluginPlatformApiTests(APITestCase):
         self.assertEqual(PluginVersion.objects.count(), 0)
         self.assertEqual(PluginDeployment.objects.count(), 0)
         self.assertEqual(self._cas_files(), [])
+        self.assertFalse((Path(self.root.name) / "runtime").exists())
+        self.assertFalse(AdminAuditLog.objects.filter(action="plugin.staff_publish_upload").exists())
 
     @override_settings(PLUGIN_MIN_FREE_DISK_MB=1)
     def test_upload_disk_floor_includes_incoming_bytes(self):
