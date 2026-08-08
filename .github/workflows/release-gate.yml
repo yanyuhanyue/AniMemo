@@ -91,7 +91,6 @@ jobs:
     timeout-minutes: 30
     env:
       COMPOSE_PROJECT_NAME: animemo-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
-      STATEFUL_UPGRADE_TEMP_ROOT: ${{ runner.temp }}/animemo-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
       COMPOSE_HTTP_TIMEOUT: "120"
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +99,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Prepare scoped upgrade temp root
+        shell: bash
+        run: echo "STATEFUL_UPGRADE_TEMP_ROOT=$RUNNER_TEMP/animemo-upgrade-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - name: Resolve audited upgrade refs
         id: refs
         run: python scripts/ci_refs.py --github-output "$GITHUB_OUTPUT"
