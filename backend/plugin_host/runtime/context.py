@@ -27,7 +27,10 @@ class PluginContext:
     _hook_disposers: list[object] = field(default_factory=list)
 
     def __post_init__(self):
+        from integrations.plugin_sdk import PluginIntegrations
+
         self.api = PluginApi(self.slug, self.manifest)
+        self.integrations = PluginIntegrations(self.slug, self.manifest, self.runtime_id)
 
     @property
     def hook_owner(self):

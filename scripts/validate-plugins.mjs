@@ -5,9 +5,10 @@ const root = resolve(process.cwd(), "plugins");
 const slugPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const idPattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)+$/;
 const semverPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/;
+const integrationNamePattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const roles = new Set(["reviewer", "user_manager", "operator", "administrator"]);
 const runtimes = new Set(["frontend", "backend"]);
-const extensions = new Set(["frontend.page", "frontend.navigation", "backend.api", "settings", "hooks", "storage", "catalog.importer", "catalog.metadata"]);
+const extensions = new Set(["frontend.page", "frontend.navigation", "backend.api", "settings", "hooks", "storage", "catalog.importer", "catalog.metadata", "integration.actions", "integration.events"]);
 const hooks = new Set(["registration.before_request", "registration.before_complete", "registration.after_complete", "journal.after_create", "journal.after_update", "journal.after_delete", "column.after_publish", "column.after_delete", "user.after_created", "user.before_delete", "user.after_delete"]);
 const userScopedHooks = new Set(["journal.after_create", "journal.after_update", "journal.after_delete", "column.after_publish", "column.after_delete"]);
 
@@ -26,6 +27,24 @@ function validateManifest(directory, manifest, { enforceDirectoryName = true } =
   requireValue(semverPattern.test(manifest.version || ""), "version 必须符合 SemVer", errors);
   requireValue(Array.isArray(manifest.runtimes) && manifest.runtimes.every((item) => runtimes.has(item)), "runtimes 只能声明 frontend/backend", errors);
   requireValue(Array.isArray(manifest.extensions) && manifest.extensions.every((item) => extensions.has(item)), "extensions 包含未知扩展", errors);
+  if (manifest.integrations !== undefined) {
+    requireValue(manifest.integrations && typeof manifest.integrations === "object" && !Array.isArray(manifest.integrations), "integrations 必须是对象", errors);
+    requireValue(Object.keys(manifest.integrations || {}).every((key) => ["actions", "events"].includes(key)), "integrations 只能包含 actions/events", errors);
+    for (const [kind, extension] of [["actions", "integration.actions"], ["events", "integration.events"]]) {
+      const declarations = manifest.integrations?.[kind] ?? [];
+      requireValue(Array.isArray(declarations) && declarations.length <= 64, `integrations.${kind} 必须是最多 64 项的数组`, errors);
+      const names = new Set();
+      for (const declaration of Array.isArray(declarations) ? declarations : []) {
+        requireValue(declaration && typeof declaration === "object" && !Array.isArray(declaration), `integrations.${kind} declaration 无效`, errors);
+        requireValue(Object.keys(declaration || {}).every((key) => ["name", "description"].includes(key)), `integrations.${kind} declaration 包含未知字段`, errors);
+        requireValue(integrationNamePattern.test(declaration?.name || ""), `integrations.${kind}.name 必须为 kebab-case`, errors);
+        requireValue(!names.has(declaration?.name), `integrations.${kind}.name 不能重复`, errors);
+        requireValue(declaration?.description === undefined || (typeof declaration.description === "string" && declaration.description.length <= 240), `integrations.${kind}.description 无效`, errors);
+        names.add(declaration?.name);
+      }
+      if (Array.isArray(declarations) && declarations.length) requireValue(manifest.extensions.includes(extension), `integrations.${kind} 必须声明 ${extension} 扩展`, errors);
+    }
+  }
   requireValue(!("backendPackage" in manifest || "backendEntrypoint" in manifest || "backendUrls" in manifest || "djangoApp" in manifest || "migrations" in manifest), "Unsupported extended backend capability", errors);
   requireValue(!manifest.extensions?.includes("background.task"), "Unsupported extended backend capability", errors);
   if (manifest.runtimes?.includes("frontend")) {

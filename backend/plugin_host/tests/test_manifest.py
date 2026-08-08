@@ -40,3 +40,39 @@ class ManifestV2Tests(SimpleTestCase):
             hooks=["registration.before_request", "user.after_created"],
         )
         self.assertEqual(validate_manifest(manifest), manifest)
+
+    def test_plugins_without_integrations_remain_valid(self):
+        manifest = self.valid_manifest()
+        self.assertNotIn("integrations", validate_manifest(manifest))
+
+    def test_integration_declarations_are_optional_and_provider_neutral(self):
+        manifest = self.valid_manifest(
+            extensions=["integration.actions", "integration.events"],
+            integrations={
+                "actions": [{"name": "import-text", "description": "Import text."}],
+                "events": [{"name": "import-completed"}],
+            },
+        )
+        self.assertEqual(validate_manifest(manifest), manifest)
+
+    def test_integration_action_requires_capability_extension(self):
+        with self.assertRaises(ManifestError):
+            validate_manifest(
+                self.valid_manifest(integrations={"actions": [{"name": "run"}]})
+            )
+
+    def test_integration_names_are_conservative_and_unique(self):
+        with self.assertRaises(ManifestError):
+            validate_manifest(
+                self.valid_manifest(
+                    extensions=["integration.actions"],
+                    integrations={"actions": [{"name": "Bad.Name"}]},
+                )
+            )
+        with self.assertRaises(ManifestError):
+            validate_manifest(
+                self.valid_manifest(
+                    extensions=["integration.events"],
+                    integrations={"events": [{"name": "done"}, {"name": "done"}]},
+                )
+            )

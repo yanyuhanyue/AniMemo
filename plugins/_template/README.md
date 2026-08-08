@@ -45,4 +45,8 @@ GET /api/plugins/blank-plugin/status/
 
 权限由 Manifest 的 `frontend.exposure` 和 handler 自己声明的 `permission` 在 metadata、asset、backend dispatch 三处统一执行。拥有某个插件权限不会自动获得该插件的其他接口；未授权请求由宿主拒绝。
 
+## Integration Protocol v1
+
+模板还展示了 provider-neutral 的 `host.integrations` 门面：Manifest 中的 `integrations.actions/events` 声明必须与 `integration.actions/events` 扩展一致，插件只注册本地 kebab-case 名称，公开动作由 Host 自动加上插件 slug 命名空间。事件路由只接受 AniMemo 用户，由 Host 根据已启用绑定投递，默认是私聊。
+
 完成接入验证后，可以删除状态卡片，但保留命名空间、权限和清理约定。

@@ -141,8 +141,8 @@ class RuntimeRegistry:
             plugin = factory(context)
             if plugin is None:
                 raise RuntimeLoadError("Backend plugin factory 未返回 runtime object。")
-            if not context.api:
-                raise RuntimeLoadError("Backend plugin 必须通过 host.api 注册至少一个 handler。")
+            if not context.api and not context.integrations:
+                raise RuntimeLoadError("Backend plugin 必须注册 API handler 或 Integration action。")
             health_check = getattr(plugin, "health_check", None)
             health = health_check() if callable(health_check) else True
             if health is False or (isinstance(health, dict) and health.get("status") not in {None, "ok", "healthy"}):
