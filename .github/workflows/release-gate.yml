@@ -60,7 +60,7 @@ jobs:
         shell: bash
         run: |
           for attempt in {1..30}; do
-            if curl --fail --silent --show-error -H 'Host: ci.example.test' http://127.0.0.1:8088/health/ | grep -q '"status":"ok"'; then
+            if curl --fail --silent --show-error -H 'Host: ci.example.test' http://127.0.0.1:8088/health/ | python3 -c "import json, sys; assert json.load(sys.stdin).get('status') == 'ok'"; then
               break
             fi
             if [[ "$attempt" == 30 ]]; then
