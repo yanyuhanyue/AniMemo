@@ -54,6 +54,11 @@ USER_SCOPED_HOOKS = {
     "journal.after_create", "journal.after_update", "journal.after_delete",
     "column.after_publish", "column.after_delete",
 }
+INTEGRATION_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+INTEGRATION_EXTENSIONS = {
+    "actions": "integration.actions",
+    "events": "integration.events",
+}
 
 
 def _boundary_error(detail=""):
@@ -170,6 +175,27 @@ def read_manifest(slug: str) -> dict:
         raise SystemExit("manifest installationMode must be user or system")
     if manifest.get("installationMode") == "user" and not set(manifest.get("hooks") or []) <= USER_SCOPED_HOOKS:
         raise SystemExit("USER plugins may only declare user-scoped journal/column hooks")
+    integrations = manifest.get("integrations")
+    if integrations is not None:
+        if not isinstance(integrations, dict) or set(integrations) - set(INTEGRATION_EXTENSIONS):
+            raise SystemExit("manifest integrations may only contain actions/events")
+        for kind, extension in INTEGRATION_EXTENSIONS.items():
+            declarations = integrations.get(kind, [])
+            if not isinstance(declarations, list) or len(declarations) > 64:
+                raise SystemExit(f"manifest integrations.{kind} must be an array with at most 64 items")
+            names = set()
+            for declaration in declarations:
+                if not isinstance(declaration, dict) or set(declaration) - {"name", "description"}:
+                    raise SystemExit(f"manifest integrations.{kind} declaration is invalid")
+                name = declaration.get("name")
+                description = declaration.get("description", "")
+                if not isinstance(name, str) or not INTEGRATION_NAME_RE.fullmatch(name) or name in names:
+                    raise SystemExit(f"manifest integrations.{kind} names must be unique kebab-case")
+                if not isinstance(description, str) or len(description) > 240:
+                    raise SystemExit(f"manifest integrations.{kind} description is invalid")
+                names.add(name)
+            if declarations and extension not in set(manifest.get("extensions") or []):
+                raise SystemExit(f"manifest integrations.{kind} requires {extension}")
     return manifest
 
 

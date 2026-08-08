@@ -38,8 +38,15 @@
       "type": "array", "uniqueItems": true,
       "items": { "enum": [
         "frontend.page", "frontend.navigation", "backend.api", "settings", "hooks", "storage",
-        "catalog.importer", "catalog.metadata"
+        "catalog.importer", "catalog.metadata", "integration.actions", "integration.events"
       ] }
+    },
+    "integrations": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "actions": { "$ref": "#/$defs/integrationDeclarations" },
+        "events": { "$ref": "#/$defs/integrationDeclarations" }
+      }
     },
     "permissions": {
       "type": "array",
@@ -104,6 +111,16 @@
     }
   ],
   "$defs": {
+    "integrationDeclarations": {
+      "type": "array", "maxItems": 64,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+          "description": { "type": "string", "maxLength": 240 }
+        }
+      }
+    },
     "semver": { "type": "string", "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]+)?$" },
     "slug": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" }
   }

@@ -8,10 +8,12 @@ from .hook_contract import SUPPORTED_HOOKS, SYSTEM_SCOPED_HOOKS
 SLUG_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 PLUGIN_ID_RE = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)+$")
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$")
+INTEGRATION_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 ROLES = {"reviewer", "user_manager", "operator", "administrator"}
 EXTENSIONS = {
     "frontend.page", "frontend.navigation", "backend.api", "settings",
     "hooks", "storage", "catalog.importer", "catalog.metadata",
+    "integration.actions", "integration.events",
 }
 HOOKS = SUPPORTED_HOOKS
 POLICY_KEYS = {"storesPersonalData", "usesExternalNetwork", "acceptsFileUploads", "retainsDataOnDisable"}
@@ -61,6 +63,29 @@ def validate_manifest(manifest: dict, *, directory_name: str | None = None) -> d
     extensions = manifest.get("extensions")
     if not isinstance(extensions, list) or not set(extensions) <= EXTENSIONS:
         raise ManifestError("extensions 包含未知扩展")
+    integrations = manifest.get("integrations")
+    if integrations is not None:
+        if not isinstance(integrations, dict) or set(integrations) - {"actions", "events"}:
+            raise ManifestError("integrations 必须只包含 actions/events")
+        for kind, extension in (("actions", "integration.actions"), ("events", "integration.events")):
+            declarations = integrations.get(kind, [])
+            if not isinstance(declarations, list) or len(declarations) > 64:
+                raise ManifestError(f"integrations.{kind} 必须是最多 64 项的数组")
+            names = set()
+            for declaration in declarations:
+                if not isinstance(declaration, dict) or set(declaration) - {"name", "description"}:
+                    raise ManifestError(f"integrations.{kind} declaration 无效")
+                name = declaration.get("name")
+                description = declaration.get("description", "")
+                if not isinstance(name, str) or not INTEGRATION_NAME_RE.fullmatch(name):
+                    raise ManifestError(f"integrations.{kind}.name 必须为 kebab-case")
+                if name in names:
+                    raise ManifestError(f"integrations.{kind}.name 不能重复")
+                if not isinstance(description, str) or len(description) > 240:
+                    raise ManifestError(f"integrations.{kind}.description 无效")
+                names.add(name)
+            if declarations and extension not in set(extensions):
+                raise ManifestError(f"integrations.{kind} 必须声明 {extension} 扩展")
     if "frontend" in runtimes:
         # Runtime packages expose one stable browser entry; the package inspector
         # checks that the file is present in the archive/directory.

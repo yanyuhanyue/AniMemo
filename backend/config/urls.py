@@ -18,6 +18,7 @@ urlpatterns = [
     path("api/token/", EmailTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/token/refresh/", CookieTokenRefreshView.as_view(), name="token_refresh"),
     path("api/", include("journal.urls")),
+    path("api/integrations/v1/", include("integrations.urls")),
     path("plugin-assets/session/<str:asset_session>/<slug>/<version>/<path:asset>", PluginAssetView.as_view(), name="plugin-asset-session"),
     path("plugin-assets/<slug>/<version>/<path:asset>", PluginAssetView.as_view(), name="plugin-asset"),
     path("plugin-previews/session/<str:preview_session>/<slug>/<version>/<path:asset>", PluginPreviewAssetView.as_view(), name="plugin-preview-asset-session"),

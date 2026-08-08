@@ -12,8 +12,12 @@
   "installationMode": "user",
   "runtimes": ["frontend", "backend"],
   "frontend": { "exposure": "authenticated" },
-  "extensions": ["frontend.page", "frontend.navigation", "backend.api", "settings", "storage"],
+  "extensions": ["frontend.page", "frontend.navigation", "backend.api", "settings", "storage", "integration.actions", "integration.events"],
   "backend": { "entry": "backend/plugin.py" },
+  "integrations": {
+    "actions": [{ "name": "echo", "description": "返回当前绑定用户与调用 payload。" }],
+    "events": [{ "name": "notice", "description": "向当前用户的已启用外部绑定发送私聊事件。" }]
+  },
   "permissions": [],
   "hooks": [],
   "settings": [{ "key": "panel_message", "scope": "user", "label": "面板提示文字", "description": "显示在空白插件示例面板中的状态说明。", "type": "text", "required": true, "default": "插件已连接" }],
