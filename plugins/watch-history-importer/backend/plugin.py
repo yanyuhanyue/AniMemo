@@ -125,10 +125,14 @@ class WatchHistoryPlugin:
         host.api.post("batches/<batch_id>/resolve-next", handler=self.resolve_next, access="user")
         host.api.post("batches/<batch_id>/select-subject", handler=self.select_subject, access="user")
         host.api.post("batches/<batch_id>/commit", handler=self.commit, access="user")
+        host.api.get("astrbot/schema", handler=self.astrbot_schema, access="user")
 
     @staticmethod
     def health_check():
         return True
+
+    def astrbot_schema(self, request):
+        return Response({"interface": "anime-journal.watch-history-import", "version": "2.0", "implemented": False, "workflow": ["preview", "resolve", "review", "commit"]})
 
     def status(self, request):
         batches = list(_store(request.user, "batches").collection().values("value")[:8])

@@ -6,8 +6,8 @@
   "files": [
     {
       "path": "backend/plugin.py",
-      "size": 15032,
-      "sha256": "61b677d85433d047a2b8ef8a8f4792d58a64df06c9732776119226ac15917621"
+      "size": 15328,
+      "sha256": "cd64f6afbec486bccfbefcba13467f4729d973888c8af817491fd404b4403cc6"
     },
     {
       "path": "backend/src/__init__.py",
