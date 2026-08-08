@@ -13,6 +13,10 @@ Anime Journal 全栈插件，用于上传年度 TXT 观看记录，在正式写�
 
 插件保留每次观看日期与刷次；番剧列表标签只保留最新观看日期和最新刷次，不生成季度日期标签。同一目标账号重复导入时，番剧按 Bangumi 条目/规范化标题合并，观看事件按日期、刷次和集数范围去重；源文件名与行号仅用于追溯。
 
+## AstrBot 预留接口
+
+`GET /api/plugins/watch-history-importer/astrbot/schema/` 返回未来接入契约。当前仅声明数据结构，不接受 AstrBot 写入。
+
 ## 验证
 
 ```powershell

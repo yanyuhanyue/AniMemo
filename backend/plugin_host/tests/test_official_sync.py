@@ -1,3 +1,4 @@
+import hashlib
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -40,6 +41,13 @@ class OfficialPluginSyncTests(TestCase):
         with ZipFile(BytesIO(first)) as archive:
             self.assertTrue(archive.infolist())
             self.assertTrue(all(item.date_time == ZIP_TIMESTAMP for item in archive.infolist()))
+
+    def test_official_package_matches_immutable_release_sha(self):
+        source = Path(__file__).resolve().parents[3] / "plugins" / "watch-history-importer"
+
+        package_sha = hashlib.sha256(build_official_package(source)).hexdigest()
+
+        self.assertEqual(package_sha, "2e55570a3a78867646d05b39543cfc63b46a0fdeef884c832c9e15c8f5fbdf05")
 
     def test_sync_is_idempotent(self):
         call_command("sync_official_plugins")
