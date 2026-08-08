@@ -20,6 +20,8 @@ function validateManifest(directory, manifest, { enforceDirectoryName = true } =
   requireValue(slugPattern.test(manifest.slug || ""), "slug 必须为 kebab-case", errors);
   if (enforceDirectoryName) requireValue(directory === manifest.slug, `目录名必须与 slug 一致：${manifest.slug}`, errors);
   for (const key of ["name", "description", "license"]) requireValue(typeof manifest[key] === "string" && manifest[key].length > 0, `${key} 不能为空`, errors);
+  requireValue(typeof manifest.author?.name === "string" && manifest.author.name.length > 0, "author.name 不能为空", errors);
+  requireValue(["user", "system"].includes(manifest.installationMode), "installationMode 必须为 user 或 system", errors);
   requireValue(semverPattern.test(manifest.version || ""), "version 必须符合 SemVer", errors);
   requireValue(Array.isArray(manifest.runtimes) && manifest.runtimes.every((item) => runtimes.has(item)), "runtimes 只能声明 frontend/backend", errors);
   requireValue(Array.isArray(manifest.extensions) && manifest.extensions.every((item) => extensions.has(item)), "extensions 包含未知扩展", errors);
@@ -41,6 +43,9 @@ function validateManifest(directory, manifest, { enforceDirectoryName = true } =
   }
   requireValue(Array.isArray(manifest.hooks) && manifest.hooks.every((hook) => hooks.has(hook)), "hooks 包含未知 Hook", errors);
   requireValue(Array.isArray(manifest.settings), "settings 必须是数组", errors);
+  for (const setting of manifest.settings || []) {
+    requireValue(["user", "system"].includes(setting.scope), `配置 ${setting.key || "未命名"} 必须声明 scope=user 或 scope=system`, errors);
+  }
   const policy = manifest.dataPolicy;
   for (const key of ["storesPersonalData", "usesExternalNetwork", "acceptsFileUploads", "retainsDataOnDisable"]) requireValue(typeof policy?.[key] === "boolean", `dataPolicy.${key} 必须是布尔值`, errors);
   return errors;

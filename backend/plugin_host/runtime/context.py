@@ -34,10 +34,15 @@ class PluginContext:
         return self.slug, self.version, self.runtime_id
 
     @property
-    def settings(self):
-        from plugin_host.sdk.settings import get_plugin_settings
+    def system_settings(self):
+        from plugin_host.sdk.settings import get_system_settings
 
-        return get_plugin_settings(self.slug)
+        return get_system_settings(self.slug)
+
+    def user_settings(self, user):
+        from plugin_host.sdk.settings import get_user_settings
+
+        return get_user_settings(self.slug, user)
 
     def storage(self, *, user=None, namespace="default"):
         return PluginStorage(self.slug, user=user, namespace=namespace)

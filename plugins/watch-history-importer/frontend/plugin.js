@@ -131,7 +131,6 @@ function WatchHistoryImporterPage({ host, api: pluginApi }) {
   const resolvingRef = useRef(false);
   const [data, setData] = useState(EMPTY);
   const [batch, setBatch] = useState(null);
-  const [targetUserId, setTargetUserId] = useState("");
   const [files, setFiles] = useState([]);
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -146,8 +145,8 @@ function WatchHistoryImporterPage({ host, api: pluginApi }) {
     window.setTimeout(() => setNotice(""), 2600);
   }, []);
   useEffect(() => {
-    if (!host?.auth?.isAuthenticated() || !host.auth.isStaff()) {
-      navigate("/admin-login", { replace: true });
+    if (!host?.auth?.isAuthenticated()) {
+      navigate("/login", { replace: true });
       return;
     }
     if (!client) {
@@ -157,7 +156,6 @@ function WatchHistoryImporterPage({ host, api: pluginApi }) {
     }
     client.get("status/").then(({ data: result }) => {
       setData({ ...EMPTY, ...result || {} });
-      setTargetUserId(String(result?.users?.find((user) => !user.is_staff)?.id || result?.users?.[0]?.id || ""));
     }).catch((requestError) => setError(readablePluginError(requestError, "\u63D2\u4EF6\u672A\u542F\u7528\u6216\u6682\u65F6\u4E0D\u53EF\u7528\u3002"))).finally(() => setLoading(false));
   }, [client, navigate]);
   const chooseFiles = (list) => {
@@ -172,7 +170,6 @@ function WatchHistoryImporterPage({ host, api: pluginApi }) {
     try {
       const response = await client.get(`batches/${batchId}/`);
       setBatch(response.data);
-      setTargetUserId(String(response.data?.target_user?.id || ""));
       setSubjectDrafts({});
       setPreviewQuery("");
       setExcludedGroupIndices(new Set(response.data?.summary?.excluded_group_indices || []));
@@ -192,11 +189,10 @@ function WatchHistoryImporterPage({ host, api: pluginApi }) {
     if (inputRef.current) inputRef.current.value = "";
   };
   const createPreview = async () => {
-    if (!files.length || !targetUserId || busy) return;
+    if (!files.length || busy) return;
     setBusy("preview");
     setError("");
     const payload = new FormData();
-    payload.append("target_user_id", targetUserId);
     files.forEach((file) => payload.append("files", file));
     try {
       const response = await client.post("preview/", payload);
@@ -311,9 +307,9 @@ function WatchHistoryImporterPage({ host, api: pluginApi }) {
         /* @__PURE__ */ jsx2("h1", { children: "\u5FC6\u5F80\u6614\u89C2\u770B\u8BB0\u5F55\u5BFC\u5165\u5668" }),
         /* @__PURE__ */ jsx2("p", { children: "\u89E3\u6790\u6587\u6863\u3001\u5339\u914D Bangumi\u3001\u4EBA\u5DE5\u786E\u8BA4\uFF0C\u6700\u540E\u4E00\u6B21\u6027\u5199\u5165\u3002" })
       ] }),
-      /* @__PURE__ */ jsxs(Link, { to: "/admin-control", children: [
+      /* @__PURE__ */ jsxs(Link, { to: "/dashboard", children: [
         /* @__PURE__ */ jsx2(Icon, { name: "arrow-left" }),
-        " \u8FD4\u56DE\u7BA1\u7406\u63A7\u5236\u5BA4"
+        " \u8FD4\u56DE\u6211\u7684\u624B\u8D26"
       ] })
     ] }),
     loading ? /* @__PURE__ */ jsxs("div", { className: "ajp-watch-import__loading", children: [
@@ -322,14 +318,6 @@ function WatchHistoryImporterPage({ host, api: pluginApi }) {
     ] }) : /* @__PURE__ */ jsxs(Fragment, { children: [
       /* @__PURE__ */ jsxs("section", { className: "ajp-watch-import__workspace", children: [
         /* @__PURE__ */ jsxs("div", { className: "ajp-watch-import__source", children: [
-          /* @__PURE__ */ jsxs("label", { children: [
-            /* @__PURE__ */ jsx2("span", { children: "\u5BFC\u5165\u76EE\u6807\u8D26\u53F7" }),
-            /* @__PURE__ */ jsx2("select", { value: targetUserId, onChange: (event) => setTargetUserId(event.target.value), disabled: Boolean(batch), children: data.users.map((user) => /* @__PURE__ */ jsxs("option", { value: user.id, children: [
-              user.username,
-              " \xB7 ",
-              user.email
-            ] }, user.id)) })
-          ] }),
           /* @__PURE__ */ jsxs(
             "label",
             {
@@ -352,7 +340,7 @@ function WatchHistoryImporterPage({ host, api: pluginApi }) {
               ]
             }
           ),
-          /* @__PURE__ */ jsxs("button", { type: "button", className: "is-primary", disabled: !files.length || !targetUserId || Boolean(batch) || busy === "preview", onClick: createPreview, children: [
+          /* @__PURE__ */ jsxs("button", { type: "button", className: "is-primary", disabled: !files.length || Boolean(batch) || busy === "preview", onClick: createPreview, children: [
             /* @__PURE__ */ jsx2(Icon, { name: "layers" }),
             " ",
             busy === "preview" ? "\u6B63\u5728\u89E3\u6790..." : "\u751F\u6210\u53EA\u8BFB\u9884\u89C8"
@@ -538,7 +526,7 @@ var init_WatchHistoryImporterPage = __esm({
     init_Icon();
     init_errors();
     init_styles();
-    EMPTY = { users: [], batches: [], config: {}, plugin: {} };
+    EMPTY = { batches: [], config: {}, plugin: {} };
   }
 });
 
@@ -551,17 +539,16 @@ function createPlugin(host) {
   const pluginApi = host.api.plugin("watch-history-importer");
   return Object.freeze({
     id: "com.anime-journal.watch-history-importer",
-    version: "0.2.0",
+    version: "0.3.0",
     routes: [{
       path: "/plugins/watch-history-importer",
       Component: (props) => /* @__PURE__ */ jsx3(WatchHistoryImporterPage2, { ...props, host, api: pluginApi }),
-      area: "admin",
-      access: "staff",
-      permission: "watch-history-importer.run"
+      area: "dashboard",
+      access: "auth"
     }],
     navigation: [{
       id: "watch-history-importer.home",
-      area: "admin",
+      area: "dashboard",
       label: "\u5FC6\u5F80\u6614\u5BFC\u5165",
       path: "/plugins/watch-history-importer",
       icon: "history",

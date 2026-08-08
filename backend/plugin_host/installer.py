@@ -10,8 +10,9 @@ from zipfile import ZipFile
 
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 
-from .models import PluginData, PluginInstallation
+from .models import PluginDeployment, PluginVersion
 from .package import LocalPluginPackageStorage, PluginPackageError, inspect_package
 from .runtime import RuntimeLoadError, runtime_registry
 
@@ -53,6 +54,12 @@ class _PluginFilesystemLock:
 
 
 class PluginPackageInstaller:
+    """Deploys only reviewed immutable PluginVersion rows.
+
+    Developer uploads never call this class. Loading Python is intentionally
+    confined to publish/rollback, both trusted administrator operations.
+    """
+
     def __init__(self, root=None):
         self.storage = LocalPluginPackageStorage(root or settings.PLUGIN_ROOT)
 
@@ -67,96 +74,97 @@ class PluginPackageInstaller:
                 target.write_bytes(archive.read(relative.as_posix()))
 
     def _assert_growth_allowed(self):
+        self.storage.ensure()
         minimum = int(getattr(settings, "PLUGIN_MIN_FREE_DISK_MB", 2048)) * 1024 * 1024
         if shutil.disk_usage(self.storage.root).free < minimum:
-            raise PluginInstallError("插件存储空间不足，无法安装或升级。")
+            raise PluginInstallError("插件存储空间不足，无法发布。")
 
-    def install(self, uploaded_file, *, replace=False, actor=None):
-        if not uploaded_file or not str(getattr(uploaded_file, "name", "")).lower().endswith(".ajplugin"):
-            raise PluginInstallError("只支持上传 .ajplugin 插件包。")
-        payload = uploaded_file.read()
+    def _payload_for(self, plugin_version):
+        path = self.storage.root / plugin_version.package_blob.storage_path
+        if path != self.storage.package_path(plugin_version.package_blob.sha256):
+            raise PluginInstallError("PackageBlob 存储路径不符合 CAS 规则。")
+        if not path.is_file():
+            raise PluginInstallError("插件 CAS 文件不存在。")
+        payload = path.read_bytes()
         try:
             inspected = inspect_package(payload)
         except PluginPackageError as error:
             raise PluginInstallError(str(error)) from error
+        if inspected["sha256"] != plugin_version.package_blob.sha256:
+            raise PluginInstallError("插件 CAS 文件完整性校验失败。")
         manifest = inspected["manifest"]
-        slug = manifest["slug"]
-        version = manifest["version"]
-        self.storage.ensure()
+        if manifest != plugin_version.manifest_snapshot:
+            raise PluginInstallError("不可变版本的 Manifest 快照不一致。")
+        return payload, inspected
 
+    def publish(self, plugin_version, *, actor=None):
+        plugin_version = PluginVersion.objects.select_related("plugin", "package_blob").get(pk=plugin_version.pk)
+        plugin = plugin_version.plugin
+        if plugin_version.review_status != PluginVersion.ReviewStatus.APPROVED or plugin_version.revoked_at:
+            raise PluginInstallError("只有审核通过且未撤销的版本可以发布。")
+        if "backend" in set(plugin_version.runtime_types or []) and not getattr(actor, "is_superuser", False):
+            raise PluginInstallError("包含 Backend Runtime 的版本只能由超级管理员发布。")
+
+        slug = plugin.slug
+        version = plugin_version.version
+        self._assert_growth_allowed()
         with _PluginFilesystemLock(self.storage.root, slug):
-            self._assert_growth_allowed()
-            installation = PluginInstallation.objects.filter(slug=slug).first()
-            if installation and installation.current_version == version:
-                raise PluginInstallError("同版本插件已经安装；升级必须使用新的版本号。")
-            if installation and not replace:
-                raise PluginInstallError("插件已经安装；升级时必须明确确认替换当前版本。")
-            if installation and installation.plugin_id != manifest["id"]:
-                raise PluginInstallError("相同 slug 不能对应不同 plugin id。")
-            if installation and installation.enabled and installation.healthy:
-                try:
-                    runtime_registry.ensure_current(slug)
-                except RuntimeLoadError as error:
-                    raise PluginInstallError(f"当前版本 Runtime 无法确认健康，升级已拒绝：{error}") from error
+            deployment = PluginDeployment.objects.select_related("current_version").filter(plugin=plugin).first()
+            old_version = deployment.current_version if deployment else None
+            if old_version and old_version.pk == plugin_version.pk:
+                raise PluginInstallError("该版本已经是当前部署版本。")
+            if deployment and deployment.enabled and deployment.healthy:
+                runtime_registry.ensure_current(slug)
 
-            package_target = self.storage.package_path(slug, version)
+            payload, inspected = self._payload_for(plugin_version)
             runtime_target = self.storage.runtime / slug / version
-            if package_target.exists() or runtime_target.exists():
-                raise PluginInstallError("发现未登记的同版本文件；请先执行插件清理。")
-
             staging = self.storage.staging / f"{slug}-{version}-{uuid4().hex}"
             runtime_temp = runtime_target.with_name(f".{version}.staged-{uuid4().hex}")
             previous_candidate = None
             final_candidate = None
             activated = False
-            package_written = False
             runtime_written = False
-            old_version = installation.current_version if installation else ""
-            was_enabled = bool(installation and installation.enabled)
             committed = False
+            was_enabled = True if deployment is None else deployment.enabled
             try:
+                if runtime_target.exists():
+                    shutil.rmtree(runtime_target, ignore_errors=True)
                 self._extract(payload, inspected, staging)
                 shutil.copytree(staging, runtime_temp)
-                health_candidate = runtime_registry.load_candidate(
-                    runtime_temp,
-                    expected_slug=slug,
-                    expected_version=version,
-                )
-                health_candidate.dispose()
+                candidate = runtime_registry.load_candidate(runtime_temp, expected_slug=slug, expected_version=version)
+                candidate.dispose()
 
                 runtime_target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(runtime_temp, runtime_target)
                 runtime_written = True
-                self.storage.store_package(slug, version, payload)
-                package_written = True
-                final_candidate = runtime_registry.load_candidate(
-                    runtime_target,
-                    expected_slug=slug,
-                    expected_version=version,
-                )
+                final_candidate = runtime_registry.load_candidate(runtime_target, expected_slug=slug, expected_version=version)
 
                 with runtime_registry.plugin_lock(slug):
                     with transaction.atomic():
-                        locked = PluginInstallation.objects.select_for_update().filter(slug=slug).first()
-                        if locked is None:
-                            locked = PluginInstallation(slug=slug, plugin_id=manifest["id"])
-                        elif locked.current_version != old_version:
-                            raise PluginInstallError("插件版本已被另一项操作修改。")
-                        if locked.plugin_id != manifest["id"]:
-                            raise PluginInstallError("plugin id 冲突。")
+                        locked_version = PluginVersion.objects.select_for_update().get(pk=plugin_version.pk)
+                        if locked_version.review_status != PluginVersion.ReviewStatus.APPROVED or locked_version.revoked_at:
+                            raise PluginInstallError("版本在发布期间被撤销或不再处于审核通过状态。")
+                        locked = PluginDeployment.objects.select_for_update().filter(plugin=plugin).first()
+                        locked_current_id = locked.current_version_id if locked else None
+                        expected_id = old_version.pk if old_version else None
+                        if locked_current_id != expected_id:
+                            raise PluginInstallError("部署版本已被另一项操作修改。")
                         if was_enabled:
                             previous_candidate = runtime_registry.activate_candidate_locked(final_candidate)
                             activated = True
+                        if locked is None:
+                            locked = PluginDeployment(plugin=plugin, current_version=locked_version)
                         locked.previous_version = old_version
-                        locked.current_version = version
+                        locked.current_version = locked_version
                         locked.enabled = was_enabled
                         locked.healthy = True
-                        locked.status = PluginInstallation.Status.ENABLED if was_enabled else PluginInstallation.Status.DEPLOYED
+                        locked.status = PluginDeployment.Status.ENABLED if was_enabled else PluginDeployment.Status.DEPLOYED
                         locked.last_error = ""
-                        locked.config = locked.config if isinstance(locked.config, dict) else {}
                         locked.updated_by = actor
                         locked.disk_bytes = sum(path.stat().st_size for path in runtime_target.rglob("*") if path.is_file())
                         locked.save()
+                        locked_version.published_at = timezone.now()
+                        locked_version.save(update_fields=["published_at"])
                 committed = True
                 if not activated and final_candidate is not None:
                     final_candidate.dispose()
@@ -164,15 +172,13 @@ class PluginPackageInstaller:
                 self.storage.retain_versions(
                     slug,
                     current=version,
-                    previous=old_version,
+                    previous=old_version.version if old_version else "",
                     keep=int(getattr(settings, "PLUGIN_KEEP_VERSIONS", 2)),
                 )
                 return {
                     "slug": slug,
                     "version": version,
-                    "replaced": bool(old_version),
-                    "previous_version": old_version,
-                    "restored_enabled": was_enabled,
+                    "previous_version": old_version.version if old_version else "",
                 }
             except Exception as error:
                 if activated:
@@ -180,8 +186,6 @@ class PluginPackageInstaller:
                         runtime_registry.restore_candidate_locked(slug, previous_candidate)
                 elif final_candidate is not None:
                     final_candidate.dispose()
-                if not committed and package_written:
-                    package_target.unlink(missing_ok=True)
                 if not committed and runtime_written:
                     shutil.rmtree(runtime_target, ignore_errors=True)
                 if isinstance(error, (PluginInstallError, RuntimeLoadError, PluginPackageError)):
@@ -194,33 +198,29 @@ class PluginPackageInstaller:
     def rollback(self, slug, *, actor=None):
         self.storage.ensure()
         with _PluginFilesystemLock(self.storage.root, slug):
-            installation = PluginInstallation.objects.filter(slug=slug).first()
-            if installation is None or not installation.previous_version:
+            deployment = PluginDeployment.objects.select_related(
+                "plugin", "current_version", "previous_version", "previous_version__package_blob"
+            ).filter(plugin__slug=slug).first()
+            if deployment is None or deployment.previous_version is None:
                 raise PluginInstallError("没有可回滚的上一版本。")
-            current_version = installation.current_version
-            target_version = installation.previous_version
-            if installation.enabled and installation.healthy:
+            current_version = deployment.current_version
+            target_version = deployment.previous_version
+            if target_version.revoked_at:
+                raise PluginInstallError("上一版本已撤销，不能回滚。")
+            if deployment.enabled and deployment.healthy:
                 runtime_registry.ensure_current(slug)
-            runtime_target = self.storage.runtime / slug / target_version
+            runtime_target = self.storage.runtime / slug / target_version.version
             if not runtime_target.is_dir():
-                package_path = self.storage.package_path(slug, target_version)
-                if not package_path.is_file():
-                    raise PluginInstallError("上一版本 package/runtime 均不存在。")
-                inspect_package(package_path.read_bytes())
-                self.storage.rollback(slug, target_version)
-            candidate = runtime_registry.load_candidate(
-                runtime_target,
-                expected_slug=slug,
-                expected_version=target_version,
-            )
+                self.storage.rollback(slug, target_version.version, target_version.package_blob.sha256)
+            candidate = runtime_registry.load_candidate(runtime_target, expected_slug=slug, expected_version=target_version.version)
             previous_candidate = None
             activated = False
             try:
                 with runtime_registry.plugin_lock(slug):
                     with transaction.atomic():
-                        locked = PluginInstallation.objects.select_for_update().get(slug=slug)
-                        if locked.current_version != current_version or locked.previous_version != target_version:
-                            raise PluginInstallError("插件版本已被另一项操作修改。")
+                        locked = PluginDeployment.objects.select_for_update().get(pk=deployment.pk)
+                        if locked.current_version_id != current_version.pk or locked.previous_version_id != target_version.pk:
+                            raise PluginInstallError("部署版本已被另一项操作修改。")
                         if locked.enabled:
                             previous_candidate = runtime_registry.activate_candidate_locked(candidate)
                             activated = True
@@ -228,20 +228,15 @@ class PluginPackageInstaller:
                         locked.previous_version = current_version
                         locked.healthy = True
                         locked.last_error = ""
-                        locked.status = PluginInstallation.Status.ENABLED if locked.enabled else PluginInstallation.Status.DEPLOYED
+                        locked.status = PluginDeployment.Status.ENABLED if locked.enabled else PluginDeployment.Status.DEPLOYED
                         locked.updated_by = actor
                         locked.disk_bytes = sum(path.stat().st_size for path in runtime_target.rglob("*") if path.is_file())
                         locked.save()
                 if not activated:
                     candidate.dispose()
                 runtime_registry.finalize_previous(previous_candidate)
-                self.storage.retain_versions(
-                    slug,
-                    current=target_version,
-                    previous=current_version,
-                    keep=int(getattr(settings, "PLUGIN_KEEP_VERSIONS", 2)),
-                )
-                return {"slug": slug, "version": target_version, "previous_version": current_version}
+                self.storage.retain_versions(slug, current=target_version.version, previous=current_version.version)
+                return {"slug": slug, "version": target_version.version, "previous_version": current_version.version}
             except Exception:
                 if activated:
                     with runtime_registry.plugin_lock(slug):
@@ -251,88 +246,73 @@ class PluginPackageInstaller:
                 raise
 
     def set_enabled(self, slug, enabled, *, actor=None):
-        self.storage.ensure()
-        with _PluginFilesystemLock(self.storage.root, slug):
-            installation = PluginInstallation.objects.filter(slug=slug).first()
-            if installation is None:
-                raise PluginInstallError("插件未安装。")
-            candidate = None
-            previous = None
-            if enabled:
-                candidate = runtime_registry.load_installed_candidate(slug, installation.current_version)
+        deployment = PluginDeployment.objects.select_related("plugin", "current_version").filter(plugin__slug=slug).first()
+        if deployment is None:
+            raise PluginInstallError("插件尚未部署。")
+        candidate = runtime_registry.load_installed_candidate(slug, deployment.current_version.version) if enabled else None
+        previous = None
+        with _PluginFilesystemLock(self.storage.root, slug), runtime_registry.plugin_lock(slug):
             try:
-                with runtime_registry.plugin_lock(slug):
-                    with transaction.atomic():
-                        locked = PluginInstallation.objects.select_for_update().get(slug=slug)
-                        if locked.current_version != installation.current_version:
-                            raise PluginInstallError("插件版本已被另一项操作修改。")
-                        if enabled:
-                            previous = runtime_registry.activate_candidate_locked(candidate)
-                            locked.healthy = True
-                            locked.last_error = ""
-                            locked.status = PluginInstallation.Status.ENABLED
-                        else:
-                            previous = runtime_registry._active.pop(slug, None)
-                            if previous is not None:
-                                previous.deactivate()
-                            locked.status = PluginInstallation.Status.DEPLOYED
-                        locked.enabled = bool(enabled)
-                        locked.updated_by = actor
-                        locked.save(update_fields=["enabled", "healthy", "last_error", "status", "updated_by", "updated_at"])
+                with transaction.atomic():
+                    locked = PluginDeployment.objects.select_for_update().get(pk=deployment.pk)
+                    if locked.current_version_id != deployment.current_version_id:
+                        raise PluginInstallError("部署版本已被另一项操作修改。")
+                    if enabled:
+                        previous = runtime_registry.activate_candidate_locked(candidate)
+                        locked.healthy = True
+                        locked.last_error = ""
+                        locked.status = PluginDeployment.Status.ENABLED
+                    else:
+                        previous = runtime_registry._active.pop(slug, None)
+                        if previous is not None:
+                            previous.deactivate()
+                        locked.status = PluginDeployment.Status.DEPLOYED
+                    locked.enabled = bool(enabled)
+                    locked.updated_by = actor
+                    locked.save(update_fields=["enabled", "healthy", "last_error", "status", "updated_by", "updated_at"])
                 if enabled:
                     runtime_registry.finalize_previous(previous)
                 elif previous is not None:
                     previous.dispose()
                 return locked
             except Exception:
-                with runtime_registry.plugin_lock(slug):
-                    if enabled and candidate is not None:
-                        runtime_registry.restore_candidate_locked(slug, previous)
-                    elif not enabled and previous is not None:
-                        previous.activate()
-                        runtime_registry._active[slug] = previous
+                if enabled and candidate is not None:
+                    runtime_registry.restore_candidate_locked(slug, previous)
+                elif not enabled and previous is not None:
+                    previous.activate()
+                    runtime_registry._active[slug] = previous
                 raise
 
-    def uninstall(self, slug):
-        self.storage.ensure()
-        with _PluginFilesystemLock(self.storage.root, slug):
-            with runtime_registry.plugin_lock(slug):
-                previous = runtime_registry.active_candidate(slug)
-                if previous is not None:
-                    previous.deactivate()
-                try:
-                    with transaction.atomic():
-                        installation = PluginInstallation.objects.select_for_update().get(slug=slug)
-                        snapshot = {
-                            "slug": installation.slug,
-                            "plugin_id": installation.plugin_id,
-                            "version": installation.current_version,
-                        }
-                        PluginData.objects.filter(plugin_slug=slug).delete()
-                        installation.delete()
-                except Exception:
-                    if previous is not None:
-                        previous.activate()
-                    raise
-                runtime_registry._active.pop(slug, None)
-                if previous is not None:
-                    previous.dispose()
-            self.storage.delete_plugin(slug)
-            return snapshot
+    def revoke(self, plugin_version, *, actor=None):
+        with transaction.atomic():
+            locked_version = PluginVersion.objects.select_for_update().get(pk=plugin_version.pk)
+            locked_version.review_status = PluginVersion.ReviewStatus.REVOKED
+            locked_version.revoked_at = timezone.now()
+            locked_version.save(update_fields=["review_status", "revoked_at"])
+            deployment = PluginDeployment.objects.select_for_update().filter(current_version=locked_version).first()
+            if deployment:
+                deployment.enabled = False
+                deployment.healthy = False
+                deployment.status = PluginDeployment.Status.REVOKED
+                deployment.last_error = "当前版本已被管理员撤销。"
+                deployment.updated_by = actor
+                deployment.save()
+        if deployment:
+            runtime_registry.unload(deployment.plugin.slug)
+        return locked_version
 
     def cleanup(self, slug=None):
         self.storage.ensure()
         result = {"staging_removed": self.storage.cleanup_staging(), "plugins": {}}
-        installations = PluginInstallation.objects.all()
+        deployments = PluginDeployment.objects.select_related("plugin", "current_version", "previous_version")
         if slug:
-            installations = installations.filter(slug=slug)
-        for installation in installations:
-            with _PluginFilesystemLock(self.storage.root, installation.slug):
-                retained = self.storage.retain_versions(
-                    installation.slug,
-                    current=installation.current_version,
-                    previous=installation.previous_version,
-                    keep=int(getattr(settings, "PLUGIN_KEEP_VERSIONS", 2)),
-                )
-                result["plugins"][installation.slug] = retained
+            deployments = deployments.filter(plugin__slug=slug)
+        for deployment in deployments:
+            retained = self.storage.retain_versions(
+                deployment.plugin.slug,
+                current=deployment.current_version.version,
+                previous=deployment.previous_version.version if deployment.previous_version else "",
+                keep=int(getattr(settings, "PLUGIN_KEEP_VERSIONS", 2)),
+            )
+            result["plugins"][deployment.plugin.slug] = retained
         return result

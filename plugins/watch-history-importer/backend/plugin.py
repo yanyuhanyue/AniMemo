@@ -5,7 +5,6 @@ from datetime import date
 from urllib.parse import quote
 from uuid import uuid4
 
-from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
@@ -19,7 +18,7 @@ from .src.anime_journal_watch_history_importer.parser import build_preview, norm
 
 
 PLUGIN_SLUG = "watch-history-importer"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 MAX_FILES = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
 DATE_TAG_RE = re.compile(r"^\d{4}年\d{1,2}月(?:\d{1,2}(?:日|号)?)?(?:\s*(?:-|–|—|至)\s*(?:\d{1,2}月)?\d{1,2}(?:日|号)?)?$")
@@ -31,10 +30,10 @@ def _store(user, namespace):
     return PluginStorage(PLUGIN_SLUG, user=user, namespace=namespace)
 
 
-def _config():
-    from plugin_host.sdk.settings import get_plugin_settings
+def _config(user):
+    from plugin_host.sdk.settings import get_user_settings
 
-    return {"resolve_batch_size": 6, "unmatched_policy": "review", **get_plugin_settings(PLUGIN_SLUG)}
+    return {"resolve_batch_size": 6, "unmatched_policy": "review", **get_user_settings(PLUGIN_SLUG, user)}
 
 
 def _batch_key(batch_id):
@@ -65,15 +64,14 @@ def _summary(payload):
 
 
 def _serialize_batch(batch, include_groups=True):
-    user = get_user_model().objects.filter(pk=batch.get("target_user_id")).first()
     payload = batch.get("payload") or {}
     result = {
         "id": batch["id"],
         "status": batch.get("status", "preview"),
         "target_user": {
             "id": batch.get("target_user_id"),
-            "username": user.get_username() if user else "",
-            "email": user.email if user else "",
+            "username": batch.get("target_username", ""),
+            "email": batch.get("target_email", ""),
         },
         "source_names": batch.get("source_names", []),
         "summary": batch.get("summary") or payload.get("summary", {}),
@@ -118,25 +116,16 @@ def _moegirl_url(title):
     return f"https://mzh.moegirl.org.cn/{quote(normalized, safe='')}" if normalized else ""
 
 
-def _resolve_entry(target_user, resolution):
-    keys = {normalize_title(resolution.get("title")), normalize_title(resolution.get("japanese_title"))}
-    keys.discard("")
-    return JournalEntry.objects.filter(user=target_user, deleted_at__isnull=True).filter(
-        title__in=[value for value in (resolution.get("title"), resolution.get("japanese_title")) if value]
-    ).first(), keys
-
-
 class WatchHistoryPlugin:
     def __init__(self, host):
         self.host = host
-        permission = "watch-history-importer.run"
-        host.api.get("status", handler=self.status, permission=permission)
-        host.api.post("preview", handler=self.preview, permission=permission)
-        host.api.get("batches/<batch_id>", handler=self.batch, permission=permission)
-        host.api.post("batches/<batch_id>/resolve-next", handler=self.resolve_next, permission=permission)
-        host.api.post("batches/<batch_id>/select-subject", handler=self.select_subject, permission=permission)
-        host.api.post("batches/<batch_id>/commit", handler=self.commit, permission=permission)
-        host.api.get("astrbot/schema", handler=self.astrbot_schema, permission=permission)
+        host.api.get("status", handler=self.status, access="user")
+        host.api.post("preview", handler=self.preview, access="user")
+        host.api.get("batches/<batch_id>", handler=self.batch, access="user")
+        host.api.post("batches/<batch_id>/resolve-next", handler=self.resolve_next, access="user")
+        host.api.post("batches/<batch_id>/select-subject", handler=self.select_subject, access="user")
+        host.api.post("batches/<batch_id>/commit", handler=self.commit, access="user")
+        host.api.get("astrbot/schema", handler=self.astrbot_schema, access="user")
 
     @staticmethod
     def health_check():
@@ -146,31 +135,30 @@ class WatchHistoryPlugin:
         return Response({"interface": "anime-journal.watch-history-import", "version": "2.0", "implemented": False, "workflow": ["preview", "resolve", "review", "commit"]})
 
     def status(self, request):
-        user_model = get_user_model()
         batches = list(_store(request.user, "batches").collection().values("value")[:8])
         values = [item["value"] for item in batches]
-        users = user_model.objects.filter(is_active=True).order_by("username").values("id", "username", "email", "is_staff")
-        return Response({"status": "ok", "plugin": {"id": "com.anime-journal.watch-history-importer", "slug": PLUGIN_SLUG, "version": PLUGIN_VERSION}, "config": _config(), "users": list(users), "batches": [_serialize_batch(value, include_groups=False) for value in values]})
+        return Response({"status": "ok", "plugin": {"id": "com.anime-journal.watch-history-importer", "slug": PLUGIN_SLUG, "version": PLUGIN_VERSION}, "config": _config(request.user), "batches": [_serialize_batch(value, include_groups=False) for value in values]})
 
     def preview(self, request):
         files = request.FILES.getlist("files")
         if not files or len(files) > MAX_FILES:
             return Response({"code": "invalid_files", "detail": f"请选择 1 至 {MAX_FILES} 个 TXT 文件。"}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            target_user = get_user_model().objects.get(pk=int(request.data.get("target_user_id", "")), is_active=True)
             documents = []
             for upload in files:
                 if not upload.name.lower().endswith(".txt"):
                     raise ValueError(f"{upload.name} 不是 TXT 文件。")
                 documents.append((upload.name, _read_uploaded_text(upload)))
-        except (TypeError, ValueError, get_user_model().DoesNotExist) as error:
+        except (TypeError, ValueError) as error:
             return Response({"code": "invalid_file", "detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
         payload = build_preview(documents)
         batch = {
             "id": uuid4().hex,
             "status": "preview",
             "created_by_id": request.user.pk,
-            "target_user_id": target_user.pk,
+            "target_user_id": request.user.pk,
+            "target_username": request.user.get_username(),
+            "target_email": request.user.email,
             "source_names": [name for name, _content in documents],
             "payload": payload,
             "summary": payload.get("summary", {}),
@@ -193,7 +181,7 @@ class WatchHistoryPlugin:
         if batch is None:
             return Response({"code": "batch_missing", "detail": "导入批次不存在。"}, status=status.HTTP_404_NOT_FOUND)
         payload = batch.get("payload") or {}
-        indexes = [index for index, group in enumerate(payload.get("groups", [])) if group.get("resolution", {}).get("status") == "pending"][: max(1, min(int(_config().get("resolve_batch_size", 6)), 12))]
+        indexes = [index for index, group in enumerate(payload.get("groups", [])) if group.get("resolution", {}).get("status") == "pending"][: max(1, min(int(_config(request.user).get("resolve_batch_size", 6)), 12))]
         errors = []
         for index in indexes:
             try:
@@ -243,9 +231,11 @@ class WatchHistoryPlugin:
         if any(group.get("resolution", {}).get("status") == "pending" for group in selected):
             return Response({"code": "resolution_pending", "detail": "仍有番剧尚未完成 Bangumi 匹配。"}, status=status.HTTP_409_CONFLICT)
         unresolved = [group for group in selected if group.get("resolution", {}).get("status") != "matched"]
-        if unresolved and _config().get("unmatched_policy", "review") == "review":
+        if unresolved and _config(request.user).get("unmatched_policy", "review") == "review":
             return Response({"code": "manual_review_required", "detail": f"仍有 {len(unresolved)} 部番剧需要人工选择 Bangumi 条目。"}, status=status.HTTP_409_CONFLICT)
-        target_user = get_user_model().objects.get(pk=batch["target_user_id"])
+        if batch.get("target_user_id") != request.user.pk:
+            return Response({"code": "batch_owner_mismatch", "detail": "导入批次不属于当前账号。"}, status=status.HTTP_404_NOT_FOUND)
+        target_user = request.user
         imported_entries = set()
         imported_records = 0
         with transaction.atomic():

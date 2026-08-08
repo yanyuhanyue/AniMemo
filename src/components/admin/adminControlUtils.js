@@ -49,7 +49,7 @@ export const auditTargetLabels = {
   UserSettings: "用户手账",
   JournalEntry: "番剧记录",
   Column: "精选专栏",
-  PluginInstallation: "插件",
+  PluginDeployment: "插件部署",
   SiteSettings: "站点设置",
   TagDefinition: "公共标签",
   system: "系统数据",

@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schemaVersion", "sdkApi", "id", "slug", "name", "version", "description",
-    "author", "license", "runtimes", "extensions", "permissions", "hooks", "settings", "dataPolicy"
+    "author", "license", "installationMode", "runtimes", "extensions", "permissions", "hooks", "settings", "dataPolicy"
   ],
   "properties": {
     "$schema": { "type": "string" },
@@ -22,6 +22,7 @@
       "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 80 }, "url": { "type": "string", "format": "uri" } }
     },
     "license": { "type": "string", "minLength": 1, "maxLength": 40 },
+    "installationMode": { "enum": ["user", "system"] },
     "runtimes": {
       "type": "array", "uniqueItems": true, "items": { "enum": ["frontend", "backend"] }
     },
@@ -62,9 +63,10 @@
     "settings": {
       "type": "array",
       "items": {
-        "type": "object", "additionalProperties": false, "required": ["key", "label", "type", "default"],
+        "type": "object", "additionalProperties": false, "required": ["key", "scope", "label", "type", "default"],
         "properties": {
           "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "scope": { "enum": ["user", "system"] },
           "label": { "type": "string", "minLength": 1, "maxLength": 80 },
           "description": { "type": "string", "maxLength": 240 },
           "type": { "enum": ["text", "textarea", "boolean", "number", "select"] },

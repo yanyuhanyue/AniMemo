@@ -11,6 +11,7 @@ class PluginRouteError(ValueError):
 @dataclass(frozen=True)
 class ResolvedPluginRoute:
     handler: object
+    access: str
     permission: str
     kwargs: dict
 
@@ -21,6 +22,7 @@ class _PluginRoute:
     path: str
     pattern: re.Pattern
     handler: object
+    access: str
     permission: str
 
 
@@ -52,37 +54,40 @@ class PluginApi:
                 raise PluginRouteError("Plugin backend route path is invalid.")
         return normalized, re.compile(r"^" + "/".join(parts) + r"$")
 
-    def route(self, method, path, *, handler, permission):
+    def route(self, method, path, *, handler, access, permission=""):
         verb = str(method or "").upper()
         if verb not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
             raise PluginRouteError("Plugin backend route method is invalid.")
         if not callable(handler):
             raise PluginRouteError("Plugin backend route handler must be callable.")
+        access_mode = str(access or "").strip().lower()
+        if access_mode not in {"user", "staff"}:
+            raise PluginRouteError("Plugin backend routes must declare access=user or access=staff.")
         required = str(permission or "").strip()
-        if not required:
-            raise PluginRouteError("Plugin backend routes must declare a permission.")
-        if required not in self._declared_permissions:
+        if access_mode == "staff" and not required:
+            raise PluginRouteError("Staff plugin routes must declare a permission.")
+        if required and required not in self._declared_permissions:
             raise PluginRouteError(f"Plugin backend route permission is not declared in Manifest: {required}")
         normalized, pattern = self._compile_path(path)
         if any(item.method == verb and item.path == normalized for item in self._routes):
             raise PluginRouteError(f"Duplicate plugin backend route: {verb} {normalized}")
-        self._routes.append(_PluginRoute(verb, normalized, pattern, handler, required))
+        self._routes.append(_PluginRoute(verb, normalized, pattern, handler, access_mode, required))
         return handler
 
-    def get(self, path, *, handler, permission):
-        return self.route("GET", path, handler=handler, permission=permission)
+    def get(self, path, *, handler, access, permission=""):
+        return self.route("GET", path, handler=handler, access=access, permission=permission)
 
-    def post(self, path, *, handler, permission):
-        return self.route("POST", path, handler=handler, permission=permission)
+    def post(self, path, *, handler, access, permission=""):
+        return self.route("POST", path, handler=handler, access=access, permission=permission)
 
-    def put(self, path, *, handler, permission):
-        return self.route("PUT", path, handler=handler, permission=permission)
+    def put(self, path, *, handler, access, permission=""):
+        return self.route("PUT", path, handler=handler, access=access, permission=permission)
 
-    def patch(self, path, *, handler, permission):
-        return self.route("PATCH", path, handler=handler, permission=permission)
+    def patch(self, path, *, handler, access, permission=""):
+        return self.route("PATCH", path, handler=handler, access=access, permission=permission)
 
-    def delete(self, path, *, handler, permission):
-        return self.route("DELETE", path, handler=handler, permission=permission)
+    def delete(self, path, *, handler, access, permission=""):
+        return self.route("DELETE", path, handler=handler, access=access, permission=permission)
 
     def resolve(self, method, path):
         verb = str(method or "").upper()
@@ -92,7 +97,7 @@ class PluginApi:
                 continue
             match = route.pattern.fullmatch(normalized)
             if match:
-                return ResolvedPluginRoute(route.handler, route.permission, match.groupdict())
+                return ResolvedPluginRoute(route.handler, route.access, route.permission, match.groupdict())
         return None
 
     def __bool__(self):

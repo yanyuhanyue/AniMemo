@@ -1,9 +1,9 @@
 from io import BytesIO
 import hashlib
 import json
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from plugin_host.package import PluginPackageError, inspect_package
 
@@ -25,6 +25,9 @@ def valid_manifest():
         "name": "Demo",
         "version": "1.0.0",
         "description": "Demo",
+        "author": {"name": "Example"},
+        "license": "MIT",
+        "installationMode": "user",
         "runtimes": [],
         "extensions": [],
         "permissions": [],
@@ -56,7 +59,7 @@ class PackageSecurityTests(SimpleTestCase):
 
     def test_rejects_duplicate_member(self):
         payload = make_package(
-            ("manifest.json", '{"schemaVersion":2,"sdkApi":2,"id":"com.example.demo","slug":"demo","name":"Demo","version":"1.0.0","description":"Demo","runtimes":[],"extensions":[],"permissions":[],"hooks":[],"dataPolicy":{"storesPersonalData":false,"usesExternalNetwork":false,"acceptsFileUploads":false,"retainsDataOnDisable":true}}'),
+            ("manifest.json", '{"schemaVersion":2,"sdkApi":2,"id":"com.example.demo","slug":"demo","name":"Demo","version":"1.0.0","description":"Demo","author":{"name":"Example"},"license":"MIT","installationMode":"user","runtimes":[],"extensions":[],"permissions":[],"hooks":[],"dataPolicy":{"storesPersonalData":false,"usesExternalNetwork":false,"acceptsFileUploads":false,"retainsDataOnDisable":true}}'),
             ("manifest.json", "{}"),
         )
         with self.assertRaises(PluginPackageError):
@@ -88,3 +91,37 @@ class PackageSecurityTests(SimpleTestCase):
             archive.writestr("frontend/assets/extra.txt", b"extra")
         with self.assertRaises(PluginPackageError):
             inspect_package(buffer.getvalue())
+
+    def test_rejects_symlink_member(self):
+        info = ZipInfo("frontend/assets/link")
+        info.create_system = 3
+        info.external_attr = 0o120777 << 16
+        buffer = BytesIO()
+        with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+            archive.writestr(info, "target")
+        with self.assertRaises(PluginPackageError):
+            inspect_package(buffer.getvalue())
+
+    def test_rejects_case_collision(self):
+        payload = indexed_package(("frontend/assets/Icon.txt", "one"), ("frontend/assets/icon.txt", "two"))
+        with self.assertRaises(PluginPackageError):
+            inspect_package(payload)
+
+    @override_settings(PLUGIN_MAX_COMPRESSION_RATIO=2)
+    def test_rejects_suspicious_compression_ratio(self):
+        payload = indexed_package(("frontend/assets/repeated.txt", "A" * 4096))
+        with self.assertRaises(PluginPackageError):
+            inspect_package(payload)
+
+    def test_rejects_malformed_package_index_entry(self):
+        manifest = json.dumps(valid_manifest(), separators=(",", ":"))
+        index = json.dumps({
+            "packageVersion": 1,
+            "pluginId": "com.example.demo",
+            "slug": "demo",
+            "version": "1.0.0",
+            "files": [{"path": "manifest.json", "size": True, "sha256": "0" * 64}],
+        })
+        payload = make_package(("manifest.json", manifest), ("package-index.json", index))
+        with self.assertRaises(PluginPackageError):
+            inspect_package(payload)

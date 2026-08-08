@@ -46,6 +46,11 @@ test("one-site deployer keeps update safe and reset explicit", () => {
   assert.match(deploy, /ARCHIVE_BACKEND=python3/);
   assert.match(deploy, /from zipfile import ZipFile/);
   assert.match(deploy, /docker volume rm anime-journal-data/);
+  assert.match(deploy, /anime-journal-api:predeploy-/);
+  assert.match(deploy, /anime-journal-web:predeploy-/);
+  assert.match(deploy, /restore_previous_images/);
+  assert.match(deploy, /STACK_STOPPED=1/);
+  assert.match(deploy, /restoring the previous Anime Journal app tree and images/);
   assert.doesNotMatch(deploy, /docker\s+(?:system|volume)\s+prune/);
   assert.doesNotMatch(deploy, /docker compose .*down .*--volumes/);
   assert.match(deploy, /re-anime\.cc\.conf/);

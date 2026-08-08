@@ -204,15 +204,15 @@ class RuntimeRegistry:
             candidate.dispose()
 
     def ensure_current(self, slug):
-        from plugin_host.models import PluginInstallation
+        from plugin_host.models import PluginDeployment
 
         slug = str(slug or "")
         with self.lock_for(slug):
-            installation = PluginInstallation.objects.filter(slug=slug).first()
-            if installation is None or not installation.enabled or not installation.healthy or not installation.current_version:
+            deployment = PluginDeployment.objects.select_related("current_version").filter(plugin__slug=slug).first()
+            if deployment is None or not deployment.enabled or not deployment.healthy or not deployment.current_version_id:
                 self._unload_locked(slug)
                 raise RuntimeUnavailable("插件不存在、已停用或当前不健康。")
-            version = installation.current_version
+            version = deployment.current_version.version
             current = self._active.get(slug)
             if current and current.version == version and current.active:
                 return current
@@ -226,10 +226,10 @@ class RuntimeRegistry:
         return candidate
 
     def reconcile_all(self):
-        from plugin_host.models import PluginInstallation
+        from plugin_host.models import PluginDeployment
 
         desired = set(
-            PluginInstallation.objects.filter(enabled=True, healthy=True).values_list("slug", flat=True)
+            PluginDeployment.objects.filter(enabled=True, healthy=True).values_list("plugin__slug", flat=True)
         )
         errors = []
         for slug in sorted(desired):
@@ -243,12 +243,12 @@ class RuntimeRegistry:
         return errors
 
     def assert_invariant(self, slug):
-        from plugin_host.models import PluginInstallation
+        from plugin_host.models import PluginDeployment
 
         candidate = self.ensure_current(slug)
-        installation = PluginInstallation.objects.get(slug=slug)
-        if candidate.version != installation.current_version:
-            raise AssertionError("Plugin runtime version does not match PluginInstallation.current_version")
+        deployment = PluginDeployment.objects.select_related("current_version").get(plugin__slug=slug)
+        if candidate.version != deployment.current_version.version:
+            raise AssertionError("Plugin runtime version does not match PluginDeployment.current_version")
         return candidate.version
 
     def unload(self, slug):

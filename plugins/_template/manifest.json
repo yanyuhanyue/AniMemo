@@ -9,12 +9,13 @@
   "description": "Anime Journal Plugin SDK v2 的全栈插件模板。",
   "author": { "name": "Plugin Author" },
   "license": "MIT",
+  "installationMode": "user",
   "runtimes": ["frontend", "backend"],
-  "frontend": { "exposure": "staff" },
+  "frontend": { "exposure": "authenticated" },
   "extensions": ["frontend.page", "frontend.navigation", "backend.api", "settings", "storage"],
   "backend": { "entry": "backend/plugin.py" },
-  "permissions": [{ "code": "blank-plugin.view", "name": "访问空白插件", "roles": ["administrator"] }],
+  "permissions": [],
   "hooks": [],
-  "settings": [{ "key": "panel_message", "label": "面板提示文字", "description": "显示在空白插件示例面板中的状态说明。", "type": "text", "required": true, "default": "插件已连接" }],
+  "settings": [{ "key": "panel_message", "scope": "user", "label": "面板提示文字", "description": "显示在空白插件示例面板中的状态说明。", "type": "text", "required": true, "default": "插件已连接" }],
   "dataPolicy": { "storesPersonalData": false, "usesExternalNetwork": false, "acceptsFileUploads": false, "retainsDataOnDisable": true }
 }

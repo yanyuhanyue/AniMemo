@@ -18,7 +18,7 @@ from rest_framework.views import APIView
 from accounts.models import LoginEvent, StaffProfile, UserSecurityProfile
 from site_config.media_storage.pool import StoragePoolService
 from site_config.models import SiteSettings
-from plugin_host.models import PluginInstallation
+from plugin_host.models import PluginDeployment, UserPluginInstallation
 from plugin_host.registry import PluginRegistryError, discover_plugins
 
 from .auth_tokens import create_refresh_token, no_store, set_refresh_cookie
@@ -103,7 +103,8 @@ class StaffBackupView(APIView):
             "user_settings": list(UserSettings.objects.values()),
             "quick_filters": list(QuickFilter.objects.values()),
             "staff_roles": list(StaffProfile.objects.values("user_id", "role", "updated_at")),
-            "plugin_installations": list(PluginInstallation.objects.values("plugin_id", "slug", "current_version", "enabled", "healthy", "config", "updated_at")),
+            "plugin_deployments": list(PluginDeployment.objects.values("plugin__plugin_id", "plugin__slug", "current_version__version", "enabled", "healthy", "system_config", "updated_at")),
+            "user_plugin_installations": list(UserPluginInstallation.objects.values("user_id", "plugin__slug", "enabled", "config", "installed_at", "updated_at")),
             "audit": list(AdminAuditLog.objects.values())[:10000],
         }
         record_audit(request, action="system.backup_export", target_type="system", target_label=kind, metadata={"format": export_format})

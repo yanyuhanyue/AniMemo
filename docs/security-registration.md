@@ -32,7 +32,7 @@ host.register_hook("registration.before_complete", callback)
 
 回调接收经过裁剪的 context 字典；Hook 必须先在 Manifest 声明。注册记录绑定 plugin slug、version 和 runtime id，停用或切换版本时只清理该 runtime 自己的 hook。
 
-插件只收到经过裁剪的 request/user 代理、邮箱/用户名；核心不会传递密码、密码哈希、原始注册链接、完成凭证、JWT、refresh token 或 CSRF token。只有健康且启用的 `PluginInstallation` 才会执行 hook。失败策略由宿主固定：policy/security before hook fail closed，普通 after hook fail open；插件不能覆盖。核心 PendingRegistration 安全性不依赖任何插件。
+插件只收到经过裁剪的 request/user 代理、邮箱/用户名；核心不会传递密码、密码哈希、原始注册链接、完成凭证、JWT、refresh token 或 CSRF token。只有健康且启用的 `PluginDeployment` 才会执行 hook。失败策略由宿主固定：policy/security before hook fail closed，普通 after hook fail open；插件不能覆盖。核心 PendingRegistration 安全性不依赖任何插件。
 
 Hook 使用受信任的进程内 Python 回调。宿主会以 `HOOK_SLOW_WARNING_SECONDS` 记录慢回调遥测；该阈值只用于告警，不会中断或强杀插件代码。
 

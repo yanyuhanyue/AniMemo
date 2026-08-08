@@ -40,7 +40,7 @@ from .import_parsers import LimitedImportJSONParser
 from accounts.models import PendingRegistration, RevokedAccessToken, StaffProfile, UserSecurityProfile
 from site_config.models import SiteSettings
 from .models import AdminAuditLog, Column, JournalEntry, UserSettings
-from plugin_host.models import PluginInstallation
+from plugin_host.models import PluginDeployment, PluginPackageBlob, PluginProject, PluginVersion
 from plugin_host.permissions import can_access_plugin_backend, plugin_permissions_for_user
 from .serializers import ColumnSerializer, JournalEntrySerializer, RegistrationCompleteSerializer, RegistrationRequestSerializer, SiteSettingsSerializer, UserSettingsSerializer
 from .network import client_ip
@@ -355,7 +355,7 @@ class StaffProfileFailClosedTests(APITestCase):
         self.assertIsNone(get_staff_role(user))
         self.assertEqual(staff_capabilities(user), [])
         self.assertEqual(plugin_permissions_for_user(user), [])
-        self.assertFalse(can_access_plugin_backend(user, "demo", manifest, permission_code="demo.manage"))
+        self.assertFalse(can_access_plugin_backend(user, "demo", manifest, access="staff", permission_code="demo.manage"))
 
     def test_direct_staff_demotion_removes_profile(self):
         user = User.objects.create_user(username="direct-demotion", password="StrongPass123!", is_staff=True)
@@ -975,9 +975,17 @@ class PluginRuntimeSecurityTests(APITestCase):
         cache.clear()
         self.admin = User.objects.create_user(username="plugin-security-admin", password="StrongPass123!", is_staff=True)
         self.client.force_authenticate(self.admin)
-        PluginInstallation.objects.update_or_create(
-            slug="watch-history-importer",
-            defaults={"plugin_id": "com.anime-journal.watch-history-importer", "current_version": "0.2.0", "enabled": True, "healthy": True, "updated_by": self.admin},
+        project = PluginProject.objects.create(
+            plugin_id="com.anime-journal.watch-history-importer", slug="watch-history-importer",
+            name="Watch history", description="test", installation_mode=PluginProject.InstallationMode.SYSTEM,
+        )
+        blob = PluginPackageBlob.objects.create(sha256="0" * 64, size_bytes=0, storage_path="packages/sha256/00/" + "0" * 64 + ".ajplugin")
+        version = PluginVersion.objects.create(
+            plugin=project, version="0.2.0", package_blob=blob, manifest_snapshot={}, runtime_types=["frontend", "backend"],
+            review_status=PluginVersion.ReviewStatus.APPROVED, published_at=timezone.now(),
+        )
+        self.deployment = PluginDeployment.objects.create(
+            plugin=project, current_version=version, enabled=True, healthy=True, updated_by=self.admin,
         )
 
     def test_enabled_plugin_metadata_only_lists_effective_frontends(self):
@@ -987,7 +995,7 @@ class PluginRuntimeSecurityTests(APITestCase):
         self.assertEqual(response.data["plugins"], [])
 
     def test_disabled_plugin_api_returns_404_even_for_admin(self):
-        PluginInstallation.objects.filter(slug="watch-history-importer").update(enabled=False)
+        PluginDeployment.objects.filter(pk=self.deployment.pk).update(enabled=False)
         response = self.client.get("/api/plugins/watch-history-importer/status/")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 

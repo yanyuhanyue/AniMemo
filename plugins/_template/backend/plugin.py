@@ -1,7 +1,7 @@
 class TemplatePlugin:
     def __init__(self, host):
         self.host = host
-        host.api.get("status", handler=self.status, permission="blank-plugin.view")
+        host.api.get("status", handler=self.status, access="user")
 
     def health_check(self):
         return {"status": "healthy", "version": self.host.version}

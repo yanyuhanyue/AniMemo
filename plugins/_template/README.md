@@ -17,7 +17,7 @@ def create_plugin(host):
 /api/plugins/blank-plugin/<path>
 ```
 
-Runtime Plugin 不注册 Django App、URLConf、model 或 migration，也不需要重启 Django。后端接口必须通过 `host.api.get/post/put/patch/delete(path, handler=..., permission=...)` 注册，并且 `permission` 必须存在于 Manifest。插件还可以通过 `host.settings`、`host.storage(...)`、`host.register_hook(...)` 和声明了外部网络权限后的 `host.request_json(...)` 使用宿主能力。
+Runtime Plugin 不注册 Django App、URLConf、model 或 migration，也不需要重启 Django。后端接口必须通过 `host.api.get/post/put/patch/delete(path, handler=..., access="user"|"staff", permission=...)` 注册；`access=user` 要求当前用户已安装并启用插件，`access=staff` 的 `permission` 必须存在于 Manifest。插件通过 `host.system_settings`、`host.user_settings(user)`、`host.storage(...)`、`host.register_hook(...)` 和声明了外部网络权限后的 `host.request_json(...)` 使用宿主能力。
 
 需要 Django model、migration、系统依赖或独立进程的 Extended Plugin 当前不受支持，安装器会拒绝相关 manifest 字段。
 
@@ -37,7 +37,7 @@ python scripts\pluginctl.py validate blank-plugin
 python scripts\pluginctl.py pack blank-plugin
 ```
 
-管理员访问页面后，模板会请求：
+用户从市场安装并启用插件后，模板会请求：
 
 ```text
 GET /api/plugins/blank-plugin/status/

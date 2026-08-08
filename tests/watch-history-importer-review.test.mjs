@@ -33,7 +33,8 @@ test("watch-history preview supports per-item and filtered bulk exclusion", () =
 
 test("watch-history stays inside the Plugin SDK v2 boundary", () => {
   assert.match(page, /host\?\.auth\?\.isAuthenticated\(\)/);
-  assert.match(page, /host\.auth\.isStaff\(\)/);
+  assert.doesNotMatch(page, /host\.auth\.isStaff\(\)/);
+  assert.doesNotMatch(page, /target_user_id|导入目标账号/);
   assert.match(page, /const client = pluginApi/);
   assert.doesNotMatch(page, /\.\.\/\.\.\/\.\.\/src\/|getStoredTokens|src\/lib\/api\.js/);
   assert.doesNotMatch(bundle, /getStoredTokens|let accessToken|accessToken =|import\.meta\.env|VITE_API_BASE_URL|VITE_API_URL|src\/lib\/api\.js/);

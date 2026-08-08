@@ -15,7 +15,7 @@ export default function createPlugin(host) {
         path: "/plugins/blank-plugin",
         Component: (props) => <BlankPluginPage {...props} host={host} api={host.api.plugin("blank-plugin")} />,
         area: "dashboard",
-        access: "staff",
+        access: "auth",
       },
     ],
     navigation: [

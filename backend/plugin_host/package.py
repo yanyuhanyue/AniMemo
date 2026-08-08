@@ -5,8 +5,10 @@ import shutil
 import stat
 from io import BytesIO
 from pathlib import Path, PurePosixPath
+from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
 
+from django.conf import settings
 from packaging.version import InvalidVersion, Version
 
 from .manifest import ManifestError, validate_manifest
@@ -16,12 +18,23 @@ class PluginPackageError(ValueError):
     pass
 
 
-MAX_PACKAGE_BYTES = 25 * 1024 * 1024
-MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
-MAX_FILES = 1000
-MAX_COMPRESSION_RATIO = 100
+DEFAULT_MAX_PACKAGE_BYTES = 25 * 1024 * 1024
+DEFAULT_MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+DEFAULT_MAX_FILES = 1000
+DEFAULT_MAX_COMPRESSION_RATIO = 100
 ALLOWED_ROOT_FILES = {"manifest.json", "package-index.json"}
 ALLOWED_TOP_DIRS = {"frontend", "backend"}
+
+
+def package_policy():
+    configured = getattr(settings, "configured", False)
+    return {
+        "max_package_bytes": int(getattr(settings, "PLUGIN_MAX_PACKAGE_BYTES", DEFAULT_MAX_PACKAGE_BYTES)) if configured else DEFAULT_MAX_PACKAGE_BYTES,
+        "max_uncompressed_bytes": int(getattr(settings, "PLUGIN_MAX_UNCOMPRESSED_BYTES", DEFAULT_MAX_UNCOMPRESSED_BYTES)) if configured else DEFAULT_MAX_UNCOMPRESSED_BYTES,
+        "max_files": int(getattr(settings, "PLUGIN_MAX_FILES", DEFAULT_MAX_FILES)) if configured else DEFAULT_MAX_FILES,
+        "max_compression_ratio": int(getattr(settings, "PLUGIN_MAX_COMPRESSION_RATIO", DEFAULT_MAX_COMPRESSION_RATIO)) if configured else DEFAULT_MAX_COMPRESSION_RATIO,
+        "allowed_extension": ".ajplugin",
+    }
 
 
 def _safe_member(name, info):
@@ -37,16 +50,17 @@ def _safe_member(name, info):
 
 
 def inspect_package(payload: bytes) -> dict:
-    if len(payload) > MAX_PACKAGE_BYTES:
-        raise PluginPackageError("插件包超过大小限制")
     raw = payload.read() if hasattr(payload, "read") else bytes(payload)
+    policy = package_policy()
+    if len(raw) > policy["max_package_bytes"]:
+        raise PluginPackageError("插件包超过大小限制")
     try:
         archive = ZipFile(BytesIO(raw))
     except BadZipFile as error:
         raise PluginPackageError("不是有效的 .ajplugin ZIP 容器") from error
     with archive:
         infos = [info for info in archive.infolist() if not info.is_dir()]
-        if not infos or len(infos) > MAX_FILES:
+        if not infos or len(infos) > policy["max_files"]:
             raise PluginPackageError("插件文件数量不合法")
         paths = [_safe_member(info.filename, info) for info in infos]
         if len(set(paths)) != len(paths):
@@ -54,10 +68,10 @@ def inspect_package(payload: bytes) -> dict:
         folded_paths = [str(path).casefold() for path in paths]
         if len(set(folded_paths)) != len(folded_paths):
             raise PluginPackageError("插件包包含大小写冲突路径")
-        if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
+        if sum(info.file_size for info in infos) > policy["max_uncompressed_bytes"]:
             raise PluginPackageError("插件解压体积超过限制")
         for info in infos:
-            if info.file_size and info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
+            if info.file_size and info.compress_size and info.file_size / info.compress_size > policy["max_compression_ratio"]:
                 raise PluginPackageError("插件包压缩比异常，疑似解压炸弹")
         if PurePosixPath("manifest.json") not in paths:
             raise PluginPackageError("插件包根目录必须包含 manifest.json")
@@ -82,8 +96,8 @@ def inspect_package(payload: bytes) -> dict:
         runtimes = set(manifest.get("runtimes") or [])
         if "frontend" in runtimes and "frontend/plugin.js" not in names:
             raise PluginPackageError("前端 runtime 缺少 frontend/plugin.js")
-        if "backend" in runtimes and not any(name == "backend" or name.startswith("backend/") for name in names):
-            raise PluginPackageError("后端 runtime 缺少 backend/ 目录")
+        if "backend" in runtimes and "backend/plugin.py" not in names:
+            raise PluginPackageError("后端 runtime 缺少 backend/plugin.py")
         if PurePosixPath("package-index.json") not in paths:
             raise PluginPackageError("插件包必须包含 package-index.json")
         try:
@@ -103,7 +117,16 @@ def inspect_package(payload: bytes) -> dict:
         declared_files = declared_index.get("files")
         if not isinstance(declared_files, list):
             raise PluginPackageError("package-index.json.files 必须是数组")
-        normalize = lambda item: (item.get("path"), item.get("size"), item.get("sha256")) if isinstance(item, dict) else None
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or isinstance(item.get("size"), bool)
+            or not isinstance(item.get("size"), int)
+            or not isinstance(item.get("sha256"), str)
+            for item in declared_files
+        ):
+            raise PluginPackageError("package-index.json.files 包含无效条目")
+        normalize = lambda item: (item["path"], item["size"], item["sha256"])
         if sorted(normalize(item) for item in declared_files) != sorted(normalize(item) for item in index):
             raise PluginPackageError("package-index.json 与包内文件的完整性索引不一致")
         return {"manifest": manifest, "files": index, "sha256": hashlib.sha256(raw).hexdigest()}
@@ -114,22 +137,40 @@ class LocalPluginPackageStorage:
         self.root = Path(root)
         self.packages = self.root / "packages"
         self.runtime = self.root / "runtime"
+        self.previews = self.root / "previews"
         self.staging = self.root / "staging"
 
     def ensure(self):
-        for path in (self.packages, self.runtime, self.staging):
+        for path in (self.packages / "sha256", self.runtime, self.previews, self.staging, self.root / ".locks"):
             path.mkdir(parents=True, exist_ok=True)
 
-    def package_path(self, slug, version):
-        return self.packages / slug / f"{version}.ajplugin"
+    def package_path(self, sha256):
+        digest = str(sha256 or "").lower()
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise PluginPackageError("Package SHA-256 无效")
+        return self.packages / "sha256" / digest[:2] / f"{digest}.ajplugin"
 
-    def store_package(self, slug, version, payload: bytes):
+    def store_package(self, payload: bytes, *, sha256=None):
         self.ensure()
-        destination = self.package_path(slug, version)
+        raw = payload.read() if hasattr(payload, "read") else bytes(payload)
+        digest = hashlib.sha256(raw).hexdigest()
+        if sha256 and digest != sha256:
+            raise PluginPackageError("Package SHA-256 校验失败")
+        destination = self.package_path(digest)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_suffix(".tmp")
-        temporary.write_bytes(payload)
-        os.replace(temporary, destination)
+        if destination.is_file():
+            if destination.stat().st_size != len(raw) or hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
+                raise PluginPackageError("CAS 中存在损坏的同 SHA 文件")
+            return destination
+        temporary = destination.with_name(f".{digest}.{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            with temporary.open("xb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
         return destination
 
     @staticmethod
@@ -140,8 +181,6 @@ class LocalPluginPackageStorage:
             raise PluginPackageError(f"发现无效插件版本：{value}") from error
 
     def retain_versions(self, slug, *, current=None, previous="", keep=2):
-        if not current:
-            current = self.list_versions(slug)[0] if self.list_versions(slug) else ""
         protected = [value for value in (current, previous) if value]
         if len(protected) < keep:
             runtime_directory = self.runtime / slug
@@ -151,15 +190,12 @@ class LocalPluginPackageStorage:
                 if path.is_dir() and not path.name.startswith(".")
             } if runtime_directory.is_dir() else set()
             candidates = sorted(
-                set(self.list_versions(slug)) | runtime_versions,
+                runtime_versions,
                 key=self._version_key,
                 reverse=True,
             )
             protected.extend(value for value in candidates if value not in protected)
         retained = set(protected[:keep])
-        for path in (self.packages / slug).glob("*.ajplugin"):
-            if path.stem not in retained:
-                path.unlink(missing_ok=True)
         runtime_directory = self.runtime / slug
         if runtime_directory.is_dir():
             for path in runtime_directory.iterdir():
@@ -168,13 +204,13 @@ class LocalPluginPackageStorage:
         return sorted(retained, key=self._version_key, reverse=True)
 
     def list_versions(self, slug):
-        directory = self.packages / slug
+        directory = self.runtime / slug
         if not directory.is_dir():
             return []
-        return sorted((path.stem for path in directory.glob("*.ajplugin")), key=self._version_key, reverse=True)
+        return sorted((path.name for path in directory.iterdir() if path.is_dir() and not path.name.startswith(".")), key=self._version_key, reverse=True)
 
-    def rollback(self, slug, version):
-        source = self.package_path(slug, version)
+    def rollback(self, slug, version, package_sha256):
+        source = self.package_path(package_sha256)
         if not source.is_file():
             raise FileNotFoundError(source)
         inspect_package(source.read_bytes())
@@ -202,8 +238,8 @@ class LocalPluginPackageStorage:
             shutil.rmtree(staging, ignore_errors=True)
 
     def delete_plugin(self, slug):
-        shutil.rmtree(self.packages / slug, ignore_errors=True)
         shutil.rmtree(self.runtime / slug, ignore_errors=True)
+        shutil.rmtree(self.previews / slug, ignore_errors=True)
 
     def cleanup_staging(self):
         if not self.staging.is_dir():

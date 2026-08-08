@@ -16,7 +16,7 @@ import requests
 from accounts.models import StaffProfile, UserSecurityProfile
 from site_config.models import SiteSettings, TagDefinition
 from .models import AdminAuditLog, Column, JournalEntry, UserSettings
-from plugin_host.models import PluginData
+from plugin_host.models import PluginData, PluginProject
 from .security import _totp_at
 
 
@@ -28,6 +28,12 @@ class JournalApiTests(APITestCase):
         cache.clear()
         self.user = User.objects.create_user(username="collector", email="collector@example.com", password="StrongPass123!")
         self.other = User.objects.create_user(username="other", email="other@example.com", password="StrongPass123!")
+        self.plugin = PluginProject.objects.create(
+            plugin_id="com.anime-journal.watch-history-importer",
+            slug="watch-history-importer",
+            name="忆往昔观看记录导入器",
+            description="test fixture",
+        )
         self.client.force_authenticate(self.user)
 
     def test_entry_crud_is_scoped_to_owner(self):
@@ -63,7 +69,7 @@ class JournalApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["watch_history"][0]["brush_label"], "首刷")
-        history = PluginData.objects.get(plugin_slug="watch-history-importer", namespace="watch_history", user=self.user, key=str(entry.pk))
+        history = PluginData.objects.get(plugin=self.plugin, namespace="watch_history", user=self.user, key=str(entry.pk))
         self.assertEqual(history.value[0]["brush_label"], "首刷")
 
     def test_manual_watch_history_accepts_multipart_entry_updates(self):
@@ -90,13 +96,13 @@ class JournalApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["watch_history"][0]["episode_end"], 3)
-        history = PluginData.objects.get(plugin_slug="watch-history-importer", namespace="watch_history", user=self.user, key=str(entry.pk))
+        history = PluginData.objects.get(plugin=self.plugin, namespace="watch_history", user=self.user, key=str(entry.pk))
         self.assertEqual(history.value[0]["brush_label"], "二刷")
 
     def test_editing_imported_watch_history_preserves_source_audit_fields(self):
         entry = JournalEntry.objects.create(user=self.user, title="保留导入来源")
         history = PluginData.objects.create(
-            plugin_slug="watch-history-importer", namespace="watch_history", user=self.user, key=str(entry.pk),
+            plugin=self.plugin, namespace="watch_history", user=self.user, key=str(entry.pk),
             value=[{"watched_on": "2026-08-06", "watched_label": "2026年8月6日", "brush_label": "首刷", "episode_start": 1, "episode_end": 3, "notes": [], "source_file": "2026.txt", "source_line": 18}],
         )
 
@@ -140,11 +146,11 @@ class JournalApiTests(APITestCase):
 
         first = self.client.patch(reverse("entry-detail", kwargs={"pk": entry.pk}), payload, format="json")
         self.assertEqual(first.status_code, 200)
-        self.assertEqual(PluginData.objects.filter(plugin_slug="watch-history-importer", namespace="watch_history", user=self.user, key=str(entry.pk)).count(), 1)
+        self.assertEqual(PluginData.objects.filter(plugin=self.plugin, namespace="watch_history", user=self.user, key=str(entry.pk)).count(), 1)
 
         second = self.client.patch(reverse("entry-detail", kwargs={"pk": entry.pk}), {"watch_history": []}, format="json")
         self.assertEqual(second.status_code, 200)
-        self.assertFalse(PluginData.objects.filter(plugin_slug="watch-history-importer", namespace="watch_history", user=self.user, key=str(entry.pk)).exists())
+        self.assertFalse(PluginData.objects.filter(plugin=self.plugin, namespace="watch_history", user=self.user, key=str(entry.pk)).exists())
 
     def test_manual_watch_history_requires_a_watch_date(self):
         entry = JournalEntry.objects.create(user=self.user, title="缺日期记录")

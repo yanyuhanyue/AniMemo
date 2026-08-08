@@ -6,6 +6,7 @@ from .hook_contract import SUPPORTED_HOOKS
 
 
 SLUG_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+PLUGIN_ID_RE = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)+$")
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$")
 ROLES = {"reviewer", "user_manager", "operator", "administrator"}
 EXTENSIONS = {
@@ -42,9 +43,16 @@ def validate_manifest(manifest: dict, *, directory_name: str | None = None) -> d
         raise ManifestError("slug 必须为 kebab-case")
     if directory_name and directory_name != slug:
         raise ManifestError("目录名必须与 slug 一致")
-    for key in ("id", "name", "version", "description"):
+    for key in ("id", "name", "version", "description", "license"):
         if not isinstance(manifest.get(key), str) or not manifest[key].strip():
             raise ManifestError(f"{key} 不能为空")
+    if not PLUGIN_ID_RE.fullmatch(manifest["id"]):
+        raise ManifestError("id 必须使用反向域名或等价的稳定命名空间")
+    author = manifest.get("author")
+    if not isinstance(author, dict) or not isinstance(author.get("name"), str) or not author["name"].strip():
+        raise ManifestError("author.name 不能为空")
+    if manifest.get("installationMode") not in {"user", "system"}:
+        raise ManifestError("installationMode 必须是 user 或 system")
     if not SEMVER_RE.fullmatch(manifest["version"]):
         raise ManifestError("version 必须符合 SemVer")
     runtimes = manifest.get("runtimes")
@@ -85,6 +93,21 @@ def validate_manifest(manifest: dict, *, directory_name: str | None = None) -> d
             raise ManifestError("权限代码必须使用插件命名空间")
         if not isinstance(permission.get("roles"), list) or not set(permission["roles"]) <= ROLES:
             raise ManifestError("权限 roles 只能使用 StaffProfile 角色")
+    settings_definitions = manifest.get("settings", [])
+    if not isinstance(settings_definitions, list):
+        raise ManifestError("settings 必须是数组")
+    setting_keys = set()
+    for definition in settings_definitions:
+        if not isinstance(definition, dict):
+            raise ManifestError("settings definition 必须是对象")
+        key = definition.get("key")
+        if not isinstance(key, str) or not re.fullmatch(r"^[a-z][a-z0-9_]*$", key):
+            raise ManifestError("settings.key 无效")
+        if key in setting_keys:
+            raise ManifestError("settings.key 不能重复")
+        setting_keys.add(key)
+        if definition.get("scope") not in {"user", "system"}:
+            raise ManifestError("每个 settings definition 必须声明 scope=user 或 scope=system")
     hooks = manifest.get("hooks", [])
     if not isinstance(hooks, list) or not set(hooks) <= HOOKS:
         raise ManifestError("hooks 包含未知 Hook")

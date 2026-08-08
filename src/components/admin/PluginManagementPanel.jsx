@@ -6,16 +6,20 @@ import { api, readableApiError } from "../../lib/api.js";
 const EMPTY = {
   plugins: [],
   can_install: false,
+  policy: { max_package_bytes: 25 * 1024 * 1024 },
   summary: { installed: 0, enabled: 0, attention: 0 },
 };
 
-const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024;
-
-function validateArchive(file) {
+function validateArchive(file, maxArchiveBytes) {
   if (!file) return "";
   if (!file.name.toLocaleLowerCase("en-US").endsWith(".ajplugin")) return "只支持 .ajplugin 格式的插件包。";
-  if (file.size > MAX_ARCHIVE_BYTES) return "插件压缩包不能超过 10 MB。";
+  if (file.size > maxArchiveBytes) return `插件压缩包不能超过 ${Math.round(maxArchiveBytes / 1024 / 1024)} MB。`;
   return "";
+}
+
+function SecurityReport({ report = {} }) {
+  const warnings = [...(report.dangerous_findings || []), ...(report.css_global_selectors || []).map((item) => `全局 CSS 选择器：${item}`)];
+  return <details className="admin-plugin-scan"><summary>安全扫描 · {warnings.length} 项提示</summary><dl><div><dt>文件</dt><dd>{report.file_count ?? 0}</dd></div><div><dt>包体</dt><dd>{report.package_size ?? 0} B</dd></div><div><dt>解压</dt><dd>{report.uncompressed_size ?? 0} B</dd></div><div><dt>后端</dt><dd>{report.contains_backend ? "是" : "否"}</dd></div></dl>{warnings.map((warning) => <p key={warning}><Icon name="warning" />{warning}</p>)}</details>;
 }
 
 function policyLabel(key, value) {
@@ -169,14 +173,17 @@ export function PluginManagementPanel({ onNotice }) {
   const [dragActive, setDragActive] = useState(false);
   const [replaceExisting, setReplaceExisting] = useState(false);
   const [installing, setInstalling] = useState(false);
+  const [reviewQueue, setReviewQueue] = useState({ submissions: [], approved_versions: [], deployments: [], marketplace_versions: [] });
+  const [lifecycleTab, setLifecycleTab] = useState("review");
+  const [reviewBusy, setReviewBusy] = useState("");
   const archiveInputRef = useRef(null);
 
   const chooseArchive = useCallback((file) => {
-    const nextError = validateArchive(file);
+    const nextError = validateArchive(file, Number(data.policy?.max_package_bytes || 25 * 1024 * 1024));
     setArchiveError(nextError);
     setArchive(nextError ? null : file || null);
     if (nextError && archiveInputRef.current) archiveInputRef.current.value = "";
-  }, []);
+  }, [data.policy?.max_package_bytes]);
 
   const dropArchive = useCallback((event) => {
     event.preventDefault();
@@ -188,8 +195,9 @@ export function PluginManagementPanel({ onNotice }) {
     setLoading(true);
     setError("");
     try {
-      const response = await api.get("staff/plugins/");
+      const [response, reviews] = await Promise.all([api.get("staff/plugins/"), api.get("staff/plugins/review/")]);
       setData({ ...EMPTY, ...(response.data || {}) });
+      setReviewQueue({ submissions: [], approved_versions: [], deployments: [], marketplace_versions: [], ...(reviews.data || {}) });
     } catch (requestError) {
       setError(readableApiError(requestError, "插件中心加载失败。"));
     } finally {
@@ -253,6 +261,55 @@ export function PluginManagementPanel({ onNotice }) {
 
   const sortedPlugins = useMemo(() => [...data.plugins].sort((a, b) => Number(b.effective_enabled) - Number(a.effective_enabled) || a.name.localeCompare(b.name, "zh-CN")), [data.plugins]);
 
+  const review = async (submission, approve) => {
+    setReviewBusy(`review:${submission.id}`);
+    setError("");
+    try {
+      await api.post(`staff/plugins/review/${submission.id}/`, { approve, note: approve ? "审核通过" : "审核拒绝" });
+      onNotice(approve ? "插件版本已审核通过" : "插件版本已拒绝");
+      await load();
+    } catch (requestError) {
+      setError(readableApiError(requestError, "审核操作失败。"));
+    } finally { setReviewBusy(""); }
+  };
+
+  const publish = async (version) => {
+    setReviewBusy(`publish:${version.id}`);
+    setError("");
+    try {
+      await api.post(`staff/plugins/versions/${version.id}/publish/`);
+      onNotice(`${version.project} ${version.version} 已发布并部署`);
+      await load();
+    } catch (requestError) {
+      setError(readableApiError(requestError, "插件发布失败。"));
+    } finally { setReviewBusy(""); }
+  };
+
+  const versionAction = async (version, action) => {
+    if (action === "revoke" && !window.confirm(`确定撤销 ${version.project || version.slug} v${version.version} 的 Runtime？`)) return;
+    setReviewBusy(`${action}:${version.id || version.version_id}`);
+    setError("");
+    try {
+      await api.post(`staff/plugins/versions/${version.id || version.version_id}/${action}/`);
+      onNotice(action === "unpublish" ? "插件版本已从市场下架" : "插件版本已撤销");
+      await load();
+    } catch (requestError) {
+      setError(readableApiError(requestError, action === "unpublish" ? "市场下架失败。" : "版本撤销失败。"));
+    } finally { setReviewBusy(""); }
+  };
+
+  const rollback = async (deployment) => {
+    setReviewBusy(`rollback:${deployment.slug}`);
+    setError("");
+    try {
+      await api.post(`staff/plugins/${deployment.slug}/rollback/`);
+      onNotice(`${deployment.name} 已回滚`);
+      await load();
+    } catch (requestError) {
+      setError(readableApiError(requestError, "插件回滚失败。"));
+    } finally { setReviewBusy(""); }
+  };
+
   if (loading) return <div className="admin-dashboard-loading"><span /><span /><span /> 正在检查插件清单</div>;
 
   return (
@@ -262,6 +319,37 @@ export function PluginManagementPanel({ onNotice }) {
         <article className="is-teal"><Icon name="check" /><div><strong>{data.summary.enabled}</strong><span>实际运行</span></div></article>
         <article className="is-pink"><Icon name="warning" /><div><strong>{data.summary.attention}</strong><span>需要处理</span></div></article>
       </div>
+
+      <section className="admin-plugin-review-queue">
+        <header><div><span>PLUGIN LIFECYCLE</span><h3>插件生命周期</h3></div><strong>{reviewQueue.submissions.length} 待审核 / {reviewQueue.deployments.length} 已部署</strong></header>
+        <nav className="admin-plugin-lifecycle-tabs" aria-label="插件生命周期视图">
+          <button type="button" className={lifecycleTab === "review" ? "is-active" : ""} onClick={() => setLifecycleTab("review")}>审核</button>
+          <button type="button" className={lifecycleTab === "deployed" ? "is-active" : ""} onClick={() => setLifecycleTab("deployed")}>部署</button>
+          <button type="button" className={lifecycleTab === "market" ? "is-active" : ""} onClick={() => setLifecycleTab("market")}>市场</button>
+        </nav>
+        {lifecycleTab === "review" && reviewQueue.submissions.map((submission) => <article key={submission.id}>
+          <div><b>{submission.project} v{submission.version}</b><small>{submission.submitter} · {(submission.runtime_types || []).join(" + ")}</small></div>
+          <SecurityReport report={submission.security_report} />
+          <div><button type="button" className="is-reject" disabled={reviewBusy === `review:${submission.id}`} onClick={() => review(submission, false)}><Icon name="close" />拒绝</button><button type="button" className="is-approve" disabled={reviewBusy === `review:${submission.id}`} onClick={() => review(submission, true)}><Icon name="check" />通过</button></div>
+        </article>)}
+        {lifecycleTab === "review" && reviewQueue.approved_versions.map((version) => <article key={`approved:${version.id}`}>
+          <div><b>{version.project} v{version.version}</b><small>审核通过 · {(version.runtime_types || []).join(" + ")}</small></div>
+          <SecurityReport report={version.security_report} />
+          <div><button type="button" className="is-publish" disabled={!data.can_install && (version.runtime_types || []).includes("backend") || reviewBusy === `publish:${version.id}`} onClick={() => publish(version)}><Icon name="rocket" />发布</button></div>
+        </article>)}
+        {lifecycleTab === "review" && reviewQueue.submissions.length === 0 && reviewQueue.approved_versions.length === 0 && <p>当前没有待处理版本。</p>}
+        {lifecycleTab === "deployed" && reviewQueue.deployments.map((deployment) => <article key={`deployment:${deployment.slug}`}>
+          <div><b>{deployment.name} v{deployment.version}</b><small>{deployment.status} · {deployment.install_count} 位用户安装 · {deployment.disk_bytes} B</small>{deployment.last_error && <small>{deployment.last_error}</small>}</div>
+          <div><button type="button" disabled={!deployment.previous_version || reviewBusy === `rollback:${deployment.slug}`} onClick={() => rollback(deployment)}><Icon name="reset" />回滚</button><button type="button" className="is-reject" disabled={!data.can_install || reviewBusy === `revoke:${deployment.version_id}`} onClick={() => versionAction(deployment, "revoke")}><Icon name="close" />撤销</button></div>
+        </article>)}
+        {lifecycleTab === "deployed" && reviewQueue.deployments.length === 0 && <p>当前没有已部署插件。</p>}
+        {lifecycleTab === "market" && reviewQueue.marketplace_versions.map((version) => <article key={`market:${version.id}`}>
+          <div><b>{version.name} v{version.version}</b><small>{version.install_count} 位用户安装 · {(version.runtime_types || []).join(" + ")}</small></div>
+          <SecurityReport report={version.security_report} />
+          <div><button type="button" className="is-reject" disabled={reviewBusy === `unpublish:${version.id}`} onClick={() => versionAction(version, "unpublish")}><Icon name="close" />下架</button><button type="button" className="is-reject" disabled={!data.can_install || reviewBusy === `revoke:${version.id}`} onClick={() => versionAction(version, "revoke")}><Icon name="warning" />撤销</button></div>
+        </article>)}
+        {lifecycleTab === "market" && reviewQueue.marketplace_versions.length === 0 && <p>市场暂无已发布版本。</p>}
+      </section>
 
       <div className="admin-plugin-deploy-note"><Icon name="shield" /><div><strong>受控插件安装与平滑升级</strong><p>新插件安装后默认停用；覆盖运行中的插件时，系统会自动阻断新请求、原子替换并恢复原启用状态。</p></div><button type="button" onClick={load} disabled={installing}><Icon name="reset" /> 重新扫描</button></div>
 
@@ -278,7 +366,7 @@ export function PluginManagementPanel({ onNotice }) {
             >
               <input ref={archiveInputRef} type="file" accept=".ajplugin,application/zip" onChange={(event) => chooseArchive(event.target.files?.[0] || null)} />
               <Icon name="file-upload" />
-              <span><b>{dragActive ? "松开即可读取 .AJPLUGIN" : archive ? archive.name : "拖拽 .AJPLUGIN 到这里，或点击选择"}</b><small>{archiveError || (archive ? `${(archive.size / 1024).toFixed(1)} KB` : "单个文件最大 10 MB")}</small></span>
+              <span><b>{dragActive ? "松开即可读取 .AJPLUGIN" : archive ? archive.name : "拖拽 .AJPLUGIN 到这里，或点击选择"}</b><small>{archiveError || (archive ? `${(archive.size / 1024).toFixed(1)} KB` : `单个文件最大 ${Math.round((data.policy?.max_package_bytes || 0) / 1024 / 1024)} MB`)}</small></span>
             </label>
             <label className="admin-plugin-replace-switch">
               <input type="checkbox" checked={replaceExisting} onChange={(event) => setReplaceExisting(event.target.checked)} />

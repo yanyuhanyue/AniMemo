@@ -316,16 +316,34 @@ PREVIOUS_APP=$TMP_ROOT/previous-app
 OPENRESTY_BACKUP=$TMP_ROOT/openresty.conf
 mkdir -p "$EXTRACT_ROOT"
 SWAPPED=0
+STACK_STOPPED=0
 OPENRESTY_CHANGED=0
+API_ROLLBACK_TAG=
+WEB_ROLLBACK_TAG=
+
+restore_previous_images() {
+    [ -z "$API_ROLLBACK_TAG" ] || docker image tag "$API_ROLLBACK_TAG" anime-journal-api:latest >/dev/null 2>&1 || true
+    [ -z "$WEB_ROLLBACK_TAG" ] || docker image tag "$WEB_ROLLBACK_TAG" anime-journal-web:latest >/dev/null 2>&1 || true
+}
+
+remove_rollback_image_tags() {
+    [ -z "$API_ROLLBACK_TAG" ] || docker image rm "$API_ROLLBACK_TAG" >/dev/null 2>&1 || true
+    [ -z "$WEB_ROLLBACK_TAG" ] || docker image rm "$WEB_ROLLBACK_TAG" >/dev/null 2>&1 || true
+}
 
 cleanup() {
     status=$?
     set +e
-    if [ "$status" -ne 0 ] && [ "$SWAPPED" -eq 1 ]; then
-        log "deployment failed; restoring the previous Anime Journal app tree"
-        (cd "$APP_ROOT" && docker compose --env-file .env.production -f deploy/docker-compose.yml down --remove-orphans) >/dev/null 2>&1 || true
-        [ -d "$APP_ROOT" ] && rm -rf "$APP_ROOT"
-        [ -d "$PREVIOUS_APP" ] && mv "$PREVIOUS_APP" "$APP_ROOT"
+    if [ "$status" -ne 0 ] && [ "$STACK_STOPPED" -eq 1 ]; then
+        log "deployment failed; restoring the previous Anime Journal app tree and images"
+        if [ -d "$APP_ROOT" ] && [ -f "$APP_ROOT/.env.production" ]; then
+            (cd "$APP_ROOT" && docker compose --env-file .env.production -f deploy/docker-compose.yml down --remove-orphans) >/dev/null 2>&1 || true
+        fi
+        if [ "$SWAPPED" -eq 1 ]; then
+            [ -d "$APP_ROOT" ] && rm -rf "$APP_ROOT"
+            [ -d "$PREVIOUS_APP" ] && mv "$PREVIOUS_APP" "$APP_ROOT"
+        fi
+        restore_previous_images
         if [ -f "$APP_ROOT/.env.production" ]; then
             (cd "$APP_ROOT" && docker compose --env-file .env.production -f deploy/docker-compose.yml up -d) >/dev/null 2>&1 || true
         fi
@@ -334,6 +352,7 @@ cleanup() {
         install -m 0644 "$OPENRESTY_BACKUP" "$OPENRESTY_CONF" >/dev/null 2>&1 || true
         docker exec "$OPENRESTY_CONTAINER" openresty -s reload >/dev/null 2>&1 || docker exec "$OPENRESTY_CONTAINER" nginx -s reload >/dev/null 2>&1 || true
     fi
+    remove_rollback_image_tags
     rm -rf "$TMP_ROOT"
     exit "$status"
 }
@@ -380,9 +399,24 @@ stage_compose() {
     (cd "$EXTRACT_ROOT" && docker compose --env-file .env.production -f deploy/docker-compose.yml "$@")
 }
 stage_compose config -q
+
+rollback_suffix=$(date -u +%Y%m%dT%H%M%SZ)-$$
+if docker image inspect anime-journal-api:latest >/dev/null 2>&1; then
+    API_ROLLBACK_TAG=anime-journal-api:predeploy-$rollback_suffix
+    docker image tag anime-journal-api:latest "$API_ROLLBACK_TAG"
+fi
+if docker image inspect anime-journal-web:latest >/dev/null 2>&1; then
+    WEB_ROLLBACK_TAG=anime-journal-web:predeploy-$rollback_suffix
+    docker image tag anime-journal-web:latest "$WEB_ROLLBACK_TAG"
+fi
+if [ -n "$API_ROLLBACK_TAG$WEB_ROLLBACK_TAG" ]; then
+    log "current Anime Journal images preserved for automatic rollback"
+fi
+
 stage_compose build
 
 stage_compose down --remove-orphans || die "could not stop the current Anime Journal Compose project"
+STACK_STOPPED=1
 
 if [ "$RESET_DATA" -eq 1 ]; then
     log "clearing only Anime Journal data under $DATA_ROOT"

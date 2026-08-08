@@ -5,7 +5,7 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from plugin_host.models import PluginInstallation
+from plugin_host.models import PluginDeployment
 from plugin_host.permissions import can_access_plugin_backend
 
 from .registry import RuntimeLoadError, RuntimeUnavailable, runtime_registry
@@ -27,6 +27,7 @@ class PluginDispatch(APIView):
                 request.user,
                 slug,
                 candidate.manifest,
+                access=resolved.access,
                 permission_code=resolved.permission,
             ):
                 return Response({"detail": "没有权限调用此插件接口。"}, status=status.HTTP_403_FORBIDDEN)
@@ -37,10 +38,10 @@ class PluginDispatch(APIView):
             raise Http404
         except RuntimeLoadError as error:
             with transaction.atomic():
-                locked = PluginInstallation.objects.select_for_update().filter(slug=slug).first()
+                locked = PluginDeployment.objects.select_for_update().filter(plugin__slug=slug).first()
                 if locked is not None:
                     locked.healthy = False
-                    locked.status = PluginInstallation.Status.UNHEALTHY
+                    locked.status = PluginDeployment.Status.UNHEALTHY
                     locked.last_error = str(error)
                     locked.save(update_fields=["healthy", "status", "last_error", "updated_at"])
             return Response({"detail": "插件 Runtime 无法加载。"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)

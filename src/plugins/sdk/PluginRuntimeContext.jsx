@@ -108,6 +108,12 @@ export function PluginRuntimeProvider({ children, authUser }) {
     confirmResolverRef.current = null;
   }, [notify]);
 
+  useEffect(() => {
+    const reload = () => setReloadNonce((value) => value + 1);
+    window.addEventListener("anime-journal:plugins-changed", reload);
+    return () => window.removeEventListener("anime-journal:plugins-changed", reload);
+  }, []);
+
   const reloadPlugin = useCallback(async (slug) => {
     const existing = pluginsRef.current.find((item) => item.slug === slug);
     existing?.plugin?.dispose?.();

@@ -1,17 +1,17 @@
 from django.db import IntegrityError, transaction
 
-from .models import PluginData
+from .models import PluginData, PluginProject
 
 
 class PluginStorage:
     def __init__(self, plugin_slug, *, user=None, namespace="default"):
-        self.plugin_slug = plugin_slug
+        self.plugin = plugin_slug if isinstance(plugin_slug, PluginProject) else PluginProject.objects.get(slug=plugin_slug)
         self.user = user
         self.namespace = namespace
 
     def get(self, key, default=None):
         row = PluginData.objects.filter(
-            plugin_slug=self.plugin_slug,
+            plugin=self.plugin,
             namespace=self.namespace,
             key=key,
             user=self.user,
@@ -21,7 +21,7 @@ class PluginStorage:
     @transaction.atomic
     def set(self, key, value):
         lookup = {
-            "plugin_slug": self.plugin_slug,
+            "plugin": self.plugin,
             "namespace": self.namespace,
             "key": key,
             "user": self.user,
@@ -42,7 +42,7 @@ class PluginStorage:
 
     def delete(self, key):
         return PluginData.objects.filter(
-            plugin_slug=self.plugin_slug,
+            plugin=self.plugin,
             namespace=self.namespace,
             key=key,
             user=self.user,
@@ -50,7 +50,7 @@ class PluginStorage:
 
     def collection(self):
         return PluginData.objects.filter(
-            plugin_slug=self.plugin_slug,
+            plugin=self.plugin,
             namespace=self.namespace,
             user=self.user,
         ).order_by("key")

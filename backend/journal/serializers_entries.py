@@ -5,7 +5,20 @@ from django.conf import settings
 from django.db import transaction
 from rest_framework import serializers
 
-from plugin_host.models import PluginData
+from plugin_host.models import PluginData, PluginProject
+
+
+def _watch_history_project():
+    project, _ = PluginProject.objects.get_or_create(
+        plugin_id="com.anime-journal.watch-history-importer",
+        defaults={
+            "slug": "watch-history-importer",
+            "name": "忆往昔观看记录导入器",
+            "description": "观看记录导入与多次观看历史存储。",
+            "installation_mode": PluginProject.InstallationMode.SYSTEM,
+        },
+    )
+    return project
 from site_config.models import SiteSettings
 from site_config.media_storage.storage import cleanup_uncommitted_media_reference, mark_media_reference_committed
 
@@ -183,8 +196,9 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         history_by_entry = self.context.get(cache_key)
         if history_by_entry is None:
             history_by_entry = {}
+            plugin = _watch_history_project()
             rows = PluginData.objects.filter(
-                plugin_slug="watch-history-importer",
+                plugin=plugin,
                 namespace="watch_history",
                 user=obj.user,
                 key=str(obj.pk),
@@ -197,8 +211,9 @@ class JournalEntrySerializer(serializers.ModelSerializer):
     def _sync_watch_history(self, entry, history_data):
         if history_data is serializers.empty:
             return
+        plugin = _watch_history_project()
         row = PluginData.objects.filter(
-            plugin_slug="watch-history-importer",
+            plugin=plugin,
             namespace="watch_history",
             user=entry.user,
             key=str(entry.pk),
@@ -218,7 +233,7 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             normalized.append({**existing_by_key.get(key, {}), **item})
         if normalized:
             if row is None:
-                PluginData.objects.create(plugin_slug="watch-history-importer", namespace="watch_history", user=entry.user, key=str(entry.pk), value=normalized)
+                PluginData.objects.create(plugin=plugin, namespace="watch_history", user=entry.user, key=str(entry.pk), value=normalized)
             else:
                 row.value = normalized
                 row.save(update_fields=["value", "updated_at"])

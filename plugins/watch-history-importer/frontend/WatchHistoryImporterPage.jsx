@@ -5,7 +5,7 @@ import { Icon } from "./Icon.jsx";
 import { readablePluginError } from "./errors.js";
 import "./styles.css";
 
-const EMPTY = { users: [], batches: [], config: {}, plugin: {} };
+const EMPTY = { batches: [], config: {}, plugin: {} };
 
 function StatusChip({ value }) {
   const labels = {
@@ -53,7 +53,6 @@ export default function WatchHistoryImporterPage({ host, api: pluginApi }) {
   const resolvingRef = useRef(false);
   const [data, setData] = useState(EMPTY);
   const [batch, setBatch] = useState(null);
-  const [targetUserId, setTargetUserId] = useState("");
   const [files, setFiles] = useState([]);
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -70,8 +69,8 @@ export default function WatchHistoryImporterPage({ host, api: pluginApi }) {
   }, []);
 
   useEffect(() => {
-    if (!host?.auth?.isAuthenticated() || !host.auth.isStaff()) {
-      navigate("/admin-login", { replace: true });
+    if (!host?.auth?.isAuthenticated()) {
+      navigate("/login", { replace: true });
       return;
     }
     if (!client) {
@@ -82,7 +81,6 @@ export default function WatchHistoryImporterPage({ host, api: pluginApi }) {
     client.get("status/")
       .then(({ data: result }) => {
         setData({ ...EMPTY, ...(result || {}) });
-        setTargetUserId(String(result?.users?.find((user) => !user.is_staff)?.id || result?.users?.[0]?.id || ""));
       })
       .catch((requestError) => setError(readablePluginError(requestError, "插件未启用或暂时不可用。")))
       .finally(() => setLoading(false));
@@ -101,7 +99,6 @@ export default function WatchHistoryImporterPage({ host, api: pluginApi }) {
     try {
       const response = await client.get(`batches/${batchId}/`);
       setBatch(response.data);
-      setTargetUserId(String(response.data?.target_user?.id || ""));
       setSubjectDrafts({});
       setPreviewQuery("");
       setExcludedGroupIndices(new Set(response.data?.summary?.excluded_group_indices || []));
@@ -123,11 +120,10 @@ export default function WatchHistoryImporterPage({ host, api: pluginApi }) {
   };
 
   const createPreview = async () => {
-    if (!files.length || !targetUserId || busy) return;
+    if (!files.length || busy) return;
     setBusy("preview");
     setError("");
     const payload = new FormData();
-    payload.append("target_user_id", targetUserId);
     files.forEach((file) => payload.append("files", file));
     try {
       const response = await client.post("preview/", payload);
@@ -249,13 +245,12 @@ export default function WatchHistoryImporterPage({ host, api: pluginApi }) {
   return <main className="ajp-watch-import">
     <header className="ajp-watch-import__header">
       <div><span>WATCH HISTORY IMPORTER</span><h1>忆往昔观看记录导入器</h1><p>解析文档、匹配 Bangumi、人工确认，最后一次性写入。</p></div>
-      <Link to="/admin-control"><Icon name="arrow-left" /> 返回管理控制室</Link>
+      <Link to="/dashboard"><Icon name="arrow-left" /> 返回我的手账</Link>
     </header>
 
     {loading ? <div className="ajp-watch-import__loading"><Icon name="spinner" spin /> 正在连接插件</div> : <>
       <section className="ajp-watch-import__workspace">
         <div className="ajp-watch-import__source">
-          <label><span>导入目标账号</span><select value={targetUserId} onChange={(event) => setTargetUserId(event.target.value)} disabled={Boolean(batch)}>{data.users.map((user) => <option key={user.id} value={user.id}>{user.username} · {user.email}</option>)}</select></label>
           <label
             className={`ajp-watch-import__drop${dragging ? " is-dragging" : ""}`}
             onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
@@ -267,7 +262,7 @@ export default function WatchHistoryImporterPage({ host, api: pluginApi }) {
             <strong>{files.length ? `已选择 ${files.length} 个年度文档` : "拖入 2021-2024 TXT 文档"}</strong>
             <small>{files.length ? files.map((file) => file.name).join(" / ") : "也可以点击选择，单个文件最大 2 MB"}</small>
           </label>
-          <button type="button" className="is-primary" disabled={!files.length || !targetUserId || Boolean(batch) || busy === "preview"} onClick={createPreview}><Icon name="layers" /> {busy === "preview" ? "正在解析..." : "生成只读预览"}</button>
+          <button type="button" className="is-primary" disabled={!files.length || Boolean(batch) || busy === "preview"} onClick={createPreview}><Icon name="layers" /> {busy === "preview" ? "正在解析..." : "生成只读预览"}</button>
           {!batch && data.batches.length > 0 && <div className="ajp-watch-import__recent">
             <strong>最近导入批次</strong>
             {data.batches.map((item) => <button type="button" key={item.id} disabled={Boolean(busy)} onClick={() => openBatch(item.id)}>

@@ -4,7 +4,7 @@ from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import include, path
 from journal.auth_views import CookieTokenRefreshView, EmailTokenObtainPairView
-from plugin_host.views import PluginAssetView
+from plugin_host.views import PluginAssetView, PluginPreviewAssetView
 from plugin_host.runtime.dispatch import PluginDispatch
 
 
@@ -20,6 +20,7 @@ urlpatterns = [
     path("api/", include("journal.urls")),
     path("plugin-assets/session/<str:asset_session>/<slug>/<version>/<path:asset>", PluginAssetView.as_view(), name="plugin-asset-session"),
     path("plugin-assets/<slug>/<version>/<path:asset>", PluginAssetView.as_view(), name="plugin-asset"),
+    path("plugin-previews/session/<str:preview_session>/<slug>/<version>/<path:asset>", PluginPreviewAssetView.as_view(), name="plugin-preview-asset-session"),
     path("api/plugins/<slug>/<path:plugin_path>", PluginDispatch.as_view(), name="plugin-dispatch"),
     path("api/plugins/<slug>/", PluginDispatch.as_view(), name="plugin-dispatch-root"),
 ]

@@ -1,5 +1,7 @@
 """Shared permission decisions for metadata, assets, and backend dispatch."""
 
+from .models import PluginDeployment, UserPluginInstallation
+
 
 def _staff_role(user):
     from journal.staff_services import resolve_staff_role
@@ -23,12 +25,27 @@ def _has_definition_permission(user, definitions, permission_code=None):
     return any(role in set(item.get("roles") or []) for item in selected)
 
 
+def _healthy_deployment(plugin_slug):
+    return PluginDeployment.objects.select_related("plugin", "current_version").filter(
+        plugin__slug=plugin_slug,
+        enabled=True,
+        healthy=True,
+        current_version__revoked_at__isnull=True,
+    ).first()
+
+
+def _enabled_user_install(user, plugin):
+    return bool(
+        user
+        and getattr(user, "is_authenticated", False)
+        and UserPluginInstallation.objects.filter(user=user, plugin=plugin, enabled=True).exists()
+    )
+
+
 def has_plugin_permission(user, plugin_slug, permission_code):
-    from .models import PluginInstallation
     from .registry import PluginRegistryError, get_plugin
 
-    installation = PluginInstallation.objects.filter(slug=plugin_slug, enabled=True, healthy=True).first()
-    if installation is None:
+    if _healthy_deployment(plugin_slug) is None:
         return False
     try:
         plugin = get_plugin(plugin_slug)
@@ -37,30 +54,26 @@ def has_plugin_permission(user, plugin_slug, permission_code):
     return _has_definition_permission(user, _definitions(plugin.get("manifest") or plugin), permission_code)
 
 
-def can_access_plugin_frontend(user, installation, manifest):
-    if not installation.enabled or not installation.healthy:
+def can_access_plugin_frontend(user, deployment, manifest):
+    if not deployment.enabled or not deployment.healthy:
         return False
-    frontend = manifest.get("frontend") or {}
-    exposure = frontend.get("exposure", "public")
+    exposure = (manifest.get("frontend") or {}).get("exposure", "user")
+    if deployment.plugin.installation_mode == deployment.plugin.InstallationMode.USER:
+        return _enabled_user_install(user, deployment.plugin)
     if exposure == "public":
         return True
-    if not user or not getattr(user, "is_authenticated", False):
-        return False
     if exposure == "authenticated":
-        return True
-    if exposure != "staff" or not _staff_role(user):
+        return bool(user and getattr(user, "is_authenticated", False))
+    return bool(_staff_role(user) and (not _definitions(manifest) or _has_definition_permission(user, _definitions(manifest))))
+
+
+def can_access_plugin_backend(user, plugin_slug, manifest, *, access, permission_code=""):
+    deployment = _healthy_deployment(plugin_slug)
+    if deployment is None or not user or not getattr(user, "is_authenticated", False):
         return False
-    definitions = _definitions(manifest)
-    return not definitions or _has_definition_permission(user, definitions)
-
-
-def can_access_plugin_backend(user, plugin_slug, manifest, *, permission_code):
-    from .models import PluginInstallation
-
-    installation = PluginInstallation.objects.filter(slug=plugin_slug, enabled=True, healthy=True).first()
-    if installation is None:
-        return False
-    if not user or not getattr(user, "is_authenticated", False):
+    if access == "user":
+        return _enabled_user_install(user, deployment.plugin)
+    if access != "staff":
         return False
     definitions = _definitions(manifest)
     if not permission_code or permission_code not in {item.get("code") for item in definitions}:
@@ -73,10 +86,10 @@ def plugin_permissions_for_user(user):
 
     if not user or not getattr(user, "is_authenticated", False):
         return []
-    permissions = []
+    result = []
     for plugin in discover_plugins():
         for definition in _definitions(plugin.get("manifest") or plugin):
             code = definition.get("code")
             if code and _has_definition_permission(user, [definition], code):
-                permissions.append(code)
-    return sorted(set(permissions))
+                result.append(code)
+    return sorted(set(result))

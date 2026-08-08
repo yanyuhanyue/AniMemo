@@ -7,6 +7,8 @@ import { DashboardPage } from "./pages/DashboardPage.jsx";
 import { ColumnSubmitPage, UniversePage } from "./pages/CommunityPages.jsx";
 import { FeaturedPage } from "./pages/FeaturedPage.jsx";
 import { ShowcasePage } from "./pages/ShowcasePage.jsx";
+import { PluginPlatformPage } from "./pages/PluginPlatformPage.jsx";
+import { PluginDraftPreviewPage } from "./pages/PluginDraftPreviewPage.jsx";
 import { PageColorTransition } from "./components/PageColorTransition.jsx";
 import { SiteSettingsProvider } from "./context/SiteSettingsContext.jsx";
 import { api, getAuthUser, initializeAuth, subscribeAuth } from "./lib/api.js";
@@ -42,6 +44,8 @@ function AppRoutes({ authUser }) {
       <Route path="/register/verify" element={<UserAuthPage />} />
       <Route path="/register/complete" element={<UserAuthPage />} />
       <Route path="/dashboard" element={<DashboardPage />} />
+      <Route path="/plugins" element={<PluginPlatformPage authUser={authUser} />} />
+      <Route path="/plugins/preview/:previewSession" element={<PluginDraftPreviewPage authUser={authUser} />} />
       <Route path="/featured" element={<FeaturedPage />} />
       <Route path="/featured/submit" element={<ColumnSubmitPage />} />
       <Route path="/featured/:columnId" element={<Navigate to="/featured" replace />} />

@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 
-class PluginInstallationUpdateSerializer(serializers.Serializer):
+class PluginDeploymentUpdateSerializer(serializers.Serializer):
     enabled = serializers.BooleanField(required=False)
     config = serializers.DictField(required=False)
 

@@ -78,6 +78,7 @@ def _validate_settings(definitions, errors):
             "min": definition.get("min"),
             "max": definition.get("max"),
             "choices": choices,
+            "scope": definition.get("scope"),
         })
     return normalized
 
@@ -130,26 +131,28 @@ def _merged_config(definitions, stored_config):
     return {item["key"]: stored.get(item["key"], item.get("default")) for item in definitions}
 
 
-def _serialize_plugin(directory, installation):
+def _serialize_plugin(directory, deployment):
     manifest, errors = read_runtime_manifest(directory)
     if not manifest:
-        return _serialize_missing_plugin(installation, errors)
-    ready = not errors and manifest.get("compatible", False) and installation.healthy
+        return _serialize_missing_plugin(deployment, errors)
+    ready = not errors and manifest.get("compatible", False) and deployment.healthy
     active = False
-    if installation.enabled and ready:
+    slug = deployment.plugin.slug
+    version = deployment.current_version.version
+    if deployment.enabled and ready:
         try:
-            runtime_registry.ensure_current(installation.slug)
-            active = runtime_registry.is_active(installation.slug, installation.current_version)
+            runtime_registry.ensure_current(slug)
+            active = runtime_registry.is_active(slug, version)
         except RuntimeLoadError as error:
             errors.append(str(error))
             ready = False
-    enabled = bool(installation.enabled)
+    enabled = bool(deployment.enabled)
     return {
         "id": manifest.get("id", ""),
-        "slug": installation.slug,
-        "name": manifest.get("name", installation.slug),
-        "version": installation.current_version,
-        "previous_version": installation.previous_version,
+        "slug": slug,
+        "name": manifest.get("name", deployment.plugin.name),
+        "version": version,
+        "previous_version": deployment.previous_version.version if deployment.previous_version else "",
         "description": manifest.get("description", ""),
         "author": manifest.get("author") or {},
         "license": manifest.get("license", ""),
@@ -168,9 +171,12 @@ def _serialize_plugin(directory, installation):
         "hooks": manifest.get("hooks") or [],
         "data_policy": manifest.get("dataPolicy") or {},
         "settings": manifest.get("settings") or [],
-        "config": _merged_config(manifest.get("settings") or [], installation.config),
+        "config": _merged_config(
+            [item for item in (manifest.get("settings") or []) if item.get("scope") == "system"],
+            deployment.system_config,
+        ),
         "enabled": enabled,
-        "healthy": installation.healthy,
+        "healthy": deployment.healthy,
         "effective_enabled": enabled and ready and active,
         "status": "loaded" if enabled and ready and active else ("deployed" if ready else "failed"),
         "discovered": True,
@@ -183,62 +189,63 @@ def _serialize_plugin(directory, installation):
             "frontend_entry": (manifest.get("frontend") or {}).get("ready", True),
             "backend_runtime": (manifest.get("backend") or {}).get("ready", True),
             "loaded": active,
-            "last_error": errors[0] if errors else installation.last_error,
+            "last_error": errors[0] if errors else deployment.last_error,
         },
         "ready": ready,
         "errors": errors,
-        "updated_at": installation.updated_at,
-        "updated_by": installation.updated_by.get_username() if installation.updated_by else "",
+        "updated_at": deployment.updated_at,
+        "updated_by": deployment.updated_by.get_username() if deployment.updated_by else "",
         "discovered_at": timezone.now(),
         "manifest": manifest,
     }
 
 
-def _serialize_missing_plugin(installation, errors=None):
+def _serialize_missing_plugin(deployment, errors=None):
     errors = errors or ["当前版本 Runtime 目录不存在。"]
     return {
-        "id": installation.plugin_id,
-        "slug": installation.slug,
-        "name": installation.slug,
-        "version": installation.current_version,
-        "previous_version": installation.previous_version,
+        "id": deployment.plugin.plugin_id,
+        "slug": deployment.plugin.slug,
+        "name": deployment.plugin.name,
+        "version": deployment.current_version.version,
+        "previous_version": deployment.previous_version.version if deployment.previous_version else "",
         "backend": {"enabled": False, "ready": False},
         "frontend": {"enabled": False, "ready": False},
         "permissions": [], "extensions": [], "runtimes": [], "hooks": [], "settings": [], "config": {},
         "data_policy": {}, "sdkApi": 2, "sdk_api": 2, "sdk_compatible": False, "compatible": False,
-        "enabled": installation.enabled, "healthy": False, "effective_enabled": False,
+        "enabled": deployment.enabled, "healthy": False, "effective_enabled": False,
         "status": "failed", "discovered": False, "installed": True, "loaded": False, "failed": True,
         "ready": False, "errors": errors,
         "diagnostics": {"manifest": False, "loaded": False, "last_error": errors[0]},
-        "updated_at": installation.updated_at,
-        "updated_by": installation.updated_by.get_username() if installation.updated_by else "",
+        "updated_at": deployment.updated_at,
+        "updated_by": deployment.updated_by.get_username() if deployment.updated_by else "",
         "discovered_at": timezone.now(),
         "manifest": {},
     }
 
 
 def discover_plugins():
-    from .models import PluginInstallation
+    from .models import PluginDeployment
 
     plugins = []
-    for installation in PluginInstallation.objects.select_related("updated_by").all():
-        directory = Path(settings.PLUGIN_ROOT) / "runtime" / installation.slug / installation.current_version
-        plugins.append(_serialize_plugin(directory, installation) if directory.is_dir() else _serialize_missing_plugin(installation))
+    deployments = PluginDeployment.objects.select_related("plugin", "current_version", "previous_version", "updated_by")
+    for deployment in deployments:
+        directory = Path(settings.PLUGIN_ROOT) / "runtime" / deployment.plugin.slug / deployment.current_version.version
+        plugins.append(_serialize_plugin(directory, deployment) if directory.is_dir() else _serialize_missing_plugin(deployment))
     return plugins
 
 
 def get_plugin(slug):
     if not SLUG_PATTERN.fullmatch(slug or ""):
         raise PluginRegistryError("插件标识无效。")
-    from .models import PluginInstallation
+    from .models import PluginDeployment
 
-    installation = PluginInstallation.objects.select_related("updated_by").filter(slug=slug).first()
-    if installation is None:
-        raise PluginRegistryError("插件未安装。")
-    directory = Path(settings.PLUGIN_ROOT) / "runtime" / slug / installation.current_version
+    deployment = PluginDeployment.objects.select_related("plugin", "current_version", "previous_version", "updated_by").filter(plugin__slug=slug).first()
+    if deployment is None:
+        raise PluginRegistryError("插件尚未部署。")
+    directory = Path(settings.PLUGIN_ROOT) / "runtime" / slug / deployment.current_version.version
     if not directory.is_dir():
         raise PluginRegistryError("当前版本 Runtime 目录不存在。")
-    return _serialize_plugin(directory, installation)
+    return _serialize_plugin(directory, deployment)
 
 
 def validate_plugin_config(plugin, config):

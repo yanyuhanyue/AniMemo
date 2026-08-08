@@ -158,6 +158,12 @@ def read_manifest(slug: str) -> dict:
         raise SystemExit("only Manifest v2 / SDK API v2 packages are supported")
     if manifest.get("slug") != slug:
         raise SystemExit("manifest slug does not match directory")
+    if not isinstance((manifest.get("author") or {}).get("name"), str) or not manifest["author"]["name"].strip():
+        raise SystemExit("manifest author.name is required")
+    if not isinstance(manifest.get("license"), str) or not manifest["license"].strip():
+        raise SystemExit("manifest license is required")
+    if manifest.get("installationMode") not in {"user", "system"}:
+        raise SystemExit("manifest installationMode must be user or system")
     return manifest
 
 
