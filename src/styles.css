@@ -1370,6 +1370,7 @@ button.tag-chip { cursor: pointer; }
 .auth-field:nth-of-type(even) > span { transform: rotate(1deg); }
 .auth-field > div { position: relative; }
 .auth-field > div svg { position: absolute; left: 15px; top: 50%; transform: translateY(-50%); }
+.auth-field__control > svg { z-index: 1; }
 .auth-field input { width: 100%; height: 60px; border: 4px solid var(--ink); background: #fff; padding: 14px 14px 14px 49px; box-shadow: 5px 5px 0 var(--teal); font-size: 16px; font-weight: 900; line-height: 24px; outline: none; }
 .auth-field__control.has-password-toggle input { padding-right: 58px; }
 .auth-field__password-toggle { position: absolute; top: 50%; right: 8px; z-index: 2; width: 42px; height: 42px; display: grid; place-items: center; border: 0; background: transparent; color: var(--ink); cursor: pointer; transform: translateY(-50%); }

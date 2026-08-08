@@ -30,6 +30,10 @@ test("password visibility control is keyboard and screen-reader accessible", () 
   assert.match(styles, /\.auth-field__control\.has-password-toggle input/);
 });
 
+test("auth field leading icons stay above transformed focused inputs", () => {
+  assert.match(styles, /\.auth-field__control\s*>\s*svg\s*\{[^}]*z-index:\s*1/);
+});
+
 test("user and staff Turnstile integrations use explicit official themes and stable slots", () => {
   assert.match(userAuth, /TurnstileWidget[^\n]*variant="user"[^\n]*size="normal"[^\n]*mountDelay=\{900\}/);
   assert.match(staffAuth, /TurnstileWidget[^\n]*variant="staff"[^\n]*size="flexible"[^\n]*mountDelay=\{900\}/);
