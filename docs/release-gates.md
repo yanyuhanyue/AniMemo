@@ -12,11 +12,20 @@ they do not replace production runtime validation.
 - `plugins`: validates/builds plugin artifacts and enforces official package
   immutability.
 
-The official plugin gate compares the actual package identity from Base with the
-artifact built from Current. A package change with the same version fails; a
-strict SemVer increase passes; a downgrade or unplanned official plugin removal
-fails. The logs always print the resolved Base SHA, Head SHA, and resolution
-source.
+The official plugin gate compares the canonical package content identity from
+Base with Current. It hashes a versioned, stable descriptor of the files that
+actually enter the official package. A canonical content change with the same
+version fails; a strict SemVer increase passes; a downgrade or unplanned official
+plugin removal fails. The logs print both the canonical content digest and the
+exact archive SHA for diagnostics, together with the resolved Base SHA, Head SHA,
+and resolution source.
+
+Content identity is not archive identity. For example, the same payload may have
+content digest `CCC` while a deflated archive has SHA `AAA` and a stored archive
+has SHA `BBB`. The immutable version remains unchanged because its payload is the
+same. CAS still addresses the actual archive bytes, and an already-published
+official version retains the original `AAA` blob instead of being rewritten to
+`BBB`.
 
 ## Fresh Docker release gate
 
@@ -37,8 +46,9 @@ recreating persistent state:
 5. Build Current and replace only the API container.
 6. Let the normal container command run migrations, `sync_official_plugins`,
    static collection, and Gunicorn against the existing data.
-7. Verify migrations, health, seeded state, immutable versions, CAS, deployment,
-   runtime reconciliation, and Integration Protocol migration coverage.
+7. Verify migrations, health, seeded state, immutable versions, original official
+   PackageBlob retention, CAS, deployment, runtime reconciliation, and Integration
+   Protocol migration coverage.
 8. Restart Current API once and verify the state again.
 
 The job never runs `down -v` between Base and Current. Cleanup is scoped to the
