@@ -30,8 +30,8 @@ class SupportedHookEmitterTests(TestCase):
             "column.after_publish", "column.after_delete",
             "user.after_created", "user.before_delete", "user.after_delete",
         })
-        self.assertEqual(HOOK_DEFINITIONS["user.before_delete"], {"mode": "filter", "failure": "closed"})
-        self.assertEqual(HOOK_DEFINITIONS["user.after_delete"], {"mode": "action", "failure": "open"})
+        self.assertEqual(HOOK_DEFINITIONS["user.before_delete"], {"mode": "filter", "failure": "closed", "scope": "system"})
+        self.assertEqual(HOOK_DEFINITIONS["user.after_delete"], {"mode": "action", "failure": "open", "scope": "system"})
 
     def test_registration_hooks_and_user_after_created_run_at_completion(self):
         request = RequestFactory().post("/api/auth/register/complete/")

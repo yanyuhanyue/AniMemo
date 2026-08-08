@@ -1,6 +1,6 @@
 """Shared permission decisions for metadata, assets, and backend dispatch."""
 
-from .models import PluginDeployment, UserPluginInstallation
+from .models import PluginDeployment, PluginProject, UserPluginInstallation
 
 
 def _staff_role(user):
@@ -34,12 +34,34 @@ def _healthy_deployment(plugin_slug):
     ).first()
 
 
-def _enabled_user_install(user, plugin):
+def is_user_plugin_enabled(user, plugin):
     return bool(
         user
         and getattr(user, "is_authenticated", False)
         and UserPluginInstallation.objects.filter(user=user, plugin=plugin, enabled=True).exists()
     )
+
+
+def is_user_plugin_enabled_for_id(plugin, user_id):
+    return bool(
+        user_id
+        and plugin
+        and plugin.installation_mode == plugin.InstallationMode.USER
+        and UserPluginInstallation.objects.filter(user_id=user_id, plugin=plugin, enabled=True).exists()
+    )
+
+
+def enabled_user_plugin(slug, user):
+    if not user or not getattr(user, "is_authenticated", False):
+        return None
+    project = PluginProject.objects.filter(
+        slug=slug,
+        installation_mode=PluginProject.InstallationMode.USER,
+        status=PluginProject.Status.ACTIVE,
+    ).first()
+    if project is None or not is_user_plugin_enabled(user, project):
+        return None
+    return project
 
 
 def has_plugin_permission(user, plugin_slug, permission_code):
@@ -59,7 +81,7 @@ def can_access_plugin_frontend(user, deployment, manifest):
         return False
     exposure = (manifest.get("frontend") or {}).get("exposure", "user")
     if deployment.plugin.installation_mode == deployment.plugin.InstallationMode.USER:
-        return _enabled_user_install(user, deployment.plugin)
+        return is_user_plugin_enabled(user, deployment.plugin)
     if exposure == "public":
         return True
     if exposure == "authenticated":
@@ -72,7 +94,7 @@ def can_access_plugin_backend(user, plugin_slug, manifest, *, access, permission
     if deployment is None or not user or not getattr(user, "is_authenticated", False):
         return False
     if access == "user":
-        return _enabled_user_install(user, deployment.plugin)
+        return is_user_plugin_enabled(user, deployment.plugin)
     if access != "staff":
         return False
     definitions = _definitions(manifest)

@@ -5,20 +5,15 @@ from django.conf import settings
 from django.db import transaction
 from rest_framework import serializers
 
-from plugin_host.models import PluginData, PluginProject
+from plugin_host.models import PluginData
+from plugin_host.permissions import enabled_user_plugin
 
 
-def _watch_history_project():
-    project, _ = PluginProject.objects.get_or_create(
-        plugin_id="com.anime-journal.watch-history-importer",
-        defaults={
-            "slug": "watch-history-importer",
-            "name": "忆往昔观看记录导入器",
-            "description": "观看记录导入与多次观看历史存储。",
-            "installation_mode": PluginProject.InstallationMode.SYSTEM,
-        },
-    )
-    return project
+WATCH_HISTORY_PLUGIN_SLUG = "watch-history-importer"
+
+
+def _watch_history_project(user):
+    return enabled_user_plugin(WATCH_HISTORY_PLUGIN_SLUG, user)
 from site_config.models import SiteSettings
 from site_config.media_storage.storage import cleanup_uncommitted_media_reference, mark_media_reference_committed
 
@@ -80,6 +75,10 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         return representation
 
     def validate_watch_history(self, value):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if _watch_history_project(user) is None:
+            raise serializers.ValidationError("请先安装并启用观看记录导入插件。")
         if not isinstance(value, list):
             raise serializers.ValidationError("观看记录必须是数组。")
         if len(value) > 500:
@@ -196,22 +195,27 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         history_by_entry = self.context.get(cache_key)
         if history_by_entry is None:
             history_by_entry = {}
-            plugin = _watch_history_project()
-            rows = PluginData.objects.filter(
-                plugin=plugin,
-                namespace="watch_history",
-                user=obj.user,
-                key=str(obj.pk),
-            ).values_list("key", "value")
-            for key, value in rows:
-                history_by_entry[int(key)] = value if isinstance(value, list) else []
+            request_user = getattr(self.context.get("request"), "user", None)
+            if getattr(request_user, "pk", None) == obj.user_id:
+                plugin = _watch_history_project(request_user)
+                if plugin is not None:
+                    rows = PluginData.objects.filter(
+                        plugin=plugin,
+                        namespace="watch_history",
+                        user=obj.user,
+                        key=str(obj.pk),
+                    ).values_list("key", "value")
+                    for key, value in rows:
+                        history_by_entry[int(key)] = value if isinstance(value, list) else []
             self.context[cache_key] = history_by_entry
         return history_by_entry.get(obj.pk, [])
 
     def _sync_watch_history(self, entry, history_data):
         if history_data is serializers.empty:
             return
-        plugin = _watch_history_project()
+        plugin = _watch_history_project(entry.user)
+        if plugin is None:
+            raise serializers.ValidationError({"watch_history": "请先安装并启用观看记录导入插件。"})
         row = PluginData.objects.filter(
             plugin=plugin,
             namespace="watch_history",

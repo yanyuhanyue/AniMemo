@@ -51,6 +51,22 @@ class PluginPackageBlob(models.Model):
         ordering = ["sha256"]
 
 
+class PluginUploadAttempt(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="plugin_upload_attempts",
+    )
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    accepted = models.BooleanField(default=False)
+    outcome = models.CharField(max_length=32, default="received")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=("user", "created_at"))]
+
+
 class PluginVersion(models.Model):
     class ReviewStatus(models.TextChoices):
         DRAFT = "draft", "草稿"

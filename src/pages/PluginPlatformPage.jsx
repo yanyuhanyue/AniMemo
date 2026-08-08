@@ -209,7 +209,9 @@ export function PluginPlatformPage({ authUser }) {
             const installation = installed.get(plugin.slug);
             const current = plugin.current_version
               ? { version: plugin.current_version, runtime_types: plugin.runtime_types }
-              : plugin.versions?.find((version) => version.published_at) || plugin.versions?.[0];
+              : plugin.published_version
+                ? { version: plugin.published_version, runtime_types: plugin.runtime_types }
+                : plugin.versions?.find((version) => version.published_at) || plugin.versions?.[0];
             return <article className="plugin-market-card" key={plugin.slug}>
               <div className="plugin-market-card__title"><span><Icon name="puzzle" /></span><div><h2>{plugin.name}</h2><code>{plugin.slug}</code></div></div>
               <p>{plugin.description}</p>

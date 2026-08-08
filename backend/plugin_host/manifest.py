@@ -2,7 +2,7 @@ import json
 import re
 from pathlib import Path
 
-from .hook_contract import SUPPORTED_HOOKS
+from .hook_contract import SUPPORTED_HOOKS, SYSTEM_SCOPED_HOOKS
 
 
 SLUG_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
@@ -111,6 +111,8 @@ def validate_manifest(manifest: dict, *, directory_name: str | None = None) -> d
     hooks = manifest.get("hooks", [])
     if not isinstance(hooks, list) or not set(hooks) <= HOOKS:
         raise ManifestError("hooks 包含未知 Hook")
+    if manifest.get("installationMode") == "user" and set(hooks) & SYSTEM_SCOPED_HOOKS:
+        raise ManifestError("USER 插件只能声明可解析唯一目标用户的 Hook")
     policy = manifest.get("dataPolicy")
     if not isinstance(policy, dict) or set(POLICY_KEYS) - set(policy) or any(not isinstance(policy[k], bool) for k in POLICY_KEYS):
         raise ManifestError("dataPolicy 必须完整声明四项布尔策略")

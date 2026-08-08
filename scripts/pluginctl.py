@@ -50,6 +50,10 @@ SHARED_IMPORTS = {
 IMPORT_FROM_RE = re.compile(r"^[ \t]*(?:import|export)[ \t]+([^;]+?)[ \t\r\n]+from[ \t\r\n]+['\"]([^'\"]+)['\"][ \t]*;", re.MULTILINE)
 SIDE_EFFECT_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]*['\"]([^'\"]+)['\"][ \t]*;", re.MULTILINE)
 DYNAMIC_IMPORT_RE = re.compile(r"\bimport\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
+USER_SCOPED_HOOKS = {
+    "journal.after_create", "journal.after_update", "journal.after_delete",
+    "column.after_publish", "column.after_delete",
+}
 
 
 def _boundary_error(detail=""):
@@ -164,6 +168,8 @@ def read_manifest(slug: str) -> dict:
         raise SystemExit("manifest license is required")
     if manifest.get("installationMode") not in {"user", "system"}:
         raise SystemExit("manifest installationMode must be user or system")
+    if manifest.get("installationMode") == "user" and not set(manifest.get("hooks") or []) <= USER_SCOPED_HOOKS:
+        raise SystemExit("USER plugins may only declare user-scoped journal/column hooks")
     return manifest
 
 

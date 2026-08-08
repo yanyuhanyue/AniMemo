@@ -88,6 +88,21 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "installationMode": { "const": "user" } }, "required": ["installationMode"] },
+      "then": {
+        "properties": {
+          "hooks": {
+            "items": { "enum": [
+              "journal.after_create", "journal.after_update", "journal.after_delete",
+              "column.after_publish", "column.after_delete"
+            ] }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "semver": { "type": "string", "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]+)?$" },
     "slug": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" }

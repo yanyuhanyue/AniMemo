@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ast
 import io
+import os
 import re
 import shutil
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
+from uuid import uuid4
 from zipfile import ZipFile
 
 from django.conf import settings
@@ -20,6 +22,7 @@ from .models import (
     PluginPackageBlob,
     PluginProject,
     PluginSubmission,
+    PluginUploadAttempt,
     PluginVersion,
     UserPluginInstallation,
 )
@@ -161,11 +164,15 @@ def static_security_scan(payload, inspected):
     return report
 
 
-def store_package_blob(payload, *, root=None):
+def store_package_blob(payload, *, root=None, minimum_free_bytes=0):
     raw = payload.read() if hasattr(payload, "read") else bytes(payload)
     inspected = inspect_package(raw)
     storage = LocalPluginPackageStorage(root or settings.PLUGIN_ROOT)
-    path = storage.store_package(raw, sha256=inspected["sha256"])
+    path = storage.store_package(
+        raw,
+        sha256=inspected["sha256"],
+        minimum_free_bytes=minimum_free_bytes,
+    )
     relative = path.relative_to(storage.root).as_posix()
     try:
         with transaction.atomic():
@@ -181,38 +188,74 @@ def store_package_blob(payload, *, root=None):
     return blob, inspected, raw, created
 
 
+def _record_upload_attempt(actor, size_bytes):
+    if actor.is_superuser:
+        return None, False
+    now = timezone.now()
+    recent_limit = int(getattr(settings, "PLUGIN_UPLOADS_PER_HOUR", 12))
+    user_model = type(actor)
+    with transaction.atomic():
+        user_model.objects.select_for_update().get(pk=actor.pk)
+        recent_count = PluginUploadAttempt.objects.filter(
+            user_id=actor.pk,
+            created_at__gte=now - timedelta(hours=1),
+        ).count()
+        limited = recent_count >= recent_limit
+        attempt = PluginUploadAttempt.objects.create(
+            user_id=actor.pk,
+            size_bytes=max(0, int(size_bytes)),
+            accepted=False,
+            outcome="rate_limited" if limited else "received",
+        )
+    return attempt, limited
+
+
+def _finish_upload_attempt(attempt, *, accepted=False, outcome):
+    if attempt is None:
+        return
+    PluginUploadAttempt.objects.filter(pk=attempt.pk).update(accepted=bool(accepted), outcome=str(outcome)[:32])
+
+
 def upload_plugin_version(project, uploaded_file, *, actor):
     if not uploaded_file or not str(getattr(uploaded_file, "name", "")).lower().endswith(".ajplugin"):
         raise PluginWorkflowError("只支持上传 .ajplugin 插件包。")
-    if project.owner_id != actor.pk and not actor.is_superuser:
-        raise PluginWorkflowError("只能向自己的插件项目上传版本。")
-    if project.status != PluginProject.Status.ACTIVE:
-        raise PluginWorkflowError("只有活跃插件项目可以上传新版本。")
-    if not actor.is_superuser:
-        now = timezone.now()
-        draft_limit = int(getattr(settings, "PLUGIN_DRAFT_LIMIT", 20))
-        recent_limit = int(getattr(settings, "PLUGIN_UPLOADS_PER_HOUR", 12))
-        if PluginVersion.objects.filter(plugin__owner=actor, review_status=PluginVersion.ReviewStatus.DRAFT).count() >= draft_limit:
-            raise PluginWorkflowError("未审核草稿数量已达上限。")
-        if PluginVersion.objects.filter(created_by=actor, created_at__gte=now - timedelta(hours=1)).count() >= recent_limit:
-            raise PluginWorkflowError("上传过于频繁，请稍后再试。")
-
-    blob, inspected, raw, _ = store_package_blob(uploaded_file)
-    manifest = inspected["manifest"]
-    if manifest["id"] != project.plugin_id or manifest["slug"] != project.slug:
-        raise PluginWorkflowError("Manifest id/slug 与插件项目不一致。")
-    if manifest["installationMode"] != project.installation_mode:
-        raise PluginWorkflowError("Manifest installationMode 与插件项目不一致。")
-    report = static_security_scan(raw, inspected)
+    raw = uploaded_file.read()
+    policy = package_policy()
+    attempt, rate_limited = _record_upload_attempt(actor, len(raw))
     try:
+        if len(raw) > policy["max_package_bytes"]:
+            raise PluginPackageError("插件包超过大小限制")
+        inspected = inspect_package(raw)
+        manifest = inspected["manifest"]
+        report = static_security_scan(raw, inspected)
         with transaction.atomic():
             locked_project = PluginProject.objects.select_for_update().get(pk=project.pk)
-            locked_blob = PluginPackageBlob.objects.select_for_update().get(pk=blob.pk)
+            if locked_project.owner_id != actor.pk and not actor.is_superuser:
+                raise PluginWorkflowError("只能向自己的插件项目上传版本。")
+            if locked_project.status != PluginProject.Status.ACTIVE:
+                raise PluginWorkflowError("只有活跃插件项目可以上传新版本。")
+            if manifest["id"] != locked_project.plugin_id or manifest["slug"] != locked_project.slug:
+                raise PluginWorkflowError("Manifest id/slug 与插件项目不一致。")
+            if manifest["installationMode"] != locked_project.installation_mode:
+                raise PluginWorkflowError("Manifest installationMode 与插件项目不一致。")
             existing = PluginVersion.objects.filter(plugin=locked_project, version=manifest["version"]).first()
             if existing:
-                if existing.package_blob_id != locked_blob.pk:
+                if existing.package_blob.sha256 != inspected["sha256"]:
                     raise PluginWorkflowError("同一插件版本的 Package SHA-256 不可改变；请提升版本号。")
+                _finish_upload_attempt(attempt, accepted=True, outcome="duplicate")
                 return existing, report, False
+            if rate_limited:
+                raise PluginWorkflowError("上传过于频繁，请稍后再试。")
+            if not actor.is_superuser:
+                draft_limit = int(getattr(settings, "PLUGIN_DRAFT_LIMIT", 20))
+                if PluginVersion.objects.filter(
+                    plugin__owner=actor,
+                    review_status=PluginVersion.ReviewStatus.DRAFT,
+                ).count() >= draft_limit:
+                    raise PluginWorkflowError("未审核草稿数量已达上限。")
+            minimum_free = int(getattr(settings, "PLUGIN_MIN_FREE_DISK_MB", 2048)) * 1024 * 1024
+            blob, _, _, _ = store_package_blob(raw, minimum_free_bytes=minimum_free)
+            locked_blob = PluginPackageBlob.objects.select_for_update().get(pk=blob.pk)
             version = PluginVersion.objects.create(
                 plugin=locked_project,
                 version=manifest["version"],
@@ -221,11 +264,14 @@ def upload_plugin_version(project, uploaded_file, *, actor):
                 runtime_types=manifest.get("runtimes") or [],
                 created_by=actor,
             )
+    except (PluginWorkflowError, PluginPackageError):
+        if attempt is not None and attempt.outcome != "rate_limited":
+            _finish_upload_attempt(attempt, outcome="rejected")
+        raise
     except IntegrityError as error:
-        existing = PluginVersion.objects.filter(plugin=project, version=manifest["version"]).first()
-        if existing and existing.package_blob_id == blob.pk:
-            return existing, report, False
+        _finish_upload_attempt(attempt, outcome="conflict")
         raise PluginWorkflowError("同一插件版本的 Package SHA-256 不可改变；请提升版本号。") from error
+    _finish_upload_attempt(attempt, accepted=True, outcome="accepted")
     return version, report, True
 
 
@@ -369,17 +415,104 @@ def publish_version(plugin_version, *, actor):
     return PluginPackageInstaller().publish(plugin_version, actor=actor)
 
 
+def _reconcile_gc_tombstones(storage):
+    removed = 0
+    restored = []
+    gc_directory = storage.staging / "gc"
+    if not gc_directory.is_dir():
+        return removed, restored
+    for tombstone in list(gc_directory.glob("*.tombstone")):
+        digest = tombstone.name.split(".", 1)[0].lower()
+        try:
+            canonical = storage.package_path(digest)
+        except PluginPackageError:
+            tombstone.unlink(missing_ok=True)
+            removed += 1
+            continue
+        with storage.package_lock(digest):
+            blob_exists = PluginPackageBlob.objects.filter(sha256=digest).exists()
+            if blob_exists and not canonical.exists():
+                canonical.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(tombstone, canonical)
+                restored.append(digest)
+            else:
+                tombstone.unlink(missing_ok=True)
+                removed += 1
+    return removed, restored
+
+
 def garbage_collect_package_blobs(*, root=None):
     storage = LocalPluginPackageStorage(root or settings.PLUGIN_ROOT)
-    removed = []
+    storage.ensure()
+    report = {
+        "package_blobs_removed": [],
+        "orphan_files_removed": [],
+        "missing_blob_files": [],
+        "package_tombstones_restored": [],
+        "staging_removed": 0,
+    }
     cutoff = timezone.now() - timedelta(seconds=int(getattr(settings, "PLUGIN_PACKAGE_GC_GRACE_SECONDS", 86400)))
-    with transaction.atomic():
-        candidates = list(
-            PluginPackageBlob.objects.select_for_update().filter(versions__isnull=True, created_at__lte=cutoff)
-        )
-        for blob in candidates:
-            path = storage.package_path(blob.sha256)
-            blob.delete()
-            path.unlink(missing_ok=True)
-            removed.append(blob.sha256)
-    return removed
+    staging_removed, restored = _reconcile_gc_tombstones(storage)
+    report["staging_removed"] += staging_removed
+    report["package_tombstones_restored"].extend(restored)
+
+    candidate_hashes = list(
+        PluginPackageBlob.objects.filter(versions__isnull=True, created_at__lte=cutoff).values_list("sha256", flat=True)
+    )
+    for digest in candidate_hashes:
+        canonical = storage.package_path(digest)
+        tombstone = None
+        committed = False
+        with storage.package_lock(digest):
+            try:
+                with transaction.atomic():
+                    blob = PluginPackageBlob.objects.select_for_update().filter(sha256=digest).first()
+                    if blob is None or blob.created_at > cutoff or blob.versions.exists():
+                        continue
+                    if not canonical.is_file():
+                        report["missing_blob_files"].append(digest)
+                        continue
+                    gc_directory = storage.staging / "gc"
+                    gc_directory.mkdir(parents=True, exist_ok=True)
+                    tombstone = gc_directory / f"{digest}.{uuid4().hex}.tombstone"
+                    os.replace(canonical, tombstone)
+                    blob.delete()
+                committed = True
+                tombstone.unlink(missing_ok=True)
+                report["package_blobs_removed"].append(digest)
+            except Exception:
+                if not committed and tombstone is not None and tombstone.exists() and not canonical.exists():
+                    canonical.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(tombstone, canonical)
+                raise
+
+    for blob in PluginPackageBlob.objects.only("sha256"):
+        digest = blob.sha256
+        with storage.package_lock(digest):
+            if PluginPackageBlob.objects.filter(sha256=digest).exists() and not storage.package_path(digest).is_file():
+                report["missing_blob_files"].append(digest)
+
+    package_root = storage.packages / "sha256"
+    if package_root.is_dir():
+        for path in list(package_root.rglob("*.ajplugin")):
+            digest = path.stem.lower()
+            try:
+                canonical = storage.package_path(digest)
+            except PluginPackageError:
+                continue
+            if path != canonical:
+                continue
+            try:
+                modified_at = path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if modified_at > cutoff.timestamp():
+                continue
+            with storage.package_lock(digest):
+                if PluginPackageBlob.objects.filter(sha256=digest).exists() or not path.is_file():
+                    continue
+                path.unlink()
+                report["orphan_files_removed"].append(path.relative_to(storage.root).as_posix())
+
+    report["missing_blob_files"] = sorted(set(report["missing_blob_files"]))
+    return report

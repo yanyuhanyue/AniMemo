@@ -26,6 +26,7 @@ class ColumnHookContext:
     column_id: int
     actor_id: int | None = None
     source: str = "core"
+    author_id: int | None = None
 
 
 @dataclass(frozen=True)

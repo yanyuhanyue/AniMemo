@@ -85,8 +85,12 @@ class ColumnViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         column_id = instance.pk
         actor_id = self.request.user.pk
+        author_id = instance.author_id
         super().perform_destroy(instance)
-        run_hook("column.after_delete", ColumnHookContext(column_id=column_id, actor_id=actor_id, source="api"))
+        run_hook(
+            "column.after_delete",
+            ColumnHookContext(column_id=column_id, actor_id=actor_id, source="api", author_id=author_id),
+        )
 
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):

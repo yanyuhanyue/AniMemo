@@ -9,6 +9,7 @@ const roles = new Set(["reviewer", "user_manager", "operator", "administrator"])
 const runtimes = new Set(["frontend", "backend"]);
 const extensions = new Set(["frontend.page", "frontend.navigation", "backend.api", "settings", "hooks", "storage", "catalog.importer", "catalog.metadata"]);
 const hooks = new Set(["registration.before_request", "registration.before_complete", "registration.after_complete", "journal.after_create", "journal.after_update", "journal.after_delete", "column.after_publish", "column.after_delete", "user.after_created", "user.before_delete", "user.after_delete"]);
+const userScopedHooks = new Set(["journal.after_create", "journal.after_update", "journal.after_delete", "column.after_publish", "column.after_delete"]);
 
 function requireValue(condition, message, errors) { if (!condition) errors.push(message); }
 
@@ -42,6 +43,7 @@ function validateManifest(directory, manifest, { enforceDirectoryName = true } =
     requireValue(Array.isArray(permission.roles) && permission.roles.every((role) => roles.has(role)), `权限 ${permission.code} 使用了未知角色`, errors);
   }
   requireValue(Array.isArray(manifest.hooks) && manifest.hooks.every((hook) => hooks.has(hook)), "hooks 包含未知 Hook", errors);
+  if (manifest.installationMode === "user") requireValue((manifest.hooks || []).every((hook) => userScopedHooks.has(hook)), "USER 插件只能声明 journal/column 用户范围 Hook", errors);
   requireValue(Array.isArray(manifest.settings), "settings 必须是数组", errors);
   for (const setting of manifest.settings || []) {
     requireValue(["user", "system"].includes(setting.scope), `配置 ${setting.key || "未命名"} 必须声明 scope=user 或 scope=system`, errors);

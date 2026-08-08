@@ -16,7 +16,7 @@ import requests
 from accounts.models import StaffProfile, UserSecurityProfile
 from site_config.models import SiteSettings, TagDefinition
 from .models import AdminAuditLog, Column, JournalEntry, UserSettings
-from plugin_host.models import PluginData, PluginProject
+from plugin_host.models import PluginData, PluginProject, UserPluginInstallation
 from .security import _totp_at
 
 
@@ -34,6 +34,7 @@ class JournalApiTests(APITestCase):
             name="忆往昔观看记录导入器",
             description="test fixture",
         )
+        self.installation = UserPluginInstallation.objects.create(user=self.user, plugin=self.plugin, enabled=True)
         self.client.force_authenticate(self.user)
 
     def test_entry_crud_is_scoped_to_owner(self):
@@ -162,6 +163,80 @@ class JournalApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_watch_history_is_empty_and_not_created_when_plugin_is_not_installed(self):
+        self.installation.delete()
+        entry = JournalEntry.objects.create(user=self.user, title="未安装插件")
+
+        response = self.client.get(reverse("entry-detail", kwargs={"pk": entry.pk}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["watch_history"], [])
+        self.assertFalse(PluginData.objects.filter(plugin=self.plugin, user=self.user).exists())
+
+    def test_watch_history_write_is_rejected_when_plugin_is_not_installed(self):
+        self.installation.delete()
+        entry = JournalEntry.objects.create(user=self.user, title="禁止写入")
+
+        response = self.client.patch(
+            reverse("entry-detail", kwargs={"pk": entry.pk}),
+            {"watch_history": [{"watched_on": "2026-08-08", "brush_label": "首刷"}]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(PluginData.objects.filter(plugin=self.plugin, user=self.user).exists())
+
+    def test_disabled_watch_history_retains_data_and_restores_after_enable(self):
+        entry = JournalEntry.objects.create(user=self.user, title="停用后保留")
+        row = PluginData.objects.create(
+            plugin=self.plugin,
+            namespace="watch_history",
+            user=self.user,
+            key=str(entry.pk),
+            value=[{"watched_on": "2026-08-08", "brush_label": "首刷"}],
+        )
+        self.installation.enabled = False
+        self.installation.save(update_fields=["enabled"])
+
+        disabled = self.client.get(reverse("entry-detail", kwargs={"pk": entry.pk}))
+        self.assertEqual(disabled.data["watch_history"], [])
+        self.assertTrue(PluginData.objects.filter(pk=row.pk).exists())
+
+        self.installation.enabled = True
+        self.installation.save(update_fields=["enabled"])
+        enabled = self.client.get(reverse("entry-detail", kwargs={"pk": entry.pk}))
+        self.assertEqual(enabled.data["watch_history"][0]["brush_label"], "首刷")
+
+    def test_core_does_not_create_watch_history_project(self):
+        self.installation.delete()
+        self.plugin.delete()
+        entry = JournalEntry.objects.create(user=self.user, title="项目不存在")
+
+        response = self.client.get(reverse("entry-detail", kwargs={"pk": entry.pk}))
+
+        self.assertEqual(response.data["watch_history"], [])
+        self.assertFalse(PluginProject.objects.filter(slug="watch-history-importer").exists())
+
+    def test_other_user_cannot_read_watch_history_from_shared_entry(self):
+        UserPluginInstallation.objects.create(user=self.other, plugin=self.plugin, enabled=True)
+        entry = JournalEntry.objects.create(user=self.other, title="他人的公开记录", visibility="public")
+        PluginData.objects.create(
+            plugin=self.plugin,
+            namespace="watch_history",
+            user=self.other,
+            key=str(entry.pk),
+            value=[{"watched_on": "2026-08-08", "brush_label": "首刷"}],
+        )
+        settings_obj, _ = UserSettings.objects.get_or_create(user=self.other)
+        settings_obj.public_status = UserSettings.PublicStatus.APPROVED
+        settings_obj.allow_sharing = True
+        settings_obj.save(update_fields=["public_status", "allow_sharing"])
+
+        response = self.client.get(reverse("shared-entry", kwargs={"share_slug": entry.share_slug}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["watch_history"], [])
 
     def test_private_entry_is_not_shareable(self):
         entry = JournalEntry.objects.create(user=self.user, title="私人记录")

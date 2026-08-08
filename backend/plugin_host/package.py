@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import stat
+import time
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -24,6 +25,44 @@ DEFAULT_MAX_FILES = 1000
 DEFAULT_MAX_COMPRESSION_RATIO = 100
 ALLOWED_ROOT_FILES = {"manifest.json", "package-index.json"}
 ALLOWED_TOP_DIRS = {"frontend", "backend"}
+
+
+class PackageHashLock:
+    def __init__(self, root, sha256, timeout=10):
+        self.path = Path(root) / ".locks" / f"cas-{sha256}.lock"
+        self.timeout = timeout
+        self.fd = None
+        self.token = f"{os.getpid()}:{uuid4().hex}"
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, f"{self.token}\n".encode("ascii"))
+                return self
+            except FileExistsError:
+                try:
+                    stale = time.time() - self.path.stat().st_mtime > 300
+                except FileNotFoundError:
+                    continue
+                if stale:
+                    self.path.unlink(missing_ok=True)
+                    continue
+                if time.monotonic() >= deadline:
+                    raise PluginPackageError("同一 Package 正在执行另一项 CAS 操作。")
+                time.sleep(0.05)
+
+    def __exit__(self, exc_type, exc, traceback):
+        if self.fd is not None:
+            os.close(self.fd)
+        try:
+            owner = self.path.read_text(encoding="ascii").strip()
+        except (FileNotFoundError, OSError, UnicodeDecodeError):
+            return
+        if owner == self.token:
+            self.path.unlink(missing_ok=True)
 
 
 def package_policy():
@@ -150,27 +189,35 @@ class LocalPluginPackageStorage:
             raise PluginPackageError("Package SHA-256 无效")
         return self.packages / "sha256" / digest[:2] / f"{digest}.ajplugin"
 
-    def store_package(self, payload: bytes, *, sha256=None):
+    def package_lock(self, sha256, *, timeout=10):
+        digest = self.package_path(sha256).stem
+        return PackageHashLock(self.root, digest, timeout=timeout)
+
+    def store_package(self, payload: bytes, *, sha256=None, minimum_free_bytes=0):
         self.ensure()
         raw = payload.read() if hasattr(payload, "read") else bytes(payload)
         digest = hashlib.sha256(raw).hexdigest()
         if sha256 and digest != sha256:
             raise PluginPackageError("Package SHA-256 校验失败")
         destination = self.package_path(digest)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.is_file():
-            if destination.stat().st_size != len(raw) or hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
-                raise PluginPackageError("CAS 中存在损坏的同 SHA 文件")
-            return destination
-        temporary = destination.with_name(f".{digest}.{os.getpid()}.{uuid4().hex}.tmp")
-        try:
-            with temporary.open("xb") as handle:
-                handle.write(raw)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, destination)
-        finally:
-            temporary.unlink(missing_ok=True)
+        with self.package_lock(digest):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.is_file():
+                if destination.stat().st_size != len(raw) or hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
+                    raise PluginPackageError("CAS 中存在损坏的同 SHA 文件")
+                return destination
+            free = shutil.disk_usage(self.root).free
+            if free - len(raw) < int(minimum_free_bytes):
+                raise PluginPackageError("插件存储空间不足，无法保存 Package。")
+            temporary = destination.with_name(f".{digest}.{os.getpid()}.{uuid4().hex}.tmp")
+            try:
+                with temporary.open("xb") as handle:
+                    handle.write(raw)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, destination)
+            finally:
+                temporary.unlink(missing_ok=True)
         return destination
 
     @staticmethod
@@ -241,11 +288,19 @@ class LocalPluginPackageStorage:
         shutil.rmtree(self.runtime / slug, ignore_errors=True)
         shutil.rmtree(self.previews / slug, ignore_errors=True)
 
-    def cleanup_staging(self):
+    def cleanup_staging(self, *, older_than=None):
         if not self.staging.is_dir():
             return 0
         removed = 0
         for path in self.staging.iterdir():
+            if path.name == "gc":
+                continue
+            if older_than is not None:
+                try:
+                    if path.stat().st_mtime > older_than:
+                        continue
+                except FileNotFoundError:
+                    continue
             if path.is_dir():
                 shutil.rmtree(path, ignore_errors=True)
             else:

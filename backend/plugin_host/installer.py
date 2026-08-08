@@ -302,17 +302,66 @@ class PluginPackageInstaller:
         return locked_version
 
     def cleanup(self, slug=None):
+        from .services import garbage_collect_package_blobs
+
         self.storage.ensure()
-        result = {"staging_removed": self.storage.cleanup_staging(), "plugins": {}}
+        now = time.time()
+        staging_grace = int(getattr(settings, "PLUGIN_STAGING_GC_GRACE_SECONDS", 3600))
+        result = {
+            "staging_removed": self.storage.cleanup_staging(older_than=now - staging_grace),
+            "runtime_removed": [],
+            "runtime_retained": {},
+            "preview_removed": [],
+            "package_blobs_removed": [],
+            "orphan_files_removed": [],
+            "missing_blob_files": [],
+        }
         deployments = PluginDeployment.objects.select_related("plugin", "current_version", "previous_version")
         if slug:
             deployments = deployments.filter(plugin__slug=slug)
         for deployment in deployments:
+            before = set(self.storage.list_versions(deployment.plugin.slug))
             retained = self.storage.retain_versions(
                 deployment.plugin.slug,
                 current=deployment.current_version.version,
                 previous=deployment.previous_version.version if deployment.previous_version else "",
                 keep=int(getattr(settings, "PLUGIN_KEEP_VERSIONS", 2)),
             )
-            result["plugins"][deployment.plugin.slug] = retained
+            result["runtime_retained"][deployment.plugin.slug] = retained
+            result["runtime_removed"].extend(
+                f"{deployment.plugin.slug}/{version}" for version in sorted(before - set(retained))
+            )
+
+        preview_grace = int(getattr(settings, "PLUGIN_PREVIEW_GC_GRACE_SECONDS", 86400))
+        preview_cutoff = now - preview_grace
+        preview_roots = [self.storage.previews / slug] if slug else list(self.storage.previews.iterdir()) if self.storage.previews.is_dir() else []
+        for project_directory in preview_roots:
+            if not project_directory.is_dir():
+                continue
+            for version_directory in list(project_directory.iterdir()):
+                if not version_directory.is_dir():
+                    continue
+                exists = PluginVersion.objects.filter(
+                    plugin__slug=project_directory.name,
+                    version=version_directory.name,
+                ).exists()
+                try:
+                    expired = version_directory.stat().st_mtime <= preview_cutoff
+                except FileNotFoundError:
+                    continue
+                if exists and not expired:
+                    continue
+                shutil.rmtree(version_directory, ignore_errors=True)
+                result["preview_removed"].append(f"{project_directory.name}/{version_directory.name}")
+            try:
+                project_directory.rmdir()
+            except OSError:
+                pass
+
+        gc_report = garbage_collect_package_blobs(root=self.storage.root)
+        result["staging_removed"] += gc_report["staging_removed"]
+        for key in ("package_blobs_removed", "orphan_files_removed", "missing_blob_files"):
+            result[key] = gc_report[key]
+        if gc_report["package_tombstones_restored"]:
+            result["package_tombstones_restored"] = gc_report["package_tombstones_restored"]
         return result

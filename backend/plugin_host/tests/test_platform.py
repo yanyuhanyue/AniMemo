@@ -1,12 +1,22 @@
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from rest_framework.test import APIClient, APITestCase
 
-from plugin_host.models import PluginData, PluginDeployment, PluginProject, PluginSubmission, PluginVersion, UserPluginInstallation
+from plugin_host.models import (
+    PluginData,
+    PluginDeployment,
+    PluginProject,
+    PluginSubmission,
+    PluginUploadAttempt,
+    PluginVersion,
+    UserPluginInstallation,
+)
 from plugin_host.runtime import runtime_registry
 from plugin_host.tests.test_runtime_e2e import make_package
 
@@ -39,6 +49,25 @@ class PluginPlatformApiTests(APITestCase):
         self.assertEqual(response.status_code, 201, response.data)
         project = PluginProject.objects.get(pk=project_id)
         return project, project.versions.get()
+
+    def _create_project(self, slug="upload-guard", plugin_id=None):
+        return PluginProject.objects.create(
+            plugin_id=plugin_id or f"com.example.{slug}",
+            slug=slug,
+            name=slug,
+            description="upload guard",
+            owner=self.owner,
+        )
+
+    def _upload(self, project, payload, name="plugin.ajplugin"):
+        return self.client.post(
+            f"/api/plugins/my/{project.pk}/versions/",
+            {"archive": SimpleUploadedFile(name, payload, content_type="application/zip")},
+            format="multipart",
+        )
+
+    def _cas_files(self):
+        return list((Path(self.root.name) / "packages" / "sha256").rglob("*.ajplugin"))
 
     def test_developer_review_publish_marketplace_and_install_flow(self):
         project, version = self._create_and_upload()
@@ -146,3 +175,128 @@ class PluginPlatformApiTests(APITestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["package"]["max_package_bytes"], 123456)
         self.assertEqual(response.data["package"]["max_files"], 77)
+
+    def test_wrong_slug_upload_does_not_write_cas(self):
+        project = self._create_project()
+        payload, _ = make_package("different-slug", "1.0.0", runtimes=["frontend"])
+
+        response = self._upload(project, payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self._cas_files(), [])
+
+    def test_wrong_plugin_id_upload_does_not_write_cas(self):
+        project = self._create_project()
+        payload, _ = make_package(
+            project.slug,
+            "1.0.0",
+            runtimes=["frontend"],
+            plugin_id="com.example.wrong-id",
+        )
+
+        response = self._upload(project, payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self._cas_files(), [])
+
+    def test_wrong_installation_mode_upload_does_not_write_cas(self):
+        project = self._create_project()
+        payload, _ = make_package(
+            project.slug,
+            "1.0.0",
+            runtimes=["frontend"],
+            installation_mode="system",
+        )
+
+        response = self._upload(project, payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self._cas_files(), [])
+
+    def test_inactive_project_upload_does_not_write_cas(self):
+        project = self._create_project()
+        project.status = PluginProject.Status.SUSPENDED
+        project.save(update_fields=["status"])
+        payload, _ = make_package(project.slug, "1.0.0", runtimes=["frontend"])
+
+        response = self._upload(project, payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self._cas_files(), [])
+
+    def test_same_version_different_sha_does_not_leave_second_cas_file(self):
+        project = self._create_project()
+        first, _ = make_package(project.slug, "1.0.0", runtimes=["frontend"], frontend_source="export default 1;")
+        second, _ = make_package(project.slug, "1.0.0", runtimes=["frontend"], frontend_source="export default 2;")
+        self.assertEqual(self._upload(project, first).status_code, 201)
+
+        response = self._upload(project, second)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(len(self._cas_files()), 1)
+
+    @override_settings(PLUGIN_UPLOADS_PER_HOUR=2)
+    def test_failed_upload_attempts_trigger_rate_limit_before_cas_write(self):
+        project = self._create_project()
+        invalid, _ = make_package("wrong-rate-slug", "1.0.0", runtimes=["frontend"])
+        valid, _ = make_package(project.slug, "1.0.0", runtimes=["frontend"])
+        self.assertEqual(self._upload(project, invalid).status_code, 400)
+        self.assertEqual(self._upload(project, invalid).status_code, 400)
+
+        response = self._upload(project, valid)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("上传过于频繁", str(response.data))
+        self.assertEqual(PluginUploadAttempt.objects.filter(user=self.owner).count(), 3)
+        self.assertEqual(self._cas_files(), [])
+
+    @override_settings(PLUGIN_MIN_FREE_DISK_MB=1)
+    def test_upload_disk_floor_includes_incoming_bytes(self):
+        project = self._create_project()
+        payload, _ = make_package(project.slug, "1.0.0", runtimes=["frontend"])
+        free = 1024 * 1024 + len(payload) - 1
+
+        with patch("plugin_host.package.shutil.disk_usage", return_value=SimpleNamespace(free=free)):
+            response = self._upload(project, payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("存储空间不足", str(response.data))
+        self.assertEqual(self._cas_files(), [])
+
+    @override_settings(PLUGIN_DRAFT_LIMIT=1)
+    def test_draft_limit_rejection_does_not_write_new_cas_file(self):
+        first = self._create_project("draft-one")
+        second = self._create_project("draft-two")
+        first_payload, _ = make_package(first.slug, "1.0.0", runtimes=["frontend"])
+        second_payload, _ = make_package(second.slug, "1.0.0", runtimes=["frontend"])
+        self.assertEqual(self._upload(first, first_payload).status_code, 201)
+
+        response = self._upload(second, second_payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("草稿数量已达上限", str(response.data))
+        self.assertEqual(len(self._cas_files()), 1)
+
+    def test_anonymous_marketplace_does_not_expose_deployment_or_review_diagnostics(self):
+        project, version = self._create_and_upload()
+        version.review_status = PluginVersion.ReviewStatus.APPROVED
+        version.save(update_fields=["review_status"])
+        from plugin_host.installer import PluginPackageInstaller
+
+        PluginPackageInstaller().publish(version, actor=self.admin)
+        deployment = PluginDeployment.objects.get(plugin=project)
+        deployment.last_error = "private runtime detail"
+        deployment.disk_bytes = 987654
+        deployment.system_config = {"secret": "private"}
+        deployment.save(update_fields=["last_error", "disk_bytes", "system_config"])
+        anonymous = APIClient()
+
+        response = anonymous.get("/api/plugins/marketplace/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.data["plugins"][0]
+        for key in ("deployment", "last_error", "disk_bytes", "previous_version", "system_config", "storage_path", "security_report", "package_sha256"):
+            self.assertNotIn(key, payload)
+            self.assertNotIn(key, payload.get("versions", [{}])[0])
+        self.assertEqual(payload["published_version"], "1.0.0")
+        self.assertIn("dataPolicy", payload)

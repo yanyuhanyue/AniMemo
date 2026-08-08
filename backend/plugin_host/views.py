@@ -19,7 +19,7 @@ from .installer import PluginInstallError, PluginPackageInstaller
 from .models import PluginDeployment, PluginProject, PluginSubmission, PluginVersion, UserPluginInstallation
 from .permissions import can_access_plugin_frontend
 from .registry import PluginRegistryError, discover_plugins, get_plugin, read_runtime_manifest, validate_plugin_config
-from .package import PluginPackageError
+from .package import PluginPackageError, inspect_package
 from .runtime import RuntimeLoadError
 from .serializers import PluginDeploymentUpdateSerializer
 from .services import (
@@ -82,10 +82,52 @@ def _load_signed_user(token, *, salt, max_age):
         raise Http404 from error
 
 
-def _project_payload(project, *, user=None, public_only=False):
+def serialize_marketplace_project(project, *, user=None):
+    deployment = getattr(project, "deployment", None)
+    current_version = deployment.current_version if deployment else None
+    manifest = current_version.manifest_snapshot if current_version else {}
+    versions = project.versions.filter(
+        published_at__isnull=False,
+        revoked_at__isnull=True,
+    ).order_by("-published_at")
+    payload = {
+        "id": project.pk,
+        "plugin_id": project.plugin_id,
+        "slug": project.slug,
+        "name": project.name,
+        "description": project.description,
+        "installation_mode": project.installation_mode,
+        "publisher": project.owner.get_username() if project.owner else "Anime Journal",
+        "owner": project.owner.get_username() if project.owner else "Anime Journal",
+        "published_version": current_version.version if current_version else None,
+        "runtime_types": current_version.runtime_types if current_version else [],
+        "permissions": [
+            {"code": item.get("code"), "name": item.get("name", "")}
+            for item in (manifest.get("permissions") or [])
+            if isinstance(item, dict) and item.get("code")
+        ],
+        "dataPolicy": manifest.get("dataPolicy") or {},
+        "versions": [
+            {
+                "version": version.version,
+                "runtime_types": version.runtime_types,
+                "published_at": version.published_at,
+            }
+            for version in versions
+        ],
+        "install_count": project.user_installations.count(),
+    }
+    if user and getattr(user, "is_authenticated", False):
+        installation = project.user_installations.filter(user=user).first()
+        payload["installation"] = {
+            "enabled": installation.enabled,
+            "config": installation.config,
+        } if installation else None
+    return payload
+
+
+def serialize_developer_project(project):
     versions = project.versions.order_by("-created_at")
-    if public_only:
-        versions = versions.filter(published_at__isnull=False, revoked_at__isnull=True)
     payload = {
         "id": project.pk,
         "plugin_id": project.plugin_id,
@@ -112,16 +154,13 @@ def _project_payload(project, *, user=None, public_only=False):
                         "review_note": version.submissions.first().review_note,
                         "security_report": version.submissions.first().security_report,
                     }
-                    if not public_only and version.submissions.first()
+                    if version.submissions.first()
                     else None
                 ),
             }
             for version in versions
         ],
     }
-    if user and getattr(user, "is_authenticated", False):
-        installation = project.user_installations.filter(user=user).first()
-        payload["installation"] = {"enabled": installation.enabled, "config": installation.config} if installation else None
     deployment = getattr(project, "deployment", None)
     payload["deployment"] = (
         {
@@ -247,7 +286,10 @@ class StaffPluginInstallView(APIView):
             return Response({"detail": "只有超级管理员可以发布包含服务器代码的插件。"}, status=status.HTTP_403_FORBIDDEN)
         archive = request.FILES.get("archive")
         try:
-            blob, inspected, _, _ = __import__("plugin_host.services", fromlist=["store_package_blob"]).store_package_blob(archive)
+            if archive is None:
+                raise PluginWorkflowError("请选择 .ajplugin 插件包。")
+            raw = archive.read()
+            inspected = inspect_package(raw)
             archive.seek(0)
             manifest = inspected["manifest"]
             project, _ = PluginProject.objects.get_or_create(
@@ -265,7 +307,7 @@ class StaffPluginInstallView(APIView):
         except (PluginWorkflowError, PluginInstallError, RuntimeLoadError, OSError) as error:
             return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
         record_audit(request, action="plugin.staff_publish_upload", target=version, after={"sha256": version.package_blob.sha256, "runtime_types": version.runtime_types})
-        return Response({"detail": "插件已发布并部署。", "project": _project_payload(project), "scan": report, **result}, status=status.HTTP_201_CREATED)
+        return Response({"detail": "插件已发布并部署。", "project": serialize_developer_project(project), "scan": report, **result}, status=status.HTTP_201_CREATED)
 
 
 class StaffPluginDetailView(APIView):
@@ -340,7 +382,7 @@ class MarketplaceView(APIView):
             deployment__current_version__published_at__isnull=False,
             deployment__current_version__revoked_at__isnull=True,
         ).select_related("deployment", "deployment__current_version")
-        return Response({"plugins": [_project_payload(project, user=request.user, public_only=True) for project in projects]})
+        return Response({"plugins": [serialize_marketplace_project(project, user=request.user) for project in projects]})
 
 
 class MarketplaceDetailView(APIView):
@@ -351,7 +393,7 @@ class MarketplaceDetailView(APIView):
         deployment = getattr(project, "deployment", None)
         if not deployment or not deployment.enabled or not deployment.healthy or not deployment.current_version.published_at:
             raise Http404
-        return Response(_project_payload(project, user=request.user, public_only=True))
+        return Response(serialize_marketplace_project(project, user=request.user))
 
 
 class InstalledPluginListView(APIView):
@@ -443,7 +485,7 @@ class MyPluginProjectView(APIView):
             "deployment", "deployment__current_version", "deployment__previous_version",
         ).prefetch_related("versions__package_blob", "versions__submissions", "user_installations")
         return Response({
-            "projects": [_project_payload(item) for item in projects],
+            "projects": [serialize_developer_project(item) for item in projects],
             "policy": {
                 "package": plugin_upload_policy(),
                 "draft_limit": int(getattr(settings, "PLUGIN_DRAFT_LIMIT", 20)),
@@ -462,8 +504,8 @@ class MyPluginProjectView(APIView):
             )
         except PluginWorkflowError as error:
             return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
-        record_audit(request, action="plugin.project_create", target=project, after=_project_payload(project))
-        return Response(_project_payload(project), status=status.HTTP_201_CREATED)
+        record_audit(request, action="plugin.project_create", target=project, after=serialize_developer_project(project))
+        return Response(serialize_developer_project(project), status=status.HTTP_201_CREATED)
 
 
 class MyPluginProjectDetailView(APIView):
@@ -478,7 +520,7 @@ class MyPluginProjectDetailView(APIView):
             pk=project_id,
             owner=request.user,
         )
-        return Response(_project_payload(project))
+        return Response(serialize_developer_project(project))
 
     def patch(self, request, project_id):
         project = get_object_or_404(PluginProject, pk=project_id, owner=request.user)
@@ -493,7 +535,7 @@ class MyPluginProjectDetailView(APIView):
         except PluginWorkflowError as error:
             return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
         record_audit(request, action="plugin.project_update", target=project, before=before, after={"name": project.name, "description": project.description})
-        return Response(_project_payload(project))
+        return Response(serialize_developer_project(project))
 
     def delete(self, request, project_id):
         project = get_object_or_404(PluginProject, pk=project_id, owner=request.user)
@@ -523,7 +565,7 @@ class MyPluginVersionUploadView(APIView):
         except (PluginWorkflowError, PluginPackageError) as error:
             return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
         record_audit(request, action="plugin.version_upload", target=version, after={"sha256": version.package_blob.sha256, "created": created, "scan": report})
-        return Response({"version": _project_payload(project), "scan": report, "created": created}, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        return Response({"version": serialize_developer_project(project), "scan": report, "created": created}, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class MyPluginPreviewView(APIView):

@@ -10,7 +10,16 @@ from types import SimpleNamespace
 
 
 logger = logging.getLogger("anime_journal.plugins")
-from .hook_contract import ACTION_HOOKS, CLOSED_HOOKS, FILTER_HOOKS, HOOK_DEFINITIONS, SUPPORTED_HOOKS
+from .hook_contract import (
+    ACTION_HOOKS,
+    CLOSED_HOOKS,
+    FILTER_HOOKS,
+    HOOK_DEFINITIONS,
+    SUPPORTED_HOOKS,
+    SYSTEM_SCOPED,
+    hook_scope,
+    resolve_hook_target_user_id,
+)
 
 HOOK_SLOW_WARNING_SECONDS = 0.25
 KNOWN_HOOKS = SUPPORTED_HOOKS
@@ -108,6 +117,26 @@ class HookRegistry:
             )
         return items, errors
 
+    @staticmethod
+    def _registration_is_authorized(item, hook_name, context):
+        from .models import PluginProject
+        from .permissions import is_user_plugin_enabled_for_id
+
+        project = PluginProject.objects.filter(slug=item.plugin_slug).only("id", "installation_mode").first()
+        if project is None:
+            logger.warning("plugin=%s hook=%s skipped because project is missing", item.plugin_slug, hook_name)
+            return False
+        if project.installation_mode == PluginProject.InstallationMode.SYSTEM:
+            return True
+        if hook_scope(hook_name) == SYSTEM_SCOPED:
+            logger.warning("plugin=%s hook=%s skipped because USER plugins cannot run SYSTEM-scoped hooks", item.plugin_slug, hook_name)
+            return False
+        target_user_id = resolve_hook_target_user_id(hook_name, context)
+        if target_user_id is None:
+            logger.warning("plugin=%s hook=%s skipped because target user could not be resolved", item.plugin_slug, hook_name)
+            return False
+        return is_user_plugin_enabled_for_id(project, target_user_id)
+
     def run_hook(self, hook_name, context):
         if hook_name not in ACTION_HOOKS:
             raise ValueError(f"{hook_name} is not an action hook")
@@ -116,6 +145,8 @@ class HookRegistry:
             raise reconcile_errors[0][1]
         results = []
         for item in items:
+            if not self._registration_is_authorized(item, hook_name, context):
+                continue
             started = monotonic()
             try:
                 results.append(item.callback(context))
@@ -137,6 +168,8 @@ class HookRegistry:
             raise reconcile_errors[0][1]
         current = value
         for item in items:
+            if not self._registration_is_authorized(item, hook_name, context):
+                continue
             started = monotonic()
             try:
                 next_value = item.callback(current, context)
