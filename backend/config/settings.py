@@ -394,6 +394,9 @@ REST_FRAMEWORK = {
         "two_factor_account": os.getenv("THROTTLE_TWO_FACTOR_ACCOUNT_RATE", "5/10min"),
         "two_factor_combined": os.getenv("THROTTLE_TWO_FACTOR_COMBINED_RATE", "3/5min"),
         "external_search": os.getenv("THROTTLE_EXTERNAL_SEARCH_RATE", "30/min"),
+        "external_account": os.getenv("THROTTLE_EXTERNAL_ACCOUNT_RATE", "10/min"),
+        "external_import_preview": os.getenv("THROTTLE_EXTERNAL_IMPORT_PREVIEW_RATE", "12/hour"),
+        "external_import_apply": os.getenv("THROTTLE_EXTERNAL_IMPORT_APPLY_RATE", "10/hour"),
         "import": os.getenv("THROTTLE_IMPORT_RATE", "5/hour"),
     },
 }
@@ -499,6 +502,33 @@ BANGUMI_IMAGE_PROXY_BASE_URL = os.getenv(
     "BANGUMI_IMAGE_PROXY_BASE_URL",
     "https://bgm-img-proxy.xhcytus100.workers.dev/",
 ).strip()
+BANGUMI_ACCOUNT_INTEGRATION_ENABLED = env_bool("BANGUMI_ACCOUNT_INTEGRATION_ENABLED", True)
+BANGUMI_OAUTH_CLIENT_ID = os.getenv("BANGUMI_OAUTH_CLIENT_ID", "").strip()
+BANGUMI_OAUTH_CLIENT_SECRET = os.getenv("BANGUMI_OAUTH_CLIENT_SECRET", "").strip()
+BANGUMI_OAUTH_REDIRECT_URI = os.getenv("BANGUMI_OAUTH_REDIRECT_URI", "").strip()
+BANGUMI_OAUTH_STATE_TTL_SECONDS = int(os.getenv("BANGUMI_OAUTH_STATE_TTL_SECONDS", "600"))
+BANGUMI_IMPORT_MAX_ITEMS = int(os.getenv("BANGUMI_IMPORT_MAX_ITEMS", "1000"))
+BANGUMI_IMPORT_PREVIEW_TTL_SECONDS = int(os.getenv("BANGUMI_IMPORT_PREVIEW_TTL_SECONDS", "1200"))
+BANGUMI_IMPORT_APPLY_MAX_ITEMS = int(os.getenv("BANGUMI_IMPORT_APPLY_MAX_ITEMS", "100"))
+if min(
+    BANGUMI_OAUTH_STATE_TTL_SECONDS,
+    BANGUMI_IMPORT_MAX_ITEMS,
+    BANGUMI_IMPORT_PREVIEW_TTL_SECONDS,
+    BANGUMI_IMPORT_APPLY_MAX_ITEMS,
+) < 1:
+    raise ImproperlyConfigured("Bangumi 账号连接与导入限制必须为正整数。")
+if BANGUMI_IMPORT_APPLY_MAX_ITEMS > BANGUMI_IMPORT_MAX_ITEMS:
+    raise ImproperlyConfigured("BANGUMI_IMPORT_APPLY_MAX_ITEMS 不能超过 BANGUMI_IMPORT_MAX_ITEMS。")
+if BANGUMI_OAUTH_REDIRECT_URI:
+    _bangumi_redirect = urlsplit(BANGUMI_OAUTH_REDIRECT_URI)
+    if (
+        _bangumi_redirect.scheme not in ({"http", "https"} if DEBUG else {"https"})
+        or not _bangumi_redirect.hostname
+        or _bangumi_redirect.username
+        or _bangumi_redirect.password
+        or _bangumi_redirect.fragment
+    ):
+        raise ImproperlyConfigured("BANGUMI_OAUTH_REDIRECT_URI 必须是固定且安全的回调 URL。")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "Anime Journal <noreply@example.com>")
 TURNSTILE_SECRET = os.getenv("TURNSTILE_SECRET", "").strip()

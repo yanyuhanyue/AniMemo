@@ -7,7 +7,12 @@ from django.utils import timezone
 from journal.models import ExternalMediaIdentity, JournalEntry
 from journal.poster_security import PosterUrlValidationError, validate_poster_url
 
-from .errors import identity_already_bound, identity_not_found, subject_already_bound
+from .errors import (
+    external_identity_changed,
+    identity_already_bound,
+    identity_not_found,
+    subject_already_bound,
+)
 from .registry import get_provider
 
 SAFE_AUTO_FIELDS = ("japanese_title", "airing_period", "studio", "episodes", "poster_url")
@@ -86,6 +91,10 @@ def bind_external_identity(*, entry, user, provider_slug, external_id):
     if ExternalMediaIdentity.objects.filter(entry=entry, provider=provider.slug).exists():
         raise identity_already_bound()
     prepared = prepare_identity(provider_slug, external_id)
+    return bind_prepared_external_identity(entry=entry, user=user, prepared=prepared)
+
+
+def bind_prepared_external_identity(*, entry, user, prepared):
     with transaction.atomic():
         locked_user = lock_identity_owner(user)
         locked_entry = JournalEntry.objects.select_for_update().get(pk=entry.pk, user=locked_user, deleted_at__isnull=True)
@@ -112,14 +121,20 @@ def refresh_external_identity(*, entry, user, provider_slug):
     current_identity = ExternalMediaIdentity.objects.filter(entry=entry, provider=provider.slug).first()
     if current_identity is None:
         raise identity_not_found()
+    original_identity_pk = current_identity.pk
+    original_external_id = current_identity.external_id
     metadata = provider.refresh(current_identity)
     fetched_at = timezone.now()
 
     with transaction.atomic():
         locked_entry = JournalEntry.objects.select_for_update().get(pk=entry.pk, user=user, deleted_at__isnull=True)
         identity = ExternalMediaIdentity.objects.select_for_update().filter(entry=locked_entry, provider=provider.slug).first()
-        if identity is None:
-            raise identity_not_found()
+        if (
+            identity is None
+            or identity.pk != original_identity_pk
+            or identity.external_id != original_external_id
+        ):
+            raise external_identity_changed()
 
         provider_values = _entry_values(metadata)
         changed_fields = {}

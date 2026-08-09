@@ -57,3 +57,11 @@ def subject_already_bound(entry_id):
 
 def identity_not_found():
     return ExternalMediaError("identity_not_found", "该记录尚未绑定此资料提供方。", status_code=404)
+
+
+def external_identity_changed():
+    return ExternalMediaError(
+        "external_identity_changed",
+        "外部资料绑定已发生变化，本次刷新结果未写入。请重新打开后再试。",
+        status_code=409,
+    )

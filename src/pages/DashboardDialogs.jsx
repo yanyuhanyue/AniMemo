@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import gsap from "gsap";
 
 import { Icon } from "../components/Icon.jsx";
+import { ExternalAccountPanel } from "../components/dashboard/ExternalAccountPanel.jsx";
 import { readableApiError } from "../lib/api.js";
 
 
@@ -160,7 +161,7 @@ export function ProfileMenu({ settings, onEdit, onLogout, onDelete, onKeyDown })
   );
 }
 
-export function ProfilePanel({ settings, initialTab = "profile", isDemo, onClose, onSave, onChangePassword }) {
+export function ProfilePanel({ settings, initialTab = "profile", isDemo, onClose, onSave, onChangePassword, onOpenBangumiImport }) {
   const rootRef = useRef(null);
   const panelRef = useRef(null);
   const tabRefs = useRef([]);
@@ -189,8 +190,10 @@ export function ProfilePanel({ settings, initialTab = "profile", isDemo, onClose
   const handleTabKeyDown = (event) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const nextIndex = event.key === "Home" || (event.key === "ArrowLeft" && activeTab === "security") ? 0 : 1;
-    const nextTab = nextIndex === 0 ? "profile" : "security";
+    const tabs = ["profile", "security", "external"];
+    const currentIndex = Math.max(0, tabs.indexOf(activeTab));
+    const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : event.key === "ArrowLeft" ? (currentIndex - 1 + tabs.length) % tabs.length : (currentIndex + 1) % tabs.length;
+    const nextTab = tabs[nextIndex];
     changeTab(nextTab);
     tabRefs.current[nextIndex]?.focus();
   };
@@ -220,6 +223,7 @@ export function ProfilePanel({ settings, initialTab = "profile", isDemo, onClose
         <div className="dashboard-profile-modal__tabs dashboard-profile-modal__piece" role="tablist" aria-label="个人设置" onKeyDown={handleTabKeyDown}>
           <button ref={(node) => { tabRefs.current[0] = node; }} id="dashboard-profile-tab" type="button" role="tab" aria-selected={activeTab === "profile"} aria-controls="dashboard-profile-panel" className={activeTab === "profile" ? "is-active" : ""} onClick={() => changeTab("profile")}><Icon name="user" /> 基础资料</button>
           <button ref={(node) => { tabRefs.current[1] = node; }} id="dashboard-security-tab" type="button" role="tab" aria-selected={activeTab === "security"} aria-controls="dashboard-security-panel" className={activeTab === "security" ? "is-active" : ""} onClick={() => changeTab("security")}><Icon name="shield" /> 安全设置</button>
+          <button ref={(node) => { tabRefs.current[2] = node; }} id="dashboard-external-tab" type="button" role="tab" aria-selected={activeTab === "external"} aria-controls="dashboard-external-panel" className={activeTab === "external" ? "is-active" : ""} onClick={() => changeTab("external")}><Icon name="link" /> 外部账号</button>
         </div>
         <div className="dashboard-profile-modal__content">
           {activeTab === "profile" ? <div id="dashboard-profile-panel" role="tabpanel" aria-labelledby="dashboard-profile-tab">
@@ -227,7 +231,7 @@ export function ProfilePanel({ settings, initialTab = "profile", isDemo, onClose
             <label className="dashboard-profile-field dashboard-profile-modal__piece"><span><Icon name="signature" /> 昵称</span><input value={draft.nickname} maxLength={50} onChange={(event) => update("nickname", event.target.value)} placeholder={settings.email || "输入昵称"} /><small>{draft.nickname.length}/50</small></label>
             <label className="dashboard-profile-field dashboard-profile-modal__piece"><span><Icon name="quote" /> 预览页副标题</span><textarea value={draft.subtitle} maxLength={200} onChange={(event) => update("subtitle", event.target.value)} placeholder="写一句属于你的追番宣言吧" /><small>{draft.subtitle.length}/200</small></label>
             <div className="dashboard-profile-actions dashboard-profile-modal__piece"><button type="button" onClick={() => closeWithMotion()}>暂不修改</button><button type="button" onClick={() => closeWithMotion(() => onSave(draft))}><Icon name="save" /> 保存资料</button></div>
-          </div> : <form id="dashboard-security-panel" role="tabpanel" aria-labelledby="dashboard-security-tab" className="dashboard-security-panel" onSubmit={submitPassword}>
+          </div> : activeTab === "security" ? <form id="dashboard-security-panel" role="tabpanel" aria-labelledby="dashboard-security-tab" className="dashboard-security-panel" onSubmit={submitPassword}>
             <div className="dashboard-security-intro dashboard-profile-modal__piece">
               <span className="dashboard-security-intro__icon"><Icon name="key" /></span>
               <div><strong>修改登录密码</strong><small>修改成功后将自动退出登录，请使用新密码重新进入手账房。</small></div>
@@ -237,7 +241,7 @@ export function ProfilePanel({ settings, initialTab = "profile", isDemo, onClose
             <label className="dashboard-security-field dashboard-profile-modal__piece"><span><Icon name="shield" /> 确认新密码</span><input type="password" autoComplete="new-password" minLength={8} value={security.passwordConfirm} onChange={(event) => updateSecurity("passwordConfirm", event.target.value)} placeholder="请再次输入新密码" required /></label>
             {securityStatus.message && <p className={`dashboard-security-status is-${securityStatus.type}`} role="status">{securityStatus.message}</p>}
             <div className="dashboard-profile-actions dashboard-security-actions dashboard-profile-modal__piece"><button type="button" onClick={() => closeWithMotion()}>暂不修改</button><button type="submit" disabled={securityBusy}>{securityBusy ? "正在修改..." : "修改密码"}</button></div>
-          </form>}
+          </form> : <ExternalAccountPanel isDemo={isDemo} onOpenImport={onOpenBangumiImport} />}
         </div>
       </section>
     </div>

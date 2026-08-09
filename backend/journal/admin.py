@@ -2,7 +2,15 @@ from django.contrib import admin
 
 from accounts.models import LoginEvent, PendingRegistration, StaffProfile, UserSecurityProfile
 from site_config.models import CloudflareR2Account, MediaObject, MediaStorageBackend, MediaStoragePoolSettings, SiteSettings, TagDefinition
-from .models import AdminAuditLog, Column, ExternalMediaIdentity, JournalEntry, QuickFilter, UserSettings
+from .models import (
+    AdminAuditLog,
+    Column,
+    ExternalMediaIdentity,
+    JournalEntry,
+    QuickFilter,
+    UserExternalAccountConnection,
+    UserSettings,
+)
 
 
 @admin.register(PendingRegistration)
@@ -155,6 +163,28 @@ class ExternalMediaIdentityAdmin(admin.ModelAdmin):
         return False
 
     def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(UserExternalAccountConnection)
+class UserExternalAccountConnectionAdmin(admin.ModelAdmin):
+    list_display = ("user", "provider", "external_username", "status", "auth_method", "verified_at")
+    list_filter = ("provider", "status", "auth_method")
+    search_fields = ("user__username", "user__email", "external_username", "display_name")
+    exclude = ("credential_ciphertext",)
+    readonly_fields = (
+        "user", "provider", "auth_method", "external_user_id", "external_username", "display_name",
+        "credential_key_version", "metadata", "status", "connected_at", "verified_at", "last_used_at",
+        "expires_at", "created_at", "updated_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
         return False
 
 

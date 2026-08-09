@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { AnimeModal } from "../components/AnimeModal.jsx";
 import { AddAnimeModal } from "../components/dashboard/AddAnimeModal.jsx";
 import { ImportJournalModal } from "../components/dashboard/ImportJournalModal.jsx";
+import { BangumiImportDialog } from "../components/dashboard/BangumiImportDialog.jsx";
 import { DashboardReturnHomeControl, DashboardShareControl } from "../components/dashboard/DashboardJournalControls.jsx";
 import { AnimeCatalog } from "../components/catalog/AnimeCatalog.jsx";
 import { CatalogFilterLab } from "../components/catalog/CatalogFilterLab.jsx";
@@ -70,6 +71,8 @@ export function DashboardPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileInitialTab, setProfileInitialTab] = useState("profile");
+  const [bangumiImportOpen, setBangumiImportOpen] = useState(false);
+  const [bangumiImportApplied, setBangumiImportApplied] = useState(false);
   const [dangerZoneOpen, setDangerZoneOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const profileMenuAnchorRef = useRef(null);
@@ -100,6 +103,16 @@ export function DashboardPage() {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [profileMenuOpen]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get("bangumi");
+    if (!outcome) return;
+    setProfileInitialTab("external");
+    setProfileOpen(true);
+    flash(outcome === "connected" ? "Bangumi 账号已安全连接。" : "Bangumi 授权未完成，请重新尝试。", "profile");
+    window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.hash}`);
+  }, []);
 
   const allTags = useMemo(() => [...new Set(records.flatMap((record) => record.tags || []))].sort((a, b) => a.localeCompare(b, "zh-CN")), [records]);
   const allYears = useMemo(() => [...new Set(records.map((record) => String(record.period || "").slice(0, 4)).filter((item) => /^\d{4}$/.test(item)))].sort((a, b) => Number(b) - Number(a)), [records]);
@@ -484,7 +497,8 @@ export function DashboardPage() {
       {notice && noticeKind === "profile" ? <div className="dashboard-profile-toast" role="status"><span className="dashboard-profile-toast__icon" aria-hidden="true"><Icon name="circle-check" /></span><span className="dashboard-profile-toast__message">{notice}</span><button className="dashboard-profile-toast__close" type="button" onClick={() => { setNotice(""); setNoticeKind(""); }} aria-label="关闭提示"><Icon name="close" /></button></div> : notice ? <div className="brutal-toast dashboard-toast" role="status"><Icon name="check" /> {notice}</div> : null}
       {selected && <AnimeModal record={selected.record} originRect={selected.originRect} returnFocus={selected.returnFocus} editable isDemo={isDemo} onClose={() => setSelected(null)} onSave={saveRecord} onDelete={records.some((record) => record.id === selected.record.id) ? deleteRecord : null} onIdentityChange={(update) => updateExternalIdentity(selected.record.id, update)} tagPresets={tagPresets} trustedPosterHosts={siteSettings.trusted_poster_hosts} />}
       {addOpen && <AddAnimeModal isDemo={isDemo} catalogRecords={demoCatalogRecords} existingRecords={records} onClose={() => setAddOpen(false)} onSubmit={saveNewRecord} trustedPosterHosts={siteSettings.trusted_poster_hosts} />}
-      {profileOpen && <ProfilePanel settings={settings} initialTab={profileInitialTab} isDemo={isDemo} onClose={() => { setProfileOpen(false); window.requestAnimationFrame(() => profileAvatarButtonRef.current?.focus({ preventScroll: true })); }} onSave={saveSettings} onChangePassword={changePassword} />}
+      {profileOpen && <ProfilePanel settings={settings} initialTab={profileInitialTab} isDemo={isDemo} onClose={() => { setProfileOpen(false); window.requestAnimationFrame(() => profileAvatarButtonRef.current?.focus({ preventScroll: true })); }} onSave={saveSettings} onChangePassword={changePassword} onOpenBangumiImport={() => { setProfileOpen(false); setBangumiImportApplied(false); setBangumiImportOpen(true); }} />}
+      {bangumiImportOpen && <BangumiImportDialog onClose={() => { if (bangumiImportApplied) window.location.reload(); else setBangumiImportOpen(false); }} onImported={() => setBangumiImportApplied(true)} />}
       {dangerZoneOpen && <DangerZoneDialog settings={settings} isDemo={isDemo} onClose={() => { setDangerZoneOpen(false); window.requestAnimationFrame(() => profileAvatarButtonRef.current?.focus({ preventScroll: true })); }} onDeleteAccount={deleteAccount} />}
       {filterEditorOpen && <QuickFilterEditor filters={quickFilters} onClose={() => setFilterEditorOpen(false)} onSave={saveQuickFilter} onDelete={deleteQuickFilter} />}
       {importOpen && <ImportJournalModal fileName={importFile?.name} preview={importPreview} busy={importBusy} error={importError} onClose={closeImport} onConfirm={confirmImport} />}

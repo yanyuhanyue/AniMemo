@@ -286,6 +286,24 @@ class ExternalMediaIdentityApiTests(APITestCase):
         self.assertEqual(refresh_response.data["code"], "identity_not_found")
         self.assertEqual(delete_response.status_code, status.HTTP_404_NOT_FOUND)
 
+    @patch("journal.external_media.providers.bangumi.BangumiProvider.refresh")
+    def test_refresh_rejects_stale_result_after_unbind_and_rebind(self, refresh):
+        entry = JournalEntry.objects.create(user=self.user, title="竞态保护")
+        original = self.create_identity(entry, external_id="123", metadata=subject("123"))
+
+        def replace_identity(_identity):
+            original.delete()
+            self.create_identity(entry, external_id="456", metadata=subject("456", title="新绑定"))
+            return subject("123", title="过期结果")
+
+        refresh.side_effect = replace_identity
+        response = self.client.post(self.refresh_url(entry), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "external_identity_changed")
+        current = ExternalMediaIdentity.objects.get(entry=entry, provider="bangumi")
+        self.assertEqual(current.external_id, "456")
+        self.assertEqual(current.metadata["title"], "新绑定")
+
     def test_existing_identity_is_returned_without_calling_provider(self):
         entry = JournalEntry.objects.create(user=self.user, title="本地快照")
         self.create_identity(entry)

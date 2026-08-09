@@ -1,15 +1,23 @@
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from datetime import timedelta
+from threading import Barrier, Event
 from unittest import skipUnless
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection, connections
 from django.test import TransactionTestCase
+from django.utils import timezone
 
+from journal.external_accounts.services import apply_import_preview
 from journal.external_media.errors import ExternalMediaError
-from journal.external_media.services import bind_external_identity
-from journal.models import ExternalMediaIdentity, JournalEntry
+from journal.external_media.services import (
+    PreparedIdentity,
+    bind_external_identity,
+    refresh_external_identity,
+    unbind_external_identity,
+)
+from journal.models import ExternalImportSession, ExternalMediaIdentity, JournalEntry
 
 
 def normalized_subject(external_id):
@@ -81,3 +89,117 @@ class ExternalMediaIdentityPostgreSQLConcurrencyTests(TransactionTestCase):
         self.assertEqual(identities.count(), 1)
         conflict = next(result for result in results if result[0] == "subject_already_bound")
         self.assertEqual(conflict[1], identities.get().entry_id)
+
+    def test_refresh_never_writes_old_subject_metadata_into_rebound_identity(self):
+        entry = self.entries[0]
+        original = ExternalMediaIdentity.objects.create(
+            entry=entry,
+            provider="bangumi",
+            external_id="123",
+            canonical_url="https://bgm.tv/subject/123",
+            metadata=normalized_subject("123"),
+        )
+        refresh_started = Event()
+        release_refresh = Event()
+
+        def blocked_refresh(_provider, _identity):
+            refresh_started.set()
+            if not release_refresh.wait(timeout=10):
+                raise TimeoutError("refresh test barrier timed out")
+            return {**normalized_subject("123"), "title": "过期的 123"}
+
+        def run_refresh():
+            close_old_connections()
+            try:
+                user = get_user_model().objects.get(pk=self.user.pk)
+                current_entry = JournalEntry.objects.get(pk=entry.pk)
+                refresh_external_identity(entry=current_entry, user=user, provider_slug="bangumi")
+                return "updated"
+            except ExternalMediaError as error:
+                return error.detail["code"]
+            finally:
+                connections.close_all()
+
+        with patch(
+            "journal.external_media.providers.bangumi.BangumiProvider.refresh",
+            autospec=True,
+            side_effect=blocked_refresh,
+        ), patch(
+            "journal.external_media.providers.bangumi.BangumiProvider.fetch_subject",
+            autospec=True,
+            side_effect=lambda _provider, external_id, force=False: normalized_subject(str(external_id)),
+        ), ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(run_refresh)
+            self.assertTrue(refresh_started.wait(timeout=10))
+            unbind_external_identity(entry=entry, user=self.user, provider_slug="bangumi")
+            rebound = bind_external_identity(entry=entry, user=self.user, provider_slug="bangumi", external_id="456")
+            release_refresh.set()
+            result = future.result(timeout=15)
+
+        self.assertEqual(result, "external_identity_changed")
+        self.assertFalse(ExternalMediaIdentity.objects.filter(pk=original.pk).exists())
+        rebound.refresh_from_db()
+        self.assertEqual(rebound.external_id, "456")
+        self.assertEqual(rebound.metadata["external_id"], "456")
+        self.assertNotEqual(rebound.metadata["title"], "过期的 123")
+
+    def test_simultaneous_imports_create_only_one_same_user_subject(self):
+        row = {
+            "provider": "bangumi",
+            "external_id": "777",
+            "title": "并发导入",
+            "japanese_title": "Concurrent Import",
+            "poster_url": "",
+            "remote_status": "planned",
+            "remote_status_label": "想看",
+            "remote_status_code": 1,
+            "remote_rating": None,
+            "remote_comment": "",
+            "remote_comment_summary": "",
+            "remote_tags": [],
+            "remote_updated_at": "",
+        }
+        sessions = [
+            ExternalImportSession.objects.create(
+                user=self.user,
+                provider="bangumi",
+                snapshot=[row],
+                expires_at=timezone.now() + timedelta(minutes=20),
+            )
+            for _ in range(2)
+        ]
+        barrier = Barrier(2)
+
+        def prepare(_provider_slug, external_id):
+            barrier.wait(timeout=10)
+            return PreparedIdentity(
+                provider="bangumi",
+                external_id=str(external_id),
+                canonical_url=f"https://bgm.tv/subject/{external_id}",
+                metadata=normalized_subject(str(external_id)),
+                metadata_fetched_at=timezone.now(),
+            )
+
+        def apply(session_id):
+            close_old_connections()
+            try:
+                user = get_user_model().objects.get(pk=self.user.pk)
+                return apply_import_preview(
+                    user=user,
+                    provider_slug="bangumi",
+                    preview_id=session_id,
+                    items=[{"external_id": "777", "mode": "CREATE_NEW"}],
+                )
+            finally:
+                connections.close_all()
+
+        with patch("journal.external_accounts.services.prepare_identity", side_effect=prepare), ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(apply, [session.pk for session in sessions]))
+
+        statuses = [result["results"][0]["status"] for result in results]
+        self.assertEqual(sorted(statuses), ["conflict", "created"])
+        self.assertEqual(
+            ExternalMediaIdentity.objects.filter(entry__user=self.user, provider="bangumi", external_id="777").count(),
+            1,
+        )
+        self.assertEqual(JournalEntry.objects.filter(user=self.user, title="并发测试").count(), 1)

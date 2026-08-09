@@ -105,6 +105,95 @@ class ExternalMediaIdentity(models.Model):
         return f"{self.provider}:{self.external_id} · {self.entry}"
 
 
+class UserExternalAccountConnection(models.Model):
+    class AuthMethod(models.TextChoices):
+        OAUTH = "oauth", "OAuth"
+        PERSONAL_ACCESS_TOKEN = "personal_access_token", "Personal Access Token"
+
+    class Status(models.TextChoices):
+        CONNECTED = "connected", "已连接"
+        NEEDS_REAUTHORIZATION = "needs_reauthorization", "需要重新授权"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="external_account_connections",
+    )
+    provider = models.CharField(max_length=50)
+    auth_method = models.CharField(max_length=32, choices=AuthMethod.choices)
+    external_user_id = models.CharField(max_length=200)
+    external_username = models.CharField(max_length=200)
+    display_name = models.CharField(max_length=200, blank=True)
+    credential_ciphertext = models.TextField()
+    credential_key_version = models.CharField(max_length=16, default="v1")
+    metadata = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.CONNECTED)
+    connected_at = models.DateTimeField()
+    verified_at = models.DateTimeField(blank=True, null=True)
+    last_used_at = models.DateTimeField(blank=True, null=True)
+    expires_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["provider", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "provider"], name="journal_extacct_user_provider_uq"),
+            models.UniqueConstraint(fields=["provider", "external_user_id"], name="journal_extacct_provider_user_uq"),
+        ]
+        indexes = [
+            models.Index(fields=["provider", "status"], name="journal_extacct_status_idx"),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.provider = str(self.provider or "").strip().lower()
+        self.external_user_id = str(self.external_user_id or "").strip()
+        self.external_username = str(self.external_username or "").strip()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.provider}:{self.external_username} · {self.user}"
+
+
+class ExternalAccountAuthorizationState(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="external_account_authorization_states",
+    )
+    provider = models.CharField(max_length=50)
+    state_digest = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["provider", "expires_at"], name="journal_extauth_expiry_idx"),
+        ]
+
+
+class ExternalImportSession(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="external_import_sessions",
+    )
+    provider = models.CharField(max_length=50)
+    snapshot = models.JSONField(default=list)
+    result = models.JSONField(default=dict, blank=True)
+    expires_at = models.DateTimeField()
+    applied_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "provider", "expires_at"], name="journal_extimport_exp_idx"),
+        ]
+
+
 class UserSettings(models.Model):
     class PublicStatus(models.TextChoices):
         PRIVATE = "private", "未公开"
