@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, close_old_connections, connection
+from django.db import IntegrityError, close_old_connections, connection, connections
 from django.test import TransactionTestCase, skipUnlessDBFeature
 from django.utils import timezone
 
@@ -67,7 +67,7 @@ class ExternalCollectionSyncStatePostgreSQLConcurrencyTests(TransactionTestCase)
             except (IntegrityError, ValidationError):
                 outcome = "duplicate"
             finally:
-                close_old_connections()
+                connections.close_all()
             with lock:
                 outcomes.append(outcome)
 
@@ -76,6 +76,7 @@ class ExternalCollectionSyncStatePostgreSQLConcurrencyTests(TransactionTestCase)
             thread.start()
         for thread in threads:
             thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
 
         self.assertEqual(sorted(outcomes), ["created", "duplicate"])
         self.assertEqual(ExternalCollectionSyncState.objects.filter(identity=self.identity).count(), 1)
@@ -158,7 +159,7 @@ class ExternalCollectionSyncStatePostgreSQLConcurrencyTests(TransactionTestCase)
             except ExternalSyncError as error:
                 outcome = str(error.detail["code"])
             finally:
-                close_old_connections()
+                connections.close_all()
             with lock:
                 outcomes.append(outcome)
 
@@ -220,7 +221,7 @@ class ExternalCollectionSyncStatePostgreSQLConcurrencyTests(TransactionTestCase)
             except ExternalSyncError as error:
                 outcome.append(str(error.detail["code"]))
             finally:
-                close_old_connections()
+                connections.close_all()
 
         thread = threading.Thread(target=worker)
         thread.start()
