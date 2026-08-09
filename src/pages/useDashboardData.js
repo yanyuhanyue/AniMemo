@@ -11,7 +11,6 @@ import {
   SETTINGS_KEY,
   STORAGE_KEY,
   apiToRecord,
-  upgradeLegacyDemoRecords,
 } from "./dashboardData.js";
 
 export function useDashboardData({ navigate }) {
@@ -22,7 +21,7 @@ export function useDashboardData({ navigate }) {
     if (!isDemo) return [];
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      return saved ? upgradeLegacyDemoRecords(JSON.parse(saved)) : [];
+      return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
     }

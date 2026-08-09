@@ -373,14 +373,10 @@ REST_FRAMEWORK = {
         "password_reset_ip": os.getenv("THROTTLE_PASSWORD_RESET_IP_RATE", os.getenv("THROTTLE_PASSWORD_RESET_RATE", "5/hour")),
         "password_reset_account": os.getenv("THROTTLE_PASSWORD_RESET_ACCOUNT_RATE", "3/hour"),
         "password_reset_combined": os.getenv("THROTTLE_PASSWORD_RESET_COMBINED_RATE", "3/hour"),
-        "register": os.getenv("THROTTLE_REGISTER_RATE", "3/hour"),
-        "register_ip": os.getenv("THROTTLE_REGISTER_IP_RATE", "10/hour"),
-        "register_account": os.getenv("THROTTLE_REGISTER_EMAIL_RATE", "3/hour"),
-        "register_combined": os.getenv("THROTTLE_REGISTER_COMBINED_RATE", "3/hour"),
-        "register_request": os.getenv("THROTTLE_REGISTER_REQUEST_RATE", os.getenv("THROTTLE_REGISTER_RATE", "3/hour")),
-        "register_request_ip": os.getenv("THROTTLE_REGISTER_REQUEST_IP_RATE", os.getenv("THROTTLE_REGISTER_IP_RATE", "10/hour")),
-        "register_request_account": os.getenv("THROTTLE_REGISTER_REQUEST_EMAIL_RATE", os.getenv("THROTTLE_REGISTER_EMAIL_RATE", "3/hour")),
-        "register_request_combined": os.getenv("THROTTLE_REGISTER_REQUEST_COMBINED_RATE", os.getenv("THROTTLE_REGISTER_COMBINED_RATE", "3/hour")),
+        "register_request": os.getenv("THROTTLE_REGISTER_REQUEST_RATE", "3/hour"),
+        "register_request_ip": os.getenv("THROTTLE_REGISTER_REQUEST_IP_RATE", "10/hour"),
+        "register_request_account": os.getenv("THROTTLE_REGISTER_REQUEST_EMAIL_RATE", "3/hour"),
+        "register_request_combined": os.getenv("THROTTLE_REGISTER_REQUEST_COMBINED_RATE", "3/hour"),
         "register_verify": os.getenv("THROTTLE_REGISTER_VERIFY_RATE", "10/hour"),
         "register_verify_ip": os.getenv("THROTTLE_REGISTER_VERIFY_IP_RATE", "10/hour"),
         "register_verify_account": os.getenv("THROTTLE_REGISTER_VERIFY_TOKEN_RATE", "10/hour"),
@@ -506,19 +502,19 @@ BANGUMI_ACCOUNT_INTEGRATION_ENABLED = env_bool("BANGUMI_ACCOUNT_INTEGRATION_ENAB
 BANGUMI_OAUTH_CLIENT_ID = os.getenv("BANGUMI_OAUTH_CLIENT_ID", "").strip()
 BANGUMI_OAUTH_CLIENT_SECRET = os.getenv("BANGUMI_OAUTH_CLIENT_SECRET", "").strip()
 BANGUMI_OAUTH_REDIRECT_URI = os.getenv("BANGUMI_OAUTH_REDIRECT_URI", "").strip()
-BANGUMI_OAUTH_STATE_TTL_SECONDS = int(os.getenv("BANGUMI_OAUTH_STATE_TTL_SECONDS", "600"))
 BANGUMI_IMPORT_MAX_ITEMS = int(os.getenv("BANGUMI_IMPORT_MAX_ITEMS", "1000"))
-BANGUMI_IMPORT_PREVIEW_TTL_SECONDS = int(os.getenv("BANGUMI_IMPORT_PREVIEW_TTL_SECONDS", "1200"))
-BANGUMI_IMPORT_APPLY_MAX_ITEMS = int(os.getenv("BANGUMI_IMPORT_APPLY_MAX_ITEMS", "100"))
+EXTERNAL_ACCOUNT_OAUTH_STATE_TTL_SECONDS = int(os.getenv("EXTERNAL_ACCOUNT_OAUTH_STATE_TTL_SECONDS", "600"))
+EXTERNAL_IMPORT_PREVIEW_TTL_SECONDS = int(os.getenv("EXTERNAL_IMPORT_PREVIEW_TTL_SECONDS", "1200"))
+EXTERNAL_IMPORT_APPLY_MAX_ITEMS = int(os.getenv("EXTERNAL_IMPORT_APPLY_MAX_ITEMS", "100"))
 if min(
-    BANGUMI_OAUTH_STATE_TTL_SECONDS,
     BANGUMI_IMPORT_MAX_ITEMS,
-    BANGUMI_IMPORT_PREVIEW_TTL_SECONDS,
-    BANGUMI_IMPORT_APPLY_MAX_ITEMS,
+    EXTERNAL_ACCOUNT_OAUTH_STATE_TTL_SECONDS,
+    EXTERNAL_IMPORT_PREVIEW_TTL_SECONDS,
+    EXTERNAL_IMPORT_APPLY_MAX_ITEMS,
 ) < 1:
-    raise ImproperlyConfigured("Bangumi 账号连接与导入限制必须为正整数。")
-if BANGUMI_IMPORT_APPLY_MAX_ITEMS > BANGUMI_IMPORT_MAX_ITEMS:
-    raise ImproperlyConfigured("BANGUMI_IMPORT_APPLY_MAX_ITEMS 不能超过 BANGUMI_IMPORT_MAX_ITEMS。")
+    raise ImproperlyConfigured("外部账号连接与导入限制必须为正整数。")
+if EXTERNAL_IMPORT_APPLY_MAX_ITEMS > BANGUMI_IMPORT_MAX_ITEMS:
+    raise ImproperlyConfigured("EXTERNAL_IMPORT_APPLY_MAX_ITEMS 不能超过 provider 导入上限。")
 if BANGUMI_OAUTH_REDIRECT_URI:
     _bangumi_redirect = urlsplit(BANGUMI_OAUTH_REDIRECT_URI)
     if (

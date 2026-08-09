@@ -40,11 +40,6 @@ def resolve_staff_role(user):
     return role
 
 
-def get_staff_role(user):
-    """Backward-compatible alias for the canonical resolver."""
-    return resolve_staff_role(user)
-
-
 def staff_capabilities(user):
     if not user or not getattr(user, "is_authenticated", False):
         return []

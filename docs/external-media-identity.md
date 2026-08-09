@@ -11,7 +11,7 @@ AniMemo 的 External Media Identity 为手账条目提供持久、Provider 无�
 当前 Provider：
 
 - `bangumi`：使用固定 HTTPS API 地址。
-- 搜索优先调用实验性 `POST /v0/search/subjects`，失败时回退 legacy 搜索。
+- 搜索只调用当前统一的 `POST /v0/search/subjects`，不保留 legacy 搜索 fallback。
 - 详情同时读取 `/v0/subjects/{id}` 与 `/v0/subjects/{id}/persons`，人物接口不可用时从 infobox 提取制作公司。
 - 搜索缓存 300 秒，详情缓存 900 秒；用户主动刷新绕过详情缓存。
 - 请求超时为连接 4 秒、读取 8 秒。
@@ -37,20 +37,23 @@ AniMemo 的 External Media Identity 为手账条目提供持久、Provider 无�
 - `POST /api/entries/{entry_id}/external-identities/`
 - `DELETE /api/entries/{entry_id}/external-identities/{provider}/`
 - `POST /api/entries/{entry_id}/external-identities/{provider}/refresh/`
+- `POST /api/entries/{entry_id}/external-identities/{provider}/metadata-source/`
 
 所有身份接口都要求登录，并通过手账条目所有权隔离数据。跨用户访问返回 404。绑定事务锁定用户行，保证同一用户的重复外部 ID 在并发请求下只能成功一次。
 
 解绑只删除身份，不删除手账、评分、评论、标签或观看记录。
 
-## Metadata Snapshot
+## Metadata Snapshot 与来源
 
 Snapshot 只保存界面与刷新所需的规范化摘要，不保存 Provider 的巨大原始响应。Bangumi snapshot 包含标题、日文名、简介、话数、首播日期、制作公司、标签、站点评分、海报、Provider 名称与规范 URL。
+
+持久 JSON 明确使用 `metadata_schema_version=1`。每个条目最多一个 `is_metadata_source=true` 的身份；第一条身份自动成为来源，后续 Provider 身份默认只保存 snapshot。来源切换必须显式传入布尔 `apply_metadata`，选择仅切换或切换并立即应用，不做静默覆盖。
 
 `provider_updated_at` 是 Provider 无关的可选字段。Bangumi subject 响应没有可靠的更新时间，因此当前保持为空，不伪造时间。
 
 ## 刷新策略
 
-手动刷新始终更新 snapshot，并只允许覆盖以下 Provider-owned 字段：
+手动刷新始终更新 snapshot。只有 metadata source 可以覆盖以下 Provider-owned 字段；非来源身份刷新仅更新 snapshot：
 
 - `japanese_title`
 - `airing_period`

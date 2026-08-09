@@ -13,6 +13,16 @@ actions as `<plugin-slug>.<name>`, resolves the AniMemo user from an authenticat
 external identity binding, and enforces the normal USER installation boundary.
 Integration handlers never receive connection secrets or HMAC material.
 
+## User-scoped Core capabilities
+
+Backend runtimes can bind narrow Core capabilities to an authenticated request or Integration action context:
+
+- `host.journal.bind(actor)`: DTO-only entry list/get/create/update.
+- `host.watch_history.bind(actor)`: normalize/list/add/merge through Core Watch History.
+- `host.analytics.bind(actor)`: read-only authoritative Core analytics.
+
+The actor's authenticated `user` is authoritative. Capabilities never accept an arbitrary `user_id`, verify the user's enabled installation on every call, and are revoked immediately when the plugin is disabled. They return DTOs rather than ORM objects and do not expose a generic database interface.
+
 ## Official plugin version immutability
 
 An official plugin release is identified by `slug + version`. Once that identity

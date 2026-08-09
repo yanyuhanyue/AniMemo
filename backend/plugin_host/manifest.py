@@ -2,6 +2,8 @@ import json
 import re
 from pathlib import Path
 
+from packaging.version import Version
+
 from .hook_contract import SUPPORTED_HOOKS, SYSTEM_SCOPED_HOOKS
 
 
@@ -57,6 +59,15 @@ def validate_manifest(manifest: dict, *, directory_name: str | None = None) -> d
         raise ManifestError("installationMode 必须是 user 或 system")
     if not SEMVER_RE.fullmatch(manifest["version"]):
         raise ManifestError("version 必须符合 SemVer")
+    data_compatibility = manifest.get("dataCompatibility")
+    if data_compatibility is not None:
+        if not isinstance(data_compatibility, dict) or set(data_compatibility) != {"rollbackFloor"}:
+            raise ManifestError("dataCompatibility 必须只声明 rollbackFloor")
+        rollback_floor = data_compatibility.get("rollbackFloor")
+        if not isinstance(rollback_floor, str) or not SEMVER_RE.fullmatch(rollback_floor):
+            raise ManifestError("dataCompatibility.rollbackFloor 必须符合 SemVer")
+        if Version(rollback_floor) > Version(manifest["version"]):
+            raise ManifestError("dataCompatibility.rollbackFloor 不能高于当前版本")
     runtimes = manifest.get("runtimes")
     if not isinstance(runtimes, list) or len(runtimes) != len(set(runtimes)) or not set(runtimes) <= {"frontend", "backend"}:
         raise ManifestError("runtimes 只能声明 frontend/backend")

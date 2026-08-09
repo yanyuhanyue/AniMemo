@@ -6,7 +6,8 @@ import { api, readableApiError } from "../../lib/api.js";
 const EMPTY_PROVIDER = {
   provider: "bangumi",
   display_name: "Bangumi",
-  enabled: true,
+  account_connection_available: true,
+  import_available: true,
   oauth_available: false,
   personal_access_token_available: true,
   connection: null,
@@ -125,12 +126,12 @@ export function ExternalAccountPanel({ isDemo, onOpenImport }) {
             <div><dt>状态</dt><dd>{connection.status === "needs_reauthorization" ? "需要重新授权" : "连接正常"}</dd></div>
           </dl>
           <div className="dashboard-external-actions">
-            <button type="button" onClick={verify} disabled={Boolean(busy) || !provider.enabled} title="验证连接"><Icon name={busy === "verify" ? "spinner" : "shield"} spin={busy === "verify"} /> 验证连接</button>
-            <button type="button" className="is-import" onClick={onOpenImport} disabled={Boolean(busy) || !provider.enabled || connection.status === "needs_reauthorization"}><Icon name="export" /> 导入收藏</button>
+            <button type="button" onClick={verify} disabled={Boolean(busy) || !provider.account_connection_available} title="验证连接"><Icon name={busy === "verify" ? "spinner" : "shield"} spin={busy === "verify"} /> 验证连接</button>
+            <button type="button" className="is-import" onClick={onOpenImport} disabled={Boolean(busy) || !provider.import_available || connection.status === "needs_reauthorization"}><Icon name="export" /> 导入收藏</button>
             <button type="button" className="is-danger" onClick={disconnect} disabled={Boolean(busy)}><Icon name={busy === "disconnect" ? "spinner" : "unlink"} spin={busy === "disconnect"} /> 断开</button>
           </div>
         </div>
-      ) : !provider.enabled ? (
+      ) : !provider.account_connection_available ? (
         <div className="dashboard-external-empty dashboard-profile-modal__piece"><Icon name="shield" /><strong>Bangumi 账号连接暂不可用</strong><small>作品搜索、资料绑定与手动刷新不受影响。</small></div>
       ) : (
         <div className="dashboard-external-connect dashboard-profile-modal__piece">

@@ -5,7 +5,7 @@
   "id": "com.anime-journal.watch-history-importer",
   "slug": "watch-history-importer",
   "name": "忆往昔观看记录导入器",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "解析年度观看文档，分批匹配 Bangumi，预览后事务导入并保留多次观看历史。",
   "author": { "name": "Anime Journal" },
   "license": "MIT",
@@ -33,5 +33,6 @@
     { "key": "resolve_batch_size", "scope": "user", "label": "每批匹配数量", "description": "每次请求向 Bangumi 匹配的番剧数量。", "type": "number", "required": true, "default": 6, "min": 1, "max": 12 },
     { "key": "unmatched_policy", "scope": "user", "label": "无法匹配时", "description": "正式导入时如何处理仍未匹配的条目。", "type": "select", "required": true, "default": "review", "choices": [{ "value": "review", "label": "阻止导入并人工确认" }, { "value": "skip", "label": "跳过无法匹配条目" }] }
   ],
-  "dataPolicy": { "storesPersonalData": true, "usesExternalNetwork": true, "acceptsFileUploads": true, "retainsDataOnDisable": true }
+  "dataPolicy": { "storesPersonalData": true, "usesExternalNetwork": true, "acceptsFileUploads": true, "retainsDataOnDisable": true },
+  "dataCompatibility": { "rollbackFloor": "0.4.0" }
 }

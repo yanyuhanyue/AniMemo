@@ -4,12 +4,14 @@ import { WatchHistoryList } from "../WatchHistoryList.jsx";
 import { buildPresetColorMap, FALLBACK_TAG_PRESETS, isCustomTagColor, TAG_COLOR_OPTIONS, tagColorKey, tagColorStyle } from "../../lib/tagPresets.js";
 import { normalizeTrustedPosterHosts, validateTrustedPosterUrl } from "../../lib/posterSources.js";
 import { ExternalMediaIdentityPanel } from "./ExternalMediaIdentityPanel.jsx";
+import { api, readableApiError } from "../../lib/api.js";
 
 const STATUS_OPTIONS = [
   ["planned", "想看"],
   ["watching", "在看"],
   ["completed", "看过"],
   ["on_hold", "搁置"],
+  ["dropped", "弃番"],
 ];
 
 const MODULES = [
@@ -82,6 +84,9 @@ export function EditAnimeRecordContent({
   const [manualHistory, setManualHistory] = useState(blankWatchHistoryRecord);
   const [historyFormError, setHistoryFormError] = useState("");
   const [historyFormNotice, setHistoryFormNotice] = useState("");
+  const [historyLoaded, setHistoryLoaded] = useState(isDemo);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historySaving, setHistorySaving] = useState(false);
   const presetColors = useMemo(() => buildPresetColorMap(tagPresets), [tagPresets]);
 
   useEffect(() => {
@@ -91,6 +96,9 @@ export function EditAnimeRecordContent({
     setManualHistory(blankWatchHistoryRecord());
     setHistoryFormError("");
     setHistoryFormNotice("");
+    setHistoryLoaded(isDemo);
+    setHistoryLoading(false);
+    setHistorySaving(false);
     if (fileRef.current) fileRef.current.value = "";
   }, [draft.id]);
 
@@ -100,8 +108,25 @@ export function EditAnimeRecordContent({
     setModule(value);
     window.requestAnimationFrame(() => editorRef.current?.scrollIntoView({ block: "start" }));
   };
+  const loadHistory = async () => {
+    if (historyLoaded || historyLoading || isDemo || !Number.isFinite(Number(draft.id))) return;
+    setHistoryLoading(true);
+    setHistoryFormError("");
+    try {
+      const response = await api.get(`entries/${draft.id}/watch-history/`);
+      const records = Array.isArray(response.data?.results) ? response.data.results : [];
+      setDraft((current) => ({ ...current, watchHistory: records, watchHistoryCount: records.length }));
+      setHistoryLoaded(true);
+    } catch (requestError) {
+      setHistoryFormError(readableApiError(requestError, "观看记录读取失败，请稍后重试。"));
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
   const toggleHistoryModule = () => {
-    setModule((current) => current === "history" ? previousModuleRef.current : "history");
+    const opening = module !== "history";
+    setModule(opening ? "history" : previousModuleRef.current);
+    if (opening) loadHistory();
     window.requestAnimationFrame(() => editorRef.current?.scrollIntoView({ block: "start" }));
   };
   const updateStatus = (value) => {
@@ -202,7 +227,7 @@ export function EditAnimeRecordContent({
     setHistoryFormNotice("");
   };
 
-  const addWatchRecord = (event) => {
+  const addWatchRecord = async (event) => {
     event.preventDefault();
     const watchedOn = manualHistory.watchedOn;
     const brushLabel = manualHistory.brushLabel.trim() || "首刷";
@@ -234,26 +259,46 @@ export function EditAnimeRecordContent({
       episode_end: episodeEnd,
       notes: manualHistory.notes.trim() ? [manualHistory.notes.trim()] : [],
     };
-    setDraft((current) => {
-      const currentHistory = Array.isArray(current.watchHistory) ? current.watchHistory : [];
-      const duplicateIndex = currentHistory.findIndex((record) => watchHistoryKey(record) === watchHistoryKey(nextRecord));
-      const nextHistory = duplicateIndex >= 0
-        ? currentHistory.map((record, index) => index === duplicateIndex ? nextRecord : record)
-        : [nextRecord, ...currentHistory];
-      return { ...current, watchHistory: sortWatchHistory(nextHistory) };
-    });
-    setManualHistory((current) => ({ ...blankWatchHistoryRecord(), watchedOn: current.watchedOn }));
-    setHistoryFormError("");
-    setHistoryFormNotice("已加入草稿，点击底部“保存全部修改”后生效。");
+    setHistorySaving(true);
+    try {
+      const saved = isDemo
+        ? nextRecord
+        : (await api.post(`entries/${draft.id}/watch-history/`, nextRecord)).data?.record;
+      if (!saved) throw new Error("观看记录响应无效。");
+      setDraft((current) => {
+        const currentHistory = Array.isArray(current.watchHistory) ? current.watchHistory : [];
+        const duplicateIndex = currentHistory.findIndex((record) => watchHistoryKey(record) === watchHistoryKey(saved));
+        const nextHistory = duplicateIndex >= 0
+          ? currentHistory.map((record, index) => index === duplicateIndex ? saved : record)
+          : [saved, ...currentHistory];
+        return { ...current, watchHistory: sortWatchHistory(nextHistory), watchHistoryCount: nextHistory.length };
+      });
+      setManualHistory((current) => ({ ...blankWatchHistoryRecord(), watchedOn: current.watchedOn }));
+      setHistoryFormError("");
+      setHistoryFormNotice(isDemo ? "已加入演示记录。" : "观看记录已保存。");
+    } catch (requestError) {
+      setHistoryFormError(readableApiError(requestError, "观看记录保存失败，请稍后重试。"));
+    } finally {
+      setHistorySaving(false);
+    }
   };
 
-  const removeWatchRecord = (index) => {
-    setDraft((current) => ({
-      ...current,
-      watchHistory: (Array.isArray(current.watchHistory) ? current.watchHistory : []).filter((_, itemIndex) => itemIndex !== index),
-    }));
-    setHistoryFormError("");
-    setHistoryFormNotice("已从草稿移除，保存全部修改后生效。");
+  const removeWatchRecord = async (index) => {
+    const record = watchHistory[index];
+    setHistorySaving(true);
+    try {
+      if (!isDemo) await api.delete(`entries/${draft.id}/watch-history/${record.id}/`);
+      setDraft((current) => {
+        const nextHistory = (Array.isArray(current.watchHistory) ? current.watchHistory : []).filter((_, itemIndex) => itemIndex !== index);
+        return { ...current, watchHistory: nextHistory, watchHistoryCount: nextHistory.length };
+      });
+      setHistoryFormError("");
+      setHistoryFormNotice(isDemo ? "已从演示记录移除。" : "观看记录已删除。");
+    } catch (requestError) {
+      setHistoryFormError(readableApiError(requestError, "观看记录删除失败，请稍后重试。"));
+    } finally {
+      setHistorySaving(false);
+    }
   };
 
   return (
@@ -305,7 +350,7 @@ export function EditAnimeRecordContent({
               <label>主观评分<input className="is-score" type="number" min="0" max="10" step="0.1" value={draft.score ?? ""} onChange={(event) => update("score", event.target.value)} placeholder="0.0 - 10.0" /></label>
               <label>观看状态<select className="is-status" value={draft.status || "planned"} onChange={(event) => updateStatus(event.target.value)}>{STATUS_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
               <button className={`anime-edit-modal__history-trigger${module === "history" ? " is-active" : ""}`} type="button" onClick={toggleHistoryModule} aria-pressed={module === "history"}>
-                <span>{module === "history" ? "返回编辑" : "观看情况"}</span><strong><Icon name={module === "history" ? "arrow-left" : "history"} /> {module === "history" ? "返回上一项" : `${watchHistory.length} 条记录`}</strong>
+                <span>{module === "history" ? "返回编辑" : "观看情况"}</span><strong><Icon name={module === "history" ? "arrow-left" : "history"} /> {module === "history" ? "返回上一项" : `${historyLoaded ? watchHistory.length : Number(draft.watchHistoryCount || 0)} 条记录`}</strong>
               </button>
             </div>
 
@@ -350,11 +395,11 @@ export function EditAnimeRecordContent({
                     <datalist id="watch-history-brush-options"><option value="首刷" /><option value="二刷" /><option value="三刷" /><option value="四刷" /><option value="补番" /></datalist>
                     <div className="anime-edit-modal__history-note-row">
                       <label>备注<input maxLength="500" value={manualHistory.notes} onChange={(event) => updateManualHistory("notes", event.target.value)} placeholder="例如：和朋友一起补完" /></label>
-                      <button type="submit"><Icon name="plus" /> 添加观看记录</button>
+                      <button type="submit" disabled={historyLoading || historySaving}><Icon name="plus" /> {historySaving ? "保存中" : "添加观看记录"}</button>
                     </div>
                     {(historyFormError || historyFormNotice) && <p className={historyFormError ? "is-error" : "is-notice"} role={historyFormError ? "alert" : "status"}>{historyFormError || historyFormNotice}</p>}
                   </form>
-                  <WatchHistoryList records={watchHistory} editable onRemove={removeWatchRecord} emptyText="还没有观看记录，可以在上方手动添加。" />
+                  {historyLoading ? <p className="anime-edit-modal__history-empty">正在读取观看记录...</p> : <WatchHistoryList records={watchHistory} editable={!historySaving} onRemove={removeWatchRecord} emptyText="还没有观看记录，可以在上方手动添加。" />}
                   <ModuleTabs module={module} onChange={selectModule} />
                 </div>
               ) : module === "external" ? (

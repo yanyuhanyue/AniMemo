@@ -28,6 +28,7 @@ def make_package(
     installation_mode="user",
     plugin_id=None,
     hooks=None,
+    rollback_floor=None,
 ):
     runtimes = runtimes or ["frontend", "backend"]
     hooks = hooks or []
@@ -41,6 +42,8 @@ def make_package(
     }
     if "backend" in runtimes:
         manifest["backend"] = {"entry": "backend/plugin.py"}
+    if rollback_floor:
+        manifest["dataCompatibility"] = {"rollbackFloor": rollback_floor}
     files = {"manifest.json": json.dumps(manifest, separators=(",", ":")).encode(), "frontend/plugin.js": frontend_source.encode()}
     if "backend" in runtimes:
         files["backend/plugin.py"] = backend_source.encode()
@@ -73,7 +76,7 @@ class PluginRuntimeV3Tests(TestCase):
         version_row, _, _ = upload_plugin_version(project, type("Upload", (), {"name": f"{slug}.ajplugin", "read": lambda self: payload})(), actor=owner or self.user)
         return project, version_row
 
-    def upload_version(self, project, version, source, *, hooks=None):
+    def upload_version(self, project, version, source, *, hooks=None, rollback_floor=None):
         payload, _ = make_package(
             project.slug,
             version,
@@ -81,6 +84,7 @@ class PluginRuntimeV3Tests(TestCase):
             plugin_id=project.plugin_id,
             installation_mode=project.installation_mode,
             hooks=hooks,
+            rollback_floor=rollback_floor,
         )
         uploaded = type(
             "Upload",
@@ -286,6 +290,47 @@ def create_plugin(host):
             {item.plugin_version for item in runtime_registry.hooks.registrations_for(project.slug)},
             {"1.0.0"},
         )
+
+    def test_data_compatibility_floor_denies_incompatible_rollback(self):
+        project = self.hook_project("runtime-floor")
+        first = self.upload_version(project, "1.0.0", self.hook_runtime_source(), hooks=["journal.after_create"])
+        second = self.upload_version(
+            project,
+            "2.0.0",
+            self.hook_runtime_source(),
+            hooks=["journal.after_create"],
+            rollback_floor="2.0.0",
+        )
+        installer = PluginPackageInstaller()
+        installer.publish(first, actor=self.admin)
+        installer.publish(second, actor=self.admin)
+
+        with self.assertRaisesMessage(PluginInstallError, "低于数据兼容下限 2.0.0"):
+            installer.rollback(project.slug, actor=self.admin)
+
+        deployment = PluginDeployment.objects.select_related("current_version", "previous_version").get(plugin=project)
+        self.assertEqual(deployment.current_version, second)
+        self.assertEqual(deployment.previous_version, first)
+        self.assertEqual(deployment.rollback_floor, "2.0.0")
+        self.assertEqual(runtime_registry.active_version(project.slug), "2.0.0")
+
+    def test_data_compatibility_floor_is_monotonic_across_later_publish(self):
+        project = self.hook_project("runtime-floor-forward")
+        first = self.upload_version(
+            project,
+            "2.0.0",
+            self.hook_runtime_source(),
+            hooks=["journal.after_create"],
+            rollback_floor="2.0.0",
+        )
+        second = self.upload_version(project, "2.1.0", self.hook_runtime_source(), hooks=["journal.after_create"])
+        installer = PluginPackageInstaller()
+        installer.publish(first, actor=self.admin)
+        installer.publish(second, actor=self.admin)
+
+        deployment = PluginDeployment.objects.get(plugin=project)
+        self.assertEqual(deployment.current_version, second)
+        self.assertEqual(deployment.rollback_floor, "2.0.0")
 
     def test_disable_and_enable_unload_and_restore_current_runtime(self):
         project = self.hook_project("runtime-toggle")

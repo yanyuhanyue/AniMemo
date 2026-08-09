@@ -38,7 +38,7 @@ class BangumiAccountProviderTests(SimpleTestCase):
             "state": ["random-state"],
         })
 
-    @patch("journal.external_accounts.providers.bangumi.requests.request")
+    @patch("journal.bangumi.client.requests.request")
     def test_verify_account_uses_bearer_and_normalizes_stable_identity(self, request):
         request.return_value = response({
             "id": 123,
@@ -52,7 +52,7 @@ class BangumiAccountProviderTests(SimpleTestCase):
         self.assertEqual(request.call_args.kwargs["headers"]["Authorization"], "Bearer token-value")
         self.assertEqual(request.call_args.args[:2], ("get", "https://api.bgm.tv/v0/me"))
 
-    @patch("journal.external_accounts.providers.bangumi.requests.request")
+    @patch("journal.bangumi.client.requests.request")
     def test_invalid_token_is_mapped_without_echoing_token(self, request):
         request.return_value = response({}, status_code=401)
         with self.assertRaises(ExternalAccountError) as caught:
@@ -60,7 +60,7 @@ class BangumiAccountProviderTests(SimpleTestCase):
         self.assertEqual(caught.exception.detail["code"], "external_account_token_invalid")
         self.assertNotIn("do-not-leak-token", str(caught.exception.detail))
 
-    @patch("journal.external_accounts.providers.bangumi.requests.request")
+    @patch("journal.bangumi.client.requests.request")
     def test_collection_pagination_is_anime_only_and_bounded(self, request):
         self.assertIsNone(self.provider.normalize_collection({"subject_id": 9, "subject_type": 1, "type": 2}))
         request.side_effect = [
@@ -107,7 +107,7 @@ class BangumiAccountProviderTests(SimpleTestCase):
         self.assertEqual(request.call_args_list[0].kwargs["params"], {"subject_type": 2, "limit": 50, "offset": 0})
         self.assertIn("user%2Fname", request.call_args_list[0].args[1])
 
-    @patch("journal.external_accounts.providers.bangumi.requests.request")
+    @patch("journal.bangumi.client.requests.request")
     def test_get_retries_transient_failure_once(self, request):
         request.side_effect = [requests.Timeout("secret timeout"), response({
             "id": 1,
@@ -115,27 +115,27 @@ class BangumiAccountProviderTests(SimpleTestCase):
             "nickname": "Retry",
             "avatar": {},
         })]
-        with self.assertLogs("journal.external_accounts.providers.bangumi", level="WARNING") as logs:
+        with self.assertLogs("journal.bangumi.client", level="WARNING") as logs:
             profile = self.provider.verify_account("token-value")
         self.assertEqual(profile["external_user_id"], "1")
         self.assertEqual(request.call_count, 2)
         self.assertNotIn("token-value", "\n".join(logs.output))
 
-    @patch("journal.external_accounts.providers.bangumi.requests.request")
+    @patch("journal.bangumi.client.requests.request")
     def test_final_timeout_is_bounded_and_token_free(self, request):
         request.side_effect = requests.Timeout("timeout detail")
-        with self.assertLogs("journal.external_accounts.providers.bangumi", level="WARNING") as logs:
+        with self.assertLogs("journal.bangumi.client", level="WARNING") as logs:
             with self.assertRaises(ExternalAccountError) as caught:
                 self.provider.verify_account("private-token-value")
         self.assertEqual(caught.exception.detail["code"], "provider_unavailable")
         self.assertEqual(request.call_count, 2)
         self.assertNotIn("private-token-value", "\n".join(logs.output))
 
-    @patch("journal.external_accounts.providers.bangumi.requests.request")
+    @patch("journal.bangumi.client.requests.request")
     def test_oversized_response_is_rejected_before_json_decode(self, request):
         request.return_value = response(
             {},
-            headers={"Content-Length": str(self.provider.max_response_bytes + 1)},
+            headers={"Content-Length": str(self.provider.client.max_response_bytes + 1)},
         )
         with self.assertRaises(ExternalAccountError) as caught:
             self.provider.verify_account("private-token-value")
@@ -147,7 +147,7 @@ class BangumiAccountProviderTests(SimpleTestCase):
         BANGUMI_OAUTH_CLIENT_SECRET="client-secret",
         BANGUMI_OAUTH_REDIRECT_URI="https://example.test/callback",
     )
-    @patch("journal.external_accounts.providers.bangumi.requests.request")
+    @patch("journal.bangumi.client.requests.request")
     def test_oauth_exchange_uses_server_side_secret_and_bounded_token_payload(self, request):
         request.return_value = response({
             "access_token": "access-token-value",

@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlparse
 from config.credentials import CredentialCipher
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.core.management import call_command
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -93,10 +94,10 @@ def prepared(external_id="1424"):
 @override_settings(
     CREDENTIAL_ENCRYPTION_KEY=TEST_KEY,
     BANGUMI_ACCOUNT_INTEGRATION_ENABLED=True,
-    BANGUMI_OAUTH_STATE_TTL_SECONDS=600,
+    EXTERNAL_ACCOUNT_OAUTH_STATE_TTL_SECONDS=600,
     BANGUMI_IMPORT_MAX_ITEMS=1000,
-    BANGUMI_IMPORT_PREVIEW_TTL_SECONDS=1200,
-    BANGUMI_IMPORT_APPLY_MAX_ITEMS=100,
+    EXTERNAL_IMPORT_PREVIEW_TTL_SECONDS=1200,
+    EXTERNAL_IMPORT_APPLY_MAX_ITEMS=100,
 )
 class ExternalAccountApiTests(APITestCase):
     def setUp(self):
@@ -193,6 +194,15 @@ class ExternalAccountApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIsNone(response.data["providers"][0]["connection"])
         self.assertNotIn("cipher", str(response.data).lower())
+
+    def test_provider_list_comes_from_registry_capabilities(self):
+        response = self.client.get(reverse("external-account-list"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        capability = response.data["providers"][0]
+        self.assertEqual(capability["provider"], "bangumi")
+        self.assertTrue(capability["media_search_available"])
+        self.assertTrue(capability["account_connection_available"])
+        self.assertTrue(capability["import_available"])
 
     def test_disconnect_preserves_entries_and_external_identity(self):
         self.create_connection()
@@ -306,7 +316,8 @@ class ExternalAccountApiTests(APITestCase):
             {"code": "unused-code", "state": first_state},
         )
         self.assertEqual(callback.status_code, status.HTTP_302_FOUND)
-        self.assertIn("bangumi=error", callback["Location"])
+        self.assertIn("external_account_status=error", callback["Location"])
+        self.assertIn("external_account_provider=bangumi", callback["Location"])
         self.assertIn("authorization_state_expired", callback["Location"])
 
     @patch("journal.external_accounts.providers.bangumi.BangumiAccountProvider.get_collections")
@@ -342,7 +353,7 @@ class ExternalAccountApiTests(APITestCase):
         self.assertEqual(page.data["total"], 3)
         self.assertEqual(page.data["results"][0]["external_id"], "2")
 
-    @patch("journal.external_accounts.services.prepare_identity")
+    @patch("journal.external_accounts.imports.prepare_identity")
     def test_apply_create_is_atomic_uses_snapshot_and_is_idempotent(self, prepare):
         session = ExternalImportSession.objects.create(
             user=self.user,
@@ -363,7 +374,7 @@ class ExternalAccountApiTests(APITestCase):
         self.assertEqual(entry.review, "远端短评")
         self.assertTrue(ExternalMediaIdentity.objects.filter(entry=entry, external_id="1424").exists())
 
-    @patch("journal.external_accounts.services.prepare_identity")
+    @patch("journal.external_accounts.imports.prepare_identity")
     def test_bind_existing_preserves_local_fields_by_default_and_explicitly_overrides_selected(self, prepare):
         entry = JournalEntry.objects.create(
             user=self.user,
@@ -434,7 +445,40 @@ class ExternalAccountApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_410_GONE)
         self.assertFalse(JournalEntry.objects.exists())
 
-    @patch("journal.external_accounts.services.prepare_identity")
+    def test_cleanup_command_removes_only_expired_external_sessions(self):
+        expired_state = ExternalAccountAuthorizationState.objects.create(
+            user=self.user,
+            provider="bangumi",
+            state_digest="a" * 64,
+            expires_at=timezone.now() - timedelta(seconds=1),
+        )
+        active_state = ExternalAccountAuthorizationState.objects.create(
+            user=self.user,
+            provider="bangumi",
+            state_digest="b" * 64,
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+        expired_import = ExternalImportSession.objects.create(
+            user=self.user,
+            provider="bangumi",
+            snapshot=[],
+            expires_at=timezone.now() - timedelta(seconds=1),
+        )
+        active_import = ExternalImportSession.objects.create(
+            user=self.user,
+            provider="bangumi",
+            snapshot=[],
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+
+        call_command("cleanup_external_account_sessions", verbosity=0)
+
+        self.assertFalse(ExternalAccountAuthorizationState.objects.filter(pk=expired_state.pk).exists())
+        self.assertTrue(ExternalAccountAuthorizationState.objects.filter(pk=active_state.pk).exists())
+        self.assertFalse(ExternalImportSession.objects.filter(pk=expired_import.pk).exists())
+        self.assertTrue(ExternalImportSession.objects.filter(pk=active_import.pk).exists())
+
+    @patch("journal.external_accounts.imports.prepare_identity")
     def test_malformed_item_is_isolated_and_client_cannot_tamper_with_snapshot(self, prepare):
         session = ExternalImportSession.objects.create(
             user=self.user,

@@ -35,7 +35,7 @@ from .registration import (
 )
 from plugin_host.hooks import RegistrationHookRejected, RegistrationHookUnavailable
 from .serializers import RegistrationCompleteSerializer, RegistrationRequestSerializer, RegistrationVerifySerializer
-from .staff_services import get_security_profile, record_audit, record_login_event, staff_capabilities, get_staff_role, update_user_password
+from .staff_services import get_security_profile, record_audit, record_login_event, resolve_staff_role, staff_capabilities, update_user_password
 from plugin_host.permissions import plugin_permissions_for_user
 from .turnstile import require_turnstile
 
@@ -152,7 +152,7 @@ class StaffLoginView(APIView):
             "access": str(access),
             "admin_url": request.build_absolute_uri(requested_admin_path),
             "admin_access": admin_access,
-            "user": {"id": result.user.id, "username": result.user.username, "email": result.user.email, "is_staff": True, "role": get_staff_role(result.user), "capabilities": staff_capabilities(result.user), "pluginPermissions": plugin_permissions_for_user(result.user)},
+            "user": {"id": result.user.id, "username": result.user.username, "email": result.user.email, "is_staff": True, "role": resolve_staff_role(result.user), "capabilities": staff_capabilities(result.user), "pluginPermissions": plugin_permissions_for_user(result.user)},
             "used_recovery_code": result.used_recovery_code,
             "remaining_recovery_codes": result.remaining_recovery_codes,
         })
@@ -227,9 +227,8 @@ class RegistrationThrottleAuditMixin:
 @method_decorator(csrf_protect, name="dispatch")
 class RegisterView(RegistrationThrottleAuditMixin, APIView):
     permission_classes = [permissions.AllowAny]
-    # Keep the established `register` scope as an alias for the email-request step.
-    throttle_scope = "register"
-    account_throttle_scope = "register"
+    throttle_scope = "register_request"
+    account_throttle_scope = "register_request"
     throttle_account_fields = ("email",)
 
     def post(self, request):

@@ -3,6 +3,7 @@ import { Icon } from "../Icon.jsx";
 import { api, readableApiError } from "../../lib/api.js";
 import {
   bangumiIdentityFromResult,
+  externalMediaResultFromApi,
   REFRESH_FIELD_LABELS,
   refreshRecordPatch,
   replaceProviderIdentity,
@@ -25,7 +26,7 @@ function formatFetchedAt(value) {
 }
 
 function providerScore(identity) {
-  const score = Number(identity?.metadata?.score);
+  const score = Number(identity?.provider_score ?? identity?.metadata?.score);
   return Number.isFinite(score) && score > 0 ? score.toFixed(1) : "暂无";
 }
 
@@ -59,8 +60,10 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
     setError("");
     setNotice("");
     try {
-      const response = await api.get("catalog/bangumi-search/", { params: { q: normalized } });
-      if (requestId === requestRef.current) setResults(response.data?.results || []);
+      const response = await api.get("external-media/providers/bangumi/search/", { params: { q: normalized } });
+      if (requestId === requestRef.current) {
+        setResults((response.data?.results || []).map(externalMediaResultFromApi));
+      }
     } catch (requestError) {
       if (requestId === requestRef.current) {
         setResults([]);
@@ -74,7 +77,7 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
   const bind = async (result) => {
     const requestedIdentity = bangumiIdentityFromResult(result);
     if (!requestedIdentity) return;
-    const subjectTitle = result.name || result.title || result.japanese_name || `条目 ${requestedIdentity.external_id}`;
+    const subjectTitle = result.title || result.japaneseTitle || `条目 ${requestedIdentity.external_id}`;
     if (!window.confirm(`将「${draft.title}」绑定到 Bangumi「${subjectTitle}」（ID ${requestedIdentity.external_id}）吗？`)) return;
     setAction("bind");
     setError("");
@@ -127,12 +130,37 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
     }
   };
 
+  const selectMetadataSource = async (applyMetadata) => {
+    setAction(applyMetadata ? "source-apply" : "source-only");
+    setError("");
+    setNotice("");
+    try {
+      const response = await api.post(
+        `entries/${draft.id}/external-identities/${PROVIDER}/metadata-source/`,
+        { apply_metadata: applyMetadata },
+      );
+      const nextIdentities = identities.map((item) => ({
+        ...item,
+        is_metadata_source: item?.provider === PROVIDER,
+      }));
+      const entryPatch = applyMetadata
+        ? refreshRecordPatch(response.data?.changed_fields, draft)
+        : {};
+      commit(nextIdentities, entryPatch);
+      setNotice(applyMetadata ? "已设为资料来源并应用可更新字段。" : "已设为资料来源，未改动手账字段。");
+    } catch (requestError) {
+      setError(readableApiError(requestError, "资料来源切换失败。"));
+    } finally {
+      setAction("");
+    }
+  };
+
   if (identity) {
     return (
       <div className="external-media-panel">
         <div className="external-media-panel__heading">
           <span><Icon name="link" /> Bangumi</span>
-          <strong>已绑定</strong>
+          <strong>{identity.is_metadata_source ? "当前资料来源" : "已绑定 · 仅快照"}</strong>
         </div>
         <dl className="external-media-panel__facts">
           <div><dt>条目 ID</dt><dd>{identity.external_id}</dd></div>
@@ -142,6 +170,10 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
         <div className="external-media-panel__actions">
           <a href={identity.canonical_url} target="_blank" rel="noreferrer"><Icon name="arrow-up-right" /> 查看 Bangumi</a>
           <button type="button" onClick={refresh} disabled={Boolean(action) || isDemo}><Icon name="reset" /> {action === "refresh" ? "同步中..." : "刷新资料"}</button>
+          {!identity.is_metadata_source && <>
+            <button type="button" onClick={() => selectMetadataSource(false)} disabled={Boolean(action) || isDemo}><Icon name="check" /> {action === "source-only" ? "切换中..." : "仅设为来源"}</button>
+            <button type="button" onClick={() => selectMetadataSource(true)} disabled={Boolean(action) || isDemo}><Icon name="download" /> {action === "source-apply" ? "应用中..." : "设为来源并应用"}</button>
+          </>}
           <button className="is-danger" type="button" onClick={unbind} disabled={Boolean(action) || isDemo}><Icon name="unlink" /> {action === "unbind" ? "解除中..." : "解除绑定"}</button>
         </div>
         {notice && <p className="external-media-panel__notice" role="status"><Icon name="check" /> {notice}</p>}
@@ -163,9 +195,9 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
       {results.length > 0 && <div className="external-media-panel__results" aria-label="Bangumi 搜索结果">{results.map((result) => {
         const resultIdentity = bangumiIdentityFromResult(result);
         return (
-          <div className="external-media-result" key={resultIdentity?.external_id || result.id}>
-            {result.thumbnail || result.poster ? <img src={result.thumbnail || result.poster} alt="" /> : <span className="external-media-result__placeholder"><Icon name="film" /></span>}
-            <div><strong>{result.name || result.title || result.japanese_name}</strong><span>{result.japanese_name || "日文名未收录"}</span><small>ID {resultIdentity?.external_id} · {result.air_date || "日期未定"}</small></div>
+          <div className="external-media-result" key={resultIdentity?.external_id}>
+            {result.thumbnailUrl || result.posterUrl ? <img src={result.thumbnailUrl || result.posterUrl} alt="" /> : <span className="external-media-result__placeholder"><Icon name="film" /></span>}
+            <div><strong>{result.title || result.japaneseTitle}</strong><span>{result.japaneseTitle || "日文名未收录"}</span><small>ID {resultIdentity?.external_id} · {result.airDate || "日期未定"}</small></div>
             <button type="button" onClick={() => bind(result)} disabled={Boolean(action)}><Icon name="link" /> {action === "bind" ? "绑定中..." : "绑定"}</button>
           </div>
         );

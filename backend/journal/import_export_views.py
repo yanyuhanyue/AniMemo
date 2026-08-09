@@ -6,25 +6,27 @@ import unicodedata
 
 from django.conf import settings
 from django.db import transaction
-from django.utils import timezone
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .import_parsers import LimitedImportJSONParser, extract_import_records
+from .data_bundle import DataBundleError, export_data_bundle, import_data_bundle, preview_data_bundle
+from .import_parsers import LimitedImportJSONParser
 from .models import JournalEntry
 from .serializers import JournalEntrySerializer
 
 
+CSV_IMPORT_FIELDS = {
+    "title", "japanese_title", "airing_period", "studio", "episodes",
+    "description", "poster_url", "custom_poster_url", "baike_url", "tags",
+    "tag_colors", "personal_score", "watch_status", "review", "visibility",
+}
+
+
 class ExportEntriesView(APIView):
     def get(self, request):
-        entries = JournalEntry.objects.filter(
-            user=request.user,
-            deleted_at__isnull=True,
-        ).prefetch_related("external_identities")
-        serializer = JournalEntrySerializer(entries, many=True, context={"request": request})
-        return Response({"version": 1, "exported_at": timezone.now(), "records": serializer.data})
+        return Response(export_data_bundle(user=request.user))
 
 
 def _import_identity(value):
@@ -42,27 +44,22 @@ def _normalize_import_record(raw):
     tags = raw.get("tags", [])
     if isinstance(tags, str):
         tags = re.split(r"[，,]", tags)
-    poster_url = raw.get("poster_url", raw.get("posterUrl", "")) or ""
-    custom_poster_url = raw.get("custom_poster_url", raw.get("customPosterUrl", "")) or ""
-    legacy_poster = raw.get("poster", "") or ""
-    if not poster_url and not custom_poster_url and re.match(r"^https?://", str(legacy_poster), re.I):
-        poster_url = legacy_poster
     return {
         "title": raw.get("title", ""),
-        "japanese_title": raw.get("japanese_title", raw.get("japaneseTitle", "")),
-        "airing_period": raw.get("airing_period", raw.get("period", "")),
+        "japanese_title": raw.get("japanese_title", ""),
+        "airing_period": raw.get("airing_period", ""),
         "studio": raw.get("studio", ""),
         "episodes": raw.get("episodes", ""),
         "description": raw.get("description", ""),
-        "poster_url": poster_url,
-        "custom_poster_url": custom_poster_url,
-        "baike_url": raw.get("baike_url", raw.get("baikeUrl", "")),
+        "poster_url": raw.get("poster_url", "") or "",
+        "custom_poster_url": raw.get("custom_poster_url", "") or "",
+        "baike_url": raw.get("baike_url", ""),
         "tags": tags,
-        "tag_colors": raw.get("tag_colors", raw.get("tagColors", {})) or {},
-        "personal_score": raw.get("personal_score", raw.get("score")),
-        "watch_status": raw.get("watch_status", raw.get("status", "planned")),
+        "tag_colors": raw.get("tag_colors", {}) or {},
+        "personal_score": raw.get("personal_score"),
+        "watch_status": raw.get("watch_status", "planned"),
         "review": raw.get("review", ""),
-        "visibility": raw.get("visibility", "public" if raw.get("shared") else "private"),
+        "visibility": raw.get("visibility", "private"),
     }
 
 
@@ -112,7 +109,7 @@ class ImportEntriesView(APIView):
     parser_classes = [LimitedImportJSONParser, MultiPartParser, FormParser]
     throttle_scope = "import"
 
-    def _read_records(self, request):
+    def _read_payload(self, request):
         if "file" in request.FILES:
             upload = request.FILES["file"]
             declared_size = getattr(upload, "size", None)
@@ -135,6 +132,9 @@ class ImportEntriesView(APIView):
                     reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
                     if not reader.fieldnames or len(reader.fieldnames) > settings.IMPORT_MAX_COLUMNS:
                         raise ValueError("CSV 表头字段数量不合法。")
+                    unknown_fields = set(reader.fieldnames) - CSV_IMPORT_FIELDS
+                    if unknown_fields:
+                        raise ValueError(f"CSV 包含不支持的字段：{', '.join(sorted(unknown_fields))}。")
                     records = []
                     for row_number, row in enumerate(reader, start=2):
                         if row_number - 1 > settings.IMPORT_MAX_RECORDS:
@@ -145,23 +145,29 @@ class ImportEntriesView(APIView):
                         records.append(row)
                 except csv.Error as error:
                     raise ValueError("CSV 文件格式不合法。") from error
+                payload_kind = "csv"
+                payload = records
             elif upload.name.lower().endswith(".json"):
                 try:
                     payload = json.loads(text)
                 except json.JSONDecodeError as error:
                     raise ValueError("JSON 文件格式不合法。") from error
-                records = extract_import_records(payload)
+                payload_kind = "bundle"
             else:
                 raise ValueError("仅支持 .json 或 .csv 导入文件。")
         else:
-            records = extract_import_records(request.data)
+            payload_kind = "bundle"
+            payload = request.data
+        if payload_kind == "bundle":
+            return payload_kind, payload
+        records = payload
         if not isinstance(records, list):
             raise ValueError("导入内容必须是记录数组。")
         if len(records) > settings.IMPORT_MAX_RECORDS:
             raise ValueError("导入文件最多允许 500 条记录。")
         for row_number, record in enumerate(records, start=1):
             _validate_import_record_limits(record, row_number)
-        return records
+        return payload_kind, records
 
     def _prepare(self, request, records):
         existing_keys = set()
@@ -205,13 +211,29 @@ class ImportEntriesView(APIView):
 
     def post(self, request):
         try:
-            records = self._read_records(request)
+            payload_kind, payload = self._read_payload(request)
         except (ValueError, UnicodeDecodeError, OSError, json.JSONDecodeError) as error:
             return Response({"detail": str(error) or "导入文件无法读取。"}, status=status.HTTP_400_BAD_REQUEST)
 
-        prepared = self._prepare(request, records)
-        preview_value = request.data.get("preview", "") if isinstance(request.data, dict) else ""
+        preview_value = request.query_params.get("preview", "")
+        if not preview_value and hasattr(request.data, "get"):
+            preview_value = request.data.get("preview", "")
         is_preview = str(preview_value).lower() in {"1", "true", "yes"}
+        if payload_kind == "bundle":
+            try:
+                result = (
+                    preview_data_bundle(user=request.user, payload=payload)
+                    if is_preview
+                    else import_data_bundle(user=request.user, payload=payload)
+                )
+            except DataBundleError as error:
+                response = {"code": error.code, "detail": error.detail}
+                if error.errors is not None:
+                    response["errors"] = error.errors
+                return Response(response, status=status.HTTP_400_BAD_REQUEST)
+            return Response(result, status=status.HTTP_200_OK if is_preview else status.HTTP_201_CREATED)
+
+        prepared = self._prepare(request, payload)
         if is_preview:
             return Response({key: value for key, value in prepared.items() if key != "ready_rows"})
 

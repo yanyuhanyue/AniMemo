@@ -23,19 +23,8 @@ export const FALLBACK_TAG_PRESETS = [
   ["魔法少女", "rose"], ["音乐", "slate"], ["悬疑", "slate"], ["职场", "slate"], ["游戏改", "slate"],
 ].map(([name, color], index) => ({ id: `fallback-${name}`, name, color, sort_order: (index + 1) * 10 }));
 
-const LEGACY_COLOR_KEYS = {
-  "#ff8fab": "pink",
-  "#4ecdc4": "cyan",
-  "#ff6b6b": "rose",
-  "#e0e7ff": "indigo",
-  "#cffafe": "cyan",
-  "#dbeafe": "blue",
-  "#ede9fe": "purple",
-};
-
 const COLOR_KEYS = new Set(TAG_COLOR_OPTIONS.map((option) => option.value));
 const FALLBACK_COLOR_MAP = Object.fromEntries(FALLBACK_TAG_PRESETS.map((preset) => [preset.name, preset.color]));
-const LEGACY_DEFAULT_COLOR = "#ffe66d";
 const GENERATED_COLOR_KEYS = TAG_COLOR_OPTIONS
   .map((option) => option.value)
   .filter((value) => value !== "slate");
@@ -67,22 +56,15 @@ export function generatedTagColorKey(tag) {
   return GENERATED_COLOR_KEYS[(hash >>> 0) % GENERATED_COLOR_KEYS.length];
 }
 
-export function isLegacyDefaultTagColor(value) {
-  return String(value || "").trim().toLowerCase() === LEGACY_DEFAULT_COLOR;
-}
-
 export function isCustomTagColor(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  return /^#[0-9a-f]{3,8}$/.test(normalized)
-    && !isLegacyDefaultTagColor(normalized)
-    && !LEGACY_COLOR_KEYS[normalized];
+  return /^#[0-9a-f]{3,8}$/.test(normalized);
 }
 
 export function tagColorKey(tag, value, presetColors = FALLBACK_COLOR_MAP) {
   if (COLOR_KEYS.has(value)) return value;
   const normalized = String(value || "").trim().toLowerCase();
-  const legacy = LEGACY_COLOR_KEYS[normalized];
-  return legacy || presetColors[tag] || FALLBACK_COLOR_MAP[tag] || generatedTagColorKey(tag);
+  return presetColors[tag] || FALLBACK_COLOR_MAP[tag] || generatedTagColorKey(tag);
 }
 
 export function resolveTagColors(tags, savedColors = {}, presetColors = FALLBACK_COLOR_MAP) {

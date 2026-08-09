@@ -35,9 +35,9 @@ class StatefulUpgradeFixtureTests(TestCase):
         report = verify_state(self.fixture_path)
 
         self.assertEqual(report["runtime"], fixture["base_plugin_version"])
-        self.assertEqual(first_report["external_media_identity"], "CREATED")
+        self.assertEqual(first_report["external_media_identity"], "PERSISTED")
         self.assertEqual(report["external_media_identity"], "PERSISTED")
-        self.assertEqual(first_report["external_account_connection"], "CREATED")
+        self.assertEqual(first_report["external_account_connection"], "PERSISTED")
         self.assertEqual(report["external_account_connection"], "PERSISTED")
         self.assertEqual(report["credential_encryption"], "PASS")
         self.assertFalse(get_user_model().objects.get(pk=fixture["user_id"]).is_staff)

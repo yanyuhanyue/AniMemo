@@ -29,6 +29,10 @@ OAuth code 的官方 TTL 为 60 秒；access token 响应记录 `expires_in`，�
 - `POST /api/external-accounts/{provider}/verify/`：重新验证；OAuth 临近到期时先刷新凭据。
 - `DELETE /api/external-accounts/{provider}/`：删除本地连接与密文。
 
+通用服务按职责拆分为 `connections.py`、`oauth.py`、`imports.py`、`matching.py` 与 `registry.py`。Registry 枚举 Provider 自报的 media search、账号连接、OAuth、PAT 与导入能力；通用代码不硬编码 Bangumi。OAuth 回调前端参数固定为 `external_account_provider` 与 `external_account_status`。
+
+平台策略使用 `EXTERNAL_ACCOUNT_OAUTH_STATE_TTL_SECONDS`、`EXTERNAL_IMPORT_PREVIEW_TTL_SECONDS`、`EXTERNAL_IMPORT_APPLY_MAX_ITEMS`；Bangumi client ID、secret、redirect、User-Agent 和更严格导入上限仍使用 Provider 前缀。`ExternalImportSession.snapshot_schema_version=1`，过期 OAuth state 与导入会话可由 `cleanup_external_account_sessions` 清理。
+
 Bangumi 当前官方契约中未发现 token revoke endpoint，因此断开时不会伪造撤销请求。用户可以在 Bangumi 侧管理或撤销授权。断开不会删除已经导入的手账条目、外部媒体身份、评分、评论或观看记录。
 
 ## 凭据安全

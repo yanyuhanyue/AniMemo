@@ -1,7 +1,9 @@
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.db.models import Count, Max
 from django.urls import reverse
 from plugin_host.models import PluginData, PluginProject, UserPluginInstallation
 from rest_framework import status
@@ -54,6 +56,9 @@ class ExternalMediaIdentityApiTests(APITestCase):
     def refresh_url(self, entry, provider="bangumi"):
         return reverse("entry-refresh-external-identity", kwargs={"pk": entry.pk, "provider": provider})
 
+    def source_url(self, entry, provider="bangumi"):
+        return reverse("entry-external-identity-metadata-source", kwargs={"pk": entry.pk, "provider": provider})
+
     def list_url(self, entry):
         return reverse("entry-external-identities", kwargs={"pk": entry.pk})
 
@@ -64,6 +69,7 @@ class ExternalMediaIdentityApiTests(APITestCase):
             external_id=external_id,
             canonical_url=f"https://bgm.tv/subject/{external_id}",
             metadata=metadata or subject(external_id),
+            is_metadata_source=True,
         )
 
     def test_create_entry_without_identity_remains_compatible(self):
@@ -83,6 +89,7 @@ class ExternalMediaIdentityApiTests(APITestCase):
         self.assertEqual(identity.provider, "bangumi")
         self.assertEqual(identity.external_id, "1424")
         self.assertEqual(identity.metadata["score"], 8.2)
+        self.assertTrue(identity.is_metadata_source)
         self.assertEqual(response.data["external_identities"][0]["external_id"], "1424")
 
     @patch("journal.external_media.providers.bangumi.BangumiProvider.fetch_subject")
@@ -313,6 +320,59 @@ class ExternalMediaIdentityApiTests(APITestCase):
         self.assertEqual(response.data["external_identities"][0]["metadata"]["title"], "轻音少女")
         fetch_subject.assert_not_called()
 
+    def test_non_source_refresh_only_updates_snapshot(self):
+        entry = JournalEntry.objects.create(user=self.user, title="用户标题", studio="本地公司")
+        self.create_identity(entry)
+        other = ExternalMediaIdentity.objects.create(
+            entry=entry,
+            provider="anilist",
+            external_id="7",
+            canonical_url="https://anilist.co/anime/7",
+            metadata=subject("7", studio="旧快照"),
+            is_metadata_source=False,
+        )
+        provider = SimpleNamespace(
+            slug="anilist",
+            refresh=lambda _identity: subject("7", studio="远端公司"),
+            canonical_url=lambda external_id: f"https://anilist.co/anime/{external_id}",
+        )
+        with patch("journal.external_media.services.get_provider", return_value=provider):
+            response = self.client.post(self.refresh_url(entry, "anilist"), {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data["applied_fields"], [])
+        entry.refresh_from_db()
+        other.refresh_from_db()
+        self.assertEqual(entry.studio, "本地公司")
+        self.assertEqual(other.metadata["studio"], "远端公司")
+
+    def test_source_switch_requires_explicit_apply_choice(self):
+        entry = JournalEntry.objects.create(user=self.user, title="来源切换", studio="本地公司")
+        bangumi = self.create_identity(entry)
+        anilist = ExternalMediaIdentity.objects.create(
+            entry=entry,
+            provider="anilist",
+            external_id="8",
+            canonical_url="https://anilist.co/anime/8",
+            metadata=subject("8", studio="新来源公司"),
+            is_metadata_source=False,
+        )
+        provider = SimpleNamespace(slug="anilist")
+        with patch("journal.external_media.services.get_provider", return_value=provider):
+            missing = self.client.post(self.source_url(entry, "anilist"), {}, format="json")
+            switched = self.client.post(
+                self.source_url(entry, "anilist"),
+                {"apply_metadata": True},
+                format="json",
+            )
+        self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(switched.status_code, status.HTTP_200_OK, switched.data)
+        bangumi.refresh_from_db()
+        anilist.refresh_from_db()
+        entry.refresh_from_db()
+        self.assertFalse(bangumi.is_metadata_source)
+        self.assertTrue(anilist.is_metadata_source)
+        self.assertEqual(entry.studio, "新来源公司")
+
     def test_unbound_entry_get_works_when_provider_is_unavailable(self):
         entry = JournalEntry.objects.create(user=self.user, title="离线可读")
         with patch("journal.external_media.providers.bangumi.BangumiProvider.fetch_subject", side_effect=provider_timeout()):
@@ -324,7 +384,10 @@ class ExternalMediaIdentityApiTests(APITestCase):
         for index in range(3):
             entry = JournalEntry.objects.create(user=self.user, title=f"记录 {index}")
             self.create_identity(entry, external_id=str(100 + index), metadata=subject(str(100 + index)))
-        queryset = JournalEntry.objects.filter(user=self.user).prefetch_related("external_identities")
+        queryset = JournalEntry.objects.filter(user=self.user).annotate(
+            watch_history_count=Count("watch_history_records", distinct=True),
+            last_watched_on=Max("watch_history_records__watched_on"),
+        ).prefetch_related("external_identities")
         with self.assertNumQueries(2):
             data = JournalEntrySerializer(queryset, many=True).data
         self.assertEqual(len(data), 3)

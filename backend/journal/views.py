@@ -1,4 +1,3 @@
-from .bangumi_views import BangumiAutofillView, BangumiSearchView
 from .entry_views import (
     ColumnViewSet,
     JournalEntryViewSet,
@@ -8,6 +7,7 @@ from .entry_views import (
     UserSettingsView,
 )
 from .import_export_views import ExportEntriesView, ImportEntriesView
+from .analytics.views import MyStatsView
 from .public_views import (
     FeaturedColumnsView,
     PublicCatalogSearchView,
@@ -21,7 +21,6 @@ from .public_views import (
     TagPresetListView,
 )
 from .staff_dashboard_views import (
-    MyStatsView,
     StaffColumnReviewView,
     StaffDashboardView,
     StaffPublicJournalReviewView,
@@ -29,8 +28,6 @@ from .staff_dashboard_views import (
 )
 
 __all__ = [
-    "BangumiAutofillView",
-    "BangumiSearchView",
     "ColumnViewSet",
     "ExportEntriesView",
     "FeaturedColumnsView",

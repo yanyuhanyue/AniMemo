@@ -28,9 +28,17 @@ class PluginContext:
 
     def __post_init__(self):
         from integrations.plugin_sdk import PluginIntegrations
+        from .capabilities import (
+            PluginAnalyticsCapability,
+            PluginJournalCapability,
+            PluginWatchHistoryCapability,
+        )
 
         self.api = PluginApi(self.slug, self.manifest)
         self.integrations = PluginIntegrations(self.slug, self.manifest, self.runtime_id)
+        self.journal = PluginJournalCapability(self.slug)
+        self.watch_history = PluginWatchHistoryCapability(self.slug)
+        self.analytics = PluginAnalyticsCapability(self.slug)
 
     @property
     def hook_owner(self):

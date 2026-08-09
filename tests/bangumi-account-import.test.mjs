@@ -67,7 +67,9 @@ test("import dialog supports preview filters, modes, conflicts, pagination, and 
 });
 
 test("OAuth callback query is consumed and removed without browser credential storage", () => {
-  assert.match(dashboard, /params\.get\("bangumi"\)/);
+  assert.match(dashboard, /params\.get\("external_account_status"\)/);
+  assert.match(dashboard, /params\.get\("external_account_provider"\)/);
+  assert.doesNotMatch(dashboard, /params\.get\("bangumi"\)/);
   assert.match(dashboard, /history\.replaceState/);
   assert.doesNotMatch(dashboard, /bangumi.*localStorage|localStorage.*bangumi/i);
 });

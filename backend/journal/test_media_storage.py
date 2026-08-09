@@ -30,7 +30,7 @@ from site_config.media_storage.common import MediaStorageExhausted, MediaStorage
 from site_config.media_storage.local import DynamicLocalBackend
 from site_config.media_storage.pool import StoragePoolService
 from site_config.media_storage.r2 import DynamicR2Backend
-from site_config.media_storage.usage import effective_account_usage, effective_r2_usage, fetch_cloudflare_usage, managed_usage_bytes
+from site_config.media_storage.usage import effective_account_usage, effective_storage_usage, fetch_cloudflare_usage, managed_usage_bytes
 from site_config.models import CloudflareR2Account, MediaObject, MediaStorageBackend, MediaStoragePoolSettings
 from site_config.storage_units import BINARY_GIB_BYTES, DECIMAL_GB_BYTES
 from .models import JournalEntry
@@ -500,13 +500,13 @@ class StoragePoolSelectionTests(TestCase):
         backend = r2_backend("managed-r2", 10, used=880, warning=800, limit=900)
         media = MediaObject.objects.create(storage_backend=backend, object_key="managed/one.webp", size_bytes=910)
         self.assertEqual(managed_usage_bytes(backend), 910)
-        self.assertEqual(effective_r2_usage(backend), 910)
+        self.assertEqual(effective_storage_usage(backend), 910)
         self.assertEqual(StoragePoolService.state_for(backend).status, "WRITE_BLOCKED")
         media.size_bytes = 850
         media.save(update_fields=["size_bytes"])
         backend.usage_payload_bytes = 0
         backend.save(update_fields=["usage_payload_bytes", "updated_at"])
-        self.assertEqual(effective_r2_usage(backend), 850)
+        self.assertEqual(effective_storage_usage(backend), 850)
         self.assertEqual(StoragePoolService.state_for(backend).status, "WARNING")
 
 

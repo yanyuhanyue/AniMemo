@@ -11,6 +11,7 @@ from zipfile import ZipFile
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from packaging.version import Version
 
 from .models import PluginDeployment, PluginVersion
 from .package import LocalPluginPackageStorage, PluginPackageError, inspect_package
@@ -118,6 +119,15 @@ class PluginPackageInstaller:
                 runtime_registry.ensure_current(slug)
 
             payload, inspected = self._payload_for(plugin_version)
+            declared_floor = str((inspected["manifest"].get("dataCompatibility") or {}).get("rollbackFloor") or "")
+            current_floor = deployment.rollback_floor if deployment else ""
+            effective_floor = max(
+                (value for value in (current_floor, declared_floor) if value),
+                key=Version,
+                default="",
+            )
+            if effective_floor and Version(version) < Version(effective_floor):
+                raise PluginInstallError(f"版本 {version} 低于数据兼容下限 {effective_floor}，不能发布。")
             expanded_bytes = sum(item["size"] for item in inspected["files"])
             # Publish keeps both the extracted staging tree and a temporary
             # runtime tree before the atomic replacement, so reserve 2x the
@@ -168,6 +178,7 @@ class PluginPackageInstaller:
                         locked.last_error = ""
                         locked.updated_by = actor
                         locked.disk_bytes = sum(path.stat().st_size for path in runtime_target.rglob("*") if path.is_file())
+                        locked.rollback_floor = effective_floor
                         locked.save()
                         locked_version.published_at = timezone.now()
                         locked_version.save(update_fields=["published_at"])
@@ -213,6 +224,10 @@ class PluginPackageInstaller:
             target_version = deployment.previous_version
             if target_version.revoked_at:
                 raise PluginInstallError("上一版本已撤销，不能回滚。")
+            if deployment.rollback_floor and Version(target_version.version) < Version(deployment.rollback_floor):
+                raise PluginInstallError(
+                    f"目标版本 {target_version.version} 低于数据兼容下限 {deployment.rollback_floor}，不能回滚。"
+                )
             if deployment.enabled and deployment.healthy:
                 runtime_registry.ensure_current(slug)
             runtime_target = self.storage.runtime / slug / target_version.version

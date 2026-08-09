@@ -9,6 +9,7 @@ export const STATUS_OPTIONS = [
   ["watching", "在看"],
   ["completed", "看过"],
   ["on_hold", "搁置"],
+  ["dropped", "弃番"],
 ];
 
 export const SORT_OPTIONS = [
@@ -28,19 +29,6 @@ export const DEFAULT_QUICK_FILTERS = [
   { id: "healing", name: "原创 & 治愈", tags: ["原创", "治愈"] },
   { id: "extras", name: "剧场版 & OVA & 泡面番", tags: ["剧场版", "OVA", "泡面番"] },
 ];
-
-export function upgradeLegacyDemoRecords(records) {
-  if (!Array.isArray(records)) return records;
-  return records.map((record) => {
-    const upgraded = record?.title === "《超时空辉夜姬！》" && record?.studio === "Studio Colorido"
-      ? { ...record, studio: "Studio Colorido、STUDIO CHROMATO" }
-      : record;
-    return {
-      ...upgraded,
-      tagColors: resolveTagColors(upgraded.tags || [], upgraded.tagColors || upgraded.tag_colors || {}),
-    };
-  });
-}
 
 export const blankRecord = () => ({
   id: `local-${Date.now()}`,
@@ -73,7 +61,7 @@ export function apiToRecord(item, presetColors) {
     episodes: item.episodes || "待定",
     score: item.personal_score === null ? null : Number(item.personal_score),
     status: item.watch_status,
-    statusLabel: item.watch_status_display || { completed: "看过", watching: "在看", planned: "想看", on_hold: "搁置" }[item.watch_status],
+    statusLabel: item.watch_status_display || { completed: "看过", watching: "在看", planned: "想看", on_hold: "搁置", dropped: "弃番" }[item.watch_status],
     tags: item.tags || [],
     tagColors: resolveTagColors(item.tags || [], item.tag_colors || {}, presetColors),
     poster: item.poster || item.poster_url || "/assets/posters/poster-01.webp",
@@ -84,7 +72,9 @@ export function apiToRecord(item, presetColors) {
     description: item.description || "",
     review: item.review || "",
     baikeUrl: item.baike_url || "https://mzh.moegirl.org.cn/",
-    watchHistory: item.watch_history || [],
+    watchHistory: [],
+    watchHistoryCount: Number(item.watch_history_count || 0),
+    lastWatchedOn: item.last_watched_on || null,
     shared: item.visibility !== "private",
     externalIdentities: Array.isArray(item.external_identities) ? item.external_identities : [],
     updatedAt: item.updated_at,
@@ -92,7 +82,6 @@ export function apiToRecord(item, presetColors) {
 }
 
 export function recordToApi(record) {
-  const legacyPosterUrl = !record.posterUrl && !record.customPosterUrl && /^https?:\/\//i.test(String(record.poster || "")) ? record.poster : "";
   const payload = {
     title: record.title,
     japanese_title: record.japaneseTitle,
@@ -103,13 +92,12 @@ export function recordToApi(record) {
     watch_status: record.status,
     tags: record.tags,
     tag_colors: record.tagColors || {},
-    poster_url: record.posterUrl || legacyPosterUrl,
+    poster_url: record.posterUrl || "",
     custom_poster_url: record.customPosterUrl || "",
     clear_custom_poster: Boolean(record.clearCustomPoster),
     description: record.description,
     review: record.review,
     baike_url: record.baikeUrl,
-    watch_history: record.watchHistory || [],
     visibility: record.shared ? "public" : "private",
   };
   if (record.externalIdentity) payload.external_identity = record.externalIdentity;
@@ -132,33 +120,33 @@ export function parseLocalImportRecords(raw, presetColors) {
   return raw.map((item) => {
     if (!item || typeof item !== "object") return null;
     const tags = Array.isArray(item.tags) ? item.tags : String(item.tags || "").split(/[，,]/).map((tag) => tag.trim()).filter(Boolean);
-    const status = item.status || item.watch_status || "planned";
-    const statusLabels = { completed: "看过", watching: "在看", planned: "想看", on_hold: "搁置" };
-    const posterUrl = item.posterUrl || item.poster_url || (/^https?:\/\//i.test(String(item.poster || "")) ? item.poster : "");
-    const customPosterUrl = item.customPosterUrl || item.custom_poster_url || "";
+    const status = item.watch_status || "planned";
+    const statusLabels = { completed: "看过", watching: "在看", planned: "想看", on_hold: "搁置", dropped: "弃番" };
+    const posterUrl = item.poster_url || "";
+    const customPosterUrl = item.custom_poster_url || "";
     return {
       id: `local-import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       title: item.title || "",
-      japaneseTitle: item.japaneseTitle || item.japanese_title || "",
-      period: item.period || item.airing_period || "未定档",
+      japaneseTitle: item.japanese_title || "",
+      period: item.airing_period || "未定档",
       studio: item.studio || "待补充",
       episodes: item.episodes || "待定",
-      score: item.score ?? item.personal_score ?? null,
+      score: item.personal_score ?? null,
       status,
-      statusLabel: item.statusLabel || item.watch_status_display || statusLabels[status] || "想看",
+      statusLabel: statusLabels[status] || "想看",
       tags,
-      tagColors: resolveTagColors(tags, item.tagColors || item.tag_colors || {}, presetColors),
-      poster: item.poster || posterUrl || customPosterUrl || "/assets/posters/poster-01.webp",
+      tagColors: resolveTagColors(tags, item.tag_colors || {}, presetColors),
+      poster: customPosterUrl || posterUrl || "/assets/posters/poster-01.webp",
       posterUrl,
       customPosterUrl,
-      posterSource: item.posterSource || item.poster_source || (customPosterUrl ? "trusted_url" : posterUrl ? "default_url" : "none"),
+      posterSource: customPosterUrl ? "trusted_url" : posterUrl ? "default_url" : "none",
       clearCustomPoster: false,
       description: item.description || "",
       review: item.review || "",
-      baikeUrl: item.baikeUrl || item.baike_url || "https://mzh.moegirl.org.cn/",
-      watchHistory: item.watchHistory || item.watch_history || [],
-      shared: item.shared ?? item.visibility === "public",
-      externalIdentities: Array.isArray(item.externalIdentities || item.external_identities) ? (item.externalIdentities || item.external_identities) : [],
+      baikeUrl: item.baike_url || "",
+      watchHistory: item.watch_history || [],
+      shared: item.visibility === "public",
+      externalIdentities: Array.isArray(item.external_identities) ? item.external_identities : [],
     };
   });
 }

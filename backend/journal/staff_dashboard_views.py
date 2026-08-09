@@ -1,9 +1,7 @@
-from datetime import date
-
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import Avg, Count
+from django.db.models import Count
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
@@ -20,8 +18,8 @@ from .staff_services import (
     StaffCapabilityPermission,
     assert_can_manage_user,
     ensure_not_last_active_superuser,
-    get_staff_role,
     record_audit,
+    resolve_staff_role,
     revoke_user_sessions,
     staff_capabilities,
 )
@@ -29,22 +27,6 @@ from .view_helpers import _validation_detail, build_staff_user_data
 
 
 User = get_user_model()
-
-
-class MyStatsView(APIView):
-    def get(self, request):
-        queryset = JournalEntry.objects.filter(user=request.user, deleted_at__isnull=True)
-        base = queryset.aggregate(total=Count("id"), average=Avg("personal_score"))
-        by_status = {row["watch_status"]: row["count"] for row in queryset.values("watch_status").annotate(count=Count("id"))}
-        return Response({
-            "total": base["total"],
-            "average": round(base["average"] or 0, 2),
-            "completed": by_status.get(JournalEntry.WatchStatus.COMPLETED, 0),
-            "watching": by_status.get(JournalEntry.WatchStatus.WATCHING, 0),
-            "planned": by_status.get(JournalEntry.WatchStatus.PLANNED, 0),
-            "shared": queryset.exclude(visibility=JournalEntry.Visibility.PRIVATE).count(),
-            "generated_on": date.today(),
-        })
 
 
 class StaffDashboardView(APIView):
@@ -129,7 +111,7 @@ class StaffDashboardView(APIView):
             "viewer": {
                 "id": request.user.id,
                 "is_superuser": request.user.is_superuser,
-                "role": get_staff_role(request.user),
+                "role": resolve_staff_role(request.user),
                 "capabilities": staff_capabilities(request.user),
             },
         })

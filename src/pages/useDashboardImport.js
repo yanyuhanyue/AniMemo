@@ -58,7 +58,14 @@ export function useDashboardImport({ isDemo, presetColors, records, setRecords, 
         });
       } else {
         const parsed = JSON.parse(text);
-        payload = Array.isArray(parsed) ? parsed : parsed.records;
+        if (parsed?.format !== "animemo-data-bundle" || parsed?.schema_version !== 1 || !Array.isArray(parsed.entries)) {
+          throw new Error("unsupported_import_schema");
+        }
+        payload = parsed.entries.map((item) => ({
+          ...(item?.entry || {}),
+          watch_history: item?.watch_history || [],
+          external_identities: item?.external_identities || [],
+        }));
       }
       const imported = parseLocalImportRecords(payload, presetColors);
       const existingKeys = new Set(records.flatMap(importIdentityValues));
