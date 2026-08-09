@@ -99,6 +99,15 @@ def check(input_path: Path = INPUT, lock_path: Path = LOCK) -> int:
             actual = normalized_lock(generated)
             if actual != expected:
                 print("依赖锁文件与 requirements.in 重新解析结果不一致。")
+                expected_entries = pinned_names(lock_path)
+                actual_entries = pinned_names(generated)
+                for name in sorted(set(expected_entries) - set(actual_entries)):
+                    print(f"- 锁文件包含但重新解析结果缺少：{expected_entries[name]}")
+                for name in sorted(set(actual_entries) - set(expected_entries)):
+                    print(f"- 重新解析结果新增：{actual_entries[name]}")
+                for name in sorted(set(expected_entries) & set(actual_entries)):
+                    if expected_entries[name] != actual_entries[name]:
+                        print(f"- 条目不一致：{expected_entries[name]} != {actual_entries[name]}")
                 print("请运行：python scripts/update_dependencies.py")
                 return 1
     except (OSError, subprocess.CalledProcessError) as error:
