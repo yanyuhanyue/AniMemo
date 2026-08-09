@@ -150,6 +150,25 @@ class CoreWatchHistoryTests(TestCase):
         self.assertIsNone(second.data["next_page"])
         self.assertEqual(len(second.data["results"]), 1)
 
+    def test_history_collection_is_newest_first_across_pages(self):
+        for index, watched_on in enumerate(("2026-08-07", "2026-08-08", "2026-08-09"), start=1):
+            add_history(
+                user=self.user,
+                entry=self.entry,
+                record=record_payload(
+                    watched_on=watched_on,
+                    watched_label=watched_on,
+                    episode_start=index,
+                    episode_end=index,
+                ),
+            )
+
+        first = self.client.get(self.collection_url(), {"page_size": 2})
+        second = self.client.get(self.collection_url(), {"page_size": 2, "page": 2})
+
+        self.assertEqual([row["watched_on"] for row in first.data["results"]], ["2026-08-09", "2026-08-08"])
+        self.assertEqual([row["watched_on"] for row in second.data["results"]], ["2026-08-07"])
+
     def test_entry_detail_does_not_reveal_another_users_private_entry(self):
         foreign = JournalEntry.objects.create(user=self.other, title="Private deep link")
 

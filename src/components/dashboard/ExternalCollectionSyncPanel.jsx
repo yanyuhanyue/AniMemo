@@ -144,6 +144,7 @@ export function ExternalCollectionSyncPanel({ entryId, identityId, onEntryRefres
   };
 
   const actions = useMemo(() => Object.entries(selected).map(([field, action]) => ({ field, action })), [selected]);
+  const hasPendingFields = Boolean(preview?.fields?.some((field) => field.state !== "in_sync"));
 
   const applySelection = async () => {
     if (!preview?.preview_token || !actions.length || applying) return;
@@ -214,7 +215,7 @@ export function ExternalCollectionSyncPanel({ entryId, identityId, onEntryRefres
         <p className="external-sync-panel__warning"><Icon name="shield" /> Pull-only：不会写入 Bangumi；拉取时只更新 AniMemo 的观看状态、评分或评价。</p>
         {loading && !preview ? <div className="external-sync-panel__loading" role="status"><Icon name="spinner" spin /> 正在读取 Bangumi 收藏...</div> : null}
         {preview?.remote_collection_missing && <p className="external-sync-panel__missing" role="status">Bangumi 尚未收藏此条目，当前阶段无法拉取。</p>}
-        {preview && <>
+        {preview && !preview.remote_collection_missing && !hasPendingFields ? <div className="external-sync-panel__empty" role="status"><Icon name="circle-check" /><strong>当前没有需要处理的差异</strong><small>AniMemo 与 Bangumi 的收藏字段已经一致。</small></div> : preview && <>
           <div className="external-sync-panel__meta"><span>最近确认：{dateTimeLabel(preview.last_synced_at)}</span><button type="button" onClick={() => refreshPreview()} disabled={loading || applying} title="刷新比较"><Icon name={loading ? "spinner" : "reset"} spin={loading} /> 刷新比较</button></div>
           <div className="external-sync-fields">
             {(preview.fields || []).map((field) => <SyncField key={field.field} field={field} selected={selected[field.field] || ""} disabled={loading || applying} onSelect={(action) => updateSelection(field.field, action)} />)}

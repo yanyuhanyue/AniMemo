@@ -43,7 +43,13 @@ class WatchHistoryCollectionView(APIView):
         page = _positive_int(request.query_params.get("page"), 1)
         page_size = min(_positive_int(request.query_params.get("page_size"), DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
         offset = (page - 1) * page_size
-        records = list_history(user=request.user, entry=entry, offset=offset, limit=page_size + 1)
+        records = list_history(
+            user=request.user,
+            entry=entry,
+            offset=offset,
+            limit=page_size + 1,
+            newest_first=True,
+        )
         has_more = len(records) > page_size
         visible = records[:page_size]
         total = entry.watch_history_records.count() if has_more or page > 1 else offset + len(visible)
