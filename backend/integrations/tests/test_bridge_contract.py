@@ -1,8 +1,8 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
-import httpx
 from django.test import SimpleTestCase
 
 from integrations.authentication import canonical_hmac_input, sign_hmac_request
@@ -37,16 +37,19 @@ class AstrBotBridgeSigningContractTests(SimpleTestCase):
                     ),
                 )
 
-    def test_bridge_uses_final_httpx_query_and_exact_json_bytes(self):
+    def test_bridge_uses_final_encoded_query_and_exact_json_bytes(self):
         body = bridge_signing.canonical_json_bytes({"query": "\u8299\u8389\u83b2", "limit": 2})
         self.assertEqual(body, json.dumps({"query": "\u8299\u8389\u83b2", "limit": 2}, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8"))
-        request = httpx.Request(
-            "GET",
-            "https://example.test/api/integrations/v1/events/",
-            params={"after": 7, "query": "\u8299 \u8389\u83b2"},
+        request = SimpleNamespace(
+            url=SimpleNamespace(
+                raw_path=b"/api/integrations/v1/events/?after=7&query=%E8%8A%99+%E8%8E%89%E8%8E%B2"
+            )
         )
         path = bridge_signing.request_path_with_query(request)
-        self.assertEqual(path, request.url.raw_path.decode("ascii"))
+        self.assertEqual(
+            path,
+            "/api/integrations/v1/events/?after=7&query=%E8%8A%99+%E8%8E%89%E8%8E%B2",
+        )
         self.assertEqual(
             sign_hmac_request("contract-secret", "1700000000", "contract-nonce", "GET", path, b""),
             bridge_signing.sign_hmac_request(
