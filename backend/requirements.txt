@@ -117,7 +117,7 @@ typing-extensions==4.16.0
     #   dj-database-url
     #   psycopg
     #   referencing
-tzdata==2026.3
+tzdata==2026.3 ; sys_platform == "win32"
     # via
     #   django
     #   psycopg

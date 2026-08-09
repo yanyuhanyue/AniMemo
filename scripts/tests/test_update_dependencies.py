@@ -51,3 +51,12 @@ class DependencyLockTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(update_dependencies.normalized_lock(first), update_dependencies.normalized_lock(second))
+
+    def test_lock_comparison_accepts_active_platform_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marked = root / "marked.txt"
+            unmarked = root / "unmarked.txt"
+            marked.write_text('tzdata==2026.3 ; sys_platform == "win32"\n', encoding="utf-8")
+            unmarked.write_text("tzdata==2026.3\n", encoding="utf-8")
+            self.assertEqual(update_dependencies.normalized_lock(marked), update_dependencies.normalized_lock(unmarked))

@@ -50,10 +50,15 @@ def compile_lock(input_path: Path, output_path: Path, *, upgrade: bool) -> None:
 
 
 def normalized_lock(path: Path) -> str:
-    """Compare pinned requirement entries, independent of pip-compile comments and paths."""
-    entries = pinned_names(path)
+    """Compare active pinned requirements, independent of comments and platform markers."""
+    entries = {}
+    for name, line in pinned_names(path).items():
+        requirement = Requirement(line)
+        if requirement.marker is not None and not requirement.marker.evaluate():
+            continue
+        entries[name] = f"{name}{requirement.specifier}"
     return "\n".join(
-        f"{name} {re.sub(r'\\s+', ' ', line).strip()}"
+        f"{name} {line}"
         for name, line in sorted(entries.items())
     ) + "\n"
 
