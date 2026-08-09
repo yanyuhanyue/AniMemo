@@ -298,15 +298,6 @@ export const animeRecords = [
   },
 ];
 
-export function upgradeLegacyDemoRecords(records) {
-  if (!Array.isArray(records)) return records;
-  return records.map((record) => (
-    record?.title === "《超时空辉夜姬！》" && record?.studio === "Studio Colorido"
-      ? { ...record, studio: "Studio Colorido、STUDIO CHROMATO" }
-      : record
-  ));
-}
-
 const hasOvaMarker = (record) => /(^|\s|《)OVA($|\s|》)/i.test(`${record.title || ""} ${record.japaneseTitle || ""}`)
   || record.tags?.some((tag) => tag.toUpperCase() === "OVA");
 

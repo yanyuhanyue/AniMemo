@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+
+- 保留 TXT/文档解析、编码探测、Bangumi 候选解析、批次预览与确认流程在 importer 插件内。
+- 将标准化后的观看记录交给 AniMemo Core `WatchHistoryService` 持久化，不再读写 `PluginData/watch_history`。
+- 通过绑定请求或 Integration 当前用户的 Host capability 访问 Core 条目与观看记录，不再直接导入 Core ORM。
+- 声明 `0.4.0` 数据兼容回滚下限，阻止回滚后重新产生第二份观看记录数据源。
+
 ## 0.3.3
 
 - 删除 provider-specific 接口，官方插件仅依赖 Integration Protocol v1。

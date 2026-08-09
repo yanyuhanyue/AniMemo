@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 
 const page = readFileSync(new URL("../src/pages/PluginPlatformPage.jsx", import.meta.url), "utf8");
 const admin = readFileSync(new URL("../src/components/admin/PluginManagementPanel.jsx", import.meta.url), "utf8");
-const routes = readFileSync(new URL("../backend/journal/urls.py", import.meta.url), "utf8");
+const routes = readFileSync(new URL("../backend/plugin_host/urls.py", import.meta.url), "utf8");
 
 test("plugin platform exposes Marketplace, Installed and My Plugins workflows", () => {
   assert.match(page, /插件市场/);

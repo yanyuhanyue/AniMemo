@@ -179,6 +179,7 @@ class PluginDeployment(models.Model):
     system_config = models.JSONField(default=dict, blank=True)
     last_error = models.TextField(blank=True, default="")
     disk_bytes = models.PositiveBigIntegerField(default=0)
+    rollback_floor = models.CharField(max_length=40, blank=True, default="")
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
 

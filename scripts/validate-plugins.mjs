@@ -69,6 +69,19 @@ function validateManifest(directory, manifest, { enforceDirectoryName = true } =
   }
   const policy = manifest.dataPolicy;
   for (const key of ["storesPersonalData", "usesExternalNetwork", "acceptsFileUploads", "retainsDataOnDisable"]) requireValue(typeof policy?.[key] === "boolean", `dataPolicy.${key} 必须是布尔值`, errors);
+  if (manifest.dataCompatibility !== undefined) {
+    requireValue(
+      manifest.dataCompatibility && typeof manifest.dataCompatibility === "object" && !Array.isArray(manifest.dataCompatibility),
+      "dataCompatibility 必须是对象",
+      errors,
+    );
+    requireValue(
+      Object.keys(manifest.dataCompatibility || {}).length === 1 && Object.hasOwn(manifest.dataCompatibility || {}, "rollbackFloor"),
+      "dataCompatibility 必须只声明 rollbackFloor",
+      errors,
+    );
+    requireValue(semverPattern.test(manifest.dataCompatibility?.rollbackFloor || ""), "dataCompatibility.rollbackFloor 必须符合 SemVer", errors);
+  }
   return errors;
 }
 

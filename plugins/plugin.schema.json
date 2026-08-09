@@ -93,6 +93,10 @@
         "storesPersonalData": { "type": "boolean" }, "usesExternalNetwork": { "type": "boolean" },
         "acceptsFileUploads": { "type": "boolean" }, "retainsDataOnDisable": { "type": "boolean" }
       }
+    },
+    "dataCompatibility": {
+      "type": "object", "additionalProperties": false, "required": ["rollbackFloor"],
+      "properties": { "rollbackFloor": { "$ref": "#/$defs/semver" } }
     }
   },
   "allOf": [

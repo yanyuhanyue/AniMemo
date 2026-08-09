@@ -2,8 +2,6 @@ import json
 
 from django.conf import settings
 from django.db import transaction
-from plugin_host.models import PluginData
-from plugin_host.permissions import enabled_user_plugin
 from rest_framework import serializers
 from site_config.media_storage.storage import (
     cleanup_uncommitted_media_reference,
@@ -18,19 +16,6 @@ from .external_media.services import (
 from .image_security import delete_replaced_file, sanitize_uploaded_image
 from .models import ExternalMediaIdentity, JournalEntry
 from .poster_security import PosterUrlValidationError, validate_poster_url
-
-WATCH_HISTORY_PLUGIN_SLUG = "watch-history-importer"
-
-
-def _watch_history_project(user):
-    return enabled_user_plugin(WATCH_HISTORY_PLUGIN_SLUG, user)
-
-
-from .watch_history import (
-    WatchHistoryValidationError,
-    normalize_watch_history_records,
-    preserve_watch_history_metadata,
-)
 
 
 def _validate_poster_url(value):
@@ -58,9 +43,35 @@ class ExternalMediaIdentitySerializer(serializers.ModelSerializer):
         model = ExternalMediaIdentity
         fields = [
             "id", "provider", "external_id", "canonical_url", "metadata",
-            "metadata_fetched_at", "provider_updated_at", "created_at", "updated_at",
+            "metadata_schema_version", "is_metadata_source", "metadata_fetched_at",
+            "provider_updated_at", "created_at", "updated_at",
         ]
         read_only_fields = fields
+
+
+class ExternalMediaIdentitySummarySerializer(serializers.ModelSerializer):
+    provider_title = serializers.SerializerMethodField()
+    provider_score = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ExternalMediaIdentity
+        fields = [
+            "id",
+            "provider",
+            "external_id",
+            "canonical_url",
+            "is_metadata_source",
+            "metadata_fetched_at",
+            "provider_title",
+            "provider_score",
+        ]
+        read_only_fields = fields
+
+    def get_provider_title(self, obj):
+        return str(obj.metadata.get("title") or "") if isinstance(obj.metadata, dict) else ""
+
+    def get_provider_score(self, obj):
+        return obj.metadata.get("score") if isinstance(obj.metadata, dict) else None
 
 
 class JournalEntrySerializer(serializers.ModelSerializer):
@@ -69,9 +80,10 @@ class JournalEntrySerializer(serializers.ModelSerializer):
     poster_source = serializers.SerializerMethodField(read_only=True)
     clear_custom_poster = serializers.BooleanField(write_only=True, required=False, default=False)
     share_url = serializers.SerializerMethodField(read_only=True)
-    watch_history = serializers.JSONField(required=False, write_only=True)
+    watch_history_count = serializers.SerializerMethodField()
+    last_watched_on = serializers.SerializerMethodField()
     external_identity = ExternalIdentityInputField(required=False, write_only=True, allow_null=True)
-    external_identities = ExternalMediaIdentitySerializer(many=True, read_only=True)
+    external_identities = serializers.SerializerMethodField()
 
     class Meta:
         model = JournalEntry
@@ -80,7 +92,7 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             "description", "poster_url", "custom_poster_url", "poster_file", "poster", "poster_source",
             "clear_custom_poster", "baike_url", "tags",
             "tag_colors", "personal_score", "watch_status", "watch_status_display", "review",
-            "visibility", "share_slug", "share_url", "watch_history", "external_identity",
+            "visibility", "share_slug", "share_url", "watch_history_count", "last_watched_on", "external_identity",
             "external_identities", "created_at", "updated_at",
         ]
         read_only_fields = ["share_slug", "created_at", "updated_at"]
@@ -104,21 +116,6 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"external_identity": "provider 和 external_id 均为必填项。"})
         self._prepared_external_identity = prepare_identity(provider, external_id)
         return attrs
-
-    def to_representation(self, instance):
-        representation = super().to_representation(instance)
-        representation["watch_history"] = self.get_watch_history(instance)
-        return representation
-
-    def validate_watch_history(self, value):
-        request = self.context.get("request")
-        user = getattr(request, "user", None)
-        if _watch_history_project(user) is None:
-            raise serializers.ValidationError("请先安装并启用观看记录导入插件。")
-        try:
-            return normalize_watch_history_records(value)
-        except WatchHistoryValidationError as error:
-            raise serializers.ValidationError(error.detail) from error
 
     def validate_poster_url(self, value):
         return _validate_poster_url(value)
@@ -169,52 +166,29 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             return "trusted_url"
         return "default_url" if obj.poster_url else "none"
 
-    def get_watch_history(self, obj):
-        cache_key = "_journal_watch_history_by_entry"
-        history_by_entry = self.context.get(cache_key)
-        if history_by_entry is None:
-            history_by_entry = {}
-            request_user = getattr(self.context.get("request"), "user", None)
-            if getattr(request_user, "pk", None) == obj.user_id:
-                plugin = _watch_history_project(request_user)
-                if plugin is not None:
-                    rows = PluginData.objects.filter(
-                        plugin=plugin,
-                        namespace="watch_history",
-                        user=obj.user,
-                        key=str(obj.pk),
-                    ).values_list("key", "value")
-                    for key, value in rows:
-                        history_by_entry[int(key)] = value if isinstance(value, list) else []
-            self.context[cache_key] = history_by_entry
-        return history_by_entry.get(obj.pk, [])
+    def get_watch_history_count(self, obj):
+        annotated = getattr(obj, "watch_history_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.watch_history_records.count()
 
-    def _sync_watch_history(self, entry, history_data):
-        if history_data is serializers.empty:
-            return
-        plugin = _watch_history_project(entry.user)
-        if plugin is None:
-            raise serializers.ValidationError({"watch_history": "请先安装并启用观看记录导入插件。"})
-        row = PluginData.objects.filter(
-            plugin=plugin,
-            namespace="watch_history",
-            user=entry.user,
-            key=str(entry.pk),
-        ).first()
-        existing = row.value if row is not None and isinstance(row.value, list) else []
-        normalized = preserve_watch_history_metadata(existing, history_data)
-        if normalized:
-            if row is None:
-                PluginData.objects.create(plugin=plugin, namespace="watch_history", user=entry.user, key=str(entry.pk), value=normalized)
-            else:
-                row.value = normalized
-                row.save(update_fields=["value", "updated_at"])
-        elif row is not None:
-            row.delete()
-        self.context.pop("_journal_watch_history_by_entry", None)
+    def get_last_watched_on(self, obj):
+        if hasattr(obj, "last_watched_on"):
+            return obj.last_watched_on
+        latest = obj.watch_history_records.order_by("-watched_on", "-sequence").values_list("watched_on", flat=True).first()
+        return latest
+
+    def get_external_identities(self, obj):
+        request = self.context.get("request")
+        view = self.context.get("view")
+        serializer = (
+            ExternalMediaIdentitySerializer
+            if getattr(view, "action", "") == "retrieve"
+            else ExternalMediaIdentitySummarySerializer
+        )
+        return serializer(obj.external_identities.all(), many=True, context={"request": request}).data
 
     def create(self, validated_data):
-        history_data = validated_data.pop("watch_history", serializers.empty)
         validated_data.pop("clear_custom_poster", None)
         if validated_data.get("poster_file"):
             validated_data["custom_poster_url"] = ""
@@ -226,7 +200,6 @@ class JournalEntrySerializer(serializers.ModelSerializer):
                 instance.save()
                 if self._prepared_external_identity is not None:
                     create_prepared_identity(instance, self._prepared_external_identity)
-                self._sync_watch_history(instance, history_data)
         except Exception:
             cleanup_uncommitted_media_reference(getattr(instance.poster_file, "name", ""))
             raise
@@ -234,7 +207,6 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         return instance
 
     def update(self, instance, validated_data):
-        history_data = validated_data.pop("watch_history", serializers.empty)
         clear_custom_poster = validated_data.pop("clear_custom_poster", False)
         replacing_file = "poster_file" in validated_data
         replacing_with_url = bool(validated_data.get("custom_poster_url")) and not replacing_file
@@ -249,7 +221,6 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         try:
             with transaction.atomic():
                 instance = super().update(instance, validated_data)
-                self._sync_watch_history(instance, history_data)
         except Exception:
             cleanup_uncommitted_media_reference(getattr(instance.poster_file, "name", ""))
             raise

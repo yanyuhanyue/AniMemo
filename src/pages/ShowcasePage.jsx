@@ -43,7 +43,7 @@ function apiToRecord(item, presetColors) {
     description: item.description || "",
     review: item.review || "",
     baikeUrl: item.baike_url || "https://mzh.moegirl.org.cn/",
-    watchHistory: item.watch_history || [],
+    watchHistory: [],
   };
 }
 

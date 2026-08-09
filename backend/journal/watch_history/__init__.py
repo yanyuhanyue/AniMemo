@@ -1,0 +1,41 @@
+from .services import (
+    add_history,
+    delete_history,
+    list_history,
+    merge_history,
+    replace_history,
+    update_history,
+)
+from .validation import (
+    MAX_WATCH_HISTORY_INTEGER,
+    MAX_WATCH_HISTORY_NOTE_LENGTH,
+    MAX_WATCH_HISTORY_NOTES,
+    MAX_WATCH_HISTORY_RECORDS,
+    WatchHistoryValidationError,
+    merge_watch_history_records,
+    normalize_watch_history_record,
+    normalize_watch_history_records,
+    preserve_watch_history_metadata,
+    semantic_digest,
+    watch_history_semantic_key,
+)
+
+__all__ = [
+    "MAX_WATCH_HISTORY_INTEGER",
+    "MAX_WATCH_HISTORY_NOTE_LENGTH",
+    "MAX_WATCH_HISTORY_NOTES",
+    "MAX_WATCH_HISTORY_RECORDS",
+    "WatchHistoryValidationError",
+    "add_history",
+    "delete_history",
+    "list_history",
+    "merge_history",
+    "merge_watch_history_records",
+    "normalize_watch_history_record",
+    "normalize_watch_history_records",
+    "preserve_watch_history_metadata",
+    "replace_history",
+    "semantic_digest",
+    "update_history",
+    "watch_history_semantic_key",
+]

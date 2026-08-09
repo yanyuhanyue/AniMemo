@@ -45,6 +45,18 @@ class ManifestV2Tests(SimpleTestCase):
         manifest = self.valid_manifest()
         self.assertNotIn("integrations", validate_manifest(manifest))
 
+    def test_data_compatibility_floor_is_optional_and_bounded_by_version(self):
+        manifest = self.valid_manifest(
+            version="2.0.0",
+            dataCompatibility={"rollbackFloor": "1.5.0"},
+        )
+        self.assertEqual(validate_manifest(manifest)["dataCompatibility"]["rollbackFloor"], "1.5.0")
+        with self.assertRaisesRegex(ManifestError, "不能高于当前版本"):
+            validate_manifest(self.valid_manifest(
+                version="2.0.0",
+                dataCompatibility={"rollbackFloor": "3.0.0"},
+            ))
+
     def test_integration_declarations_are_optional_and_provider_neutral(self):
         manifest = self.valid_manifest(
             extensions=["integration.actions", "integration.events"],

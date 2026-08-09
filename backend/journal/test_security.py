@@ -47,7 +47,7 @@ from .network import client_ip
 from .security import TOTP_RECOVERY_CODE_COUNT, _totp_at, consume_recovery_code, hash_recovery_codes
 from .throttling import AuthThrottleUnavailable, HashedAccountRateThrottle
 from .admin_security_middleware import STAFF_2FA_AT_KEY, STAFF_2FA_USER_KEY, STAFF_2FA_VERSION_KEY
-from .staff_services import ALL_CAPABILITIES, get_staff_role, staff_capabilities
+from .staff_services import ALL_CAPABILITIES, resolve_staff_role, staff_capabilities
 
 
 User = get_user_model()
@@ -63,10 +63,10 @@ RELAXED_THROTTLE_SETTINGS = {
         "password_reset_ip": "1000/min",
         "password_reset_account": "1000/min",
         "password_reset_combined": "1000/min",
-        "register": "1000/min",
-        "register_ip": "1000/min",
-        "register_account": "1000/min",
-        "register_combined": "1000/min",
+        "register_request": "1000/min",
+        "register_request_ip": "1000/min",
+        "register_request_account": "1000/min",
+        "register_request_combined": "1000/min",
         "two_factor": "1000/min",
         "two_factor_ip": "1000/min",
         "two_factor_account": "1000/min",
@@ -79,10 +79,10 @@ REGISTER_THROTTLE_SETTINGS = {
     **RELAXED_THROTTLE_SETTINGS,
     "DEFAULT_THROTTLE_RATES": {
         **RELAXED_THROTTLE_SETTINGS["DEFAULT_THROTTLE_RATES"],
-        "register": "100/hour",
-        "register_ip": "2/hour",
-        "register_account": "2/hour",
-        "register_combined": "1/hour",
+        "register_request": "100/hour",
+        "register_request_ip": "2/hour",
+        "register_request_account": "2/hour",
+        "register_request_combined": "1/hour",
     },
 }
 
@@ -314,7 +314,7 @@ class StaffProfileFailClosedTests(APITestCase):
     def test_superuser_keeps_all_capabilities(self):
         user = User.objects.create_superuser(username="cap-root", password="StrongPass123!")
         self.assertEqual(staff_capabilities(user), list(ALL_CAPABILITIES))
-        self.assertEqual(get_staff_role(user), "superuser")
+        self.assertEqual(resolve_staff_role(user), "superuser")
 
     def test_explicit_roles_keep_only_their_declared_capabilities(self):
         expected = {
@@ -329,7 +329,7 @@ class StaffProfileFailClosedTests(APITestCase):
 
     def test_missing_profile_returns_no_capabilities_without_creating_one(self):
         user = User.objects.create_user(username="profile-missing", password="StrongPass123!", is_staff=True)
-        self.assertIsNone(get_staff_role(user))
+        self.assertIsNone(resolve_staff_role(user))
         self.assertEqual(staff_capabilities(user), [])
         self.assertFalse(StaffProfile.objects.filter(user=user).exists())
 
@@ -352,7 +352,7 @@ class StaffProfileFailClosedTests(APITestCase):
             "permissions": [{"code": "demo.manage", "roles": [StaffProfile.Role.ADMINISTRATOR]}],
             "frontend": {"exposure": "staff"},
         }
-        self.assertIsNone(get_staff_role(user))
+        self.assertIsNone(resolve_staff_role(user))
         self.assertEqual(staff_capabilities(user), [])
         self.assertEqual(plugin_permissions_for_user(user), [])
         self.assertFalse(can_access_plugin_backend(user, "demo", manifest, access="staff", permission_code="demo.manage"))
@@ -1053,19 +1053,30 @@ class ThrottleSecurityTests(APITestCase):
         self.assertEqual(limited.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
         self.assertEqual(send_email.call_count, 1)
 
-    @patch("journal.bangumi_views.get_provider")
+    @patch("journal.external_media.views.get_provider")
     def test_external_search_and_import_have_independent_scopes(self, get_provider):
+        get_provider.return_value.slug = "bangumi"
         get_provider.return_value.search.return_value = []
         with patch.dict(SimpleRateThrottle.THROTTLE_RATES, self.rates, clear=True):
             client = APIClient()
-            search_responses = [client.get(reverse("bangumi-search"), {"q": f"测试番剧{index}"}) for index in range(3)]
+            search_responses = [client.get(
+                reverse("external-media-search", kwargs={"provider": "bangumi"}),
+                {"q": f"测试番剧{index}"},
+            ) for index in range(3)]
             self.assertEqual(search_responses[-1].status_code, status.HTTP_429_TOO_MANY_REQUESTS)
             self.assertEqual(get_provider.return_value.search.call_count, 2)
 
             cache.clear()
             client.force_authenticate(self.user)
-            first = client.post(reverse("import"), {"records": [], "preview": True}, format="json")
-            second = client.post(reverse("import"), {"records": [], "preview": True}, format="json")
+            payload = {
+                "format": "animemo-data-bundle",
+                "schema_version": 1,
+                "exported_at": "2026-08-09T00:00:00Z",
+                "entries": [],
+            }
+            endpoint = f'{reverse("import")}?preview=true'
+            first = client.post(endpoint, payload, format="json")
+            second = client.post(endpoint, payload, format="json")
             self.assertEqual(first.status_code, status.HTTP_200_OK)
             self.assertEqual(second.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
@@ -1450,7 +1461,7 @@ class RegistrationThrottleSecurityTests(APITestCase):
             "META": {"REMOTE_ADDR": "198.51.100.40"},
         })()
         view = type("RegisterThrottleView", (), {
-            "account_throttle_scope": "register",
+            "account_throttle_scope": "register_request",
             "secondary_throttle_scope": None,
             "throttle_account_fields": ("email",),
         })()

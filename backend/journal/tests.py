@@ -16,7 +16,6 @@ import requests
 from accounts.models import StaffProfile, UserSecurityProfile
 from site_config.models import SiteSettings, TagDefinition
 from .models import AdminAuditLog, Column, JournalEntry, UserSettings
-from plugin_host.models import PluginData, PluginProject, UserPluginInstallation
 from .security import _totp_at
 
 
@@ -28,13 +27,6 @@ class JournalApiTests(APITestCase):
         cache.clear()
         self.user = User.objects.create_user(username="collector", email="collector@example.com", password="StrongPass123!")
         self.other = User.objects.create_user(username="other", email="other@example.com", password="StrongPass123!")
-        self.plugin = PluginProject.objects.create(
-            plugin_id="com.anime-journal.watch-history-importer",
-            slug="watch-history-importer",
-            name="忆往昔观看记录导入器",
-            description="test fixture",
-        )
-        self.installation = UserPluginInstallation.objects.create(user=self.user, plugin=self.plugin, enabled=True)
         self.client.force_authenticate(self.user)
 
     def test_entry_crud_is_scoped_to_owner(self):
@@ -48,195 +40,6 @@ class JournalApiTests(APITestCase):
         JournalEntry.objects.create(user=self.other, title="不应看到的记录")
         result = self.client.get(reverse("entry-list"))
         self.assertEqual(result.data["count"], 1)
-
-    def test_owner_can_add_manual_watch_history_through_entry_update(self):
-        entry = JournalEntry.objects.create(user=self.user, title="手动记录番剧")
-
-        response = self.client.patch(
-            reverse("entry-detail", kwargs={"pk": entry.pk}),
-            {
-                "watch_history": [{
-                    "watched_on": "2026-08-06",
-                    "watched_label": "2026年8月6日",
-                    "brush_number": 1,
-                    "brush_label": "首刷",
-                    "episode_start": 1,
-                    "episode_end": 3,
-                    "notes": ["后台手动补录"],
-                }],
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data["watch_history"][0]["brush_label"], "首刷")
-        history = PluginData.objects.get(plugin=self.plugin, namespace="watch_history", user=self.user, key=str(entry.pk))
-        self.assertEqual(history.value[0]["brush_label"], "首刷")
-
-    def test_manual_watch_history_accepts_multipart_entry_updates(self):
-        entry = JournalEntry.objects.create(user=self.user, title="同时更换封面")
-        poster = SimpleUploadedFile(
-            "watch-history-poster.png",
-            b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
-            content_type="image/png",
-        )
-
-        response = self.client.patch(
-            reverse("entry-detail", kwargs={"pk": entry.pk}),
-            {
-                "poster_file": poster,
-                "watch_history": json.dumps([{
-                    "watched_on": "2026-08-06",
-                    "brush_label": "二刷",
-                    "episode_start": 1,
-                    "episode_end": 3,
-                }]),
-            },
-            format="multipart",
-        )
-
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data["watch_history"][0]["episode_end"], 3)
-        history = PluginData.objects.get(plugin=self.plugin, namespace="watch_history", user=self.user, key=str(entry.pk))
-        self.assertEqual(history.value[0]["brush_label"], "二刷")
-
-    def test_editing_imported_watch_history_preserves_source_audit_fields(self):
-        entry = JournalEntry.objects.create(user=self.user, title="保留导入来源")
-        history = PluginData.objects.create(
-            plugin=self.plugin, namespace="watch_history", user=self.user, key=str(entry.pk),
-            value=[{"watched_on": "2026-08-06", "watched_label": "2026年8月6日", "brush_label": "首刷", "episode_start": 1, "episode_end": 3, "notes": [], "source_file": "2026.txt", "source_line": 18}],
-        )
-
-        response = self.client.patch(
-            reverse("entry-detail", kwargs={"pk": entry.pk}),
-            {"watch_history": [{
-                "watched_on": "2026-08-06",
-                "brush_label": "首刷",
-                "episode_start": 1,
-                "episode_end": 3,
-                "notes": ["后台补充备注"],
-            }]},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        history.refresh_from_db()
-        history.refresh_from_db()
-        self.assertEqual(history.value[0]["source_file"], "2026.txt")
-        self.assertEqual(history.value[0]["source_line"], 18)
-        self.assertEqual(history.value[0]["notes"], ["后台补充备注"])
-
-    def test_manual_watch_history_update_replaces_and_deduplicates_events(self):
-        entry = JournalEntry.objects.create(user=self.user, title="可编辑观看记录")
-        payload = {
-            "watch_history": [
-                {
-                    "watched_on": "2026-08-06",
-                    "brush_label": "首刷",
-                    "episode_start": 1,
-                    "episode_end": 3,
-                },
-                {
-                    "watched_on": "2026-08-06",
-                    "brush_label": "首刷",
-                    "episode_start": 1,
-                    "episode_end": 3,
-                },
-            ]
-        }
-
-        first = self.client.patch(reverse("entry-detail", kwargs={"pk": entry.pk}), payload, format="json")
-        self.assertEqual(first.status_code, 200)
-        self.assertEqual(PluginData.objects.filter(plugin=self.plugin, namespace="watch_history", user=self.user, key=str(entry.pk)).count(), 1)
-
-        second = self.client.patch(reverse("entry-detail", kwargs={"pk": entry.pk}), {"watch_history": []}, format="json")
-        self.assertEqual(second.status_code, 200)
-        self.assertFalse(PluginData.objects.filter(plugin=self.plugin, namespace="watch_history", user=self.user, key=str(entry.pk)).exists())
-
-    def test_manual_watch_history_requires_a_watch_date(self):
-        entry = JournalEntry.objects.create(user=self.user, title="缺日期记录")
-
-        response = self.client.patch(
-            reverse("entry-detail", kwargs={"pk": entry.pk}),
-            {"watch_history": [{"brush_label": "首刷"}]},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 400)
-
-    def test_watch_history_is_empty_and_not_created_when_plugin_is_not_installed(self):
-        self.installation.delete()
-        entry = JournalEntry.objects.create(user=self.user, title="未安装插件")
-
-        response = self.client.get(reverse("entry-detail", kwargs={"pk": entry.pk}))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["watch_history"], [])
-        self.assertFalse(PluginData.objects.filter(plugin=self.plugin, user=self.user).exists())
-
-    def test_watch_history_write_is_rejected_when_plugin_is_not_installed(self):
-        self.installation.delete()
-        entry = JournalEntry.objects.create(user=self.user, title="禁止写入")
-
-        response = self.client.patch(
-            reverse("entry-detail", kwargs={"pk": entry.pk}),
-            {"watch_history": [{"watched_on": "2026-08-08", "brush_label": "首刷"}]},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertFalse(PluginData.objects.filter(plugin=self.plugin, user=self.user).exists())
-
-    def test_disabled_watch_history_retains_data_and_restores_after_enable(self):
-        entry = JournalEntry.objects.create(user=self.user, title="停用后保留")
-        row = PluginData.objects.create(
-            plugin=self.plugin,
-            namespace="watch_history",
-            user=self.user,
-            key=str(entry.pk),
-            value=[{"watched_on": "2026-08-08", "brush_label": "首刷"}],
-        )
-        self.installation.enabled = False
-        self.installation.save(update_fields=["enabled"])
-
-        disabled = self.client.get(reverse("entry-detail", kwargs={"pk": entry.pk}))
-        self.assertEqual(disabled.data["watch_history"], [])
-        self.assertTrue(PluginData.objects.filter(pk=row.pk).exists())
-
-        self.installation.enabled = True
-        self.installation.save(update_fields=["enabled"])
-        enabled = self.client.get(reverse("entry-detail", kwargs={"pk": entry.pk}))
-        self.assertEqual(enabled.data["watch_history"][0]["brush_label"], "首刷")
-
-    def test_core_does_not_create_watch_history_project(self):
-        self.installation.delete()
-        self.plugin.delete()
-        entry = JournalEntry.objects.create(user=self.user, title="项目不存在")
-
-        response = self.client.get(reverse("entry-detail", kwargs={"pk": entry.pk}))
-
-        self.assertEqual(response.data["watch_history"], [])
-        self.assertFalse(PluginProject.objects.filter(slug="watch-history-importer").exists())
-
-    def test_other_user_cannot_read_watch_history_from_shared_entry(self):
-        UserPluginInstallation.objects.create(user=self.other, plugin=self.plugin, enabled=True)
-        entry = JournalEntry.objects.create(user=self.other, title="他人的公开记录", visibility="public")
-        PluginData.objects.create(
-            plugin=self.plugin,
-            namespace="watch_history",
-            user=self.other,
-            key=str(entry.pk),
-            value=[{"watched_on": "2026-08-08", "brush_label": "首刷"}],
-        )
-        settings_obj, _ = UserSettings.objects.get_or_create(user=self.other)
-        settings_obj.public_status = UserSettings.PublicStatus.APPROVED
-        settings_obj.allow_sharing = True
-        settings_obj.save(update_fields=["public_status", "allow_sharing"])
-
-        response = self.client.get(reverse("shared-entry", kwargs={"share_slug": entry.share_slug}))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["watch_history"], [])
 
     def test_private_entry_is_not_shareable(self):
         entry = JournalEntry.objects.create(user=self.user, title="私人记录")
@@ -496,181 +299,66 @@ class JournalApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual([item["title"] for item in response.data["results"]], ["春日番剧"])
 
-    @patch("journal.external_media.providers.bangumi.requests.get")
-    @patch("journal.external_media.providers.bangumi.requests.post")
-    def test_bangumi_search_falls_back_when_v0_endpoint_is_temporarily_unavailable(self, post, get):
-        post.side_effect = requests.ConnectionError("temporary upstream failure")
-        legacy_response = Mock()
-        legacy_response.raise_for_status.return_value = None
-        legacy_response.json.return_value = {
-            "list": [{
-                "id": 1120,
-                "name": "地獄少女 三鼎",
-                "name_cn": "地狱少女 三鼎",
-                "air_date": "2008-10-04",
-                "eps": 26,
-                "images": {"large": "http://lain.bgm.tv/pic/cover/l/test.jpg"},
-                "rating": {"score": 7.1},
-            }],
-        }
-        get.return_value = legacy_response
+    @patch("journal.external_media.views.get_provider")
+    def test_external_media_search_returns_only_unified_dto(self, get_provider):
+        get_provider.return_value.slug = "bangumi"
+        get_provider.return_value.search.return_value = [{
+            "provider": "bangumi",
+            "external_id": "1424",
+            "title": "轻音少女",
+            "japanese_title": "けいおん！",
+            "summary": "樱丘高中轻音部的故事。",
+            "episodes": 14,
+            "air_date": "2009-04-03",
+            "studio": "京都アニメーション",
+            "tags": ["校园", "日常"],
+            "score": 8.2,
+            "poster_url": "https://lain.bgm.tv/pic/cover/l/k-on.jpg",
+            "thumbnail_url": "https://lain.bgm.tv/r/100/pic/cover/l/k-on.jpg",
+            "canonical_url": "https://bgm.tv/subject/1424",
+        }]
         self.client.force_authenticate(user=None)
 
-        response = self.client.get(reverse("bangumi-search"), {"q": "地方1"})
+        response = self.client.get(
+            reverse("external-media-search", kwargs={"provider": "bangumi"}),
+            {"q": "轻音少女"},
+        )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["results"][0]["name"], "地狱少女 三鼎")
-        self.assertEqual(response.data["results"][0]["poster"], "https://bgm-img-proxy.xhcytus100.workers.dev/pic/cover/l/test.jpg")
-        self.assertEqual(response.data["results"][0]["thumbnail"], "https://bgm-img-proxy.xhcytus100.workers.dev/r/100/pic/cover/l/test.jpg")
-        post.assert_called_once()
-        get.assert_called_once()
-
-    @patch("journal.external_media.providers.bangumi.requests.post")
-    def test_bangumi_search_returns_metadata_used_by_smart_fill(self, post):
-        v0_response = Mock()
-        v0_response.raise_for_status.return_value = None
-        v0_response.json.return_value = {
-            "data": [{
-                "id": 1424,
-                "name": "けいおん！",
-                "name_cn": "轻音少女",
-                "date": "2009-04-03",
-                "total_episodes": 14,
-                "summary": "樱丘高中轻音部的故事。",
-                "images": {"large": "http://lain.bgm.tv/pic/cover/l/k-on.jpg"},
-                "infobox": [{"key": "动画制作", "value": [{"v": "京都アニメーション"}]}],
-                "tags": [
-                    {"name": "京阿尼"}, {"name": "K-ON!"}, {"name": "校园"}, {"name": "轻音"},
-                    {"name": "萌"}, {"name": "治愈"}, {"name": "日常"}, {"name": "2009年4月"},
-                    {"name": "社团"},
-                ],
-                "rating": {"score": 8.2},
-            }],
-        }
-        post.return_value = v0_response
-        self.client.force_authenticate(user=None)
-
-        response = self.client.get(reverse("bangumi-search"), {"q": "轻音少女metadata"})
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["provider"], "bangumi")
         result = response.data["results"][0]
+        self.assertEqual(result["external_id"], "1424")
         self.assertEqual(result["studio"], "京都アニメーション")
-        self.assertEqual(result["tags"], ["京阿尼", "K-ON!", "校园", "轻音", "萌", "治愈", "日常", "2009年4月"])
-        self.assertEqual(result["poster"], "https://bgm-img-proxy.xhcytus100.workers.dev/pic/cover/l/k-on.jpg")
-        self.assertEqual(result["thumbnail"], "https://bgm-img-proxy.xhcytus100.workers.dev/r/100/pic/cover/l/k-on.jpg")
+        for old_field in ("id", "name", "japanese_name", "eps", "poster", "thumbnail", "url"):
+            self.assertNotIn(old_field, result)
 
-    @patch("journal.external_media.providers.bangumi.requests.post")
-    def test_bangumi_search_prefers_animation_studio_over_production_committee(self, post):
-        production_committee = "「無職転生」製作委員会（博報堂DYミュージック&ピクチャーズ、東宝、KADOKAWA、フロンティアワークス、日本BS放送、グリー、EGG FIRM）"
-        v0_response = Mock()
-        v0_response.raise_for_status.return_value = None
-        v0_response.json.return_value = {
-            "data": [{
-                "id": 277554,
-                "name": "無職転生 ～異世界行ったら本気だす～",
-                "name_cn": "无职转生～到了异世界就拿出真本事～",
-                "infobox": [
-                    {"key": "动画制作", "value": "スタジオバインド"},
-                    {"key": "製作", "value": production_committee},
-                ],
-            }],
+    @patch("journal.external_media.views.get_provider")
+    def test_external_media_subject_returns_unified_detail(self, get_provider):
+        get_provider.return_value.fetch_subject.return_value = {
+            "provider": "bangumi",
+            "external_id": "277554",
+            "title": "无职转生",
+            "japanese_title": "無職転生",
+            "summary": "",
+            "episodes": 11,
+            "air_date": "2021-01-11",
+            "studio": "スタジオバインド",
+            "tags": [],
+            "score": None,
+            "poster_url": "",
+            "thumbnail_url": "",
+            "canonical_url": "https://bgm.tv/subject/277554",
         }
-        post.return_value = v0_response
         self.client.force_authenticate(user=None)
 
-        response = self.client.get(reverse("bangumi-search"), {"q": "无职转生studio-priority"})
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["results"][0]["studio"], "スタジオバインド")
-
-    @patch("journal.external_media.providers.bangumi.requests.get")
-    def test_bangumi_autofill_reads_animation_studio_from_persons(self, get):
-        subject_response = Mock()
-        subject_response.raise_for_status.return_value = None
-        subject_response.json.return_value = {
-            "id": 277554,
-            "name": "無職転生 ～異世界行ったら本気だす～",
-            "name_cn": "无职转生～到了异世界就拿出真本事～",
-            "date": "2021-01-11",
-            "total_episodes": 11,
-            "infobox": [{"key": "製作", "value": "「無職転生」製作委員会"}],
-        }
-        persons_response = Mock()
-        persons_response.raise_for_status.return_value = None
-        persons_response.json.return_value = [
-            {"name": "スタジオバインド", "relation": "动画制作", "type": 2},
-            {"name": "EGG FIRM", "relation": "製作", "type": 2},
-        ]
-        get.side_effect = [subject_response, persons_response]
-        self.client.force_authenticate(user=None)
-
-        response = self.client.get(reverse("bangumi-autofill"), {"id": 277554})
+        response = self.client.get(reverse(
+            "external-media-subject",
+            kwargs={"provider": "bangumi", "external_id": "277554"},
+        ))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["studio"], "スタジオバインド")
-        self.assertEqual(response.data["eps"], 11)
-
-    @patch("journal.external_media.providers.bangumi.requests.get")
-    def test_bangumi_autofill_combines_multiple_animation_studios(self, get):
-        subject_response = Mock()
-        subject_response.raise_for_status.return_value = None
-        subject_response.json.return_value = {"id": 1, "name": "测试番剧"}
-        persons_response = Mock()
-        persons_response.raise_for_status.return_value = None
-        persons_response.json.return_value = [
-            {"name": "Studio A", "relation": "动画制作", "type": 2},
-            {"name": "Studio B", "relation": "アニメーション制作", "type": 2},
-            {"name": "Studio A", "relation": "動畫製作", "type": 2},
-        ]
-        get.side_effect = [subject_response, persons_response]
-        self.client.force_authenticate(user=None)
-
-        response = self.client.get(reverse("bangumi-autofill"), {"id": 1})
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["studio"], "Studio A / Studio B")
-
-    @patch("journal.external_media.providers.bangumi.requests.get")
-    def test_bangumi_autofill_falls_back_to_infobox_when_persons_fails(self, get):
-        subject_response = Mock()
-        subject_response.raise_for_status.return_value = None
-        subject_response.json.return_value = {
-            "id": 2,
-            "name": "回退测试",
-            "infobox": [
-                {"key": "动画制作", "value": "Fallback Animation"},
-                {"key": "製作", "value": "Fallback Committee"},
-            ],
-        }
-        get.side_effect = [subject_response, requests.ConnectionError("persons unavailable")]
-        self.client.force_authenticate(user=None)
-
-        response = self.client.get(reverse("bangumi-autofill"), {"id": 2})
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["studio"], "Fallback Animation")
-
-    @patch("journal.external_media.providers.bangumi.requests.get")
-    def test_bangumi_autofill_never_prefers_committee_over_person_animation_relation(self, get):
-        subject_response = Mock()
-        subject_response.raise_for_status.return_value = None
-        subject_response.json.return_value = {
-            "id": 3,
-            "name": "优先级测试",
-            "infobox": [{"key": "製作", "value": "Very Long Production Committee"}],
-        }
-        persons_response = Mock()
-        persons_response.raise_for_status.return_value = None
-        persons_response.json.return_value = [
-            {"name": "Correct Animation Studio", "relation": "动画制作", "type": 2},
-        ]
-        get.side_effect = [subject_response, persons_response]
-        self.client.force_authenticate(user=None)
-
-        response = self.client.get(reverse("bangumi-autofill"), {"id": 3})
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["studio"], "Correct Animation Studio")
+        self.assertEqual(response.data["episodes"], 11)
 
     def test_public_catalog_combines_all_staff_entries(self):
         first_staff = User.objects.create_user(username="staff-one", password="StrongPass123!", is_staff=True)
@@ -688,33 +376,22 @@ class JournalApiTests(APITestCase):
             {"管理员番剧一", "管理员番剧二"},
         )
 
-    def test_import_preview_and_commit_skip_existing_and_repeated_records(self):
-        JournalEntry.objects.create(user=self.user, title="《已有番剧》", japanese_title="既有番剧")
+    def test_import_rejects_pre_ga_json_record_aliases(self):
         payload = {
             "version": 1,
-            "records": [
-                {"title": "《已有番剧》", "japaneseTitle": "既有番剧", "period": "2025-1", "status": "planned"},
-                {"title": "《新番剧》", "japaneseTitle": "新番剧", "period": "2026-1", "status": "watching", "tags": ["日常"]},
-                {"title": "《新番剧》", "japaneseTitle": "新番剧", "period": "2026-1", "status": "watching", "tags": ["日常"]},
-            ],
+            "records": [{"title": "旧格式", "japaneseTitle": "旧字段", "status": "planned"}],
         }
-        preview_file = SimpleUploadedFile("anime-journal.json", json.dumps(payload).encode("utf-8"), content_type="application/json")
+        upload = SimpleUploadedFile(
+            "anime-journal.json",
+            json.dumps(payload).encode("utf-8"),
+            content_type="application/json",
+        )
 
-        preview = self.client.post(reverse("import"), {"file": preview_file, "preview": "true"}, format="multipart")
+        response = self.client.post(reverse("import"), {"file": upload, "preview": "true"}, format="multipart")
 
-        self.assertEqual(preview.status_code, status.HTTP_200_OK)
-        self.assertEqual(preview.data["total"], 3)
-        self.assertEqual(preview.data["ready"], 1)
-        self.assertEqual(preview.data["skipped_duplicates"], 2)
-        self.assertEqual([item["status"] for item in preview.data["items"]], ["duplicate", "ready", "duplicate"])
-
-        commit_file = SimpleUploadedFile("anime-journal.json", json.dumps(payload).encode("utf-8"), content_type="application/json")
-        commit = self.client.post(reverse("import"), {"file": commit_file}, format="multipart")
-
-        self.assertEqual(commit.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(commit.data["created"], 1)
-        self.assertEqual(commit.data["skipped_duplicates"], 2)
-        self.assertEqual(JournalEntry.objects.filter(user=self.user).count(), 2)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "unsupported_import_schema")
+        self.assertFalse(JournalEntry.objects.filter(user=self.user).exists())
 
     def test_import_accepts_csv_templates(self):
         csv_file = SimpleUploadedFile(

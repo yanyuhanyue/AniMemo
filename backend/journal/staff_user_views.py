@@ -19,9 +19,9 @@ from .staff_services import (
     USER_MANAGEMENT_DENIED_DETAIL,
     assert_can_manage_user,
     get_security_profile,
-    get_staff_role,
     record_audit,
     record_login_event,
+    resolve_staff_role,
     revoke_user_sessions,
     update_user_password,
 )
@@ -125,7 +125,7 @@ class StaffUserActionView(APIView):
                 _require_sensitive_reauthentication(request, user, action, force=True)
             except DjangoValidationError as error:
                 return Response({"detail": _validation_detail(error)}, status=status.HTTP_403_FORBIDDEN)
-            before = {"is_staff": user.is_staff, "role": get_staff_role(user) if user.is_staff else "user"}
+            before = {"is_staff": user.is_staff, "role": resolve_staff_role(user) if user.is_staff else "user"}
             user.is_staff = True
             user.save(update_fields=["is_staff"])
             profile, _ = StaffProfile.objects.get_or_create(

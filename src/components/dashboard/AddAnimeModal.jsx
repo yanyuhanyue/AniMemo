@@ -3,7 +3,7 @@ import gsap from "gsap";
 import { Icon } from "../Icon.jsx";
 import { readableApiError, api } from "../../lib/api.js";
 import { validateTrustedPosterUrl } from "../../lib/posterSources.js";
-import { bangumiIdentityFromResult } from "../../lib/externalMedia.js";
+import { bangumiIdentityFromResult, externalMediaResultFromApi } from "../../lib/externalMedia.js";
 
 const CATALOG_PAGE_SIZE = 10;
 const BANGUMI_SPINNER_MIN_MS = 420;
@@ -47,18 +47,18 @@ function normalizeCatalogRecord(item) {
 }
 
 function normalizeBangumi(item) {
-  const [year, rawMonth] = String(item.air_date || "").split("-");
+  const [year, rawMonth] = String(item.airDate || "").split("-");
   const month = Number.parseInt(rawMonth, 10);
   const yearMonth = year && Number.isFinite(month) ? `${year}-${month}` : "";
-  const rawTitle = String(item.name || "").trim();
+  const rawTitle = String(item.title || "").trim();
   return {
     title: rawTitle ? formatAnimeTitle(rawTitle) : "",
-    japaneseTitle: item.japanese_name || "",
+    japaneseTitle: item.japaneseTitle || "",
     period: yearMonth || "",
     studio: item.studio || "",
-    episodes: item.eps || "",
-    poster: item.poster || "",
-    baikeUrl: item.baike_url || item.baikeUrl || (rawTitle ? `https://zh.moegirl.org.cn/${encodeURIComponent(rawTitle)}` : ""),
+    episodes: item.episodes || "",
+    poster: item.posterUrl || "",
+    baikeUrl: rawTitle ? `https://zh.moegirl.org.cn/${encodeURIComponent(rawTitle)}` : "",
     tagsText: Array.isArray(item.tags) ? item.tags.slice(0, 8).join(",") : "",
     description: item.summary || "",
     status: "planned",
@@ -217,8 +217,10 @@ export function AddAnimeModal({ onClose, onSubmit, isDemo = false, catalogRecord
     setSmartSearching(true);
     setSmartError("");
     try {
-      const response = await api.get("catalog/bangumi-search/", { params: { q: normalized } });
-      if (requestId === bangumiRequestRef.current) setSmartResults(response.data?.results || []);
+      const response = await api.get("external-media/providers/bangumi/search/", { params: { q: normalized } });
+      if (requestId === bangumiRequestRef.current) {
+        setSmartResults((response.data?.results || []).map(externalMediaResultFromApi));
+      }
     } catch (requestError) {
       if (requestId === bangumiRequestRef.current) {
         setSmartResults([]);
@@ -432,12 +434,9 @@ export function AddAnimeModal({ onClose, onSubmit, isDemo = false, catalogRecord
   const chooseBangumi = async (item, row) => {
     if (bangumiSelectionRef.current) return;
     bangumiSelectionRef.current = true;
-    setSelectedBangumiId(item.id);
+    setSelectedBangumiId(item.externalId);
     const completeSelection = (selectedItem, notice) => {
-      const next = normalizeBangumi({
-        ...selectedItem,
-        id: selectedItem?.external_id ?? selectedItem?.id ?? item?.external_id ?? item?.id,
-      });
+      const next = normalizeBangumi(selectedItem);
       setDraft(next);
       setPreview(next.poster);
       setSmartResults([]);
@@ -464,10 +463,12 @@ export function AddAnimeModal({ onClose, onSubmit, isDemo = false, catalogRecord
     let notice = "番剧资料已自动填充，请检查后再创建。";
     try {
       const [response] = await Promise.all([
-        item.id ? api.get("catalog/bangumi-autofill/", { params: { id: item.id } }) : Promise.resolve({ data: item }),
+        item.externalId
+          ? api.get(`external-media/providers/bangumi/subjects/${encodeURIComponent(item.externalId)}/`)
+          : Promise.resolve({ data: null }),
         collapse,
       ]);
-      selectedItem = response.data || item;
+      selectedItem = response.data ? externalMediaResultFromApi(response.data) : item;
     } catch (requestError) {
       await collapse;
       notice = readableApiError(requestError, "Bangumi 详情暂时无法读取，已使用搜索结果填充。");
@@ -553,7 +554,7 @@ export function AddAnimeModal({ onClose, onSubmit, isDemo = false, catalogRecord
                       <div className="dashboard-add-search-popover__head"><span><Icon name="satellite-dish" /> MAGIC METADATA SEARCH</span><button className="dashboard-add-search-popover__close" type="button" onClick={closeSmartSearch} aria-label="关闭智能搜索提示"><Icon name="close" /></button></div>
                       {smartSearching && <p className="is-status"><SearchSpinner pink /> <span>正在搜索 Bangumi…</span></p>}
                       {smartError && <p className="is-error"><Icon name="warning" /> <span>{smartError}</span></p>}
-                      {!smartSearching && !smartError && smartResults.map((item) => <button className={`dashboard-add-search-result${selectedBangumiId === item.id ? " is-selecting" : ""}`} type="button" key={item.id} onClick={(event) => chooseBangumi(item, event.currentTarget)} disabled={selectedBangumiId !== null}><span className="dashboard-add-search-result__poster"><img src={item.thumbnail || item.poster || "/assets/posters/poster-01.webp"} alt={`${item.name} 海报`} decoding="async" onError={(event) => { event.currentTarget.src = "/assets/posters/poster-01.webp"; }} /></span><span className="dashboard-add-search-result__copy"><strong><ResultMarquee>{item.name}</ResultMarquee></strong><small><ResultMarquee>{item.japanese_name || "未填写日文名"}</ResultMarquee></small></span><Icon className="dashboard-add-search-result__arrow" name="arrow-right" /></button>)}
+                      {!smartSearching && !smartError && smartResults.map((item) => <button className={`dashboard-add-search-result${selectedBangumiId === item.externalId ? " is-selecting" : ""}`} type="button" key={item.externalId} onClick={(event) => chooseBangumi(item, event.currentTarget)} disabled={selectedBangumiId !== null}><span className="dashboard-add-search-result__poster"><img src={item.thumbnailUrl || item.posterUrl || "/assets/posters/poster-01.webp"} alt={`${item.title} 海报`} decoding="async" onError={(event) => { event.currentTarget.src = "/assets/posters/poster-01.webp"; }} /></span><span className="dashboard-add-search-result__copy"><strong><ResultMarquee>{item.title}</ResultMarquee></strong><small><ResultMarquee>{item.japaneseTitle || "未填写日文名"}</ResultMarquee></small></span><Icon className="dashboard-add-search-result__arrow" name="arrow-right" /></button>)}
                     </div>}
                   <button className={`dashboard-add-search-trigger${smartSearching ? " is-searching" : ""}`} type="button" onClick={() => searchBangumi(draft.title)} disabled={smartSearching} aria-label={smartSearching ? "正在从 Bangumi 搜索番剧资料" : "从 Bangumi 自动搜索番剧资料"} aria-expanded={smartDropdownOpen} aria-controls="dashboard-smart-search-results">{smartSearching ? <SearchSpinner /> : <Icon name="search" />}</button>
                 </div>

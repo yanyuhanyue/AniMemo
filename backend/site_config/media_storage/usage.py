@@ -80,11 +80,6 @@ def effective_storage_usage(backend):
     return max(managed_usage_bytes(backend), actual)
 
 
-def effective_r2_usage(backend):
-    """Compatibility name for callers that still describe the R2 guard."""
-    return effective_storage_usage(backend)
-
-
 def _latest_r2_group(payload):
     """Parse the exact Cloudflare account -> adaptive groups response shape."""
     data = payload.get("data") if isinstance(payload, dict) else None

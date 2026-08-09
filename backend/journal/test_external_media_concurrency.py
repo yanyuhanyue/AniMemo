@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier, Event
+from types import SimpleNamespace
 from unittest import skipUnless
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from journal.external_media.services import (
     PreparedIdentity,
     bind_external_identity,
     refresh_external_identity,
+    set_metadata_source,
     unbind_external_identity,
 )
 from journal.models import ExternalImportSession, ExternalMediaIdentity, JournalEntry
@@ -193,7 +195,7 @@ class ExternalMediaIdentityPostgreSQLConcurrencyTests(TransactionTestCase):
             finally:
                 connections.close_all()
 
-        with patch("journal.external_accounts.services.prepare_identity", side_effect=prepare), ThreadPoolExecutor(max_workers=2) as executor:
+        with patch("journal.external_accounts.imports.prepare_identity", side_effect=prepare), ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(apply, [session.pk for session in sessions]))
 
         statuses = [result["results"][0]["status"] for result in results]
@@ -203,3 +205,50 @@ class ExternalMediaIdentityPostgreSQLConcurrencyTests(TransactionTestCase):
             1,
         )
         self.assertEqual(JournalEntry.objects.filter(user=self.user, title="并发测试").count(), 1)
+
+    def test_metadata_source_switch_keeps_at_most_one_source(self):
+        entry = self.entries[0]
+        ExternalMediaIdentity.objects.create(
+            entry=entry,
+            provider="bangumi",
+            external_id="1",
+            canonical_url="https://bgm.tv/subject/1",
+            metadata=normalized_subject("1"),
+            is_metadata_source=True,
+        )
+        ExternalMediaIdentity.objects.create(
+            entry=entry,
+            provider="anilist",
+            external_id="2",
+            canonical_url="https://anilist.co/anime/2",
+            metadata=normalized_subject("2"),
+        )
+        barrier = Barrier(2)
+
+        def switch(provider_slug):
+            close_old_connections()
+            try:
+                user = get_user_model().objects.get(pk=self.user.pk)
+                current_entry = JournalEntry.objects.get(pk=entry.pk)
+                barrier.wait(timeout=10)
+                selected, _applied, _changed = set_metadata_source(
+                    entry=current_entry,
+                    user=user,
+                    provider_slug=provider_slug,
+                    apply_metadata=False,
+                )
+                return selected.provider
+            finally:
+                connections.close_all()
+
+        with patch(
+            "journal.external_media.services.get_provider",
+            side_effect=lambda slug: SimpleNamespace(slug=slug),
+        ), ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(switch, ["bangumi", "anilist"]))
+
+        self.assertEqual(sorted(results), ["anilist", "bangumi"])
+        self.assertEqual(
+            ExternalMediaIdentity.objects.filter(entry=entry, is_metadata_source=True).count(),
+            1,
+        )

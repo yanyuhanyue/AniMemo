@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 import re
+from urllib.parse import urlparse
 
 import requests
 from django.conf import settings
@@ -178,6 +179,22 @@ def _episodes(item):
         return None
 
 
+def _poster_url(value):
+    url = str(value or "").strip()
+    if url.startswith("http://"):
+        url = f"https://{url[7:]}"
+    parsed = urlparse(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "lain.bgm.tv"
+        or parsed.username
+        or parsed.password
+        or len(url) > 1000
+    ):
+        return ""
+    return url
+
+
 def search_subject(title):
     merged = []
     seen_ids = set()
@@ -318,7 +335,7 @@ def resolve_group_from_item(group, item, confidence=1.0, initial_status="matched
         "episodes": episodes,
         "studio": _studio(item) if studio is None else studio,
         "description": item.get("summary") or "",
-        "poster_url": images.get("large") or images.get("common") or images.get("medium") or "",
+        "poster_url": _poster_url(images.get("large") or images.get("common") or images.get("medium")),
         "tags": _tags(item),
         "source_url": f"https://bgm.tv/subject/{item.get('id')}" if item.get("id") else "",
         "claimed_episodes": sorted(claims),

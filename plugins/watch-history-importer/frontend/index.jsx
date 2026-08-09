@@ -7,7 +7,7 @@ export default function createPlugin(host) {
   const pluginApi = host.api.plugin("watch-history-importer");
   return Object.freeze({
     id: "com.anime-journal.watch-history-importer",
-    version: "0.3.3",
+    version: "0.4.0",
     routes: [{
       path: "/plugins/watch-history-importer",
       Component: (props) => <WatchHistoryImporterPage {...props} host={host} api={pluginApi} />,

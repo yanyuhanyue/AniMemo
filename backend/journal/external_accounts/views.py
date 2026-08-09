@@ -75,8 +75,11 @@ class ExternalAccountCallbackView(APIView):
     throttle_scope = "external_account"
 
     @staticmethod
-    def _redirect(outcome, code=""):
-        query = {"bangumi": outcome}
+    def _redirect(provider, outcome, code=""):
+        query = {
+            "external_account_provider": provider,
+            "external_account_status": outcome,
+        }
         if code:
             query["code"] = code
         return HttpResponseRedirect(f"{settings.FRONTEND_URL}/dashboard?{urlencode(query)}")
@@ -89,8 +92,8 @@ class ExternalAccountCallbackView(APIView):
                 state=request.query_params.get("state"),
             )
         except ExternalAccountError as error:
-            return self._redirect("error", str(error.detail.get("code") or "authorization_exchange_failed"))
-        return self._redirect("connected")
+            return self._redirect(provider, "error", str(error.detail.get("code") or "authorization_exchange_failed"))
+        return self._redirect(provider, "connected")
 
 
 class ExternalAccountImportPreviewView(APIView):

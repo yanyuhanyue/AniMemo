@@ -23,6 +23,7 @@ class JournalEntry(models.Model):
         WATCHING = "watching", "在看"
         PLANNED = "planned", "想看"
         ON_HOLD = "on_hold", "搁置"
+        DROPPED = "dropped", "弃番"
 
     class Visibility(models.TextChoices):
         PRIVATE = "private", "私人"
@@ -82,6 +83,8 @@ class ExternalMediaIdentity(models.Model):
     external_id = models.CharField(max_length=200)
     canonical_url = models.URLField(max_length=1000)
     metadata = models.JSONField(default=dict, blank=True)
+    metadata_schema_version = models.PositiveSmallIntegerField(default=1)
+    is_metadata_source = models.BooleanField(default=False)
     metadata_fetched_at = models.DateTimeField(blank=True, null=True)
     provider_updated_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -91,6 +94,11 @@ class ExternalMediaIdentity(models.Model):
         ordering = ["provider", "id"]
         constraints = [
             models.UniqueConstraint(fields=["entry", "provider"], name="journal_ext_entry_provider_uq"),
+            models.UniqueConstraint(
+                fields=["entry"],
+                condition=models.Q(is_metadata_source=True),
+                name="journal_ext_one_metadata_source_uq",
+            ),
         ]
         indexes = [
             models.Index(fields=["provider", "external_id"], name="journal_ext_provider_id_idx"),
@@ -182,6 +190,7 @@ class ExternalImportSession(models.Model):
     )
     provider = models.CharField(max_length=50)
     snapshot = models.JSONField(default=list)
+    snapshot_schema_version = models.PositiveSmallIntegerField(default=1)
     result = models.JSONField(default=dict, blank=True)
     expires_at = models.DateTimeField()
     applied_at = models.DateTimeField(blank=True, null=True)
@@ -192,6 +201,65 @@ class ExternalImportSession(models.Model):
         indexes = [
             models.Index(fields=["user", "provider", "expires_at"], name="journal_extimport_exp_idx"),
         ]
+
+
+class WatchHistoryRecord(models.Model):
+    entry = models.ForeignKey(
+        JournalEntry,
+        on_delete=models.CASCADE,
+        related_name="watch_history_records",
+    )
+    watched_on = models.DateField()
+    watched_label = models.CharField(max_length=80)
+    brush_number = models.PositiveSmallIntegerField(blank=True, null=True)
+    brush_label = models.CharField(max_length=20, default="首刷")
+    episode_start = models.PositiveSmallIntegerField(blank=True, null=True)
+    episode_end = models.PositiveSmallIntegerField(blank=True, null=True)
+    notes = models.JSONField(default=list, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    sequence = models.PositiveIntegerField()
+    semantic_key = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sequence", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["entry", "semantic_key"],
+                name="journal_watch_entry_semantic_uq",
+            ),
+            models.UniqueConstraint(
+                fields=["entry", "sequence"],
+                name="journal_watch_entry_sequence_uq",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(episode_start__isnull=True)
+                | models.Q(episode_end__isnull=True)
+                | models.Q(episode_end__gte=models.F("episode_start")),
+                name="journal_watch_episode_range_ck",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["entry", "watched_on"],
+                name="journal_watch_entry_date_idx",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        from .watch_history.validation import semantic_digest_from_values
+
+        self.semantic_key = semantic_digest_from_values(
+            self.watched_on,
+            self.brush_label,
+            self.episode_start,
+            self.episode_end,
+        )
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.entry} · {self.watched_on} · {self.brush_label}"
 
 
 class UserSettings(models.Model):

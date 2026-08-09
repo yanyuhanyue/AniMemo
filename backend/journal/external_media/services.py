@@ -73,12 +73,18 @@ def create_prepared_identity(entry, prepared):
     if duplicate is not None:
         raise subject_already_bound(duplicate.entry_id)
     try:
+        is_metadata_source = not ExternalMediaIdentity.objects.filter(
+            entry=entry,
+            is_metadata_source=True,
+        ).exists()
         return ExternalMediaIdentity.objects.create(
             entry=entry,
             provider=prepared.provider,
             external_id=prepared.external_id,
             canonical_url=prepared.canonical_url,
             metadata=prepared.metadata,
+            metadata_schema_version=1,
+            is_metadata_source=is_metadata_source,
             metadata_fetched_at=prepared.metadata_fetched_at,
             provider_updated_at=prepared.provider_updated_at,
         )
@@ -139,27 +145,74 @@ def refresh_external_identity(*, entry, user, provider_slug):
         provider_values = _entry_values(metadata)
         changed_fields = {}
         applied_fields = []
-        for field in SAFE_AUTO_FIELDS:
-            provider_value = provider_values.get(field)
-            if provider_value in (None, ""):
-                continue
-            current_value = getattr(locked_entry, field)
-            if current_value == provider_value:
-                continue
-            changed_fields[field] = {"current": current_value, "provider": provider_value}
-            setattr(locked_entry, field, provider_value)
-            applied_fields.append(field)
+        if identity.is_metadata_source:
+            for field in SAFE_AUTO_FIELDS:
+                provider_value = provider_values.get(field)
+                if provider_value in (None, ""):
+                    continue
+                current_value = getattr(locked_entry, field)
+                if current_value == provider_value:
+                    continue
+                changed_fields[field] = {"current": current_value, "provider": provider_value}
+                setattr(locked_entry, field, provider_value)
+                applied_fields.append(field)
 
         if applied_fields:
             locked_entry.save(update_fields=[*applied_fields, "updated_at"])
         identity.canonical_url = provider.canonical_url(identity.external_id)
         identity.metadata = metadata
+        identity.metadata_schema_version = 1
         identity.metadata_fetched_at = fetched_at
         identity.provider_updated_at = None
         identity.save(
-            update_fields=["canonical_url", "metadata", "metadata_fetched_at", "provider_updated_at", "updated_at"]
+            update_fields=["canonical_url", "metadata", "metadata_schema_version", "metadata_fetched_at", "provider_updated_at", "updated_at"]
         )
     return identity, metadata, applied_fields, changed_fields
+
+
+def set_metadata_source(*, entry, user, provider_slug, apply_metadata):
+    if not isinstance(apply_metadata, bool):
+        raise ValueError("apply_metadata must be an explicit boolean")
+    provider = get_provider(provider_slug)
+    with transaction.atomic():
+        locked_user = lock_identity_owner(user)
+        locked_entry = JournalEntry.objects.select_for_update().get(
+            pk=entry.pk,
+            user=locked_user,
+            deleted_at__isnull=True,
+        )
+        identities = list(
+            ExternalMediaIdentity.objects.select_for_update()
+            .filter(entry=locked_entry)
+            .order_by("id")
+        )
+        selected = next((item for item in identities if item.provider == provider.slug), None)
+        if selected is None:
+            raise identity_not_found()
+        ExternalMediaIdentity.objects.filter(entry=locked_entry, is_metadata_source=True).exclude(
+            pk=selected.pk
+        ).update(is_metadata_source=False, updated_at=timezone.now())
+        if not selected.is_metadata_source:
+            selected.is_metadata_source = True
+            selected.save(update_fields=["is_metadata_source", "updated_at"])
+
+        applied_fields = []
+        changed_fields = {}
+        if apply_metadata:
+            provider_values = _entry_values(selected.metadata)
+            for field in SAFE_AUTO_FIELDS:
+                provider_value = provider_values.get(field)
+                if provider_value in (None, ""):
+                    continue
+                current_value = getattr(locked_entry, field)
+                if current_value == provider_value:
+                    continue
+                changed_fields[field] = {"current": current_value, "provider": provider_value}
+                setattr(locked_entry, field, provider_value)
+                applied_fields.append(field)
+            if applied_fields:
+                locked_entry.save(update_fields=[*applied_fields, "updated_at"])
+        return selected, applied_fields, changed_fields
 
 
 def _entry_values(metadata):

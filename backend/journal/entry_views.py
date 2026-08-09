@@ -1,5 +1,6 @@
 from plugin_host.permissions import plugin_permissions_for_user
 from plugin_host.sdk import ColumnHookContext, JournalHookContext, run_hook
+from django.db.models import Count, Max
 from rest_framework import filters, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -9,6 +10,7 @@ from rest_framework.views import APIView
 from .external_media.services import (
     bind_external_identity,
     refresh_external_identity,
+    set_metadata_source,
     unbind_external_identity,
 )
 from .models import Column, JournalEntry, QuickFilter, UserSettings
@@ -38,6 +40,9 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
         queryset = JournalEntry.objects.filter(
             user=self.request.user,
             deleted_at__isnull=True,
+        ).annotate(
+            watch_history_count=Count("watch_history_records", distinct=True),
+            last_watched_on=Max("watch_history_records__watched_on"),
         ).prefetch_related("external_identities")
         status_value = self.request.query_params.get("status")
         visibility = self.request.query_params.get("visibility")
@@ -105,6 +110,31 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
         return Response({
             "identity": ExternalMediaIdentitySerializer(identity).data,
             "metadata": metadata,
+            "applied_fields": applied_fields,
+            "changed_fields": changed_fields,
+        })
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"external-identities/(?P<provider>[-a-z0-9_]+)/metadata-source",
+    )
+    def external_identity_metadata_source(self, request, provider=None, pk=None):
+        entry = self.get_object()
+        apply_metadata = request.data.get("apply_metadata")
+        if not isinstance(apply_metadata, bool):
+            return Response(
+                {"code": "apply_metadata_required", "detail": "必须明确选择是否立即应用该来源的资料。"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        identity, applied_fields, changed_fields = set_metadata_source(
+            entry=entry,
+            user=request.user,
+            provider_slug=provider,
+            apply_metadata=apply_metadata,
+        )
+        return Response({
+            "identity": ExternalMediaIdentitySerializer(identity).data,
             "applied_fields": applied_fields,
             "changed_fields": changed_fields,
         })

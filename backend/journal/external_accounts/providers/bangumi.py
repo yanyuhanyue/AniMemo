@@ -1,11 +1,13 @@
-import json
-import logging
 from urllib.parse import quote, urlencode
 
-import requests
 from django.conf import settings
 
-from journal.external_media.providers.bangumi import BangumiProvider
+from journal.bangumi import (
+    BangumiClient,
+    BangumiClientError,
+    image_url,
+    normalize_external_id,
+)
 
 from ..errors import (
     ExternalAccountError,
@@ -15,33 +17,42 @@ from ..errors import (
     provider_unavailable,
 )
 
-logger = logging.getLogger(__name__)
-
-
 class BangumiAccountProvider:
     slug = "bangumi"
     display_name = "Bangumi"
-    api_base_url = "https://api.bgm.tv"
     oauth_base_url = "https://bgm.tv/oauth"
-    timeout = (4, 8)
-    max_response_bytes = 2 * 1024 * 1024
     collection_page_size = 50
     collection_statuses = {
         1: ("planned", "想看"),
         2: ("completed", "看过"),
         3: ("watching", "在看"),
         4: ("on_hold", "搁置"),
-        5: ("on_hold", "抛弃"),
+        5: ("dropped", "抛弃"),
     }
 
-    def __init__(self):
-        self.media_provider = BangumiProvider()
+    def __init__(self, client=None):
+        self.client = client or BangumiClient()
 
     def headers(self, access_token=None):
-        headers = self.media_provider.headers()
-        if access_token:
-            headers["Authorization"] = f"Bearer {access_token}"
-        return headers
+        return self.client.headers(access_token)
+
+    def enabled(self):
+        return bool(getattr(settings, "BANGUMI_ACCOUNT_INTEGRATION_ENABLED", True))
+
+    def capabilities(self):
+        enabled = self.enabled()
+        return {
+            "provider": self.slug,
+            "display_name": self.display_name,
+            "media_search_available": True,
+            "account_connection_available": enabled,
+            "oauth_available": enabled and self.oauth_available(),
+            "personal_access_token_available": enabled,
+            "import_available": enabled,
+        }
+
+    def import_max_items(self):
+        return int(settings.BANGUMI_IMPORT_MAX_ITEMS)
 
     def oauth_available(self):
         return all(
@@ -61,8 +72,9 @@ class BangumiAccountProvider:
     def exchange_code(self, code, state):
         payload = self._request_json(
             "post",
-            f"{self.oauth_base_url}/access_token",
+            "/access_token",
             endpoint="oauth_exchange",
+            base="oauth",
             data={
                 "grant_type": "authorization_code",
                 "client_id": settings.BANGUMI_OAUTH_CLIENT_ID,
@@ -71,15 +83,15 @@ class BangumiAccountProvider:
                 "redirect_uri": settings.BANGUMI_OAUTH_REDIRECT_URI,
                 "state": str(state or "")[:512],
             },
-            exchange=True,
         )
         return self._normalize_token_payload(payload)
 
     def refresh_oauth_token(self, refresh_token):
         payload = self._request_json(
             "post",
-            f"{self.oauth_base_url}/access_token",
+            "/access_token",
             endpoint="oauth_refresh",
+            base="oauth",
             data={
                 "grant_type": "refresh_token",
                 "client_id": settings.BANGUMI_OAUTH_CLIENT_ID,
@@ -87,17 +99,15 @@ class BangumiAccountProvider:
                 "refresh_token": str(refresh_token or "")[:4096],
                 "redirect_uri": settings.BANGUMI_OAUTH_REDIRECT_URI,
             },
-            exchange=True,
         )
         return self._normalize_token_payload(payload)
 
     def verify_account(self, access_token):
         payload = self._request_json(
             "get",
-            f"{self.api_base_url}/v0/me",
+            "/v0/me",
             endpoint="me",
             access_token=self._validate_token(access_token),
-            retry=True,
         )
         if not isinstance(payload, dict):
             raise provider_invalid_response()
@@ -106,7 +116,7 @@ class BangumiAccountProvider:
         if not external_user_id.isascii() or not external_user_id.isdigit() or not username:
             raise provider_invalid_response()
         avatars = payload.get("avatar") if isinstance(payload.get("avatar"), dict) else {}
-        avatar_url = self.media_provider._image_url(avatars.get("large") or avatars.get("medium") or avatars.get("small"))
+        avatar_url = image_url(avatars.get("large") or avatars.get("medium") or avatars.get("small"))
         return {
             "external_user_id": external_user_id[:200],
             "external_username": username[:200],
@@ -130,11 +140,10 @@ class BangumiAccountProvider:
             page_count += 1
             payload = self._request_json(
                 "get",
-                f"{self.api_base_url}/v0/users/{quote(username, safe='')}/collections",
+                f"/v0/users/{quote(username, safe='')}/collections",
                 endpoint="collections",
                 access_token=token,
                 params={"subject_type": 2, "limit": self.collection_page_size, "offset": offset},
-                retry=True,
             )
             if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
                 raise provider_invalid_response()
@@ -159,13 +168,12 @@ class BangumiAccountProvider:
         return rows
 
     def get_collection(self, access_token, username, external_id):
-        external_id = self.media_provider.normalize_external_id(external_id)
+        external_id = self._normalize_external_id(external_id)
         payload = self._request_json(
             "get",
-            f"{self.api_base_url}/v0/users/{quote(str(username or ''), safe='')}/collections/{external_id}",
+            f"/v0/users/{quote(str(username or ''), safe='')}/collections/{external_id}",
             endpoint="collection",
             access_token=self._validate_token(access_token),
-            retry=True,
         )
         normalized = self.normalize_collection(payload)
         if normalized is None:
@@ -176,7 +184,7 @@ class BangumiAccountProvider:
         if not isinstance(item, dict) or item.get("subject_type") != 2:
             return None
         subject = item.get("subject") if isinstance(item.get("subject"), dict) else {}
-        external_id = self.media_provider.normalize_external_id(item.get("subject_id") or subject.get("id"))
+        external_id = self._normalize_external_id(item.get("subject_id") or subject.get("id"))
         status_code = item.get("type")
         try:
             status_code = int(status_code)
@@ -195,7 +203,7 @@ class BangumiAccountProvider:
                 break
         comment = str(item.get("comment") or "").strip()[:10000]
         images = subject.get("images") if isinstance(subject.get("images"), dict) else {}
-        poster_url = self.media_provider._image_url(images.get("large") or images.get("common") or images.get("medium"))
+        poster_url = image_url(images.get("large") or images.get("common") or images.get("medium"))
         title = str(subject.get("name_cn") or subject.get("name") or f"Bangumi #{external_id}").strip()[:500]
         japanese_title = str(subject.get("name") or "").strip()[:500]
         return {
@@ -252,75 +260,29 @@ class BangumiAccountProvider:
             "token_type": "Bearer",
         }
 
-    def _request_json(self, method, url, *, endpoint, access_token=None, retry=False, exchange=False, **kwargs):
-        attempts = 2 if retry and method.lower() == "get" else 1
-        last_error = None
-        for attempt in range(attempts):
-            status_code = None
-            response = None
-            try:
-                response = requests.request(
-                    method,
-                    url,
-                    headers=self.headers(access_token),
-                    timeout=self.timeout,
-                    stream=True,
-                    **kwargs,
-                )
-                status_code = getattr(response, "status_code", None)
-                if status_code in (401, 403):
-                    raise account_token_invalid()
-                if status_code in (502, 503) and attempt + 1 < attempts:
-                    continue
-                response.raise_for_status()
-                content_length = str(getattr(response, "headers", {}).get("Content-Length") or "").strip()
-                if content_length:
-                    try:
-                        if int(content_length) > self.max_response_bytes:
-                            raise provider_invalid_response()
-                    except ValueError as error:
-                        raise provider_invalid_response() from error
-                chunks = []
-                total_bytes = 0
-                for chunk in response.iter_content(chunk_size=64 * 1024):
-                    if not chunk:
-                        continue
-                    total_bytes += len(chunk)
-                    if total_bytes > self.max_response_bytes:
-                        raise provider_invalid_response()
-                    chunks.append(chunk)
-                return json.loads(b"".join(chunks).decode("utf-8"))
-            except ExternalAccountError:
-                raise
-            except requests.Timeout as error:
-                last_error = error
-                if attempt + 1 < attempts:
-                    self._log_failure(endpoint, status_code, type(error).__name__)
-                    continue
-            except requests.RequestException as error:
-                last_error = error
-                if attempt + 1 < attempts and status_code in (None, 502, 503):
-                    self._log_failure(endpoint, status_code, type(error).__name__)
-                    continue
-            except (TypeError, ValueError, UnicodeError) as error:
-                self._log_failure(endpoint, status_code, type(error).__name__)
+    def _request_json(self, method, path, *, endpoint, access_token=None, base="api", **kwargs):
+        try:
+            return self.client.request_json(
+                method,
+                path,
+                endpoint=endpoint,
+                base=base,
+                access_token=access_token,
+                retry_get=True,
+                **kwargs,
+            )
+        except BangumiClientError as error:
+            if endpoint in {"oauth_exchange", "oauth_refresh"}:
+                raise authorization_exchange_failed() from error
+            if error.code == "unauthorized":
+                raise account_token_invalid() from error
+            if error.code == "invalid_response":
                 raise provider_invalid_response() from error
-            finally:
-                if response is not None:
-                    response.close()
-            self._log_failure(endpoint, status_code, type(last_error).__name__)
-            if exchange:
-                raise authorization_exchange_failed() from last_error
-            raise provider_unavailable() from last_error
-        if exchange:
-            raise authorization_exchange_failed()
-        raise provider_unavailable()
+            raise provider_unavailable() from error
 
-    def _log_failure(self, endpoint, status_code, error_class):
-        logger.warning(
-            "External account request failed provider=%s endpoint=%s status=%s error=%s",
-            self.slug,
-            endpoint,
-            status_code if status_code is not None else "unknown",
-            error_class,
-        )
+    @staticmethod
+    def _normalize_external_id(value):
+        try:
+            return normalize_external_id(value)
+        except ValueError as error:
+            raise provider_invalid_response() from error

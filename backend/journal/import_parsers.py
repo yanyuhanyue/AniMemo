@@ -44,8 +44,4 @@ class LimitedImportJSONParser(JSONParser):
             payload = json.loads(text)
         except json.JSONDecodeError as error:
             raise ParseError("JSON 格式不正确。") from error
-        try:
-            extract_import_records(payload)
-        except ValueError as error:
-            raise ParseError(str(error)) from error
         return payload

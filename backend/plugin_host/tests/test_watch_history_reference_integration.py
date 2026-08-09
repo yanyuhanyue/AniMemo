@@ -1,6 +1,7 @@
 import json
 import tempfile
 import time
+from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,7 +13,7 @@ from rest_framework.test import APIClient
 from accounts.models import User
 from integrations.authentication import sign_hmac_request
 from integrations.models import ExternalIdentityBinding, IntegrationConnection, IntegrationEvent
-from journal.models import JournalEntry
+from journal.models import JournalEntry, WatchHistoryRecord
 from plugin_host.models import PluginData, PluginProject
 from plugin_host.runtime import runtime_registry
 from plugin_host.services import install_for_user
@@ -108,14 +109,8 @@ class WatchHistoryReferenceIntegrationTests(TestCase):
                 self.assertEqual(response.status_code, 400, response.data)
                 self.assertEqual(response.data["code"], expected_code)
 
-        self.assertFalse(
-            PluginData.objects.filter(
-                plugin=self.project,
-                namespace="watch_history",
-                user=self.user,
-                key=str(self.entry.pk),
-            ).exists()
-        )
+        self.assertFalse(WatchHistoryRecord.objects.filter(entry=self.entry).exists())
+        self.assertFalse(PluginData.objects.filter(plugin=self.project, namespace="watch_history").exists())
 
     def test_web_and_integration_use_identical_normalization(self):
         raw_record = {
@@ -135,13 +130,20 @@ class WatchHistoryReferenceIntegrationTests(TestCase):
         web_entry = JournalEntry.objects.create(user=self.user, title="Web 端规范化")
         web_client = APIClient()
         web_client.force_authenticate(self.user)
-        web = web_client.patch(
-            f"/api/entries/{web_entry.pk}/",
-            {"watch_history": [raw_record]},
+        web = web_client.post(
+            f"/api/entries/{web_entry.pk}/watch-history/",
+            raw_record,
             format="json",
         )
-        self.assertEqual(web.status_code, 200, web.data)
-        self.assertEqual(integration.data["record"], web.data["watch_history"][0])
+        self.assertEqual(web.status_code, 201, web.data)
+        comparable_fields = {
+            "watched_on", "watched_label", "brush_number", "brush_label",
+            "episode_start", "episode_end", "notes", "metadata",
+        }
+        self.assertEqual(
+            {key: integration.data["record"][key] for key in comparable_fields},
+            {key: web.data["record"][key] for key in comparable_fields},
+        )
 
     def test_duplicate_semantic_history_record_is_idempotent(self):
         payload = {
@@ -201,14 +203,8 @@ class WatchHistoryReferenceIntegrationTests(TestCase):
         invalid = self.signed_action("import-commit", {"batch_id": batch_id})
         self.assertEqual(invalid.status_code, 400, invalid.data)
         self.assertEqual(invalid.data["code"], "invalid_watched_on")
-        self.assertFalse(
-            PluginData.objects.filter(
-                plugin=self.project,
-                namespace="watch_history",
-                user=self.user,
-                key=str(self.entry.pk),
-            ).exists()
-        )
+        self.assertFalse(WatchHistoryRecord.objects.filter(entry=self.entry).exists())
+        self.assertFalse(PluginData.objects.filter(plugin=self.project, namespace="watch_history").exists())
 
         batch = batch_row.value
         batch["payload"]["groups"][0]["records"][0] = {
@@ -224,21 +220,21 @@ class WatchHistoryReferenceIntegrationTests(TestCase):
         committed = self.signed_action("import-commit", {"batch_id": batch_id})
         self.assertEqual(committed.status_code, 200, committed.data)
         self.assertEqual(committed.data["imported_records"], 1)
-        history = PluginData.objects.get(
-            plugin=self.project,
-            namespace="watch_history",
-            user=self.user,
-            key=str(self.entry.pk),
-        )
-        self.assertEqual(history.value, [{
-            "watched_on": "2026-08-09",
+        history = list(WatchHistoryRecord.objects.filter(entry=self.entry).values(
+            "watched_on", "watched_label", "brush_number", "brush_label",
+            "episode_start", "episode_end", "notes", "metadata",
+        ))
+        self.assertEqual(history, [{
+            "watched_on": date(2026, 8, 9),
             "watched_label": "2026年8月9日",
             "brush_number": 2,
             "brush_label": "二刷",
             "episode_start": 7,
             "episode_end": 8,
             "notes": ["导入备注"],
+            "metadata": {},
         }])
+        self.assertFalse(PluginData.objects.filter(plugin=self.project, namespace="watch_history").exists())
 
     def test_web_import_commit_uses_shared_watch_history_normalization(self):
         batch_id = uuid4().hex
@@ -282,21 +278,27 @@ class WatchHistoryReferenceIntegrationTests(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 200, response.data)
-        history = PluginData.objects.get(
-            plugin=self.project,
-            namespace="watch_history",
-            user=self.user,
-            key=str(self.entry.pk),
-        )
-        self.assertEqual(history.value[0], {
-            "watched_on": "2026-08-10",
+        history = WatchHistoryRecord.objects.get(entry=self.entry)
+        self.assertEqual({
+            "watched_on": history.watched_on,
+            "watched_label": history.watched_label,
+            "brush_number": history.brush_number,
+            "brush_label": history.brush_label,
+            "episode_start": history.episode_start,
+            "episode_end": history.episode_end,
+            "notes": history.notes,
+            "metadata": history.metadata,
+        }, {
+            "watched_on": date(2026, 8, 10),
             "watched_label": "2026年8月10日",
             "brush_number": 3,
             "brush_label": "三刷",
             "episode_start": 1,
             "episode_end": 12,
             "notes": ["Web 导入备注"],
+            "metadata": {},
         })
+        self.assertFalse(PluginData.objects.filter(plugin=self.project, namespace="watch_history").exists())
 
     def test_entries_search_does_not_cross_tenant(self):
         response = self.signed_action("entries-search", {"query": "芙莉莲"})

@@ -106,11 +106,13 @@ export function DashboardPage() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const outcome = params.get("bangumi");
+    const outcome = params.get("external_account_status");
     if (!outcome) return;
+    const providerSlug = params.get("external_account_provider");
+    const provider = providerSlug === "bangumi" ? "Bangumi" : (providerSlug || "外部账号");
     setProfileInitialTab("external");
     setProfileOpen(true);
-    flash(outcome === "connected" ? "Bangumi 账号已安全连接。" : "Bangumi 授权未完成，请重新尝试。", "profile");
+    flash(outcome === "connected" ? `${provider} 账号已安全连接。` : `${provider} 授权未完成，请重新尝试。`, "profile");
     window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.hash}`);
   }, []);
 
@@ -195,7 +197,7 @@ export function DashboardPage() {
   const saveNewRecord = async (draft) => {
     const tags = String(draft.tagsText || "").split(/[，,]/).map((item) => item.trim()).filter(Boolean).slice(0, 30);
     const poster = draft.posterFile ? URL.createObjectURL(draft.posterFile) : draft.poster || "/assets/posters/poster-01.webp";
-    const statusLabels = { completed: "看过", watching: "在看", planned: "想看", on_hold: "搁置" };
+    const statusLabels = { completed: "看过", watching: "在看", planned: "想看", on_hold: "搁置", dropped: "弃番" };
     const record = {
       id: `local-${Date.now()}`,
       title: draft.title,
@@ -262,15 +264,47 @@ export function DashboardPage() {
     pressBeforeOpen(container, () => setSelected({ record, originRect: origin?.getBoundingClientRect?.() || null, returnFocus: source || container || null }));
   };
 
-  const exportData = () => {
-    const blob = new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), records }, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `anime-journal-${new Date().toISOString().slice(0, 10)}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    flash("手账数据已导出");
+  const exportData = async () => {
+    try {
+      const bundle = isDemo
+        ? {
+            format: "animemo-data-bundle",
+            schema_version: 1,
+            exported_at: new Date().toISOString(),
+            entries: records.map((record) => ({
+              entry: {
+                title: record.title || "",
+                japanese_title: record.japaneseTitle || "",
+                airing_period: record.period || "",
+                studio: record.studio || "",
+                episodes: record.episodes || "",
+                description: record.description || "",
+                poster_url: record.posterUrl || "",
+                custom_poster_url: record.customPosterUrl || "",
+                baike_url: record.baikeUrl || "",
+                tags: record.tags || [],
+                tag_colors: record.tagColors || {},
+                personal_score: record.score ?? null,
+                watch_status: record.status || "planned",
+                review: record.review || "",
+                visibility: record.shared ? "public" : "private",
+              },
+              external_identities: record.externalIdentities || [],
+              watch_history: record.watchHistory || [],
+            })),
+          }
+        : (await api.get("export/")).data;
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `animemo-data-bundle-${new Date().toISOString().slice(0, 10)}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      flash("手账数据已导出");
+    } catch (requestError) {
+      flash(readableApiError(requestError, "手账数据导出失败，请稍后重试。"));
+    }
   };
 
   const saveSettings = async (next) => {

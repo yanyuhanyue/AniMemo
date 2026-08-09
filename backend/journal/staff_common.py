@@ -12,8 +12,8 @@ from .models import Column, JournalEntry, UserSettings
 from .staff_services import (
     can_manage_user,
     get_security_profile,
-    get_staff_role,
     record_audit,
+    resolve_staff_role,
 )
 
 
@@ -97,7 +97,7 @@ def _tag_definition_values(data, *, partial=False):
 
 def _user_data(user, actor=None):
     settings_obj = getattr(user, "journal_settings", None)
-    role = get_staff_role(user) if user.is_staff else "user"
+    role = resolve_staff_role(user) if user.is_staff else "user"
     security = get_security_profile(user)
     return {
         "id": user.id,

@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 
 from .models import JournalEntry
-from .staff_services import can_manage_user, get_security_profile, get_staff_role
+from .staff_services import can_manage_user, get_security_profile, resolve_staff_role
 
 
 User = get_user_model()
@@ -48,7 +48,7 @@ def build_staff_user_data(user, settings_obj=None, actor=None):
         "is_active": user.is_active,
         "is_staff": user.is_staff,
         "is_superuser": user.is_superuser,
-        "staff_role": get_staff_role(user) if user.is_staff else "user",
+        "staff_role": resolve_staff_role(user) if user.is_staff else "user",
         "email_verified": security.email_verified,
         "two_factor_enabled": security.two_factor_enabled,
         "last_login": user.last_login,
