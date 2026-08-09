@@ -33,14 +33,35 @@ anime-journal/
 
 要求 Node.js 20+、Python 3.12+。
 
+推荐使用跨平台 bootstrap（会创建或复用 `.venv`、安装锁定依赖、执行迁移，并同时启动 Django 与 Vite）：
+
+```powershell
+./scripts/dev.ps1
+```
+
 ```bash
-npm install
+./scripts/dev.sh
+```
+
+只准备依赖和数据库、不启动服务：
+
+```powershell
+./scripts/dev.ps1 -SetupOnly
+./scripts/dev.sh --setup-only
+```
+
+脚本使用 SQLite + LocMemCache，仅限本地开发；生产环境仍需要 PostgreSQL + Redis。不会自动创建管理员账号。详细说明见 [`docs/local-development.md`](docs/local-development.md)。
+
+手动启动仍然支持。复制 `.env.example` 为 `.env`，然后运行：
+
+```bash
+npm ci
 python -m pip install -r backend/requirements.txt
 python backend/manage.py migrate
 python backend/manage.py runserver 8000
 ```
 
-复制 `.env.example` 为 `.env`，另开终端启动前端：
+另开终端启动前端：
 
 ```bash
 npm run dev -- --host 0.0.0.0
@@ -63,6 +84,8 @@ npm run dev -- --host 0.0.0.0
 | 个人设置 | `/api/settings/me/` |
 | 公开展示 | `/api/showcase/{public_slug}/`、`/api/shared/{share_slug}/` |
 | 健康检查 | `/health/` |
+| OpenAPI Schema | `GET /api/schema/` |
+| Swagger UI | `GET /api/docs/` |
 
 ## 插件开发
 
@@ -158,7 +181,22 @@ sudo sh deploy/deploy.sh \
 
 ## Python 依赖更新
 
-生产安装使用精确锁定的 `backend/requirements.txt`。升级时先修改 `backend/requirements.in`，重新生成锁定文件，并完整运行 Django 与前端测试；Django 最低安全基线为 5.2.16，当前不升级到 Django 6.x。
+生产安装使用精确锁定的 `backend/requirements.txt`。升级时先修改 `backend/requirements.in`，运行 `python scripts/update_dependencies.py` 重新生成锁定文件，并完整运行 Django 与前端测试；CI 会运行 `python scripts/update_dependencies.py --check` 防止锁文件漂移。Django 最低安全基线为 5.2.16，当前不升级到 Django 6.x。
+
+## API 文档与维护
+
+`/api/schema/` 提供 OpenAPI 3 schema，`/api/docs/` 提供 Swagger UI。文档只描述接口契约，不包含任何生产密钥、OAuth secret、凭证密文或插件 HMAC secret；refresh token 仅通过 HttpOnly Cookie 传递。
+
+已有维护命令可通过统一入口执行：
+
+```bash
+python backend/manage.py run_maintenance
+python backend/manage.py run_maintenance --task purge_expired_revoked_tokens
+```
+
+每个任务都会输出 `PASS` 或 `FAIL`；任一任务失败时总命令返回非零状态，但会继续执行其他任务。该入口只包含非破坏性任务，不会启用 Celery、后台 worker 或生产部署操作。
+
+查询计划和 cron/systemd 调度说明见 [`docs/maintenance.md`](docs/maintenance.md)。
 
 ## 验证命令
 

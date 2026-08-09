@@ -1,20 +1,26 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { AdminLoginPage } from "./pages/AdminLoginPage.jsx";
-import { AdminDashboardPage } from "./pages/AdminDashboardPage.jsx";
-import { UserAuthPage } from "./pages/UserAuthPage.jsx";
-import { DashboardPage } from "./pages/DashboardPage.jsx";
-import { ColumnSubmitPage, UniversePage } from "./pages/CommunityPages.jsx";
-import { FeaturedPage } from "./pages/FeaturedPage.jsx";
 import { ShowcasePage } from "./pages/ShowcasePage.jsx";
-import { PluginPlatformPage } from "./pages/PluginPlatformPage.jsx";
-import { PluginDraftPreviewPage } from "./pages/PluginDraftPreviewPage.jsx";
 import { PageColorTransition } from "./components/PageColorTransition.jsx";
 import { SiteSettingsProvider } from "./context/SiteSettingsContext.jsx";
 import { api, getAuthUser, initializeAuth, subscribeAuth } from "./lib/api.js";
 import { PluginErrorBoundary } from "./plugins/sdk/PluginErrorBoundary.jsx";
 import { PluginRuntimeProvider, usePluginRuntime } from "./plugins/sdk/PluginRuntimeContext.jsx";
 import { validatePluginRoute } from "./plugins/sdk/host.js";
+
+const UserAuthPage = lazy(() => import("./pages/UserAuthPage.jsx").then(({ UserAuthPage: Component }) => ({ default: Component })));
+const DashboardPage = lazy(() => import("./pages/DashboardPage.jsx").then(({ DashboardPage: Component }) => ({ default: Component })));
+const AdminLoginPage = lazy(() => import("./pages/AdminLoginPage.jsx").then(({ AdminLoginPage: Component }) => ({ default: Component })));
+const AdminDashboardPage = lazy(() => import("./pages/AdminDashboardPage.jsx").then(({ AdminDashboardPage: Component }) => ({ default: Component })));
+const PluginPlatformPage = lazy(() => import("./pages/PluginPlatformPage.jsx").then(({ PluginPlatformPage: Component }) => ({ default: Component })));
+const PluginDraftPreviewPage = lazy(() => import("./pages/PluginDraftPreviewPage.jsx").then(({ PluginDraftPreviewPage: Component }) => ({ default: Component })));
+const FeaturedPage = lazy(() => import("./pages/FeaturedPage.jsx").then(({ FeaturedPage: Component }) => ({ default: Component })));
+const ColumnSubmitPage = lazy(() => import("./pages/CommunityPages.jsx").then(({ ColumnSubmitPage: Component }) => ({ default: Component })));
+const UniversePage = lazy(() => import("./pages/CommunityPages.jsx").then(({ UniversePage: Component }) => ({ default: Component })));
+
+function RouteLoading() {
+  return <main className="app-auth-bootstrap" aria-label="正在加载页面"><span>正在加载页面...</span></main>;
+}
 
 // SDK v2 loads only server-declared frontend entries and explicit route access
 // policies. Plugin code is never eagerly executed before the host authorizes it.
@@ -37,6 +43,7 @@ function AppRoutes({ authUser }) {
   }), [plugins]);
 
   return (
+    <Suspense fallback={<RouteLoading />}>
     <Routes>
       <Route path="/" element={<ShowcasePage />} />
       <Route path="/login" element={<UserAuthPage />} />
@@ -79,6 +86,7 @@ function AppRoutes({ authUser }) {
           : <Navigate to="/" replace />}
       />
     </Routes>
+    </Suspense>
   );
 }
 

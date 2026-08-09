@@ -58,6 +58,9 @@ jobs:
         working-directory: backend
       - run: python manage.py makemigrations --check
         working-directory: backend
+      - run: python manage.py spectacular --validate --file /tmp/animemo-openapi.yaml
+        working-directory: backend
+      - run: python scripts/update_dependencies.py --check
       - run: python manage.py test
         working-directory: backend
 
