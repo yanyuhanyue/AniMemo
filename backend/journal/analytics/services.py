@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from django.db.models import Avg, Count, Q
 from django.utils import timezone
@@ -63,14 +63,24 @@ def build_user_analytics(*, user, start=None, end=None):
         .order_by("personal_score")
     ]
 
+    base_history = WatchHistoryRecord.objects.filter(
+        entry__user=user,
+        entry__deleted_at__isnull=True,
+    )
     history = _history_range(
-        WatchHistoryRecord.objects.filter(entry__user=user, entry__deleted_at__isnull=True),
+        base_history,
         start,
         end,
     )
+    today = timezone.localdate()
+    week_start = today - timedelta(days=6)
+    month_start = today.replace(day=1)
     history_summary = history.aggregate(
         watch_history_count=Count("id"),
         active_days=Count("watched_on", distinct=True),
+        today_count=Count("id", filter=Q(watched_on=today)),
+        seven_day_count=Count("id", filter=Q(watched_on__gte=week_start, watched_on__lte=today)),
+        month_count=Count("id", filter=Q(watched_on__gte=month_start, watched_on__lte=today)),
     )
     monthly_activity = [
         {
@@ -83,6 +93,21 @@ def build_user_analytics(*, user, start=None, end=None):
     ]
 
     average = aggregate["average_score"]
+    recent_activity = [
+        {
+            "id": record.pk,
+            "entry_id": record.entry_id,
+            "title": record.entry.title,
+            "watched_on": record.watched_on.isoformat(),
+            "watched_label": record.watched_label,
+            "brush_number": record.brush_number,
+            "brush_label": record.brush_label,
+            "episode_start": record.episode_start,
+            "episode_end": record.episode_end,
+            "notes": record.notes,
+        }
+        for record in history.select_related("entry").order_by("-watched_on", "-sequence", "-id")[:10]
+    ]
     return {
         "summary": {
             "total": aggregate["total"],
@@ -94,6 +119,12 @@ def build_user_analytics(*, user, start=None, end=None):
         "status_distribution": status_distribution,
         "score_distribution": score_distribution,
         "monthly_activity": monthly_activity,
+        "activity_summary": {
+            "today": history_summary["today_count"],
+            "last_7_days": history_summary["seven_day_count"],
+            "current_month": history_summary["month_count"],
+        },
+        "recent_activity": recent_activity,
         "range": {
             "start": start.isoformat() if start is not None else None,
             "end": end.isoformat() if end is not None else None,

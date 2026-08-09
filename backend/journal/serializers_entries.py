@@ -86,6 +86,9 @@ class JournalEntrySerializer(serializers.ModelSerializer):
     share_url = serializers.SerializerMethodField(read_only=True)
     watch_history_count = serializers.SerializerMethodField()
     last_watched_on = serializers.SerializerMethodField()
+    first_watched_on = serializers.SerializerMethodField()
+    latest_episode_start = serializers.SerializerMethodField()
+    latest_episode_end = serializers.SerializerMethodField()
     external_identity = ExternalIdentityInputField(required=False, write_only=True, allow_null=True)
     external_identities = serializers.SerializerMethodField()
 
@@ -96,7 +99,8 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             "description", "poster_url", "custom_poster_url", "poster_file", "poster", "poster_source",
             "clear_custom_poster", "baike_url", "tags",
             "tag_colors", "personal_score", "watch_status", "watch_status_display", "review",
-            "visibility", "share_slug", "share_url", "watch_history_count", "last_watched_on", "external_identity",
+            "visibility", "share_slug", "share_url", "watch_history_count", "last_watched_on", "first_watched_on",
+            "latest_episode_start", "latest_episode_end", "external_identity",
             "external_identities", "created_at", "updated_at",
         ]
         read_only_fields = ["share_slug", "created_at", "updated_at"]
@@ -185,6 +189,26 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             return obj.last_watched_on
         latest = obj.watch_history_records.order_by("-watched_on", "-sequence").values_list("watched_on", flat=True).first()
         return latest
+
+    @extend_schema_field(OpenApiTypes.DATE)
+    def get_first_watched_on(self, obj):
+        if hasattr(obj, "first_watched_on"):
+            return obj.first_watched_on
+        return obj.watch_history_records.order_by("watched_on", "sequence").values_list("watched_on", flat=True).first()
+
+    @extend_schema_field(OpenApiTypes.INT)
+    def get_latest_episode_start(self, obj):
+        if hasattr(obj, "latest_episode_start"):
+            return obj.latest_episode_start
+        latest = obj.watch_history_records.order_by("-watched_on", "-sequence", "-id").only("episode_start").first()
+        return latest.episode_start if latest else None
+
+    @extend_schema_field(OpenApiTypes.INT)
+    def get_latest_episode_end(self, obj):
+        if hasattr(obj, "latest_episode_end"):
+            return obj.latest_episode_end
+        latest = obj.watch_history_records.order_by("-watched_on", "-sequence", "-id").only("episode_end").first()
+        return latest.episode_end if latest else None
 
     @extend_schema_field(ExternalMediaIdentitySummarySerializer(many=True))
     def get_external_identities(self, obj):

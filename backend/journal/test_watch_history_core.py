@@ -127,6 +127,35 @@ class CoreWatchHistoryTests(TestCase):
         self.assertNotIn("watch_history", row)
         self.assertEqual(row["watch_history_count"], 1)
         self.assertEqual(str(row["last_watched_on"]), "2026-08-09")
+        self.assertEqual(str(row["first_watched_on"]), "2026-08-09")
+        self.assertEqual(row["latest_episode_start"], 1)
+        self.assertEqual(row["latest_episode_end"], 12)
+
+    def test_history_collection_uses_bounded_pagination(self):
+        for episode in range(1, 4):
+            add_history(
+                user=self.user,
+                entry=self.entry,
+                record=record_payload(episode_start=episode, episode_end=episode),
+            )
+
+        first = self.client.get(self.collection_url(), {"page_size": 2})
+        second = self.client.get(self.collection_url(), {"page_size": 2, "page": 2})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.data["count"], 3)
+        self.assertEqual(first.data["next_page"], 2)
+        self.assertEqual(len(first.data["results"]), 2)
+        self.assertEqual(second.data["count"], 3)
+        self.assertIsNone(second.data["next_page"])
+        self.assertEqual(len(second.data["results"]), 1)
+
+    def test_entry_detail_does_not_reveal_another_users_private_entry(self):
+        foreign = JournalEntry.objects.create(user=self.other, title="Private deep link")
+
+        response = self.client.get(reverse("entry-detail", kwargs={"pk": foreign.pk}))
+
+        self.assertEqual(response.status_code, 404)
 
 
 @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row-level locking")

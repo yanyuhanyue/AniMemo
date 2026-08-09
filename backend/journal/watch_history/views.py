@@ -14,6 +14,18 @@ from .services import add_history, delete_history, list_history, replace_history
 from .validation import WatchHistoryValidationError
 
 
+DEFAULT_PAGE_SIZE = 100
+MAX_PAGE_SIZE = 100
+
+
+def _positive_int(value, default):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 def _entry_for(request, entry_id):
     return get_object_or_404(
         JournalEntry,
@@ -28,8 +40,20 @@ class WatchHistoryCollectionView(APIView):
 
     def get(self, request, entry_id):
         entry = _entry_for(request, entry_id)
-        records = list_history(user=request.user, entry=entry)
-        return Response({"count": len(records), "results": WatchHistoryRecordSerializer(records, many=True).data})
+        page = _positive_int(request.query_params.get("page"), 1)
+        page_size = min(_positive_int(request.query_params.get("page_size"), DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
+        offset = (page - 1) * page_size
+        records = list_history(user=request.user, entry=entry, offset=offset, limit=page_size + 1)
+        has_more = len(records) > page_size
+        visible = records[:page_size]
+        total = entry.watch_history_records.count() if has_more or page > 1 else offset + len(visible)
+        return Response({
+            "count": total,
+            "page": page,
+            "page_size": page_size,
+            "next_page": page + 1 if has_more else None,
+            "results": WatchHistoryRecordSerializer(visible, many=True).data,
+        })
 
     def post(self, request, entry_id):
         entry = _entry_for(request, entry_id)
