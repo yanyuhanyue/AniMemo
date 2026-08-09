@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
+from astrbot.api.event import MessageChain
+
 from .errors import (
     BridgeAuthError,
     BridgeConnectionError,
@@ -14,28 +16,11 @@ from .renderers import render_event
 
 
 async def send_private_message(context, umo, text):
-    chain = text
-    try:
-        from astrbot.api.message import MessageChain
-
-        chain = MessageChain().message(text)
-    except (ImportError, AttributeError, TypeError):
-        try:
-            from astrbot.api.event import MessageChain
-
-            chain = MessageChain().message(text)
-        except (ImportError, AttributeError, TypeError):
-            chain = text
+    chain = MessageChain().message(text)
     sender = getattr(context, "send_message", None)
     if not callable(sender):
         raise BridgeEventError("AstrBot context.send_message 不可用。")
-    try:
-        result = sender(umo, chain)
-    except TypeError:
-        try:
-            result = sender(chain, umo=umo)
-        except TypeError:
-            result = sender(umo=umo, message=chain)
+    result = sender(umo, chain)
     if hasattr(result, "__await__"):
         result = await result
     if result is False:

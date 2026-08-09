@@ -29,6 +29,8 @@ def validate():
     for field in ("name", "display_name", "version", "desc", "license"):
         if not metadata.get(field):
             raise SystemExit(f"metadata.yaml missing {field}")
+    if metadata.get("astrbot_version") != ">=4.27.2":
+        raise SystemExit("metadata.yaml must require the audited AstrBot >=4.27.2 runtime")
     schema = json.loads((BRIDGE / "_conf_schema.json").read_text(encoding="utf-8"))
     required_config = {"enabled", "animemo_base_url", "key_id", "secret", "poll_events", "poll_wait_seconds", "request_timeout_seconds", "allow_group_commands", "developer_commands", "verify_tls"}
     if set(schema) != required_config:
@@ -49,6 +51,13 @@ def validate():
     requirements = (BRIDGE / "requirements.txt").read_text(encoding="utf-8").lower()
     if "requests" in requirements or "httpx" not in requirements:
         raise SystemExit("requirements.txt must use httpx and must not use requests")
+    production_main = (BRIDGE / "main.py").read_text(encoding="utf-8")
+    for forbidden in ("_FallbackLogger", "class Star:", "class Context:", "astrbot.api.message"):
+        if forbidden in production_main:
+            raise SystemExit(f"production Bridge contains a fake or invalid AstrBot runtime path: {forbidden}")
+    event_source = (BRIDGE / "animemo_bridge" / "events.py").read_text(encoding="utf-8")
+    if "astrbot.api.message" in event_source:
+        raise SystemExit("event delivery must import MessageChain from astrbot.api.event")
     for path in BRIDGE.rglob("*"):
         if "__pycache__" in path.parts or path.suffix == ".pyc":
             continue

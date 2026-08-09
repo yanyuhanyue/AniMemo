@@ -5,6 +5,10 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from astrbot_stub import install_astrbot_stubs
+
+install_astrbot_stubs()
+
 from animemo_bridge.errors import BridgeAuthError, BridgeEventError
 from animemo_bridge.events import EventPoller
 from animemo_bridge.identity import MessageIdentity

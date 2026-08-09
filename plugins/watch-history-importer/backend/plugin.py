@@ -11,6 +11,12 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from journal.models import JournalEntry
+from journal.watch_history import (
+    WatchHistoryValidationError,
+    merge_watch_history_records,
+    normalize_watch_history_record,
+    normalize_watch_history_records,
+)
 from plugin_host.storage import PluginStorage
 
 from .src.anime_journal_watch_history_importer.bangumi import BangumiError, resolve_group, resolve_subject_id
@@ -18,9 +24,10 @@ from .src.anime_journal_watch_history_importer.parser import build_preview, norm
 
 
 PLUGIN_SLUG = "watch-history-importer"
-PLUGIN_VERSION = "0.3.2"
+PLUGIN_VERSION = "0.3.3"
 MAX_FILES = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
+INTEGRATION_TEXT_MAX_BYTES = 120 * 1024
 DATE_TAG_RE = re.compile(r"^\d{4}年\d{1,2}月(?:\d{1,2}(?:日|号)?)?(?:\s*(?:-|–|—|至)\s*(?:\d{1,2}月)?\d{1,2}(?:日|号)?)?$")
 BRUSH_TAG_RE = re.compile(r"^(?:首|二|三|四|五|六|七|八|九|十|\d+|X)刷$", re.IGNORECASE)
 YEAR_TAG_RE = re.compile(r"^\d{4}年?$")
@@ -38,6 +45,23 @@ def _config(user):
 
 def _batch_key(batch_id):
     return str(batch_id)
+
+
+def _import_history_records(records):
+    if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+        raise WatchHistoryValidationError("导入批次中的观看记录格式无效。")
+    return normalize_watch_history_records([
+        {
+            "watched_on": record.get("watch_date"),
+            "watched_label": record.get("watch_date_label"),
+            "brush_number": record.get("brush"),
+            "brush_label": record.get("brush_label"),
+            "episode_start": (record.get("episode_range") or {}).get("start"),
+            "episode_end": (record.get("episode_range") or {}).get("end"),
+            "notes": record.get("notes", []),
+        }
+        for record in records
+    ])
 
 
 def _get_batch(request, batch_id):
@@ -125,7 +149,6 @@ class WatchHistoryPlugin:
         host.api.post("batches/<batch_id>/resolve-next", handler=self.resolve_next, access="user")
         host.api.post("batches/<batch_id>/select-subject", handler=self.select_subject, access="user")
         host.api.post("batches/<batch_id>/commit", handler=self.commit, access="user")
-        host.api.get("astrbot/schema", handler=self.astrbot_schema, access="user")
         host.integrations.register_action("history-get", self.integration_history_get)
         host.integrations.register_action("history-add", self.integration_history_add)
         host.integrations.register_action("entries-search", self.integration_entries_search)
@@ -135,9 +158,6 @@ class WatchHistoryPlugin:
     @staticmethod
     def health_check():
         return True
-
-    def astrbot_schema(self, request):
-        return Response({"interface": "anime-journal.watch-history-import", "version": "2.0", "implemented": True, "workflow": ["preview", "resolve", "review", "commit"]})
 
     def integration_history_get(self, context, payload):
         entry_id = payload.get("entry_id")
@@ -160,26 +180,16 @@ class WatchHistoryPlugin:
             entry = JournalEntry.objects.get(pk=entry_id, user=context.user, deleted_at__isnull=True)
         except JournalEntry.DoesNotExist:
             return {"code": "entry_not_found", "detail": "番剧条目不存在。"}, 404
-        watched_on = str(payload.get("watched_on") or "").strip()
-        if not watched_on or len(watched_on) > 32:
-            return {"code": "invalid_watched_on", "detail": "watched_on 无效。"}, 400
-        record = {
-            "watched_on": watched_on,
-            "watched_label": str(payload.get("watched_label") or watched_on)[:80],
-            "brush_number": payload.get("brush_number"),
-            "brush_label": str(payload.get("brush_label") or "")[:40],
-            "episode_start": payload.get("episode_start"),
-            "episode_end": payload.get("episode_end"),
-            "notes": [str(item)[:200] for item in payload.get("notes", []) if isinstance(item, str)][:10],
-        }
+        try:
+            record = normalize_watch_history_record(payload)
+        except WatchHistoryValidationError as error:
+            return {"code": error.code, "detail": error.detail}, 400
         store = _store(context.user, "watch_history")
         history = store.get(str(entry.pk), []) or []
-        key = (record["watched_on"], record["brush_label"], record["episode_start"], record["episode_end"])
-        keys = {(item.get("watched_on"), item.get("brush_label"), item.get("episode_start"), item.get("episode_end")) for item in history}
-        created = key not in keys
+        history, created_count, _ = merge_watch_history_records(history, [record])
+        created = created_count == 1
         if created:
-            history.append(record)
-            store.set(str(entry.pk), history[-500:])
+            store.set(str(entry.pk), history)
             self.host.integrations.emit(
                 context.user,
                 "history-updated",
@@ -207,9 +217,9 @@ class WatchHistoryPlugin:
 
     def integration_import_preview(self, context, payload):
         text = payload.get("text")
-        if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > MAX_FILE_BYTES:
-            return {"code": "invalid_text", "detail": "text 必须是非空 UTF-8 文本且不超过 2 MB。"}, 400
-        preview = build_preview([(str(payload.get("filename") or "astrbot.txt")[:120], text)])
+        if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > INTEGRATION_TEXT_MAX_BYTES:
+            return {"code": "invalid_text", "detail": "text 必须是非空 UTF-8 文本且不超过 120 KiB。"}, 400
+        preview = build_preview([(str(payload.get("filename") or "integration.txt")[:120], text)])
         return {"summary": preview.get("summary", {}), "groups": preview.get("groups", [])}
 
     def integration_import_commit(self, context, payload):
@@ -226,6 +236,15 @@ class WatchHistoryPlugin:
             return {"code": "empty_import_selection", "detail": "至少保留一部番剧后才能正式导入。"}, 400
         if any(group.get("resolution", {}).get("status") == "pending" for group in selected):
             return {"code": "resolution_pending", "detail": "仍有番剧尚未完成 Bangumi 匹配。"}, 409
+        try:
+            prepared = [
+                (group, _import_history_records(group.get("records", [])))
+                for group in selected
+                if group.get("resolution", {}).get("status") == "matched"
+                and group.get("resolution", {}).get("bangumi_id")
+            ]
+        except WatchHistoryValidationError as error:
+            return {"code": error.code, "detail": error.detail}, 400
         imported_entries = set()
         imported_records = 0
         created_entries = 0
@@ -235,7 +254,7 @@ class WatchHistoryPlugin:
             entries = list(JournalEntry.objects.select_for_update().filter(user=context.user, deleted_at__isnull=True))
             by_title = {normalize_title(title): entry for entry in entries for title in (entry.title, entry.japanese_title) if normalize_title(title)}
             history_store = _store(context.user, "watch_history")
-            for group in selected:
+            for group, incoming_history in prepared:
                 resolution = group.get("resolution", {})
                 if resolution.get("status") != "matched" or not resolution.get("bangumi_id"):
                     continue
@@ -245,17 +264,12 @@ class WatchHistoryPlugin:
                     created_entries += 1
                 imported_entries.add(entry.pk)
                 history = history_store.get(str(entry.pk), []) or []
-                keys = {(item.get("watched_on"), item.get("brush_label"), item.get("episode_start"), item.get("episode_end")) for item in history}
-                for record in group.get("records", []):
-                    episode = record.get("episode_range") or {}
-                    normalized = {"watched_on": record.get("watch_date"), "watched_label": record.get("watch_date_label"), "brush_number": record.get("brush"), "brush_label": record.get("brush_label"), "episode_start": episode.get("start"), "episode_end": episode.get("end"), "notes": record.get("notes", [])}
-                    key = (normalized["watched_on"], normalized["brush_label"], normalized["episode_start"], normalized["episode_end"])
-                    if key not in keys:
-                        history.append(normalized); keys.add(key); imported_records += 1
-                        updated_records += 1
-                    else:
-                        skipped_records += 1
-                history_store.set(str(entry.pk), history[-500:])
+                history, created_count, skipped_count = merge_watch_history_records(history, incoming_history)
+                imported_records += created_count
+                updated_records += created_count
+                skipped_records += skipped_count
+                if created_count:
+                    history_store.set(str(entry.pk), history)
         result = {
             "batch_id": batch_id,
             "imported_entries": len(imported_entries),
@@ -369,6 +383,15 @@ class WatchHistoryPlugin:
             return Response({"code": "manual_review_required", "detail": f"仍有 {len(unresolved)} 部番剧需要人工选择 Bangumi 条目。"}, status=status.HTTP_409_CONFLICT)
         if batch.get("target_user_id") != request.user.pk:
             return Response({"code": "batch_owner_mismatch", "detail": "导入批次不属于当前账号。"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            prepared = [
+                (group, _import_history_records(group.get("records", [])))
+                for group in selected
+                if group.get("resolution", {}).get("status") == "matched"
+                and group.get("resolution", {}).get("bangumi_id")
+            ]
+        except WatchHistoryValidationError as error:
+            return Response({"code": error.code, "detail": error.detail}, status=status.HTTP_400_BAD_REQUEST)
         target_user = request.user
         imported_entries = set()
         imported_records = 0
@@ -380,7 +403,7 @@ class WatchHistoryPlugin:
             by_title = {normalize_title(title): entry for entry in entries for title in (entry.title, entry.japanese_title) if normalize_title(title)}
             history_store = _store(target_user, "watch_history")
             subject_store = _store(target_user, "subjects")
-            for group in selected:
+            for group, incoming_history in prepared:
                 resolution = group.get("resolution", {})
                 if resolution.get("status") != "matched" or not resolution.get("bangumi_id"):
                     continue
@@ -409,19 +432,12 @@ class WatchHistoryPlugin:
                 imported_entries.add(entry.pk)
                 subject_store.set(f"{target_user.pk}:{resolution['bangumi_id']}", {"entry_id": entry.pk, "batch_id": batch["id"]})
                 history = history_store.get(str(entry.pk), []) or []
-                keys = {(item.get("watched_on"), item.get("brush_label"), item.get("episode_start"), item.get("episode_end")) for item in history}
-                for record in group.get("records", []):
-                    episode = record.get("episode_range") or {}
-                    normalized = {"watched_on": record["watch_date"], "watched_label": record["watch_date_label"], "brush_number": record.get("brush"), "brush_label": record["brush_label"], "episode_start": episode.get("start"), "episode_end": episode.get("end"), "notes": record.get("notes", [])}
-                    key = (normalized["watched_on"], normalized["brush_label"], normalized["episode_start"], normalized["episode_end"])
-                    if key not in keys:
-                        history.append(normalized)
-                        keys.add(key)
-                        imported_records += 1
-                        updated_records += 1
-                    else:
-                        skipped_records += 1
-                history_store.set(str(entry.pk), history)
+                history, created_count, skipped_count = merge_watch_history_records(history, incoming_history)
+                imported_records += created_count
+                updated_records += created_count
+                skipped_records += skipped_count
+                if created_count:
+                    history_store.set(str(entry.pk), history)
         batch["status"] = "imported"
         batch["imported_at"] = timezone.now().isoformat()
         batch["summary"] = {**batch.get("summary", {}), "imported_entries": len(imported_entries), "imported_history_records": imported_records, "selected_groups": len(selected), "excluded_groups": len(excluded), "excluded_group_indices": sorted(excluded)}

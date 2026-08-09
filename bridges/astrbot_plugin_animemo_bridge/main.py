@@ -3,17 +3,16 @@ from __future__ import annotations
 import inspect
 import json
 import os
-from pathlib import Path
 from uuid import uuid4
 
-try:
+if __package__:
     from .animemo_bridge.client import AsyncAniMemoClient, BridgeConfig
     from .animemo_bridge.errors import AniMemoBridgeError, PairingResultUnknown
     from .animemo_bridge.events import EventPoller
     from .animemo_bridge.identity import extract_identity
     from .animemo_bridge.routing import RouteStore
     from .animemo_bridge.state import EventState
-except ImportError:  # direct AstrBot loader / static tests
+else:
     from animemo_bridge.client import AsyncAniMemoClient, BridgeConfig
     from animemo_bridge.errors import AniMemoBridgeError, PairingResultUnknown
     from animemo_bridge.events import EventPoller
@@ -21,44 +20,10 @@ except ImportError:  # direct AstrBot loader / static tests
     from animemo_bridge.routing import RouteStore
     from animemo_bridge.state import EventState
 
-try:  # AstrBot is intentionally optional for repository-side unit tests.
-    from astrbot.api import logger
-    from astrbot.api.event import AstrMessageEvent, filter
-    from astrbot.api.star import Context, Star, register
-    from astrbot.api.web import request as web_request
-except ImportError:  # pragma: no cover - exercised by packaging/static tests
-    class _FallbackLogger:
-        def __getattr__(self, _name):
-            return lambda *args, **kwargs: None
-
-    logger = _FallbackLogger()
-
-    class Star:
-        def __init__(self, context=None, config=None):
-            self.context, self.config = context, config or {}
-
-    class Context:
-        pass
-
-    class AstrMessageEvent:
-        pass
-
-    class _Group:
-        def command(self, *_args, **_kwargs):
-            return lambda fn: fn
-
-    class _Filter:
-        def command(self, *_args, **_kwargs):
-            return lambda fn: fn
-
-        def command_group(self, *_args, **_kwargs):
-            return _Group()
-
-    filter = _Filter()
-    web_request = None
-
-    def register(*_args, **_kwargs):
-        return lambda cls: cls
+from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.api.web import request as web_request
 
 
 DEFAULT_CONFIG = {
@@ -88,39 +53,15 @@ def _message_text(event):
 async def _reply(event, text):
     method = getattr(event, "send", None) or getattr(event, "reply", None)
     if callable(method):
-        message = str(text)
-        try:
-            from astrbot.api.message import MessageChain
-
-            message = MessageChain().message(message)
-        except (ImportError, AttributeError, TypeError):
-            try:
-                from astrbot.api.event import MessageChain
-
-                message = MessageChain().message(message)
-            except (ImportError, AttributeError, TypeError):
-                message = str(text)
+        message = MessageChain().message(str(text))
         result = method(message)
         if inspect.isawaitable(result):
             await result
     return str(text)
 
 
-def _data_dir(context):
-    for name in ("get_plugin_data_dir", "get_data_dir"):
-        method = getattr(context, name, None)
-        if callable(method):
-            try:
-                value = method("astrbot_plugin_animemo_bridge")
-            except TypeError:
-                value = method()
-            if value:
-                return Path(value)
-    for name in ("plugin_data_dir", "data_dir"):
-        value = getattr(context, name, None)
-        if value:
-            return Path(value) / "astrbot_plugin_animemo_bridge"
-    return Path("data/plugins/astrbot_plugin_animemo_bridge")
+def _data_dir():
+    return StarTools.get_data_dir("astrbot_plugin_animemo_bridge")
 
 
 def _config_value(config, key):
@@ -135,20 +76,8 @@ def _config_value(config, key):
 
 
 def _developer_allowed(event):
-    role = getattr(event, "role", None)
-    if role is not None:
-        return str(role).strip().lower() in {"admin", "administrator"}
-    for name in ("is_admin", "is_sender_admin", "sender_is_admin"):
-        candidate = getattr(event, name, None)
-        if callable(candidate):
-            try:
-                result = candidate()
-                return False if inspect.isawaitable(result) else bool(result)
-            except TypeError:
-                continue
-        if candidate is not None:
-            return bool(candidate)
-    return False
+    is_admin = getattr(event, "is_admin", None)
+    return bool(is_admin()) if callable(is_admin) else False
 
 
 def _watch_action_result(action, result):
@@ -188,8 +117,9 @@ class AniMemoBridge(Star):
         self.context = context
         self.config = {**DEFAULT_CONFIG, **(config or {})}
         self.client = None
-        self.routes = RouteStore(_data_dir(context) / "routes.json")
-        self.state = EventState(_data_dir(context) / "state.json")
+        data_dir = _data_dir()
+        self.routes = RouteStore(data_dir / "routes.json")
+        self.state = EventState(data_dir / "state.json")
         self.poller = None
         self.last_ping = "NOT RUN"
         self.configuration_error = ""
