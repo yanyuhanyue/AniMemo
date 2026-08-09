@@ -70,7 +70,11 @@ def seed_state(output_path):
     from django.utils import timezone
     from integrations.models import ExternalIdentityBinding, IntegrationConnection
     from journal.external_accounts.credentials import encrypt_credentials
-    from journal.models import ExternalMediaIdentity, JournalEntry, UserExternalAccountConnection
+    from journal.models import (
+        ExternalMediaIdentity,
+        JournalEntry,
+        UserExternalAccountConnection,
+    )
     from plugin_host.models import (
         PluginData,
         PluginDeployment,
@@ -335,6 +339,13 @@ def verify_state(input_path):
     _assert(connection.credential_ciphertext == fixture["external_account_ciphertext"], "Encrypted credential changed.")
     _assert(fake_token not in connection.credential_ciphertext, "Database credential contains plaintext token.")
     _assert(decrypt_credentials(connection.credential_ciphertext)["access_token"] == fake_token, "Credential cannot be decrypted.")
+    if _migration_applied("journal", "0005_external_collection_sync_state"):
+        from journal.models import ExternalCollectionSyncState
+
+        _assert(
+            not ExternalCollectionSyncState.objects.filter(identity=identity).exists(),
+            "Upgrade synthesized a collection sync baseline for an existing identity.",
+        )
 
     integration = IntegrationConnection.objects.filter(pk=fixture["integration_connection_id"]).first()
     _assert(integration is not None and integration.enabled, "IntegrationConnection did not survive.")
@@ -429,6 +440,11 @@ def verify_state(input_path):
         "external_media_identity": "PERSISTED",
         "metadata_source": "PASS" if core_history_applied else "NOT_APPLICABLE_BASE",
         "external_account_connection": "PERSISTED",
+        "external_collection_sync_state": (
+            "ABSENT_UNINITIALIZED"
+            if _migration_applied("journal", "0005_external_collection_sync_state")
+            else "NOT_APPLICABLE_BASE"
+        ),
         "credential_encryption": "PASS",
         "integration": "PASS",
         "user_plugin_installation": "PASS",

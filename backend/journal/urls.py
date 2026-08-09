@@ -44,6 +44,7 @@ urlpatterns = [
     path("", include("journal.watch_history.urls")),
     path("", include("journal.external_media.urls")),
     path("", include("journal.analytics.urls")),
+    path("", include("journal.external_sync.urls")),
     path("", include("plugin_host.urls")),
     path("external-accounts/", include("journal.external_accounts.urls")),
     path("staff/", include("journal.staff_urls")),

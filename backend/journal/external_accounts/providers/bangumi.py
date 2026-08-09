@@ -8,6 +8,7 @@ from journal.bangumi import (
     image_url,
     normalize_external_id,
 )
+from journal.external_sync.canonical import MISSING, canonical_snapshot
 
 from ..errors import (
     ExternalAccountError,
@@ -16,6 +17,7 @@ from ..errors import (
     provider_invalid_response,
     provider_unavailable,
 )
+
 
 class BangumiAccountProvider:
     slug = "bangumi"
@@ -49,6 +51,9 @@ class BangumiAccountProvider:
             "oauth_available": enabled and self.oauth_available(),
             "personal_access_token_available": enabled,
             "import_available": enabled,
+            "collection_sync_preview_available": enabled,
+            "collection_sync_apply_available": False,
+            "collection_write_implemented": False,
         }
 
     def import_max_items(self):
@@ -169,12 +174,19 @@ class BangumiAccountProvider:
 
     def get_collection(self, access_token, username, external_id):
         external_id = self._normalize_external_id(external_id)
+        username = str(username or "").strip()
+        if not username or len(username) > 200:
+            raise provider_invalid_response()
         payload = self._request_json(
             "get",
-            f"/v0/users/{quote(str(username or ''), safe='')}/collections/{external_id}",
+            f"/v0/users/{quote(username, safe='')}/collections/{external_id}",
             endpoint="collection",
             access_token=self._validate_token(access_token),
+            not_found=True,
+            allow_not_found=True,
         )
+        if payload is None:
+            return None
         normalized = self.normalize_collection(payload)
         if normalized is None:
             raise provider_invalid_response()
@@ -201,7 +213,10 @@ class BangumiAccountProvider:
                 tags.append(value)
             if len(tags) == 30:
                 break
-        comment = str(item.get("comment") or "").strip()[:10000]
+        comment_present = item.get("comment") is not None
+        comment = str(item.get("comment") or "").strip()
+        if len(comment) > 10000:
+            raise provider_invalid_response()
         images = subject.get("images") if isinstance(subject.get("images"), dict) else {}
         poster_url = image_url(images.get("large") or images.get("common") or images.get("medium"))
         title = str(subject.get("name_cn") or subject.get("name") or f"Bangumi #{external_id}").strip()[:500]
@@ -216,11 +231,60 @@ class BangumiAccountProvider:
             "remote_status_label": status_info[1],
             "remote_status_code": status_code,
             "remote_rating": rating,
+            "remote_rating_present": rating is not None,
             "remote_comment": comment,
+            "remote_comment_present": comment_present,
             "remote_comment_summary": comment[:160],
             "remote_tags": tags,
             "remote_updated_at": str(item.get("updated_at") or "")[:64],
         }
+
+    def collection_sync_snapshot(self, collection):
+        if collection is None:
+            return None
+        return canonical_snapshot(
+            watch_status=collection["remote_status"],
+            personal_score=(
+                collection["remote_rating"]
+                if collection.get("remote_rating_present")
+                else MISSING
+            ),
+            review=(
+                collection["remote_comment"]
+                if collection.get("remote_comment_present")
+                else MISSING
+            ),
+        )
+
+    @staticmethod
+    def collection_push_capabilities(local):
+        score = local["personal_score"]
+        if not score["present"]:
+            score_capability = {"supported": True, "reason": None}
+        elif local["watch_status"]["value"] == "planned":
+            score_capability = {"supported": False, "reason": "planned_status_forces_score_clear"}
+        elif score["value"] == "0":
+            score_capability = {"supported": False, "reason": "zero_score_represents_clear"}
+        elif "." in score["value"]:
+            score_capability = {"supported": False, "reason": "fractional_score_not_supported"}
+        else:
+            score_capability = {"supported": True, "reason": None}
+        review = local["review"]
+        if review["present"] and len(review["value"]) > 380:
+            review_capability = {"supported": False, "reason": "review_exceeds_provider_limit"}
+        elif review["present"] and not BangumiAccountProvider._comment_is_printable(review["value"]):
+            review_capability = {"supported": False, "reason": "review_contains_unsupported_characters"}
+        else:
+            review_capability = {"supported": True, "reason": None}
+        return {
+            "watch_status": {"supported": True, "reason": None},
+            "personal_score": score_capability,
+            "review": review_capability,
+        }
+
+    @staticmethod
+    def _comment_is_printable(value):
+        return all(character in "\n\t\r" or character.isprintable() for character in value)
 
     @staticmethod
     def _rating(value):
@@ -260,7 +324,17 @@ class BangumiAccountProvider:
             "token_type": "Bearer",
         }
 
-    def _request_json(self, method, path, *, endpoint, access_token=None, base="api", **kwargs):
+    def _request_json(
+        self,
+        method,
+        path,
+        *,
+        endpoint,
+        access_token=None,
+        base="api",
+        allow_not_found=False,
+        **kwargs,
+    ):
         try:
             return self.client.request_json(
                 method,
@@ -272,6 +346,8 @@ class BangumiAccountProvider:
                 **kwargs,
             )
         except BangumiClientError as error:
+            if error.code == "not_found" and allow_not_found:
+                return None
             if endpoint in {"oauth_exchange", "oauth_refresh"}:
                 raise authorization_exchange_failed() from error
             if error.code == "unauthorized":
