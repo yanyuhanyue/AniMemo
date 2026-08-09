@@ -2,6 +2,7 @@ from rest_framework import permissions
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from drf_spectacular.utils import OpenApiExample, extend_schema
 
 from .errors import sync_request_invalid
 from .serializers import CollectionSyncApplySerializer
@@ -26,6 +27,22 @@ class ExternalCollectionSyncApplyView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = "external_sync_apply"
 
+    @extend_schema(
+        request=CollectionSyncApplySerializer,
+        examples=[
+            OpenApiExample(
+                "确认远程字段",
+                value={
+                    "preview_token": "preview-token-from-preview-response",
+                    "actions": [
+                        {"field": "status", "action": "pull_remote"},
+                        {"field": "tags", "action": "accept_equal"},
+                    ],
+                },
+                request_only=True,
+            )
+        ],
+    )
     def post(self, request, provider, entry_id):
         serializer = CollectionSyncApplySerializer(data=request.data)
         try:

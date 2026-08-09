@@ -2,6 +2,7 @@ from urllib.parse import urlencode
 
 from django.conf import settings
 from django.http import HttpResponseRedirect
+from drf_spectacular.utils import OpenApiExample, extend_schema
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -19,6 +20,12 @@ from .services import (
     start_oauth_authorization,
     verify_connection,
 )
+from journal.openapi_serializers import (
+    ExternalAccountAuthorizeResponseSerializer,
+    ExternalAccountConnectRequestSerializer,
+    ExternalImportApplyRequestSerializer,
+    ExternalImportPreviewRequestSerializer,
+)
 
 
 class ExternalAccountListView(APIView):
@@ -32,6 +39,10 @@ class ExternalAccountConnectView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = "external_account"
 
+    @extend_schema(
+        request=ExternalAccountConnectRequestSerializer,
+        examples=[OpenApiExample("个人访问令牌", value={"access_token": "fake-token"}, request_only=True)],
+    )
     def post(self, request, provider):
         connection = connect_personal_access_token(
             user=request.user,
@@ -62,6 +73,7 @@ class ExternalAccountAuthorizeView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = "external_account"
 
+    @extend_schema(responses=ExternalAccountAuthorizeResponseSerializer)
     def post(self, request, provider):
         return Response({
             "provider": provider,
@@ -100,6 +112,7 @@ class ExternalAccountImportPreviewView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = "external_import_preview"
 
+    @extend_schema(request=ExternalImportPreviewRequestSerializer)
     def post(self, request, provider):
         session = create_import_preview(user=request.user, provider_slug=provider)
         return Response(
@@ -136,6 +149,16 @@ class ExternalAccountImportApplyView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = "external_import_apply"
 
+    @extend_schema(
+        request=ExternalImportApplyRequestSerializer,
+        examples=[
+            OpenApiExample(
+                "确认导入条目",
+                value={"preview_id": "00000000-0000-4000-8000-000000000000", "items": [{"row": 1, "action": "import"}]},
+                request_only=True,
+            )
+        ],
+    )
     def post(self, request, provider):
         result = apply_import_preview(
             user=request.user,

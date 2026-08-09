@@ -10,6 +10,7 @@ from django.utils.decorators import method_decorator
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
+from drf_spectacular.utils import OpenApiParameter, OpenApiRequest, extend_schema
 from rest_framework import permissions, serializers, status
 from rest_framework.exceptions import AuthenticationFailed, Throttled
 from rest_framework.response import Response
@@ -38,6 +39,18 @@ from .serializers import RegistrationCompleteSerializer, RegistrationRequestSeri
 from .staff_services import get_security_profile, record_audit, record_login_event, resolve_staff_role, staff_capabilities, update_user_password
 from plugin_host.permissions import plugin_permissions_for_user
 from .turnstile import require_turnstile
+from .openapi_serializers import (
+    AccessTokenResponseSerializer,
+    AccountDeleteRequestSerializer,
+    CsrfTokenResponseSerializer,
+    LoginResponseSerializer,
+    MessageResponseSerializer,
+    PasswordChangeRequestSerializer,
+    PasswordResetConfirmRequestSerializer,
+    PasswordResetRequestSerializer,
+    RegistrationVerificationResponseSerializer,
+    TOKEN_LOGIN_REQUEST_SCHEMA,
+)
 
 
 User = get_user_model()
@@ -93,6 +106,7 @@ class EmailTokenObtainPairView(TokenObtainPairView):
     account_throttle_scope = "login"
     throttle_account_fields = ("username",)
 
+    @extend_schema(request=OpenApiRequest(TOKEN_LOGIN_REQUEST_SCHEMA), responses=LoginResponseSerializer, auth=[])
     def post(self, request, *args, **kwargs):
         turnstile_response = require_turnstile(request)
         if turnstile_response is not None:
@@ -114,6 +128,7 @@ class StaffLoginView(APIView):
     account_throttle_scope = "login"
     throttle_account_fields = ("username",)
 
+    @extend_schema(request=OpenApiRequest(TOKEN_LOGIN_REQUEST_SCHEMA), responses=LoginResponseSerializer, auth=[])
     def post(self, request):
         turnstile_response = require_turnstile(request)
         if turnstile_response is not None:
@@ -165,6 +180,7 @@ class CsrfTokenView(APIView):
     permission_classes = [permissions.AllowAny]
     authentication_classes = []
 
+    @extend_schema(responses=CsrfTokenResponseSerializer, auth=[])
     def get(self, request):
         return no_store(Response({"csrf_token": get_token(request)}))
 
@@ -175,6 +191,7 @@ class CookieTokenRefreshView(APIView):
     authentication_classes = []
     throttle_scope = "login"
 
+    @extend_schema(request=None, responses=AccessTokenResponseSerializer, auth=[{"refreshCookie": []}], parameters=[OpenApiParameter("X-CSRFToken", str, OpenApiParameter.HEADER, required=True)])
     def post(self, request):
         raw_refresh = request.COOKIES.get(settings.REFRESH_COOKIE_NAME)
         if not raw_refresh:
@@ -199,6 +216,7 @@ class LogoutView(APIView):
     permission_classes = [permissions.AllowAny]
     authentication_classes = []
 
+    @extend_schema(request=None, responses=MessageResponseSerializer, auth=[{"refreshCookie": []}])
     def post(self, request):
         raw_refresh = request.COOKIES.get(settings.REFRESH_COOKIE_NAME)
         if raw_refresh:
@@ -231,6 +249,7 @@ class RegisterView(RegistrationThrottleAuditMixin, APIView):
     account_throttle_scope = "register_request"
     throttle_account_fields = ("email",)
 
+    @extend_schema(request=RegistrationRequestSerializer, responses=MessageResponseSerializer, auth=[])
     def post(self, request):
         turnstile_response = require_turnstile(request)
         if turnstile_response is not None:
@@ -290,6 +309,7 @@ class VerifyRegistrationView(RegistrationThrottleAuditMixin, APIView):
     account_throttle_scope = "register_verify"
     throttle_account_fields = ("token",)
 
+    @extend_schema(request=RegistrationVerifySerializer, responses=RegistrationVerificationResponseSerializer, auth=[])
     def post(self, request):
         serializer = RegistrationVerifySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -311,6 +331,7 @@ class CompleteRegistrationView(RegistrationThrottleAuditMixin, APIView):
     account_throttle_scope = "register_complete"
     throttle_account_fields = ("completion_token",)
 
+    @extend_schema(request=RegistrationCompleteSerializer, responses=MessageResponseSerializer, auth=[])
     def post(self, request):
         turnstile_response = require_turnstile(request)
         if turnstile_response is not None:
@@ -349,6 +370,7 @@ class PasswordResetView(APIView):
     account_throttle_scope = "password_reset"
     throttle_account_fields = ("email",)
 
+    @extend_schema(request=PasswordResetRequestSerializer, responses=MessageResponseSerializer, auth=[])
     def post(self, request):
         turnstile_response = require_turnstile(request)
         if turnstile_response is not None:
@@ -377,6 +399,7 @@ class PasswordResetConfirmView(APIView):
     account_throttle_scope = "password_reset"
     throttle_account_fields = ("uid",)
 
+    @extend_schema(request=PasswordResetConfirmRequestSerializer, responses=MessageResponseSerializer, auth=[])
     def post(self, request):
         turnstile_response = require_turnstile(request)
         if turnstile_response is not None:
@@ -407,6 +430,7 @@ class PasswordChangeView(APIView):
     account_throttle_scope = "two_factor"
     throttle_account_fields = ()
 
+    @extend_schema(request=PasswordChangeRequestSerializer, responses=MessageResponseSerializer)
     def post(self, request):
         current_password = str(request.data.get("current_password", ""))
         password = str(request.data.get("password", ""))
@@ -430,6 +454,7 @@ class AccountView(APIView):
     throttle_scope = "two_factor"
     account_throttle_scope = "two_factor"
 
+    @extend_schema(request=AccountDeleteRequestSerializer, responses={204: None})
     def delete(self, request):
         current_password = str(request.data.get("current_password", ""))
         try:

@@ -94,7 +94,7 @@ class ColumnSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["slug", "status", "featured", "moderation_reason", "moderated_at", "created_at", "updated_at", "published_at"]
 
-    def get_author_name(self, obj):
+    def get_author_name(self, obj) -> str:
         settings = getattr(obj.author, "journal_settings", None)
         return settings.nickname if settings and settings.nickname else obj.author.get_username()
 

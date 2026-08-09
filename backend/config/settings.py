@@ -217,6 +217,7 @@ INSTALLED_APPS = [
     "corsheaders",
     "rest_framework",
     "drf_spectacular",
+    "drf_spectacular_sidecar",
     "rest_framework_simplejwt.token_blacklist",
     "storages",
     "accounts",
@@ -246,7 +247,7 @@ ROOT_URLCONF = "config.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -268,8 +269,8 @@ DATABASE_SSL_REQUIRE = env_bool(
     not DEBUG and DATABASE_URL.startswith(("postgres://", "postgresql://")),
 )
 DATABASES = {
-    "default": dj_database_url.config(
-        default=DATABASE_URL or f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
+    "default": dj_database_url.parse(
+        DATABASE_URL or f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
         conn_max_age=600,
         conn_health_checks=True,
         ssl_require=DATABASE_SSL_REQUIRE,
@@ -412,6 +413,8 @@ SPECTACULAR_SETTINGS = {
     "SERVE_PERMISSIONS": ["rest_framework.permissions.AllowAny"],
     "SCHEMA_PATH_PREFIX": r"/api",
     "PREPROCESSING_HOOKS": ["config.openapi.exclude_dynamic_plugin_runtime"],
+    "SWAGGER_UI_DIST": "SIDECAR",
+    "SWAGGER_UI_FAVICON_HREF": "SIDECAR",
     "POSTPROCESSING_HOOKS": [
         "config.openapi.stabilize_operation_ids",
         "drf_spectacular.hooks.postprocess_schema_enums",

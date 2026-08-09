@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { api, getStoredTokens, readableApiError } from "../lib/api.js";
+import { useServerStateRevision } from "../lib/serverState.js";
 import { buildPresetColorMap, FALLBACK_TAG_PRESETS, normalizeTagPresets, resolveTagColors } from "../lib/tagPresets.js";
 import { demoAnimeRecords, demoEnabled } from "@demo-data";
 
@@ -42,6 +43,7 @@ export function useDashboardData({ navigate }) {
   const [tagPresets, setTagPresets] = useState(FALLBACK_TAG_PRESETS);
   const [dashboardReady, setDashboardReady] = useState(isDemo);
   const [loadError, setLoadError] = useState("");
+  const serverStateRevision = useServerStateRevision(["journal_entries", "settings", "filters", "showcase"]);
   const presetColors = useMemo(() => buildPresetColorMap(tagPresets), [tagPresets]);
 
   useEffect(() => {
@@ -114,7 +116,7 @@ export function useDashboardData({ navigate }) {
       setDashboardReady(true);
     });
     return () => { cancelled = true; };
-  }, [access, isDemo]);
+  }, [access, isDemo, serverStateRevision]);
 
   useEffect(() => {
     if (!isDemo) return;

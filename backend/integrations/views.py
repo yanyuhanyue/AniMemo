@@ -5,6 +5,7 @@ import time
 from django.conf import settings
 from django.db import close_old_connections
 from django.utils import timezone
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -26,6 +27,13 @@ REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 PUBLIC_ACTION_RE = re.compile(
     r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
 )
+
+INTEGRATION_HMAC_PARAMETERS = [
+    OpenApiParameter("X-AniMemo-Key-Id", str, OpenApiParameter.HEADER, required=True),
+    OpenApiParameter("X-AniMemo-Timestamp", str, OpenApiParameter.HEADER, required=True),
+    OpenApiParameter("X-AniMemo-Nonce", str, OpenApiParameter.HEADER, required=True),
+    OpenApiParameter("X-AniMemo-Signature", str, OpenApiParameter.HEADER, required=True),
+]
 
 
 def _error(code, detail, status_code):
@@ -118,6 +126,7 @@ class HMACAPIView(APIView):
 
 
 class PairConsumeView(HMACAPIView):
+    @extend_schema(parameters=INTEGRATION_HMAC_PARAMETERS)
     def post(self, request):
         try:
             payload = _parse_json_object(
@@ -158,6 +167,7 @@ class PairConsumeView(HMACAPIView):
 
 
 class ActionsView(HMACAPIView):
+    @extend_schema(parameters=INTEGRATION_HMAC_PARAMETERS)
     def post(self, request):
         try:
             payload = _parse_json_object(
@@ -191,6 +201,7 @@ class ActionsView(HMACAPIView):
 
 
 class EventsView(HMACAPIView):
+    @extend_schema(parameters=INTEGRATION_HMAC_PARAMETERS)
     def get(self, request):
         try:
             after = int(request.query_params.get("after", "0"))
@@ -240,6 +251,7 @@ class EventsView(HMACAPIView):
 
 
 class EventsAckView(HMACAPIView):
+    @extend_schema(parameters=INTEGRATION_HMAC_PARAMETERS)
     def post(self, request):
         try:
             payload = _parse_json_object(

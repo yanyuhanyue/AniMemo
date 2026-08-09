@@ -2,6 +2,8 @@ import json
 
 from django.conf import settings
 from django.db import transaction
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from site_config.media_storage.storage import (
     cleanup_uncommitted_media_reference,
@@ -67,9 +69,11 @@ class ExternalMediaIdentitySummarySerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    def get_provider_title(self, obj):
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_provider_title(self, obj) -> str:
         return str(obj.metadata.get("title") or "") if isinstance(obj.metadata, dict) else ""
 
+    @extend_schema_field(OpenApiTypes.NUMBER)
     def get_provider_score(self, obj):
         return obj.metadata.get("score") if isinstance(obj.metadata, dict) else None
 
@@ -150,6 +154,7 @@ class JournalEntrySerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("个人封面存储已达到 500MB 配额。")
         return sanitized
 
+    @extend_schema_field(OpenApiTypes.URI)
     def get_poster(self, obj):
         request = self.context.get("request")
         if obj.poster_file:
@@ -159,6 +164,7 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             return obj.custom_poster_url
         return obj.poster_url
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_poster_source(self, obj):
         if obj.poster_file:
             return "upload"
@@ -166,18 +172,21 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             return "trusted_url"
         return "default_url" if obj.poster_url else "none"
 
+    @extend_schema_field(OpenApiTypes.INT)
     def get_watch_history_count(self, obj):
         annotated = getattr(obj, "watch_history_count", None)
         if annotated is not None:
             return annotated
         return obj.watch_history_records.count()
 
+    @extend_schema_field(OpenApiTypes.DATETIME)
     def get_last_watched_on(self, obj):
         if hasattr(obj, "last_watched_on"):
             return obj.last_watched_on
         latest = obj.watch_history_records.order_by("-watched_on", "-sequence").values_list("watched_on", flat=True).first()
         return latest
 
+    @extend_schema_field(ExternalMediaIdentitySummarySerializer(many=True))
     def get_external_identities(self, obj):
         request = self.context.get("request")
         view = self.context.get("view")
@@ -228,6 +237,7 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         delete_replaced_file(previous_file, instance.poster_file)
         return instance
 
+    @extend_schema_field(OpenApiTypes.URI)
     def get_share_url(self, obj):
         request = self.context.get("request")
         if not request:

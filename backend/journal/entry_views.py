@@ -1,6 +1,8 @@
 from plugin_host.permissions import plugin_permissions_for_user
 from plugin_host.sdk import ColumnHookContext, JournalHookContext, run_hook
 from django.db.models import Count, Max
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import filters, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -26,7 +28,16 @@ from .serializers_entries import ExternalMediaIdentitySerializer
 from .staff_services import staff_capabilities
 
 
+@extend_schema_view(
+    retrieve=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+    update=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+    partial_update=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+    destroy=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+)
 class JournalEntryViewSet(viewsets.ModelViewSet):
+    # Keep the model discoverable to schema generation while runtime filtering
+    # remains scoped to the authenticated owner in ``get_queryset``.
+    queryset = JournalEntry.objects.none()
     serializer_class = JournalEntrySerializer
     permission_classes = [permissions.IsAuthenticated, IsOwner]
     pagination_class = FlexiblePageNumberPagination
@@ -140,6 +151,12 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
         })
 
 
+@extend_schema_view(
+    retrieve=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+    update=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+    partial_update=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+    destroy=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+)
 class QuickFilterViewSet(viewsets.ModelViewSet):
     serializer_class = QuickFilterSerializer
     permission_classes = [permissions.IsAuthenticated, IsOwner]
@@ -151,7 +168,14 @@ class QuickFilterViewSet(viewsets.ModelViewSet):
         serializer.save(user=self.request.user)
 
 
+@extend_schema_view(
+    retrieve=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+    update=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+    partial_update=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+    destroy=extend_schema(parameters=[OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH)]),
+)
 class ColumnViewSet(viewsets.ModelViewSet):
+    queryset = Column.objects.none()
     serializer_class = ColumnSerializer
     permission_classes = [permissions.IsAuthenticated, IsOwner]
     parser_classes = [JSONParser, MultiPartParser, FormParser]

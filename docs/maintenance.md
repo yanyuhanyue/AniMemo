@@ -14,10 +14,11 @@ python backend/manage.py run_maintenance --task purge_expired_revoked_tokens
 代表性手账列表查询可以在开发数据库或 CI 数据库中生成真实计划：
 
 ```bash
-python backend/manage.py profile_journal_queries --format json
+python backend/manage.py profile_journal_queries --username <用户名> --format json
+# 或：python backend/manage.py profile_journal_queries --user-id <用户 ID> --format json
 ```
 
-命令支持 SQLite 和 PostgreSQL，默认最多分析 24 行，限制上限为 500；它只输出 `EXPLAIN`，不会自动新增索引。只有当计划和基准证明需要时，才允许新增 migration/index。
+命令必须明确指定一个用户，支持 SQLite 和 PostgreSQL，默认最多分析 24 行，限制上限为 500；它只输出 `EXPLAIN`，不会输出用户名、邮箱、评论、令牌或凭据，也不会自动新增索引。只有当计划和基准证明需要时，才允许新增 migration/index。
 
 ## Scheduling
 
