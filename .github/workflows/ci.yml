@@ -51,18 +51,47 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: |
+            backend/requirements.txt
+            scripts/requirements-tools.txt
       - run: python -m pip install -r backend/requirements.txt
+      - run: python -m pip install -r scripts/requirements-tools.txt
       - run: python -m compileall -q backend
       - run: python manage.py check
         working-directory: backend
       - run: python manage.py makemigrations --check
         working-directory: backend
-      - run: python manage.py spectacular --validate --file /tmp/animemo-openapi.yaml
+      - run: python manage.py spectacular --validate --fail-on-warn --file /tmp/animemo-openapi.yaml
         working-directory: backend
       - run: python scripts/update_dependencies.py --check
       - run: python manage.py test
         working-directory: backend
+
+  bootstrap-smoke:
+    name: bootstrap-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run macOS/Linux setup smoke
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/dev.sh --setup-only
+      - name: Run Windows setup smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/dev.ps1 -SetupOnly
 
   postgres:
     name: postgres
@@ -112,7 +141,7 @@ jobs:
       - run: python -c "import os, psycopg; psycopg.connect(os.environ['DATABASE_URL']).close(); print('PostgreSQL service is reachable')"
       - run: python manage.py shell -c "from django.db import connection; assert connection.vendor == 'postgresql', connection.vendor; print(connection.vendor)"
         working-directory: backend
-      - run: python manage.py test plugin_host.tests.test_concurrency.PluginPlatformPostgreSQLConcurrencyTests integrations.tests.test_concurrency.IntegrationReceiptPostgreSQLConcurrencyTests journal.test_external_media_concurrency.ExternalMediaIdentityPostgreSQLConcurrencyTests journal.test_watch_history_core.WatchHistoryPostgreSQLConcurrencyTests journal.test_external_sync_concurrency.ExternalCollectionSyncStatePostgreSQLConcurrencyTests --verbosity 2
+      - run: python manage.py test plugin_host.tests.test_concurrency.PluginPlatformPostgreSQLConcurrencyTests integrations.tests.test_concurrency.IntegrationReceiptPostgreSQLConcurrencyTests journal.test_external_media_concurrency.ExternalMediaIdentityPostgreSQLConcurrencyTests journal.test_watch_history_core.WatchHistoryPostgreSQLConcurrencyTests journal.test_external_sync_concurrency.ExternalCollectionSyncStatePostgreSQLConcurrencyTests journal.test_profile_journal_queries --verbosity 2
         working-directory: backend
 
   plugins:

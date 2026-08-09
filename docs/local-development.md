@@ -26,6 +26,8 @@ macOS/Linux：
 ./scripts/dev.sh --setup-only
 ```
 
-脚本会检查 Python 3.12+、Node.js 20+ 和 npm，复用或创建 `.venv`，安装精确锁定依赖、创建开发 `.env`（若不存在）、执行迁移，并在完整模式下同时启动 Django 与 Vite。脚本可重复执行，不会删除 SQLite 数据库、重建虚拟环境或清空 npm 缓存，也不会自动创建管理员账号。
+脚本会检查 Python 3.12+、Node.js 20+ 和 npm，复用或创建 `.venv`，安装精确锁定依赖、从 `.env.development.example` 创建开发 `.env`（若不存在）、执行迁移，并在完整模式下同时启动 Django 与 Vite。脚本可重复执行，不会删除 SQLite 数据库、重建虚拟环境或清空 npm 缓存，也不会自动创建管理员账号。
 
 首次需要管理员时，请在另一个终端运行 `./.venv/bin/python backend/manage.py createsuperuser`（Windows 使用 `./.venv/Scripts/python.exe`）。
+
+开发模板明确关闭 Turnstile 校验并使用 SQLite + LocMemCache；这组设置只适用于本地开发，生产环境必须使用 `.env.example`/`.env.production.example` 中的 fail-closed 配置。

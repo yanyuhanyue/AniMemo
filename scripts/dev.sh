@@ -18,10 +18,12 @@ node -e 'const major=Number(process.versions.node.split(".")[0]); if (major < 20
 
 cd "$ROOT"
 if [[ ! -x .venv/bin/python ]]; then python3 -m venv .venv; fi
-if [[ ! -f .env ]]; then cp .env.example .env; echo "已创建 .env（仅供本地开发使用）。"; fi
+if [[ ! -f .env ]]; then cp .env.development.example .env; echo "已创建 .env（仅供本地开发使用）。"; fi
 .venv/bin/python -m pip install -r backend/requirements.txt
 if [[ -f package-lock.json ]]; then npm ci; else npm install; fi
 .venv/bin/python backend/manage.py migrate --noinput
+.venv/bin/python backend/manage.py check
+.venv/bin/python backend/manage.py shell -c "from django.conf import settings; from django.test import Client; assert settings.DEBUG and settings.TURNSTILE_ENABLED is False; assert Client(HTTP_HOST='localhost').get('/health/').status_code == 200"
 if (( SETUP_ONLY )); then exit 0; fi
 
 cleanup() {

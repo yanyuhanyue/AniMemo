@@ -1,4 +1,5 @@
-from drf_spectacular.extensions import OpenApiAuthenticationExtension
+from drf_spectacular.extensions import OpenApiAuthenticationExtension, OpenApiViewExtension
+from drf_spectacular.types import OpenApiTypes
 import re
 
 
@@ -29,9 +30,10 @@ class IntegrationHMACAuthenticationScheme(OpenApiAuthenticationExtension):
         return {
             "type": "apiKey",
             "in": "header",
-            "name": "X-Integration-Signature",
+            "name": "X-AniMemo-Key-Id",
             "description": (
-                "HMAC integration requests also require the documented timestamp, nonce and key-id headers; "
+                "HMAC integration requests also require X-AniMemo-Timestamp, X-AniMemo-Nonce and "
+                "X-AniMemo-Signature; "
                 "密钥值不会出现在 schema。"
             ),
         }
@@ -40,8 +42,43 @@ class IntegrationHMACAuthenticationScheme(OpenApiAuthenticationExtension):
 def exclude_dynamic_plugin_runtime(endpoints):
     """Keep arbitrary plugin runtime paths out of the stable core schema."""
 
-    dynamic_paths = {"/api/plugins/{slug}/", "/api/plugins/{slug}/{plugin_path}"}
+    dynamic_paths = {
+        "/api/plugins/{slug}/",
+        "/api/plugins/{slug}/{plugin_path}",
+        "/plugin-assets/session/{asset_session}/{slug}/{version}/{asset}",
+        "/plugin-assets/{slug}/{version}/{asset}",
+        "/plugin-previews/session/{preview_session}/{slug}/{version}/{asset}",
+    }
     return [endpoint for endpoint in endpoints if endpoint[0] not in dynamic_paths]
+
+
+class BusinessAPIViewSchemaExtension(OpenApiViewExtension):
+    """Give hand-written business APIViews an explicit generic JSON contract.
+
+    Core views add precise ``@extend_schema`` metadata where the response shape is
+    important. The fallback keeps less critical staff/platform endpoints visible
+    without allowing serializer inference failures to silently drop them.
+    """
+
+    target_class = "rest_framework.views.APIView"
+    match_subclasses = True
+    priority = -1
+
+    def view_replacement(self):
+        target = self.target
+        module = getattr(target, "__module__", "")
+        if not module.startswith(("journal.", "integrations.", "plugin_host.")):
+            return target
+        if any(
+            callable(getattr(target, name, None)) or hasattr(target, "serializer_class")
+            for name in ("get_serializer", "get_serializer_class")
+        ):
+            return target
+        return type(
+            f"{target.__name__}OpenApiSchema",
+            (target,),
+            {"serializer_class": OpenApiTypes.OBJECT},
+        )
 
 
 def stabilize_operation_ids(result, generator, request, public):
@@ -59,7 +96,9 @@ def stabilize_operation_ids(result, generator, request, public):
         for method, operation in result["paths"][path].items():
             if method.lower() not in {"get", "post", "put", "patch", "delete", "head", "options"}:
                 continue
-            suffix = {"get": "retrieve", "post": "create", "put": "update", "patch": "partial_update", "delete": "destroy"}.get(method.lower(), method.lower())
+            original_operation_id = operation.get("operationId", "")
+            get_suffix = "list" if original_operation_id.endswith("_list") else "retrieve"
+            suffix = {"get": get_suffix, "post": "create", "put": "update", "patch": "partial_update", "delete": "destroy"}.get(method.lower(), method.lower())
             candidate = f"{stem}_{suffix}"
             if candidate in used:
                 candidate = f"{stem}_{method.lower()}"

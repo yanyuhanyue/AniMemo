@@ -3,11 +3,17 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import include, path
-from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerSplitView
 import config.openapi  # noqa: F401 - registers the authentication extension
 from journal.auth_views import CookieTokenRefreshView, EmailTokenObtainPairView
 from plugin_host.views import PluginAssetView, PluginPreviewAssetView
 from plugin_host.runtime.dispatch import PluginDispatch
+
+
+class CSPCompatibleSwaggerView(SpectacularSwaggerSplitView):
+    """Serve sidecar assets and the initializer as same-origin resources."""
+
+    template_name = "drf_spectacular/swagger_ui_split.html"
 
 
 def health(_request):
@@ -18,7 +24,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("health/", health),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
-    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    path("api/docs/", CSPCompatibleSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("api/token/", EmailTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/token/refresh/", CookieTokenRefreshView.as_view(), name="token_refresh"),
     path("api/", include("journal.urls")),

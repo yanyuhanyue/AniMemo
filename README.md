@@ -52,7 +52,7 @@ anime-journal/
 
 脚本使用 SQLite + LocMemCache，仅限本地开发；生产环境仍需要 PostgreSQL + Redis。不会自动创建管理员账号。详细说明见 [`docs/local-development.md`](docs/local-development.md)。
 
-手动启动仍然支持。复制 `.env.example` 为 `.env`，然后运行：
+手动启动仍然支持。复制 `.env.development.example` 为 `.env`，然后运行：
 
 ```bash
 npm ci
@@ -203,7 +203,7 @@ python backend/manage.py run_maintenance --task purge_expired_revoked_tokens
 ```bash
 npm run test:plugins
 npm run build
-npm run test:sites
+npm test
 python backend/manage.py check
 python backend/manage.py test journal
 ```

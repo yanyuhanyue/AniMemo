@@ -1,11 +1,14 @@
 import axios from "axios";
 
+import { invalidateServerStateForRequest } from "./serverState.js";
+
 function defaultApiUrl() {
   if (typeof window !== "undefined") return `${window.location.origin}/api`;
   return "http://localhost:8000/api";
 }
 
-const API_URL = (import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || defaultApiUrl()).replace(/\/$/, "");
+const runtimeEnv = import.meta.env || {};
+const API_URL = (runtimeEnv.VITE_API_BASE_URL || runtimeEnv.VITE_API_URL || defaultApiUrl()).replace(/\/$/, "");
 const LEGACY_ACCESS_KEY = "anime_journal_access";
 const LEGACY_REFRESH_KEY = "anime_journal_refresh";
 
@@ -139,7 +142,10 @@ function isAuthInfrastructureRequest(url = "") {
 }
 
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    invalidateServerStateForRequest(response.config);
+    return response;
+  },
   async (error) => {
     const request = error.config;
     if (error.response?.status !== 401 || request?._retry || isAuthInfrastructureRequest(request?.url)) {
