@@ -57,6 +57,6 @@ class DependencyLockTests(unittest.TestCase):
             root = Path(directory)
             marked = root / "marked.txt"
             unmarked = root / "unmarked.txt"
-            marked.write_text('tzdata==2026.3 ; sys_platform == "win32"\n', encoding="utf-8")
+            marked.write_text('tzdata==2026.3 ; python_version >= "3"\n', encoding="utf-8")
             unmarked.write_text("tzdata==2026.3\n", encoding="utf-8")
             self.assertEqual(update_dependencies.normalized_lock(marked), update_dependencies.normalized_lock(unmarked))
