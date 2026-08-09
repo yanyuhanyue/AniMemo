@@ -207,7 +207,7 @@ export function readableApiError(error, fallback = "操作失败，请稍后重�
   const status = error?.response?.status;
   const parsed = parseApiError(error, fallback);
   if (status === 503 || parsed.code === "service_unavailable") return "安全服务暂时繁忙，请稍后重试。";
-  if (parsed.code === "permission_denied" && parsed.detail.toLowerCase().includes("csrf")) {
+  if (parsed.code === "csrf_failed") {
     return "安全验证已过期，请刷新页面后重试。";
   }
   if (status === 429 || parsed.code === "rate_limited") {

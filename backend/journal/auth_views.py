@@ -147,8 +147,9 @@ class StaffLoginView(APIView):
         except AuthenticationFailed as error:
             matched_user = User.objects.filter(email__iexact=account).first() if "@" in account else User.objects.filter(username__iexact=account).first()
             record_login_event(request, event_type=LoginEvent.EventType.LOGIN_FAILED, success=False, user=matched_user, account=account)
-            detail = error.detail if isinstance(error.detail, dict) else {"detail": str(error.detail)}
+            detail = error.detail.copy() if isinstance(error.detail, dict) else {"detail": str(error.detail)}
             needs_second_factor = bool(detail.get("two_factor_required"))
+            detail.setdefault("code", "two_factor_required" if needs_second_factor else "invalid_credentials")
             return Response(detail, status=status.HTTP_428_PRECONDITION_REQUIRED if needs_second_factor else status.HTTP_401_UNAUTHORIZED)
 
         session_login(request, result.user)
@@ -195,11 +196,11 @@ class CookieTokenRefreshView(APIView):
     def post(self, request):
         raw_refresh = request.COOKIES.get(settings.REFRESH_COOKIE_NAME)
         if not raw_refresh:
-            return no_store(Response({"detail": "刷新凭据缺失，请重新登录。"}, status=status.HTTP_401_UNAUTHORIZED))
+            return no_store(Response({"code": "authentication_required", "detail": "刷新凭据缺失，请重新登录。"}, status=status.HTTP_401_UNAUTHORIZED))
         try:
             user, access, rotated = rotate_refresh(raw_refresh, request=request)
         except (TokenError, AuthenticationFailed, ValueError, TypeError):
-            response = Response({"detail": "登录会话已失效，请重新登录。"}, status=status.HTTP_401_UNAUTHORIZED)
+            response = Response({"code": "session_expired", "detail": "登录会话已失效，请重新登录。"}, status=status.HTTP_401_UNAUTHORIZED)
             clear_refresh_cookie(response)
             return no_store(response)
         response = Response({

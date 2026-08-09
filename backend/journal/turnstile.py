@@ -44,4 +44,4 @@ def verify_turnstile(request, token):
 def require_turnstile(request):
     if verify_turnstile(request, request.data.get("cf-turnstile-response")):
         return None
-    return Response({"detail": "安全验证失败，请完成验证后重试。"}, status=status.HTTP_403_FORBIDDEN)
+    return Response({"code": "turnstile_failed", "detail": "安全验证失败，请完成验证后重试。"}, status=status.HTTP_403_FORBIDDEN)

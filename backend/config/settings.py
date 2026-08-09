@@ -243,6 +243,8 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+CSRF_FAILURE_VIEW = "config.csrf_failure.csrf_failure"
+
 ROOT_URLCONF = "config.urls"
 TEMPLATES = [
     {
@@ -354,6 +356,10 @@ EXTERNAL_SYNC_CONFIRMATION_MAX_AGE_SECONDS = int(
 
 REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "config.rest_exceptions.exception_handler",
+    "DEFAULT_RENDERER_CLASSES": (
+        "config.api_renderers.CanonicalJSONRenderer",
+        "rest_framework.renderers.BrowsableAPIRenderer",
+    ),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "journal.authentication.SessionVersionJWTAuthentication",

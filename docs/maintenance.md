@@ -29,3 +29,35 @@ python backend/manage.py profile_journal_queries --username <用户名> --format
 ```
 
 systemd service/timer 也应使用同一个命令，并让失败状态进入宿主机日志和告警系统；本项目不引入 Celery、Celery Beat、RabbitMQ、Kafka 或新的后台 worker。
+
+一个最小的 systemd 配置示例（按实际部署路径和用户调整）：
+
+`/etc/systemd/system/animemo-maintenance.service`
+
+```ini
+[Unit]
+Description=AniMemo maintenance tasks
+
+[Service]
+Type=oneshot
+User=animemo
+WorkingDirectory=/opt/animemo
+ExecStart=/opt/animemo/.venv/bin/python backend/manage.py run_maintenance
+```
+
+`/etc/systemd/system/animemo-maintenance.timer`
+
+```ini
+[Unit]
+Description=Run AniMemo maintenance hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=animemo-maintenance.service
+
+[Install]
+WantedBy=timers.target
+```
+
+启用前执行 `systemctl daemon-reload && systemctl enable --now animemo-maintenance.timer`，再用 `systemctl status animemo-maintenance.timer` 和 `journalctl -u animemo-maintenance.service` 检查调度与失败告警。不要把 `audit_orphan_media --delete` 或任何 destructive task 放进 timer。

@@ -29,7 +29,7 @@ anime-journal/
 └─ public/              静态资源与 Shared React Runtime wrapper
 ```
 
-## 本地启动
+## 本地快速启动
 
 要求 Node.js 20+、Python 3.12+。
 
@@ -51,6 +51,8 @@ anime-journal/
 ```
 
 脚本使用 SQLite + LocMemCache，仅限本地开发；生产环境仍需要 PostgreSQL + Redis。不会自动创建管理员账号。详细说明见 [`docs/local-development.md`](docs/local-development.md)。
+
+文档入口：[`API 错误契约`](docs/api-errors.md)、[`前端状态与路由架构`](docs/frontend-architecture.md)、[`依赖更新工作流`](docs/dependencies.md)、[`维护与调度`](docs/maintenance.md)、[`插件开发`](docs/plugin-development.md)、[`集成协议`](docs/integration-protocol-v1.md) 和 [`生产部署`](docs/deployment-vps.md)。
 
 手动启动仍然支持。复制 `.env.development.example` 为 `.env`，然后运行：
 
@@ -185,7 +187,7 @@ sudo sh deploy/deploy.sh \
 
 ## API 文档与维护
 
-`/api/schema/` 提供 OpenAPI 3 schema，`/api/docs/` 提供 Swagger UI。文档只描述接口契约，不包含任何生产密钥、OAuth secret、凭证密文或插件 HMAC secret；refresh token 仅通过 HttpOnly Cookie 传递。
+`/api/schema/` 提供 OpenAPI 3 schema，`/api/docs/` 提供同源 Swagger UI。文档只描述接口契约，不包含任何生产密钥、OAuth secret、凭证密文或插件 HMAC secret；refresh token 仅通过 HttpOnly Cookie 传递。错误响应契约和前端解析规则见 [`docs/api-errors.md`](docs/api-errors.md)。
 
 已有维护命令可通过统一入口执行：
 
