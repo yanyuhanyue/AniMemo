@@ -1,4 +1,4 @@
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from site_config.media_storage.usage import refresh_cloudflare_usage
 from site_config.models import MediaStorageBackend
@@ -32,4 +32,8 @@ class Command(BaseCommand):
             success += 1
             if not options["quiet"]:
                 self.stdout.write(f"SUCCESS {backend.slug}")
-        self.stdout.write(self.style.SUCCESS(f"summary success={success} failed={failed} skipped={skipped}"))
+        summary = f"summary success={success} failed={failed} skipped={skipped}"
+        if failed:
+            self.stdout.write(self.style.ERROR(summary))
+            raise CommandError(f"媒体存储 usage 刷新失败：{failed} 个后端。")
+        self.stdout.write(self.style.SUCCESS(summary))

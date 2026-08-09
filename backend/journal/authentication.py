@@ -1,6 +1,5 @@
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework_simplejwt.exceptions import InvalidToken
 from django.utils import timezone
 
 from accounts.models import RevokedAccessToken
@@ -13,7 +12,7 @@ class SessionVersionJWTAuthentication(JWTAuthentication):
         if "sv" not in validated_token:
             raise AuthenticationFailed("登录会话已失效，请重新登录。", code="session_revoked")
         if not validated_token.get("jti"):
-            raise InvalidToken("Token has no jti.")
+            raise AuthenticationFailed("登录会话已失效，请重新登录。", code="session_revoked")
         try:
             token_version = int(validated_token["sv"])
         except (TypeError, ValueError) as error:
@@ -24,5 +23,5 @@ class SessionVersionJWTAuthentication(JWTAuthentication):
             jti=str(validated_token["jti"]),
             expires_at__gt=timezone.now(),
         ).exists():
-            raise InvalidToken("Token has been revoked.")
+            raise AuthenticationFailed("登录会话已失效，请重新登录。", code="session_revoked")
         return user

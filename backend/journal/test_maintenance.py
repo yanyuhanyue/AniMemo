@@ -1,4 +1,5 @@
 from io import StringIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.core import management
@@ -38,3 +39,22 @@ class MaintenanceRunnerTests(SimpleTestCase):
         self.assertEqual(call_command.call_count, 2)
         self.assertIn("FAIL purge_expired_pending_registrations", output.getvalue())
         self.assertIn("PASS purge_expired_revoked_tokens", output.getvalue())
+
+    @patch("journal.management.commands.refresh_media_storage_usage.refresh_cloudflare_usage", side_effect=RuntimeError("provider failure"))
+    @patch("journal.management.commands.refresh_media_storage_usage.MediaStorageBackend.objects")
+    def test_media_usage_failure_returns_nonzero(self, objects, _refresh):
+        backend = SimpleNamespace(
+            pk=7,
+            slug="primary-r2",
+            cloudflare_account_ref_id=3,
+            bucket_name="anime-journal",
+            analytics_token_configured=True,
+        )
+        objects.select_related.return_value.filter.return_value.order_by.return_value = [backend]
+        output = StringIO()
+
+        with self.assertRaises(CommandError):
+            management.call_command("refresh_media_storage_usage", stdout=output)
+
+        self.assertIn("FAILED primary-r2", output.getvalue())
+        self.assertIn("failed=1", output.getvalue())

@@ -33,3 +33,16 @@ test("readableApiError keeps rate-limit feedback human-friendly", () => {
     "操作过于频繁，请在 9 秒后重试。",
   );
 });
+
+test("readableApiError uses the stable CSRF code", () => {
+  assert.equal(
+    readableApiError({
+      response: {
+        status: 403,
+        data: { code: "csrf_failed", detail: "安全验证已过期，请刷新页面后重试。" },
+        headers: {},
+      },
+    }),
+    "安全验证已过期，请刷新页面后重试。",
+  );
+});
