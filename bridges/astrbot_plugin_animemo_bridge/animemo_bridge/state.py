@@ -4,13 +4,15 @@ import json
 import os
 import tempfile
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 class EventState:
-    def __init__(self, path, *, max_delivered=1000):
+    def __init__(self, path, *, max_delivered=1000, backup_corrupt=True):
         self.path = Path(path)
         self.max_delivered = max(500, int(max_delivered))
+        self.backup_corrupt = backup_corrupt
         self.cursor = 0
         self.delivered_event_ids = deque(maxlen=self.max_delivered)
         self.pending_event_ids = deque()
@@ -28,7 +30,21 @@ class EventState:
             self.pending_event_ids = deque(int(item) for item in pending if int(item) > 0)
             self.last_successful_poll = data.get("last_successful_poll")
             self.last_error = str(data.get("last_error") or "")[:240]
-        except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+        except FileNotFoundError:
+            self.cursor = 0
+            self.delivered_event_ids.clear()
+            self.pending_event_ids.clear()
+            self.last_successful_poll = None
+            self.last_error = ""
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            if self.backup_corrupt and self.path.exists():
+                backup = self.path.with_name(
+                    f"{self.path.name}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+                )
+                try:
+                    self.path.replace(backup)
+                except OSError:
+                    pass
             self.cursor = 0
             self.delivered_event_ids.clear()
             self.pending_event_ids.clear()

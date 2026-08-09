@@ -71,6 +71,17 @@ class InvalidShapeClient(FakeClient):
 
 
 class EventTests(unittest.IsolatedAsyncioTestCase):
+    async def test_corrupt_event_state_is_backed_up_and_reset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "state.json"
+            path.write_text("{broken", encoding="utf-8")
+
+            state = EventState(path)
+
+            self.assertEqual(state.cursor, 0)
+            self.assertFalse(path.exists())
+            self.assertEqual(len(list(Path(temp).glob("state.json.corrupt-*"))), 1)
+
     async def test_delivery_dedup_and_ack(self):
         with tempfile.TemporaryDirectory() as temp:
             routes = RouteStore(Path(temp) / "routes.json")

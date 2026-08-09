@@ -441,7 +441,9 @@ class AniMemoBridge(Star):
             except AniMemoBridgeError as error:
                 return await _reply(event, f"动作失败：{type(error).__name__}。")
             return await _reply(event, _watch_action_result("action", result))
-        if command == "debug" and bool(_config_value(self.config, "developer_commands")):
+        if command == "debug":
+            if not bool(_config_value(self.config, "developer_commands")) or not _developer_allowed(event):
+                return await _reply(event, "developer debug 已关闭。")
             return await _reply(event, f"event route count={self.routes.count()} cursor={self.state.cursor}")
         return await _reply(event, "未知命令，请使用 /animemo help。")
 

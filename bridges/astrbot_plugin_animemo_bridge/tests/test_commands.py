@@ -83,6 +83,19 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("must-not-be-rendered", allowed)
             self.assertEqual(len(bridge.client.calls), 1)
 
+    async def test_developer_debug_requires_flag_and_admin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            bridge = AniMemoBridge(
+                SimpleNamespace(data_dir=temp),
+                {"enabled": False, "developer_commands": True},
+            )
+
+            denied = await bridge._command(self._event("/animemo debug", admin=False))
+            allowed = await bridge._command(self._event("/animemo debug", admin=True))
+
+            self.assertIn("关闭", denied)
+            self.assertIn("route count=", allowed)
+
     async def test_pair_route_is_saved_only_after_confirmed_success(self):
         class PairClient:
             async def pair(self, *args):
