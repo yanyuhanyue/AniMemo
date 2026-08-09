@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { Icon } from "../Icon.jsx";
 import { api, readableApiError } from "../../lib/api.js";
+import { ExternalCollectionSyncPanel } from "./ExternalCollectionSyncPanel.jsx";
 import {
   bangumiIdentityFromResult,
   externalMediaResultFromApi,
@@ -155,6 +156,10 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
     }
   };
 
+  const syncEntryRefresh = ({ entryPatch = {}, externalIdentities } = {}) => {
+    commit(Array.isArray(externalIdentities) ? externalIdentities : identities, entryPatch);
+  };
+
   if (identity) {
     return (
       <div className="external-media-panel">
@@ -176,6 +181,7 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
           </>}
           <button className="is-danger" type="button" onClick={unbind} disabled={Boolean(action) || isDemo}><Icon name="unlink" /> {action === "unbind" ? "解除中..." : "解除绑定"}</button>
         </div>
+        <ExternalCollectionSyncPanel entryId={draft.id} identityId={identity.id} onEntryRefresh={syncEntryRefresh} isDemo={isDemo} />
         {notice && <p className="external-media-panel__notice" role="status"><Icon name="check" /> {notice}</p>}
         {error && <p className="external-media-panel__error" role="alert"><Icon name="warning" /> {error}</p>}
       </div>

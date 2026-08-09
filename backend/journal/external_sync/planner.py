@@ -46,18 +46,48 @@ def _actions(state, *, pull_supported, push_supported):
     return actions
 
 
-def plan_collection(*, baseline, local, remote, push_capabilities, remote_missing=False):
+def plan_collection(
+    *,
+    baseline,
+    local,
+    remote,
+    push_capabilities,
+    pull_capabilities=None,
+    remote_missing=False,
+):
     baseline = validate_baselines({} if baseline is None else baseline)
     fields = []
     for field in SUPPORTED_FIELDS:
         local_value = local[field]
         remote_value = field_value() if remote_missing else remote[field]
         baseline_value = baseline.get(field)
-        capability = push_capabilities.get(field, {})
-        push_supported = bool(capability.get("supported"))
-        push_block_reason = None if push_supported else str(capability.get("reason") or "provider_push_not_supported")
-        pull_supported = not remote_missing
-        state = "remote_missing" if remote_missing else _state(baseline_value, local_value, remote_value)
+        push_capability = push_capabilities.get(field, {})
+        push_supported = bool(push_capability.get("supported"))
+        push_block_reason = (
+            None
+            if push_supported
+            else str(push_capability.get("reason") or "provider_push_not_supported")
+        )
+        pull_capability = (pull_capabilities or {}).get(field, {})
+        pull_supported = (
+            bool(pull_capability.get("supported"))
+            if pull_capabilities is not None
+            else not remote_missing
+        )
+        pull_block_reason = (
+            None
+            if pull_supported
+            else str(
+                pull_capability.get("reason")
+                or ("remote_collection_missing" if remote_missing else "remote_value_not_representable")
+            )
+        )
+        if remote_missing:
+            state = "remote_missing"
+        elif not pull_supported:
+            state = "unsupported"
+        else:
+            state = _state(baseline_value, local_value, remote_value)
         fields.append(
             {
                 "field": field,
@@ -66,6 +96,7 @@ def plan_collection(*, baseline, local, remote, push_capabilities, remote_missin
                 "local": local_value,
                 "remote": remote_value,
                 "pull_supported": pull_supported,
+                "pull_block_reason": pull_block_reason,
                 "push_supported": push_supported,
                 "push_block_reason": push_block_reason,
                 "recommended_actions": _actions(

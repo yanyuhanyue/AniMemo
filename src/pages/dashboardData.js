@@ -1,3 +1,5 @@
+import { resolveTagColors } from "../lib/tagPresets.js";
+
 export const STORAGE_KEY = "anime_journal_records_v1";
 export const SETTINGS_KEY = "anime_journal_settings_v1";
 export const FILTERS_KEY = "anime_journal_quick_filters_v1";

@@ -119,6 +119,22 @@ class BangumiAccountProviderTests(SimpleTestCase):
             ("get", "https://api.bgm.tv/v0/users/user%2Fname/collections/1424"),
         )
 
+    def test_collection_comment_preserves_semantic_whitespace(self):
+        payload = {
+            "subject_id": 1424,
+            "subject_type": 2,
+            "type": 2,
+            "comment": "  首尾空白必须保留\n",
+            "subject": {"id": 1424, "type": 2, "name": "QA", "images": {}},
+        }
+        collection = self.provider.normalize_collection(payload)
+
+        self.assertEqual(collection["remote_comment"], "  首尾空白必须保留\n")
+        self.assertTrue(collection["remote_comment_present"])
+        payload["comment"] = ["不能静默转换"]
+        with self.assertRaises(ExternalAccountError):
+            self.provider.normalize_collection(payload)
+
     @patch("journal.bangumi.client.requests.request")
     def test_get_retries_transient_failure_once(self, request):
         request.side_effect = [requests.Timeout("secret timeout"), response({
