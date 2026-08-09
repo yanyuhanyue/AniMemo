@@ -216,6 +216,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "corsheaders",
     "rest_framework",
+    "drf_spectacular",
     "rest_framework_simplejwt.token_blacklist",
     "storages",
     "accounts",
@@ -352,6 +353,7 @@ EXTERNAL_SYNC_CONFIRMATION_MAX_AGE_SECONDS = int(
 
 REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "config.rest_exceptions.exception_handler",
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "journal.authentication.SessionVersionJWTAuthentication",
     ),
@@ -399,6 +401,52 @@ REST_FRAMEWORK = {
         "external_import_preview": os.getenv("THROTTLE_EXTERNAL_IMPORT_PREVIEW_RATE", "12/hour"),
         "external_import_apply": os.getenv("THROTTLE_EXTERNAL_IMPORT_APPLY_RATE", "10/hour"),
         "import": os.getenv("THROTTLE_IMPORT_RATE", "5/hour"),
+    },
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "AniMemo API",
+    "DESCRIPTION": "AniMemo 番剧手账、观看记录、外部账号与插件平台 API。",
+    "VERSION": ANIME_JOURNAL_VERSION,
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SERVE_PERMISSIONS": ["rest_framework.permissions.AllowAny"],
+    "SCHEMA_PATH_PREFIX": r"/api",
+    "PREPROCESSING_HOOKS": ["config.openapi.exclude_dynamic_plugin_runtime"],
+    "POSTPROCESSING_HOOKS": [
+        "config.openapi.stabilize_operation_ids",
+        "drf_spectacular.hooks.postprocess_schema_enums",
+    ],
+    "COMPONENT_SPLIT_REQUEST": True,
+    "APPEND_COMPONENTS": {
+        "securitySchemes": {
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT",
+                "description": "使用 access token：Authorization: Bearer <token>",
+            },
+            "refreshCookie": {
+                "type": "apiKey",
+                "in": "cookie",
+                "name": os.getenv("REFRESH_COOKIE_NAME", "anime_journal_refresh"),
+                "description": "refresh token 仅通过 HttpOnly Cookie 传递。",
+            },
+        },
+        "schemas": {
+            "ApiError": {
+                "type": "object",
+                "required": ["code", "detail"],
+                "properties": {
+                    "code": {"type": "string", "description": "稳定的 machine-readable 错误码。"},
+                    "detail": {"type": "string", "description": "面向用户或调试的说明。"},
+                    "fields": {
+                        "type": "object",
+                        "additionalProperties": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "retry_after_seconds": {"type": "integer", "minimum": 1},
+                },
+            }
+        },
     },
 }
 

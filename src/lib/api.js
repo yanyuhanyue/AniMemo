@@ -158,26 +158,58 @@ api.interceptors.response.use(
   },
 );
 
+export function parseApiError(error, fallback = "操作失败，请稍后重试。") {
+  const response = error?.response;
+  const payload = response?.data;
+  const status = response?.status ?? error?.status ?? null;
+  const headers = response?.headers || {};
+  const retryAfter = Number(payload?.retry_after_seconds ?? headers["retry-after"] ?? 0);
+  const rawDetail = payload && typeof payload === "object" ? payload.detail : undefined;
+  const fields = payload && typeof payload === "object" && payload.fields
+    ? payload.fields
+    : rawDetail && typeof rawDetail === "object"
+      ? rawDetail
+      : payload && typeof payload === "object" && !payload.detail && !payload.code
+        ? payload
+        : undefined;
+  const firstField = fields && Object.values(fields).flat(Infinity).find(Boolean);
+  const detail = typeof payload === "string"
+    ? payload
+    : typeof rawDetail === "string"
+      ? rawDetail
+      : firstField || error?.message || fallback;
+  const code = payload?.code || ({
+    400: "invalid_request",
+    401: "authentication_required",
+    403: "permission_denied",
+    404: "not_found",
+    409: "conflict",
+    429: "rate_limited",
+    503: "service_unavailable",
+    507: "storage_exhausted",
+  }[status] || "api_error");
+  return {
+    code,
+    detail: String(detail),
+    fields,
+    status,
+    retryAfterSeconds: Number.isFinite(retryAfter) && retryAfter > 0 ? Math.ceil(retryAfter) : null,
+  };
+}
+
 export function readableApiError(error, fallback = "操作失败，请稍后重试。") {
-  if (error?.response?.status === 503) {
-    return "安全服务暂时繁忙，请稍后重试。";
+  const status = error?.response?.status;
+  const parsed = parseApiError(error, fallback);
+  if (status === 503 || parsed.code === "service_unavailable") return "安全服务暂时繁忙，请稍后重试。";
+  if (parsed.code === "permission_denied" && parsed.detail.toLowerCase().includes("csrf")) {
+    return "安全验证已过期，请刷新页面后重试。";
   }
-  if (error?.response?.status === 403) {
-    const detail = String(error?.response?.data?.detail || "");
-    if (detail.toLowerCase().includes("csrf")) return "安全验证已过期，请刷新页面后重试。";
-  }
-  if (error?.response?.status === 429) {
-    const retryAfter = Number(error.response.headers?.["retry-after"] || 0);
-    return retryAfter > 0
-      ? `操作过于频繁，请在 ${Math.ceil(retryAfter)} 秒后重试。`
+  if (status === 429 || parsed.code === "rate_limited") {
+    return parsed.retryAfterSeconds
+      ? `操作过于频繁，请在 ${parsed.retryAfterSeconds} 秒后重试。`
       : "操作过于频繁，请稍后再试。";
   }
-  const payload = error?.response?.data;
-  if (!payload) return error?.message || fallback;
-  if (typeof payload === "string") return payload;
-  if (payload.detail) return payload.detail;
-  const first = Object.values(payload).flat()[0];
-  return first || fallback;
+  return parsed.detail || fallback;
 }
 
 export const authApi = {
