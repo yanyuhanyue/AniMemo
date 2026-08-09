@@ -225,6 +225,22 @@ def seed_state(output_path):
                 "verified_at": timezone.now(),
             },
         )
+        sync_state = None
+        sync_baselines = {"watch_status": {"present": True, "value": "completed"}}
+        if _migration_applied("journal", "0005_external_collection_sync_state"):
+            from journal.models import ExternalCollectionSyncState
+
+            # This release fixture deliberately seeds pre-upgrade state. Runtime
+            # application writes use journal.external_sync.state exclusively.
+            sync_state, _ = ExternalCollectionSyncState.objects.update_or_create(
+                identity=identity,
+                defaults={
+                    "connection": account,
+                    "schema_version": 1,
+                    "baselines": sync_baselines,
+                    "last_synced_at": timezone.now(),
+                },
+            )
         integration, _ = IntegrationConnection.objects.get_or_create(
             provider="astrbot",
             instance_id="stateful-upgrade-instance",
@@ -271,6 +287,9 @@ def seed_state(output_path):
         "external_identity_metadata": identity.metadata,
         "external_account_connection_id": account.pk,
         "external_account_ciphertext": account.credential_ciphertext,
+        "external_sync_state_id": sync_state.pk if sync_state is not None else None,
+        "external_sync_baselines": sync_baselines if sync_state is not None else None,
+        "external_sync_last_synced_at": sync_state.last_synced_at.isoformat() if sync_state is not None else None,
         "integration_connection_id": str(integration.pk),
         "integration_binding_id": binding.pk,
         "plugin_slug": project.slug,
@@ -342,10 +361,31 @@ def verify_state(input_path):
     if _migration_applied("journal", "0005_external_collection_sync_state"):
         from journal.models import ExternalCollectionSyncState
 
-        _assert(
-            not ExternalCollectionSyncState.objects.filter(identity=identity).exists(),
-            "Upgrade synthesized a collection sync baseline for an existing identity.",
-        )
+        sync_state_id = fixture.get("external_sync_state_id")
+        if sync_state_id is None:
+            _assert(
+                not ExternalCollectionSyncState.objects.filter(identity=identity).exists(),
+                "Upgrade synthesized a collection sync baseline for an existing identity.",
+            )
+        else:
+            sync_state = ExternalCollectionSyncState.objects.filter(
+                pk=sync_state_id,
+                identity=identity,
+                connection=connection,
+            ).first()
+            _assert(sync_state is not None, "ExternalCollectionSyncState did not survive the upgrade or restart.")
+            _assert(
+                sync_state.baselines == fixture["external_sync_baselines"],
+                "ExternalCollectionSyncState partial baseline semantics changed.",
+            )
+            _assert(
+                set(sync_state.baselines) == {"watch_status"},
+                "Upgrade synthesized missing score or review baselines.",
+            )
+            _assert(
+                sync_state.last_synced_at.isoformat() == fixture["external_sync_last_synced_at"],
+                "ExternalCollectionSyncState last_synced_at changed.",
+            )
 
     integration = IntegrationConnection.objects.filter(pk=fixture["integration_connection_id"]).first()
     _assert(integration is not None and integration.enabled, "IntegrationConnection did not survive.")
@@ -441,9 +481,13 @@ def verify_state(input_path):
         "metadata_source": "PASS" if core_history_applied else "NOT_APPLICABLE_BASE",
         "external_account_connection": "PERSISTED",
         "external_collection_sync_state": (
-            "ABSENT_UNINITIALIZED"
-            if _migration_applied("journal", "0005_external_collection_sync_state")
-            else "NOT_APPLICABLE_BASE"
+            "PERSISTED_PARTIAL_BASELINE"
+            if fixture.get("external_sync_state_id") is not None
+            else (
+                "ABSENT_UNINITIALIZED"
+                if _migration_applied("journal", "0005_external_collection_sync_state")
+                else "NOT_APPLICABLE_BASE"
+            )
         ),
         "credential_encryption": "PASS",
         "integration": "PASS",

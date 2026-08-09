@@ -52,7 +52,9 @@ class BangumiAccountProvider:
             "personal_access_token_available": enabled,
             "import_available": enabled,
             "collection_sync_preview_available": enabled,
-            "collection_sync_apply_available": False,
+            "collection_sync_pull_available": enabled,
+            "collection_sync_apply_available": enabled,
+            "collection_sync_push_available": False,
             "collection_write_implemented": False,
         }
 
@@ -213,8 +215,11 @@ class BangumiAccountProvider:
                 tags.append(value)
             if len(tags) == 30:
                 break
-        comment_present = item.get("comment") is not None
-        comment = str(item.get("comment") or "").strip()
+        raw_comment = item.get("comment")
+        if raw_comment is not None and not isinstance(raw_comment, str):
+            raise provider_invalid_response()
+        comment_present = raw_comment is not None
+        comment = raw_comment or ""
         if len(comment) > 10000:
             raise provider_invalid_response()
         images = subject.get("images") if isinstance(subject.get("images"), dict) else {}

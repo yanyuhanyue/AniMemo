@@ -90,4 +90,7 @@ test("stateful upgrade gate seeds and verifies identity metadata source across r
   assert.match(upgradeFixture, /ExternalMediaIdentity\.objects\.update_or_create/);
   assert.match(upgradeFixture, /ExternalMediaIdentity did not survive the upgrade or restart/);
   assert.match(upgradeFixture, /Existing ExternalMediaIdentity was not assigned as metadata source/);
+  assert.match(upgradeFixture, /sync_baselines = \{"watch_status": \{"present": True, "value": "completed"\}\}/);
+  assert.match(upgradeFixture, /ExternalCollectionSyncState partial baseline semantics changed/);
+  assert.match(upgradeFixture, /Upgrade synthesized missing score or review baselines/);
 });

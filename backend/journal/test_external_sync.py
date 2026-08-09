@@ -13,7 +13,13 @@ from journal.external_accounts.credentials import encrypt_credentials
 from journal.external_accounts.errors import account_token_invalid
 from journal.external_accounts.providers.bangumi import BangumiAccountProvider
 from journal.external_media.services import refresh_external_identity
-from journal.external_sync.canonical import MISSING, canonical_snapshot, fingerprint
+from journal.external_sync.canonical import (
+    MISSING,
+    canonical_snapshot,
+    fingerprint,
+    local_pull_capabilities,
+)
+from journal.external_sync.confirmation import CONFIRMATION_KEYS, decode_preview_token
 from journal.external_sync.planner import plan_collection
 from journal.models import (
     ExternalCollectionSyncState,
@@ -172,6 +178,22 @@ class ThreeWayPlannerTests(APITransactionTestCase):
             self.assertEqual(snapshot["personal_score"], {"present": False, "value": None})
             self.assertEqual(snapshot["review"], {"present": False, "value": None})
 
+    def test_d1a_capabilities_are_pull_only_and_lossy_local_score_is_blocked(self):
+        provider = BangumiAccountProvider()
+        provider_capabilities = provider.capabilities()
+        self.assertTrue(provider_capabilities["collection_sync_preview_available"])
+        self.assertTrue(provider_capabilities["collection_sync_pull_available"])
+        self.assertTrue(provider_capabilities["collection_sync_apply_available"])
+        self.assertFalse(provider_capabilities["collection_sync_push_available"])
+        self.assertFalse(provider_capabilities["collection_write_implemented"])
+
+        remote = canonical_snapshot(watch_status="watching", personal_score="8.555", review="ok")
+        pull = local_pull_capabilities(remote)
+        self.assertEqual(
+            pull["personal_score"],
+            {"supported": False, "reason": "remote_value_not_representable"},
+        )
+
 
 class ExternalCollectionSyncStateTests(APITransactionTestCase):
     reset_sequences = True
@@ -325,7 +347,11 @@ class ReadOnlySyncPreviewTests(APITransactionTestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
         self.assertEqual(response.data["provider"], "bangumi")
-        self.assertFalse(any("token" in str(key).lower() for key in response.data))
+        self.assertTrue(response.data["preview_token"])
+        token_payload = decode_preview_token(response.data["preview_token"])
+        self.assertEqual(set(token_payload), CONFIRMATION_KEYS)
+        self.assertNotIn("test-access-token", str(token_payload))
+        self.assertNotIn("本地短评", str(token_payload))
         score = field_plan(response.data, "personal_score")
         self.assertEqual(score["local"], {"present": True, "value": "8.5"})
         self.assertFalse(score["push_supported"])

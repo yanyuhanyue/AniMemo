@@ -346,6 +346,9 @@ IMPORT_MAX_LINE_LENGTH = int(os.getenv("IMPORT_MAX_LINE_LENGTH", "200000"))
 IMPORT_MAX_NESTING_DEPTH = int(os.getenv("IMPORT_MAX_NESTING_DEPTH", "3"))
 REGISTRATION_TOKEN_TTL_SECONDS = int(os.getenv("REGISTRATION_TOKEN_TTL_SECONDS", "3600"))
 REGISTRATION_COMPLETION_TOKEN_TTL_SECONDS = int(os.getenv("REGISTRATION_COMPLETION_TOKEN_TTL_SECONDS", "900"))
+EXTERNAL_SYNC_CONFIRMATION_MAX_AGE_SECONDS = int(
+    os.getenv("EXTERNAL_SYNC_CONFIRMATION_MAX_AGE_SECONDS", "300")
+)
 
 REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "config.rest_exceptions.exception_handler",
@@ -391,6 +394,8 @@ REST_FRAMEWORK = {
         "two_factor_combined": os.getenv("THROTTLE_TWO_FACTOR_COMBINED_RATE", "3/5min"),
         "external_search": os.getenv("THROTTLE_EXTERNAL_SEARCH_RATE", "30/min"),
         "external_account": os.getenv("THROTTLE_EXTERNAL_ACCOUNT_RATE", "10/min"),
+        "external_sync_preview": os.getenv("THROTTLE_EXTERNAL_SYNC_PREVIEW_RATE", "10/min"),
+        "external_sync_apply": os.getenv("THROTTLE_EXTERNAL_SYNC_APPLY_RATE", "6/min"),
         "external_import_preview": os.getenv("THROTTLE_EXTERNAL_IMPORT_PREVIEW_RATE", "12/hour"),
         "external_import_apply": os.getenv("THROTTLE_EXTERNAL_IMPORT_APPLY_RATE", "10/hour"),
         "import": os.getenv("THROTTLE_IMPORT_RATE", "5/hour"),

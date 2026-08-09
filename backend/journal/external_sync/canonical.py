@@ -62,6 +62,42 @@ def local_snapshot(entry):
     )
 
 
+def _score_is_locally_representable(value):
+    try:
+        score = Decimal(value)
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    if score != score.quantize(Decimal("0.01")):
+        return False
+    return canonical_score(score) == value
+
+
+def local_pull_capabilities(remote, *, remote_missing=False):
+    if remote_missing:
+        return {
+            field: {"supported": False, "reason": "remote_collection_missing"}
+            for field in SUPPORTED_FIELDS
+        }
+
+    capabilities = {}
+    for field in SUPPORTED_FIELDS:
+        value = remote[field]
+        supported = True
+        if field == "watch_status":
+            supported = value["present"] and value["value"] in WATCH_STATUSES
+        elif field == "personal_score":
+            supported = not value["present"] or _score_is_locally_representable(value["value"])
+        elif field == "review":
+            # JournalEntry.review is a non-null string, so provider-level
+            # missing and an explicitly empty review are not interchangeable.
+            supported = value["present"]
+        capabilities[field] = {
+            "supported": supported,
+            "reason": None if supported else "remote_value_not_representable",
+        }
+    return capabilities
+
+
 def validate_baselines(value):
     if not isinstance(value, dict):
         raise ValueError("baselines must be an object")

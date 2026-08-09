@@ -78,14 +78,26 @@ jobs:
           done
           curl --fail --silent --show-error -H 'Host: ci.example.test' http://127.0.0.1:8088/ | grep -q '<div id="root">'
           docker compose --env-file .env.production -f deploy/docker-compose.yml ps
-      - name: Verify fresh sync schema has no synthetic baseline
+      - name: Verify fresh D1A routes, pull-only capability, and empty sync state
         run: >-
           docker compose --env-file .env.production -f deploy/docker-compose.yml exec -T api
           python manage.py shell -c
-          "from django.db import connection; from journal.models import ExternalCollectionSyncState;
+          "from django.db import connection; from django.urls import resolve, reverse;
+          from journal.external_accounts.providers.bangumi import BangumiAccountProvider;
+          from journal.models import ExternalCollectionSyncState;
           assert ExternalCollectionSyncState._meta.db_table in connection.introspection.table_names();
           assert not ExternalCollectionSyncState.objects.exists();
-          print('Fresh collection sync state: PASS')"
+          preview = reverse('external-collection-sync-preview', kwargs={'provider': 'bangumi', 'entry_id': 1});
+          apply = reverse('external-collection-sync-apply', kwargs={'provider': 'bangumi', 'entry_id': 1});
+          assert resolve(preview).view_name == 'external-collection-sync-preview';
+          assert resolve(apply).view_name == 'external-collection-sync-apply';
+          capabilities = BangumiAccountProvider().capabilities();
+          assert capabilities['collection_sync_preview_available'];
+          assert capabilities['collection_sync_pull_available'];
+          assert capabilities['collection_sync_apply_available'];
+          assert not capabilities['collection_sync_push_available'];
+          assert not capabilities['collection_write_implemented'];
+          print('Fresh D1A pull-only gate: PASS')"
       - name: Print logs on failure
         if: failure()
         run: docker compose --env-file .env.production -f deploy/docker-compose.yml logs --no-color
