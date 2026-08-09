@@ -27,6 +27,11 @@ def _validate_poster_url(value):
         raise serializers.ValidationError(str(error)) from error
 
 
+def _prefetched_watch_history(obj):
+    cache = getattr(obj, "_prefetched_objects_cache", {})
+    return cache.get("watch_history_records") if "watch_history_records" in cache else None
+
+
 class ExternalIdentityInputField(serializers.JSONField):
     def to_internal_value(self, data):
         if isinstance(data, str):
@@ -187,27 +192,38 @@ class JournalEntrySerializer(serializers.ModelSerializer):
     def get_last_watched_on(self, obj):
         if hasattr(obj, "last_watched_on"):
             return obj.last_watched_on
-        latest = obj.watch_history_records.order_by("-watched_on", "-sequence").values_list("watched_on", flat=True).first()
-        return latest
+        records = _prefetched_watch_history(obj)
+        if records is None:
+            return None
+        return max((record.watched_on for record in records if record.watched_on), default=None)
 
     @extend_schema_field(OpenApiTypes.DATE)
     def get_first_watched_on(self, obj):
         if hasattr(obj, "first_watched_on"):
             return obj.first_watched_on
-        return obj.watch_history_records.order_by("watched_on", "sequence").values_list("watched_on", flat=True).first()
+        records = _prefetched_watch_history(obj)
+        if records is None:
+            return None
+        return min((record.watched_on for record in records if record.watched_on), default=None)
 
     @extend_schema_field(OpenApiTypes.INT)
     def get_latest_episode_start(self, obj):
         if hasattr(obj, "latest_episode_start"):
             return obj.latest_episode_start
-        latest = obj.watch_history_records.order_by("-watched_on", "-sequence", "-id").only("episode_start").first()
+        records = _prefetched_watch_history(obj)
+        if records is None:
+            return None
+        latest = max(records, key=lambda record: (record.watched_on or "", record.sequence or 0, record.id or 0), default=None)
         return latest.episode_start if latest else None
 
     @extend_schema_field(OpenApiTypes.INT)
     def get_latest_episode_end(self, obj):
         if hasattr(obj, "latest_episode_end"):
             return obj.latest_episode_end
-        latest = obj.watch_history_records.order_by("-watched_on", "-sequence", "-id").only("episode_end").first()
+        records = _prefetched_watch_history(obj)
+        if records is None:
+            return None
+        latest = max(records, key=lambda record: (record.watched_on or "", record.sequence or 0, record.id or 0), default=None)
         return latest.episode_end if latest else None
 
     @extend_schema_field(ExternalMediaIdentitySummarySerializer(many=True))

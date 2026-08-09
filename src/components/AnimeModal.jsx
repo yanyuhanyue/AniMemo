@@ -57,7 +57,22 @@ export function AnimeModal({ record, returnFocus, onClose, editable = false, onS
   const [posterFile, setPosterFile] = useState(null);
 
   useEffect(() => {
-    setDraft(normalizeDraft(record));
+    setDraft((current) => {
+      const next = normalizeDraft(record);
+      const sameRecord = String(current?.id) === String(record?.id);
+      const localHistory = Array.isArray(current?.watchHistory) ? current.watchHistory : [];
+      const parentHistory = Array.isArray(record?.watchHistory) ? record.watchHistory : [];
+      const parentCount = Number(record?.watchHistoryCount || 0);
+      if (sameRecord && localHistory.length && !parentHistory.length && parentCount >= localHistory.length) {
+        next.watchHistory = localHistory;
+        next.watchHistoryCount = Math.max(parentCount, localHistory.length);
+        next.firstWatchedOn = current.firstWatchedOn;
+        next.lastWatchedOn = current.lastWatchedOn;
+        next.latestEpisodeStart = current.latestEpisodeStart;
+        next.latestEpisodeEnd = current.latestEpisodeEnd;
+      }
+      return next;
+    });
     setTab(editable ? "tags" : "intro");
     setPhase("opening");
     setBusy(false);

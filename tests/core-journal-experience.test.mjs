@@ -13,6 +13,7 @@ import {
 } from "../src/lib/journalExperience.js";
 
 const dashboard = readFileSync(new URL("../src/pages/DashboardPage.jsx", import.meta.url), "utf8");
+const animeModal = readFileSync(new URL("../src/components/AnimeModal.jsx", import.meta.url), "utf8");
 const editor = readFileSync(new URL("../src/components/dashboard/EditAnimeRecordContent.jsx", import.meta.url), "utf8");
 const sections = readFileSync(new URL("../src/components/dashboard/JournalDashboardSections.jsx", import.meta.url), "utf8");
 const bulk = readFileSync(new URL("../src/components/dashboard/BulkManagementToolbar.jsx", import.meta.url), "utf8");
@@ -78,8 +79,13 @@ test("dashboard wires analytics, quick status, bulk management, reminders, and r
   assert.match(dashboard, /runBounded\(targets/);
   assert.match(dashboard, /成功 \$\{successful\.length\}，失败 \$\{failed\}/);
   assert.match(dashboard, /params\.set\("entry", record\.id\)/);
+  assert.match(dashboard, /openingEntryRef\.current = String\(record\.id\)/);
+  assert.match(dashboard, /openingEntryRef\.current === String\(entryId\)/);
+  assert.match(dashboard, /location\.search\.includes\("entry="\) \|\| openingEntryRef\.current/);
   assert.match(dashboard, /params\.delete\("entry"\)/);
   assert.match(dashboard, /没有找到这部作品，或它不属于当前账号/);
+  assert.match(animeModal, /parentCount >= localHistory\.length/);
+  assert.match(animeModal, /next\.watchHistory = localHistory/);
   assert.match(bulk, /批量管理/);
 });
 

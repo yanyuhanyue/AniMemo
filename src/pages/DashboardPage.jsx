@@ -89,6 +89,7 @@ export function DashboardPage() {
   const [notice, setNotice] = useState("");
   const [noticeKind, setNoticeKind] = useState("");
   const deepLinkRequestRef = useRef("");
+  const openingEntryRef = useRef("");
   useEffect(() => { if (loadError) setNotice(loadError); }, [loadError]);
   useEffect(() => {
     if (!selected) return;
@@ -107,6 +108,7 @@ export function DashboardPage() {
   };
 
   const closeSelected = () => {
+    openingEntryRef.current = "";
     setSelected(null);
     clearEntryQuery();
   };
@@ -148,6 +150,10 @@ export function DashboardPage() {
     const params = new URLSearchParams(location.search);
     const entryId = params.get("entry");
     if (!entryId || !dashboardReady || selected?.record?.id === Number(entryId) || selected?.record?.id === entryId) return;
+    if (openingEntryRef.current === String(entryId)) {
+      openingEntryRef.current = "";
+      return;
+    }
     const localRecord = records.find((record) => String(record.id) === String(entryId));
     if (localRecord) {
       deepLinkRequestRef.current = entryId;
@@ -173,7 +179,7 @@ export function DashboardPage() {
   }, [dashboardReady, isDemo, location.pathname, location.search, presetColors, records, selected]);
 
   useEffect(() => {
-    if (location.search.includes("entry=")) return;
+    if (location.search.includes("entry=") || openingEntryRef.current) return;
     if (selected) setSelected(null);
   }, [location.search, selected]);
 
@@ -330,6 +336,7 @@ export function DashboardPage() {
     const container = source?.closest?.(".anime-list-row, .anime-poster-card__interaction") || source;
     const origin = container?.querySelector?.("img") || source;
     pressBeforeOpen(container, () => {
+      if (updateUrl) openingEntryRef.current = String(record.id);
       setSelected({ record, initialTab, originRect: origin?.getBoundingClientRect?.() || null, returnFocus: source || container || null });
       if (!updateUrl) return;
       const params = new URLSearchParams(location.search);
