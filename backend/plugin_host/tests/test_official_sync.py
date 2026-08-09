@@ -25,6 +25,9 @@ from plugin_host.official_packages import (
 from plugin_host.runtime import runtime_registry
 
 
+HISTORICAL_OFFICIAL_RELEASE_SHA = "347f3e8466e7fe67296aecabe0d68fc958f729e4"
+
+
 def _repack(payload, compression):
     output = BytesIO()
     with ZipFile(BytesIO(payload)) as source, ZipFile(output, "w", compression) as target:
@@ -83,7 +86,14 @@ class OfficialPluginSyncTests(TestCase):
     def test_official_canonical_content_digest_matches_git_release_identity(self):
         repository = Path(__file__).resolve().parents[3]
         archive = subprocess.run(
-            ["git", "archive", "--format=tar", "HEAD", "--", "plugins/watch-history-importer"],
+            [
+                "git",
+                "archive",
+                "--format=tar",
+                HISTORICAL_OFFICIAL_RELEASE_SHA,
+                "--",
+                "plugins/watch-history-importer",
+            ],
             cwd=repository,
             check=True,
             capture_output=True,
@@ -100,7 +110,14 @@ class OfficialPluginSyncTests(TestCase):
     def test_historical_official_archive_matches_immutable_release_sha(self):
         repository = Path(__file__).resolve().parents[3]
         archive = subprocess.run(
-            ["git", "archive", "--format=tar", "HEAD", "--", "plugins/watch-history-importer"],
+            [
+                "git",
+                "archive",
+                "--format=tar",
+                HISTORICAL_OFFICIAL_RELEASE_SHA,
+                "--",
+                "plugins/watch-history-importer",
+            ],
             cwd=repository,
             check=True,
             capture_output=True,

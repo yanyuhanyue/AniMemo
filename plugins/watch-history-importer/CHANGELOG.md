@@ -7,3 +7,8 @@
 - 支持事务导入、已有番剧合并和观看历史幂等去重。
 - 保留多刷记录与观看日期，并预留 AstrBot 1.0 接口契约。
 - 将来源标题中的季数作为硬匹配条件，兼容“第几季 / 第几部分 / 第几クール / 罗马数字”并阻止跨季误匹配。
+# 0.3.1
+
+- 增加 watch-history-importer 的 Integration Protocol v1 动作：观看记录读取/新增、条目搜索、导入预览与提交。
+- 增加 `history-updated`、`import-completed` 私聊事件。
+- 保留 0.3.0 的用户 PluginData、安装状态与可回滚版本。

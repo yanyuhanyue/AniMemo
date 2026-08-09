@@ -133,3 +133,9 @@ POST /api/integrations/v1/events/ack/
 ## Credential Boundary
 
 外部服务器连接凭证 != AniMemo 用户凭证。网关通过绑定解析 AniMemo 用户，插件收到解析后的用户对象；插件不能选择外部身份，也不能从外部请求中选择另一个 AniMemo 用户。
+
+## AstrBot Bridge 示例
+
+`astrbot_plugin_animemo_bridge` 是一个 provider-neutral 的协议客户端示例：它只把 AstrBot 提供的 `platform + external_user_id` 作为外部身份，把私聊 UMO 保存在 AstrBot 官方 plugin data directory，并用 HMAC 调用本协议。协议本身不依赖 AstrBot API；AstrBot 的命令、MessageChain 和生命周期适配只存在于 Bridge 包中。
+
+Reference integration `watch-history-importer` 0.3.1 声明以下动作（协议本地名使用规范 kebab-case）：`history-get`、`history-add`、`entries-search`、`import-preview`、`import-commit`；事件为 `history-updated`、`import-completed`。外部调用名形如 `watch-history-importer.history-get`。

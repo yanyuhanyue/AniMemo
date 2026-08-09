@@ -1,0 +1,12 @@
+{
+  "enabled": {"type": "boolean", "default": true, "description": "是否启用 AniMemo Bridge。"},
+  "animemo_base_url": {"type": "string", "default": "https://re-anime.cc", "description": "AniMemo 服务地址。"},
+  "key_id": {"type": "string", "default": "", "description": "管理员创建 IntegrationConnection 后得到的 key id。"},
+  "secret": {"type": "password", "default": "", "description": "IntegrationConnection secret，仅用于 HMAC 签名。"},
+  "poll_events": {"type": "boolean", "default": true, "description": "是否启动事件长轮询。"},
+  "poll_wait_seconds": {"type": "number", "default": 20, "min": 0, "max": 25, "description": "事件长轮询等待秒数。"},
+  "request_timeout_seconds": {"type": "number", "default": 35, "min": 5, "max": 120, "description": "HTTP 请求超时，必须大于长轮询等待时间。"},
+  "allow_group_commands": {"type": "boolean", "default": false, "description": "是否允许已绑定用户在群聊调用动作。配对始终只允许私聊。"},
+  "developer_commands": {"type": "boolean", "default": false, "description": "是否启用 debug 命令和事件字段预览。"},
+  "verify_tls": {"type": "boolean", "default": true, "description": "是否校验 AniMemo HTTPS 证书。"}
+}
