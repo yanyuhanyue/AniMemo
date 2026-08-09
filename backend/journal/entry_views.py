@@ -1,6 +1,6 @@
 from plugin_host.permissions import plugin_permissions_for_user
 from plugin_host.sdk import ColumnHookContext, JournalHookContext, run_hook
-from django.db.models import Count, Max
+from django.db.models import Count, Max, Min, OuterRef, Subquery
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import filters, permissions, status, viewsets
@@ -15,7 +15,7 @@ from .external_media.services import (
     set_metadata_source,
     unbind_external_identity,
 )
-from .models import Column, JournalEntry, QuickFilter, UserSettings
+from .models import Column, JournalEntry, QuickFilter, UserSettings, WatchHistoryRecord
 from .pagination import FlexiblePageNumberPagination
 from .permissions import IsOwner
 from .serializers import (
@@ -48,12 +48,20 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
     parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def get_queryset(self):
+        latest_history = WatchHistoryRecord.objects.filter(entry_id=OuterRef("pk")).order_by(
+            "-watched_on",
+            "-sequence",
+            "-id",
+        )
         queryset = JournalEntry.objects.filter(
             user=self.request.user,
             deleted_at__isnull=True,
         ).annotate(
             watch_history_count=Count("watch_history_records", distinct=True),
             last_watched_on=Max("watch_history_records__watched_on"),
+            first_watched_on=Min("watch_history_records__watched_on"),
+            latest_episode_start=Subquery(latest_history.values("episode_start")[:1]),
+            latest_episode_end=Subquery(latest_history.values("episode_end")[:1]),
         ).prefetch_related("external_identities")
         status_value = self.request.query_params.get("status")
         visibility = self.request.query_params.get("visibility")

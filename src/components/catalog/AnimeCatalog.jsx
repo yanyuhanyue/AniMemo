@@ -10,6 +10,10 @@ export function AnimeCatalog({
   ready,
   variant = "default",
   onAddRecord,
+  onQuickStatus,
+  selectionMode = false,
+  selectedIds,
+  onToggleSelection,
 }) {
   return (
     <div className={`anime-catalog anime-catalog--${viewMode} anime-catalog--${variant}`} aria-busy={!ready}>
@@ -22,9 +26,13 @@ export function AnimeCatalog({
           ready={ready}
           variant={variant}
           onAddRecord={onAddRecord}
+          onQuickStatus={onQuickStatus}
+          selectionMode={selectionMode}
+          selectedIds={selectedIds}
+          onToggleSelection={onToggleSelection}
         />
       ) : (
-        <AnimePosterWall records={records} onOpenDetail={onOpenDetail} ready={ready} variant={variant} onAddRecord={onAddRecord} />
+        <AnimePosterWall records={records} onOpenDetail={onOpenDetail} ready={ready} variant={variant} onAddRecord={onAddRecord} onQuickStatus={onQuickStatus} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelection={onToggleSelection} />
       )}
     </div>
   );

@@ -3,7 +3,7 @@ import { AnimeListRow } from "./AnimeListRow.jsx";
 import { AddAnimePlaceholder } from "./AddAnimePlaceholder.jsx";
 import { useCatalogReveal } from "./useCatalogReveal.js";
 
-export function AnimeListView({ records, onOpenDetail, sort, onSortChange, ready, variant, onAddRecord }) {
+export function AnimeListView({ records, onOpenDetail, sort, onSortChange, ready, variant, onAddRecord, onQuickStatus, selectionMode, selectedIds, onToggleSelection }) {
   const revealDependency = records.map((record) => record.id).join(":");
   const listRef = useCatalogReveal({ enabled: ready, dependency: revealDependency });
 
@@ -58,6 +58,10 @@ export function AnimeListView({ records, onOpenDetail, sort, onSortChange, ready
           onOpen={onOpenDetail}
           catalogReady={ready}
           variant={variant}
+          onQuickStatus={onQuickStatus}
+          selectionMode={selectionMode}
+          selected={selectedIds?.has(record.id)}
+          onToggleSelection={onToggleSelection}
         />
       ))}
       {onAddRecord && <AddAnimePlaceholder layout="list" onAdd={onAddRecord} />}

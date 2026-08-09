@@ -14,7 +14,9 @@ function centerFocusedEntry(event) {
   });
 }
 
-export function AnimePosterCard({ record, shadowColor, expanded, onToggleTags, onOpen, catalogReady, variant = "default" }) {
+const QUICK_STATUS_OPTIONS = [["planned", "想看"], ["watching", "在看"], ["completed", "看过"], ["on_hold", "搁置"], ["dropped", "弃番"]];
+
+export function AnimePosterCard({ record, shadowColor, expanded, onToggleTags, onOpen, catalogReady, variant = "default", onQuickStatus, selectionMode = false, selected = false, onToggleSelection }) {
   const visibleTags = expanded ? record.tags : record.tags.slice(0, 3);
   const {
     imageRef,
@@ -24,7 +26,7 @@ export function AnimePosterCard({ record, shadowColor, expanded, onToggleTags, o
   } = usePosterReady(record.poster);
 
   const openCard = (event) => {
-    if (event.target.closest(".anime-poster-card__tag-more, .anime-poster-card__edit")) return;
+    if (event.target.closest(".anime-poster-card__tag-more, .anime-poster-card__edit, .catalog-selection, .catalog-quick-status")) return;
     onOpen(record, event.currentTarget);
   };
 
@@ -54,6 +56,7 @@ export function AnimePosterCard({ record, shadowColor, expanded, onToggleTags, o
       >
         <div className="anime-poster-card__content">
           <div className="anime-poster-card__media">
+            {selectionMode && <button className={`catalog-selection${selected ? " is-selected" : ""}`} type="button" aria-pressed={selected} aria-label={`${selected ? "取消选择" : "选择"} ${record.title}`} onClick={(event) => { event.stopPropagation(); onToggleSelection?.(record.id); }}><Icon name={selected ? "check" : "plus"} /></button>}
             {variant === "editable" && (
               <button
                 className="anime-poster-card__edit"
@@ -91,6 +94,7 @@ export function AnimePosterCard({ record, shadowColor, expanded, onToggleTags, o
               {record.statusLabel}
             </span>
           </div>
+          {variant === "editable" && onQuickStatus && <select className="catalog-quick-status catalog-quick-status--poster" value={record.status} onClick={(event) => event.stopPropagation()} onChange={(event) => { event.stopPropagation(); onQuickStatus(record, event.target.value); }} aria-label={`快速修改 ${record.title} 的观看状态`}>{QUICK_STATUS_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select>}
           <div className="anime-poster-card__copy">
             <strong>{record.title}</strong>
             <small>{record.japaneseTitle || "\u00a0"}</small>

@@ -43,7 +43,9 @@ export function useDashboardData({ navigate }) {
   const [tagPresets, setTagPresets] = useState(FALLBACK_TAG_PRESETS);
   const [dashboardReady, setDashboardReady] = useState(isDemo);
   const [loadError, setLoadError] = useState("");
-  const serverStateRevision = useServerStateRevision(["journal_entries", "settings", "filters", "showcase"]);
+  const [analytics, setAnalytics] = useState(null);
+  const [analyticsError, setAnalyticsError] = useState("");
+  const serverStateRevision = useServerStateRevision(["journal_entries", "settings", "filters", "showcase", "analytics"]);
   const presetColors = useMemo(() => buildPresetColorMap(tagPresets), [tagPresets]);
 
   useEffect(() => {
@@ -78,7 +80,8 @@ export function useDashboardData({ navigate }) {
       api.get("settings/me/"),
       api.get("filters/"),
       api.get("tag-presets/"),
-    ]).then(([entriesResult, settingsResult, filtersResult, tagPresetsResult]) => {
+      api.get("stats/me/"),
+    ]).then(([entriesResult, settingsResult, filtersResult, tagPresetsResult, analyticsResult]) => {
       if (cancelled) return;
       const loadedTagPresets = tagPresetsResult.status === "fulfilled"
         ? normalizeTagPresets(tagPresetsResult.value.data, [])
@@ -113,6 +116,13 @@ export function useDashboardData({ navigate }) {
         const items = filtersResult.value.data?.results || filtersResult.value.data || [];
         if (Array.isArray(items) && items.length) setQuickFilters([{ id: "all", name: "全部", tags: [] }, ...items]);
       }
+      if (analyticsResult.status === "fulfilled") {
+        setAnalytics(analyticsResult.value.data || null);
+        setAnalyticsError("");
+      } else {
+        setAnalytics(null);
+        setAnalyticsError(readableApiError(analyticsResult.reason, "手账统计读取失败，请稍后重试。"));
+      }
       setDashboardReady(true);
     });
     return () => { cancelled = true; };
@@ -128,6 +138,8 @@ export function useDashboardData({ navigate }) {
   useEffect(() => { if (isDemo) localStorage.setItem(FILTERS_KEY, JSON.stringify(quickFilters)); }, [isDemo, quickFilters]);
 
   return {
+    analytics,
+    analyticsError,
     dashboardReady,
     demoCatalogRecords,
     isDemo,

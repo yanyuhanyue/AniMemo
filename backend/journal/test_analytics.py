@@ -66,6 +66,14 @@ class AnalyticsCoreTests(TestCase):
             {"score": "8.50", "count": 1},
         ])
         self.assertEqual(result["monthly_activity"], [{"month": "2026-01", "count": 3}])
+        self.assertEqual(result["activity_summary"], {
+            "today": 0,
+            "last_7_days": 0,
+            "current_month": 0,
+        })
+        self.assertEqual(len(result["recent_activity"]), 3)
+        self.assertEqual(result["recent_activity"][0]["watched_on"], "2026-01-31")
+        self.assertIn(result["recent_activity"][0]["entry_id"], {self.completed.pk, self.dropped.pk})
         self.assertEqual(result["range"]["boundaries"], "inclusive")
         self.assertEqual(result["range"]["timezone"], "Asia/Shanghai")
 

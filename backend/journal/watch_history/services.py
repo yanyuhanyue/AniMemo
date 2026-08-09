@@ -14,9 +14,14 @@ from .validation import (
 )
 
 
-def list_history(*, user, entry):
+def list_history(*, user, entry, offset=0, limit=None):
     _assert_owner(user, entry)
-    return list(entry.watch_history_records.all())
+    queryset = entry.watch_history_records.all()
+    if offset:
+        queryset = queryset[offset:]
+    if limit is not None:
+        queryset = queryset[:limit]
+    return list(queryset)
 
 
 def add_history(*, user, entry, record):

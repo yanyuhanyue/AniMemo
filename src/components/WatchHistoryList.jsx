@@ -9,7 +9,7 @@ function episodeLabel(record) {
   return "未记录话数范围";
 }
 
-export function WatchHistoryList({ records = [], emptyText = "暂无观看记录。", editable = false, onRemove }) {
+export function WatchHistoryList({ records = [], emptyText = "暂无观看记录。", editable = false, onEdit, onRemove }) {
   if (!records.length) {
     return <div className="watch-history-list__empty"><Icon name="history" /><p>{emptyText}</p></div>;
   }
@@ -27,9 +27,10 @@ export function WatchHistoryList({ records = [], emptyText = "暂无观看记录
           <div className="watch-history-list__actions">
             <b>{record.brush_label || "观看记录"}</b>
             {editable && onRemove && (
-              <button type="button" aria-label={`删除 ${record.watched_label || record.watched_on || "这条"}观看记录`} onClick={() => onRemove(index)}>
-                <Icon name="trash" /> 删除
-              </button>
+              <div className="watch-history-list__action-group">
+                {onEdit && <button type="button" aria-label={`编辑 ${record.watched_label || record.watched_on || "这条"}观看记录`} onClick={() => onEdit(index)}><Icon name="edit" /> 编辑</button>}
+                <button type="button" aria-label={`删除 ${record.watched_label || record.watched_on || "这条"}观看记录`} onClick={() => onRemove(index)}><Icon name="trash" /> 删除</button>
+              </div>
             )}
           </div>
         </article>

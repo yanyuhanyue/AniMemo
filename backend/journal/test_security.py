@@ -518,6 +518,9 @@ class ProductionSecretKeyTests(SimpleTestCase):
             "REFRESH_COOKIE_SECURE": "true",
         })
         environment.pop("DEBUG", None)
+        # Keep this subprocess focused on the absent-environment default even
+        # when a local bootstrap has created the development .env file.
+        environment["PYTHON_DOTENV_DISABLED"] = "true"
         result = subprocess.run(
             [sys.executable, "-c", "from django.conf import settings; print(settings.DEBUG); print(settings.CACHES['default']['BACKEND'])"],
             cwd=settings.BASE_DIR,

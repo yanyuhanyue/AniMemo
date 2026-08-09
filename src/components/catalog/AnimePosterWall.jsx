@@ -5,7 +5,7 @@ import { useCatalogReveal } from "./useCatalogReveal.js";
 
 const POSTER_SHADOWS = ["#ff5f68", "#4ecbc4", "#ffe36e"];
 
-export function AnimePosterWall({ records, onOpenDetail, ready, variant, onAddRecord }) {
+export function AnimePosterWall({ records, onOpenDetail, ready, variant, onAddRecord, onQuickStatus, selectionMode, selectedIds, onToggleSelection }) {
   const [expandedTags, setExpandedTags] = useState(() => new Set());
   const revealDependency = records.map((record) => record.id).join(":");
   const wallRef = useCatalogReveal({ enabled: ready, dependency: revealDependency });
@@ -31,6 +31,10 @@ export function AnimePosterWall({ records, onOpenDetail, ready, variant, onAddRe
           onOpen={onOpenDetail}
           catalogReady={ready}
           variant={variant}
+          onQuickStatus={onQuickStatus}
+          selectionMode={selectionMode}
+          selected={selectedIds?.has(record.id)}
+          onToggleSelection={onToggleSelection}
         />
       ))}
       {onAddRecord && <AddAnimePlaceholder layout="grid" onAdd={onAddRecord} />}
