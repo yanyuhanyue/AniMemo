@@ -1,0 +1,22 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; background: #f4f6f8; color: #17202a; }
+main { max-width: 760px; margin: 32px auto; padding: 24px; background: #fff; border: 1px solid #d7dde5; border-radius: 8px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+h1, h2 { margin: 0 0 16px; }
+h2 { margin-top: 24px; font-size: 1rem; }
+button { min-height: 36px; padding: 0 14px; border: 1px solid #52606d; border-radius: 6px; background: #e8eef5; color: inherit; cursor: pointer; }
+button:hover { background: #dbe7f3; }
+dl { display: grid; grid-template-columns: minmax(150px, 0.5fr) minmax(0, 1fr); gap: 8px 16px; margin: 0; }
+dt { color: #52606d; }
+dd { margin: 0; overflow-wrap: anywhere; }
+.route { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid #e1e6eb; }
+.route:first-child { border-top: 0; }
+#message { min-height: 1.4em; color: #52606d; }
+@media (prefers-color-scheme: dark) {
+  body { background: #111820; color: #edf2f7; }
+  main { background: #1b2632; border-color: #394958; }
+  button { background: #293a4a; color: #edf2f7; border-color: #607487; }
+  button:hover { background: #344b60; }
+  dt, #message { color: #a9b8c6; }
+  .route { border-color: #394958; }
+}

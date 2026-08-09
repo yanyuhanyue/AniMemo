@@ -73,3 +73,14 @@ class RouteStore:
             digest = hashlib.sha256(external.encode("utf-8")).hexdigest()[:10]
             result.append({"platform": platform, "external_user_id": f"…{digest}", "updated_at": value.get("updated_at", "")})
         return result
+
+    def clear_masked(self, platform, external_hash):
+        platform = str(platform).strip().lower()
+        external_hash = str(external_hash).strip()
+        for key in list(self.state["routes"]):
+            route_platform, _, external = key.partition(":")
+            digest = hashlib.sha256(external.encode("utf-8")).hexdigest()[:10]
+            if route_platform == platform and external_hash in {digest, f"…{digest}"}:
+                del self.state["routes"][key]
+                return True
+        return False
