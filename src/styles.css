@@ -1163,13 +1163,14 @@ button.tag-chip { cursor: pointer; }
 .anime-edit-modal__preset-list button:disabled { cursor: default; opacity: .4; }
 .anime-edit-modal__module-switch { flex: 0 0 auto; margin-top: 12px; border-top: 3px solid var(--ink); padding-top: 12px; }
 .anime-edit-modal__module-switch > p { margin: 0 0 8px; font-size: 10px; font-weight: 900; line-height: 1.5; text-transform: uppercase; letter-spacing: .12em; }
-.anime-edit-modal__tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 3px solid var(--ink); background: #fff; box-shadow: 4px 4px 0 var(--ink); }
+.anime-edit-modal__tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 3px solid var(--ink); background: #fff; box-shadow: 4px 4px 0 var(--ink); }
 .anime-edit-modal__tabs button { min-width: 0; border: 0; border-right: 3px solid var(--ink); background: #f4f1ea; padding: 8px; color: var(--ink); font-size: 12px; font-weight: 900; line-height: 16px; cursor: pointer; transition: none; }
 .anime-edit-modal__tabs button:last-child { border-right: 0; }
 .anime-edit-modal__tabs button:hover { background: #fff; }
 .anime-edit-modal__tabs button.is-active { background: var(--yellow); transform: translate(2px, 2px); }
 .anime-edit-modal__tabs button:nth-child(2).is-active { background: var(--teal); }
 .anime-edit-modal__tabs button:nth-child(3).is-active { background: var(--pink); }
+.anime-edit-modal__tabs button:nth-child(4).is-active { background: var(--coral); }
 .anime-edit-modal__tabs button:focus-visible { position: relative; z-index: 2; outline: 3px solid var(--coral); outline-offset: -4px; }
 .anime-edit-modal__copy-panel { height: 100%; min-height: 0; display: flex; flex-direction: column; border: 3px solid var(--ink); background: var(--teal); padding: 12px; box-shadow: 6px 6px 0 var(--ink); }
 .anime-edit-modal__copy-panel.is-review { background: var(--pink); }
@@ -1192,6 +1193,46 @@ button.tag-chip { cursor: pointer; }
 .anime-edit-modal__history-panel > .watch-history-list, .anime-edit-modal__history-panel > .watch-history-list__empty { min-height: 0; flex: 1; overflow-y: auto; margin-bottom: 12px; }
 .anime-edit-modal__history-panel > .watch-history-list__empty { min-height: 76px; flex: 0 0 76px; overflow: visible; }
 .anime-edit-modal__copy-panel textarea { width: 100%; min-height: 0; flex: 1; margin-top: 12px; border: 2px solid var(--ink); border-radius: 0; background: #fff; padding: 16px; box-shadow: 3px 3px 0 var(--ink); color: #27272a; font-family: var(--font-primary); font-size: 14px; font-weight: 700; line-height: 1.75; resize: none; outline: none; }
+.external-media-layout { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.external-media-layout > .external-media-panel { min-height: 0; flex: 1; margin-top: 12px; }
+.external-media-panel { overflow-y: auto; border: 3px solid var(--ink); background: #fff; padding: 14px; box-shadow: 6px 6px 0 var(--coral); color: var(--ink); }
+.external-media-panel__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 3px solid var(--ink); padding-bottom: 12px; }
+.external-media-panel__heading > span { display: inline-flex; align-items: center; gap: 9px; font-size: 16px; font-weight: 900; }
+.external-media-panel__heading > strong { border: 2px solid var(--ink); background: var(--teal); padding: 4px 10px; box-shadow: 2px 2px 0 var(--ink); font-size: 11px; line-height: 16px; }
+.external-media-panel__facts { display: grid; grid-template-columns: .7fr .7fr 1.4fr; margin: 14px 0; border: 3px solid var(--ink); background: var(--yellow); }
+.external-media-panel__facts > div { min-width: 0; padding: 10px 12px; border-right: 3px solid var(--ink); }
+.external-media-panel__facts > div:last-child { border-right: 0; }
+.external-media-panel__facts dt { margin: 0 0 4px; font-size: 10px; font-weight: 900; }
+.external-media-panel__facts dd { margin: 0; overflow-wrap: anywhere; font-size: 13px; font-weight: 900; font-variant-numeric: tabular-nums; }
+.external-media-panel__actions { display: flex; flex-wrap: wrap; gap: 9px; }
+.external-media-panel__actions :is(a, button),
+.external-media-panel__search button,
+.external-media-result button { min-height: 40px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 3px solid var(--ink); background: var(--teal); padding: 7px 12px; box-shadow: 4px 4px 0 var(--ink); color: var(--ink); font-family: var(--font-primary); font-size: 11px; font-weight: 900; cursor: pointer; }
+.external-media-panel__actions button { background: var(--yellow); }
+.external-media-panel__actions .is-danger { background: var(--coral); }
+.external-media-panel__actions :is(a, button):active,
+.external-media-panel__search button:active,
+.external-media-result button:active { transform: translate(4px, 4px); box-shadow: none; }
+.external-media-panel :is(button:disabled, input:disabled) { cursor: not-allowed; opacity: .48; }
+.external-media-panel__search { margin-top: 14px; }
+.external-media-panel__search > label { display: block; margin-bottom: 5px; font-size: 11px; font-weight: 900; }
+.external-media-panel__search > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.external-media-panel__search input { min-width: 0; height: 42px; border: 3px solid var(--ink); border-right: 0; border-radius: 0; background: #fff; padding: 7px 12px; color: var(--ink); font-family: var(--font-primary); font-size: 13px; font-weight: 800; outline: none; }
+.external-media-panel__search button { box-shadow: 4px 4px 0 var(--ink); }
+.external-media-panel__results { display: grid; gap: 8px; margin-top: 14px; }
+.external-media-result { min-width: 0; display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; align-items: center; gap: 10px; border: 2px solid var(--ink); background: #fff; padding: 8px; box-shadow: 3px 3px 0 var(--ink); }
+.external-media-result img,
+.external-media-result__placeholder { width: 52px; height: 66px; display: grid; place-items: center; border: 2px solid var(--ink); background: var(--pink); object-fit: cover; }
+.external-media-result > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.external-media-result > div :is(strong, span, small) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.external-media-result > div strong { font-size: 12px; }
+.external-media-result > div span { font-size: 10px; font-weight: 700; }
+.external-media-result > div small { font-size: 9px; font-weight: 800; }
+.external-media-panel__notice,
+.external-media-panel__error,
+.external-media-panel__empty { margin: 14px 0 0; border-left: 5px solid var(--teal); background: #e7fffb; padding: 9px 11px; font-size: 11px; font-weight: 900; line-height: 16px; }
+.external-media-panel__error { border-left-color: #dc2626; background: #fff0ef; color: #991b1b; }
+.external-media-panel__empty { border-left-color: var(--yellow); background: #fffbe6; }
 .anime-edit-modal__error { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; margin: 0; border: 3px solid var(--ink); background: var(--coral); padding: 11px 16px; box-shadow: 4px 4px 0 var(--ink); font-size: 14px; font-weight: 900; }
 .anime-edit-modal__footer { min-height: 73px; display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; border-top: 4px solid var(--ink); background: var(--yellow); padding: 12px 24px; }
 .anime-edit-modal__footer > span { flex: 1; }
@@ -3469,6 +3510,7 @@ button.tag-chip { cursor: pointer; }
   .anime-edit-modal__poster { min-height: 0; flex: none; aspect-ratio: 3 / 4; }
   .anime-edit-modal__main { min-height: auto; }
   .anime-edit-modal__editor { min-height: 540px; flex: none; }
+  .external-media-layout { min-height: 540px; }
   .anime-edit-modal__copy-panel textarea { min-height: 430px; }
 }
 
@@ -3483,6 +3525,7 @@ button.tag-chip { cursor: pointer; }
   .anime-edit-modal__body { padding: 12px 10px; }
   .anime-edit-modal__facts { grid-template-columns: 1fr; padding: 10px; }
   .anime-edit-modal__editor { min-height: 820px; }
+  .external-media-layout { min-height: 820px; }
   .anime-edit-modal__tag-layout { grid-template-columns: 1fr; }
   .anime-edit-modal__current-tags,
   .anime-edit-modal__presets { min-height: 390px; }
@@ -3493,6 +3536,14 @@ button.tag-chip { cursor: pointer; }
   .watch-history-list article.is-editable { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
   .watch-history-list article.is-editable .watch-history-list__actions { grid-column: 1 / -1; justify-content: space-between; }
   .anime-edit-modal__tabs button { padding-inline: 5px; font-size: 10px; }
+  .external-media-panel { padding: 10px; }
+  .external-media-panel__facts { grid-template-columns: 1fr; }
+  .external-media-panel__facts > div { border-right: 0; border-bottom: 3px solid var(--ink); }
+  .external-media-panel__facts > div:last-child { border-bottom: 0; }
+  .external-media-result { grid-template-columns: 44px minmax(0, 1fr); }
+  .external-media-result img,
+  .external-media-result__placeholder { width: 44px; height: 58px; }
+  .external-media-result button { grid-column: 1 / -1; width: 100%; }
   .anime-edit-modal__footer { align-items: stretch; flex-direction: column; padding: 12px; }
   .anime-edit-modal__footer > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
   .anime-edit-modal__footer button { padding-inline: 12px; font-size: 12px; }

@@ -1,16 +1,26 @@
+from plugin_host.permissions import plugin_permissions_for_user
+from plugin_host.sdk import ColumnHookContext, JournalHookContext, run_hook
 from rest_framework import filters, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from plugin_host.permissions import plugin_permissions_for_user
-from plugin_host.sdk import ColumnHookContext, JournalHookContext, run_hook
-
+from .external_media.services import (
+    bind_external_identity,
+    refresh_external_identity,
+    unbind_external_identity,
+)
 from .models import Column, JournalEntry, QuickFilter, UserSettings
 from .pagination import FlexiblePageNumberPagination
 from .permissions import IsOwner
-from .serializers import ColumnSerializer, JournalEntrySerializer, QuickFilterSerializer, UserSettingsSerializer
+from .serializers import (
+    ColumnSerializer,
+    JournalEntrySerializer,
+    QuickFilterSerializer,
+    UserSettingsSerializer,
+)
+from .serializers_entries import ExternalMediaIdentitySerializer
 from .staff_services import staff_capabilities
 
 
@@ -25,7 +35,10 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
     parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def get_queryset(self):
-        queryset = JournalEntry.objects.filter(user=self.request.user, deleted_at__isnull=True)
+        queryset = JournalEntry.objects.filter(
+            user=self.request.user,
+            deleted_at__isnull=True,
+        ).prefetch_related("external_identities")
         status_value = self.request.query_params.get("status")
         visibility = self.request.query_params.get("visibility")
         tag = self.request.query_params.get("tag")
@@ -52,6 +65,49 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
         entry_id, user_id = instance.pk, instance.user_id
         super().perform_destroy(instance)
         run_hook("journal.after_delete", JournalHookContext(user_id=user_id, journal_entry_id=entry_id, source="api"))
+
+    @action(detail=True, methods=["get", "post"], url_path="external-identities")
+    def external_identities(self, request, pk=None):
+        entry = self.get_object()
+        if request.method == "GET":
+            identities = entry.external_identities.all()
+            return Response(ExternalMediaIdentitySerializer(identities, many=True).data)
+        identity = bind_external_identity(
+            entry=entry,
+            user=request.user,
+            provider_slug=request.data.get("provider"),
+            external_id=request.data.get("external_id"),
+        )
+        return Response(ExternalMediaIdentitySerializer(identity).data, status=status.HTTP_201_CREATED)
+
+    @action(
+        detail=True,
+        methods=["delete"],
+        url_path=r"external-identities/(?P<provider>[-a-z0-9_]+)",
+    )
+    def external_identity_detail(self, request, provider=None, pk=None):
+        entry = self.get_object()
+        unbind_external_identity(entry=entry, user=request.user, provider_slug=provider)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"external-identities/(?P<provider>[-a-z0-9_]+)/refresh",
+    )
+    def refresh_external_identity(self, request, provider=None, pk=None):
+        entry = self.get_object()
+        identity, metadata, applied_fields, changed_fields = refresh_external_identity(
+            entry=entry,
+            user=request.user,
+            provider_slug=provider,
+        )
+        return Response({
+            "identity": ExternalMediaIdentitySerializer(identity).data,
+            "metadata": metadata,
+            "applied_fields": applied_fields,
+            "changed_fields": changed_fields,
+        })
 
 
 class QuickFilterViewSet(viewsets.ModelViewSet):

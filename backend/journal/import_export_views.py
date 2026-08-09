@@ -19,7 +19,10 @@ from .serializers import JournalEntrySerializer
 
 class ExportEntriesView(APIView):
     def get(self, request):
-        entries = JournalEntry.objects.filter(user=request.user, deleted_at__isnull=True)
+        entries = JournalEntry.objects.filter(
+            user=request.user,
+            deleted_at__isnull=True,
+        ).prefetch_related("external_identities")
         serializer = JournalEntrySerializer(entries, many=True, context={"request": request})
         return Response({"version": 1, "exported_at": timezone.now(), "records": serializer.data})
 

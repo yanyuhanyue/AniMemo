@@ -205,6 +205,8 @@ export function DashboardPage() {
       watchHistory: [],
       tagColors: resolveTagColors(tags, {}, presetColors),
       shared: false,
+      externalIdentity: draft.externalIdentity || null,
+      externalIdentities: [],
     };
     setRecords((current) => [record, ...current]);
     if (!isDemo) {
@@ -232,6 +234,13 @@ export function DashboardPage() {
     setRecords((current) => current.filter((record) => record.id !== id));
     flash("记录已删除");
     if (!isDemo && Number.isFinite(Number(id))) api.delete(`entries/${id}/`).catch(() => {});
+  };
+
+  const updateExternalIdentity = (entryId, { externalIdentities, entryPatch }) => {
+    const applyUpdate = (record) => record.id === entryId
+      ? { ...record, ...entryPatch, externalIdentities }
+      : record;
+    setRecords((current) => current.map(applyUpdate));
   };
 
   const openEditor = (record, source) => {
@@ -473,7 +482,7 @@ export function DashboardPage() {
       </section>
 
       {notice && noticeKind === "profile" ? <div className="dashboard-profile-toast" role="status"><span className="dashboard-profile-toast__icon" aria-hidden="true"><Icon name="circle-check" /></span><span className="dashboard-profile-toast__message">{notice}</span><button className="dashboard-profile-toast__close" type="button" onClick={() => { setNotice(""); setNoticeKind(""); }} aria-label="关闭提示"><Icon name="close" /></button></div> : notice ? <div className="brutal-toast dashboard-toast" role="status"><Icon name="check" /> {notice}</div> : null}
-      {selected && <AnimeModal record={selected.record} originRect={selected.originRect} returnFocus={selected.returnFocus} editable onClose={() => setSelected(null)} onSave={saveRecord} onDelete={records.some((record) => record.id === selected.record.id) ? deleteRecord : null} tagPresets={tagPresets} trustedPosterHosts={siteSettings.trusted_poster_hosts} />}
+      {selected && <AnimeModal record={selected.record} originRect={selected.originRect} returnFocus={selected.returnFocus} editable isDemo={isDemo} onClose={() => setSelected(null)} onSave={saveRecord} onDelete={records.some((record) => record.id === selected.record.id) ? deleteRecord : null} onIdentityChange={(update) => updateExternalIdentity(selected.record.id, update)} tagPresets={tagPresets} trustedPosterHosts={siteSettings.trusted_poster_hosts} />}
       {addOpen && <AddAnimeModal isDemo={isDemo} catalogRecords={demoCatalogRecords} existingRecords={records} onClose={() => setAddOpen(false)} onSubmit={saveNewRecord} trustedPosterHosts={siteSettings.trusted_poster_hosts} />}
       {profileOpen && <ProfilePanel settings={settings} initialTab={profileInitialTab} isDemo={isDemo} onClose={() => { setProfileOpen(false); window.requestAnimationFrame(() => profileAvatarButtonRef.current?.focus({ preventScroll: true })); }} onSave={saveSettings} onChangePassword={changePassword} />}
       {dangerZoneOpen && <DangerZoneDialog settings={settings} isDemo={isDemo} onClose={() => { setDangerZoneOpen(false); window.requestAnimationFrame(() => profileAvatarButtonRef.current?.focus({ preventScroll: true })); }} onDeleteAccount={deleteAccount} />}

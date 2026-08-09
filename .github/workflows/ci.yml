@@ -109,7 +109,7 @@ jobs:
       - run: python -c "import os, psycopg; psycopg.connect(os.environ['DATABASE_URL']).close(); print('PostgreSQL service is reachable')"
       - run: python manage.py shell -c "from django.db import connection; assert connection.vendor == 'postgresql', connection.vendor; print(connection.vendor)"
         working-directory: backend
-      - run: python manage.py test plugin_host.tests.test_concurrency.PluginPlatformPostgreSQLConcurrencyTests integrations.tests.test_concurrency.IntegrationReceiptPostgreSQLConcurrencyTests --verbosity 2
+      - run: python manage.py test plugin_host.tests.test_concurrency.PluginPlatformPostgreSQLConcurrencyTests integrations.tests.test_concurrency.IntegrationReceiptPostgreSQLConcurrencyTests journal.test_external_media_concurrency.ExternalMediaIdentityPostgreSQLConcurrencyTests --verbosity 2
         working-directory: backend
 
   plugins:

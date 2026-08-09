@@ -115,7 +115,10 @@ class PublicShowcaseView(APIView):
             or not owner_settings.allow_sharing
         ):
             return Response({"detail": "该手账未公开。"}, status=status.HTTP_404_NOT_FOUND)
-        showcase_entries = JournalEntry.objects.filter(user=owner_settings.user, deleted_at__isnull=True)
+        showcase_entries = JournalEntry.objects.filter(
+            user=owner_settings.user,
+            deleted_at__isnull=True,
+        ).prefetch_related("external_identities")
         if not is_owner_preview:
             showcase_entries = showcase_entries.filter(visibility=JournalEntry.Visibility.PUBLIC)
         summary_records = list(showcase_entries.values(
@@ -176,7 +179,7 @@ class PublicShowcaseListView(APIView):
                 user=settings_obj.user,
                 visibility=JournalEntry.Visibility.PUBLIC,
                 deleted_at__isnull=True,
-            )
+            ).prefetch_related("external_identities")
             summary_records = list(public_entries.values(
                 "title", "airing_period", "tags", "personal_score", "watch_status",
             ))
@@ -202,7 +205,11 @@ class SharedEntryView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, share_slug):
-        entry = get_object_or_404(JournalEntry, share_slug=share_slug, deleted_at__isnull=True)
+        entry = get_object_or_404(
+            JournalEntry.objects.prefetch_related("external_identities"),
+            share_slug=share_slug,
+            deleted_at__isnull=True,
+        )
         settings_obj, _ = UserSettings.objects.get_or_create(user=entry.user, defaults={"nickname": entry.user.username})
         if (
             entry.visibility == JournalEntry.Visibility.PRIVATE
@@ -237,7 +244,10 @@ class PublicCatalogSearchView(APIView):
         except (TypeError, ValueError):
             page = 1
 
-        entries = JournalEntry.objects.filter(user__is_staff=True, deleted_at__isnull=True)
+        entries = JournalEntry.objects.filter(
+            user__is_staff=True,
+            deleted_at__isnull=True,
+        ).prefetch_related("external_identities")
         if query:
             entries = entries.filter(
                 Q(title__icontains=query)
@@ -278,7 +288,7 @@ class PublicHomepageView(APIView):
         entries = JournalEntry.objects.filter(
             user=owner,
             deleted_at__isnull=True,
-        ).order_by("-updated_at", "-id") if owner else JournalEntry.objects.none()
+        ).prefetch_related("external_identities").order_by("-updated_at", "-id") if owner else JournalEntry.objects.none()
         summary_records = list(entries.values(
             "title", "airing_period", "tags", "personal_score", "watch_status",
         ))

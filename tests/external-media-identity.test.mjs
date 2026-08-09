@@ -1,0 +1,76 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+import {
+  bangumiIdentityFromResult,
+  refreshRecordPatch,
+  replaceProviderIdentity,
+} from "../src/lib/externalMedia.js";
+
+const addModal = readFileSync(new URL("../src/components/dashboard/AddAnimeModal.jsx", import.meta.url), "utf8");
+const editor = readFileSync(new URL("../src/components/dashboard/EditAnimeRecordContent.jsx", import.meta.url), "utf8");
+const identityPanel = readFileSync(new URL("../src/components/dashboard/ExternalMediaIdentityPanel.jsx", import.meta.url), "utf8");
+const dashboardData = readFileSync(new URL("../src/pages/dashboardData.js", import.meta.url), "utf8");
+const upgradeFixture = readFileSync(new URL("../scripts/stateful_upgrade_fixture.py", import.meta.url), "utf8");
+
+test("Bangumi selections retain a provider-neutral external identity", () => {
+  assert.deepEqual(bangumiIdentityFromResult({ id: 123 }), { provider: "bangumi", external_id: "123" });
+  assert.deepEqual(bangumiIdentityFromResult({ id: 1, external_id: " 456 " }), { provider: "bangumi", external_id: "456" });
+  assert.match(addModal, /externalIdentity:\s*bangumiIdentityFromResult\(item\)/);
+  assert.match(dashboardData, /payload\.external_identity\s*=\s*record\.externalIdentity/);
+});
+
+test("refresh applies only the approved provider-owned fields", () => {
+  const changed = {
+    japanese_title: { provider: "新日文名" },
+    airing_period: { provider: "2026-8" },
+    studio: { provider: "新公司" },
+    episodes: { provider: "13" },
+    poster_url: { provider: "https://lain.bgm.tv/pic/cover/l/test.jpg" },
+    title: { provider: "不能覆盖" },
+    description: { provider: "不能覆盖" },
+    tags: { provider: ["不能覆盖"] },
+    review: { provider: "不能覆盖" },
+  };
+  assert.deepEqual(refreshRecordPatch(changed), {
+    japaneseTitle: "新日文名",
+    period: "2026-8",
+    studio: "新公司",
+    episodes: "13",
+    posterUrl: "https://lain.bgm.tv/pic/cover/l/test.jpg",
+    poster: "https://lain.bgm.tv/pic/cover/l/test.jpg",
+    posterSource: "default_url",
+  });
+});
+
+test("refresh preserves custom poster priority", () => {
+  const patch = refreshRecordPatch(
+    { poster_url: { provider: "https://lain.bgm.tv/pic/cover/l/new.jpg" } },
+    { poster: "https://lain.bgm.tv/pic/cover/l/custom.jpg", customPosterUrl: "https://lain.bgm.tv/pic/cover/l/custom.jpg", posterSource: "trusted_url" },
+  );
+  assert.deepEqual(patch, { posterUrl: "https://lain.bgm.tv/pic/cover/l/new.jpg" });
+});
+
+test("provider identity replacement does not disturb other providers", () => {
+  const next = replaceProviderIdentity(
+    [{ provider: "other", external_id: "a" }, { provider: "bangumi", external_id: "1" }],
+    { provider: "bangumi", external_id: "2" },
+  );
+  assert.deepEqual(next, [{ provider: "other", external_id: "a" }, { provider: "bangumi", external_id: "2" }]);
+});
+
+test("edit workflow exposes bind, refresh, source link, and guarded unbind", () => {
+  assert.match(editor, /\["external",\s*"外部资料",\s*"link"\]/);
+  assert.match(identityPanel, /entries\/\$\{draft\.id\}\/external-identities\//);
+  assert.match(identityPanel, /external-identities\/\$\{PROVIDER\}\/refresh\//);
+  assert.match(identityPanel, /解除后不会删除你的番剧记录、评分、评论或观看记录/);
+  assert.match(identityPanel, /href=\{identity\.canonical_url\}/);
+  assert.doesNotMatch(identityPanel, /JSON\.stringify/);
+});
+
+test("stateful upgrade gate creates then verifies the identity across restart", () => {
+  assert.match(upgradeFixture, /external_identity_status = "CREATED"/);
+  assert.match(upgradeFixture, /external_identity_status = "PERSISTED"/);
+  assert.match(upgradeFixture, /ExternalMediaIdentity did not survive the restart/);
+});

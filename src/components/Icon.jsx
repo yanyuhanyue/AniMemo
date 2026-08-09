@@ -75,6 +75,8 @@ import {
   faSpinner,
   faXmark,
   faLeaf,
+  faLink,
+  faLinkSlash,
 } from "@fortawesome/free-solid-svg-icons";
 
 // CSP blocks Font Awesome's runtime style injection in production. Bundle its
@@ -154,6 +156,8 @@ const icons = {
   wand: faWandMagicSparkles,
   warning: faTriangleExclamation,
   leaf: faLeaf,
+  link: faLink,
+  unlink: faLinkSlash,
   close: faXmark,
 };
 

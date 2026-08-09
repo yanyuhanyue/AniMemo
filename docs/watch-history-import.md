@@ -45,3 +45,5 @@ python qa/watch_history_import.py \
 ```
 
 这一步仍然只输出预览；人工核对 `review` 与 `excluded` 后，才允许接入正式导入器。标题匹配应优先使用 Bangumi subject ID，不应把标题字符串当作数据库唯一键。
+
+手账条目的持久 Bangumi subject ID 由 [外部媒体身份](external-media-identity.md) 管理。观看记录导入器只负责解析和候选确认，不拥有身份模型，也不代表 Bangumi 账户授权或双向同步。

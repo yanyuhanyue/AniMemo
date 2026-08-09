@@ -76,6 +76,35 @@ class JournalEntry(models.Model):
         return f"{self.title} · {self.user}"
 
 
+class ExternalMediaIdentity(models.Model):
+    entry = models.ForeignKey(JournalEntry, on_delete=models.CASCADE, related_name="external_identities")
+    provider = models.CharField(max_length=50)
+    external_id = models.CharField(max_length=200)
+    canonical_url = models.URLField(max_length=1000)
+    metadata = models.JSONField(default=dict, blank=True)
+    metadata_fetched_at = models.DateTimeField(blank=True, null=True)
+    provider_updated_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["provider", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["entry", "provider"], name="journal_ext_entry_provider_uq"),
+        ]
+        indexes = [
+            models.Index(fields=["provider", "external_id"], name="journal_ext_provider_id_idx"),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.provider = str(self.provider or "").strip().lower()
+        self.external_id = str(self.external_id or "").strip()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.provider}:{self.external_id} · {self.entry}"
+
+
 class UserSettings(models.Model):
     class PublicStatus(models.TextChoices):
         PRIVATE = "private", "未公开"
