@@ -36,3 +36,18 @@ class DependencyLockTests(unittest.TestCase):
             input_path.write_text("Django>=5.2,<5.3\n", encoding="utf-8")
             lock_path.write_text("Django==5.2.17\n", encoding="utf-8")
             self.assertEqual(update_dependencies.validate_direct_constraints(input_path, lock_path), [])
+
+    def test_lock_comparison_ignores_generator_comments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.txt"
+            second = root / "second.txt"
+            first.write_text(
+                "# pip-compile on Windows\nDjango==5.2.17\n    # via -r C:\\repo\\backend\\requirements.in\n",
+                encoding="utf-8",
+            )
+            second.write_text(
+                "# pip-compile on Ubuntu\nDjango==5.2.17\n    # via -r /home/runner/work/AniMemo/backend/requirements.in\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(update_dependencies.normalized_lock(first), update_dependencies.normalized_lock(second))

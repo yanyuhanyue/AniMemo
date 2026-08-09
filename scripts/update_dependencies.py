@@ -50,16 +50,12 @@ def compile_lock(input_path: Path, output_path: Path, *, upgrade: bool) -> None:
 
 
 def normalized_lock(path: Path) -> str:
-    """Remove only pip-compile's output-path-dependent command banner."""
-    lines = path.read_text(encoding="utf-8").replace("\r\n", "\n").splitlines()
-    normalized = []
-    for line in lines:
-        if line.startswith("#    pip-compile "):
-            continue
-        if "# via" in line and "requirements.in" in line:
-            line = re.sub(r"-r\s+.*requirements\.in", "-r backend/requirements.in", line)
-        normalized.append(line.rstrip())
-    return "\n".join(normalized).rstrip() + "\n"
+    """Compare pinned requirement entries, independent of pip-compile comments and paths."""
+    entries = pinned_names(path)
+    return "\n".join(
+        f"{name} {re.sub(r'\\s+', ' ', line).strip()}"
+        for name, line in sorted(entries.items())
+    ) + "\n"
 
 
 def locked_versions(path: Path) -> dict[str, str]:
