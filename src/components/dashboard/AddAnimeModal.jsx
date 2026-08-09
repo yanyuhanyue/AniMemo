@@ -186,7 +186,16 @@ export function AddAnimeModal({ onClose, onSubmit, isDemo = false, catalogRecord
   const [error, setError] = useState("");
   const [preview, setPreview] = useState("");
   const existingAnimeKeys = useMemo(() => new Set(existingRecords.flatMap(animeIdentityValues)), [existingRecords]);
+  const boundBangumiIds = useMemo(() => new Set(
+    existingRecords.flatMap((record) => (record.externalIdentities || [])
+      .filter((identity) => identity?.provider === "bangumi" && identity.external_id != null)
+      .map((identity) => String(identity.external_id))),
+  ), [existingRecords]);
   const isCatalogItemAdded = useCallback((item) => animeIdentityValues(item).some((key) => existingAnimeKeys.has(key)), [existingAnimeKeys]);
+  const isBangumiAlreadyBound = useCallback((item) => {
+    const externalId = item?.externalId ?? item?.external_id;
+    return externalId != null && boundBangumiIds.has(String(externalId));
+  }, [boundBangumiIds]);
   const smartDropdownOpen = smartSearching || smartResults.length > 0 || Boolean(smartError);
 
   const closeWithMotion = useCallback(() => {
@@ -432,6 +441,10 @@ export function AddAnimeModal({ onClose, onSubmit, isDemo = false, catalogRecord
     reader.readAsDataURL(file);
   };
   const chooseBangumi = async (item, row) => {
+    if (isBangumiAlreadyBound(item)) {
+      setSmartError("这个 Bangumi 条目已经绑定到你的另一部手账，请选择其他条目。");
+      return;
+    }
     if (bangumiSelectionRef.current) return;
     bangumiSelectionRef.current = true;
     setSelectedBangumiId(item.externalId);
@@ -554,7 +567,10 @@ export function AddAnimeModal({ onClose, onSubmit, isDemo = false, catalogRecord
                       <div className="dashboard-add-search-popover__head"><span><Icon name="satellite-dish" /> MAGIC METADATA SEARCH</span><button className="dashboard-add-search-popover__close" type="button" onClick={closeSmartSearch} aria-label="关闭智能搜索提示"><Icon name="close" /></button></div>
                       {smartSearching && <p className="is-status"><SearchSpinner pink /> <span>正在搜索 Bangumi…</span></p>}
                       {smartError && <p className="is-error"><Icon name="warning" /> <span>{smartError}</span></p>}
-                      {!smartSearching && !smartError && smartResults.map((item) => <button className={`dashboard-add-search-result${selectedBangumiId === item.externalId ? " is-selecting" : ""}`} type="button" key={item.externalId} onClick={(event) => chooseBangumi(item, event.currentTarget)} disabled={selectedBangumiId !== null}><span className="dashboard-add-search-result__poster"><img src={item.thumbnailUrl || item.posterUrl || "/assets/posters/poster-01.webp"} alt={`${item.title} 海报`} decoding="async" onError={(event) => { event.currentTarget.src = "/assets/posters/poster-01.webp"; }} /></span><span className="dashboard-add-search-result__copy"><strong><ResultMarquee>{item.title}</ResultMarquee></strong><small><ResultMarquee>{item.japaneseTitle || "未填写日文名"}</ResultMarquee></small></span><Icon className="dashboard-add-search-result__arrow" name="arrow-right" /></button>)}
+                      {!smartSearching && !smartError && smartResults.map((item) => {
+                        const alreadyBound = isBangumiAlreadyBound(item);
+                        return <button className={`dashboard-add-search-result${selectedBangumiId === item.externalId ? " is-selecting" : ""}`} type="button" key={item.externalId} onClick={(event) => chooseBangumi(item, event.currentTarget)} disabled={selectedBangumiId !== null || alreadyBound} aria-label={alreadyBound ? `${item.title} 已绑定到其他手账` : `选择 ${item.title}`}><span className="dashboard-add-search-result__poster"><img src={item.thumbnailUrl || item.posterUrl || "/assets/posters/poster-01.webp"} alt={`${item.title} 海报`} decoding="async" onError={(event) => { event.currentTarget.src = "/assets/posters/poster-01.webp"; }} /></span><span className="dashboard-add-search-result__copy"><strong><ResultMarquee>{item.title}</ResultMarquee></strong><small><ResultMarquee>{alreadyBound ? "已绑定到其他手账" : item.japaneseTitle || "未填写日文名"}</ResultMarquee></small></span><Icon className="dashboard-add-search-result__arrow" name="arrow-right" /></button>;
+                      })}
                     </div>}
                   <button className={`dashboard-add-search-trigger${smartSearching ? " is-searching" : ""}`} type="button" onClick={() => searchBangumi(draft.title)} disabled={smartSearching} aria-label={smartSearching ? "正在从 Bangumi 搜索番剧资料" : "从 Bangumi 自动搜索番剧资料"} aria-expanded={smartDropdownOpen} aria-controls="dashboard-smart-search-results">{smartSearching ? <SearchSpinner /> : <Icon name="search" />}</button>
                 </div>
@@ -567,7 +583,7 @@ export function AddAnimeModal({ onClose, onSubmit, isDemo = false, catalogRecord
               <label data-smart-fill-piece><span>公共标签</span><input value={draft.tagsText} onChange={(event) => update("tagsText", event.target.value)} placeholder="使用逗号分隔，例如：日常，治愈，原创" /></label>
               <div className="dashboard-add-bottom-grid">
                 <label data-smart-fill-piece><span>剧情简介</span><textarea value={draft.description} onChange={(event) => update("description", event.target.value)} rows="6" /></label>
-                <fieldset className="dashboard-add-private"><h3><Icon name="bookmark" /> 初始私人手账信息</h3><label><span>观看状态</span><select value={draft.status} onChange={(event) => update("status", event.target.value)}><option value="planned">想看</option><option value="watching">在看</option><option value="completed">看过</option><option value="on_hold">搁置</option></select></label><label><span>主观评分</span><input type="number" min="0" max="10" step="0.1" value={draft.score} onChange={(event) => update("score", event.target.value)} placeholder="0.0 - 10.0" /></label><label className="wide"><span>个人评价</span><textarea value={draft.review} onChange={(event) => update("review", event.target.value)} rows="3" /></label></fieldset>
+                <fieldset className="dashboard-add-private"><h3><Icon name="bookmark" /> 初始私人手账信息</h3><label><span>观看状态</span><select value={draft.status} onChange={(event) => update("status", event.target.value)}><option value="planned">想看</option><option value="watching">在看</option><option value="completed">看过</option><option value="on_hold">搁置</option><option value="dropped">弃番</option></select></label><label><span>主观评分</span><input type="number" min="0" max="10" step="0.1" value={draft.score} onChange={(event) => update("score", event.target.value)} placeholder="0.0 - 10.0" /></label><label className="wide"><span>个人评价</span><textarea value={draft.review} onChange={(event) => update("review", event.target.value)} rows="3" /></label></fieldset>
               </div>
             </div>
             {error && <p className="dashboard-add-error" role="alert">{error}</p>}

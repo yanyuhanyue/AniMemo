@@ -14,9 +14,11 @@ from .validation import (
 )
 
 
-def list_history(*, user, entry, offset=0, limit=None):
+def list_history(*, user, entry, offset=0, limit=None, newest_first=False):
     _assert_owner(user, entry)
     queryset = entry.watch_history_records.all()
+    if newest_first:
+        queryset = queryset.order_by("-watched_on", "-sequence", "-id")
     if offset:
         queryset = queryset[offset:]
     if limit is not None:

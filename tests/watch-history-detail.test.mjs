@@ -17,7 +17,7 @@ test("entry DTOs keep only history summary and load full history lazily", () => 
   assert.match(apiAdapter, /watchHistory:\s*\[\]/);
   assert.match(apiAdapter, /watchHistoryCount:\s*Number\(item\.watch_history_count/);
   assert.doesNotMatch(apiAdapter, /item\.watch_history\s*\|\|/);
-  assert.match(editor, /api\.get\(`entries\/\$\{draft\.id\}\/watch-history\/`, \{ params: \{ page, page_size: 100 \} \}\)/);
+  assert.match(editor, /api\.get\(`entries\/\$\{draft\.id\}\/watch-history\/`, \{ params: \{ page: currentPage, page_size: 100 \} \}\)/);
   assert.match(showcase, /watchHistory:\s*\[\]/);
   assert.match(showcase, /watchHistory:\s*record\.watchHistory\s*\|\|\s*\[\]/);
 });
@@ -43,4 +43,8 @@ test("editable watch-history panel can add, edit, remove, and paginate records",
   assert.match(editor, /api\.patch\(`entries\/\$\{draft\.id\}\/watch-history\/\$\{editing\.id\}\/`/);
   assert.match(editor, /api\.delete\(`entries\/\$\{draft\.id\}\/watch-history\/\$\{record\.id\}\/`/);
   assert.match(editor, /historyNextPage/);
+  assert.match(editor, /loadHistory\(1, \{ loadAll: true \}\)/);
+  assert.match(editor, /while \(nextPage && loadedPages < 10\)/);
+  assert.match(editor, /刷次编号/);
+  assert.match(editor, /brush_number:\s*brushNumber \?\? BRUSH_NUMBERS\[brushLabel\] \?\? null/);
 });

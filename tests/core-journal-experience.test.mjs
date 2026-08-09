@@ -17,6 +17,7 @@ const animeModal = readFileSync(new URL("../src/components/AnimeModal.jsx", impo
 const editor = readFileSync(new URL("../src/components/dashboard/EditAnimeRecordContent.jsx", import.meta.url), "utf8");
 const sections = readFileSync(new URL("../src/components/dashboard/JournalDashboardSections.jsx", import.meta.url), "utf8");
 const bulk = readFileSync(new URL("../src/components/dashboard/BulkManagementToolbar.jsx", import.meta.url), "utf8");
+const addAnime = readFileSync(new URL("../src/components/dashboard/AddAnimeModal.jsx", import.meta.url), "utf8");
 
 test("continue watching ordering prefers latest watch then deterministic update time", () => {
   const records = [
@@ -95,4 +96,11 @@ test("entry hub keeps external data independent and uses server-issued sync flow
   assert.match(editor, /onOpenExternalAccount/);
   assert.match(editor, /suggestNextEpisode/);
   assert.match(editor, /api\.patch\(`entries\/\$\{draft\.id\}\/watch-history\/\$\{editing\.id\}\/`/);
+});
+
+test("add anime keeps every canonical status and warns about duplicate Bangumi subjects", () => {
+  assert.match(addAnime, /<option value="dropped">弃番<\/option>/);
+  assert.match(addAnime, /boundBangumiIds/);
+  assert.match(addAnime, /已经绑定到你的另一部手账/);
+  assert.match(addAnime, /disabled=\{selectedBangumiId !== null \|\| alreadyBound\}/);
 });

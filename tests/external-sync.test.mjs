@@ -19,8 +19,9 @@ test("sync field labels preserve missing, empty, decimal, and status semantics",
   assert.equal(syncValueLabel("review", { present: true, value: "" }), "空内容");
   assert.equal(syncValueLabel("personal_score", { present: true, value: "8.5" }), "8.5");
   assert.equal(syncValueLabel("watch_status", { present: true, value: "dropped" }), "抛弃");
-  assert.equal(SYNC_STATE_LABELS.conflict, "双方冲突");
-  assert.equal(SYNC_STATE_LABELS.unsupported, "无法同步");
+  assert.equal(SYNC_STATE_LABELS.remote_changed, "Bangumi 上的值发生了变化");
+  assert.equal(SYNC_STATE_LABELS.conflict, "AniMemo 和 Bangumi 都修改过");
+  assert.equal(SYNC_STATE_LABELS.unsupported, "当前无法安全拉取");
 });
 
 test("frontend exposes only pull and accept-equal actions", () => {
@@ -78,6 +79,7 @@ test("comparison is lazy, signed, server-authoritative, and pull-only", () => {
   assert.match(panel, /\{ preview_token: preview\.preview_token, actions \}/);
   assert.doesNotMatch(panel, /(?:local_value|remote_value|baseline_value)\s*:/);
   assert.match(panel, /当前只会拉取到 AniMemo，不会修改 Bangumi/);
+  assert.match(panel, /当前没有需要处理的差异/);
   assert.match(panel, /provider_unavailable/);
   assert.match(panel, /Bangumi 暂时不可用/);
   assert.match(panel, /collection_sync_pull_available/);

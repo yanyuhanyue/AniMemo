@@ -36,7 +36,7 @@ function localDateValue() {
 }
 
 function blankWatchHistoryRecord(suggestion = {}) {
-  return { watchedOn: localDateValue(), brushLabel: "首刷", episodeStart: suggestion.episodeStart || "", episodeEnd: suggestion.episodeEnd || "", notes: "" };
+  return { watchedOn: localDateValue(), brushLabel: "首刷", brushNumber: "1", episodeStart: suggestion.episodeStart || "", episodeEnd: suggestion.episodeEnd || "", notes: "" };
 }
 
 function formatWatchDate(value) {
@@ -148,19 +148,31 @@ export function EditAnimeRecordContent({
     window.requestAnimationFrame(() => editorRef.current?.scrollIntoView({ block: "start" }));
   };
 
-  const loadHistory = async (page = 1) => {
-    if ((page === 1 && historyLoaded) || historyLoading || isDemo || !Number.isFinite(Number(draft.id))) return;
+  const loadHistory = async (page = 1, { loadAll = false } = {}) => {
+    if ((page === 1 && historyLoaded && !loadAll) || historyLoading || isDemo || !Number.isFinite(Number(draft.id))) return;
     setHistoryLoading(true);
     setHistoryFormError("");
     try {
-      const response = await api.get(`entries/${draft.id}/watch-history/`, { params: { page, page_size: 100 } });
-      const records = Array.isArray(response.data?.results) ? response.data.results : [];
-      const current = page === 1 ? records : [...watchHistory, ...records];
-      const unique = [...new Map(current.map((record) => [watchHistoryKey(record), record])).values()];
-      setDraft((previous) => ({ ...previous, ...historySummary(unique), watchHistoryCount: Number(response.data?.count ?? unique.length) }));
-      setHistoryNextPage(response.data?.next_page || null);
+      let currentPage = page;
+      let nextPage = page;
+      let totalCount = Number(draft.watchHistoryCount || watchHistory.length);
+      let current = page === 1 ? [] : [...watchHistory];
+      let loadedPages = 0;
+      while (nextPage && loadedPages < 10) {
+        currentPage = nextPage;
+        const response = await api.get(`entries/${draft.id}/watch-history/`, { params: { page: currentPage, page_size: 100 } });
+        const records = Array.isArray(response.data?.results) ? response.data.results : [];
+        current = [...new Map([...current, ...records].map((record) => [watchHistoryKey(record), record])).values()];
+        totalCount = Number(response.data?.count ?? current.length);
+        nextPage = response.data?.next_page || null;
+        loadedPages += 1;
+        if (!loadAll) break;
+      }
+      const summary = historySummary(current);
+      setDraft((previous) => ({ ...previous, ...summary, watchHistoryCount: totalCount }));
+      setHistoryNextPage(nextPage);
       setHistoryLoaded(true);
-      if (page === 1) setManualHistory(blankWatchHistoryRecord(suggestNextEpisode(unique, draft.episodes)));
+      if (page === 1) setManualHistory(blankWatchHistoryRecord(suggestNextEpisode(summary.watchHistory, draft.episodes)));
     } catch (requestError) {
       setHistoryFormError(readableApiError(requestError, "观看记录读取失败，请稍后重试。"));
     } finally {
@@ -170,7 +182,8 @@ export function EditAnimeRecordContent({
 
   const selectHubTab = (value) => {
     setHubTab(value);
-    if (value === "history" || value === "statistics") loadHistory();
+    if (value === "history") loadHistory();
+    if (value === "statistics") loadHistory(1, { loadAll: true });
     window.requestAnimationFrame(() => editorRef.current?.scrollIntoView({ block: "start" }));
   };
 
@@ -252,7 +265,11 @@ export function EditAnimeRecordContent({
   };
 
   const updateManualHistory = (key, value) => {
-    setManualHistory((current) => ({ ...current, [key]: value }));
+    setManualHistory((current) => ({
+      ...current,
+      [key]: value,
+      ...(key === "brushLabel" && BRUSH_NUMBERS[value] ? { brushNumber: String(BRUSH_NUMBERS[value]) } : {}),
+    }));
     setHistoryFormError("");
     setHistoryFormNotice("");
   };
@@ -266,7 +283,8 @@ export function EditAnimeRecordContent({
     const record = watchHistory[index];
     if (!record) return;
     setHistoryEditingKey(watchHistoryKey(record));
-    setManualHistory({ watchedOn: record.watched_on || localDateValue(), brushLabel: record.brush_label || "首刷", episodeStart: record.episode_start ?? "", episodeEnd: record.episode_end ?? "", notes: Array.isArray(record.notes) ? record.notes.join(" · ") : "" });
+    const brushLabel = record.brush_label || "首刷";
+    setManualHistory({ watchedOn: record.watched_on || localDateValue(), brushLabel, brushNumber: String(record.brush_number ?? BRUSH_NUMBERS[brushLabel] ?? ""), episodeStart: record.episode_start ?? "", episodeEnd: record.episode_end ?? "", notes: Array.isArray(record.notes) ? record.notes.join(" · ") : "" });
     setHistoryFormError("");
     setHistoryFormNotice("正在编辑这条观看记录。");
   };
@@ -275,14 +293,16 @@ export function EditAnimeRecordContent({
     event.preventDefault();
     const watchedOn = manualHistory.watchedOn;
     const brushLabel = manualHistory.brushLabel.trim() || "首刷";
+    const brushNumber = optionalPositiveNumber(manualHistory.brushNumber);
     const episodeStart = optionalPositiveNumber(manualHistory.episodeStart);
     const episodeEnd = optionalPositiveNumber(manualHistory.episodeEnd);
     if (!watchedOn) { setHistoryFormError("请选择观看日期。"); return; }
+    if (manualHistory.brushNumber !== "" && brushNumber === null) { setHistoryFormError("刷次编号必须是正整数。"); return; }
     if (manualHistory.episodeStart !== "" && episodeStart === null) { setHistoryFormError("起始话数必须是正整数。"); return; }
     if (manualHistory.episodeEnd !== "" && episodeEnd === null) { setHistoryFormError("结束话数必须是正整数。"); return; }
     if (episodeStart !== null && episodeEnd !== null && episodeEnd < episodeStart) { setHistoryFormError("结束话数不能小于起始话数。"); return; }
 
-    const payload = { watched_on: watchedOn, watched_label: formatWatchDate(watchedOn), brush_number: BRUSH_NUMBERS[brushLabel] || null, brush_label: brushLabel, episode_start: episodeStart, episode_end: episodeEnd, notes: manualHistory.notes.trim() ? [manualHistory.notes.trim()] : [] };
+    const payload = { watched_on: watchedOn, watched_label: formatWatchDate(watchedOn), brush_number: brushNumber ?? BRUSH_NUMBERS[brushLabel] ?? null, brush_label: brushLabel, episode_start: episodeStart, episode_end: episodeEnd, notes: manualHistory.notes.trim() ? [manualHistory.notes.trim()] : [] };
     const editing = watchHistory.find((record) => watchHistoryKey(record) === historyEditingKey);
     setHistorySaving(true);
     try {
@@ -396,6 +416,7 @@ export function EditAnimeRecordContent({
             <div className="anime-edit-modal__history-fields">
               <label>观看日期<input type="date" required value={manualHistory.watchedOn} onChange={(event) => updateManualHistory("watchedOn", event.target.value)} /></label>
               <label>刷次<input list="watch-history-brush-options" maxLength="20" value={manualHistory.brushLabel} onChange={(event) => updateManualHistory("brushLabel", event.target.value)} placeholder="首刷" /></label>
+              <label>刷次编号<input type="number" min="1" step="1" value={manualHistory.brushNumber} onChange={(event) => updateManualHistory("brushNumber", event.target.value)} placeholder="可选" /></label>
               <label>起始话数<input type="number" min="1" step="1" value={manualHistory.episodeStart} onChange={(event) => updateManualHistory("episodeStart", event.target.value)} placeholder="可选" /></label>
               <label>结束话数<input type="number" min="1" step="1" value={manualHistory.episodeEnd} onChange={(event) => updateManualHistory("episodeEnd", event.target.value)} placeholder="可选" /></label>
             </div>

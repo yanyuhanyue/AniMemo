@@ -6,14 +6,14 @@ export const SYNC_FIELD_LABELS = {
 
 export const SYNC_STATE_LABELS = {
   in_sync: "已同步",
-  uninitialized: "未初始化",
-  uninitialized_equal: "双方相同",
+  uninitialized: "尚未确认差异",
+  uninitialized_equal: "双方目前相同",
   local_changed: "AniMemo 已修改",
-  remote_changed: "Bangumi 已修改",
+  remote_changed: "Bangumi 上的值发生了变化",
   converged: "双方相同",
-  conflict: "双方冲突",
-  remote_missing: "远端未收藏",
-  unsupported: "无法同步",
+  conflict: "AniMemo 和 Bangumi 都修改过",
+  remote_missing: "Bangumi 尚未收藏",
+  unsupported: "当前无法安全拉取",
 };
 
 const WATCH_STATUS_LABELS = {

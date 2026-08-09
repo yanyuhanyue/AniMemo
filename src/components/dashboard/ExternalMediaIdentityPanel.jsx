@@ -205,7 +205,7 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
         return (
           <div className="external-media-result" key={resultIdentity?.external_id}>
             {result.thumbnailUrl || result.posterUrl ? <img src={result.thumbnailUrl || result.posterUrl} alt="" /> : <span className="external-media-result__placeholder"><Icon name="film" /></span>}
-            <div><strong>{result.title || result.japaneseTitle}</strong><span>{result.japaneseTitle || "日文名未收录"}</span><small>ID {resultIdentity?.external_id} · {result.airDate || "日期未定"}</small></div>
+            <div><strong>{result.title || result.japaneseTitle}</strong><span>{result.japaneseTitle || "日文名未收录"}</span><small>ID {resultIdentity?.external_id} · {result.airDate || "日期未定"} · {result.episodes ? `${result.episodes} 话` : "集数未定"}</small></div>
             <button type="button" onClick={() => bind(result)} disabled={Boolean(action)}><Icon name="link" /> {action === "bind" ? "绑定中..." : "绑定"}</button>
           </div>
         );
