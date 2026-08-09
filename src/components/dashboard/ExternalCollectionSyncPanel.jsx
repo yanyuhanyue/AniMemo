@@ -68,7 +68,7 @@ function SyncField({ field, selected, disabled, onSelect }) {
   );
 }
 
-export function ExternalCollectionSyncPanel({ entryId, identityId, onEntryRefresh, isDemo = false }) {
+export function ExternalCollectionSyncPanel({ entryId, identityId, onEntryRefresh, onConnectAccount, isDemo = false }) {
   const [provider, setProvider] = useState(null);
   const [availabilityError, setAvailabilityError] = useState("");
   const [opened, setOpened] = useState(false);
@@ -187,7 +187,17 @@ export function ExternalCollectionSyncPanel({ entryId, identityId, onEntryRefres
   if (availabilityError) {
     return <p className="external-sync-availability-error" role="alert"><Icon name="warning" /> {availabilityError}</p>;
   }
-  if (!available) return null;
+  if (!available) {
+    if (!provider || provider.connection?.status === "connected") return null;
+    return (
+      <section className="external-sync-panel external-sync-panel--connect" aria-labelledby="external-sync-title">
+        <div className="external-sync-panel__entry">
+          <div><strong id="external-sync-title">Bangumi 收藏比较</strong><small>连接 Bangumi 账号后，可比较收藏状态并手动拉取到 AniMemo。</small></div>
+          <button type="button" onClick={onConnectAccount} disabled={isDemo}><Icon name="link" /> 前往连接</button>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="external-sync-panel" aria-labelledby="external-sync-title">

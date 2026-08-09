@@ -48,8 +48,14 @@ export const blankRecord = () => ({
   review: "",
   baikeUrl: "https://mzh.moegirl.org.cn/",
   watchHistory: [],
+  watchHistoryCount: 0,
+  firstWatchedOn: null,
+  lastWatchedOn: null,
+  latestEpisodeStart: null,
+  latestEpisodeEnd: null,
   tagColors: { 日常: "blue" },
   shared: false,
+  visibility: "private",
   externalIdentities: [],
 });
 
@@ -76,8 +82,12 @@ export function apiToRecord(item, presetColors) {
     baikeUrl: item.baike_url || "https://mzh.moegirl.org.cn/",
     watchHistory: [],
     watchHistoryCount: Number(item.watch_history_count || 0),
+    firstWatchedOn: item.first_watched_on || null,
     lastWatchedOn: item.last_watched_on || null,
+    latestEpisodeStart: item.latest_episode_start ?? null,
+    latestEpisodeEnd: item.latest_episode_end ?? null,
     shared: item.visibility !== "private",
+    visibility: item.visibility || "private",
     externalIdentities: Array.isArray(item.external_identities) ? item.external_identities : [],
     updatedAt: item.updated_at,
   };
@@ -100,7 +110,7 @@ export function recordToApi(record) {
     description: record.description,
     review: record.review,
     baike_url: record.baikeUrl,
-    visibility: record.shared ? "public" : "private",
+    visibility: record.visibility || (record.shared ? "public" : "private"),
   };
   if (record.externalIdentity) payload.external_identity = record.externalIdentity;
   return payload;
@@ -147,7 +157,13 @@ export function parseLocalImportRecords(raw, presetColors) {
       review: item.review || "",
       baikeUrl: item.baike_url || "",
       watchHistory: item.watch_history || [],
+      watchHistoryCount: Array.isArray(item.watch_history) ? item.watch_history.length : 0,
+      firstWatchedOn: null,
+      lastWatchedOn: null,
+      latestEpisodeStart: null,
+      latestEpisodeEnd: null,
       shared: item.visibility === "public",
+      visibility: item.visibility || "private",
       externalIdentities: Array.isArray(item.external_identities) ? item.external_identities : [],
     };
   });

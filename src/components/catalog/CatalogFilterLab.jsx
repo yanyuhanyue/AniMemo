@@ -16,6 +16,16 @@ const DEFAULT_SORT_OPTIONS = [
   ["score-asc", "评分 (低 → 高)"],
 ];
 
+const DEFAULT_ACTIVITY_OPTIONS = [
+  ["all", "全部活动"],
+  ["recent-watched", "最近观看"],
+  ["never-watched", "从未记录观看"],
+  ["unrated", "未评分"],
+  ["external-bound", "已绑定外部数据"],
+  ["external-unbound", "未绑定外部数据"],
+  ["recent-updated", "最近更新"],
+];
+
 export function CatalogFilterLab({
   filters,
   onFilterChange,
@@ -29,6 +39,7 @@ export function CatalogFilterLab({
   onEditQuickFilters,
   statusOptions = DEFAULT_STATUS_OPTIONS,
   sortOptions = DEFAULT_SORT_OPTIONS,
+  activityOptions = DEFAULT_ACTIVITY_OPTIONS,
 }) {
   const [expanded, setExpanded] = useState(() => window.innerWidth >= 768);
 
@@ -80,6 +91,14 @@ export function CatalogFilterLab({
               </select>
             </span>
           </label>
+          {Object.hasOwn(filters, "activity") && <label className="filter-field">
+            <span>活动与资料</span>
+            <span className="filter-control-hitbox">
+              <select aria-label="活动与资料" value={filters.activity} onChange={(event) => onFilterChange("activity", event.target.value)}>
+                {activityOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </span>
+          </label>}
           <div className="filter-field filter-field--sort">
             <div className="filter-field__header">
               <label htmlFor="catalog-sort">排序规则 (默认)</label>

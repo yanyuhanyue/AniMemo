@@ -31,7 +31,7 @@ function providerScore(identity) {
   return Number.isFinite(score) && score > 0 ? score.toFixed(1) : "暂无";
 }
 
-export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, isDemo = false }) {
+export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, onOpenExternalAccount, isDemo = false }) {
   const requestRef = useRef(0);
   const identities = Array.isArray(draft.externalIdentities) ? draft.externalIdentities : [];
   const identity = identities.find((item) => item?.provider === PROVIDER) || null;
@@ -168,7 +168,9 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
           <strong>{identity.is_metadata_source ? "当前资料来源" : "已绑定 · 仅快照"}</strong>
         </div>
         <dl className="external-media-panel__facts">
+          <div><dt>资料标题</dt><dd>{identity.provider_title || identity.metadata?.title || "未提供"}</dd></div>
           <div><dt>条目 ID</dt><dd>{identity.external_id}</dd></div>
+          <div><dt>提供方地址</dt><dd>{identity.canonical_url ? "Bangumi 详情页" : "未提供"}</dd></div>
           <div><dt>站点评分</dt><dd>{score}</dd></div>
           <div><dt>最近同步</dt><dd>{formatFetchedAt(identity.metadata_fetched_at)}</dd></div>
         </dl>
@@ -181,7 +183,7 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
           </>}
           <button className="is-danger" type="button" onClick={unbind} disabled={Boolean(action) || isDemo}><Icon name="unlink" /> {action === "unbind" ? "解除中..." : "解除绑定"}</button>
         </div>
-        <ExternalCollectionSyncPanel entryId={draft.id} identityId={identity.id} onEntryRefresh={syncEntryRefresh} isDemo={isDemo} />
+        <ExternalCollectionSyncPanel entryId={draft.id} identityId={identity.id} onEntryRefresh={syncEntryRefresh} onConnectAccount={onOpenExternalAccount} isDemo={isDemo} />
         {notice && <p className="external-media-panel__notice" role="status"><Icon name="check" /> {notice}</p>}
         {error && <p className="external-media-panel__error" role="alert"><Icon name="warning" /> {error}</p>}
       </div>
@@ -192,7 +194,7 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
     <div className="external-media-panel">
       <div className="external-media-panel__heading">
         <span><Icon name="link" /> Bangumi</span>
-        <strong>未绑定</strong>
+        <strong>尚未关联 Bangumi</strong>
       </div>
       <form className="external-media-panel__search" onSubmit={search}>
         <label htmlFor="external-media-search">搜索 Bangumi 条目</label>

@@ -22,7 +22,9 @@ function centerFocusedEntry(event) {
   });
 }
 
-export function AnimeListRow({ record, rank, onOpen, catalogReady, variant = "default" }) {
+const QUICK_STATUS_OPTIONS = [["planned", "想看"], ["watching", "在看"], ["completed", "看过"], ["on_hold", "搁置"], ["dropped", "弃番"]];
+
+export function AnimeListRow({ record, rank, onOpen, catalogReady, variant = "default", onQuickStatus, selectionMode = false, selected = false, onToggleSelection }) {
   const {
     imageRef,
     posterFailed,
@@ -53,13 +55,17 @@ export function AnimeListRow({ record, rank, onOpen, catalogReady, variant = "de
         rank % 2 === 0 ? "anime-list-row--alt" : "",
         catalogReady ? "is-ready" : "is-pending",
       ].filter(Boolean).join(" ")}
-      onClick={(event) => onOpen(record, event.currentTarget)}
+      onClick={(event) => {
+        if (event.target.closest(".catalog-selection, .catalog-quick-status")) return;
+        onOpen(record, event.currentTarget);
+      }}
       onKeyDown={openFromKeyboard}
       onFocus={centerFocusedEntry}
       role="button"
       tabIndex="0"
       aria-label={variant === "editable" ? `编辑 ${record.title}` : `打开 ${record.title} 动漫档案`}
     >
+      {selectionMode && <button className={`catalog-selection${selected ? " is-selected" : ""}`} type="button" aria-pressed={selected} aria-label={`${selected ? "取消选择" : "选择"} ${record.title}`} onClick={(event) => { event.stopPropagation(); onToggleSelection?.(record.id); }}><Icon name={selected ? "check" : "plus"} /></button>}
       <div className="anime-list-row__content">
         <span className="anime-list-row__rank">{rank}</span>
         <div className="anime-list-row__poster">
@@ -120,16 +126,19 @@ export function AnimeListRow({ record, rank, onOpen, catalogReady, variant = "de
           ))}
         </div>
         <RatingDisplay score={record.score} className="anime-list-row__rating" />
-        <button
-          className={`detail-button${variant === "editable" ? " detail-button--edit" : ""}`}
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            onOpen(record, event.currentTarget.closest(".anime-list-row"));
-          }}
-        >
-          <span className="detail-button__visual"><Icon name={variant === "editable" ? "edit" : "layers"} /> {variant === "editable" ? "修改" : "详情"}</span>
-        </button>
+        <div className="catalog-row-actions">
+          {variant === "editable" && onQuickStatus && <select className="catalog-quick-status" value={record.status} onClick={(event) => event.stopPropagation()} onChange={(event) => { event.stopPropagation(); onQuickStatus(record, event.target.value); }} aria-label={`快速修改 ${record.title} 的观看状态`}>{QUICK_STATUS_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select>}
+          <button
+            className={`detail-button${variant === "editable" ? " detail-button--edit" : ""}`}
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen(record, event.currentTarget.closest(".anime-list-row"));
+            }}
+          >
+            <span className="detail-button__visual"><Icon name={variant === "editable" ? "edit" : "layers"} /> {variant === "editable" ? "修改" : "详情"}</span>
+          </button>
+        </div>
       </div>
     </article>
   );

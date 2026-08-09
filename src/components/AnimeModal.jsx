@@ -37,7 +37,7 @@ function normalizeDraft(record) {
   };
 }
 
-export function AnimeModal({ record, returnFocus, onClose, editable = false, onSave, onDelete, onIdentityChange, isDemo = false, tagPresets, trustedPosterHosts }) {
+export function AnimeModal({ record, returnFocus, onClose, editable = false, onSave, onDelete, onIdentityChange, onOpenExternalAccount, initialTab = "overview", isDemo = false, tagPresets, trustedPosterHosts }) {
   const rootRef = useRef(null);
   const panelRef = useRef(null);
   const backdropRef = useRef(null);
@@ -341,6 +341,8 @@ export function AnimeModal({ record, returnFocus, onClose, editable = false, onS
             tagPresets={tagPresets}
             trustedPosterHosts={trustedPosterHosts}
             onIdentityChange={onIdentityChange}
+            onOpenExternalAccount={onOpenExternalAccount}
+            initialTab={initialTab}
             isDemo={isDemo}
           />
         ) : <>

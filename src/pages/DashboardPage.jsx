@@ -5,6 +5,8 @@ import { AddAnimeModal } from "../components/dashboard/AddAnimeModal.jsx";
 import { ImportJournalModal } from "../components/dashboard/ImportJournalModal.jsx";
 import { BangumiImportDialog } from "../components/dashboard/BangumiImportDialog.jsx";
 import { DashboardReturnHomeControl, DashboardShareControl } from "../components/dashboard/DashboardJournalControls.jsx";
+import { BulkManagementToolbar } from "../components/dashboard/BulkManagementToolbar.jsx";
+import { ContinueWatchingSection, DashboardAnalyticsSection, SmartReminderSection } from "../components/dashboard/JournalDashboardSections.jsx";
 import { AnimeCatalog } from "../components/catalog/AnimeCatalog.jsx";
 import { CatalogFilterLab } from "../components/catalog/CatalogFilterLab.jsx";
 import { CatalogMeta } from "../components/catalog/CatalogMeta.jsx";
@@ -12,6 +14,7 @@ import { Icon } from "../components/Icon.jsx";
 import { api, authApi, clearTokens, readableApiError } from "../lib/api.js";
 import { resolveTagColors } from "../lib/tagPresets.js";
 import { pressBeforeOpen } from "../lib/modalMotion.js";
+import { matchesActivityFilter, runBounded } from "../lib/journalExperience.js";
 import { useSiteSettings } from "../context/SiteSettingsContext.jsx";
 import { usePluginRuntime } from "../plugins/sdk/PluginRuntimeContext.jsx";
 import {
@@ -46,6 +49,8 @@ export function DashboardPage() {
   const {
     dashboardReady,
     demoCatalogRecords,
+    analytics,
+    analyticsError,
     isDemo,
     loadError,
     presetColors,
@@ -66,8 +71,12 @@ export function DashboardPage() {
   const [pageSize, setPageSize] = useState("all");
   const [priority, setPriority] = useState(true);
   const [activeQuick, setActiveQuick] = useState("all");
+  const [activity, setActivity] = useState("all");
   const [view, setView] = useState("list");
   const [selected, setSelected] = useState(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileInitialTab, setProfileInitialTab] = useState("profile");
@@ -79,6 +88,7 @@ export function DashboardPage() {
   const [filterEditorOpen, setFilterEditorOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [noticeKind, setNoticeKind] = useState("");
+  const deepLinkRequestRef = useRef("");
   useEffect(() => { if (loadError) setNotice(loadError); }, [loadError]);
   useEffect(() => {
     if (!selected) return;
@@ -88,6 +98,18 @@ export function DashboardPage() {
     }
   }, [records, selected]);
   useDashboardEntrance({ dashboardReady, modeTransition, rootRef });
+
+  const clearEntryQuery = () => {
+    const params = new URLSearchParams(location.search);
+    if (!params.has("entry")) return;
+    params.delete("entry");
+    navigate({ pathname: location.pathname, search: params.toString() ? `?${params}` : "" }, { replace: true });
+  };
+
+  const closeSelected = () => {
+    setSelected(null);
+    clearEntryQuery();
+  };
 
   useEffect(() => {
     if (!profileMenuOpen) return undefined;
@@ -122,6 +144,39 @@ export function DashboardPage() {
     window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.hash}`);
   }, []);
 
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const entryId = params.get("entry");
+    if (!entryId || !dashboardReady || selected?.record?.id === Number(entryId) || selected?.record?.id === entryId) return;
+    const localRecord = records.find((record) => String(record.id) === String(entryId));
+    if (localRecord) {
+      deepLinkRequestRef.current = entryId;
+      openEditor(localRecord, null, false);
+      return;
+    }
+    if (isDemo || deepLinkRequestRef.current === entryId || !/^\d+$/.test(entryId)) {
+      if (!/^\d+$/.test(entryId)) {
+        flash("作品链接无效，请从手账列表重新打开。", "error");
+        clearEntryQuery();
+      }
+      return;
+    }
+    deepLinkRequestRef.current = entryId;
+    api.get(`entries/${entryId}/`).then((response) => {
+      const record = apiToRecord(response.data, presetColors);
+      setRecords((current) => current.some((item) => String(item.id) === String(record.id)) ? current : [record, ...current]);
+      openEditor(record, null, false);
+    }).catch(() => {
+      flash("没有找到这部作品，或它不属于当前账号。", "error");
+      clearEntryQuery();
+    });
+  }, [dashboardReady, isDemo, location.pathname, location.search, presetColors, records, selected]);
+
+  useEffect(() => {
+    if (location.search.includes("entry=")) return;
+    if (selected) setSelected(null);
+  }, [location.search, selected]);
+
   const allTags = useMemo(() => [...new Set(records.flatMap((record) => record.tags || []))].sort((a, b) => a.localeCompare(b, "zh-CN")), [records]);
   const allYears = useMemo(() => [...new Set(records.map((record) => String(record.period || "").slice(0, 4)).filter((item) => /^\d{4}$/.test(item)))].sort((a, b) => Number(b) - Number(a)), [records]);
   const activeFilter = quickFilters.find((item) => String(item.id) === activeQuick);
@@ -132,6 +187,7 @@ export function DashboardPage() {
         && (status === "all" || record.status === status)
         && (tag === "all" || record.tags?.includes(tag))
         && (year === "all" || String(record.period || "").startsWith(year))
+        && matchesActivityFilter(record, activity)
         && matchesQuickFilter(record, activeFilter);
     });
     const sorted = [...filtered].sort((a, b) => {
@@ -148,7 +204,7 @@ export function DashboardPage() {
       return comparePeriod(b, a);
     });
     return sorted;
-  }, [activeFilter, priority, query, records, sort, status, tag, year]);
+  }, [activeFilter, activity, priority, query, records, sort, status, tag, year]);
   const visible = pageSize === "all" ? filteredRecords : filteredRecords.slice(0, Number(pageSize));
 
   const flash = (message, kind = "") => {
@@ -224,8 +280,14 @@ export function DashboardPage() {
       review: draft.review || "",
       baikeUrl: draft.baikeUrl || "https://mzh.moegirl.org.cn/",
       watchHistory: [],
+      watchHistoryCount: 0,
+      firstWatchedOn: null,
+      lastWatchedOn: null,
+      latestEpisodeStart: null,
+      latestEpisodeEnd: null,
       tagColors: resolveTagColors(tags, {}, presetColors),
       shared: false,
+      visibility: "private",
       externalIdentity: draft.externalIdentity || null,
       externalIdentities: [],
     };
@@ -264,10 +326,98 @@ export function DashboardPage() {
     setRecords((current) => current.map(applyUpdate));
   };
 
-  const openEditor = (record, source) => {
+  const openEditor = (record, source, updateUrl = true, initialTab = "overview") => {
     const container = source?.closest?.(".anime-list-row, .anime-poster-card__interaction") || source;
     const origin = container?.querySelector?.("img") || source;
-    pressBeforeOpen(container, () => setSelected({ record, originRect: origin?.getBoundingClientRect?.() || null, returnFocus: source || container || null }));
+    pressBeforeOpen(container, () => {
+      setSelected({ record, initialTab, originRect: origin?.getBoundingClientRect?.() || null, returnFocus: source || container || null });
+      if (!updateUrl) return;
+      const params = new URLSearchParams(location.search);
+      params.set("entry", record.id);
+      navigate({ pathname: location.pathname, search: `?${params}` });
+    });
+  };
+
+  const openEntryById = (entryId, initialTab = "overview") => {
+    const record = records.find((item) => String(item.id) === String(entryId));
+    if (record) {
+      openEditor(record, null, true, initialTab);
+      return;
+    }
+    const params = new URLSearchParams(location.search);
+    params.set("entry", entryId);
+    navigate({ pathname: location.pathname, search: `?${params}` });
+  };
+
+  const quickUpdateStatus = async (record, nextStatus) => {
+    if (!record || record.status === nextStatus) return;
+    const labels = Object.fromEntries(STATUS_OPTIONS.filter(([value]) => value !== "all"));
+    const previous = record;
+    const optimistic = { ...record, status: nextStatus, statusLabel: labels[nextStatus] || nextStatus };
+    setRecords((current) => current.map((item) => item.id === record.id ? optimistic : item));
+    try {
+      if (!isDemo) {
+        const response = await api.patch(`entries/${record.id}/`, { watch_status: nextStatus });
+        setRecords((current) => current.map((item) => item.id === record.id ? apiToRecord(response.data, presetColors) : item));
+      }
+      flash(`已将《${record.title}》标记为${labels[nextStatus] || nextStatus}`);
+    } catch (requestError) {
+      setRecords((current) => current.map((item) => item.id === record.id ? previous : item));
+      flash(readableApiError(requestError, "观看状态修改失败，请稍后重试。"), "error");
+    }
+  };
+
+  const toggleSelected = (entryId) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(entryId)) next.delete(entryId);
+      else next.add(entryId);
+      return next;
+    });
+  };
+
+  const toggleSelectionMode = () => {
+    setSelectionMode((current) => !current);
+    setSelectedIds(new Set());
+  };
+
+  const applyBulkOperation = async (operation, value) => {
+    const targets = records.filter((record) => selectedIds.has(record.id));
+    if (!targets.length || bulkBusy) return;
+    setBulkBusy(true);
+    const results = await runBounded(targets, async (record) => {
+      let patch;
+      if (operation === "status") patch = { watch_status: value };
+      if (operation === "visibility") patch = { visibility: value };
+      if (operation === "tag-add") {
+        const tags = record.tags.includes(value) ? record.tags : [...record.tags, value];
+        patch = { tags, tag_colors: resolveTagColors(tags, record.tagColors || {}, presetColors) };
+      }
+      if (operation === "tag-remove") {
+        const tags = record.tags.filter((tagName) => tagName !== value);
+        const tagColors = { ...(record.tagColors || {}) };
+        delete tagColors[value];
+        patch = { tags, tag_colors: tagColors };
+      }
+      if (isDemo) {
+        const labels = Object.fromEntries(STATUS_OPTIONS.filter(([statusValue]) => statusValue !== "all"));
+        return {
+          ...record,
+          ...(patch.watch_status ? { status: patch.watch_status, statusLabel: labels[patch.watch_status] } : {}),
+          ...(patch.visibility ? { visibility: patch.visibility, shared: patch.visibility !== "private" } : {}),
+          ...(patch.tags ? { tags: patch.tags, tagColors: patch.tag_colors } : {}),
+        };
+      }
+      const response = await api.patch(`entries/${record.id}/`, patch);
+      return apiToRecord(response.data, presetColors);
+    }, 4);
+    const successful = results.filter((result) => result.status === "fulfilled");
+    const failed = results.length - successful.length;
+    const updates = new Map(successful.map((result) => [result.value.id, result.value]));
+    setRecords((current) => current.map((record) => updates.get(record.id) || record));
+    setSelectedIds(new Set());
+    setBulkBusy(false);
+    flash(`批量操作完成：成功 ${successful.length}，失败 ${failed}${failed ? "。失败项目保持原值" : ""}`, failed ? "error" : "");
   };
 
   const exportData = async () => {
@@ -293,7 +443,7 @@ export function DashboardPage() {
                 personal_score: record.score ?? null,
                 watch_status: record.status || "planned",
                 review: record.review || "",
-                visibility: record.shared ? "public" : "private",
+                visibility: record.visibility || (record.shared ? "public" : "private"),
               },
               external_identities: record.externalIdentities || [],
               watch_history: record.watchHistory || [],
@@ -325,7 +475,7 @@ export function DashboardPage() {
   };
 
   const resetFilters = () => {
-    setQuery(""); setTag("all"); setStatus("all"); setYear("all"); setSort("date-desc"); setPageSize("all"); setPriority(true); setActiveQuick("all");
+    setQuery(""); setTag("all"); setStatus("all"); setYear("all"); setActivity("all"); setSort("date-desc"); setPageSize("all"); setPriority(true); setActiveQuick("all");
     flash("筛选条件已恢复默认");
   };
 
@@ -343,6 +493,7 @@ export function DashboardPage() {
     if (key === "tag") setTag(value);
     if (key === "status") setStatus(value);
     if (key === "year") setYear(value);
+    if (key === "activity") setActivity(value);
     if (key === "sort") setSort(value);
     if (key === "quick") {
       setActiveQuick(value);
@@ -469,7 +620,17 @@ export function DashboardPage() {
   };
 
   const scored = records.filter((record) => Number(record.score) > 0);
-  const catalogFilters = { search: query, tag, status, year, sort, quick: activeQuick };
+  const catalogFilters = { search: query, tag, status, year, activity, sort, quick: activeQuick };
+  const displayedAnalytics = analytics || (isDemo ? {
+    summary: {
+      total: records.length,
+      watch_history_count: records.reduce((total, record) => total + Number(record.watchHistoryCount || record.watchHistory?.length || 0), 0),
+      active_days: new Set(records.flatMap((record) => (record.watchHistory || []).map((item) => item.watched_on).filter(Boolean))).size,
+    },
+    status_distribution: Object.fromEntries(STATUS_OPTIONS.filter(([value]) => value !== "all").map(([value]) => [value, records.filter((record) => record.status === value).length])),
+    activity_summary: { today: 0, last_7_days: 0, current_month: 0 },
+    recent_activity: [],
+  } : null);
 
   return (
     <main className="dashboard-page dashboard-page--target" ref={rootRef} style={{ "--user-accent": settings.accent }}>
@@ -509,6 +670,12 @@ export function DashboardPage() {
         </div>
       </header>
 
+      <div className="dashboard-journal-workbench dashboard-entrance-piece">
+        <ContinueWatchingSection records={records} onOpen={(record, source) => openEditor(record, source)} onRecord={(record, source) => openEditor(record, source, true, "history")} onComplete={(record) => quickUpdateStatus(record, "completed")} onAdd={() => setAddOpen(true)} />
+        <DashboardAnalyticsSection analytics={displayedAnalytics} error={analyticsError} onOpenEntry={openEntryById} />
+        <SmartReminderSection records={records} onOpen={(record, source) => openEditor(record, source)} />
+      </div>
+
       <section className="dashboard-main dashboard-entrance-piece">
         <CatalogFilterLab
           filters={catalogFilters}
@@ -525,17 +692,19 @@ export function DashboardPage() {
           sortOptions={SORT_OPTIONS}
         />
 
+        <BulkManagementToolbar active={selectionMode} selectedCount={selectedIds.size} tags={allTags} busy={bulkBusy} onToggle={toggleSelectionMode} onClear={() => setSelectedIds(new Set())} onApply={applyBulkOperation} />
+
         <CatalogMeta resultCount={filteredRecords.length} pageSize={pageSize} onPageSizeChange={setPageSize} unscoredCount={records.length - scored.length} pageSizeOptions={["12", "24", "48", "96"]} />
         <div className="hazard-line" aria-hidden="true" />
 
         <section className={`dashboard-results dashboard-results--${view} dashboard-entrance-piece`}>
-          {visible.length > 0 && <AnimeCatalog records={visible} viewMode={view} onOpenDetail={openEditor} sort={sort} onSortChange={setSort} ready={dashboardReady} variant="editable" onAddRecord={() => setAddOpen(true)} />}
+          {visible.length > 0 && <AnimeCatalog records={visible} viewMode={view} onOpenDetail={openEditor} sort={sort} onSortChange={setSort} ready={dashboardReady} variant="editable" onAddRecord={() => setAddOpen(true)} onQuickStatus={quickUpdateStatus} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelection={toggleSelected} />}
           {!visible.length && <button className="dashboard-empty-state" type="button" onClick={() => records.length ? resetFilters() : setAddOpen(true)}><span className="dashboard-empty-plus"><Icon name="plus" /></span><h2>{records.length ? "没有匹配的番剧" : "手账还是空的"}</h2><p>{records.length ? "换一个筛选条件，或者恢复默认筛选。" : "点击这里，添加第一部属于你的番剧。"}</p><strong>{records.length ? "恢复默认" : "开始添加"} <Icon name="arrow-right" /></strong></button>}
         </section>
       </section>
 
       {notice && noticeKind === "profile" ? <div className="dashboard-profile-toast" role="status"><span className="dashboard-profile-toast__icon" aria-hidden="true"><Icon name="circle-check" /></span><span className="dashboard-profile-toast__message">{notice}</span><button className="dashboard-profile-toast__close" type="button" onClick={() => { setNotice(""); setNoticeKind(""); }} aria-label="关闭提示"><Icon name="close" /></button></div> : notice ? <div className="brutal-toast dashboard-toast" role="status"><Icon name="check" /> {notice}</div> : null}
-      {selected && <AnimeModal record={selected.record} originRect={selected.originRect} returnFocus={selected.returnFocus} editable isDemo={isDemo} onClose={() => setSelected(null)} onSave={saveRecord} onDelete={records.some((record) => record.id === selected.record.id) ? deleteRecord : null} onIdentityChange={(update) => updateExternalIdentity(selected.record.id, update)} tagPresets={tagPresets} trustedPosterHosts={siteSettings.trusted_poster_hosts} />}
+      {selected && <AnimeModal record={selected.record} originRect={selected.originRect} returnFocus={selected.returnFocus} editable isDemo={isDemo} initialTab={selected.initialTab} onClose={closeSelected} onSave={saveRecord} onDelete={records.some((record) => record.id === selected.record.id) ? deleteRecord : null} onIdentityChange={(update) => updateExternalIdentity(selected.record.id, update)} onOpenExternalAccount={() => { closeSelected(); openProfilePanel("external"); }} tagPresets={tagPresets} trustedPosterHosts={siteSettings.trusted_poster_hosts} />}
       {addOpen && <AddAnimeModal isDemo={isDemo} catalogRecords={demoCatalogRecords} existingRecords={records} onClose={() => setAddOpen(false)} onSubmit={saveNewRecord} trustedPosterHosts={siteSettings.trusted_poster_hosts} />}
       {profileOpen && <ProfilePanel settings={settings} initialTab={profileInitialTab} isDemo={isDemo} onClose={() => { setProfileOpen(false); window.requestAnimationFrame(() => profileAvatarButtonRef.current?.focus({ preventScroll: true })); }} onSave={saveSettings} onChangePassword={changePassword} onOpenBangumiImport={() => { setProfileOpen(false); setBangumiImportOpen(true); }} />}
       {bangumiImportOpen && <BangumiImportDialog onClose={() => setBangumiImportOpen(false)} />}
