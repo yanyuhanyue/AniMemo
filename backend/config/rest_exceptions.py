@@ -32,6 +32,8 @@ def _jsonable(value):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
     return str(value)
 
 
@@ -39,6 +41,8 @@ def _canonicalize(response, exc):
     status_code = response.status_code
     payload = response.data
     fields = None
+    metadata = None
+    compatibility = {}
     detail = None
     code = _CODE_ALIASES.get(
         getattr(exc, "default_code", None),
@@ -52,11 +56,20 @@ def _canonicalize(response, exc):
         detail = payload.get("detail")
         if detail is None:
             fields = _jsonable(payload)
+            compatibility.update(fields)
             detail = "请求参数无效。" if status_code == 400 else "请求无法完成。"
-        elif status_code == 400:
+        else:
             extra_fields = {key: value for key, value in payload.items() if key not in {"detail", "code"}}
             if extra_fields:
-                fields = _jsonable(extra_fields)
+                validation_fields = {
+                    key: value for key, value in extra_fields.items() if isinstance(value, (list, tuple, dict))
+                }
+                metadata_fields = {key: value for key, value in extra_fields.items() if key not in validation_fields}
+                if validation_fields:
+                    fields = _jsonable(validation_fields)
+                if metadata_fields:
+                    metadata = _jsonable(metadata_fields)
+                compatibility.update(_jsonable(extra_fields))
     elif isinstance(payload, list):
         fields = {"non_field_errors": _jsonable(payload)}
         detail = "请求参数无效。"
@@ -71,6 +84,9 @@ def _canonicalize(response, exc):
     body = {"code": code, "detail": _jsonable(detail or "请求无法完成。")}
     if fields:
         body["fields"] = fields
+    if metadata:
+        body["metadata"] = metadata
+    body.update(compatibility)
     if status_code == 429:
         retry_after = getattr(exc, "wait", None)
         if retry_after is None:
