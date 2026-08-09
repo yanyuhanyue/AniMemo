@@ -21,6 +21,10 @@ from .errors import (
 )
 from .signing import canonical_json_bytes, request_path_with_query, sign_hmac_request
 
+PAIRING_REQUEST_MAX_BYTES = 8 * 1024
+ACTION_REQUEST_MAX_BYTES = 256 * 1024
+ACK_REQUEST_MAX_BYTES = 16 * 1024
+
 
 @dataclass(frozen=True)
 class BridgeConfig:
@@ -80,21 +84,25 @@ class AsyncAniMemoClient:
             self.config.secret, timestamp, nonce, request.method, request_path_with_query(request), body
         )
 
-    async def _request_once(self, method, path, *, params=None, json_body=None):
+    async def _request_once(self, method, path, *, params=None, json_body=None, max_body_bytes=None):
         if not self.configured:
             raise BridgeAuthError("AniMemo 凭证尚未配置。")
         body = canonical_json_bytes(json_body) if json_body is not None else b""
+        if max_body_bytes is not None and len(body) > max_body_bytes:
+            raise BridgeProtocolError("AniMemo 请求体超过协议允许的大小。")
         request = self._client.build_request(method, path, params=params, content=body)
         self._headers(request)
         try:
             response = await self._client.send(request)
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             raise BridgeConnectionError("AniMemo 连接失败。") from error
         if response.status_code == 401:
             raise BridgeAuthError("AniMemo HMAC 认证失败。")
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After")
             raise BridgeRateLimitError(f"AniMemo 请求受限，请稍后重试。retry_after={retry_after or 'unknown'}")
+        if 500 <= response.status_code < 600:
+            raise BridgeConnectionError(f"AniMemo 服务暂时不可用（HTTP {response.status_code}）。")
         try:
             payload = response.json() if response.content else {}
         except ValueError as error:
@@ -107,11 +115,17 @@ class AsyncAniMemoClient:
             raise error_type(detail)
         return payload
 
-    async def request(self, method, path, *, params=None, json_body=None, retries=2, pairing=False):
+    async def request(self, method, path, *, params=None, json_body=None, retries=2, pairing=False, max_body_bytes=None):
         delay = 1.0
         for attempt in range(retries + 1):
             try:
-                return await self._request_once(method, path, params=params, json_body=json_body)
+                return await self._request_once(
+                    method,
+                    path,
+                    params=params,
+                    json_body=json_body,
+                    max_body_bytes=max_body_bytes,
+                )
             except PairingResultUnknown:
                 raise
             except BridgeAuthError:
@@ -131,6 +145,7 @@ class AsyncAniMemoClient:
             "POST", "/api/integrations/v1/pair/consume/",
             json_body={"code": code, "platform": platform, "external_user_id": external_user_id, "display_name": display_name},
             retries=0, pairing=True,
+            max_body_bytes=PAIRING_REQUEST_MAX_BYTES,
         )
 
     async def action(self, request_id, platform, external_user_id, action, payload=None):
@@ -138,6 +153,7 @@ class AsyncAniMemoClient:
             "POST", "/api/integrations/v1/actions/",
             json_body={"request_id": request_id, "platform": platform, "external_user_id": external_user_id, "action": action, "payload": payload or {}},
             retries=2,
+            max_body_bytes=ACTION_REQUEST_MAX_BYTES,
         )
 
     async def events(self, *, after=0, limit=50, wait=20):
@@ -146,7 +162,13 @@ class AsyncAniMemoClient:
         )
 
     async def ack(self, event_ids):
-        return await self.request("POST", "/api/integrations/v1/events/ack/", json_body={"event_ids": list(event_ids)}, retries=3)
+        return await self.request(
+            "POST",
+            "/api/integrations/v1/events/ack/",
+            json_body={"event_ids": list(event_ids)},
+            retries=3,
+            max_body_bytes=ACK_REQUEST_MAX_BYTES,
+        )
 
     async def ping(self):
         return await self.events(after=0, limit=1, wait=0)

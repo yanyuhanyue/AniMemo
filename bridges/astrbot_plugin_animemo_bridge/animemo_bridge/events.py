@@ -7,6 +7,7 @@ from .errors import (
     BridgeAuthError,
     BridgeConnectionError,
     BridgeEventError,
+    BridgeProtocolError,
     BridgeRateLimitError,
 )
 from .renderers import render_event
@@ -81,6 +82,8 @@ class EventPoller:
             try:
                 result = await self.client.events(after=self.state.cursor, limit=50, wait=self.wait_seconds)
                 events = result.get("events", [])
+                if not isinstance(events, list):
+                    raise BridgeProtocolError("AniMemo events 字段不是数组。")
                 for event in events:
                     await self._deliver(event)
                 if not events:
@@ -91,7 +94,7 @@ class EventPoller:
                 backoff = 1.0
             except asyncio.CancelledError:
                 raise
-            except (BridgeConnectionError, BridgeRateLimitError, BridgeAuthError, BridgeEventError) as error:
+            except (BridgeConnectionError, BridgeRateLimitError, BridgeAuthError, BridgeEventError, BridgeProtocolError) as error:
                 self.state.last_error = type(error).__name__
                 self.state.save()
                 if self.logger:
@@ -101,7 +104,7 @@ class EventPoller:
 
     async def _deliver(self, event):
         if not isinstance(event, dict):
-            return
+            raise BridgeEventError("AniMemo 事件结构无效。")
         event_id = event.get("event_id")
         platform = event.get("platform")
         external_user_id = event.get("external_user_id")
@@ -113,11 +116,15 @@ class EventPoller:
         if route is None:
             # Keep the unacknowledged event available for a later route refresh,
             # but avoid hammering the same event in a tight loop.
+            self.state.defer(event_id)
+            self.state.save()
             await self.sleep(min(max(self.wait_seconds, 1), 5))
             return
         if self.state.has_delivered(event_id):
             await self.client.ack([event_id])
+            self.state.resolve_pending(event_id)
             self.state.advance(event_id)
+            self.state.save()
             return
         text = render_event(event, developer=self.developer)
         await send_private_message(self.context, route["umo"], text)
@@ -125,3 +132,4 @@ class EventPoller:
         self.state.save()
         await self.client.ack([event_id])
         self.state.advance(event_id)
+        self.state.save()

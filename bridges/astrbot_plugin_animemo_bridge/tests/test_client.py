@@ -9,7 +9,12 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from animemo_bridge.client import AsyncAniMemoClient, BridgeConfig
-from animemo_bridge.errors import BridgeAuthError
+from animemo_bridge.errors import (
+    BridgeActionError,
+    BridgeAuthError,
+    BridgeProtocolError,
+    PairingResultUnknown,
+)
 from animemo_bridge.signing import sign_hmac_request
 
 
@@ -62,4 +67,105 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(BridgeAuthError):
             await client.ping()
         self.assertEqual(attempts, 1)
+        await client.aclose()
+
+    async def test_server_502_is_retried(self):
+        attempts = 0
+
+        async def handler(_request):
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(502 if attempts == 1 else 200, json={"ok": True})
+
+        client = AsyncAniMemoClient(
+            BridgeConfig("https://example.test", "key", "secret"),
+            transport=httpx.MockTransport(handler),
+            sleep=lambda _delay: asyncio.sleep(0),
+        )
+        self.assertEqual(await client.action("req-502", "qq", "42", "watch-history-importer.history-get", {}), {"ok": True})
+        self.assertEqual(attempts, 2)
+        await client.aclose()
+
+    async def test_bad_request_is_not_retried(self):
+        attempts = 0
+
+        async def handler(_request):
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(400, json={"detail": "bad request"})
+
+        client = AsyncAniMemoClient(BridgeConfig("https://example.test", "key", "secret"), transport=httpx.MockTransport(handler))
+        with self.assertRaises(BridgeActionError):
+            await client.action("req-400", "qq", "42", "watch-history-importer.history-get", {})
+        self.assertEqual(attempts, 1)
+        await client.aclose()
+
+    async def test_pair_timeout_is_ambiguous(self):
+        async def handler(_request):
+            raise httpx.ReadTimeout("temporary")
+
+        client = AsyncAniMemoClient(BridgeConfig("https://example.test", "key", "secret"), transport=httpx.MockTransport(handler))
+        with self.assertRaises(PairingResultUnknown):
+            await client.pair("ABC", "qq", "42")
+        await client.aclose()
+
+    async def test_remote_protocol_error_is_retried(self):
+        attempts = 0
+
+        async def handler(_request):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.RemoteProtocolError("temporary")
+            return httpx.Response(200, json={"ok": True})
+
+        client = AsyncAniMemoClient(
+            BridgeConfig("https://example.test", "key", "secret"),
+            transport=httpx.MockTransport(handler),
+            sleep=lambda _delay: asyncio.sleep(0),
+        )
+        self.assertEqual(
+            await client.action("req-protocol", "qq", "42", "watch-history-importer.history-get", {}),
+            {"ok": True},
+        )
+        self.assertEqual(attempts, 2)
+        await client.aclose()
+
+    async def test_invalid_json_is_protocol_error(self):
+        async def handler(_request):
+            return httpx.Response(200, content=b"not-json")
+
+        client = AsyncAniMemoClient(BridgeConfig("https://example.test", "key", "secret"), transport=httpx.MockTransport(handler))
+        with self.assertRaises(BridgeProtocolError):
+            await client.ping()
+        await client.aclose()
+
+    async def test_oversized_action_is_rejected_before_network(self):
+        attempts = 0
+
+        async def handler(_request):
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(200, json={"ok": True})
+
+        client = AsyncAniMemoClient(BridgeConfig("https://example.test", "key", "secret"), transport=httpx.MockTransport(handler))
+        with self.assertRaises(BridgeProtocolError):
+            await client.action("req-large", "qq", "42", "watch-history-importer.history-add", {"text": "x" * (256 * 1024)})
+        self.assertEqual(attempts, 0)
+        await client.aclose()
+
+    async def test_oversized_pairing_and_ack_are_rejected_before_network(self):
+        attempts = 0
+
+        async def handler(_request):
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(200, json={"ok": True})
+
+        client = AsyncAniMemoClient(BridgeConfig("https://example.test", "key", "secret"), transport=httpx.MockTransport(handler))
+        with self.assertRaises(BridgeProtocolError):
+            await client.pair("ABC", "qq", "42", "x" * (8 * 1024))
+        with self.assertRaises(BridgeProtocolError):
+            await client.ack(range(5000))
+        self.assertEqual(attempts, 0)
         await client.aclose()

@@ -2,7 +2,7 @@
 
 ## AstrBot API baseline
 
-本实现按 AstrBot 官方仓库 `AstrBotDevs/AstrBot` 当前 `master` API 审计（截至 2026-08-09，最新 release `v4.27.2`）：`@register`、`Star`、`Context` 来自 `astrbot.api.star`；`@filter.command`、`AstrMessageEvent` 与 `MessageChain` 来自 `astrbot.api.event`；事件使用 `get_sender_id()`、`get_sender_name()`、`get_platform_id()`、`get_message_type()`、`is_private_chat()` 和 `unified_msg_origin`；主动投递使用 `await context.send_message(umo, MessageChain().message(text))`；diagnostics 可选使用 `context.register_web_api(route, handler, methods, desc)`。Bridge 不使用已标记 deprecated 的 `Context.register_task`，而在 `initialize()` 中创建唯一 asyncio poller，在 `terminate()` 中取消它。
+本实现按 AstrBot 官方仓库 `AstrBotDevs/AstrBot` 当前 `master` API 审计（截至 2026-08-09，最新 release `v4.27.2`）：`@register`、`Star`、`Context` 来自 `astrbot.api.star`；`@filter.command` 与 `AstrMessageEvent` 来自 `astrbot.api.event`；`MessageChain` 优先来自 `astrbot.api.message`，并保留旧导入路径兼容；事件使用 `get_sender_id()`、`get_sender_name()`、`get_platform_id()`、`get_message_type()`、`is_private_chat()` 和 `unified_msg_origin`；主动投递使用 `await context.send_message(umo, MessageChain().message(text))`；diagnostics 使用 `context.register_web_api(route, handler, methods, desc)` 与 Plugin Pages 的 `window.AstrBotPluginPage.ready()/apiGet()/apiPost()`。Bridge 不使用已标记 deprecated 的 `Context.register_task`，而在 `initialize()` 中创建唯一 asyncio poller，在 `terminate()` 中取消它。
 
 ## Architecture
 
@@ -24,11 +24,13 @@ python manage.py integration_connection create --provider astrbot --instance-id 
 
 ## Pairing and commands
 
-AniMemo 登录用户生成 pairing code，然后在 AstrBot 私聊发送 `/animemo pair CODE`。群聊配对始终拒绝且不会回显 code。常用命令：`/animemo help`、`status`、`ping`、`watch <action>`、`unpair-help`。群聊动作只有显式开启 `allow_group_commands` 后才允许；主动事件 v1 仍只投递到已保存的私聊 UMO。
+AniMemo 登录用户生成 pairing code，然后在 AstrBot 私聊发送 `/animemo pair CODE`。群聊配对始终拒绝且不会回显 code。常用命令：`/animemo help`、`status`、`ping`、`watch get <entry_id>`、`watch add <entry_id> <date> [episode]`、`watch find <query>`、`unpair-help`。群聊动作只有显式开启 `allow_group_commands` 后才允许；主动事件 v1 仍只投递到已保存的私聊 UMO。任意 action JSON 调试命令默认关闭，开启后仍要求 AstrBot 管理员身份。
 
 ## Event delivery and security
 
-事件使用 HTTP long-poll。Bridge 成功发送后先落盘 event id，再 ACK；ACK 失败时重放只重试 ACK，不重复发送。无私聊 route 不 ACK。路由文件和事件状态文件使用 temp + fsync + `os.replace` 原子写入；损坏路由会备份后 fail safe。普通日志只记录错误类型，状态页只显示 route count、平台和外部 ID 哈希片段。
+事件使用 HTTP long-poll。Bridge 成功发送后先落盘 event id，再 ACK；ACK 失败时重放只重试 ACK，不重复发送。无私聊 route 不 ACK，pending event 会阻止 cursor 越过更早的未处理事件。路由文件和事件状态文件使用 temp + fsync + `os.replace` 原子写入；损坏路由会备份后 fail safe。普通日志只记录错误类型，状态页只显示 route count、平台和外部 ID 哈希片段。
+
+Diagnostics 页面位于 `pages/status/`，可查看脱敏状态、测试 HMAC 连接、重启轮询器，并在确认后清除单条脱敏私聊路由。页面只使用 AstrBot Plugin Pages SDK，不读取 Dashboard cookie、localStorage、secret、签名或原始事件 payload。
 
 ## Troubleshooting
 

@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "bridges" / "astrbot_plugin_animemo_bridge"
 REQUIRED = {"main.py", "metadata.yaml", "_conf_schema.json", "requirements.txt", "README.md"}
+PAGE_REQUIRED = {"index.html", "app.js", "style.css"}
 
 
 def parse_metadata(path):
@@ -32,6 +33,19 @@ def validate():
     required_config = {"enabled", "animemo_base_url", "key_id", "secret", "poll_events", "poll_wait_seconds", "request_timeout_seconds", "allow_group_commands", "developer_commands", "verify_tls"}
     if set(schema) != required_config:
         raise SystemExit("_conf_schema.json configuration keys do not match Bridge contract")
+    page_root = BRIDGE / "pages" / "status"
+    missing_page = sorted(name for name in PAGE_REQUIRED if not (page_root / name).is_file())
+    if missing_page:
+        raise SystemExit(f"AstrBot diagnostics page missing files: {', '.join(missing_page)}")
+    page_script = (page_root / "app.js").read_text(encoding="utf-8")
+    page_html = (page_root / "index.html").read_text(encoding="utf-8")
+    for api_name in ("AstrBotPluginPage", "ready", "apiGet", "apiPost"):
+        if api_name not in page_script:
+            raise SystemExit(f"AstrBot diagnostics page missing Plugin Pages API: {api_name}")
+    if 'type="module"' not in page_html:
+        raise SystemExit("AstrBot diagnostics page script must be an external module")
+    if "localStorage" in page_script or "document.cookie" in page_script:
+        raise SystemExit("AstrBot diagnostics page must not read dashboard credentials")
     requirements = (BRIDGE / "requirements.txt").read_text(encoding="utf-8").lower()
     if "requests" in requirements or "httpx" not in requirements:
         raise SystemExit("requirements.txt must use httpx and must not use requests")

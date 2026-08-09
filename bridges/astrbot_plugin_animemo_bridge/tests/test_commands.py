@@ -3,12 +3,27 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from animemo_bridge.errors import BridgeConnectionError, PairingResultUnknown
+from animemo_bridge.identity import MessageIdentity
 from main import AniMemoBridge
 
 
 class CommandsTests(unittest.IsolatedAsyncioTestCase):
+    def _event(self, text, *, message_type="private", admin=False):
+        return SimpleNamespace(
+            message_str=text,
+            platform="telegram",
+            get_sender_id=lambda: "42",
+            get_sender_name=lambda: "A",
+            unified_msg_origin="telegram:private:42" if message_type == "private" else "telegram:group:1",
+            message_type=message_type,
+            is_admin=admin,
+            send=lambda value: value,
+        )
+
     async def test_group_pair_is_rejected_without_client(self):
         with tempfile.TemporaryDirectory() as temp:
             context = SimpleNamespace(data_dir=temp)
@@ -20,5 +35,110 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
     async def test_help_is_available_when_disabled(self):
         with tempfile.TemporaryDirectory() as temp:
             bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": False})
-            event = SimpleNamespace(message_str="/animemo help", platform="telegram", get_sender_id=lambda: "1", get_sender_name=lambda: "A", unified_msg_origin="telegram:private:1", message_type="private", send=lambda text: text)
+            event = self._event("/animemo help")
             self.assertIn("pair", await bridge._command(event))
+
+    async def test_watch_commands_map_to_reference_actions(self):
+        class RecordingClient:
+            def __init__(self):
+                self.calls = []
+
+            async def action(self, request_id, platform, external_user_id, action, payload):
+                self.calls.append((request_id, platform, external_user_id, action, payload))
+                if action.endswith("entries-search"):
+                    return {"entries": [{"entry_id": 7, "title": "葬送的芙莉莲"}]}
+                if action.endswith("history-add"):
+                    return {"created": True, "record": {"watched_on": "2026-08-09", "episode_start": 7}}
+                return {"entry_id": 7, "records": []}
+
+        with tempfile.TemporaryDirectory() as temp:
+            bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": True})
+            bridge.client = RecordingClient()
+            for text, expected_action, expected_payload in (
+                ("/animemo watch get 7", "watch-history-importer.history-get", {"entry_id": 7}),
+                ("/animemo watch add 7 2026-08-09 7", "watch-history-importer.history-add", {"entry_id": 7, "watched_on": "2026-08-09", "episode_start": 7, "episode_end": 7}),
+                ("/animemo watch find 芙莉莲", "watch-history-importer.entries-search", {"query": "芙莉莲"}),
+            ):
+                await bridge._command(self._event(text))
+                request_id, platform, external_user_id, action, payload = bridge.client.calls[-1]
+                UUID(request_id)
+                self.assertEqual((platform, external_user_id, action, payload), ("telegram", "42", expected_action, expected_payload))
+
+    async def test_developer_action_requires_flag_and_admin_when_available(self):
+        class RecordingClient:
+            def __init__(self):
+                self.calls = []
+
+            async def action(self, *args):
+                self.calls.append(args)
+                return {"secret": "must-not-be-rendered"}
+
+        with tempfile.TemporaryDirectory() as temp:
+            bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": True, "developer_commands": True})
+            bridge.client = RecordingClient()
+            denied = await bridge._command(self._event('/animemo action watch-history-importer.history-get {"entry_id":1}', admin=False))
+            self.assertIn("关闭", denied)
+            allowed = await bridge._command(self._event('/animemo action watch-history-importer.history-get {"entry_id":1}', admin=True))
+            self.assertEqual(allowed, "动作执行完成。")
+            self.assertNotIn("must-not-be-rendered", allowed)
+            self.assertEqual(len(bridge.client.calls), 1)
+
+    async def test_pair_route_is_saved_only_after_confirmed_success(self):
+        class PairClient:
+            async def pair(self, *args):
+                raise BridgeConnectionError("timeout")
+
+        with tempfile.TemporaryDirectory() as temp:
+            bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": True})
+            bridge.client = PairClient()
+            await bridge._command(self._event("/animemo pair ABC"))
+            self.assertEqual(bridge.routes.count(), 0)
+
+        class UnknownPairClient:
+            async def pair(self, *args):
+                raise PairingResultUnknown("unknown")
+
+        with tempfile.TemporaryDirectory() as temp:
+            bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": True})
+            bridge.client = UnknownPairClient()
+            result = await bridge._command(self._event("/animemo pair ABC"))
+            self.assertIn("结果未知", result)
+            self.assertNotIn("ABC", result)
+            self.assertEqual(bridge.routes.count(), 0)
+
+        class SuccessClient:
+            async def pair(self, *args):
+                return {"binding_id": 1}
+
+        with tempfile.TemporaryDirectory() as temp:
+            bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": True})
+            bridge.client = SuccessClient()
+            await bridge._command(self._event("/animemo pair ABC"))
+            self.assertEqual(bridge.routes.count(), 1)
+
+    async def test_diagnostics_register_once_and_clear_only_selected_route(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registered = []
+            context = SimpleNamespace(
+                data_dir=temp,
+                register_web_api=lambda *args: registered.append(args),
+            )
+            bridge = AniMemoBridge(context, {"enabled": True, "key_id": "", "secret": ""})
+            await bridge.initialize()
+            await bridge.initialize()
+            self.assertEqual(len(registered), 4)
+            status = await bridge._web_status()
+            self.assertFalse(status["configured"])
+            self.assertEqual(status["key_id"], "未配置")
+
+            bridge.routes.save_private(MessageIdentity("qq", "42", "A", "private", "qq:private:42"))
+            bridge.routes.save_private(MessageIdentity("telegram", "42", "B", "private", "telegram:private:42"))
+            selected = next(item for item in bridge.routes.masked_routes() if item["platform"] == "qq")
+            result = await bridge._web_clear_route(
+                {"platform": "qq", "external_user_hash": selected["external_user_id"]}
+            )
+            self.assertEqual(result, {"status": "cleared"})
+            self.assertIsNone(bridge.routes.get("qq", "42"))
+            self.assertIsNotNone(bridge.routes.get("telegram", "42"))
+            serialized = str(await bridge._web_status())
+            self.assertNotIn("qq:private:42", serialized)

@@ -18,7 +18,7 @@ from .src.anime_journal_watch_history_importer.parser import build_preview, norm
 
 
 PLUGIN_SLUG = "watch-history-importer"
-PLUGIN_VERSION = "0.3.1"
+PLUGIN_VERSION = "0.3.2"
 MAX_FILES = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
 DATE_TAG_RE = re.compile(r"^\d{4}年\d{1,2}月(?:\d{1,2}(?:日|号)?)?(?:\s*(?:-|–|—|至)\s*(?:\d{1,2}月)?\d{1,2}(?:日|号)?)?$")
@@ -147,7 +147,7 @@ class WatchHistoryPlugin:
                 entry = JournalEntry.objects.get(pk=int(entry_id), user=context.user, deleted_at__isnull=True)
             except (TypeError, ValueError, JournalEntry.DoesNotExist):
                 return {"code": "entry_not_found", "detail": "番剧条目不存在。"}, 404
-            return {"entry_id": entry.pk, "records": store.get(str(entry.pk), []) or []}
+            return {"entry_id": entry.pk, "title": entry.title, "records": store.get(str(entry.pk), []) or []}
         rows = JournalEntry.objects.filter(user=context.user, deleted_at__isnull=True).order_by("pk")[:100]
         return {"entries": [{"entry_id": row.pk, "title": row.title, "records": store.get(str(row.pk), []) or []} for row in rows]}
 
@@ -180,7 +180,19 @@ class WatchHistoryPlugin:
         if created:
             history.append(record)
             store.set(str(entry.pk), history[-500:])
-            self.host.integrations.emit(context.user, "history-updated", {"entry_id": entry.pk, "count": 1})
+            self.host.integrations.emit(
+                context.user,
+                "history-updated",
+                {
+                    "entry_id": entry.pk,
+                    "title": entry.title,
+                    "watched_on": record["watched_on"],
+                    "brush_label": record["brush_label"],
+                    "episode_start": record["episode_start"],
+                    "episode_end": record["episode_end"],
+                    "count": 1,
+                },
+            )
         return {"entry_id": entry.pk, "created": created, "record": record, "total": len(history)}
 
     def integration_entries_search(self, context, payload):
@@ -216,6 +228,9 @@ class WatchHistoryPlugin:
             return {"code": "resolution_pending", "detail": "仍有番剧尚未完成 Bangumi 匹配。"}, 409
         imported_entries = set()
         imported_records = 0
+        created_entries = 0
+        updated_records = 0
+        skipped_records = 0
         with transaction.atomic():
             entries = list(JournalEntry.objects.select_for_update().filter(user=context.user, deleted_at__isnull=True))
             by_title = {normalize_title(title): entry for entry in entries for title in (entry.title, entry.japanese_title) if normalize_title(title)}
@@ -227,6 +242,7 @@ class WatchHistoryPlugin:
                 entry = by_title.get(normalize_title(resolution.get("title"))) or by_title.get(normalize_title(resolution.get("japanese_title")))
                 if entry is None:
                     entry = JournalEntry.objects.create(user=context.user, title=resolution.get("title") or group["source_title"], japanese_title=resolution.get("japanese_title") or "", watch_status=JournalEntry.WatchStatus.COMPLETED, visibility=JournalEntry.Visibility.PRIVATE, tags=[])
+                    created_entries += 1
                 imported_entries.add(entry.pk)
                 history = history_store.get(str(entry.pk), []) or []
                 keys = {(item.get("watched_on"), item.get("brush_label"), item.get("episode_start"), item.get("episode_end")) for item in history}
@@ -236,8 +252,19 @@ class WatchHistoryPlugin:
                     key = (normalized["watched_on"], normalized["brush_label"], normalized["episode_start"], normalized["episode_end"])
                     if key not in keys:
                         history.append(normalized); keys.add(key); imported_records += 1
+                        updated_records += 1
+                    else:
+                        skipped_records += 1
                 history_store.set(str(entry.pk), history[-500:])
-        result = {"batch_id": batch_id, "imported_entries": len(imported_entries), "imported_records": imported_records, "excluded_groups": len(excluded)}
+        result = {
+            "batch_id": batch_id,
+            "imported_entries": len(imported_entries),
+            "imported_records": imported_records,
+            "excluded_groups": len(excluded),
+            "created": created_entries,
+            "updated": updated_records,
+            "skipped": skipped_records + len(excluded),
+        }
         self.host.integrations.emit(context.user, "import-completed", result)
         return result
 
@@ -345,6 +372,9 @@ class WatchHistoryPlugin:
         target_user = request.user
         imported_entries = set()
         imported_records = 0
+        created_entries = 0
+        updated_records = 0
+        skipped_records = 0
         with transaction.atomic():
             entries = list(JournalEntry.objects.select_for_update().filter(user=target_user, deleted_at__isnull=True))
             by_title = {normalize_title(title): entry for entry in entries for title in (entry.title, entry.japanese_title) if normalize_title(title)}
@@ -369,6 +399,7 @@ class WatchHistoryPlugin:
                 }
                 if entry is None:
                     entry = JournalEntry.objects.create(user=target_user, **defaults)
+                    created_entries += 1
                 else:
                     for field, value in defaults.items():
                         if value or field in {"tags", "watch_status", "visibility"}:
@@ -387,6 +418,9 @@ class WatchHistoryPlugin:
                         history.append(normalized)
                         keys.add(key)
                         imported_records += 1
+                        updated_records += 1
+                    else:
+                        skipped_records += 1
                 history_store.set(str(entry.pk), history)
         batch["status"] = "imported"
         batch["imported_at"] = timezone.now().isoformat()
@@ -396,7 +430,14 @@ class WatchHistoryPlugin:
         self.host.integrations.emit(
             target_user,
             "import-completed",
-            {"batch_id": batch["id"], "imported_entries": len(imported_entries), "imported_records": imported_records},
+            {
+                "batch_id": batch["id"],
+                "imported_entries": len(imported_entries),
+                "imported_records": imported_records,
+                "created": created_entries,
+                "updated": updated_records,
+                "skipped": skipped_records + len(excluded),
+            },
         )
         return Response(_serialize_batch(batch))
 

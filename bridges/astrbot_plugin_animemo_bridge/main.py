@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
-import secrets
 from pathlib import Path
+from uuid import uuid4
 
 try:
     from .animemo_bridge.client import AsyncAniMemoClient, BridgeConfig
-    from .animemo_bridge.errors import AniMemoBridgeError
+    from .animemo_bridge.errors import AniMemoBridgeError, PairingResultUnknown
     from .animemo_bridge.events import EventPoller
     from .animemo_bridge.identity import extract_identity
     from .animemo_bridge.routing import RouteStore
     from .animemo_bridge.state import EventState
 except ImportError:  # direct AstrBot loader / static tests
     from animemo_bridge.client import AsyncAniMemoClient, BridgeConfig
-    from animemo_bridge.errors import AniMemoBridgeError
+    from animemo_bridge.errors import AniMemoBridgeError, PairingResultUnknown
     from animemo_bridge.events import EventPoller
     from animemo_bridge.identity import extract_identity
     from animemo_bridge.routing import RouteStore
@@ -24,6 +25,7 @@ try:  # AstrBot is intentionally optional for repository-side unit tests.
     from astrbot.api import logger
     from astrbot.api.event import AstrMessageEvent, filter
     from astrbot.api.star import Context, Star, register
+    from astrbot.api.web import request as web_request
 except ImportError:  # pragma: no cover - exercised by packaging/static tests
     class _FallbackLogger:
         def __getattr__(self, _name):
@@ -53,6 +55,7 @@ except ImportError:  # pragma: no cover - exercised by packaging/static tests
             return _Group()
 
     filter = _Filter()
+    web_request = None
 
     def register(*_args, **_kwargs):
         return lambda cls: cls
@@ -87,11 +90,16 @@ async def _reply(event, text):
     if callable(method):
         message = str(text)
         try:
-            from astrbot.api.event import MessageChain
+            from astrbot.api.message import MessageChain
 
             message = MessageChain().message(message)
         except (ImportError, AttributeError, TypeError):
-            message = str(text)
+            try:
+                from astrbot.api.event import MessageChain
+
+                message = MessageChain().message(message)
+            except (ImportError, AttributeError, TypeError):
+                message = str(text)
         result = method(message)
         if inspect.isawaitable(result):
             await result
@@ -126,6 +134,53 @@ def _config_value(config, key):
     return value
 
 
+def _developer_allowed(event):
+    role = getattr(event, "role", None)
+    if role is not None:
+        return str(role).strip().lower() in {"admin", "administrator"}
+    for name in ("is_admin", "is_sender_admin", "sender_is_admin"):
+        candidate = getattr(event, name, None)
+        if callable(candidate):
+            try:
+                result = candidate()
+                return False if inspect.isawaitable(result) else bool(result)
+            except TypeError:
+                continue
+        if candidate is not None:
+            return bool(candidate)
+    return False
+
+
+def _watch_action_result(action, result):
+    if action in {"find", "search", "entries-search"}:
+        entries = result.get("entries", []) if isinstance(result, dict) else []
+        if not entries:
+            return "没有找到匹配的番剧条目。"
+        return "\n".join(
+            f"{item.get('entry_id')} · {item.get('title') or item.get('japanese_title') or '未命名'}"
+            for item in entries[:20]
+            if isinstance(item, dict)
+        )
+    if action in {"add", "history-add"} and isinstance(result, dict):
+        record = result.get("record") if isinstance(result.get("record"), dict) else {}
+        episode = record.get("episode_start")
+        if episode is not None:
+            episode_text = f" · 第{episode}话"
+        else:
+            episode_text = ""
+        return f"观看记录已{'新增' if result.get('created') else '存在'}：{record.get('watched_on') or '日期未填写'}{episode_text}"
+    if action in {"get", "history-get"} and isinstance(result, dict):
+        records = result.get("records", [])
+        title = result.get("title") or f"条目 {result.get('entry_id', 'unknown')}"
+        return f"《{title}》共有 {len(records) if isinstance(records, list) else 0} 条观看记录。"
+    if isinstance(result, dict):
+        detail = result.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()[:240]
+        return "动作执行完成。"
+    return "动作执行完成。"
+
+
 @register("astrbot_plugin_animemo_bridge", "AniMemo", "AniMemo Integration Protocol v1 Bridge", "0.1.0")
 class AniMemoBridge(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -138,31 +193,56 @@ class AniMemoBridge(Star):
         self.poller = None
         self.last_ping = "NOT RUN"
         self.configuration_error = ""
+        self._web_registered = False
 
     async def initialize(self):
-        if not bool(_config_value(self.config, "enabled")):
-            return
-        try:
-            bridge_config = BridgeConfig.from_values(
-                _config_value(self.config, "animemo_base_url"),
-                _config_value(self.config, "key_id"),
-                _config_value(self.config, "secret"),
-                timeout_seconds=max(float(_config_value(self.config, "request_timeout_seconds")), float(_config_value(self.config, "poll_wait_seconds")) + 5),
-                verify_tls=bool(_config_value(self.config, "verify_tls")),
-            )
-        except ValueError:
-            self.configuration_error = "凭证配置不完整"
-            logger.warning("AniMemo Bridge disabled until credentials are configured")
-            return
-        self.client = AsyncAniMemoClient(bridge_config)
+        if self.client or self.poller:
+            await self.terminate()
         register_web_api = getattr(self.context, "register_web_api", None)
-        if callable(register_web_api):
+        if callable(register_web_api) and not self._web_registered:
             register_web_api(
                 "/astrbot_plugin_animemo_bridge/status",
                 self._web_status,
                 ["GET"],
                 "AniMemo Bridge sanitized diagnostics",
             )
+            register_web_api(
+                "/astrbot_plugin_animemo_bridge/ping",
+                self._web_ping,
+                ["POST"],
+                "AniMemo Bridge connectivity check",
+            )
+            register_web_api(
+                "/astrbot_plugin_animemo_bridge/restart",
+                self._web_restart,
+                ["POST"],
+                "Restart AniMemo Bridge event poller",
+            )
+            register_web_api(
+                "/astrbot_plugin_animemo_bridge/routes/clear",
+                self._web_clear_route,
+                ["POST"],
+                "Clear one masked AniMemo Bridge route",
+            )
+            self._web_registered = True
+        if not bool(_config_value(self.config, "enabled")):
+            return
+        try:
+            verify_tls = bool(_config_value(self.config, "verify_tls"))
+            if not verify_tls:
+                logger.warning("AniMemo Bridge TLS verification is disabled; use this only for local development")
+            bridge_config = BridgeConfig.from_values(
+                _config_value(self.config, "animemo_base_url"),
+                _config_value(self.config, "key_id"),
+                _config_value(self.config, "secret"),
+                timeout_seconds=max(float(_config_value(self.config, "request_timeout_seconds")), float(_config_value(self.config, "poll_wait_seconds")) + 5),
+                verify_tls=verify_tls,
+            )
+        except ValueError:
+            self.configuration_error = "凭证配置不完整"
+            logger.warning("AniMemo Bridge disabled until credentials are configured")
+            return
+        self.client = AsyncAniMemoClient(bridge_config)
         if bool(_config_value(self.config, "poll_events")):
             self.poller = EventPoller(
                 client=self.client,
@@ -188,13 +268,71 @@ class AniMemoBridge(Star):
     async def _web_status(self, _request=None):
         return {
             "enabled": bool(self.client),
+            "configured": bool(self.client and self.client.configured),
+            "server": _config_value(self.config, "animemo_base_url"),
+            "key_id": self._masked_key_id(),
             "poller": self.poller.status if self.poller else "STOPPED",
             "route_count": self.routes.count(),
             "routes": self.routes.masked_routes(),
             "cursor": self.state.cursor,
+            "delivered_event_count": self.state.delivered_count,
             "last_successful_poll": self.state.last_successful_poll,
             "last_error": self.state.last_error,
+            "last_ping": self.last_ping,
+            "configuration_error": self.configuration_error,
         }
+
+    async def _web_ping(self, _request=None):
+        try:
+            await self._require_client().ping()
+            self.last_ping = "OK"
+        except AniMemoBridgeError:
+            self.last_ping = "FAIL"
+        return {"status": self.last_ping}
+
+    async def _web_restart(self, _request=None):
+        if not self.client or not bool(_config_value(self.config, "poll_events")):
+            return {"status": "STOPPED"}
+        if self.poller:
+            await self.poller.stop()
+        self.poller = EventPoller(
+            client=self.client,
+            context=self.context,
+            routes=self.routes,
+            state=self.state,
+            logger=logger,
+            wait_seconds=int(_config_value(self.config, "poll_wait_seconds")),
+            developer=bool(_config_value(self.config, "developer_commands")),
+        )
+        self.poller.start()
+        return {"status": self.poller.status}
+
+    async def _web_clear_route(self, request=None):
+        payload = request if isinstance(request, dict) else {}
+        request_source = request if request is not None else web_request
+        reader = getattr(request_source, "json", None)
+        if not payload and callable(reader):
+            try:
+                candidate = reader(default={})
+            except TypeError:
+                candidate = reader()
+            payload = await candidate if inspect.isawaitable(candidate) else candidate
+        if not isinstance(payload, dict):
+            payload = {}
+        platform = str(payload.get("platform") or "").strip().lower()
+        external_hash = str(payload.get("external_user_hash") or "").strip()
+        if not platform or not external_hash:
+            return {"status": "invalid_request"}
+        if not self.routes.clear_masked(platform, external_hash):
+            return {"status": "not_found"}
+        self.routes.save()
+        return {"status": "cleared"}
+
+    def _masked_key_id(self):
+        key_id = str(_config_value(self.config, "key_id") or "")
+        if not key_id:
+            return "未配置"
+        return f"{key_id[:8]}…{key_id[-4:]}"
 
     def _require_client(self):
         if not self.client:
@@ -208,10 +346,10 @@ class AniMemoBridge(Star):
             parts = parts[1:]
         command = parts[0].lower() if parts else "help"
         identity = extract_identity(event)
-        if identity.is_private:
+        if identity.is_private and command != "pair":
             self.routes.save_private(identity)
         if command in {"help", ""}:
-            return await _reply(event, "AniMemo Bridge 命令：pair <code>、status、ping、watch <action>、unpair-help。")
+            return await _reply(event, "AniMemo Bridge 命令：pair <code>、status、ping、watch get/add/find、unpair-help。")
         if command == "unpair-help":
             return await _reply(event, "请在 AniMemo 绑定管理页面移除该外部身份；Bridge 不会在群聊执行解绑。")
         if command == "pair":
@@ -221,8 +359,15 @@ class AniMemoBridge(Star):
                 return await _reply(event, "用法：/animemo pair <code>")
             try:
                 result = await self._require_client().pair(parts[1], identity.platform, identity.external_user_id, identity.display_name)
+            except PairingResultUnknown:
+                return await _reply(
+                    event,
+                    "配对请求结果未知，请在 AniMemo 绑定页面确认；如未成功请生成新的配对码。",
+                )
             except AniMemoBridgeError as error:
                 return await _reply(event, f"配对失败：{type(error).__name__}。")
+            if result:
+                self.routes.save_private(identity)
             return await _reply(event, "AniMemo 绑定成功。" if result else "AniMemo 绑定请求已提交。")
         if not identity.is_private and not bool(_config_value(self.config, "allow_group_commands")):
             return await _reply(event, "群聊业务命令默认关闭，请在私聊中使用。")
@@ -237,14 +382,65 @@ class AniMemoBridge(Star):
             return await _reply(event, f"AniMemo HMAC connectivity: {self.last_ping}")
         if command == "watch":
             if len(parts) < 2:
-                return await _reply(event, "用法：/animemo watch <action> [参数]")
-            action = parts[1]
-            payload = {"args": parts[2:]}
+                return await _reply(event, "用法：/animemo watch get <entry_id>、add <entry_id> <日期> [集数]、find <关键词>")
+            action = parts[1].lower()
+            payload = {}
+            if action in {"get", "history-get"}:
+                if len(parts) != 3:
+                    return await _reply(event, "用法：/animemo watch get <entry_id>")
+                try:
+                    payload["entry_id"] = int(parts[2])
+                except ValueError:
+                    return await _reply(event, "entry_id 必须是数字。")
+                action_name = "history-get"
+            elif action in {"add", "history-add"}:
+                if len(parts) not in {4, 5}:
+                    return await _reply(event, "用法：/animemo watch add <entry_id> <日期> [集数]")
+                try:
+                    payload = {"entry_id": int(parts[2]), "watched_on": parts[3]}
+                    if len(parts) == 5:
+                        payload["episode_start"] = int(parts[4])
+                        payload["episode_end"] = payload["episode_start"]
+                except ValueError:
+                    return await _reply(event, "entry_id 和集数必须是数字。")
+                action_name = "history-add"
+            elif action in {"find", "search", "entries-search"}:
+                if len(parts) < 3:
+                    return await _reply(event, "用法：/animemo watch find <关键词>")
+                payload = {"query": " ".join(parts[2:])}
+                action_name = "entries-search"
+            else:
+                return await _reply(event, "支持：get、add、find。")
             try:
-                result = await self._require_client().action(secrets.token_hex(16), identity.platform, identity.external_user_id, f"watch-history-importer.{action}", payload)
+                result = await self._require_client().action(
+                    str(uuid4()),
+                    identity.platform,
+                    identity.external_user_id,
+                    f"watch-history-importer.{action_name}",
+                    payload,
+                )
             except AniMemoBridgeError as error:
                 return await _reply(event, f"动作失败：{type(error).__name__}。")
-            return await _reply(event, result.get("detail") or str(result.get("result") or result))
+            return await _reply(event, _watch_action_result(action, result))
+        if command == "action":
+            if not bool(_config_value(self.config, "developer_commands")) or not _developer_allowed(event):
+                return await _reply(event, "developer action 已关闭。")
+            if len(parts) < 3:
+                return await _reply(event, "用法：/animemo action <plugin.action> <json>")
+            try:
+                action_name = parts[1]
+                payload = json.loads(" ".join(parts[2:]))
+                if not isinstance(payload, dict):
+                    raise TypeError("action payload must be an object")
+            except (TypeError, json.JSONDecodeError):
+                return await _reply(event, "action payload 必须是 JSON 对象。")
+            try:
+                result = await self._require_client().action(
+                    str(uuid4()), identity.platform, identity.external_user_id, action_name, payload
+                )
+            except AniMemoBridgeError as error:
+                return await _reply(event, f"动作失败：{type(error).__name__}。")
+            return await _reply(event, _watch_action_result("action", result))
         if command == "debug" and bool(_config_value(self.config, "developer_commands")):
             return await _reply(event, f"event route count={self.routes.count()} cursor={self.state.cursor}")
         return await _reply(event, "未知命令，请使用 /animemo help。")
@@ -254,10 +450,12 @@ class AniMemoBridge(Star):
         return "\n".join((
             "AniMemo Bridge: 已启用" if self.client else "AniMemo Bridge: 未启用",
             f"Server: {_config_value(self.config, 'animemo_base_url')}",
-            f"Key ID: {str(_config_value(self.config, 'key_id'))[:8]}…{str(_config_value(self.config, 'key_id'))[-4:] if _config_value(self.config, 'key_id') else ''}",
+            f"Key ID: {self._masked_key_id()}",
             f"Event poller: {poll}",
             f"Current route: {'已绑定本地投递路由' if self.routes.count() else '无'}",
+            f"HMAC connectivity: {self.last_ping}",
             f"Last successful poll: {self.state.last_successful_poll or 'NOT RUN'}",
+            f"Last error: {self.state.last_error or 'NONE'}",
             f"Config: {self.configuration_error}" if self.configuration_error else "",
         ))
 
