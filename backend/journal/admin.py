@@ -2,7 +2,7 @@ from django.contrib import admin
 
 from accounts.models import LoginEvent, PendingRegistration, StaffProfile, UserSecurityProfile
 from site_config.models import CloudflareR2Account, MediaObject, MediaStorageBackend, MediaStoragePoolSettings, SiteSettings, TagDefinition
-from .models import AdminAuditLog, Column, JournalEntry, QuickFilter, UserSettings
+from .models import AdminAuditLog, Column, ExternalMediaIdentity, JournalEntry, QuickFilter, UserSettings
 
 
 @admin.register(PendingRegistration)
@@ -135,6 +135,27 @@ class JournalEntryAdmin(admin.ModelAdmin):
     list_filter = ("watch_status", "visibility")
     search_fields = ("title", "japanese_title", "user__username", "user__email")
     readonly_fields = ("share_slug", "created_at", "updated_at")
+
+
+@admin.register(ExternalMediaIdentity)
+class ExternalMediaIdentityAdmin(admin.ModelAdmin):
+    list_display = ("provider", "external_id", "entry", "entry_user", "metadata_fetched_at", "updated_at")
+    list_filter = ("provider",)
+    search_fields = ("external_id", "entry__title", "entry__user__username", "entry__user__email")
+    readonly_fields = (
+        "entry", "provider", "external_id", "canonical_url", "metadata", "metadata_fetched_at",
+        "provider_updated_at", "created_at", "updated_at",
+    )
+
+    @admin.display(description="用户")
+    def entry_user(self, obj):
+        return obj.entry.user
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(UserSettings)

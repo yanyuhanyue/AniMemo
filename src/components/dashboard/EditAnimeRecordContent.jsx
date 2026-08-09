@@ -3,6 +3,7 @@ import { Icon } from "../Icon.jsx";
 import { WatchHistoryList } from "../WatchHistoryList.jsx";
 import { buildPresetColorMap, FALLBACK_TAG_PRESETS, isCustomTagColor, TAG_COLOR_OPTIONS, tagColorKey, tagColorStyle } from "../../lib/tagPresets.js";
 import { normalizeTrustedPosterHosts, validateTrustedPosterUrl } from "../../lib/posterSources.js";
+import { ExternalMediaIdentityPanel } from "./ExternalMediaIdentityPanel.jsx";
 
 const STATUS_OPTIONS = [
   ["planned", "想看"],
@@ -15,6 +16,7 @@ const MODULES = [
   ["tags", "标签管理", "tags"],
   ["intro", "剧情简介", "list"],
   ["review", "个人评价", "edit"],
+  ["external", "外部资料", "link"],
 ];
 
 const BRUSH_NUMBERS = { 首刷: 1, 一刷: 1, 二刷: 2, 三刷: 3, 四刷: 4, 五刷: 5, 六刷: 6, 七刷: 7, 八刷: 8, 九刷: 9, 十刷: 10 };
@@ -69,8 +71,11 @@ export function EditAnimeRecordContent({
   onClose,
   tagPresets = FALLBACK_TAG_PRESETS,
   trustedPosterHosts,
+  onIdentityChange,
+  isDemo = false,
 }) {
   const fileRef = useRef(null);
+  const editorRef = useRef(null);
   const previousModuleRef = useRef("tags");
   const [module, setModule] = useState("tags");
   const [customTag, setCustomTag] = useState("");
@@ -93,10 +98,12 @@ export function EditAnimeRecordContent({
   const selectModule = (value) => {
     if (value !== "history") previousModuleRef.current = value;
     setModule(value);
+    window.requestAnimationFrame(() => editorRef.current?.scrollIntoView({ block: "start" }));
   };
-  const toggleHistoryModule = () => setModule((current) => (
-    current === "history" ? previousModuleRef.current : "history"
-  ));
+  const toggleHistoryModule = () => {
+    setModule((current) => current === "history" ? previousModuleRef.current : "history");
+    window.requestAnimationFrame(() => editorRef.current?.scrollIntoView({ block: "start" }));
+  };
   const updateStatus = (value) => {
     const label = STATUS_OPTIONS.find(([key]) => key === value)?.[1] || "想看";
     setDraft((current) => ({ ...current, status: value, statusLabel: label }));
@@ -302,7 +309,7 @@ export function EditAnimeRecordContent({
               </button>
             </div>
 
-            <section className="anime-edit-modal__editor anime-edit-modal__piece">
+            <section className="anime-edit-modal__editor anime-edit-modal__piece" ref={editorRef}>
               {module === "tags" ? (
                 <div className="anime-edit-modal__tag-layout">
                   <div className="anime-edit-modal__current-tags">
@@ -349,6 +356,11 @@ export function EditAnimeRecordContent({
                   </form>
                   <WatchHistoryList records={watchHistory} editable onRemove={removeWatchRecord} emptyText="还没有观看记录，可以在上方手动添加。" />
                   <ModuleTabs module={module} onChange={selectModule} />
+                </div>
+              ) : module === "external" ? (
+                <div className="external-media-layout">
+                  <ModuleTabs module={module} onChange={selectModule} />
+                  <ExternalMediaIdentityPanel draft={draft} setDraft={setDraft} onIdentityChange={onIdentityChange} isDemo={isDemo} />
                 </div>
               ) : (
                 <div className={`anime-edit-modal__copy-panel is-${module}`}>

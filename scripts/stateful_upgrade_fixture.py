@@ -7,7 +7,6 @@ import os
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 if not BACKEND.is_dir() and Path("/app/backend").is_dir():
@@ -68,9 +67,13 @@ def seed_state(output_path):
     from django.contrib.auth import get_user_model
     from django.core.management import call_command
     from django.db import transaction
-
     from journal.models import JournalEntry
-    from plugin_host.models import PluginData, PluginDeployment, PluginProject, UserPluginInstallation
+    from plugin_host.models import (
+        PluginData,
+        PluginDeployment,
+        PluginProject,
+        UserPluginInstallation,
+    )
     from plugin_host.runtime import runtime_registry
 
     output_path = Path(output_path)
@@ -165,7 +168,6 @@ def seed_state(output_path):
 
 def verify_state(input_path):
     from django.contrib.auth import get_user_model
-
     from journal.models import JournalEntry
     from plugin_host.models import (
         PluginData,
@@ -184,6 +186,57 @@ def verify_state(input_path):
     _assert(user is not None, "Seed user did not survive the upgrade.")
     journal = JournalEntry.objects.filter(pk=fixture["journal_id"], user=user).first()
     _assert(journal is not None and journal.review == fixture["journal_review"], "Seed JournalEntry changed or is missing.")
+
+    external_identity_status = "NOT_APPLICABLE"
+    if _migration_applied("journal", "0002_external_media_identity"):
+        from journal.models import ExternalMediaIdentity
+
+        identity_metadata = {
+            "title": "Stateful Upgrade Gate",
+            "japanese_title": "ステートフルアップグレードゲート",
+            "summary": "stateful-upgrade-external-identity-v1",
+            "episodes": 12,
+            "air_date": "2026-08-09",
+            "studio": "AniMemo CI",
+            "tags": ["upgrade-gate"],
+            "score": 8.8,
+            "poster_url": "",
+            "thumbnail_url": "",
+            "provider_name": "Bangumi",
+            "provider_url": "https://bgm.tv/subject/475000",
+            "external_id": "475000",
+        }
+        identity = ExternalMediaIdentity.objects.filter(
+            entry=journal,
+            provider="bangumi",
+            external_id="475000",
+        ).first()
+        if "external_identity_id" not in fixture:
+            _assert(identity is None, "External identity unexpectedly existed before the current-schema verification.")
+            identity = ExternalMediaIdentity.objects.create(
+                entry=journal,
+                provider="bangumi",
+                external_id="475000",
+                canonical_url="https://bgm.tv/subject/475000",
+                metadata=identity_metadata,
+            )
+            fixture["external_identity_id"] = identity.pk
+            fixture["external_identity_metadata"] = identity_metadata
+            Path(input_path).write_text(json.dumps(fixture, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            external_identity_status = "CREATED"
+        else:
+            identity = ExternalMediaIdentity.objects.filter(
+                pk=fixture["external_identity_id"],
+                entry=journal,
+                provider="bangumi",
+                external_id="475000",
+            ).first()
+            _assert(identity is not None, "ExternalMediaIdentity did not survive the restart.")
+            _assert(identity.canonical_url == "https://bgm.tv/subject/475000", "ExternalMediaIdentity canonical URL changed.")
+            _assert(identity.metadata == fixture["external_identity_metadata"], "ExternalMediaIdentity metadata changed.")
+            _assert(identity.created_at is not None and identity.updated_at is not None, "ExternalMediaIdentity timestamps are missing.")
+            _assert(journal.external_identities.count() == 1, "ExternalMediaIdentity was duplicated after restart.")
+            external_identity_status = "PERSISTED"
 
     projects = PluginProject.objects.filter(slug=fixture["plugin_slug"])
     _assert(projects.count() == 1, "Official PluginProject is missing or duplicated.")
@@ -235,6 +288,7 @@ def verify_state(input_path):
     report = {
         "user": "PASS",
         "journal_entry": "PASS",
+        "external_media_identity": external_identity_status,
         "user_plugin_installation": "PASS",
         "plugin_data": "PASS",
         "plugin_project": "PASS",

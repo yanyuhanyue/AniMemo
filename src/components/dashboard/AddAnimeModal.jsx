@@ -3,6 +3,7 @@ import gsap from "gsap";
 import { Icon } from "../Icon.jsx";
 import { readableApiError, api } from "../../lib/api.js";
 import { validateTrustedPosterUrl } from "../../lib/posterSources.js";
+import { bangumiIdentityFromResult } from "../../lib/externalMedia.js";
 
 const CATALOG_PAGE_SIZE = 10;
 const BANGUMI_SPINNER_MIN_MS = 420;
@@ -22,6 +23,7 @@ const EMPTY_DRAFT = {
   status: "planned",
   score: "",
   review: "",
+  externalIdentity: null,
 };
 
 function normalizeCatalogRecord(item) {
@@ -40,6 +42,7 @@ function normalizeCatalogRecord(item) {
     review: "",
     posterFile: null,
     posterSource: "default_url",
+    externalIdentity: null,
   };
 }
 
@@ -63,6 +66,7 @@ function normalizeBangumi(item) {
     review: "",
     posterFile: null,
     posterSource: "default_url",
+    externalIdentity: bangumiIdentityFromResult(item),
   };
 }
 
@@ -430,7 +434,10 @@ export function AddAnimeModal({ onClose, onSubmit, isDemo = false, catalogRecord
     bangumiSelectionRef.current = true;
     setSelectedBangumiId(item.id);
     const completeSelection = (selectedItem, notice) => {
-      const next = normalizeBangumi(selectedItem);
+      const next = normalizeBangumi({
+        ...selectedItem,
+        id: selectedItem?.external_id ?? selectedItem?.id ?? item?.external_id ?? item?.id,
+      });
       setDraft(next);
       setPreview(next.poster);
       setSmartResults([]);

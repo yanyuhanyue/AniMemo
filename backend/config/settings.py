@@ -494,7 +494,11 @@ _raw_frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173" if DEBUG e
 if not _raw_frontend_url:
     raise ImproperlyConfigured("生产环境必须显式配置 FRONTEND_URL。")
 FRONTEND_URL = _validate_origin(_raw_frontend_url, setting_name="FRONTEND_URL", production=not DEBUG)
-BANGUMI_USER_AGENT = os.getenv("BANGUMI_USER_AGENT", "AnimeJournal/1.0 (+https://xh-anime.com)")
+BANGUMI_USER_AGENT = os.getenv("BANGUMI_USER_AGENT", "AniMemo/1.0 (+https://re-anime.cc)")
+BANGUMI_IMAGE_PROXY_BASE_URL = os.getenv(
+    "BANGUMI_IMAGE_PROXY_BASE_URL",
+    "https://bgm-img-proxy.xhcytus100.workers.dev/",
+).strip()
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "Anime Journal <noreply@example.com>")
 TURNSTILE_SECRET = os.getenv("TURNSTILE_SECRET", "").strip()

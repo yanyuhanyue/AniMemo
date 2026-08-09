@@ -1,24 +1,31 @@
-import ipaddress
-from urllib.parse import urlsplit
+import json
 
 from django.conf import settings
 from django.db import transaction
-from rest_framework import serializers
-
 from plugin_host.models import PluginData
 from plugin_host.permissions import enabled_user_plugin
+from rest_framework import serializers
+from site_config.media_storage.storage import (
+    cleanup_uncommitted_media_reference,
+    mark_media_reference_committed,
+)
 
+from .external_media.services import (
+    create_prepared_identity,
+    lock_identity_owner,
+    prepare_identity,
+)
+from .image_security import delete_replaced_file, sanitize_uploaded_image
+from .models import ExternalMediaIdentity, JournalEntry
+from .poster_security import PosterUrlValidationError, validate_poster_url
 
 WATCH_HISTORY_PLUGIN_SLUG = "watch-history-importer"
 
 
 def _watch_history_project(user):
     return enabled_user_plugin(WATCH_HISTORY_PLUGIN_SLUG, user)
-from site_config.models import SiteSettings
-from site_config.media_storage.storage import cleanup_uncommitted_media_reference, mark_media_reference_committed
 
-from .image_security import delete_replaced_file, sanitize_uploaded_image
-from .models import JournalEntry
+
 from .watch_history import (
     WatchHistoryValidationError,
     normalize_watch_history_records,
@@ -26,28 +33,34 @@ from .watch_history import (
 )
 
 
-def _trusted_poster_hosts():
-    values = SiteSettings.load().trusted_poster_hosts or []
-    return {str(value).strip().lower().rstrip(".") for value in values if str(value).strip()}
-
-
 def _validate_poster_url(value):
-    value = str(value or "").strip()
-    if not value:
-        return ""
-    parsed = urlsplit(value)
-    hostname = (parsed.hostname or "").lower().rstrip(".")
-    if parsed.scheme != "https" or not hostname or parsed.username or parsed.password:
-        raise serializers.ValidationError("封面必须使用受信任域名的 HTTPS 地址。")
     try:
-        ipaddress.ip_address(hostname)
-    except ValueError:
-        pass
-    else:
-        raise serializers.ValidationError("封面地址不能直接使用 IP 地址。")
-    if hostname not in _trusted_poster_hosts():
-        raise serializers.ValidationError("该图片域名不在管理员维护的可信白名单中。")
-    return value
+        return validate_poster_url(value)
+    except PosterUrlValidationError as error:
+        raise serializers.ValidationError(str(error)) from error
+
+
+class ExternalIdentityInputField(serializers.JSONField):
+    def to_internal_value(self, data):
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError as error:
+                raise serializers.ValidationError("外部资料身份必须是 JSON 对象。") from error
+        value = super().to_internal_value(data)
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("外部资料身份必须是 JSON 对象。")
+        return value
+
+
+class ExternalMediaIdentitySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ExternalMediaIdentity
+        fields = [
+            "id", "provider", "external_id", "canonical_url", "metadata",
+            "metadata_fetched_at", "provider_updated_at", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
 
 
 class JournalEntrySerializer(serializers.ModelSerializer):
@@ -57,6 +70,8 @@ class JournalEntrySerializer(serializers.ModelSerializer):
     clear_custom_poster = serializers.BooleanField(write_only=True, required=False, default=False)
     share_url = serializers.SerializerMethodField(read_only=True)
     watch_history = serializers.JSONField(required=False, write_only=True)
+    external_identity = ExternalIdentityInputField(required=False, write_only=True, allow_null=True)
+    external_identities = ExternalMediaIdentitySerializer(many=True, read_only=True)
 
     class Meta:
         model = JournalEntry
@@ -65,7 +80,8 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             "description", "poster_url", "custom_poster_url", "poster_file", "poster", "poster_source",
             "clear_custom_poster", "baike_url", "tags",
             "tag_colors", "personal_score", "watch_status", "watch_status_display", "review",
-            "visibility", "share_slug", "share_url", "watch_history", "created_at", "updated_at",
+            "visibility", "share_slug", "share_url", "watch_history", "external_identity",
+            "external_identities", "created_at", "updated_at",
         ]
         read_only_fields = ["share_slug", "created_at", "updated_at"]
 
@@ -73,6 +89,21 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         if not isinstance(value, list) or any(not isinstance(tag, str) for tag in value):
             raise serializers.ValidationError("标签必须是字符串数组。")
         return list(dict.fromkeys(tag.strip() for tag in value if tag.strip()))[:30]
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        identity_data = attrs.pop("external_identity", serializers.empty)
+        self._prepared_external_identity = None
+        if identity_data is serializers.empty or identity_data is None:
+            return attrs
+        if self.instance is not None:
+            raise serializers.ValidationError({"external_identity": "请使用外部资料绑定接口修改身份。"})
+        provider = identity_data.get("provider")
+        external_id = identity_data.get("external_id")
+        if not provider or external_id in (None, ""):
+            raise serializers.ValidationError({"external_identity": "provider 和 external_id 均为必填项。"})
+        self._prepared_external_identity = prepare_identity(provider, external_id)
+        return attrs
 
     def to_representation(self, instance):
         representation = super().to_representation(instance)
@@ -190,7 +221,11 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         instance = JournalEntry(**validated_data)
         try:
             with transaction.atomic():
+                if self._prepared_external_identity is not None:
+                    lock_identity_owner(instance.user)
                 instance.save()
+                if self._prepared_external_identity is not None:
+                    create_prepared_identity(instance, self._prepared_external_identity)
                 self._sync_watch_history(instance, history_data)
         except Exception:
             cleanup_uncommitted_media_reference(getattr(instance.poster_file, "name", ""))

@@ -60,6 +60,7 @@ export const blankRecord = () => ({
   watchHistory: [],
   tagColors: { 日常: "blue" },
   shared: false,
+  externalIdentities: [],
 });
 
 export function apiToRecord(item, presetColors) {
@@ -85,13 +86,14 @@ export function apiToRecord(item, presetColors) {
     baikeUrl: item.baike_url || "https://mzh.moegirl.org.cn/",
     watchHistory: item.watch_history || [],
     shared: item.visibility !== "private",
+    externalIdentities: Array.isArray(item.external_identities) ? item.external_identities : [],
     updatedAt: item.updated_at,
   };
 }
 
 export function recordToApi(record) {
   const legacyPosterUrl = !record.posterUrl && !record.customPosterUrl && /^https?:\/\//i.test(String(record.poster || "")) ? record.poster : "";
-  return {
+  const payload = {
     title: record.title,
     japanese_title: record.japaneseTitle,
     airing_period: record.period,
@@ -110,6 +112,8 @@ export function recordToApi(record) {
     watch_history: record.watchHistory || [],
     visibility: record.shared ? "public" : "private",
   };
+  if (record.externalIdentity) payload.external_identity = record.externalIdentity;
+  return payload;
 }
 
 export function importIdentity(value) {
@@ -154,6 +158,7 @@ export function parseLocalImportRecords(raw, presetColors) {
       baikeUrl: item.baikeUrl || item.baike_url || "https://mzh.moegirl.org.cn/",
       watchHistory: item.watchHistory || item.watch_history || [],
       shared: item.shared ?? item.visibility === "public",
+      externalIdentities: Array.isArray(item.externalIdentities || item.external_identities) ? (item.externalIdentities || item.external_identities) : [],
     };
   });
 }

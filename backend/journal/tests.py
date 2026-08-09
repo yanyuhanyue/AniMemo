@@ -496,8 +496,8 @@ class JournalApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual([item["title"] for item in response.data["results"]], ["春日番剧"])
 
-    @patch("journal.bangumi_views.requests.get")
-    @patch("journal.bangumi_views.requests.post")
+    @patch("journal.external_media.providers.bangumi.requests.get")
+    @patch("journal.external_media.providers.bangumi.requests.post")
     def test_bangumi_search_falls_back_when_v0_endpoint_is_temporarily_unavailable(self, post, get):
         post.side_effect = requests.ConnectionError("temporary upstream failure")
         legacy_response = Mock()
@@ -525,7 +525,7 @@ class JournalApiTests(APITestCase):
         post.assert_called_once()
         get.assert_called_once()
 
-    @patch("journal.bangumi_views.requests.post")
+    @patch("journal.external_media.providers.bangumi.requests.post")
     def test_bangumi_search_returns_metadata_used_by_smart_fill(self, post):
         v0_response = Mock()
         v0_response.raise_for_status.return_value = None
@@ -559,7 +559,7 @@ class JournalApiTests(APITestCase):
         self.assertEqual(result["poster"], "https://bgm-img-proxy.xhcytus100.workers.dev/pic/cover/l/k-on.jpg")
         self.assertEqual(result["thumbnail"], "https://bgm-img-proxy.xhcytus100.workers.dev/r/100/pic/cover/l/k-on.jpg")
 
-    @patch("journal.bangumi_views.requests.post")
+    @patch("journal.external_media.providers.bangumi.requests.post")
     def test_bangumi_search_prefers_animation_studio_over_production_committee(self, post):
         production_committee = "「無職転生」製作委員会（博報堂DYミュージック&ピクチャーズ、東宝、KADOKAWA、フロンティアワークス、日本BS放送、グリー、EGG FIRM）"
         v0_response = Mock()
@@ -583,7 +583,7 @@ class JournalApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["results"][0]["studio"], "スタジオバインド")
 
-    @patch("journal.bangumi_views.requests.get")
+    @patch("journal.external_media.providers.bangumi.requests.get")
     def test_bangumi_autofill_reads_animation_studio_from_persons(self, get):
         subject_response = Mock()
         subject_response.raise_for_status.return_value = None
@@ -610,7 +610,7 @@ class JournalApiTests(APITestCase):
         self.assertEqual(response.data["studio"], "スタジオバインド")
         self.assertEqual(response.data["eps"], 11)
 
-    @patch("journal.bangumi_views.requests.get")
+    @patch("journal.external_media.providers.bangumi.requests.get")
     def test_bangumi_autofill_combines_multiple_animation_studios(self, get):
         subject_response = Mock()
         subject_response.raise_for_status.return_value = None
@@ -630,7 +630,7 @@ class JournalApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["studio"], "Studio A / Studio B")
 
-    @patch("journal.bangumi_views.requests.get")
+    @patch("journal.external_media.providers.bangumi.requests.get")
     def test_bangumi_autofill_falls_back_to_infobox_when_persons_fails(self, get):
         subject_response = Mock()
         subject_response.raise_for_status.return_value = None
@@ -650,7 +650,7 @@ class JournalApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["studio"], "Fallback Animation")
 
-    @patch("journal.bangumi_views.requests.get")
+    @patch("journal.external_media.providers.bangumi.requests.get")
     def test_bangumi_autofill_never_prefers_committee_over_person_animation_relation(self, get):
         subject_response = Mock()
         subject_response.raise_for_status.return_value = None

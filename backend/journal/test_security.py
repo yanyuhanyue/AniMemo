@@ -1053,13 +1053,14 @@ class ThrottleSecurityTests(APITestCase):
         self.assertEqual(limited.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
         self.assertEqual(send_email.call_count, 1)
 
-    @patch("journal.bangumi_views._bangumi_search_payload", return_value=[])
-    def test_external_search_and_import_have_independent_scopes(self, search_payload):
+    @patch("journal.bangumi_views.get_provider")
+    def test_external_search_and_import_have_independent_scopes(self, get_provider):
+        get_provider.return_value.search.return_value = []
         with patch.dict(SimpleRateThrottle.THROTTLE_RATES, self.rates, clear=True):
             client = APIClient()
             search_responses = [client.get(reverse("bangumi-search"), {"q": f"测试番剧{index}"}) for index in range(3)]
             self.assertEqual(search_responses[-1].status_code, status.HTTP_429_TOO_MANY_REQUESTS)
-            self.assertEqual(search_payload.call_count, 2)
+            self.assertEqual(get_provider.return_value.search.call_count, 2)
 
             cache.clear()
             client.force_authenticate(self.user)
