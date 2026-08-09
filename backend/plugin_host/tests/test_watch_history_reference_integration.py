@@ -13,7 +13,7 @@ from accounts.models import User
 from integrations.authentication import sign_hmac_request
 from integrations.models import ExternalIdentityBinding, IntegrationConnection, IntegrationEvent
 from journal.models import JournalEntry
-from plugin_host.models import PluginProject
+from plugin_host.models import PluginData, PluginProject
 from plugin_host.runtime import runtime_registry
 from plugin_host.services import install_for_user
 
@@ -93,6 +93,210 @@ class WatchHistoryReferenceIntegrationTests(TestCase):
         fetched = self.signed_action("history-get", {"entry_id": self.entry.pk})
         self.assertEqual(fetched.status_code, 200, fetched.data)
         self.assertEqual(len(fetched.data["records"]), 1)
+
+    def test_history_add_rejects_invalid_shared_watch_history_fields(self):
+        invalid_payloads = (
+            ({"watched_on": "banana"}, "invalid_watched_on"),
+            ({"watched_on": "2026-08-09", "episode_start": 0}, "invalid_episode_start"),
+            ({"watched_on": "2026-08-09", "episode_start": 2, "episode_end": 1}, "invalid_episode_range"),
+            ({"watched_on": "2026-08-09", "episode_end": 32768}, "invalid_episode_end"),
+            ({"watched_on": "2026-08-09", "notes": {"text": "invalid"}}, "invalid_notes"),
+        )
+        for fields, expected_code in invalid_payloads:
+            with self.subTest(fields=fields):
+                response = self.signed_action("history-add", {"entry_id": self.entry.pk, **fields})
+                self.assertEqual(response.status_code, 400, response.data)
+                self.assertEqual(response.data["code"], expected_code)
+
+        self.assertFalse(
+            PluginData.objects.filter(
+                plugin=self.project,
+                namespace="watch_history",
+                user=self.user,
+                key=str(self.entry.pk),
+            ).exists()
+        )
+
+    def test_web_and_integration_use_identical_normalization(self):
+        raw_record = {
+            "watched_on": "2026-08-09",
+            "watched_label": "",
+            "brush_number": "2",
+            "brush_label": "  二刷  ",
+            "episode_start": "7",
+            "episode_end": "8",
+            "notes": "  补充记录  ",
+        }
+        integration = self.signed_action(
+            "history-add", {"entry_id": self.entry.pk, **raw_record}
+        )
+        self.assertEqual(integration.status_code, 200, integration.data)
+
+        web_entry = JournalEntry.objects.create(user=self.user, title="Web 端规范化")
+        web_client = APIClient()
+        web_client.force_authenticate(self.user)
+        web = web_client.patch(
+            f"/api/entries/{web_entry.pk}/",
+            {"watch_history": [raw_record]},
+            format="json",
+        )
+        self.assertEqual(web.status_code, 200, web.data)
+        self.assertEqual(integration.data["record"], web.data["watch_history"][0])
+
+    def test_duplicate_semantic_history_record_is_idempotent(self):
+        payload = {
+            "entry_id": self.entry.pk,
+            "watched_on": "2026-08-09",
+            "brush_label": "首刷",
+            "episode_start": 1,
+            "episode_end": 12,
+        }
+        first = self.signed_action("history-add", payload)
+        second = self.signed_action("history-add", payload)
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertTrue(first.data["created"])
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertFalse(second.data["created"])
+        self.assertEqual(second.data["total"], 1)
+
+    def test_integration_import_preview_reserves_gateway_envelope_overhead(self):
+        accepted = self.signed_action("import-preview", {"text": "x" * (120 * 1024)})
+        self.assertEqual(accepted.status_code, 200, accepted.data)
+
+        rejected = self.signed_action("import-preview", {"text": "x" * (120 * 1024 + 1)})
+        self.assertEqual(rejected.status_code, 400, rejected.data)
+        self.assertEqual(rejected.data["code"], "invalid_text")
+
+    def test_import_commit_uses_shared_watch_history_validation(self):
+        batch_id = uuid4().hex
+        batch_row = PluginData.objects.create(
+            plugin=self.project,
+            namespace="batches",
+            user=self.user,
+            key=batch_id,
+            value={
+                "id": batch_id,
+                "target_user_id": self.user.pk,
+                "payload": {
+                    "groups": [{
+                        "source_title": self.entry.title,
+                        "resolution": {
+                            "status": "matched",
+                            "bangumi_id": 123,
+                            "title": self.entry.title,
+                            "japanese_title": "",
+                        },
+                        "records": [{
+                            "watch_date": "banana",
+                            "watch_date_label": "",
+                            "brush": 2,
+                            "brush_label": "二刷",
+                            "episode_range": {"start": 7, "end": 8},
+                            "notes": [],
+                        }],
+                    }],
+                },
+            },
+        )
+        invalid = self.signed_action("import-commit", {"batch_id": batch_id})
+        self.assertEqual(invalid.status_code, 400, invalid.data)
+        self.assertEqual(invalid.data["code"], "invalid_watched_on")
+        self.assertFalse(
+            PluginData.objects.filter(
+                plugin=self.project,
+                namespace="watch_history",
+                user=self.user,
+                key=str(self.entry.pk),
+            ).exists()
+        )
+
+        batch = batch_row.value
+        batch["payload"]["groups"][0]["records"][0] = {
+            "watch_date": "2026-08-09",
+            "watch_date_label": "",
+            "brush": "2",
+            "brush_label": "  二刷  ",
+            "episode_range": {"start": "7", "end": "8"},
+            "notes": "  导入备注  ",
+        }
+        batch_row.value = batch
+        batch_row.save(update_fields=["value", "updated_at"])
+        committed = self.signed_action("import-commit", {"batch_id": batch_id})
+        self.assertEqual(committed.status_code, 200, committed.data)
+        self.assertEqual(committed.data["imported_records"], 1)
+        history = PluginData.objects.get(
+            plugin=self.project,
+            namespace="watch_history",
+            user=self.user,
+            key=str(self.entry.pk),
+        )
+        self.assertEqual(history.value, [{
+            "watched_on": "2026-08-09",
+            "watched_label": "2026年8月9日",
+            "brush_number": 2,
+            "brush_label": "二刷",
+            "episode_start": 7,
+            "episode_end": 8,
+            "notes": ["导入备注"],
+        }])
+
+    def test_web_import_commit_uses_shared_watch_history_normalization(self):
+        batch_id = uuid4().hex
+        PluginData.objects.create(
+            plugin=self.project,
+            namespace="batches",
+            user=self.user,
+            key=batch_id,
+            value={
+                "id": batch_id,
+                "status": "ready",
+                "summary": {},
+                "target_user_id": self.user.pk,
+                "payload": {
+                    "groups": [{
+                        "source_title": self.entry.title,
+                        "resolution": {
+                            "status": "matched",
+                            "bangumi_id": 456,
+                            "title": self.entry.title,
+                            "japanese_title": "",
+                            "tags": [],
+                        },
+                        "records": [{
+                            "watch_date": "2026-08-10",
+                            "watch_date_label": "",
+                            "brush": "3",
+                            "brush_label": "  三刷  ",
+                            "episode_range": {"start": "1", "end": "12"},
+                            "notes": "  Web 导入备注  ",
+                        }],
+                    }],
+                },
+            },
+        )
+        web_client = APIClient()
+        web_client.force_authenticate(self.user)
+        response = web_client.post(
+            f"/api/plugins/watch-history-importer/batches/{batch_id}/commit/",
+            {"excluded_group_indices": []},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        history = PluginData.objects.get(
+            plugin=self.project,
+            namespace="watch_history",
+            user=self.user,
+            key=str(self.entry.pk),
+        )
+        self.assertEqual(history.value[0], {
+            "watched_on": "2026-08-10",
+            "watched_label": "2026年8月10日",
+            "brush_number": 3,
+            "brush_label": "三刷",
+            "episode_start": 1,
+            "episode_end": 12,
+            "notes": ["Web 导入备注"],
+        })
 
     def test_entries_search_does_not_cross_tenant(self):
         response = self.signed_action("entries-search", {"query": "芙莉莲"})

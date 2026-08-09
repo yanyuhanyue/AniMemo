@@ -150,3 +150,31 @@ jobs:
       - run: python -m unittest discover -s bridges/astrbot_plugin_animemo_bridge/tests -p "test_*.py" -v
       - run: python scripts/validate-astrbot-bridge.py
       - run: python scripts/package-astrbot-bridge.py
+
+  astrbot-runtime:
+    name: astrbot-runtime (${{ matrix.astrbot_ref }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        astrbot_ref:
+          - v4.27.2
+          - 30e20318cbaaa2e1ba57f3e0eee265d9ee98115c
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: AstrBotDevs/AstrBot
+          ref: ${{ matrix.astrbot_ref }}
+          path: .astrbot-runtime
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r .astrbot-runtime/requirements.txt
+      - run: python -m pip install -r bridges/astrbot_plugin_animemo_bridge/requirements.txt
+      - name: Smoke Bridge against the real AstrBot runtime
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.astrbot-runtime
+          ASTRBOT_ROOT: ${{ runner.temp }}/animemo-astrbot-smoke
+        run: python scripts/smoke-astrbot-bridge-runtime.py

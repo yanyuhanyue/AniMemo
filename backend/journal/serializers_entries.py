@@ -19,6 +19,11 @@ from site_config.media_storage.storage import cleanup_uncommitted_media_referenc
 
 from .image_security import delete_replaced_file, sanitize_uploaded_image
 from .models import JournalEntry
+from .watch_history import (
+    WatchHistoryValidationError,
+    normalize_watch_history_records,
+    preserve_watch_history_metadata,
+)
 
 
 def _trusted_poster_hosts():
@@ -79,67 +84,10 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         user = getattr(request, "user", None)
         if _watch_history_project(user) is None:
             raise serializers.ValidationError("请先安装并启用观看记录导入插件。")
-        if not isinstance(value, list):
-            raise serializers.ValidationError("观看记录必须是数组。")
-        if len(value) > 500:
-            raise serializers.ValidationError("单部番剧最多保存 500 条观看记录。")
-
-        date_field = serializers.DateField()
-        normalized_by_key = {}
-        for index, raw_record in enumerate(value):
-            if not isinstance(raw_record, dict):
-                raise serializers.ValidationError(f"第 {index + 1} 条观看记录格式无效。")
-
-            watched_on_raw = raw_record.get("watched_on")
-            if not watched_on_raw:
-                raise serializers.ValidationError(f"第 {index + 1} 条观看记录缺少观看日期。")
-            try:
-                watched_on = date_field.run_validation(watched_on_raw)
-            except serializers.ValidationError as error:
-                raise serializers.ValidationError(f"第 {index + 1} 条观看记录日期无效。") from error
-
-            brush_number = self._optional_positive_integer(raw_record.get("brush_number"), "刷次", index)
-            episode_start = self._optional_positive_integer(raw_record.get("episode_start"), "起始话数", index)
-            episode_end = self._optional_positive_integer(raw_record.get("episode_end"), "结束话数", index)
-            if episode_start is not None and episode_end is not None and episode_end < episode_start:
-                raise serializers.ValidationError(f"第 {index + 1} 条观看记录的结束话数不能小于起始话数。")
-
-            brush_label = str(raw_record.get("brush_label") or "首刷").strip()[:20] or "首刷"
-            watched_label = str(raw_record.get("watched_label") or "").strip()[:80]
-            if not watched_label:
-                watched_label = f"{watched_on.year}年{watched_on.month}月{watched_on.day}日"
-
-            raw_notes = raw_record.get("notes", [])
-            if isinstance(raw_notes, str):
-                raw_notes = [raw_notes]
-            if not isinstance(raw_notes, list) or any(not isinstance(note, str) for note in raw_notes):
-                raise serializers.ValidationError(f"第 {index + 1} 条观看记录的备注必须是字符串数组。")
-            notes = [note.strip()[:500] for note in raw_notes if note.strip()][:20]
-
-            normalized = {
-                "watched_on": watched_on,
-                "watched_label": watched_label,
-                "brush_number": brush_number,
-                "brush_label": brush_label,
-                "episode_start": episode_start,
-                "episode_end": episode_end,
-                "notes": notes,
-            }
-            semantic_key = (watched_on, brush_label, episode_start, episode_end)
-            normalized_by_key[semantic_key] = normalized
-        return list(normalized_by_key.values())
-
-    @staticmethod
-    def _optional_positive_integer(value, label, index):
-        if value in (None, ""):
-            return None
         try:
-            normalized = int(value)
-        except (TypeError, ValueError) as error:
-            raise serializers.ValidationError(f"第 {index + 1} 条观看记录的{label}必须是正整数。") from error
-        if normalized <= 0 or normalized > 32767:
-            raise serializers.ValidationError(f"第 {index + 1} 条观看记录的{label}必须是 1 到 32767。")
-        return normalized
+            return normalize_watch_history_records(value)
+        except WatchHistoryValidationError as error:
+            raise serializers.ValidationError(error.detail) from error
 
     def validate_poster_url(self, value):
         return _validate_poster_url(value)
@@ -223,18 +171,7 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             key=str(entry.pk),
         ).first()
         existing = row.value if row is not None and isinstance(row.value, list) else []
-        existing_by_key = {
-            (item.get("watched_on"), item.get("brush_label"), item.get("episode_start"), item.get("episode_end")): item
-            for item in existing
-            if isinstance(item, dict)
-        }
-        normalized = []
-        for record in history_data:
-            item = dict(record)
-            if hasattr(item.get("watched_on"), "isoformat"):
-                item["watched_on"] = item["watched_on"].isoformat()
-            key = (item.get("watched_on"), item.get("brush_label"), item.get("episode_start"), item.get("episode_end"))
-            normalized.append({**existing_by_key.get(key, {}), **item})
+        normalized = preserve_watch_history_metadata(existing, history_data)
         if normalized:
             if row is None:
                 PluginData.objects.create(plugin=plugin, namespace="watch_history", user=entry.user, key=str(entry.pk), value=normalized)

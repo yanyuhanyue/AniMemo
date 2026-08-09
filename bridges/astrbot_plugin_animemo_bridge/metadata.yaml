@@ -1,6 +1,7 @@
 name: astrbot_plugin_animemo_bridge
 display_name: AniMemo Bridge
 version: 0.1.0
+astrbot_version: ">=4.27.2"
 author: AniMemo
 desc: 连接 AniMemo Integration Protocol v1，实现帐号绑定、动作调用和事件推送。
 description: 连接 AniMemo Integration Protocol v1，实现帐号绑定、动作调用和事件推送。

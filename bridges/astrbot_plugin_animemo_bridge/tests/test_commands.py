@@ -6,12 +6,21 @@ from types import SimpleNamespace
 from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from astrbot_stub import install_astrbot_stubs, set_plugin_data_root
+
+install_astrbot_stubs()
+
 from animemo_bridge.errors import BridgeConnectionError, PairingResultUnknown
 from animemo_bridge.identity import MessageIdentity
 from main import AniMemoBridge
 
 
 class CommandsTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _bridge(temp, config, context=None):
+        set_plugin_data_root(Path(temp) / "data" / "plugin_data")
+        return AniMemoBridge(context or SimpleNamespace(), config)
+
     def _event(self, text, *, message_type="private", admin=False):
         return SimpleNamespace(
             message_str=text,
@@ -20,21 +29,20 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
             get_sender_name=lambda: "A",
             unified_msg_origin="telegram:private:42" if message_type == "private" else "telegram:group:1",
             message_type=message_type,
-            is_admin=admin,
+            is_admin=lambda: admin,
             send=lambda value: value,
         )
 
     async def test_group_pair_is_rejected_without_client(self):
         with tempfile.TemporaryDirectory() as temp:
-            context = SimpleNamespace(data_dir=temp)
-            bridge = AniMemoBridge(context, {"enabled": False})
+            bridge = self._bridge(temp, {"enabled": False})
             event = SimpleNamespace(message_str="/animemo pair ABC", platform="qq", get_sender_id=lambda: "42", get_sender_name=lambda: "A", unified_msg_origin="qq:group:1", message_type="group", send=lambda text: text)
             result = await bridge._command(event)
             self.assertIn("私聊", result)
 
     async def test_help_is_available_when_disabled(self):
         with tempfile.TemporaryDirectory() as temp:
-            bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": False})
+            bridge = self._bridge(temp, {"enabled": False})
             event = self._event("/animemo help")
             self.assertIn("pair", await bridge._command(event))
 
@@ -52,7 +60,7 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
                 return {"entry_id": 7, "records": []}
 
         with tempfile.TemporaryDirectory() as temp:
-            bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": True})
+            bridge = self._bridge(temp, {"enabled": True})
             bridge.client = RecordingClient()
             for text, expected_action, expected_payload in (
                 ("/animemo watch get 7", "watch-history-importer.history-get", {"entry_id": 7}),
@@ -74,7 +82,7 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
                 return {"secret": "must-not-be-rendered"}
 
         with tempfile.TemporaryDirectory() as temp:
-            bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": True, "developer_commands": True})
+            bridge = self._bridge(temp, {"enabled": True, "developer_commands": True})
             bridge.client = RecordingClient()
             denied = await bridge._command(self._event('/animemo action watch-history-importer.history-get {"entry_id":1}', admin=False))
             self.assertIn("关闭", denied)
@@ -85,10 +93,7 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_developer_debug_requires_flag_and_admin(self):
         with tempfile.TemporaryDirectory() as temp:
-            bridge = AniMemoBridge(
-                SimpleNamespace(data_dir=temp),
-                {"enabled": False, "developer_commands": True},
-            )
+            bridge = self._bridge(temp, {"enabled": False, "developer_commands": True})
 
             denied = await bridge._command(self._event("/animemo debug", admin=False))
             allowed = await bridge._command(self._event("/animemo debug", admin=True))
@@ -102,7 +107,7 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
                 raise BridgeConnectionError("timeout")
 
         with tempfile.TemporaryDirectory() as temp:
-            bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": True})
+            bridge = self._bridge(temp, {"enabled": True})
             bridge.client = PairClient()
             await bridge._command(self._event("/animemo pair ABC"))
             self.assertEqual(bridge.routes.count(), 0)
@@ -112,7 +117,7 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
                 raise PairingResultUnknown("unknown")
 
         with tempfile.TemporaryDirectory() as temp:
-            bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": True})
+            bridge = self._bridge(temp, {"enabled": True})
             bridge.client = UnknownPairClient()
             result = await bridge._command(self._event("/animemo pair ABC"))
             self.assertIn("结果未知", result)
@@ -124,7 +129,7 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
                 return {"binding_id": 1}
 
         with tempfile.TemporaryDirectory() as temp:
-            bridge = AniMemoBridge(SimpleNamespace(data_dir=temp), {"enabled": True})
+            bridge = self._bridge(temp, {"enabled": True})
             bridge.client = SuccessClient()
             await bridge._command(self._event("/animemo pair ABC"))
             self.assertEqual(bridge.routes.count(), 1)
@@ -132,11 +137,8 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
     async def test_diagnostics_register_once_and_clear_only_selected_route(self):
         with tempfile.TemporaryDirectory() as temp:
             registered = []
-            context = SimpleNamespace(
-                data_dir=temp,
-                register_web_api=lambda *args: registered.append(args),
-            )
-            bridge = AniMemoBridge(context, {"enabled": True, "key_id": "", "secret": ""})
+            context = SimpleNamespace(register_web_api=lambda *args: registered.append(args))
+            bridge = self._bridge(temp, {"enabled": True, "key_id": "", "secret": ""}, context)
             await bridge.initialize()
             await bridge.initialize()
             self.assertEqual(len(registered), 4)
@@ -155,3 +157,36 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(bridge.routes.get("telegram", "42"))
             serialized = str(await bridge._web_status())
             self.assertNotIn("qq:private:42", serialized)
+
+    async def test_official_plugin_data_path_persists_and_install_dir_is_untouched(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            install_dir = root / "data" / "plugins" / "astrbot_plugin_animemo_bridge"
+            install_dir.mkdir(parents=True)
+            marker = install_dir / "main.py"
+            marker.write_text("plugin code", encoding="utf-8")
+
+            bridge = self._bridge(temp, {"enabled": False})
+            expected = root / "data" / "plugin_data" / "astrbot_plugin_animemo_bridge"
+            self.assertEqual(bridge.routes.path.parent, expected.resolve())
+            self.assertEqual(bridge.state.path.parent, expected.resolve())
+            bridge.routes.save_private(MessageIdentity("qq", "42", "A", "private", "qq:FriendMessage:42"))
+            bridge.state.mark_delivered(7)
+            bridge.state.advance(7)
+            await bridge.terminate()
+
+            reloaded = self._bridge(temp, {"enabled": False})
+            self.assertIsNotNone(reloaded.routes.get("qq", "42"))
+            self.assertTrue(reloaded.state.has_delivered(7))
+            self.assertEqual(reloaded.state.cursor, 7)
+            self.assertEqual([path.name for path in install_dir.iterdir()], [marker.name])
+
+            reloaded.routes.path.write_text("{broken", encoding="utf-8")
+            recovered = self._bridge(temp, {"enabled": False})
+            self.assertEqual(recovered.routes.count(), 0)
+            self.assertEqual(len(list(expected.glob("routes.json.corrupt-*"))), 1)
+
+    def test_production_main_contains_no_fake_astrbot_runtime(self):
+        source = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+        for forbidden in ("_FallbackLogger", "class Star:", "class Context:", "astrbot.api.message"):
+            self.assertNotIn(forbidden, source)

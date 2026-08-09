@@ -138,4 +138,6 @@ POST /api/integrations/v1/events/ack/
 
 `astrbot_plugin_animemo_bridge` 是一个 provider-neutral 的协议客户端示例：它只把 AstrBot 提供的 `platform + external_user_id` 作为外部身份，把私聊 UMO 保存在 AstrBot 官方 plugin data directory，并用 HMAC 调用本协议。协议本身不依赖 AstrBot API；AstrBot 的命令、MessageChain 和生命周期适配只存在于 Bridge 包中。
 
-Reference integration `watch-history-importer` 0.3.2 声明以下动作（协议本地名使用规范 kebab-case）：`history-get`、`history-add`、`entries-search`、`import-preview`、`import-commit`；事件为 `history-updated`、`import-completed`。外部调用名形如 `watch-history-importer.history-get`。
+Reference integration `watch-history-importer` 0.3.3 声明以下动作（协议本地名使用规范 kebab-case）：`history-get`、`history-add`、`entries-search`、`import-preview`、`import-commit`；事件为 `history-updated`、`import-completed`。外部调用名形如 `watch-history-importer.history-get`。
+
+Integration `import-preview` 的 UTF-8 `text` 上限为 120 KiB，用于在 256 KiB Action request envelope 内为 JSON 字段、转义和协议元数据保留空间。Web 端 TXT 文件上传仍使用独立的 2 MiB 上限；不应为 Web 上传扩大 Integration Gateway envelope。
