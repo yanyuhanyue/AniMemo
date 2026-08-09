@@ -2,6 +2,17 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .auth_views import AccountView, CompleteRegistrationView, CsrfTokenView, LogoutView, PasswordChangeView, PasswordResetConfirmView, PasswordResetView, RegisterView, StaffLoginView, VerifyRegistrationView
+from .external_accounts.views import (
+    ExternalAccountAuthorizeView,
+    ExternalAccountCallbackView,
+    ExternalAccountConnectView,
+    ExternalAccountDetailView,
+    ExternalAccountImportApplyView,
+    ExternalAccountImportPreviewDetailView,
+    ExternalAccountImportPreviewView,
+    ExternalAccountListView,
+    ExternalAccountVerifyView,
+)
 from .views import (
     ColumnViewSet,
     BangumiAutofillView,
@@ -109,6 +120,15 @@ urlpatterns = [
     path("auth/account/", AccountView.as_view(), name="account"),
     path("auth/me/", MeView.as_view(), name="me"),
     path("settings/me/", UserSettingsView.as_view(), name="settings"),
+    path("external-accounts/", ExternalAccountListView.as_view(), name="external-account-list"),
+    path("external-accounts/<slug:provider>/connect/", ExternalAccountConnectView.as_view(), name="external-account-connect"),
+    path("external-accounts/<slug:provider>/authorize/", ExternalAccountAuthorizeView.as_view(), name="external-account-authorize"),
+    path("external-accounts/<slug:provider>/callback/", ExternalAccountCallbackView.as_view(), name="external-account-callback"),
+    path("external-accounts/<slug:provider>/verify/", ExternalAccountVerifyView.as_view(), name="external-account-verify"),
+    path("external-accounts/<slug:provider>/import-preview/", ExternalAccountImportPreviewView.as_view(), name="external-account-import-preview"),
+    path("external-accounts/<slug:provider>/import-preview/<uuid:preview_id>/", ExternalAccountImportPreviewDetailView.as_view(), name="external-account-import-preview-detail"),
+    path("external-accounts/<slug:provider>/import-apply/", ExternalAccountImportApplyView.as_view(), name="external-account-import-apply"),
+    path("external-accounts/<slug:provider>/", ExternalAccountDetailView.as_view(), name="external-account-detail"),
     path("public-journal/status/", PublicJournalStatusView.as_view(), name="public-journal-status"),
     path("stats/me/", MyStatsView.as_view(), name="stats"),
     path("staff/dashboard/", StaffDashboardView.as_view(), name="staff-dashboard"),

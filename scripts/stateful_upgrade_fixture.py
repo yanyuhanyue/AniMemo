@@ -238,6 +238,53 @@ def verify_state(input_path):
             _assert(journal.external_identities.count() == 1, "ExternalMediaIdentity was duplicated after restart.")
             external_identity_status = "PERSISTED"
 
+    external_account_status = "NOT_APPLICABLE"
+    credential_encryption_status = "NOT_APPLICABLE"
+    if _migration_applied("journal", "0003_external_account_connections"):
+        from django.utils import timezone
+        from journal.external_accounts.credentials import (
+            decrypt_credentials,
+            encrypt_credentials,
+        )
+        from journal.models import UserExternalAccountConnection
+
+        fake_token = "stateful-upgrade-fake-bangumi-token"
+        connection = UserExternalAccountConnection.objects.filter(user=user, provider="bangumi").first()
+        if "external_account_connection_id" not in fixture:
+            _assert(connection is None, "External account connection unexpectedly existed before current-schema verification.")
+            ciphertext = encrypt_credentials({"access_token": fake_token, "token_type": "Bearer"})
+            _assert(fake_token not in ciphertext, "External account credential was stored in plaintext.")
+            connection = UserExternalAccountConnection.objects.create(
+                user=user,
+                provider="bangumi",
+                auth_method=UserExternalAccountConnection.AuthMethod.PERSONAL_ACCESS_TOKEN,
+                external_user_id="987654321",
+                external_username="stateful-upgrade-user",
+                display_name="Stateful Upgrade User",
+                credential_ciphertext=ciphertext,
+                credential_key_version="v1",
+                metadata={"fixture": "stateful-upgrade-account-v1"},
+                connected_at=timezone.now(),
+                verified_at=timezone.now(),
+            )
+            fixture["external_account_connection_id"] = connection.pk
+            fixture["external_account_ciphertext"] = ciphertext
+            Path(input_path).write_text(json.dumps(fixture, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            external_account_status = "CREATED"
+        else:
+            connection = UserExternalAccountConnection.objects.filter(
+                pk=fixture["external_account_connection_id"],
+                user=user,
+                provider="bangumi",
+                external_user_id="987654321",
+            ).first()
+            _assert(connection is not None, "UserExternalAccountConnection did not survive the restart.")
+            _assert(connection.credential_ciphertext == fixture["external_account_ciphertext"], "Encrypted credential changed across restart.")
+            external_account_status = "PERSISTED"
+        _assert(fake_token not in connection.credential_ciphertext, "Database credential value contains plaintext token.")
+        _assert(decrypt_credentials(connection.credential_ciphertext)["access_token"] == fake_token, "Encrypted credential cannot be decrypted after restart.")
+        credential_encryption_status = "PASS"
+
     projects = PluginProject.objects.filter(slug=fixture["plugin_slug"])
     _assert(projects.count() == 1, "Official PluginProject is missing or duplicated.")
     project = projects.get()
@@ -289,6 +336,8 @@ def verify_state(input_path):
         "user": "PASS",
         "journal_entry": "PASS",
         "external_media_identity": external_identity_status,
+        "external_account_connection": external_account_status,
+        "credential_encryption": credential_encryption_status,
         "user_plugin_installation": "PASS",
         "plugin_data": "PASS",
         "plugin_project": "PASS",

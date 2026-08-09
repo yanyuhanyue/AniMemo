@@ -1,6 +1,6 @@
 # 外部媒体身份
 
-AniMemo 的 External Media Identity 为手账条目提供持久、Provider 无关的外部资料标识。本轮同时交付 Phase A（Persistent External Media Identity）与 Phase B（Metadata Refresh）。
+AniMemo 的 External Media Identity 为手账条目提供持久、Provider 无关的外部资料标识。Phase A 交付 Persistent External Media Identity，Phase B 交付 Metadata Refresh，Phase C 在不改变该边界的前提下增加账号连接与显式收藏导入。
 
 ## 架构
 
@@ -72,11 +72,15 @@ Snapshot 只保存界面与刷新所需的规范化摘要，不保存 Provider �
 - `BANGUMI_USER_AGENT` 默认是 `AniMemo/1.0 (+https://re-anime.cc)`；部署者应按实际站点维护可联系信息。
 - `BANGUMI_IMAGE_PROXY_BASE_URL` 控制 Bangumi 图片代理前缀；留空时使用固定 HTTPS 图片源。
 
-## 后续阶段
+## 阶段边界
 
-- Phase C：Bangumi account authorization/import。
+- Phase A：持久化外部媒体身份。
+- Phase B：手动刷新 Provider-owned metadata。
+- Phase C：用户外部账号授权与只读收藏导入。
 - Phase D：显式、可审计的双向同步策略。
 
-Phase C 与 Phase D 不属于当前实现。未来的账户授权应使用用户范围、凭据加密的 `UserExternalAccountConnection`，不能复用服务端 Integration Gateway 的 `IntegrationConnection` 信任边界。任何双向同步实现都必须先定义字段级 source of truth、冲突策略与审计记录，不能把本轮 metadata refresh 直接扩展成隐式同步。
+Phase C 使用用户范围、凭据加密的 `UserExternalAccountConnection`，不复用服务端 Integration Gateway 的 `IntegrationConnection` 信任边界。收藏导入只通过显式 Preview/Apply 创建或绑定 `ExternalMediaIdentity`，不会自动写回 Bangumi。
+
+Phase D 实现前必须先定义字段级 source of truth、初始同步基线、冲突状态和人工解决流程。`JournalEntry.updated_at` 可能因海报或 metadata 刷新变化；Bangumi 收藏的 `updated_at` 也被官方 OpenAPI 标记为不可靠，因此两者都不能直接用作“最后写入者胜出”的同步依据。
 
 新增 Provider 时复用同一身份模型和服务接口，禁止把 Provider 专用字段加入 `JournalEntry`。
