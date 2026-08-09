@@ -78,6 +78,14 @@ jobs:
           done
           curl --fail --silent --show-error -H 'Host: ci.example.test' http://127.0.0.1:8088/ | grep -q '<div id="root">'
           docker compose --env-file .env.production -f deploy/docker-compose.yml ps
+      - name: Verify fresh sync schema has no synthetic baseline
+        run: >-
+          docker compose --env-file .env.production -f deploy/docker-compose.yml exec -T api
+          python manage.py shell -c
+          "from django.db import connection; from journal.models import ExternalCollectionSyncState;
+          assert ExternalCollectionSyncState._meta.db_table in connection.introspection.table_names();
+          assert not ExternalCollectionSyncState.objects.exists();
+          print('Fresh collection sync state: PASS')"
       - name: Print logs on failure
         if: failure()
         run: docker compose --env-file .env.production -f deploy/docker-compose.yml logs --no-color

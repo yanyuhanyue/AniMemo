@@ -7,14 +7,13 @@ from rest_framework.test import APITestCase
 
 from journal.data_bundle import export_data_bundle, import_data_bundle
 from journal.models import (
+    ExternalCollectionSyncState,
     ExternalImportSession,
     ExternalMediaIdentity,
     JournalEntry,
     UserExternalAccountConnection,
-    WatchHistoryRecord,
 )
 from journal.watch_history import add_history
-
 
 User = get_user_model()
 
@@ -78,6 +77,12 @@ class DataBundleV1Tests(APITestCase):
             snapshot=[{"access_token": "never-export-this"}],
             expires_at=timezone.now(),
         )
+        ExternalCollectionSyncState.objects.create(
+            identity=self.entry.external_identities.get(),
+            connection=self.source_user.external_account_connections.get(provider="bangumi"),
+            baselines={"watch_status": {"present": True, "value": "dropped"}},
+            last_synced_at=timezone.now(),
+        )
 
     @staticmethod
     def semantic(bundle):
@@ -91,6 +96,8 @@ class DataBundleV1Tests(APITestCase):
         self.assertNotIn("secret-ciphertext", encoded)
         self.assertNotIn("access_token", encoded)
         self.assertNotIn("ExternalImportSession", encoded)
+        self.assertNotIn("ExternalCollectionSyncState", encoded)
+        self.assertNotIn("last_synced_at", encoded)
 
         result = import_data_bundle(user=self.target_user, payload=first)
         second = export_data_bundle(user=self.target_user)
@@ -101,6 +108,7 @@ class DataBundleV1Tests(APITestCase):
         self.assertEqual(restored.watch_status, JournalEntry.WatchStatus.DROPPED)
         self.assertEqual(restored.external_identities.get().is_metadata_source, True)
         self.assertEqual(restored.watch_history_records.get().notes, ["重新观看"])
+        self.assertFalse(ExternalCollectionSyncState.objects.filter(identity__entry=restored).exists())
 
     def test_export_api_returns_bundle_v1(self):
         self.client.force_authenticate(self.source_user)

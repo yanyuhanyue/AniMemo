@@ -108,6 +108,18 @@ class BangumiAccountProviderTests(SimpleTestCase):
         self.assertIn("user%2Fname", request.call_args_list[0].args[1])
 
     @patch("journal.bangumi.client.requests.request")
+    def test_missing_single_collection_is_a_read_only_absence(self, request):
+        request.return_value = response({}, status_code=404)
+
+        result = self.provider.get_collection("token-value", "user/name", "1424")
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            request.call_args.args[:2],
+            ("get", "https://api.bgm.tv/v0/users/user%2Fname/collections/1424"),
+        )
+
+    @patch("journal.bangumi.client.requests.request")
     def test_get_retries_transient_failure_once(self, request):
         request.side_effect = [requests.Timeout("secret timeout"), response({
             "id": 1,

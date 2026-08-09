@@ -1,6 +1,7 @@
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
@@ -161,6 +162,57 @@ class UserExternalAccountConnection(models.Model):
 
     def __str__(self):
         return f"{self.provider}:{self.external_username} · {self.user}"
+
+
+class ExternalCollectionSyncState(models.Model):
+    identity = models.OneToOneField(
+        ExternalMediaIdentity,
+        on_delete=models.CASCADE,
+        related_name="collection_sync_state",
+    )
+    connection = models.ForeignKey(
+        UserExternalAccountConnection,
+        on_delete=models.CASCADE,
+        related_name="collection_sync_states",
+    )
+    schema_version = models.PositiveSmallIntegerField(default=1)
+    baselines = models.JSONField(default=dict, blank=True)
+    last_synced_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["identity_id"]
+        indexes = [
+            models.Index(fields=["connection", "updated_at"], name="journal_extsync_conn_idx"),
+        ]
+
+    def clean(self):
+        from .external_sync.canonical import validate_baselines
+
+        errors = {}
+        if self.schema_version != 1:
+            errors["schema_version"] = "Unsupported collection sync baseline schema version."
+        try:
+            validate_baselines(self.baselines)
+        except ValueError as error:
+            errors["baselines"] = str(error)
+        if self.identity_id and self.connection_id:
+            identity = self.identity
+            connection = self.connection
+            if identity.entry.user_id != connection.user_id:
+                errors["connection"] = "Sync identity and connection must have the same owner."
+            if identity.provider != connection.provider:
+                errors["connection"] = "Sync identity and connection must use the same provider."
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.identity} · {self.connection}"
 
 
 class ExternalAccountAuthorizationState(models.Model):
