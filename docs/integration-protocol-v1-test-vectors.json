@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "vectors": [
+    {"name":"get-no-body","secret":"TEST SECRET","timestamp":"1700000000","nonce":"nonce-00000001","method":"GET","path_with_query":"/api/integrations/v1/events/","body_utf8":"","body_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","expected_signature":"v1=84d49a33edde8ca576a841b4862bdd36965e1625e1911afe19b386a130e79afe"},
+    {"name":"get-query","secret":"TEST SECRET","timestamp":"1700000001","nonce":"nonce-00000002","method":"GET","path_with_query":"/api/integrations/v1/events/?after=7&limit=2&wait=0","body_utf8":"","body_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","expected_signature":"v1=fdbdac1fe4a82a6ddca5f6d57a40c3035f40ae510cfee2127825c12b5afc0480"},
+    {"name":"post-ascii","secret":"TEST SECRET","timestamp":"1700000002","nonce":"nonce-00000003","method":"POST","path_with_query":"/api/integrations/v1/actions/","body_utf8":"{\"action\":\"ping\",\"request_id\":\"r1\"}","body_sha256":"d6907840d55f90663cb9c21c83a5e2f1ef330d7e7c20642adfbbfba6d53ff7cb","expected_signature":"v1=08f58ef83d42cfbc753a0e450ec3dd0e47d9b4d65bb3a5ca5fc5a89a4c577913"},
+    {"name":"post-unicode","secret":"TEST SECRET","timestamp":"1700000003","nonce":"nonce-00000004","method":"POST","path_with_query":"/api/integrations/v1/pair/consume/","body_utf8":"{\"display_name\":\"测试\",\"platform\":\"qq\"}","body_sha256":"64a37034ba378899334b896b0a3b539a8c94bf3c0bde7cd6172b848c3f444909","expected_signature":"v1=0b94e1a81af76b553a677cb68bc40cc92ae8065751bf70c2281c0528ab6574b0"},
+    {"name":"empty-body","secret":"TEST SECRET","timestamp":"1700000004","nonce":"nonce-00000005","method":"POST","path_with_query":"/api/integrations/v1/events/ack/","body_utf8":"","body_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","expected_signature":"v1=e37042ebc7f38245e0934d61e755736342a90f20c8ba1707115dd58f2397da17"}
+  ]
+}

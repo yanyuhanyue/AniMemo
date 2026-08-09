@@ -134,3 +134,17 @@ jobs:
       - name: Check official plugin immutable package identities
         run: python scripts/check_official_plugin_immutability.py --head-root .
       - run: python scripts/pluginctl.py pack watch-history-importer
+
+  astrbot-bridge:
+    name: astrbot-bridge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r bridges/astrbot_plugin_animemo_bridge/requirements.txt
+      - run: python -m unittest discover -s bridges/astrbot_plugin_animemo_bridge/tests -p "test_*.py" -v
+      - run: python scripts/validate-astrbot-bridge.py
+      - run: python scripts/package-astrbot-bridge.py

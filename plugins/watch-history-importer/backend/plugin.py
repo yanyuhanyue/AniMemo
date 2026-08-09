@@ -18,7 +18,7 @@ from .src.anime_journal_watch_history_importer.parser import build_preview, norm
 
 
 PLUGIN_SLUG = "watch-history-importer"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.3.1"
 MAX_FILES = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
 DATE_TAG_RE = re.compile(r"^\d{4}年\d{1,2}月(?:\d{1,2}(?:日|号)?)?(?:\s*(?:-|–|—|至)\s*(?:\d{1,2}月)?\d{1,2}(?:日|号)?)?$")
@@ -126,13 +126,120 @@ class WatchHistoryPlugin:
         host.api.post("batches/<batch_id>/select-subject", handler=self.select_subject, access="user")
         host.api.post("batches/<batch_id>/commit", handler=self.commit, access="user")
         host.api.get("astrbot/schema", handler=self.astrbot_schema, access="user")
+        host.integrations.register_action("history-get", self.integration_history_get)
+        host.integrations.register_action("history-add", self.integration_history_add)
+        host.integrations.register_action("entries-search", self.integration_entries_search)
+        host.integrations.register_action("import-preview", self.integration_import_preview)
+        host.integrations.register_action("import-commit", self.integration_import_commit)
 
     @staticmethod
     def health_check():
         return True
 
     def astrbot_schema(self, request):
-        return Response({"interface": "anime-journal.watch-history-import", "version": "2.0", "implemented": False, "workflow": ["preview", "resolve", "review", "commit"]})
+        return Response({"interface": "anime-journal.watch-history-import", "version": "2.0", "implemented": True, "workflow": ["preview", "resolve", "review", "commit"]})
+
+    def integration_history_get(self, context, payload):
+        entry_id = payload.get("entry_id")
+        store = _store(context.user, "watch_history")
+        if entry_id is not None:
+            try:
+                entry = JournalEntry.objects.get(pk=int(entry_id), user=context.user, deleted_at__isnull=True)
+            except (TypeError, ValueError, JournalEntry.DoesNotExist):
+                return {"code": "entry_not_found", "detail": "番剧条目不存在。"}, 404
+            return {"entry_id": entry.pk, "records": store.get(str(entry.pk), []) or []}
+        rows = JournalEntry.objects.filter(user=context.user, deleted_at__isnull=True).order_by("pk")[:100]
+        return {"entries": [{"entry_id": row.pk, "title": row.title, "records": store.get(str(row.pk), []) or []} for row in rows]}
+
+    def integration_history_add(self, context, payload):
+        try:
+            entry_id = int(payload.get("entry_id"))
+        except (TypeError, ValueError):
+            return {"code": "invalid_entry_id", "detail": "entry_id 无效。"}, 400
+        try:
+            entry = JournalEntry.objects.get(pk=entry_id, user=context.user, deleted_at__isnull=True)
+        except JournalEntry.DoesNotExist:
+            return {"code": "entry_not_found", "detail": "番剧条目不存在。"}, 404
+        watched_on = str(payload.get("watched_on") or "").strip()
+        if not watched_on or len(watched_on) > 32:
+            return {"code": "invalid_watched_on", "detail": "watched_on 无效。"}, 400
+        record = {
+            "watched_on": watched_on,
+            "watched_label": str(payload.get("watched_label") or watched_on)[:80],
+            "brush_number": payload.get("brush_number"),
+            "brush_label": str(payload.get("brush_label") or "")[:40],
+            "episode_start": payload.get("episode_start"),
+            "episode_end": payload.get("episode_end"),
+            "notes": [str(item)[:200] for item in payload.get("notes", []) if isinstance(item, str)][:10],
+        }
+        store = _store(context.user, "watch_history")
+        history = store.get(str(entry.pk), []) or []
+        key = (record["watched_on"], record["brush_label"], record["episode_start"], record["episode_end"])
+        keys = {(item.get("watched_on"), item.get("brush_label"), item.get("episode_start"), item.get("episode_end")) for item in history}
+        created = key not in keys
+        if created:
+            history.append(record)
+            store.set(str(entry.pk), history[-500:])
+            self.host.integrations.emit(context.user, "history-updated", {"entry_id": entry.pk, "count": 1})
+        return {"entry_id": entry.pk, "created": created, "record": record, "total": len(history)}
+
+    def integration_entries_search(self, context, payload):
+        query = str(payload.get("query") or "").strip()[:120]
+        rows = JournalEntry.objects.filter(user=context.user, deleted_at__isnull=True).order_by("pk")
+        if query:
+            needle = normalize_title(query)
+            rows = [row for row in rows if needle in normalize_title(row.title) or needle in normalize_title(row.japanese_title)]
+        else:
+            rows = list(rows[:20])
+        return {"entries": [{"entry_id": row.pk, "title": row.title, "japanese_title": row.japanese_title} for row in rows[:20]]}
+
+    def integration_import_preview(self, context, payload):
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > MAX_FILE_BYTES:
+            return {"code": "invalid_text", "detail": "text 必须是非空 UTF-8 文本且不超过 2 MB。"}, 400
+        preview = build_preview([(str(payload.get("filename") or "astrbot.txt")[:120], text)])
+        return {"summary": preview.get("summary", {}), "groups": preview.get("groups", [])}
+
+    def integration_import_commit(self, context, payload):
+        batch_id = str(payload.get("batch_id") or "").strip()
+        if not batch_id:
+            return {"code": "batch_missing", "detail": "batch_id 必填。"}, 400
+        batch = _store(context.user, "batches").get(batch_id)
+        if not isinstance(batch, dict):
+            return {"code": "batch_missing", "detail": "导入批次不存在。"}, 404
+        groups = batch.get("payload", {}).get("groups", [])
+        excluded = {int(value) for value in payload.get("excluded_group_indices", []) if isinstance(value, int) and not isinstance(value, bool)}
+        selected = [group for index, group in enumerate(groups) if index not in excluded]
+        if not selected:
+            return {"code": "empty_import_selection", "detail": "至少保留一部番剧后才能正式导入。"}, 400
+        if any(group.get("resolution", {}).get("status") == "pending" for group in selected):
+            return {"code": "resolution_pending", "detail": "仍有番剧尚未完成 Bangumi 匹配。"}, 409
+        imported_entries = set()
+        imported_records = 0
+        with transaction.atomic():
+            entries = list(JournalEntry.objects.select_for_update().filter(user=context.user, deleted_at__isnull=True))
+            by_title = {normalize_title(title): entry for entry in entries for title in (entry.title, entry.japanese_title) if normalize_title(title)}
+            history_store = _store(context.user, "watch_history")
+            for group in selected:
+                resolution = group.get("resolution", {})
+                if resolution.get("status") != "matched" or not resolution.get("bangumi_id"):
+                    continue
+                entry = by_title.get(normalize_title(resolution.get("title"))) or by_title.get(normalize_title(resolution.get("japanese_title")))
+                if entry is None:
+                    entry = JournalEntry.objects.create(user=context.user, title=resolution.get("title") or group["source_title"], japanese_title=resolution.get("japanese_title") or "", watch_status=JournalEntry.WatchStatus.COMPLETED, visibility=JournalEntry.Visibility.PRIVATE, tags=[])
+                imported_entries.add(entry.pk)
+                history = history_store.get(str(entry.pk), []) or []
+                keys = {(item.get("watched_on"), item.get("brush_label"), item.get("episode_start"), item.get("episode_end")) for item in history}
+                for record in group.get("records", []):
+                    episode = record.get("episode_range") or {}
+                    normalized = {"watched_on": record.get("watch_date"), "watched_label": record.get("watch_date_label"), "brush_number": record.get("brush"), "brush_label": record.get("brush_label"), "episode_start": episode.get("start"), "episode_end": episode.get("end"), "notes": record.get("notes", [])}
+                    key = (normalized["watched_on"], normalized["brush_label"], normalized["episode_start"], normalized["episode_end"])
+                    if key not in keys:
+                        history.append(normalized); keys.add(key); imported_records += 1
+                history_store.set(str(entry.pk), history[-500:])
+        result = {"batch_id": batch_id, "imported_entries": len(imported_entries), "imported_records": imported_records, "excluded_groups": len(excluded)}
+        self.host.integrations.emit(context.user, "import-completed", result)
+        return result
 
     def status(self, request):
         batches = list(_store(request.user, "batches").collection().values("value")[:8])
@@ -286,6 +393,11 @@ class WatchHistoryPlugin:
         batch["summary"] = {**batch.get("summary", {}), "imported_entries": len(imported_entries), "imported_history_records": imported_records, "selected_groups": len(selected), "excluded_groups": len(excluded), "excluded_group_indices": sorted(excluded)}
         batch["updated_at"] = timezone.now().isoformat()
         _save_batch(request, batch)
+        self.host.integrations.emit(
+            target_user,
+            "import-completed",
+            {"batch_id": batch["id"], "imported_entries": len(imported_entries), "imported_records": imported_records},
+        )
         return Response(_serialize_batch(batch))
 
 

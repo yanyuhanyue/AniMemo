@@ -5,17 +5,30 @@
   "id": "com.anime-journal.watch-history-importer",
   "slug": "watch-history-importer",
   "name": "忆往昔观看记录导入器",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "解析年度观看文档，分批匹配 Bangumi，预览后事务导入并保留多次观看历史。",
   "author": { "name": "Anime Journal" },
   "license": "MIT",
   "installationMode": "user",
   "runtimes": ["frontend", "backend"],
   "frontend": { "exposure": "authenticated" },
-  "extensions": ["frontend.page", "frontend.navigation", "backend.api", "settings", "catalog.importer", "catalog.metadata"],
+  "extensions": ["frontend.page", "frontend.navigation", "backend.api", "settings", "catalog.importer", "catalog.metadata", "integration.actions", "integration.events"],
   "backend": { "entry": "backend/plugin.py" },
   "permissions": [],
   "hooks": [],
+  "integrations": {
+    "actions": [
+      { "name": "history-get", "description": "读取当前用户的观看记录。" },
+      { "name": "history-add", "description": "为当前用户增加一条观看记录。" },
+      { "name": "entries-search", "description": "搜索当前用户的番剧条目。" },
+      { "name": "import-preview", "description": "预览观看记录文本导入。" },
+      { "name": "import-commit", "description": "提交已完成匹配的观看记录导入。" }
+    ],
+    "events": [
+      { "name": "history-updated", "description": "观看记录发生变化。" },
+      { "name": "import-completed", "description": "观看记录导入完成。" }
+    ]
+  },
   "settings": [
     { "key": "resolve_batch_size", "scope": "user", "label": "每批匹配数量", "description": "每次请求向 Bangumi 匹配的番剧数量。", "type": "number", "required": true, "default": 6, "min": 1, "max": 12 },
     { "key": "unmatched_policy", "scope": "user", "label": "无法匹配时", "description": "正式导入时如何处理仍未匹配的条目。", "type": "select", "required": true, "default": "review", "choices": [{ "value": "review", "label": "阻止导入并人工确认" }, { "value": "skip", "label": "跳过无法匹配条目" }] }
