@@ -6,6 +6,7 @@ import {
   DASHBOARD_PAGE_SIZE,
   appendUniqueDashboardRecords,
   buildDashboardQueryParams,
+  buildDashboardQueryKey,
   getDashboardNextPage,
 } from "../src/pages/dashboardQuery.js";
 
@@ -48,6 +49,30 @@ test("dashboard query maps search, filters, quick filter, sort and fixed page si
   assert.equal(params.get("include_facets"), "1");
 });
 
+test("dashboard query key follows actual first-page params, not metadata object identity", () => {
+  const base = {
+    search: "",
+    status: "all",
+    tag: "all",
+    year: "all",
+    activity: "all",
+    sort: "date-desc",
+    priority: true,
+    quickFilter: { id: "all", name: "全部", tags: [] },
+  };
+  const recreatedMetadata = {
+    ...base,
+    quickFilter: { id: "all", name: "全部", tags: [], description: "来自服务端" },
+  };
+
+  assert.equal(buildDashboardQueryKey(base), buildDashboardQueryKey(recreatedMetadata));
+  assert.equal(buildDashboardQueryKey(base), "page=1&page_size=48&priority=1&ordering=-airing_period&include_facets=1");
+  assert.notEqual(
+    buildDashboardQueryKey(base),
+    buildDashboardQueryKey({ ...base, search: "进击的巨人" }),
+  );
+});
+
 test("infinite pages append once per entry id and stop when next is absent", () => {
   const appended = appendUniqueDashboardRecords(
     [{ id: 1 }, { id: 2 }],
@@ -69,6 +94,10 @@ test("dashboard keeps initial and load-more states separate with debounce and st
   assert.match(dashboardData, /if \(append\) setLoadMoreError/);
   assert.match(dashboardData, /loadedCount: records\.length/);
   assert.match(dashboardData, /totalCount/);
+  assert.match(dashboardData, /buildDashboardQueryKey/);
+  assert.match(dashboardData, /requestQueryRef\.current/);
+  assert.match(dashboardData, /presetColorsRef\.current/);
+  assert.doesNotMatch(dashboardData, /useCallback\(async \(\{ page, append, generation \}\) =>[\s\S]*?\}, \[presetColors, requestQuery\]\)/);
 });
 
 test("dashboard infinite loading preserves deep links and replaces the all-record import refresh", () => {

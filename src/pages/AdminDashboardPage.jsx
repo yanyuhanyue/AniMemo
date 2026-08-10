@@ -417,7 +417,7 @@ export function AdminDashboardPage() {
             return <button key={value} type="button" className={active ? "is-active" : ""} aria-current={active ? "page" : undefined} onClick={() => path ? navigate(path) : selectTab(value)}><Icon name={icon} /> {label}{count > 0 && <b>{count}</b>}</button>;
           })}</nav>
           <label className="admin-dashboard-mobile-nav"><span>当前管理模块</span><select value={tab} onChange={(event) => { const item = sidebarTabs.find(([value]) => value === event.target.value); item?.[4] ? navigate(item[4]) : selectTab(event.target.value); }}>{sidebarTabs.map(([value, label]) => <option key={value} value={value}>{label}{tabCount(value) > 0 ? ` (${tabCount(value)})` : ""}</option>)}</select></label>
-          <div className="admin-dashboard-sidebar__note"><span>LIVE MONITOR</span><p>审核队列每 4 秒自动同步。</p></div>
+          <div className="admin-dashboard-sidebar__note"><span>LIVE MONITOR</span><p>审核队列每 20 秒自动同步。</p></div>
         </aside>
 
         <section className="admin-dashboard-content">
