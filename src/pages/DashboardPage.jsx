@@ -459,7 +459,14 @@ export function DashboardPage() {
       }
       flash(`已将《${record.title}》标记为${labels[nextStatus] || nextStatus}`);
     } catch (requestError) {
-      if (mountedRef.current) setRecords((current) => current.map((item) => item.id === record.id ? previous : item));
+      if (mountedRef.current) {
+        const currentSnapshot = getEntryMutationSnapshot();
+        if (currentSnapshot.queryKey === snapshot.queryKey && currentSnapshot.revision === snapshot.revision) {
+          setRecords((current) => current.map((item) => item.id === record.id ? previous : item));
+        } else {
+          refreshEntries();
+        }
+      }
       flash(readableApiError(requestError, "观看状态修改失败，请稍后重试。"), "error");
     }
   };

@@ -133,6 +133,9 @@ const state = {
   entryPatch401Once: false,
   entryPatchDelay: 0,
   failEntryDelete: false,
+  entryDeleteStatus: 500,
+  entryDelete401Once: false,
+  entryDeleteNetworkOnce: false,
   entryDeleteDelay: 0,
   failEntryCreate: false,
   failSettings: false,
@@ -250,7 +253,15 @@ try {
     if (entryMatch && method === "DELETE") {
       entryDeleteRequests += 1;
       if (state.entryDeleteDelay) await wait(state.entryDeleteDelay);
-      if (state.failEntryDelete) return json(route, { detail: "记录删除失败" }, 500);
+      if (state.entryDeleteNetworkOnce) {
+        state.entryDeleteNetworkOnce = false;
+        return route.abort("failed");
+      }
+      if (state.entryDelete401Once) {
+        state.entryDelete401Once = false;
+        return json(route, { detail: "expired" }, 401);
+      }
+      if (state.failEntryDelete) return json(route, { detail: "记录删除失败" }, state.entryDeleteStatus);
       state.entries = state.entries.filter((entry) => entry.id !== Number(entryMatch[1]));
       return route.fulfill({ status: 204, body: "" });
     }
@@ -282,6 +293,7 @@ try {
   assert.equal(entryRequests.length, 1, "successful local update must not reload page one");
 
   state.failEntryDelete = true;
+  state.entryDeleteStatus = 403;
   await openEditor("测试番剧一号·已修改");
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "删除私人记录" }).click();
@@ -289,16 +301,39 @@ try {
   assert.equal(await page.locator(".anime-edit-modal").isVisible(), true);
   assert.equal(entryRequests.length, 1, "failed delete must not reload or remove the record");
 
+  state.entryDeleteStatus = 500;
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "删除私人记录" }).click();
+  await page.getByRole("alert").filter({ hasText: "记录删除失败" }).waitFor({ state: "visible" });
+  assert.equal(await page.locator(".anime-edit-modal").isVisible(), true);
+
   state.failEntryDelete = false;
   state.entryDeleteDelay = 300;
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "删除私人记录" }).click();
-  await waitFor(() => entryDeleteRequests === 2);
+  await waitFor(() => entryDeleteRequests === 3);
   assert.equal(await page.getByRole("button", { name: "处理中..." }).isDisabled(), true, "pending delete must prevent duplicate submission");
   await page.locator(".anime-edit-modal").waitFor({ state: "detached" });
   await page.getByText("测试番剧一号·已修改", { exact: true }).first().waitFor({ state: "detached" });
   await page.getByText("已载入 1 / 共 1 条", { exact: false }).waitFor({ state: "visible" });
   assert.equal(entryRequests.length, 1, "confirmed delete with no next page must stay local");
+
+  state.entryDeleteDelay = 0;
+  state.entryDeleteNetworkOnce = true;
+  await openEditor("测试番剧二号");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "删除私人记录" }).click();
+  const networkDeleteAlert = page.locator(".anime-edit-modal__error");
+  await networkDeleteAlert.waitFor({ state: "visible" });
+  assert.match(await networkDeleteAlert.textContent(), /删除失败|Network Error/i);
+  assert.equal(await page.locator(".anime-edit-modal").isVisible(), true);
+
+  state.entryDelete401Once = true;
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "删除私人记录" }).click();
+  await page.locator(".anime-edit-modal").waitFor({ state: "detached" });
+  assert.equal(entryDeleteRequests, 6, "DELETE network failure plus 401 refresh must retry only the 401 request");
+  await page.getByText("已载入 0 / 共 0 条", { exact: false }).waitFor({ state: "visible" });
 
   state.failEntryCreate = true;
   await page.getByRole("button", { name: /添加番剧/ }).first().click();
@@ -314,7 +349,7 @@ try {
   await page.getByRole("button", { name: /创建并加入手账/ }).click();
   await page.locator(".dashboard-add-modal").waitFor({ state: "detached" });
   await page.getByText("新增番剧", { exact: true }).first().waitFor({ state: "visible" });
-  await page.getByText("已载入 2 / 共 2 条", { exact: false }).waitFor({ state: "visible" });
+  await page.getByText("已载入 1 / 共 1 条", { exact: false }).waitFor({ state: "visible" });
   assert.equal(entryRequests.length, 1, "confirmed create must reconcile locally");
 
   state.failSettings = true;
@@ -335,7 +370,7 @@ try {
   assert.equal(entryRequests.length, 1, "settings invalidation must refresh settings only");
 
   await wait(1100);
-  await page.getByLabel("快速修改 测试番剧二号 的观看状态").selectOption("completed");
+  await page.getByLabel("快速修改 新增番剧 的观看状态").selectOption("completed");
   await page.getByRole("status").filter({ hasText: "标记为看过" }).waitFor({ state: "visible" });
   await wait(1400);
   assert.equal(await page.getByRole("status").filter({ hasText: "标记为看过" }).isVisible(), true, "the previous flash timer must not clear a newer notice");
@@ -371,10 +406,23 @@ try {
   await waitFor(() => entryRequests.length === quickFilterEntryRequestCount + 1);
   assert.equal(filterDeleteRequests, 2);
 
+  const beforeFailureRaceRequests = entryRequests.length;
+  state.entryPatchDelay = 600;
+  state.failEntryPatch = true;
+  await page.getByLabel("快速修改 新增番剧 的观看状态").selectOption("watching");
+  await page.getByPlaceholder("输入番剧中文或日文名...").fill("不存在的番剧");
+  await waitFor(() => entryRequests.length >= beforeFailureRaceRequests + 1, 5000);
+  await page.getByRole("alert").filter({ hasText: "记录保存失败" }).waitFor({ state: "visible" });
+  assert.equal(await page.locator(".anime-list-row", { hasText: "新增番剧" }).count(), 0, "failed mutation after query change must not resurrect the old record");
+
+  state.failEntryPatch = false;
+  await page.getByPlaceholder("输入番剧中文或日文名...").fill("新增番剧");
+  await page.getByLabel("快速修改 新增番剧 的观看状态").waitFor({ state: "visible" });
+
   const beforeRaceRequests = entryRequests.length;
   state.entryPatchDelay = 600;
   await page.getByLabel("快速修改 新增番剧 的观看状态").selectOption("watching");
-  await page.getByPlaceholder("输入番剧中文或日文名...").fill("新增番剧");
+  await page.getByPlaceholder("输入番剧中文或日文名...").fill("新增");
   await waitFor(() => entryRequests.length >= beforeRaceRequests + 2, 5000);
   await page.getByLabel("快速修改 新增番剧 的观看状态").waitFor({ state: "visible" });
   assert.equal(await page.getByLabel("快速修改 新增番剧 的观看状态").inputValue(), "watching", "query refresh after a pending mutation must use the confirmed server value");
