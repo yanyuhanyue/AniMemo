@@ -90,6 +90,8 @@ async def smoke():
     require(issubclass(bridge_main.AniMemoBridge, Star), "AniMemoBridge is not a real Star subclass")
     require(bridge_main.MessageChain is MessageChain, "Bridge MessageChain import path is not official")
     package_metadata = yaml.safe_load((install_dir / "metadata.yaml").read_text(encoding="utf-8"))
+    expected_version = str(package_metadata.get("version", "")).strip()
+    require(expected_version, "metadata.yaml does not declare a plugin version")
     require(
         astrbot.__version__ in SpecifierSet(package_metadata.get("astrbot_version", "")),
         "metadata.yaml does not allow the tested AstrBot runtime",
@@ -97,7 +99,7 @@ async def smoke():
 
     metadata = star_map.get(bridge_main.AniMemoBridge.__module__)
     require(metadata is not None, "AstrBot register metadata was not created")
-    require(metadata.name == PLUGIN_NAME and metadata.version == "0.1.1", "register metadata is invalid")
+    require(metadata.name == PLUGIN_NAME and metadata.version == expected_version, "register metadata is invalid")
     handler = star_handlers_registry.get_handler_by_full_name("main_animemo")
     require(handler is not None, "@filter.command did not register the animemo handler")
     require(

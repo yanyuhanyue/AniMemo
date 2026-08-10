@@ -18,6 +18,13 @@ BRIDGE_SOURCE = ROOT / "bridges" / "astrbot_plugin_animemo_bridge"
 PLUGIN_NAME = "astrbot_plugin_animemo_bridge"
 
 
+def _read_metadata(path: Path) -> dict:
+    import yaml
+
+    value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return value if isinstance(value, dict) else {}
+
+
 class SmokeContext:
     def __init__(self, config):
         self._config = config
@@ -67,6 +74,9 @@ async def run(runtime_root: Path, label: str, plugin_zip: Path | None = None) ->
         copy_plugin(plugin_destination, plugin_zip)
 
         schema = json.loads((plugin_destination / "_conf_schema.json").read_text(encoding="utf-8"))
+        metadata = _read_metadata(plugin_destination / "metadata.yaml")
+        expected_version = str(metadata.get("version", "")).strip()
+        assert expected_version
         config_path = temp_root / "data" / "cmd_config.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config = AstrBotConfig(
@@ -87,7 +97,7 @@ async def run(runtime_root: Path, label: str, plugin_zip: Path | None = None) ->
         assert success, error
         metadata = star_manager_module.star_map[f"data.plugins.{PLUGIN_NAME}.main"]
         assert metadata.star_cls is not None
-        assert metadata.version == "0.1.1"
+        assert metadata.version == expected_version
         assert len(context.web_routes) == 4
         await metadata.star_cls.terminate()
         await db_helper.engine.dispose()
