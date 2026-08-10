@@ -54,6 +54,8 @@ anime-journal/
 
 文档入口：[`API 错误契约`](docs/api-errors.md)、[`前端状态与路由架构`](docs/frontend-architecture.md)、[`依赖更新工作流`](docs/dependencies.md)、[`维护与调度`](docs/maintenance.md)、[`插件开发`](docs/plugin-development.md)、[`集成协议`](docs/integration-protocol-v1.md) 和 [`生产部署`](docs/deployment-vps.md)。
 
+本次实际生产 hotfix 的审计记录见 [`2026-08-10 Production Hotfix`](docs/production-hotfix-20260810.md)。
+
 手动启动仍然支持。复制 `.env.development.example` 为 `.env`，然后运行：
 
 ```bash
@@ -127,7 +129,7 @@ REFRESH_COOKIE_SECURE=true
 
 如果前后端确实跨站，三类 Cookie 都改为 `SameSite=None` 并保持 `Secure=true`，同时将前端 origin 精确加入 CORS/CSRF 配置，禁止使用通配符。
 
-部署脚本已经把宿主机目录准备、SHA 校验、core-only 包检查、Compose 配置校验、构建、健康检查、单站点 OpenResty 重载和 release 归档收拢到一次调用中。先在服务器准备并填写唯一的 production env 文件：
+完整发布时，部署脚本会把宿主机目录准备、SHA 校验、core-only 包检查、Compose 配置校验、构建、健康检查、单站点 OpenResty 重载和 release 归档收拢到一次调用中。生产代码-only hotfix 不应直接套用完整发布脚本；应按 [`VPS Deployment`](docs/deployment-vps.md) 的 Scoped Hotfix 流程，只构建/替换 API 与 Web，并在完成 refresh PostgreSQL 回归后执行一次 API/Web scoped restart。先在服务器准备并填写唯一的 production env 文件：
 
 ```bash
 cp .env.production.example .env.production

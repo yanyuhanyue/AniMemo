@@ -10,10 +10,12 @@ Cloudflare usage snapshots are observability data only. The hard write guard use
 
 R2 thresholds use decimal GB (`1 GB = 1,000,000,000 bytes`). Local disk reserves use GiB (`1 GiB = 1,073,741,824 bytes`) and are labeled as GiB in the admin UI. Optional `CloudflareR2Account` budgets aggregate managed bytes and refreshed bucket snapshots across all linked buckets, so two buckets in one account share one configured account limit; accounts without a configured limit do not add a guard.
 
-For periodic external usage refresh, run the built-in command from a host scheduler every 30–60 minutes as appropriate for the deployment:
+For periodic external usage refresh, run the built-in command from a host scheduler every 30–60 minutes as appropriate for the deployment. On the production VPS, invoke it through the API container from the real Compose working directory:
 
 ```bash
-python manage.py refresh_media_storage_usage
+cd /opt/1panel/docker/compose/anime-journal/app
+docker compose --env-file .env.production -f deploy/docker-compose.yml \
+  exec -T api python manage.py refresh_media_storage_usage
 ```
 
 The command reports only backend slugs and `success/failed/skipped` counts. It never prints access keys, secrets, analytics tokens, or authorization headers. One failing R2 refresh does not prevent the remaining backends from being attempted.
