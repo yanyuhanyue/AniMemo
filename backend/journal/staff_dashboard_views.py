@@ -8,7 +8,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.models import StaffProfile
+from accounts.models import StaffProfile, UserSecurityProfile
 from plugin_host.sdk import ColumnHookContext, run_hook
 
 from .models import Column, JournalEntry, UserSettings
@@ -36,18 +36,43 @@ class StaffDashboardView(APIView):
     required_capability = "view_dashboard"
 
     def get(self, request):
-        columns = Column.objects.filter(deleted_at__isnull=True).select_related("author").prefetch_related("entries")
+        visible_columns = Column.objects.filter(deleted_at__isnull=True)
+        columns = visible_columns.select_related("author").annotate(entry_count=Count("entries"))
         pending = columns.filter(status__in=[Column.Status.PENDING, Column.Status.REMOVAL_REQUESTED])[:12]
         recent_columns = columns[:8]
         entries = JournalEntry.objects.filter(deleted_at__isnull=True).select_related("user").order_by("-updated_at")[:12]
-        journal_requests = UserSettings.objects.select_related("user").filter(
-            public_status__in=[UserSettings.PublicStatus.PENDING, UserSettings.PublicStatus.APPROVED],
-        ).order_by("public_status", "-updated_at")[:20]
-        recent_users = list(User.objects.order_by("-date_joined")[:100])
+        journal_requests = (
+            UserSettings.objects.select_related("user")
+            .filter(public_status__in=[UserSettings.PublicStatus.PENDING, UserSettings.PublicStatus.APPROVED])
+            .annotate(entry_count=Count("user__journal_entries", distinct=True))
+            .order_by("public_status", "-updated_at")[:20]
+        )
+        recent_users = list(
+            User.objects.annotate(
+                entry_count=Count("journal_entries", distinct=True),
+                column_count=Count("columns", distinct=True),
+            ).order_by("-date_joined")[:100]
+        )
+        user_ids = [user.id for user in recent_users]
         settings_by_user = {
             item.user_id: item
-            for item in UserSettings.objects.filter(user_id__in=[user.id for user in recent_users])
+            for item in UserSettings.objects.filter(user_id__in=user_ids)
         }
+        security_profiles_by_user = {
+            profile.user_id: profile
+            for profile in UserSecurityProfile.objects.filter(user_id__in=user_ids)
+        }
+        staff_profiles_by_user = {
+            profile.user_id: profile
+            for profile in StaffProfile.objects.filter(user_id__in=user_ids)
+        }
+        actor_staff_profile = (
+            None
+            if request.user.is_superuser
+            else StaffProfile.objects.filter(user_id=request.user.id).first()
+        )
+        actor_role = resolve_staff_role(request.user, staff_profile=actor_staff_profile)
+        actor_capabilities = staff_capabilities(request.user, staff_profile=actor_staff_profile)
 
         def column_data(column):
             return {
@@ -59,7 +84,7 @@ class StaffDashboardView(APIView):
                 "featured": column.featured,
                 "author": column.author.get_username(),
                 "author_email": column.author.email,
-                "entry_count": column.entries.count(),
+                "entry_count": column.entry_count,
                 "updated_at": column.updated_at,
                 "published_at": column.published_at,
             }
@@ -86,11 +111,23 @@ class StaffDashboardView(APIView):
                 "public_status_display": settings_obj.get_public_status_display(),
                 "is_public": settings_obj.allow_sharing,
                 "public_slug": settings_obj.public_slug,
-                "entry_count": settings_obj.user.journal_entries.count(),
+                "entry_count": settings_obj.entry_count,
                 "updated_at": settings_obj.updated_at,
             }
 
-        users = [build_staff_user_data(user, settings_by_user.get(user.id), request.user) for user in recent_users]
+        users = [
+            build_staff_user_data(
+                user,
+                settings_by_user.get(user.id),
+                request.user,
+                security_profile=security_profiles_by_user.get(user.id),
+                staff_profile=staff_profiles_by_user.get(user.id),
+                entry_count=user.entry_count,
+                column_count=user.column_count,
+                actor_capabilities=actor_capabilities,
+            )
+            for user in recent_users
+        ]
 
         return Response({
             "stats": {
@@ -98,9 +135,9 @@ class StaffDashboardView(APIView):
                 "active_users": User.objects.filter(is_active=True).count(),
                 "entries": JournalEntry.objects.filter(deleted_at__isnull=True).count(),
                 "columns": Column.objects.filter(deleted_at__isnull=True).count(),
-                "pending_columns": columns.filter(status=Column.Status.PENDING).count(),
-                "published_columns": columns.filter(status=Column.Status.APPROVED, featured=True).count(),
-                "removal_requests": columns.filter(status=Column.Status.REMOVAL_REQUESTED).count(),
+                "pending_columns": visible_columns.filter(status=Column.Status.PENDING).count(),
+                "published_columns": visible_columns.filter(status=Column.Status.APPROVED, featured=True).count(),
+                "removal_requests": visible_columns.filter(status=Column.Status.REMOVAL_REQUESTED).count(),
                 "pending_journals": UserSettings.objects.filter(public_status=UserSettings.PublicStatus.PENDING).count(),
             },
             "pending_columns": [column_data(item) for item in pending],
@@ -111,8 +148,8 @@ class StaffDashboardView(APIView):
             "viewer": {
                 "id": request.user.id,
                 "is_superuser": request.user.is_superuser,
-                "role": resolve_staff_role(request.user),
-                "capabilities": staff_capabilities(request.user),
+                "role": actor_role,
+                "capabilities": actor_capabilities,
             },
         })
 
