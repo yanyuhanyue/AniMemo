@@ -32,8 +32,8 @@ def validate():
             raise SystemExit(f"metadata.yaml missing {field}")
     if metadata.get("astrbot_version") != ">=4.27.2":
         raise SystemExit("metadata.yaml must require the audited AstrBot >=4.27.2 runtime")
-    if metadata.get("version") != "0.1.1":
-        raise SystemExit("AstrBot Bridge config-schema hotfix must use version 0.1.1")
+    if metadata.get("version") != "0.1.2":
+        raise SystemExit("AstrBot Bridge pairing-log/timezone hotfix must use version 0.1.2")
     schema = json.loads((BRIDGE / "_conf_schema.json").read_text(encoding="utf-8"))
     required_config = {"enabled", "animemo_base_url", "key_id", "secret", "poll_events", "poll_wait_seconds", "request_timeout_seconds", "allow_group_commands", "developer_commands", "verify_tls"}
     if set(schema) != required_config:

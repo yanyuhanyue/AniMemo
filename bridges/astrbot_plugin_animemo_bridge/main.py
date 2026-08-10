@@ -10,15 +10,19 @@ if __package__:
     from .animemo_bridge.errors import AniMemoBridgeError, PairingResultUnknown
     from .animemo_bridge.events import EventPoller
     from .animemo_bridge.identity import extract_identity
+    from .animemo_bridge.log_safety import install_pairing_log_redactor
     from .animemo_bridge.routing import RouteStore
     from .animemo_bridge.state import EventState
+    from .animemo_bridge.time_display import format_status_timestamp
 else:
     from animemo_bridge.client import AsyncAniMemoClient, BridgeConfig
     from animemo_bridge.errors import AniMemoBridgeError, PairingResultUnknown
     from animemo_bridge.events import EventPoller
     from animemo_bridge.identity import extract_identity
+    from animemo_bridge.log_safety import install_pairing_log_redactor
     from animemo_bridge.routing import RouteStore
     from animemo_bridge.state import EventState
+    from animemo_bridge.time_display import format_status_timestamp
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -149,10 +153,11 @@ def _watch_action_result(action, result):
     return "动作执行完成。"
 
 
-@register("astrbot_plugin_animemo_bridge", "AniMemo", "AniMemo Integration Protocol v1 Bridge", "0.1.1")
+@register("astrbot_plugin_animemo_bridge", "AniMemo", "AniMemo Integration Protocol v1 Bridge", "0.1.2")
 class AniMemoBridge(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config or {})
+        install_pairing_log_redactor(logger)
         self.context = context
         self.config = {**DEFAULT_CONFIG, **(config or {})}
         self.client = None
@@ -427,7 +432,7 @@ class AniMemoBridge(Star):
             f"Event poller: {poll}",
             f"Current route: {'已绑定本地投递路由' if self.routes.count() else '无'}",
             f"HMAC connectivity: {self.last_ping}",
-            f"Last successful poll: {self.state.last_successful_poll or 'NOT RUN'}",
+            f"Last successful poll (Asia/Shanghai): {format_status_timestamp(self.state.last_successful_poll)}",
             f"Last error: {self.state.last_error or 'NONE'}",
             f"Config: {self.configuration_error}" if self.configuration_error else "",
         ))

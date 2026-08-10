@@ -4,7 +4,7 @@
 
 本实现已对 AstrBot 官方仓库的 `v4.27.2` (`ad4fbfa90ca0c4ac2b30b3250e34dbf8fe7babbf`) 与固定 master 快照 (`30e20318cbaaa2e1ba57f3e0eee265d9ee98115c`) 执行真实 runtime smoke。`@register`、`Star`、`Context`、`StarTools` 来自 `astrbot.api.star`；`@filter.command`、`AstrMessageEvent`、`MessageChain` 来自 `astrbot.api.event`；主动投递使用 `await context.send_message(umo, MessageChain().message(text))`；持久化目录由 `StarTools.get_data_dir("astrbot_plugin_animemo_bridge")` 创建；diagnostics 使用 `context.register_web_api(route, handler, methods, desc)` 与 Plugin Pages 的 `window.AstrBotPluginPage.ready()/apiGet()/apiPost()`。Bridge 不使用已标记 deprecated 的 `Context.register_task`，而在 `initialize()` 中创建唯一 asyncio poller，在 `terminate()` 中取消它。详细官方源码证据见 `docs/astrbot-runtime-compatibility-audit.md`。
 
-Bridge `0.1.1` 的 CI 还会把源码和最终 ZIP 分别交给真实 AstrBot `AstrBotConfig` schema parser 与 `PluginManager.load()`。AstrBot `4.27.2` 支持 `int`、`float`、`bool`、`string`、`text`、`list`、`file`、`object`、`template_list` 和 `dict`；这些是 AstrBot 配置类型，不是 JSON Schema 类型名。门禁会稳定拒绝旧版使用的 `boolean`、`number` 和 `password`。
+Bridge `0.1.2` 的 CI 还会把源码和最终 ZIP 分别交给真实 AstrBot `AstrBotConfig` schema parser 与 `PluginManager.load()`。AstrBot `4.27.2` 支持 `int`、`float`、`bool`、`string`、`text`、`list`、`file`、`object`、`template_list` 和 `dict`；这些是 AstrBot 配置类型，不是 JSON Schema 类型名。门禁会稳定拒绝旧版使用的 `boolean`、`number` 和 `password`。
 
 ## Architecture
 

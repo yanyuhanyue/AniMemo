@@ -17,7 +17,7 @@ OUT = ROOT / "dist"
 
 def version():
     match = re.search(r"^version:\s*(.+)$", (BRIDGE / "metadata.yaml").read_text(encoding="utf-8"), re.MULTILINE)
-    return match.group(1).strip().strip('"\'') if match else "0.1.1"
+    return match.group(1).strip().strip('"\'') if match else "0.1.2"
 
 
 def package(output=None):
