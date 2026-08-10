@@ -26,7 +26,19 @@ def package(output=None):
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="astrbot-bridge-export-") as temp:
         export_root = Path(temp) / "astrbot_plugin_animemo_bridge"
-        shutil.copytree(BRIDGE, export_root, ignore=shutil.ignore_patterns("__pycache__", "tests", ".env", "*.pyc"))
+        shutil.copytree(
+            BRIDGE,
+            export_root,
+            ignore=shutil.ignore_patterns(
+                "__pycache__",
+                ".pytest_cache",
+                ".mypy_cache",
+                ".ruff_cache",
+                "tests",
+                ".env",
+                "*.pyc",
+            ),
+        )
         with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(export_root.rglob("*")):
                 if path.is_file():
