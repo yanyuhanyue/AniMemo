@@ -71,6 +71,7 @@ export function apiToRecord(item, presetColors) {
     status: item.watch_status,
     statusLabel: item.watch_status_display || { completed: "看过", watching: "在看", planned: "想看", on_hold: "搁置", dropped: "弃番" }[item.watch_status],
     tags: item.tags || [],
+    savedTagColors: item.tag_colors || {},
     tagColors: resolveTagColors(item.tags || [], item.tag_colors || {}, presetColors),
     poster: item.poster || item.poster_url || "/assets/posters/poster-01.webp",
     posterUrl: item.poster_url || "",
