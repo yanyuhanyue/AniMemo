@@ -5,6 +5,7 @@ from .staff_services import can_manage_user, get_security_profile, resolve_staff
 
 
 User = get_user_model()
+_MISSING = object()
 
 
 def _validation_detail(error):
@@ -39,8 +40,24 @@ def build_public_stats(summary_records):
     }
 
 
-def build_staff_user_data(user, settings_obj=None, actor=None):
-    security = get_security_profile(user)
+def build_staff_user_data(
+    user,
+    settings_obj=None,
+    actor=None,
+    *,
+    security_profile=_MISSING,
+    staff_profile=_MISSING,
+    entry_count=_MISSING,
+    column_count=_MISSING,
+    actor_capabilities=_MISSING,
+):
+    security = get_security_profile(user) if security_profile is _MISSING else security_profile
+    role = (
+        resolve_staff_role(user)
+        if staff_profile is _MISSING
+        else resolve_staff_role(user, staff_profile=staff_profile)
+    )
+    manage_capabilities = None if actor_capabilities is _MISSING else actor_capabilities
     return {
         "id": user.id,
         "username": user.username,
@@ -48,14 +65,18 @@ def build_staff_user_data(user, settings_obj=None, actor=None):
         "is_active": user.is_active,
         "is_staff": user.is_staff,
         "is_superuser": user.is_superuser,
-        "staff_role": resolve_staff_role(user) if user.is_staff else "user",
-        "email_verified": security.email_verified,
-        "two_factor_enabled": security.two_factor_enabled,
+        "staff_role": role if user.is_staff else "user",
+        "email_verified": security.email_verified if security else False,
+        "two_factor_enabled": security.two_factor_enabled if security else False,
         "last_login": user.last_login,
         "date_joined": user.date_joined,
-        "entry_count": user.journal_entries.count(),
-        "column_count": user.columns.count(),
+        "entry_count": user.journal_entries.count() if entry_count is _MISSING else entry_count,
+        "column_count": user.columns.count() if column_count is _MISSING else column_count,
         "nickname": settings_obj.nickname if settings_obj else "",
-        "can_manage": can_manage_user(actor, user) if actor is not None else False,
+        "can_manage": (
+            can_manage_user(actor, user, actor_capabilities=manage_capabilities)
+            if actor is not None
+            else False
+        ),
     }
 

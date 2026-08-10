@@ -88,6 +88,11 @@ test("rotates staff CSRF and sends the current access token before logout cleanu
   assert.match(dashboardSource, /await authApi\.logout\(\)/);
 });
 
+test("keeps the staff dashboard refresh interval bounded without four-second polling", () => {
+  assert.match(adminDashboardSource, /intervalMs: 20000/);
+  assert.doesNotMatch(adminDashboardSource, /intervalMs: 4000/);
+});
+
 test("uses the shared CSRF cookie flow for ordinary login and handles unavailable security services", () => {
   assert.match(apiSource, /cookiePost\("token\/", \{ username, password, "cf-turnstile-response": turnstileToken \}\)/);
   assert.match(apiSource, /authApi = \{[\s\S]*clearCsrfToken\(\);[\s\S]*ensureCsrfToken\(\{ force: true \}\)/);

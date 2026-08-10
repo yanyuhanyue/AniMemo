@@ -199,7 +199,7 @@ export function AdminDashboardPage() {
   useEffect(() => {
     const liveRefresh = createLiveRefreshController({
       refresh: () => load({ silent: hasLoadedRef.current }),
-      intervalMs: 4000,
+      intervalMs: 20000,
     });
     void liveRefresh.refreshNow();
     return () => liveRefresh.dispose();

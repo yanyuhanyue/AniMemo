@@ -26,7 +26,10 @@ USER_MANAGEMENT_DENIED_DETAIL = "无权操作该管理员账号。"
 HIGH_RISK_USER_ACTIONS = {"reset-password", "force-logout", "permissions", "role", "security"}
 
 
-def resolve_staff_role(user):
+_MISSING = object()
+
+
+def resolve_staff_role(user, *, staff_profile=_MISSING):
     """Resolve staff identity from the account flag and assigned profile."""
     if not user or not getattr(user, "is_authenticated", False):
         return None
@@ -34,18 +37,21 @@ def resolve_staff_role(user):
         return "superuser"
     if not getattr(user, "is_staff", False):
         return None
-    role = StaffProfile.objects.filter(user_id=user.pk).values_list("role", flat=True).first()
+    if staff_profile is _MISSING:
+        role = StaffProfile.objects.filter(user_id=user.pk).values_list("role", flat=True).first()
+    else:
+        role = getattr(staff_profile, "role", None) if staff_profile else None
     if not role or role == StaffProfile.Role.UNASSIGNED:
         return None
     return role
 
 
-def staff_capabilities(user):
+def staff_capabilities(user, *, staff_profile=_MISSING):
     if not user or not getattr(user, "is_authenticated", False):
         return []
     if getattr(user, "is_superuser", False):
         return list(ALL_CAPABILITIES)
-    role = resolve_staff_role(user)
+    role = resolve_staff_role(user, staff_profile=staff_profile)
     if not role:
         return []
     return sorted(ROLE_CAPABILITIES.get(role, set()))
@@ -59,9 +65,13 @@ def has_staff_capability(user, capability):
     )
 
 
-def can_manage_user(actor, target, *, action=None):
+def can_manage_user(actor, target, *, action=None, actor_capabilities=None):
     """Central server-side boundary for all staff account operations."""
-    if not actor or not actor.is_authenticated or not has_staff_capability(actor, "manage_users"):
+    if actor_capabilities is None:
+        can_manage = has_staff_capability(actor, "manage_users")
+    else:
+        can_manage = bool(actor and actor.is_authenticated and "manage_users" in actor_capabilities)
+    if not can_manage:
         return False
     if actor.pk == target.pk:
         return False
