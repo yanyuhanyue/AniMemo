@@ -466,8 +466,9 @@ try {
   await openEditor("删除竞态番剧");
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "删除私人记录" }).click();
-  await page.getByLabel("排序规则 (默认)").selectOption("score-desc");
+  await page.getByLabel("观看状态", { exact: true }).selectOption("completed");
   await waitFor(() => entryRequests.length >= beforeDeleteRaceRequests + 1, 5000);
+  assert.equal(entryRequests.at(-1).searchParams.get("status"), "completed", "stale DELETE test must issue the changed status filter query");
   await page.locator(".anime-edit-modal").waitFor({ state: "detached" });
   await page.getByText("删除竞态番剧", { exact: true }).first().waitFor({ state: "detached" });
   assert.equal(entryDeleteRequests, 7, "stale DELETE response must reconcile against the changed query");
