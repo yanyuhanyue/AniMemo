@@ -3,12 +3,11 @@ import { useRef, useState } from "react";
 import { api, readableApiError } from "../lib/api.js";
 
 import {
-  apiToRecord,
   importIdentityValues,
   parseLocalImportRecords,
 } from "./dashboardData.js";
 
-export function useDashboardImport({ isDemo, presetColors, records, setRecords, flash }) {
+export function useDashboardImport({ isDemo, presetColors, records, setRecords, refreshEntries, flash }) {
   const fileRef = useRef(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importFile, setImportFile] = useState(null);
@@ -131,9 +130,7 @@ export function useDashboardImport({ isDemo, presetColors, records, setRecords, 
       formData.append("file", importFile);
       const response = await api.post("import/", formData);
       const result = response.data || {};
-      const entriesResponse = await api.get("entries/?page_size=all");
-      const entries = entriesResponse.data?.results || entriesResponse.data || [];
-      setRecords(Array.isArray(entries) ? entries.map((item) => apiToRecord(item, presetColors)) : []);
+      refreshEntries();
       flash(`成功导入 ${result.created || 0} 条记录，已跳过 ${result.skipped_duplicates || 0} 条重复记录`);
       setImportBusy(false);
       closeImport(true);
