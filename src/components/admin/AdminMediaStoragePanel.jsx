@@ -2,6 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 
 import { api, readableApiError } from "../../lib/api.js";
 import { Icon } from "../Icon.jsx";
+import {
+  analyticsSnapshotPresentation,
+  bytesLabel,
+  formatLocalDateTime,
+  storageStateLabel,
+} from "./mediaStoragePresentation.js";
 
 
 const DECIMAL_GB = 1_000_000_000;
@@ -37,23 +43,6 @@ function unitFor(type) {
   return type === "local" ? GIB : DECIMAL_GB;
 }
 
-function bytesLabel(value, unit = DECIMAL_GB, suffix = "GB") {
-  if (value == null) return "无法获取用量";
-  return `${(Number(value) / unit).toFixed(2)} ${suffix}`;
-}
-
-const STORAGE_STATE_LABELS = {
-  ONLINE: "在线",
-  OFFLINE: "离线",
-  WRITE_BLOCKED: "已停止新写入",
-  DEGRADED: "状态异常 / 降级",
-};
-
-function storageStateLabel(status) {
-  const normalized = String(status || "OFFLINE").toUpperCase();
-  return STORAGE_STATE_LABELS[normalized] || "状态未知";
-}
-
 function toForm(item) {
   return {
     ...EMPTY_FORM,
@@ -77,6 +66,7 @@ export function AdminMediaStoragePanel({ viewer, onNotice, onError }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(null);
+  const [refreshFeedback, setRefreshFeedback] = useState(null);
   const isSuperuser = Boolean(viewer?.is_superuser);
 
   const load = async () => {
@@ -134,10 +124,26 @@ export function AdminMediaStoragePanel({ viewer, onNotice, onError }) {
     setBusy(`${item.id}:${actionName}`);
     try {
       const { data } = await api.post(`staff/system/media-storage/${item.id}/actions/`, { action: actionName, ...extra });
-      if (data?.results) setPayload(data);
+      if (actionName === "refresh-usage" && data?.storage) {
+        setPayload((current) => ({
+          ...current,
+          results: current.results.map((candidate) => candidate.id === data.storage.id ? { ...candidate, ...data.storage } : candidate),
+        }));
+        setRefreshFeedback({ id: item.id, status: data.refresh?.status || "UPDATED", detail: data.detail });
+      } else if (data?.results) setPayload(data);
       else await load();
       onNotice(data?.detail || "存储操作已完成");
-    } catch (error) { onError(readableApiError(error, "存储操作失败。")); }
+    } catch (error) {
+      const response = error?.response?.data;
+      if (actionName === "refresh-usage" && response?.storage) {
+        setPayload((current) => ({
+          ...current,
+          results: current.results.map((candidate) => candidate.id === response.storage.id ? { ...candidate, ...response.storage } : candidate),
+        }));
+        setRefreshFeedback({ id: item.id, status: response.refresh?.status || "FAILED", detail: response.detail });
+      }
+      onError(readableApiError(error, "存储操作失败。"));
+    }
     finally { setBusy(null); }
   };
 
@@ -165,20 +171,34 @@ export function AdminMediaStoragePanel({ viewer, onNotice, onError }) {
     </section>
 
     <div className="admin-storage-grid">
-       {payload.results.map((item) => <article className="admin-panel admin-storage-card" key={item.id}>
+       {payload.results.map((item) => {
+         const analytics = analyticsSnapshotPresentation(item);
+         const feedback = refreshFeedback?.id === item.id ? refreshFeedback : null;
+         const refreshing = busy === `${item.id}:refresh-usage`;
+         return <article className="admin-panel admin-storage-card" key={item.id}>
          <header><div><span>{item.backend_type === "cloudflare_r2" ? "Cloudflare R2" : "VPS 本地存储"}</span><h3>{item.name}</h3></div><div className="admin-storage-card__roles">{item.is_effective && <b className="admin-status is-effective">当前写入</b>}{item.is_preferred && <b className="admin-status is-preferred">首选</b>}<b className={`admin-status is-${String(item.state?.status || "offline").toLowerCase()}`}>{storageStateLabel(item.state?.status)}</b></div></header>
-         <dl><div><dt>优先级</dt><dd>{item.priority}</dd></div><div><dt>已管理容量</dt><dd>{bytesLabel(item.usage?.managed_bytes, unitFor(item.backend_type), item.backend_type === "local" ? "GiB" : "GB")}</dd></div>{item.backend_type === "cloudflare_r2" && <><div><dt>R2 实际容量</dt><dd>{bytesLabel(item.usage?.actual_bytes, DECIMAL_GB, "GB")}</dd></div><div><dt>未纳管容量</dt><dd>{bytesLabel(item.usage?.untracked_bytes, DECIMAL_GB, "GB")}</dd></div>{item.account && <><div><dt>Cloudflare 账户</dt><dd>{item.account.name}</dd></div><div><dt>账户容量</dt><dd>{bytesLabel(item.account.effective_bytes, DECIMAL_GB, "GB")}{item.account.write_limit_bytes == null ? " / 无限制" : ` / ${bytesLabel(item.account.write_limit_bytes, DECIMAL_GB, "GB")}`}</dd></div></>}</>}{item.backend_type === "local" && <div><dt>磁盘剩余空间</dt><dd>{bytesLabel(item.state?.disk_free_bytes, GIB, "GiB")}</dd></div>}<div><dt>媒体对象数</dt><dd>{item.media_object_count}</dd></div></dl>
-         {item.backend_type === "cloudflare_r2" && <div className="admin-storage-credentials"><span>访问密钥 ID <b>{item.access_key_configured ? "已配置" : "未配置"}</b></span><span>访问密钥 <b>{item.secret_key_configured ? "已配置" : "未配置"}</b></span><span>Analytics 令牌 <b>{item.analytics_token_configured ? "已配置" : "未配置"}</b></span></div>}
+         <dl><div><dt>优先级</dt><dd>{item.priority}</dd></div><div><dt>已管理容量</dt><dd>{bytesLabel(item.usage?.managed_bytes, unitFor(item.backend_type), item.backend_type === "local" ? "GiB" : "GB")}</dd></div>{item.backend_type === "cloudflare_r2" && <><div><dt>R2 实际容量</dt><dd>{bytesLabel(item.usage?.actual_bytes, DECIMAL_GB, "GB")}</dd></div><div><dt>未纳管容量</dt><dd>{bytesLabel(item.usage?.untracked_bytes, DECIMAL_GB, "GB")}</dd></div>{item.account && <><div><dt>Cloudflare 账户</dt><dd>{item.account.name}</dd></div><div><dt>账户容量</dt><dd>{bytesLabel(item.account.effective_bytes, DECIMAL_GB, "GB")}</dd></div><div><dt>账户级上限</dt><dd>{item.account.write_limit_bytes == null ? "未设置" : bytesLabel(item.account.write_limit_bytes, DECIMAL_GB, "GB")}</dd></div></>}</>}{item.backend_type === "local" && <div><dt>磁盘剩余空间</dt><dd>{bytesLabel(item.state?.disk_free_bytes, GIB, "GiB", "暂不可用")}</dd></div>}<div><dt>媒体对象数</dt><dd>{item.media_object_count}</dd></div></dl>
+         {item.backend_type === "cloudflare_r2" && <>
+           <div className={`admin-storage-analytics ${analytics.tone}`}>
+             <span><small>Analytics 状态</small><strong>{analytics.label}</strong><em>{analytics.detail}</em></span>
+             <span><small>最近同步</small><strong>{formatLocalDateTime(item.usage_refreshed_at)}</strong></span>
+             {feedback && <p className={`is-${String(feedback.status).toLowerCase()}`}>{feedback.detail}</p>}
+           </div>
+           <div className="admin-storage-credentials">
+             <section><strong>S3 写入连接</strong><span>访问密钥 ID <b>{item.access_key_configured ? "已配置" : "未配置"}</b></span><span>访问密钥 <b>{item.secret_key_configured ? "已配置" : "未配置"}</b></span></section>
+             <section><strong>Analytics 查询</strong><span>API 令牌 <b>{item.analytics_token_configured ? "已配置" : "未配置"}</b></span></section>
+           </div>
+         </>}
         <div className="admin-row-actions">
           <button type="button" onClick={() => setForm(toForm(item))}><Icon name="edit" /> 编辑</button>
           <button type="button" disabled={!item.state?.writable || busy} onClick={() => action(item, "set-active")}><Icon name="upload" /> 设为当前写入</button>
           <button type="button" disabled={busy} onClick={() => action(item, "test-connection")}><Icon name="bolt" /> 测试连接</button>
-          {item.backend_type === "cloudflare_r2" && <button type="button" disabled={busy} onClick={() => action(item, "refresh-usage")}><Icon name="chart" /> 刷新容量</button>}
+          {item.backend_type === "cloudflare_r2" && <button type="button" disabled={Boolean(busy)} onClick={() => action(item, "refresh-usage")}><Icon name="chart" /> {refreshing ? "正在刷新..." : "刷新容量"}</button>}
           <button type="button" disabled={busy} onClick={() => action(item, "toggle-writes", { accept_new_writes: !item.accept_new_writes })}><Icon name={item.accept_new_writes ? "eye-slash" : "eye"} /> {item.accept_new_writes ? "停止新写入" : "恢复新写入"}</button>
           {item.backend_type === "cloudflare_r2" && <button type="button" className="is-reject" onClick={() => clearCredentials(item)}><Icon name="key" /> 清除凭证</button>}
           <button type="button" className="is-reject" onClick={() => remove(item)}><Icon name="trash" /> 删除</button>
         </div>
-      </article>)}
+      </article>})}
     </div>
 
     <section className="admin-panel admin-storage-editor">

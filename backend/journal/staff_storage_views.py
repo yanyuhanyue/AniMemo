@@ -7,7 +7,11 @@ from rest_framework.views import APIView
 
 from site_config.media_storage.common import MediaStorageError, safe_error_summary
 from site_config.media_storage.pool import StoragePoolService
-from site_config.media_storage.usage import refresh_cloudflare_usage
+from site_config.media_storage.usage import (
+    CLOUDFLARE_ANALYTICS_NO_DATA,
+    CloudflareAnalyticsError,
+    refresh_cloudflare_usage,
+)
 from site_config.models import CloudflareR2Account, MediaStorageBackend, MediaStoragePoolSettings
 
 from .serializers_storage import MediaStorageBackendSerializer
@@ -156,10 +160,46 @@ class StaffMediaStorageActionView(APIView):
             if backend.backend_type != MediaStorageBackend.BackendType.CLOUDFLARE_R2:
                 return Response({"detail": "只有 R2 存储支持 Cloudflare usage 刷新。"}, status=status.HTTP_400_BAD_REQUEST)
             try:
-                refreshed, _metrics = refresh_cloudflare_usage(backend.pk)
-            except Exception:
-                record_audit(request, action="storage.usage_refreshed", target=backend, metadata={"ok": False})
-                return Response({"detail": "Cloudflare Usage unavailable，已保留上次成功快照。"}, status=status.HTTP_502_BAD_GATEWAY)
-            record_audit(request, action="storage.usage_refreshed", target=refreshed, metadata={"ok": True})
-            return Response(MediaStorageBackendSerializer(storage_queryset().get(pk=backend.pk)).data)
+                refreshed, metrics = refresh_cloudflare_usage(backend.pk)
+            except CloudflareAnalyticsError as error:
+                current = storage_queryset().get(pk=backend.pk)
+                record_audit(
+                    request,
+                    action="storage.usage_refreshed",
+                    target=current,
+                    metadata={"ok": False, "status": "FAILED", "code": error.code},
+                )
+                return Response(
+                    {
+                        "detail": f"{error.detail} 已保留上次成功快照。",
+                        "code": error.code,
+                        "refresh": {"status": "FAILED", "code": error.code},
+                        "storage": MediaStorageBackendSerializer(current, context={"request": request}).data,
+                    },
+                    status=status.HTTP_424_FAILED_DEPENDENCY,
+                )
+            current = storage_queryset().get(pk=refreshed.pk)
+            if metrics is None:
+                record_audit(
+                    request,
+                    action="storage.usage_refreshed",
+                    target=current,
+                    metadata={"ok": True, "status": "NO_DATA", "code": CLOUDFLARE_ANALYTICS_NO_DATA},
+                )
+                return Response({
+                    "detail": "Cloudflare Analytics 暂无统计数据，已保留上次成功快照。",
+                    "refresh": {"status": "NO_DATA", "code": CLOUDFLARE_ANALYTICS_NO_DATA},
+                    "storage": MediaStorageBackendSerializer(current, context={"request": request}).data,
+                })
+            record_audit(
+                request,
+                action="storage.usage_refreshed",
+                target=current,
+                metadata={"ok": True, "status": "UPDATED", "code": "CLOUDFLARE_ANALYTICS_UPDATED"},
+            )
+            return Response({
+                "detail": "Cloudflare Analytics 容量快照已更新。",
+                "refresh": {"status": "UPDATED", "code": "CLOUDFLARE_ANALYTICS_UPDATED"},
+                "storage": MediaStorageBackendSerializer(current, context={"request": request}).data,
+            })
         return Response({"detail": "不支持的存储操作。"}, status=status.HTTP_400_BAD_REQUEST)
