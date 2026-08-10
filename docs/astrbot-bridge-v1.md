@@ -4,6 +4,8 @@
 
 本实现已对 AstrBot 官方仓库的 `v4.27.2` (`ad4fbfa90ca0c4ac2b30b3250e34dbf8fe7babbf`) 与固定 master 快照 (`30e20318cbaaa2e1ba57f3e0eee265d9ee98115c`) 执行真实 runtime smoke。`@register`、`Star`、`Context`、`StarTools` 来自 `astrbot.api.star`；`@filter.command`、`AstrMessageEvent`、`MessageChain` 来自 `astrbot.api.event`；主动投递使用 `await context.send_message(umo, MessageChain().message(text))`；持久化目录由 `StarTools.get_data_dir("astrbot_plugin_animemo_bridge")` 创建；diagnostics 使用 `context.register_web_api(route, handler, methods, desc)` 与 Plugin Pages 的 `window.AstrBotPluginPage.ready()/apiGet()/apiPost()`。Bridge 不使用已标记 deprecated 的 `Context.register_task`，而在 `initialize()` 中创建唯一 asyncio poller，在 `terminate()` 中取消它。详细官方源码证据见 `docs/astrbot-runtime-compatibility-audit.md`。
 
+Bridge `0.1.1` 的 CI 还会把源码和最终 ZIP 分别交给真实 AstrBot `AstrBotConfig` schema parser 与 `PluginManager.load()`。AstrBot `4.27.2` 支持 `int`、`float`、`bool`、`string`、`text`、`list`、`file`、`object`、`template_list` 和 `dict`；这些是 AstrBot 配置类型，不是 JSON Schema 类型名。门禁会稳定拒绝旧版使用的 `boolean`、`number` 和 `password`。
+
 ## Architecture
 
 Bridge 是独立可导出的 `astrbot_plugin_animemo_bridge`，由 `httpx.AsyncClient`、HMAC v1 signing、一次性 pairing、identity binding、action client、event long-poll、bounded local dedup 和 AstrBot delivery glue 组成。Bridge 不使用 AniMemo JWT、Cookie 或数据库，也不实现 WebSocket、LLM Tool、MQ 或 Bangumi OAuth。
@@ -21,6 +23,8 @@ python manage.py integration_connection create --provider astrbot --instance-id 
 ## Configure and install
 
 从仓库根目录执行 `python scripts/package-astrbot-bridge.py`，将输出 ZIP 安装到 AstrBot。填写 `animemo_base_url`、`key_id`、`secret`；也支持环境变量 `ANIMEMO_BASE_URL`、`ANIMEMO_INTEGRATION_KEY_ID`、`ANIMEMO_INTEGRATION_SECRET` 覆盖配置。默认 `verify_tls=true`、`poll_events=true`、`poll_wait_seconds=20`、`request_timeout_seconds=35`、`allow_group_commands=false`。
+
+AstrBot `4.27.2` 没有独立的 `password` schema 类型。Bridge 将 `secret` 声明为受支持的 `string` 并设置 `invisible: true`，Dashboard 会隐藏该字段，但配置文件本身不是加密凭证库。生产环境优先使用 `ANIMEMO_INTEGRATION_SECRET`，并继续避免把 secret 写入仓库、日志、状态页、`routes.json` 或 `state.json`。运行时会自行解析布尔值并校验 `0 <= poll_wait_seconds <= 25`、`5 <= request_timeout_seconds <= 120` 以及 `request_timeout_seconds > poll_wait_seconds`，不把 Dashboard 的 `min/max` 元数据当作唯一安全边界。
 
 ## Pairing and commands
 

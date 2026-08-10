@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "bridges" / "astrbot_plugin_animemo_bridge"
 REQUIRED = {"main.py", "metadata.yaml", "_conf_schema.json", "requirements.txt", "README.md"}
 PAGE_REQUIRED = {"index.html", "app.js", "style.css"}
+ALLOWED_TYPES = {"int", "float", "bool", "string", "text", "list", "file", "object", "template_list", "dict"}
 
 
 def parse_metadata(path):
@@ -31,10 +32,36 @@ def validate():
             raise SystemExit(f"metadata.yaml missing {field}")
     if metadata.get("astrbot_version") != ">=4.27.2":
         raise SystemExit("metadata.yaml must require the audited AstrBot >=4.27.2 runtime")
+    if metadata.get("version") != "0.1.1":
+        raise SystemExit("AstrBot Bridge config-schema hotfix must use version 0.1.1")
     schema = json.loads((BRIDGE / "_conf_schema.json").read_text(encoding="utf-8"))
     required_config = {"enabled", "animemo_base_url", "key_id", "secret", "poll_events", "poll_wait_seconds", "request_timeout_seconds", "allow_group_commands", "developer_commands", "verify_tls"}
     if set(schema) != required_config:
         raise SystemExit("_conf_schema.json configuration keys do not match Bridge contract")
+    for key, item in schema.items():
+        if item.get("type") not in ALLOWED_TYPES:
+            raise SystemExit(f"configuration {key} uses unsupported AstrBot type {item.get('type')}")
+    expected_types = {
+        "enabled": "bool",
+        "animemo_base_url": "string",
+        "key_id": "string",
+        "secret": "string",
+        "poll_events": "bool",
+        "poll_wait_seconds": "int",
+        "request_timeout_seconds": "int",
+        "allow_group_commands": "bool",
+        "developer_commands": "bool",
+        "verify_tls": "bool",
+    }
+    for key, expected in expected_types.items():
+        if schema[key].get("type") != expected:
+            raise SystemExit(f"configuration {key} must use AstrBot type {expected}")
+    if schema["secret"].get("invisible") is not True:
+        raise SystemExit("secret must use invisible=true; production should prefer the environment override")
+    if schema["allow_group_commands"].get("default") is not False:
+        raise SystemExit("allow_group_commands must remain disabled by default")
+    if schema["verify_tls"].get("default") is not True:
+        raise SystemExit("verify_tls must remain enabled by default")
     page_root = BRIDGE / "pages" / "status"
     missing_page = sorted(name for name in PAGE_REQUIRED if not (page_root / name).is_file())
     if missing_page:
@@ -55,6 +82,8 @@ def validate():
     for forbidden in ("_FallbackLogger", "class Star:", "class Context:", "astrbot.api.message"):
         if forbidden in production_main:
             raise SystemExit(f"production Bridge contains a fake or invalid AstrBot runtime path: {forbidden}")
+    if "_config_bool" not in production_main or "_validated_timing" not in production_main:
+        raise SystemExit("production Bridge must validate runtime boolean and timing values")
     event_source = (BRIDGE / "animemo_bridge" / "events.py").read_text(encoding="utf-8")
     if "astrbot.api.message" in event_source:
         raise SystemExit("event delivery must import MessageChain from astrbot.api.event")

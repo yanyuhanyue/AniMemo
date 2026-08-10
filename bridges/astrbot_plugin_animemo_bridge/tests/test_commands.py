@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -12,7 +13,7 @@ install_astrbot_stubs()
 
 from animemo_bridge.errors import BridgeConnectionError, PairingResultUnknown
 from animemo_bridge.identity import MessageIdentity
-from main import AniMemoBridge
+from main import AniMemoBridge, _config_bool, _validated_timing
 
 
 class CommandsTests(unittest.IsolatedAsyncioTestCase):
@@ -32,6 +33,59 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
             is_admin=lambda: admin,
             send=lambda value: value,
         )
+
+    def test_runtime_config_parses_bool_strings_and_rejects_invalid_timing(self):
+        self.assertFalse(_config_bool({"enabled": "false"}, "enabled"))
+        self.assertFalse(_config_bool({"verify_tls": "0"}, "verify_tls"))
+        self.assertFalse(_config_bool({"allow_group_commands": 2}, "allow_group_commands"))
+        self.assertTrue(_config_bool({"poll_events": "yes"}, "poll_events"))
+        self.assertEqual(
+            _validated_timing({"poll_wait_seconds": "20", "request_timeout_seconds": "35"}),
+            (20, 35),
+        )
+        for config in (
+            {"poll_wait_seconds": -1, "request_timeout_seconds": 35},
+            {"poll_wait_seconds": 26, "request_timeout_seconds": 35},
+            {"poll_wait_seconds": 20, "request_timeout_seconds": 4},
+            {"poll_wait_seconds": 20, "request_timeout_seconds": 121},
+            {"poll_wait_seconds": 20, "request_timeout_seconds": 20},
+            {"poll_wait_seconds": "NaN", "request_timeout_seconds": 35},
+            {"poll_wait_seconds": None, "request_timeout_seconds": 35},
+        ):
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                _validated_timing(config)
+
+    async def test_environment_secret_override_stays_out_of_status_and_state(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            "os.environ",
+            {
+                "ANIMEMO_INTEGRATION_KEY_ID": "test-key-id",
+                "ANIMEMO_INTEGRATION_SECRET": "environment-only-test-secret",
+            },
+            clear=False,
+        ):
+            context = SimpleNamespace(register_web_api=lambda *_args: None)
+            bridge = self._bridge(
+                temp,
+                {
+                    "enabled": True,
+                    "key_id": "config-key-id",
+                    "secret": "config-test-secret",
+                    "poll_events": False,
+                },
+                context,
+            )
+            await bridge.initialize()
+            self.assertEqual(bridge.client.config.key_id, "test-key-id")
+            self.assertEqual(bridge.client.config.secret, "environment-only-test-secret")
+            serialized = str(await bridge._web_status())
+            self.assertNotIn("environment-only-test-secret", serialized)
+            self.assertNotIn("config-test-secret", serialized)
+            await bridge.terminate()
+            for path in (bridge.routes.path, bridge.state.path):
+                content = path.read_text(encoding="utf-8")
+                self.assertNotIn("environment-only-test-secret", content)
+                self.assertNotIn("config-test-secret", content)
 
     async def test_group_pair_is_rejected_without_client(self):
         with tempfile.TemporaryDirectory() as temp:
