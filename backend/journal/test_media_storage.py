@@ -2,10 +2,12 @@ import tempfile
 import io
 import errno
 import os
+import requests
 import stat
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from io import StringIO
 from pathlib import Path
 from collections import namedtuple
@@ -30,10 +32,21 @@ from site_config.media_storage.common import MediaStorageExhausted, MediaStorage
 from site_config.media_storage.local import DynamicLocalBackend
 from site_config.media_storage.pool import StoragePoolService
 from site_config.media_storage.r2 import DynamicR2Backend
-from site_config.media_storage.usage import effective_account_usage, effective_storage_usage, fetch_cloudflare_usage, managed_usage_bytes
+from site_config.media_storage.usage import (
+    MAX_ANALYTICS_RESPONSE_BYTES,
+    CloudflareAnalyticsAuthFailed,
+    CloudflareAnalyticsInvalidResponse,
+    CloudflareAnalyticsQueryFailed,
+    CloudflareAnalyticsTimeout,
+    effective_account_usage,
+    effective_storage_usage,
+    fetch_cloudflare_usage,
+    managed_usage_bytes,
+    refresh_cloudflare_usage,
+)
 from site_config.models import CloudflareR2Account, MediaObject, MediaStorageBackend, MediaStoragePoolSettings
 from site_config.storage_units import BINARY_GIB_BYTES, DECIMAL_GB_BYTES
-from .models import JournalEntry
+from .models import AdminAuditLog, JournalEntry
 from .admin import CloudflareR2AccountAdmin, MediaObjectAdmin, MediaStorageBackendAdmin, MediaStoragePoolSettingsAdmin
 from .serializers_entries import JournalEntrySerializer
 from .serializers_storage import MediaStorageBackendSerializer, StoragePhysicalIdentityLocked
@@ -634,6 +647,208 @@ class MediaIdentityAndRuntimeTests(TestCase):
 
 
 @override_settings(CREDENTIAL_ENCRYPTION_KEY=TEST_CREDENTIAL_KEY)
+class CloudflareAnalyticsObservabilityTests(TestCase):
+    def setUp(self):
+        self.superuser = User.objects.create_superuser(username="analytics-root", password="StrongPass123!")
+        self.client = APIClient()
+        self.client.force_authenticate(self.superuser)
+        self.backend = r2_backend("analytics-observability", 10)
+        self.secret = "super-secret-analytics-token"
+        self.backend.cloudflare_account_ref.set_analytics_token(self.secret)
+        self.backend.cloudflare_account_ref.save(update_fields=["encrypted_analytics_token", "updated_at"])
+        self.backend.usage_payload_bytes = 120
+        self.backend.usage_metadata_bytes = 30
+        self.backend.usage_object_count = 4
+        self.backend.usage_refreshed_at = timezone.now() - timedelta(hours=3)
+        self.backend.save(update_fields=[
+            "usage_payload_bytes", "usage_metadata_bytes", "usage_object_count",
+            "usage_refreshed_at", "updated_at",
+        ])
+
+    @staticmethod
+    def payload(groups):
+        return {"data": {"viewer": {"accounts": [{"r2StorageAdaptiveGroups": groups}]}}}
+
+    @staticmethod
+    def response(payload=None, *, status_code=200, content=b"{}", json_error=None):
+        response = Mock()
+        response.status_code = status_code
+        response.headers = {}
+        response.content = content
+        if status_code >= 400:
+            response.raise_for_status.side_effect = requests.HTTPError(response=response)
+        else:
+            response.raise_for_status.return_value = None
+        if json_error is not None:
+            response.json.side_effect = json_error
+        else:
+            response.json.return_value = payload
+        return response
+
+    def assert_snapshot_unchanged(self):
+        self.backend.refresh_from_db()
+        self.assertEqual(self.backend.usage_payload_bytes, 120)
+        self.assertEqual(self.backend.usage_metadata_bytes, 30)
+        self.assertEqual(self.backend.usage_object_count, 4)
+        self.assertLess(self.backend.usage_refreshed_at, timezone.now() - timedelta(hours=2))
+
+    def test_exact_zero_metrics_are_valid(self):
+        response = self.response(self.payload([{
+            "dimensions": {"datetime": "2026-08-10T05:00:00Z"},
+            "max": {"payloadSize": 0, "metadataSize": 0, "objectCount": 0},
+        }]))
+        with patch("site_config.media_storage.usage.requests.post", return_value=response):
+            self.assertEqual(fetch_cloudflare_usage(self.backend), {
+                "payload_bytes": 0,
+                "metadata_bytes": 0,
+                "object_count": 0,
+            })
+
+    def test_empty_groups_are_successful_no_data(self):
+        with patch(
+            "site_config.media_storage.usage.requests.post",
+            return_value=self.response(self.payload([])),
+        ):
+            refreshed, metrics = refresh_cloudflare_usage(self.backend.pk)
+        self.assertEqual(refreshed.pk, self.backend.pk)
+        self.assertIsNone(metrics)
+        self.assert_snapshot_unchanged()
+
+    def test_401_and_403_are_classified_as_auth_failures(self):
+        for status_code in (401, 403):
+            with self.subTest(status_code=status_code):
+                with patch(
+                    "site_config.media_storage.usage.requests.post",
+                    return_value=self.response(status_code=status_code),
+                ):
+                    with self.assertRaises(CloudflareAnalyticsAuthFailed) as raised:
+                        fetch_cloudflare_usage(self.backend)
+                self.assertEqual(raised.exception.code, "CLOUDFLARE_ANALYTICS_AUTH_FAILED")
+                self.assertNotIn(self.secret, str(raised.exception))
+
+    def test_timeout_is_classified_without_leaking_credentials(self):
+        with patch(
+            "site_config.media_storage.usage.requests.post",
+            side_effect=requests.Timeout("upstream timed out"),
+        ):
+            with self.assertRaises(CloudflareAnalyticsTimeout) as raised:
+                fetch_cloudflare_usage(self.backend)
+        self.assertEqual(raised.exception.code, "CLOUDFLARE_ANALYTICS_TIMEOUT")
+        self.assertNotIn(self.secret, str(raised.exception))
+
+    def test_graphql_errors_are_query_failures(self):
+        response = self.response({"errors": [{"message": f"rejected {self.secret}"}]})
+        with patch("site_config.media_storage.usage.requests.post", return_value=response):
+            with self.assertRaises(CloudflareAnalyticsQueryFailed) as raised:
+                fetch_cloudflare_usage(self.backend)
+        self.assertEqual(raised.exception.code, "CLOUDFLARE_ANALYTICS_QUERY_FAILED")
+        self.assertNotIn(self.secret, str(raised.exception))
+
+    def test_invalid_responses_share_the_safe_invalid_response_code(self):
+        cases = {
+            "non-json": self.response(json_error=ValueError("not json")),
+            "invalid-shape": self.response({"data": {"viewer": {}}}),
+            "missing-metric": self.response(self.payload([{
+                "dimensions": {"datetime": "2026-08-10T05:00:00Z"},
+                "max": {"payloadSize": 1, "metadataSize": 2},
+            }])),
+            "wrong-type": self.response(self.payload([{
+                "dimensions": {"datetime": "2026-08-10T05:00:00Z"},
+                "max": {"payloadSize": None, "metadataSize": 2, "objectCount": 3},
+            }])),
+            "oversized": self.response(
+                self.payload([]),
+                content=b"x" * (MAX_ANALYTICS_RESPONSE_BYTES + 1),
+            ),
+        }
+        for name, response in cases.items():
+            with self.subTest(name=name):
+                with patch("site_config.media_storage.usage.requests.post", return_value=response):
+                    with self.assertRaises(CloudflareAnalyticsInvalidResponse) as raised:
+                        fetch_cloudflare_usage(self.backend)
+                self.assertEqual(raised.exception.code, "CLOUDFLARE_ANALYTICS_INVALID_RESPONSE")
+                self.assertNotIn(self.secret, str(raised.exception))
+
+    def test_timeout_and_auth_failure_preserve_last_successful_snapshot(self):
+        failures = [
+            requests.Timeout("upstream timed out"),
+            self.response(status_code=401),
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure.__class__.__name__):
+                patcher = patch(
+                    "site_config.media_storage.usage.requests.post",
+                    side_effect=failure if isinstance(failure, Exception) else None,
+                    return_value=None if isinstance(failure, Exception) else failure,
+                )
+                with patcher:
+                    with self.assertRaises((CloudflareAnalyticsTimeout, CloudflareAnalyticsAuthFailed)):
+                        refresh_cloudflare_usage(self.backend.pk)
+                self.assert_snapshot_unchanged()
+
+    def test_refresh_action_returns_updated_zero_snapshot(self):
+        response = self.response(self.payload([{
+            "dimensions": {"datetime": "2026-08-10T05:00:00Z"},
+            "max": {"payloadSize": 0, "metadataSize": 0, "objectCount": 0},
+        }]))
+        with patch("site_config.media_storage.usage.requests.post", return_value=response):
+            result = self.client.post(
+                reverse("staff-media-storage-action", kwargs={"pk": self.backend.pk}),
+                {"action": "refresh-usage"},
+                format="json",
+            )
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(result.data["refresh"], {
+            "status": "UPDATED",
+            "code": "CLOUDFLARE_ANALYTICS_UPDATED",
+        })
+        self.assertEqual(result.data["storage"]["usage"]["actual_bytes"], 0)
+
+    def test_refresh_action_reports_no_data_without_erasing_snapshot(self):
+        with patch(
+            "site_config.media_storage.usage.requests.post",
+            return_value=self.response(self.payload([])),
+        ):
+            result = self.client.post(
+                reverse("staff-media-storage-action", kwargs={"pk": self.backend.pk}),
+                {"action": "refresh-usage"},
+                format="json",
+            )
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(result.data["refresh"]["status"], "NO_DATA")
+        self.assertEqual(result.data["refresh"]["code"], "CLOUDFLARE_ANALYTICS_NO_DATA")
+        self.assertEqual(result.data["storage"]["usage"]["actual_bytes"], 150)
+        self.assert_snapshot_unchanged()
+
+    def test_refresh_action_returns_424_code_and_safe_last_known_storage(self):
+        with patch(
+            "site_config.media_storage.usage.requests.post",
+            side_effect=requests.Timeout(f"timed out {self.secret}"),
+        ):
+            result = self.client.post(
+                reverse("staff-media-storage-action", kwargs={"pk": self.backend.pk}),
+                {"action": "refresh-usage"},
+                format="json",
+            )
+        self.assertEqual(result.status_code, 424, result.data)
+        self.assertEqual(result.data["code"], "CLOUDFLARE_ANALYTICS_TIMEOUT")
+        self.assertEqual(result.data["refresh"], {
+            "status": "FAILED",
+            "code": "CLOUDFLARE_ANALYTICS_TIMEOUT",
+        })
+        self.assertEqual(result.data["storage"]["usage"]["actual_bytes"], 150)
+        audit = AdminAuditLog.objects.filter(action="storage.usage_refreshed").latest("id")
+        self.assertEqual(audit.metadata, {
+            "ok": False,
+            "status": "FAILED",
+            "code": "CLOUDFLARE_ANALYTICS_TIMEOUT",
+        })
+        exposed = f"{result.data} {audit.metadata}"
+        self.assertNotIn(self.secret, exposed)
+        self.assert_snapshot_unchanged()
+
+
+@override_settings(CREDENTIAL_ENCRYPTION_KEY=TEST_CREDENTIAL_KEY)
 class StorageUsageAndLocalSafetyTests(TestCase):
     def test_refresh_usage_command_reports_skipped_without_secrets(self):
         r2_backend("command-skip", 10)
@@ -668,6 +883,7 @@ class StorageUsageAndLocalSafetyTests(TestCase):
         with patch("site_config.media_storage.usage.requests.post", return_value=response):
             with self.assertRaises(ValueError) as raised:
                 fetch_cloudflare_usage(backend)
+        self.assertEqual(raised.exception.code, "CLOUDFLARE_ANALYTICS_QUERY_FAILED")
         self.assertNotIn("super-secret-analytics-token", str(raised.exception))
 
     def test_local_disk_guard_and_traversal_protection(self):

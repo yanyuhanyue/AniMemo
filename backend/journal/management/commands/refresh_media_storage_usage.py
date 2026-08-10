@@ -23,7 +23,7 @@ class Command(BaseCommand):
                     self.stdout.write(f"SKIPPED {backend.slug}: analytics not configured")
                 continue
             try:
-                refresh_cloudflare_usage(backend.pk)
+                _refreshed, metrics = refresh_cloudflare_usage(backend.pk)
             except Exception as error:
                 failed += 1
                 if not options["quiet"]:
@@ -31,7 +31,7 @@ class Command(BaseCommand):
                 continue
             success += 1
             if not options["quiet"]:
-                self.stdout.write(f"SUCCESS {backend.slug}")
+                self.stdout.write(f"{'SUCCESS' if metrics is not None else 'NO_DATA'} {backend.slug}")
         summary = f"summary success={success} failed={failed} skipped={skipped}"
         if failed:
             self.stdout.write(self.style.ERROR(summary))
