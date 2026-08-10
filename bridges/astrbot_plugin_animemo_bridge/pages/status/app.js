@@ -14,6 +14,24 @@ function text(value) {
   return document.createTextNode(value == null ? "" : String(value));
 }
 
+const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+
+function formatStatusTimestamp(value) {
+  if (!value) return "未运行";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return `${new Intl.DateTimeFormat("zh-CN", {
+    timeZone: DISPLAY_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(parsed)} (UTC+08:00)`;
+}
+
 function renderStatus(status) {
   const summary = document.querySelector("#summary");
   summary.replaceChildren();
@@ -26,7 +44,7 @@ function renderStatus(status) {
     游标: status.cursor,
     已投递缓存: status.delivered_event_count,
     路由数: status.route_count,
-    最近成功轮询: status.last_successful_poll || "未运行",
+    最近成功轮询: formatStatusTimestamp(status.last_successful_poll),
     最近错误: status.last_error || "无",
   };
   const dl = document.createElement("dl");
