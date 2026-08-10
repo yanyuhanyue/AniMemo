@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, getStoredTokens, readableApiError } from "../lib/api.js";
 import { useServerStateRevision } from "../lib/serverState.js";
@@ -13,8 +13,13 @@ import {
   STORAGE_KEY,
   apiToRecord,
 } from "./dashboardData.js";
+import {
+  appendUniqueDashboardRecords,
+  buildDashboardQueryParams,
+  getDashboardNextPage,
+} from "./dashboardQuery.js";
 
-export function useDashboardData({ navigate }) {
+export function useDashboardData({ navigate, entryQuery = {} }) {
   const [{ access }, setAuthSnapshot] = useState(() => getStoredTokens());
   const isDemo = demoEnabled
     && (!access || localStorage.getItem("anime_journal_demo") === "true");
@@ -43,10 +48,53 @@ export function useDashboardData({ navigate }) {
   const [tagPresets, setTagPresets] = useState(FALLBACK_TAG_PRESETS);
   const [dashboardReady, setDashboardReady] = useState(isDemo);
   const [loadError, setLoadError] = useState("");
+  const [isInitialLoading, setIsInitialLoading] = useState(!isDemo);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState("");
+  const [hasMore, setHasMore] = useState(false);
+  const [nextPage, setNextPage] = useState(null);
+  const [totalCount, setTotalCount] = useState(isDemo ? records.length : 0);
+  const [facets, setFacets] = useState({ tags: [], years: [] });
+  const [debouncedSearch, setDebouncedSearch] = useState(String(entryQuery.search || ""));
+  const [entriesReloadKey, setEntriesReloadKey] = useState(0);
+  const requestGenerationRef = useRef(0);
+  const requestControllerRef = useRef(null);
+  const loadingMoreRef = useRef(false);
   const [analytics, setAnalytics] = useState(null);
   const [analyticsError, setAnalyticsError] = useState("");
-  const serverStateRevision = useServerStateRevision(["journal_entries", "settings", "filters", "showcase", "analytics"]);
+  const entriesRevision = useServerStateRevision(["journal_entries"]);
+  const metadataRevision = useServerStateRevision(["settings", "filters", "showcase", "analytics"]);
   const presetColors = useMemo(() => buildPresetColorMap(tagPresets), [tagPresets]);
+  const requestQuery = useMemo(() => ({
+    search: debouncedSearch,
+    tag: entryQuery.tag,
+    status: entryQuery.status,
+    visibility: entryQuery.visibility,
+    year: entryQuery.year,
+    activity: entryQuery.activity,
+    sort: entryQuery.sort,
+    priority: entryQuery.priority,
+    quickFilterId: entryQuery.quickFilterId,
+    quickFilter: entryQuery.quickFilter || quickFilters.find((item) => String(item.id) === String(entryQuery.quickFilterId)),
+  }), [
+    debouncedSearch,
+    entryQuery.activity,
+    entryQuery.priority,
+    entryQuery.quickFilter,
+    entryQuery.quickFilterId,
+    entryQuery.sort,
+    entryQuery.status,
+    entryQuery.tag,
+    entryQuery.visibility,
+    entryQuery.year,
+    quickFilters,
+  ]);
+  const requestQueryKey = useMemo(() => JSON.stringify(requestQuery), [requestQuery]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(String(entryQuery.search || "")), 300);
+    return () => window.clearTimeout(timer);
+  }, [entryQuery.search]);
 
   useEffect(() => {
     if (!demoEnabled && !access) navigate("/login", { replace: true });
@@ -76,25 +124,16 @@ export function useDashboardData({ navigate }) {
     }
     if (!access) return undefined;
     Promise.allSettled([
-      api.get("entries/?page_size=100"),
       api.get("settings/me/"),
       api.get("filters/"),
       api.get("tag-presets/"),
       api.get("stats/me/"),
-    ]).then(([entriesResult, settingsResult, filtersResult, tagPresetsResult, analyticsResult]) => {
+    ]).then(([settingsResult, filtersResult, tagPresetsResult, analyticsResult]) => {
       if (cancelled) return;
       const loadedTagPresets = tagPresetsResult.status === "fulfilled"
         ? normalizeTagPresets(tagPresetsResult.value.data, [])
         : FALLBACK_TAG_PRESETS;
-      const loadedPresetColors = buildPresetColorMap(loadedTagPresets);
       setTagPresets(loadedTagPresets);
-      if (entriesResult.status === "fulfilled") {
-        const items = entriesResult.value.data?.results || entriesResult.value.data || [];
-        setRecords(Array.isArray(items) ? items.map((item) => apiToRecord(item, loadedPresetColors)) : []);
-      } else {
-        setRecords([]);
-        setLoadError(readableApiError(entriesResult.reason, "番剧数据加载失败，请检查服务器连接。"));
-      }
       if (settingsResult.status === "fulfilled") {
         const data = settingsResult.value.data;
         setSettings((current) => ({
@@ -126,7 +165,88 @@ export function useDashboardData({ navigate }) {
       setDashboardReady(true);
     });
     return () => { cancelled = true; };
-  }, [access, isDemo, serverStateRevision]);
+  }, [access, isDemo, metadataRevision]);
+
+  const fetchEntriesPage = useCallback(async ({ page, append, generation }) => {
+    const controller = new AbortController();
+    requestControllerRef.current?.abort();
+    requestControllerRef.current = controller;
+    const params = buildDashboardQueryParams(requestQuery, { page, includeFacets: page === 1 });
+    try {
+      const response = await api.get("entries/", { params, signal: controller.signal });
+      if (generation !== requestGenerationRef.current) return;
+      const payload = response.data || {};
+      const items = Array.isArray(payload) ? payload : (payload.results || []);
+      const mapped = items.map((item) => apiToRecord(item, presetColors));
+      setRecords((current) => append ? appendUniqueDashboardRecords(current, mapped) : mapped);
+      setTotalCount(Number.isFinite(Number(payload.count)) ? Number(payload.count) : mapped.length);
+      setNextPage(getDashboardNextPage(payload));
+      setHasMore(Boolean(payload.next));
+      if (page === 1 && payload.facets) {
+        setFacets({ tags: payload.facets.tags || [], years: payload.facets.years || [] });
+      }
+      setLoadError("");
+      setLoadMoreError("");
+    } catch (error) {
+      if (controller.signal.aborted || generation !== requestGenerationRef.current) return;
+      if (append) setLoadMoreError(readableApiError(error, "加载更多记录失败，请重试。"));
+      else {
+        setRecords([]);
+        setTotalCount(0);
+        setNextPage(null);
+        setHasMore(false);
+        setLoadError(readableApiError(error, "番剧数据加载失败，请检查服务器连接。"));
+      }
+    } finally {
+      if (generation === requestGenerationRef.current) {
+        if (append) {
+          loadingMoreRef.current = false;
+          setIsLoadingMore(false);
+        }
+        else setIsInitialLoading(false);
+      }
+    }
+  }, [presetColors, requestQuery]);
+
+  useEffect(() => {
+    if (isDemo) {
+      setIsInitialLoading(false);
+      setHasMore(false);
+      setNextPage(null);
+      setTotalCount(records.length);
+      return undefined;
+    }
+    if (!access) return undefined;
+    const generation = requestGenerationRef.current + 1;
+    requestGenerationRef.current = generation;
+    requestControllerRef.current?.abort();
+    setIsInitialLoading(true);
+    loadingMoreRef.current = false;
+    setIsLoadingMore(false);
+    setLoadMoreError("");
+    setLoadError("");
+    setRecords([]);
+    setNextPage(null);
+    setHasMore(false);
+    fetchEntriesPage({ page: 1, append: false, generation });
+    return () => {
+      requestControllerRef.current?.abort();
+      requestGenerationRef.current += 1;
+    };
+  }, [access, entriesRevision, fetchEntriesPage, isDemo, requestQueryKey, entriesReloadKey]);
+
+  const loadMore = useCallback(() => {
+    if (isDemo || !hasMore || !nextPage || isInitialLoading || isLoadingMore || loadingMoreRef.current) return;
+    const generation = requestGenerationRef.current;
+    loadingMoreRef.current = true;
+    setIsLoadingMore(true);
+    setLoadMoreError("");
+    fetchEntriesPage({ page: nextPage, append: true, generation });
+  }, [fetchEntriesPage, hasMore, isDemo, isInitialLoading, isLoadingMore, nextPage]);
+
+  const refreshEntries = useCallback(() => {
+    setEntriesReloadKey((current) => current + 1);
+  }, []);
 
   useEffect(() => {
     if (!isDemo) return;
@@ -143,7 +263,14 @@ export function useDashboardData({ navigate }) {
     dashboardReady,
     demoCatalogRecords,
     isDemo,
+    isInitialLoading,
+    isLoadingMore,
+    loadMore,
+    loadMoreError,
     loadError,
+    hasMore,
+    loadedCount: records.length,
+    nextPage,
     presetColors,
     quickFilters,
     records,
@@ -153,5 +280,8 @@ export function useDashboardData({ navigate }) {
     setSettings,
     settings,
     tagPresets,
+    totalCount,
+    facets,
+    refreshEntries,
   };
 }

@@ -26,6 +26,7 @@ import {
   matchesQuickFilter,
   recordToApi,
 } from "./dashboardData.js";
+import { DASHBOARD_PAGE_SIZE } from "./dashboardQuery.js";
 import {
   DangerZoneDialog,
   DashboardAvatar,
@@ -46,13 +47,38 @@ export function DashboardPage() {
   const dashboardItems = navigation.filter((item) => item.area === "dashboard");
   const location = useLocation();
   const modeTransition = location.state?.dashboardModeTransition === true;
+  const [query, setQuery] = useState("");
+  const [tag, setTag] = useState("all");
+  const [status, setStatus] = useState("all");
+  const [year, setYear] = useState("all");
+  const [sort, setSort] = useState("date-desc");
+  const [priority, setPriority] = useState(true);
+  const [activeQuick, setActiveQuick] = useState("all");
+  const [activity, setActivity] = useState("all");
+  const entryQuery = useMemo(() => ({
+    search: query,
+    tag,
+    status,
+    year,
+    activity,
+    sort,
+    priority,
+    quickFilterId: activeQuick,
+  }), [activeQuick, activity, priority, query, sort, status, tag, year]);
   const {
     dashboardReady,
     demoCatalogRecords,
     analytics,
     analyticsError,
+    facets,
+    hasMore,
     isDemo,
+    isInitialLoading,
+    isLoadingMore,
+    loadMore,
+    loadMoreError,
     loadError,
+    loadedCount,
     presetColors,
     quickFilters,
     records,
@@ -62,16 +88,9 @@ export function DashboardPage() {
     setSettings,
     settings,
     tagPresets,
-  } = useDashboardData({ navigate });
-  const [query, setQuery] = useState("");
-  const [tag, setTag] = useState("all");
-  const [status, setStatus] = useState("all");
-  const [year, setYear] = useState("all");
-  const [sort, setSort] = useState("date-desc");
-  const [pageSize, setPageSize] = useState("all");
-  const [priority, setPriority] = useState(true);
-  const [activeQuick, setActiveQuick] = useState("all");
-  const [activity, setActivity] = useState("all");
+    totalCount,
+    refreshEntries,
+  } = useDashboardData({ navigate, entryQuery });
   const [view, setView] = useState("list");
   const [selected, setSelected] = useState(null);
   const [selectionMode, setSelectionMode] = useState(false);
@@ -90,6 +109,7 @@ export function DashboardPage() {
   const [noticeKind, setNoticeKind] = useState("");
   const deepLinkRequestRef = useRef("");
   const openingEntryRef = useRef("");
+  const loadMoreRef = useRef(null);
   useEffect(() => { if (loadError) setNotice(loadError); }, [loadError]);
   useEffect(() => {
     if (!selected) return;
@@ -109,6 +129,7 @@ export function DashboardPage() {
 
   const closeSelected = () => {
     openingEntryRef.current = "";
+    deepLinkRequestRef.current = "";
     setSelected(null);
     clearEntryQuery();
   };
@@ -170,7 +191,6 @@ export function DashboardPage() {
     deepLinkRequestRef.current = entryId;
     api.get(`entries/${entryId}/`).then((response) => {
       const record = apiToRecord(response.data, presetColors);
-      setRecords((current) => current.some((item) => String(item.id) === String(record.id)) ? current : [record, ...current]);
       openEditor(record, null, false);
     }).catch(() => {
       flash("没有找到这部作品，或它不属于当前账号。", "error");
@@ -183,10 +203,26 @@ export function DashboardPage() {
     if (selected) setSelected(null);
   }, [location.search, selected]);
 
-  const allTags = useMemo(() => [...new Set(records.flatMap((record) => record.tags || []))].sort((a, b) => a.localeCompare(b, "zh-CN")), [records]);
-  const allYears = useMemo(() => [...new Set(records.map((record) => String(record.period || "").slice(0, 4)).filter((item) => /^\d{4}$/.test(item)))].sort((a, b) => Number(b) - Number(a)), [records]);
+  useEffect(() => {
+    if (isDemo || !hasMore || loadMoreError || !loadMoreRef.current) return undefined;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) loadMore();
+    }, { rootMargin: "600px 0px" });
+    observer.observe(loadMoreRef.current);
+    return () => observer.disconnect();
+  }, [hasMore, isDemo, loadMore, loadMoreError]);
+
+  const allTags = useMemo(() => isDemo
+    ? [...new Set(records.flatMap((record) => record.tags || []))].sort((a, b) => a.localeCompare(b, "zh-CN"))
+    : facets.tags,
+  [facets.tags, isDemo, records]);
+  const allYears = useMemo(() => isDemo
+    ? [...new Set(records.map((record) => String(record.period || "").slice(0, 4)).filter((item) => /^\d{4}$/.test(item)))].sort((a, b) => Number(b) - Number(a))
+    : facets.years,
+  [facets.years, isDemo, records]);
   const activeFilter = quickFilters.find((item) => String(item.id) === activeQuick);
   const filteredRecords = useMemo(() => {
+    if (!isDemo) return records;
     const filtered = records.filter((record) => {
       const haystack = `${record.title} ${record.japaneseTitle} ${record.studio}`.toLowerCase();
       return (!query.trim() || haystack.includes(query.trim().toLowerCase()))
@@ -210,8 +246,9 @@ export function DashboardPage() {
       return comparePeriod(b, a);
     });
     return sorted;
-  }, [activeFilter, activity, priority, query, records, sort, status, tag, year]);
-  const visible = pageSize === "all" ? filteredRecords : filteredRecords.slice(0, Number(pageSize));
+  }, [activeFilter, activity, isDemo, priority, query, records, sort, status, tag, year]);
+  const visible = filteredRecords;
+  const resultCount = isDemo ? filteredRecords.length : totalCount;
 
   const flash = (message, kind = "") => {
     setNotice(message);
@@ -229,13 +266,15 @@ export function DashboardPage() {
     importError,
     importOpen,
     importPreview,
-  } = useDashboardImport({ isDemo, presetColors, records, setRecords, flash });
+  } = useDashboardImport({ isDemo, presetColors, records, setRecords, refreshEntries, flash });
 
   const saveRecord = async (record) => {
     const { posterFile, ...savedRecord } = record;
-    const existing = records.some((item) => item.id === savedRecord.id);
-    const previousRecord = existing ? records.find((item) => item.id === savedRecord.id) : null;
-    setRecords((current) => existing ? current.map((item) => item.id === savedRecord.id ? savedRecord : item) : [savedRecord, ...current]);
+    const previousRecord = records.find((item) => item.id === savedRecord.id) || null;
+    const existing = Boolean(previousRecord) || Number.isFinite(Number(savedRecord.id));
+    setRecords((current) => previousRecord
+      ? current.map((item) => item.id === savedRecord.id ? savedRecord : item)
+      : existing ? current : [savedRecord, ...current]);
     if (!isDemo) {
       try {
         const payload = recordToApi(savedRecord);
@@ -482,7 +521,7 @@ export function DashboardPage() {
   };
 
   const resetFilters = () => {
-    setQuery(""); setTag("all"); setStatus("all"); setYear("all"); setActivity("all"); setSort("date-desc"); setPageSize("all"); setPriority(true); setActiveQuick("all");
+    setQuery(""); setTag("all"); setStatus("all"); setYear("all"); setActivity("all"); setSort("date-desc"); setPriority(true); setActiveQuick("all");
     flash("筛选条件已恢复默认");
   };
 
@@ -626,8 +665,9 @@ export function DashboardPage() {
     logout();
   };
 
-  const scored = records.filter((record) => Number(record.score) > 0);
   const catalogFilters = { search: query, tag, status, year, activity, sort, quick: activeQuick };
+  const hasSearch = Boolean(query.trim());
+  const hasFilters = tag !== "all" || status !== "all" || year !== "all" || activity !== "all" || activeQuick !== "all";
   const displayedAnalytics = analytics || (isDemo ? {
     summary: {
       total: records.length,
@@ -690,7 +730,7 @@ export function DashboardPage() {
           onReset={resetFilters}
           viewMode={view}
           onViewChange={changeView}
-          resultCount={filteredRecords.length}
+          resultCount={resultCount}
           tags={allTags}
           years={allYears}
           quickFilters={quickFilters}
@@ -701,12 +741,18 @@ export function DashboardPage() {
 
         <BulkManagementToolbar active={selectionMode} selectedCount={selectedIds.size} tags={allTags} busy={bulkBusy} onToggle={toggleSelectionMode} onClear={() => setSelectedIds(new Set())} onApply={applyBulkOperation} />
 
-        <CatalogMeta resultCount={filteredRecords.length} pageSize={pageSize} onPageSizeChange={setPageSize} unscoredCount={records.length - scored.length} pageSizeOptions={["12", "24", "48", "96"]} />
+        <CatalogMeta resultCount={resultCount} loadedCount={loadedCount} pageSize={DASHBOARD_PAGE_SIZE} infinite />
         <div className="hazard-line" aria-hidden="true" />
 
         <section className={`dashboard-results dashboard-results--${view} dashboard-entrance-piece`}>
-          {visible.length > 0 && <AnimeCatalog records={visible} viewMode={view} onOpenDetail={openEditor} sort={sort} onSortChange={setSort} ready={dashboardReady} variant="editable" onAddRecord={() => setAddOpen(true)} onQuickStatus={quickUpdateStatus} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelection={toggleSelected} />}
-          {!visible.length && <button className="dashboard-empty-state" type="button" onClick={() => records.length ? resetFilters() : setAddOpen(true)}><span className="dashboard-empty-plus"><Icon name="plus" /></span><h2>{records.length ? "没有匹配的番剧" : "手账还是空的"}</h2><p>{records.length ? "换一个筛选条件，或者恢复默认筛选。" : "点击这里，添加第一部属于你的番剧。"}</p><strong>{records.length ? "恢复默认" : "开始添加"} <Icon name="arrow-right" /></strong></button>}
+          {isInitialLoading && <div className="dashboard-infinite-status" role="status"><Icon name="spinner" spin /> 正在加载手账记录</div>}
+          {!isInitialLoading && loadError && <div className="dashboard-infinite-status is-error" role="alert"><span>{loadError}</span><button type="button" onClick={refreshEntries}><Icon name="refresh" /> 重试</button></div>}
+          {!isInitialLoading && !loadError && visible.length > 0 && <AnimeCatalog records={visible} viewMode={view} onOpenDetail={openEditor} sort={sort} onSortChange={setSort} ready={dashboardReady} variant="editable" onAddRecord={() => setAddOpen(true)} onQuickStatus={quickUpdateStatus} selectionMode={selectionMode} selectedIds={selectedIds} onToggleSelection={toggleSelected} />}
+          {!isInitialLoading && !loadError && !visible.length && <button className="dashboard-empty-state" type="button" onClick={() => hasSearch || hasFilters ? resetFilters() : setAddOpen(true)}><span className="dashboard-empty-plus"><Icon name="plus" /></span><h2>{hasSearch ? "没有找到匹配记录" : hasFilters ? "当前筛选没有结果" : "手账还是空的"}</h2><p>{hasSearch || hasFilters ? "换一个检索条件，或者恢复默认筛选。" : "点击这里，添加第一部属于你的番剧。"}</p><strong>{hasSearch || hasFilters ? "恢复默认" : "开始添加"} <Icon name="arrow-right" /></strong></button>}
+          {!isDemo && visible.length > 0 && <div ref={loadMoreRef} className="dashboard-infinite-sentinel" aria-hidden={!isLoadingMore && !loadMoreError}>
+            {isLoadingMore && <span role="status"><Icon name="spinner" spin /> 正在加载更多记录</span>}
+            {loadMoreError && <span role="alert">{loadMoreError} <button type="button" onClick={loadMore}><Icon name="refresh" /> 重试</button></span>}
+          </div>}
         </section>
       </section>
 

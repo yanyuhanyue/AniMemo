@@ -1,6 +1,11 @@
+from datetime import timedelta
+
 from plugin_host.permissions import plugin_permissions_for_user
 from plugin_host.sdk import ColumnHookContext, JournalHookContext, run_hook
-from django.db.models import Count, Max, Min, OuterRef, Subquery
+from django.db import connection
+from django.db.models import Case, Count, F, IntegerField, Max, Min, OuterRef, Q, Subquery, Value, When
+from django.db.models.expressions import RawSQL
+from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import filters, permissions, status, viewsets
@@ -43,39 +48,151 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
     pagination_class = FlexiblePageNumberPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ["title", "japanese_title", "studio", "review"]
-    ordering_fields = ["updated_at", "created_at", "airing_period", "personal_score", "title"]
+    ordering_fields = [
+        "updated_at",
+        "created_at",
+        "airing_period",
+        "personal_score",
+        "title",
+        "last_watched_on",
+    ]
     ordering = ["-updated_at"]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
 
-    def get_queryset(self):
+    def get_unfiltered_queryset(self):
+        return JournalEntry.objects.filter(
+            user=self.request.user,
+            deleted_at__isnull=True,
+        )
+
+    def get_base_queryset(self):
         latest_history = WatchHistoryRecord.objects.filter(entry_id=OuterRef("pk")).order_by(
             "-watched_on",
             "-sequence",
             "-id",
         )
-        queryset = JournalEntry.objects.filter(
-            user=self.request.user,
-            deleted_at__isnull=True,
-        ).annotate(
+        return self.get_unfiltered_queryset().annotate(
             watch_history_count=Count("watch_history_records", distinct=True),
             last_watched_on=Max("watch_history_records__watched_on"),
             first_watched_on=Min("watch_history_records__watched_on"),
             latest_episode_start=Subquery(latest_history.values("episode_start")[:1]),
             latest_episode_end=Subquery(latest_history.values("episode_end")[:1]),
+            external_identity_count=Count("external_identities", distinct=True),
+            dashboard_priority=Case(
+                When(
+                    Q(personal_score__gt=0) | Q(watch_status=JournalEntry.WatchStatus.COMPLETED),
+                    then=Value(1),
+                ),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
         ).prefetch_related("external_identities")
+
+    @staticmethod
+    def _tag_query(tag):
+        if connection.vendor == "sqlite":
+            table = connection.ops.quote_name(JournalEntry._meta.db_table)
+            return Q(pk__in=RawSQL(
+                f"SELECT tag_entry.id FROM {table} AS tag_entry, json_each(tag_entry.tags) AS tag_value "
+                "WHERE LOWER(CAST(tag_value.value AS TEXT)) LIKE LOWER(%s)",
+                [f"%{tag}%"],
+            ))
+        return Q(tags__icontains=str(tag))
+
+    def _apply_quick_filter(self, queryset):
+        tags = [value.strip() for value in self.request.query_params.getlist("quick_tags") if value.strip()]
+        keywords = [value.strip() for value in self.request.query_params.getlist("quick_title_keywords") if value.strip()]
+        if not tags and not keywords:
+            return queryset
+        match_mode = self.request.query_params.get("quick_match_mode", "any").lower()
+        predicates = [self._tag_query(tag) for tag in tags]
+        predicates.extend(
+            Q(title__icontains=keyword) | Q(japanese_title__icontains=keyword)
+            for keyword in keywords
+        )
+        if match_mode == "all":
+            for predicate in predicates:
+                queryset = queryset.filter(predicate)
+            return queryset
+        combined = predicates[0]
+        for predicate in predicates[1:]:
+            combined |= predicate
+        return queryset.filter(combined)
+
+    def get_queryset(self):
+        queryset = self.get_base_queryset()
         status_value = self.request.query_params.get("status")
         visibility = self.request.query_params.get("visibility")
         tag = self.request.query_params.get("tag")
         year = self.request.query_params.get("year")
+        activity = self.request.query_params.get("activity")
         if status_value:
             queryset = queryset.filter(watch_status=status_value)
         if visibility:
             queryset = queryset.filter(visibility=visibility)
         if tag:
-            queryset = queryset.filter(tags__icontains=tag)
+            queryset = queryset.filter(self._tag_query(tag))
         if year:
             queryset = queryset.filter(airing_period__startswith=year)
+        queryset = self._apply_quick_filter(queryset)
+        if activity == "never-watched":
+            queryset = queryset.filter(last_watched_on__isnull=True)
+        elif activity == "unrated":
+            queryset = queryset.filter(Q(personal_score__isnull=True) | Q(personal_score__lte=0))
+        elif activity == "external-bound":
+            queryset = queryset.filter(external_identity_count__gt=0)
+        elif activity == "external-unbound":
+            queryset = queryset.filter(external_identity_count=0)
+        elif activity == "recent-watched":
+            queryset = queryset.filter(last_watched_on__gte=timezone.localdate() - timedelta(days=30))
+        elif activity == "recent-updated":
+            queryset = queryset.filter(updated_at__gte=timezone.now() - timedelta(days=14))
+        elif activity == "needs-attention":
+            stale_cutoff = timezone.localdate() - timedelta(days=14)
+            no_poster = (
+                Q(poster_url="")
+                & Q(custom_poster_url="")
+                & (Q(poster_file="") | Q(poster_file__isnull=True))
+            )
+            queryset = queryset.filter(
+                Q(watch_status=JournalEntry.WatchStatus.COMPLETED)
+                & (Q(personal_score__isnull=True) | Q(personal_score__lte=0))
+                | Q(watch_status=JournalEntry.WatchStatus.WATCHING, last_watched_on__lt=stale_cutoff)
+                | Q(external_identity_count=0)
+                | no_poster
+            )
         return queryset
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        ordering = list(queryset.query.order_by or ("-updated_at", "-id"))
+        if not any(order.lstrip("-") == "id" for order in ordering):
+            ordering.append("-id")
+        if self.request.query_params.get("priority", "0").lower() in {"1", "true", "yes"}:
+            ordering.insert(0, "-dashboard_priority")
+        stable_ordering = []
+        for field in ordering:
+            if field == "personal_score":
+                stable_ordering.append(F("personal_score").asc(nulls_last=True))
+            elif field == "-personal_score":
+                stable_ordering.append(F("personal_score").desc(nulls_last=True))
+            else:
+                stable_ordering.append(field)
+        return queryset.order_by(*stable_ordering)
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        if request.query_params.get("include_facets") == "1" and isinstance(response.data, dict):
+            tags = set()
+            years = set()
+            for entry_tags, airing_period in self.get_unfiltered_queryset().values_list("tags", "airing_period"):
+                if isinstance(entry_tags, list):
+                    tags.update(str(tag).strip() for tag in entry_tags if str(tag).strip())
+                year = str(airing_period or "")[:4]
+                if year.isdigit() and len(year) == 4:
+                    years.add(year)
+            response.data["facets"] = {"tags": sorted(tags), "years": sorted(years, reverse=True)}
+        return response
 
     def perform_create(self, serializer):
         entry = serializer.save(user=self.request.user)
