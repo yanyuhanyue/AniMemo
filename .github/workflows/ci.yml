@@ -211,10 +211,10 @@ jobs:
           ASTRBOT_ROOT: ${{ runner.temp }}/animemo-astrbot-smoke
         run: python scripts/smoke-astrbot-bridge-runtime.py
       - name: Package Bridge for real loader smoke
-        run: python scripts/package-astrbot-bridge.py --output "${{ runner.temp }}/astrbot_plugin_animemo_bridge-0.1.1.zip"
+        run: python scripts/package-astrbot-bridge.py --output "${{ runner.temp }}/astrbot_plugin_animemo_bridge-0.1.3.zip"
       - name: Load Bridge source through AstrBot PluginManager
         run: python scripts/smoke-astrbot-bridge-loader.py --runtime-root .astrbot-runtime --label "${{ matrix.astrbot_ref }} source loader"
       - name: Load packaged Bridge through AstrBot PluginManager
-        run: python scripts/smoke-astrbot-bridge-loader.py --runtime-root .astrbot-runtime --plugin-zip "${{ runner.temp }}/astrbot_plugin_animemo_bridge-0.1.1.zip" --label "${{ matrix.astrbot_ref }} package loader"
+        run: python scripts/smoke-astrbot-bridge-loader.py --runtime-root .astrbot-runtime --plugin-zip "${{ runner.temp }}/astrbot_plugin_animemo_bridge-0.1.3.zip" --label "${{ matrix.astrbot_ref }} package loader"
       - name: Prove schema loader gate red and green
-        run: python scripts/prove-astrbot-bridge-schema-gate.py --runtime-root .astrbot-runtime --plugin-zip "${{ runner.temp }}/astrbot_plugin_animemo_bridge-0.1.1.zip"
+        run: python scripts/prove-astrbot-bridge-schema-gate.py --runtime-root .astrbot-runtime --plugin-zip "${{ runner.temp }}/astrbot_plugin_animemo_bridge-0.1.3.zip"

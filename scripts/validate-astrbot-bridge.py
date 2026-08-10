@@ -32,8 +32,8 @@ def validate():
             raise SystemExit(f"metadata.yaml missing {field}")
     if metadata.get("astrbot_version") != ">=4.27.2":
         raise SystemExit("metadata.yaml must require the audited AstrBot >=4.27.2 runtime")
-    if metadata.get("version") != "0.1.2":
-        raise SystemExit("AstrBot Bridge pairing-log/timezone hotfix must use version 0.1.2")
+    if metadata.get("version") != "0.1.3":
+        raise SystemExit("AstrBot Bridge localized diagnostics release must use version 0.1.3")
     schema = json.loads((BRIDGE / "_conf_schema.json").read_text(encoding="utf-8"))
     required_config = {"enabled", "animemo_base_url", "key_id", "secret", "poll_events", "poll_wait_seconds", "request_timeout_seconds", "allow_group_commands", "developer_commands", "verify_tls"}
     if set(schema) != required_config:
@@ -71,6 +71,12 @@ def validate():
     for api_name in ("AstrBotPluginPage", "ready", "apiGet", "apiPost"):
         if api_name not in page_script:
             raise SystemExit(f"AstrBot diagnostics page missing Plugin Pages API: {api_name}")
+    for helper_name in ("formatLocalDateTime", "translateStatus", "translateError"):
+        if helper_name not in page_script:
+            raise SystemExit(f"AstrBot diagnostics page missing display helper: {helper_name}")
+    for forbidden in ("Asia/Shanghai", "UTC+08:00", "28800", "timeZone:"):
+        if forbidden in page_script:
+            raise SystemExit(f"AstrBot diagnostics page must use the browser local timezone: {forbidden}")
     if 'type="module"' not in page_html:
         raise SystemExit("AstrBot diagnostics page script must be an external module")
     if "localStorage" in page_script or "document.cookie" in page_script:

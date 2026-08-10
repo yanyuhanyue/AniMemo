@@ -43,6 +43,35 @@ DEFAULT_CONFIG = {
     "verify_tls": True,
 }
 
+DISPLAY_STATUSES = {
+    "RUNNING": "运行中",
+    "STOPPED": "已停止",
+    "OK": "正常",
+    "FAIL": "失败",
+    "NONE": "无",
+    "NOT RUN": "未运行",
+}
+
+DISPLAY_ERRORS = {
+    "BridgeAuthError": "认证错误（BridgeAuthError）",
+    "BridgeConnectionError": "连接错误（BridgeConnectionError）",
+    "BridgeEventError": "事件错误（BridgeEventError）",
+    "BridgeProtocolError": "协议错误（BridgeProtocolError）",
+    "BridgeRateLimitError": "限流错误（BridgeRateLimitError）",
+}
+
+
+def _display_status(value):
+    normalized = str(value or "NONE").strip() or "NONE"
+    return DISPLAY_STATUSES.get(normalized, normalized)
+
+
+def _display_error(value):
+    normalized = str(value or "NONE").strip() or "NONE"
+    if normalized == "NONE":
+        return "无"
+    return DISPLAY_ERRORS.get(normalized, normalized)
+
 
 def _message_text(event):
     for name in ("message_str", "get_message_str", "message_text"):
@@ -153,7 +182,7 @@ def _watch_action_result(action, result):
     return "动作执行完成。"
 
 
-@register("astrbot_plugin_animemo_bridge", "AniMemo", "AniMemo Integration Protocol v1 Bridge", "0.1.2")
+@register("astrbot_plugin_animemo_bridge", "AniMemo", "AniMemo Integration Protocol v1 Bridge", "0.1.3")
 class AniMemoBridge(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config or {})
@@ -355,7 +384,7 @@ class AniMemoBridge(Star):
                 self.last_ping = "OK"
             except AniMemoBridgeError:
                 self.last_ping = "FAIL"
-            return await _reply(event, f"AniMemo HMAC connectivity: {self.last_ping}")
+            return await _reply(event, f"AniMemo HMAC 连通性：{_display_status(self.last_ping)}")
         if command == "watch":
             if len(parts) < 2:
                 return await _reply(event, "用法：/animemo watch get <entry_id>、add <entry_id> <日期> [集数]、find <关键词>")
@@ -426,15 +455,15 @@ class AniMemoBridge(Star):
     async def _status_text(self):
         poll = self.poller.status if self.poller else "STOPPED"
         return "\n".join((
-            "AniMemo Bridge: 已启用" if self.client else "AniMemo Bridge: 未启用",
-            f"Server: {_config_value(self.config, 'animemo_base_url')}",
-            f"Key ID: {self._masked_key_id()}",
-            f"Event poller: {poll}",
-            f"Current route: {'已绑定本地投递路由' if self.routes.count() else '无'}",
-            f"HMAC connectivity: {self.last_ping}",
-            f"Last successful poll (Asia/Shanghai): {format_status_timestamp(self.state.last_successful_poll)}",
-            f"Last error: {self.state.last_error or 'NONE'}",
-            f"Config: {self.configuration_error}" if self.configuration_error else "",
+            "AniMemo Bridge：已启用" if self.client else "AniMemo Bridge：未启用",
+            f"服务地址：{_config_value(self.config, 'animemo_base_url')}",
+            f"Key ID：{self._masked_key_id()}",
+            f"事件轮询器：{_display_status(poll)}",
+            f"当前路由：{'已绑定本地投递路由' if self.routes.count() else '暂无私聊路由'}",
+            f"HMAC 连通性：{_display_status(self.last_ping)}",
+            f"最近成功轮询（AstrBot 本地时区）：{format_status_timestamp(self.state.last_successful_poll)}",
+            f"最近错误：{_display_error(self.state.last_error)}",
+            f"配置错误：{self.configuration_error}" if self.configuration_error else "",
         ))
 
     @filter.command("animemo")
