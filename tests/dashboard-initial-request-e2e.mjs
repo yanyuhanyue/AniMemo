@@ -80,7 +80,7 @@ try {
     }
     if (path === "tag-presets/") {
       await wait(160);
-      return json(route, { results: [{ id: 1, name: "日常", color: "blue", sort_order: 10 }] });
+      return json(route, { results: [{ id: 1, name: "日常", color: "rose", sort_order: 10 }] });
     }
     if (path === "stats/me/") {
       await wait(120);
@@ -116,6 +116,8 @@ try {
   await waitFor(() => entryRequests.length === 1, 5000);
   await wait(450);
   assert.equal(entryRequests.length, 1, "metadata and tag preset updates must not repeat the initial entries request");
+  const presetTag = page.locator(".tag-chip", { hasText: "日常" }).first();
+  assert.match(await presetTag.getAttribute("class"), /\btag-rose\b/, "late tag presets must redecorate loaded entries without refetching");
   assert.equal(entryRequests[0].searchParams.get("page"), "1");
   assert.equal(entryRequests[0].searchParams.get("page_size"), "48");
 

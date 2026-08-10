@@ -122,6 +122,23 @@ export function useDashboardData({ navigate, entryQuery = {} }) {
   }, [isDemo, presetColors]);
 
   useEffect(() => {
+    if (isDemo) return;
+    setRecords((current) => {
+      let changed = false;
+      const decorated = current.map((record) => {
+        const tagColors = resolveTagColors(record.tags, record.savedTagColors ?? record.tagColors, presetColors);
+        const keys = Object.keys(tagColors);
+        const matches = keys.length === Object.keys(record.tagColors || {}).length
+          && keys.every((tag) => tagColors[tag] === record.tagColors?.[tag]);
+        if (matches) return record;
+        changed = true;
+        return { ...record, tagColors };
+      });
+      return changed ? decorated : current;
+    });
+  }, [isDemo, presetColors]);
+
+  useEffect(() => {
     let cancelled = false;
     if (isDemo) {
       setDashboardReady(true);
