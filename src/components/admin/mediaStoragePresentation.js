@@ -8,6 +8,12 @@ const STORAGE_STATE_LABELS = {
   DISABLED: "已停用",
 };
 
+const REFRESH_FEEDBACK_LABELS = {
+  CLOUDFLARE_ANALYTICS_UPDATED: "容量数据已更新",
+  CLOUDFLARE_ANALYTICS_NO_DATA: "Cloudflare 暂未生成该 Bucket 的统计数据。",
+  CLOUDFLARE_ANALYTICS_AUTH_FAILED: "Cloudflare Analytics 权限验证失败，请检查 Analytics 凭证权限。",
+};
+
 export function bytesLabel(value, unit = 1_000_000_000, suffix = "GB", emptyLabel = "暂无统计数据") {
   if (value == null || !Number.isFinite(Number(value))) return emptyLabel;
   return `${(Number(value) / unit).toFixed(2)} ${suffix}`;
@@ -30,7 +36,7 @@ export function analyticsSnapshotPresentation(item) {
     };
   }
   const ageSeconds = Number(item?.usage?.snapshot_age_seconds);
-  if (Number.isFinite(ageSeconds) && ageSeconds >= SNAPSHOT_STALE_SECONDS) {
+  if (Number.isFinite(ageSeconds) && ageSeconds > SNAPSHOT_STALE_SECONDS) {
     return {
       status: "STALE",
       label: "快照已过期",
@@ -44,6 +50,15 @@ export function analyticsSnapshotPresentation(item) {
     detail: "最近一次 Analytics 同步有效",
     tone: "is-fresh",
   };
+}
+
+export function refreshFeedbackLabel(refresh) {
+  const code = String(refresh?.code || "").trim().toUpperCase();
+  if (REFRESH_FEEDBACK_LABELS[code]) return REFRESH_FEEDBACK_LABELS[code];
+  if (String(refresh?.status || "").toUpperCase() === "FAILED") {
+    return "Analytics 读取失败，上次成功快照已保留。";
+  }
+  return "存储容量刷新已完成。";
 }
 
 export function formatLocalDateTime(value, locales) {

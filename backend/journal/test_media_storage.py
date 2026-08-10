@@ -847,6 +847,38 @@ class CloudflareAnalyticsObservabilityTests(TestCase):
         self.assertNotIn(self.secret, exposed)
         self.assert_snapshot_unchanged()
 
+    def test_refresh_action_contract_covers_every_dependency_failure_class(self):
+        cases = [
+            ("401", self.response(status_code=401), None, "CLOUDFLARE_ANALYTICS_AUTH_FAILED"),
+            ("403", self.response(status_code=403), None, "CLOUDFLARE_ANALYTICS_AUTH_FAILED"),
+            ("timeout", None, requests.Timeout("upstream timeout"), "CLOUDFLARE_ANALYTICS_TIMEOUT"),
+            ("graphql", self.response({"errors": [{"message": f"rejected {self.secret}"}]}), None, "CLOUDFLARE_ANALYTICS_QUERY_FAILED"),
+            ("non-json", self.response(json_error=ValueError("not json")), None, "CLOUDFLARE_ANALYTICS_INVALID_RESPONSE"),
+            ("invalid-shape", self.response({"data": {"viewer": {}}}), None, "CLOUDFLARE_ANALYTICS_INVALID_RESPONSE"),
+            ("missing-metric", self.response(self.payload([{
+                "dimensions": {"datetime": "2026-08-10T05:00:00Z"},
+                "max": {"payloadSize": 1, "metadataSize": 2},
+            }])), None, "CLOUDFLARE_ANALYTICS_INVALID_RESPONSE"),
+            ("oversized", self.response(self.payload([]), content=b"x" * (MAX_ANALYTICS_RESPONSE_BYTES + 1)), None, "CLOUDFLARE_ANALYTICS_INVALID_RESPONSE"),
+        ]
+        for name, response, exception, expected_code in cases:
+            with self.subTest(name=name):
+                patch_kwargs = {"side_effect": exception} if exception else {"return_value": response}
+                with patch("site_config.media_storage.usage.requests.post", **patch_kwargs):
+                    result = self.client.post(
+                        reverse("staff-media-storage-action", kwargs={"pk": self.backend.pk}),
+                        {"action": "refresh-usage"},
+                        format="json",
+                    )
+                self.assertEqual(result.status_code, 424, result.data)
+                self.assertEqual(result.data["code"], expected_code)
+                self.assertEqual(result.data["refresh"], {"status": "FAILED", "code": expected_code})
+                self.assertEqual(result.data["storage"]["usage"]["actual_bytes"], 150)
+                audit = AdminAuditLog.objects.filter(action="storage.usage_refreshed").latest("id")
+                self.assertEqual(audit.metadata["code"], expected_code)
+                self.assertNotIn(self.secret, f"{result.data} {audit.metadata}")
+                self.assert_snapshot_unchanged()
+
 
 @override_settings(CREDENTIAL_ENCRYPTION_KEY=TEST_CREDENTIAL_KEY)
 class StorageUsageAndLocalSafetyTests(TestCase):

@@ -7,6 +7,7 @@ import {
   analyticsSnapshotPresentation,
   bytesLabel,
   formatLocalDateTime,
+  refreshFeedbackLabel,
   storageStateLabel,
 } from "../src/components/admin/mediaStoragePresentation.js";
 
@@ -70,9 +71,14 @@ test("usage presentation distinguishes no data from an exact zero", () => {
 });
 
 test("analytics snapshot becomes stale after two hours", () => {
-  const stale = analyticsSnapshotPresentation({
+  const freshAtBoundary = analyticsSnapshotPresentation({
     usage_refreshed_at: "2026-08-10T03:00:00Z",
     usage: { actual_bytes: 10, snapshot_age_seconds: SNAPSHOT_STALE_SECONDS },
+  });
+  assert.equal(freshAtBoundary.status, "FRESH");
+  const stale = analyticsSnapshotPresentation({
+    usage_refreshed_at: "2026-08-10T02:59:59Z",
+    usage: { actual_bytes: 10, snapshot_age_seconds: SNAPSHOT_STALE_SECONDS + 1 },
   });
   assert.equal(stale.status, "STALE");
   assert.equal(stale.label, "快照已过期");
@@ -94,14 +100,22 @@ test("sync timestamps use the browser local timezone without a fixed Shanghai of
   assert.doesNotMatch(readFileSync(new URL("../src/components/admin/mediaStoragePresentation.js", import.meta.url), "utf8"), /Asia\/Shanghai|UTC\+8|\+08:00/);
 });
 
+test("refresh feedback stays safe and distinguishes success, no data and auth failure", () => {
+  assert.equal(refreshFeedbackLabel({ status: "UPDATED", code: "CLOUDFLARE_ANALYTICS_UPDATED" }), "容量数据已更新");
+  assert.equal(refreshFeedbackLabel({ status: "NO_DATA", code: "CLOUDFLARE_ANALYTICS_NO_DATA" }), "Cloudflare 暂未生成该 Bucket 的统计数据。");
+  assert.equal(refreshFeedbackLabel({ status: "FAILED", code: "CLOUDFLARE_ANALYTICS_AUTH_FAILED" }), "Cloudflare Analytics 权限验证失败，请检查 Analytics 凭证权限。");
+  assert.equal(refreshFeedbackLabel({ status: "FAILED", code: "CLOUDFLARE_ANALYTICS_TIMEOUT" }), "Analytics 读取失败，上次成功快照已保留。");
+});
+
 test("R2 card separates Analytics from S3 writes and keeps refresh feedback", () => {
   assert.match(component, /账户级上限<\/dt><dd>\{item\.account\.write_limit_bytes == null \? "未设置"/);
+  assert.match(component, /账户容量<\/dt><dd>\{bytesLabel\(item\.account\.actual_bytes/);
   assert.doesNotMatch(component, /\/ 无限制/);
-  assert.match(component, /Analytics 状态/);
+  assert.match(component, /Cloudflare Analytics/);
   assert.match(component, /最近同步/);
   assert.match(component, /S3 写入连接/);
   assert.match(component, /Analytics 查询/);
   assert.match(component, /refreshFeedback/);
   assert.match(component, /\{ \.\.\.candidate, \.\.\.(?:data|response)\.storage \}/);
-  assert.match(component, /正在刷新\.\.\./);
+  assert.match(component, /正在读取 Cloudflare Analytics\.\.\./);
 });
