@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { AnimeModal } from "../components/AnimeModal.jsx";
 import { AddAnimeModal } from "../components/dashboard/AddAnimeModal.jsx";
@@ -17,6 +17,7 @@ import { pressBeforeOpen } from "../lib/modalMotion.js";
 import { matchesActivityFilter, runBounded } from "../lib/journalExperience.js";
 import { useSiteSettings } from "../context/SiteSettingsContext.jsx";
 import { usePluginRuntime } from "../plugins/sdk/PluginRuntimeContext.jsx";
+import { invalidateServerState } from "../lib/serverState.js";
 import {
   SORT_OPTIONS,
   STATUS_OPTIONS,
@@ -89,6 +90,8 @@ export function DashboardPage() {
     settings,
     tagPresets,
     totalCount,
+    commitEntryMutations,
+    getEntryMutationSnapshot,
     refreshEntries,
   } = useDashboardData({ navigate, entryQuery });
   const [view, setView] = useState("list");
@@ -107,9 +110,20 @@ export function DashboardPage() {
   const [filterEditorOpen, setFilterEditorOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [noticeKind, setNoticeKind] = useState("");
+  const flashTimerRef = useRef(0);
+  const mountedRef = useRef(false);
+  const deletePromisesRef = useRef(new Map());
   const deepLinkRequestRef = useRef("");
   const openingEntryRef = useRef("");
   const loadMoreRef = useRef(null);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      window.clearTimeout(flashTimerRef.current);
+      deletePromisesRef.current.clear();
+    };
+  }, []);
   useEffect(() => { if (loadError) setNotice(loadError); }, [loadError]);
   useEffect(() => {
     if (!selected) return;
@@ -250,12 +264,17 @@ export function DashboardPage() {
   const visible = filteredRecords;
   const resultCount = isDemo ? filteredRecords.length : totalCount;
 
-  const flash = (message, kind = "") => {
+  const flash = useCallback((message, kind = "") => {
+    if (!mountedRef.current) return;
     setNotice(message);
     setNoticeKind(kind);
-    window.clearTimeout(flash.timer);
-    flash.timer = window.setTimeout(() => { setNotice(""); setNoticeKind(""); }, 2400);
-  };
+    window.clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = window.setTimeout(() => {
+      if (!mountedRef.current) return;
+      setNotice("");
+      setNoticeKind("");
+    }, 2400);
+  }, []);
 
   const {
     closeImport,
@@ -270,13 +289,13 @@ export function DashboardPage() {
 
   const saveRecord = async (record) => {
     const { posterFile, ...savedRecord } = record;
-    const previousRecord = records.find((item) => item.id === savedRecord.id) || null;
+    const previousRecord = records.find((item) => item.id === savedRecord.id)
+      || (String(selected?.record?.id) === String(savedRecord.id) ? selected.record : null);
     const existing = Boolean(previousRecord) || Number.isFinite(Number(savedRecord.id));
-    setRecords((current) => previousRecord
-      ? current.map((item) => item.id === savedRecord.id ? savedRecord : item)
-      : existing ? current : [savedRecord, ...current]);
-    if (!isDemo) {
-      try {
+    const snapshot = getEntryMutationSnapshot();
+    try {
+      let confirmedRecord = savedRecord;
+      if (!isDemo) {
         const payload = recordToApi(savedRecord);
         if (existing) delete payload.poster_url;
         let response;
@@ -284,26 +303,35 @@ export function DashboardPage() {
           const formData = new FormData();
           Object.entries(payload).forEach(([key, value]) => formData.append(key, Array.isArray(value) || typeof value === "object" ? JSON.stringify(value) : value ?? ""));
           formData.append("poster_file", posterFile);
+          const config = { headers: { "Content-Type": "multipart/form-data" }, serverStateInvalidation: false };
           response = existing && Number.isFinite(Number(savedRecord.id))
-            ? await api.patch(`entries/${savedRecord.id}/`, formData, { headers: { "Content-Type": "multipart/form-data" } })
-            : await api.post("entries/", formData, { headers: { "Content-Type": "multipart/form-data" } });
+            ? await api.patch(`entries/${savedRecord.id}/`, formData, config)
+            : await api.post("entries/", formData, config);
         } else {
+          const config = { serverStateInvalidation: false };
           response = existing && Number.isFinite(Number(savedRecord.id))
-            ? await api.patch(`entries/${savedRecord.id}/`, payload)
-            : await api.post("entries/", payload);
+            ? await api.patch(`entries/${savedRecord.id}/`, payload, config)
+            : await api.post("entries/", payload, config);
         }
-        if (response.data) setRecords((current) => current.map((item) => item.id === savedRecord.id ? apiToRecord(response.data, presetColors) : item));
-      } catch (requestError) {
-        setRecords((current) => previousRecord ? current.map((item) => item.id === savedRecord.id ? previousRecord : item) : current.filter((item) => item.id !== savedRecord.id));
-        throw new Error(readableApiError(requestError, "记录保存失败，请检查封面来源后重试。"));
+        confirmedRecord = apiToRecord(response.data, presetColors);
       }
+      commitEntryMutations([{
+        type: existing ? "update" : "create",
+        previousRecord,
+        nextRecord: confirmedRecord,
+      }], snapshot);
+      if (!isDemo) invalidateServerState("analytics", confirmedRecord.id);
+      flash(existing ? "记录已更新" : "新番剧已加入手账");
+    } catch (requestError) {
+      throw new Error(readableApiError(requestError, "记录保存失败，请检查封面来源后重试。"));
     }
-    flash(existing ? "记录已更新" : "新番剧已加入手账");
   };
 
   const saveNewRecord = async (draft) => {
     const tags = String(draft.tagsText || "").split(/[，,]/).map((item) => item.trim()).filter(Boolean).slice(0, 30);
-    const poster = draft.posterFile ? URL.createObjectURL(draft.posterFile) : draft.poster || "/assets/posters/poster-01.webp";
+    const poster = draft.posterFile
+      ? (isDemo ? URL.createObjectURL(draft.posterFile) : "/assets/posters/poster-01.webp")
+      : draft.poster || "/assets/posters/poster-01.webp";
     const statusLabels = { completed: "看过", watching: "在看", planned: "想看", on_hold: "搁置", dropped: "弃番" };
     const record = {
       id: `local-${Date.now()}`,
@@ -336,32 +364,52 @@ export function DashboardPage() {
       externalIdentity: draft.externalIdentity || null,
       externalIdentities: [],
     };
-    setRecords((current) => [record, ...current]);
-    if (!isDemo) {
-      try {
+    const snapshot = getEntryMutationSnapshot();
+    try {
+      let confirmedRecord = record;
+      if (!isDemo) {
         const payload = recordToApi(record);
         if (draft.posterFile) {
           const formData = new FormData();
           Object.entries(payload).forEach(([key, value]) => formData.append(key, Array.isArray(value) || typeof value === "object" ? JSON.stringify(value) : value ?? ""));
           formData.append("poster_file", draft.posterFile);
-          const response = await api.post("entries/", formData, { headers: { "Content-Type": "multipart/form-data" } });
-          if (response.data) setRecords((current) => current.map((item) => item.id === record.id ? apiToRecord(response.data, presetColors) : item));
+          const response = await api.post("entries/", formData, { headers: { "Content-Type": "multipart/form-data" }, serverStateInvalidation: false });
+          confirmedRecord = apiToRecord(response.data, presetColors);
         } else {
-          const response = await api.post("entries/", payload);
-          if (response.data) setRecords((current) => current.map((item) => item.id === record.id ? apiToRecord(response.data, presetColors) : item));
+          const response = await api.post("entries/", payload, { serverStateInvalidation: false });
+          confirmedRecord = apiToRecord(response.data, presetColors);
         }
-      } catch (requestError) {
-        setRecords((current) => current.filter((item) => item.id !== record.id));
-        throw new Error(readableApiError(requestError, "加入手账失败，请检查封面来源后重试。"));
       }
+      commitEntryMutations([{ type: "create", previousRecord: null, nextRecord: confirmedRecord }], snapshot);
+      if (!isDemo) invalidateServerState("analytics", confirmedRecord.id);
+      flash("新番剧已加入手账");
+    } catch (requestError) {
+      throw new Error(readableApiError(requestError, "加入手账失败，请检查封面来源后重试。"));
     }
-    flash("新番剧已加入手账");
   };
 
-  const deleteRecord = async (id) => {
-    setRecords((current) => current.filter((record) => record.id !== id));
-    flash("记录已删除");
-    if (!isDemo && Number.isFinite(Number(id))) api.delete(`entries/${id}/`).catch(() => {});
+  const deleteRecord = (id) => {
+    const key = String(id);
+    const pending = deletePromisesRef.current.get(key);
+    if (pending) return pending;
+    const previousRecord = records.find((record) => String(record.id) === key) || selected?.record || null;
+    const snapshot = getEntryMutationSnapshot();
+    const request = Promise.resolve().then(async () => {
+      try {
+        if (!isDemo && Number.isFinite(Number(id))) {
+          await api.delete(`entries/${id}/`, { serverStateInvalidation: false });
+        }
+        commitEntryMutations([{ type: "delete", previousRecord, nextRecord: null }], snapshot);
+        if (!isDemo) invalidateServerState("analytics", id);
+        flash("记录已删除");
+      } catch (requestError) {
+        throw new Error(readableApiError(requestError, "记录删除失败，请稍后重试。"));
+      } finally {
+        deletePromisesRef.current.delete(key);
+      }
+    });
+    deletePromisesRef.current.set(key, request);
+    return request;
   };
 
   const updateExternalIdentity = (entryId, { externalIdentities, entryPatch }) => {
@@ -399,16 +447,19 @@ export function DashboardPage() {
     if (!record || record.status === nextStatus) return;
     const labels = Object.fromEntries(STATUS_OPTIONS.filter(([value]) => value !== "all"));
     const previous = record;
+    const snapshot = getEntryMutationSnapshot();
     const optimistic = { ...record, status: nextStatus, statusLabel: labels[nextStatus] || nextStatus };
     setRecords((current) => current.map((item) => item.id === record.id ? optimistic : item));
     try {
       if (!isDemo) {
-        const response = await api.patch(`entries/${record.id}/`, { watch_status: nextStatus });
-        setRecords((current) => current.map((item) => item.id === record.id ? apiToRecord(response.data, presetColors) : item));
+        const response = await api.patch(`entries/${record.id}/`, { watch_status: nextStatus }, { serverStateInvalidation: false });
+        const confirmed = apiToRecord(response.data, presetColors);
+        commitEntryMutations([{ type: "update", previousRecord: previous, nextRecord: confirmed }], snapshot);
+        invalidateServerState("analytics", record.id);
       }
       flash(`已将《${record.title}》标记为${labels[nextStatus] || nextStatus}`);
     } catch (requestError) {
-      setRecords((current) => current.map((item) => item.id === record.id ? previous : item));
+      if (mountedRef.current) setRecords((current) => current.map((item) => item.id === record.id ? previous : item));
       flash(readableApiError(requestError, "观看状态修改失败，请稍后重试。"), "error");
     }
   };
@@ -430,6 +481,7 @@ export function DashboardPage() {
   const applyBulkOperation = async (operation, value) => {
     const targets = records.filter((record) => selectedIds.has(record.id));
     if (!targets.length || bulkBusy) return;
+    const snapshot = getEntryMutationSnapshot();
     setBulkBusy(true);
     const results = await runBounded(targets, async (record) => {
       let patch;
@@ -454,13 +506,20 @@ export function DashboardPage() {
           ...(patch.tags ? { tags: patch.tags, tagColors: patch.tag_colors } : {}),
         };
       }
-      const response = await api.patch(`entries/${record.id}/`, patch);
+      const response = await api.patch(`entries/${record.id}/`, patch, { serverStateInvalidation: false });
       return apiToRecord(response.data, presetColors);
     }, 4);
     const successful = results.filter((result) => result.status === "fulfilled");
     const failed = results.length - successful.length;
-    const updates = new Map(successful.map((result) => [result.value.id, result.value]));
-    setRecords((current) => current.map((record) => updates.get(record.id) || record));
+    if (successful.length) {
+      commitEntryMutations(successful.map((result) => ({
+        type: "update",
+        previousRecord: result.item,
+        nextRecord: result.value,
+      })), snapshot);
+      if (!isDemo) invalidateServerState("analytics");
+    }
+    if (!mountedRef.current) return;
     setSelectedIds(new Set());
     setBulkBusy(false);
     flash(`批量操作完成：成功 ${successful.length}，失败 ${failed}${failed ? "。失败项目保持原值" : ""}`, failed ? "error" : "");
@@ -510,13 +569,31 @@ export function DashboardPage() {
   };
 
   const saveSettings = async (next) => {
-    setSettings(next);
-    setProfileOpen(false);
-    window.requestAnimationFrame(() => profileAvatarButtonRef.current?.focus({ preventScroll: true }));
-    flash("个人资料已更新。", "profile");
-    if (!isDemo) {
-      try { await api.patch("settings/me/", { nickname: next.nickname, showcase_subtitle: next.subtitle, accent: next.accent }); }
-      catch { flash("资料已保存到本地，服务器同步稍后重试"); }
+    const { avatarFile, ...settingsDraft } = next;
+    try {
+      let response = null;
+      if (!isDemo) {
+        if (avatarFile) {
+          const formData = new FormData();
+          formData.append("nickname", settingsDraft.nickname || "");
+          formData.append("showcase_subtitle", settingsDraft.subtitle || "");
+          formData.append("accent", settingsDraft.accent || "");
+          formData.append("avatar", avatarFile);
+          response = await api.patch("settings/me/", formData, { headers: { "Content-Type": "multipart/form-data" } });
+        } else {
+          response = await api.patch("settings/me/", { nickname: settingsDraft.nickname, showcase_subtitle: settingsDraft.subtitle, accent: settingsDraft.accent });
+        }
+      }
+      if (mountedRef.current) {
+        setSettings((current) => ({
+          ...current,
+          ...settingsDraft,
+          avatar: response?.data?.avatar_url ?? settingsDraft.avatar ?? current.avatar,
+        }));
+      }
+      flash("个人资料已更新。", "profile");
+    } catch (requestError) {
+      throw new Error(readableApiError(requestError, "个人资料保存失败，请稍后重试。"));
     }
   };
 
@@ -583,7 +660,6 @@ export function DashboardPage() {
       const local = { ...payload, id: filter.id || `local-filter-${Date.now()}` };
       setQuickFilters((current) => filter.id ? current.map((item) => String(item.id) === String(filter.id) ? local : item) : [...current, local]);
       setActiveQuick(String(local.id));
-      setFilterEditorOpen(false);
       flash("自定义筛选已保存");
       return;
     }
@@ -592,17 +668,22 @@ export function DashboardPage() {
       const saved = response.data;
       setQuickFilters((current) => filter.id ? current.map((item) => String(item.id) === String(filter.id) ? saved : item) : [...current, saved]);
       setActiveQuick(String(saved.id));
-      setFilterEditorOpen(false);
       flash("自定义筛选已同步");
-    } catch { flash("筛选保存失败，请稍后重试"); }
+    } catch (requestError) {
+      throw new Error(readableApiError(requestError, "筛选保存失败，请稍后重试。"));
+    }
   };
 
   const deleteQuickFilter = async (filter) => {
-    setQuickFilters((current) => current.filter((item) => String(item.id) !== String(filter.id)));
-    if (String(activeQuick) === String(filter.id)) setActiveQuick("all");
-    setFilterEditorOpen(false);
-    flash("自定义筛选已删除");
-    if (!isDemo && Number.isFinite(Number(filter.id))) api.delete(`filters/${filter.id}/`).catch(() => flash("服务器删除稍后重试"));
+    try {
+      if (!isDemo && Number.isFinite(Number(filter.id))) await api.delete(`filters/${filter.id}/`);
+      if (!mountedRef.current) return;
+      setQuickFilters((current) => current.filter((item) => String(item.id) !== String(filter.id)));
+      if (String(activeQuick) === String(filter.id)) setActiveQuick("all");
+      flash("自定义筛选已删除");
+    } catch (requestError) {
+      throw new Error(readableApiError(requestError, "筛选删除失败，请稍后重试。"));
+    }
   };
 
   const logout = async () => {
@@ -756,8 +837,8 @@ export function DashboardPage() {
         </section>
       </section>
 
-      {notice && noticeKind === "profile" ? <div className="dashboard-profile-toast" role="status"><span className="dashboard-profile-toast__icon" aria-hidden="true"><Icon name="circle-check" /></span><span className="dashboard-profile-toast__message">{notice}</span><button className="dashboard-profile-toast__close" type="button" onClick={() => { setNotice(""); setNoticeKind(""); }} aria-label="关闭提示"><Icon name="close" /></button></div> : notice ? <div className="brutal-toast dashboard-toast" role="status"><Icon name="check" /> {notice}</div> : null}
-      {selected && <AnimeModal record={selected.record} originRect={selected.originRect} returnFocus={selected.returnFocus} editable isDemo={isDemo} initialTab={selected.initialTab} onClose={closeSelected} onSave={saveRecord} onDelete={records.some((record) => record.id === selected.record.id) ? deleteRecord : null} onIdentityChange={(update) => updateExternalIdentity(selected.record.id, update)} onOpenExternalAccount={() => { closeSelected(); openProfilePanel("external"); }} tagPresets={tagPresets} trustedPosterHosts={siteSettings.trusted_poster_hosts} />}
+      {notice && noticeKind === "profile" ? <div className="dashboard-profile-toast" role="status"><span className="dashboard-profile-toast__icon" aria-hidden="true"><Icon name="circle-check" /></span><span className="dashboard-profile-toast__message">{notice}</span><button className="dashboard-profile-toast__close" type="button" onClick={() => { window.clearTimeout(flashTimerRef.current); setNotice(""); setNoticeKind(""); }} aria-label="关闭提示"><Icon name="close" /></button></div> : notice ? <div className={`brutal-toast dashboard-toast${noticeKind === "error" ? " is-error" : ""}`} role={noticeKind === "error" ? "alert" : "status"}><Icon name={noticeKind === "error" ? "warning" : "check"} /> {notice}</div> : null}
+      {selected && <AnimeModal record={selected.record} originRect={selected.originRect} returnFocus={selected.returnFocus} editable isDemo={isDemo} initialTab={selected.initialTab} onClose={closeSelected} onSave={saveRecord} onDelete={Number.isFinite(Number(selected.record.id)) ? deleteRecord : null} onIdentityChange={(update) => updateExternalIdentity(selected.record.id, update)} onOpenExternalAccount={() => { closeSelected(); openProfilePanel("external"); }} tagPresets={tagPresets} trustedPosterHosts={siteSettings.trusted_poster_hosts} />}
       {addOpen && <AddAnimeModal isDemo={isDemo} catalogRecords={demoCatalogRecords} existingRecords={records} onClose={() => setAddOpen(false)} onSubmit={saveNewRecord} trustedPosterHosts={siteSettings.trusted_poster_hosts} />}
       {profileOpen && <ProfilePanel settings={settings} initialTab={profileInitialTab} isDemo={isDemo} onClose={() => { setProfileOpen(false); window.requestAnimationFrame(() => profileAvatarButtonRef.current?.focus({ preventScroll: true })); }} onSave={saveSettings} onChangePassword={changePassword} onOpenBangumiImport={() => { setProfileOpen(false); setBangumiImportOpen(true); }} />}
       {bangumiImportOpen && <BangumiImportDialog onClose={() => setBangumiImportOpen(false)} />}

@@ -100,24 +100,52 @@ export function QuickFilterEditor({ filters, onClose, onSave, onDelete }) {
   const [selectedId, setSelectedId] = useState(customFilters[0]?.id || "new");
   const selected = customFilters.find((filter) => String(filter.id) === String(selectedId));
   const [draft, setDraft] = useState(() => selected || { name: "", tags: [], title_keywords: [], match_mode: "any", color: "#ffe66d" });
+  const [busy, setBusy] = useState(false);
+  const [mutationError, setMutationError] = useState("");
   const syncDraft = (filter) => setDraft(filter || { name: "", tags: [], title_keywords: [], match_mode: "any", color: "#ffe66d" });
-  const selectFilter = (filter) => { setSelectedId(filter?.id || "new"); syncDraft(filter); };
+  const selectFilter = (filter) => { setSelectedId(filter?.id || "new"); syncDraft(filter); setMutationError(""); };
   const update = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
   const closeWithMotion = useDashboardDialogMotion({ rootRef, panelRef, pieceSelector: ".dashboard-filter-editor__piece", variant: "filter", onClose });
+  const save = async (event) => {
+    event.preventDefault();
+    if (busy || !draft.name.trim()) return;
+    setBusy(true);
+    setMutationError("");
+    try {
+      await onSave({ ...draft, id: selected?.id, name: draft.name.trim() });
+      closeWithMotion();
+    } catch (error) {
+      setMutationError(readableApiError(error, "筛选保存失败，请稍后重试。"));
+      setBusy(false);
+    }
+  };
+  const remove = async () => {
+    if (!selected || busy) return;
+    setBusy(true);
+    setMutationError("");
+    try {
+      await onDelete(selected);
+      closeWithMotion();
+    } catch (error) {
+      setMutationError(readableApiError(error, "筛选删除失败，请稍后重试。"));
+      setBusy(false);
+    }
+  };
   return (
     <div className="dashboard-modal-backdrop" ref={rootRef} role="dialog" aria-modal="true" aria-label="编辑自定义快速筛选">
-      <button className="dashboard-modal-backdrop__dismiss" type="button" onClick={() => closeWithMotion()} aria-label="关闭筛选编辑器" />
+      <button className="dashboard-modal-backdrop__dismiss" type="button" onClick={() => closeWithMotion()} aria-label="关闭筛选编辑器" disabled={busy} />
       <section className="dashboard-filter-editor" ref={panelRef}>
-        <header className="dashboard-filter-editor__piece"><div><span className="dashboard-modal-kicker">CUSTOM FILTER LAB</span><h2>自定义快速筛选</h2><p>组合标签和标题关键词，保存常用检索方式。</p></div><button type="button" className="dashboard-square-button" onClick={() => closeWithMotion()} aria-label="关闭"><Icon name="close" /></button></header>
+        <header className="dashboard-filter-editor__piece"><div><span className="dashboard-modal-kicker">CUSTOM FILTER LAB</span><h2>自定义快速筛选</h2><p>组合标签和标题关键词，保存常用检索方式。</p></div><button type="button" className="dashboard-square-button" onClick={() => closeWithMotion()} aria-label="关闭" disabled={busy}><Icon name="close" /></button></header>
         <div className="dashboard-filter-editor__body">
-          <aside className="dashboard-filter-editor__piece"><button type="button" className={selectedId === "new" ? "is-active" : ""} onClick={() => selectFilter(null)}><Icon name="plus" /> 新建筛选</button>{customFilters.map((filter) => <button type="button" className={String(selectedId) === String(filter.id) ? "is-active" : ""} key={filter.id} onClick={() => selectFilter(filter)}><i style={{ background: filter.color || "#ffe66d" }} /> <span>{filter.name}</span></button>)}</aside>
-          <form className="dashboard-filter-editor__piece" onSubmit={(event) => { event.preventDefault(); if (draft.name.trim()) closeWithMotion(() => onSave({ ...draft, id: selected?.id, name: draft.name.trim() })); }}>
+          <aside className="dashboard-filter-editor__piece"><button type="button" className={selectedId === "new" ? "is-active" : ""} onClick={() => selectFilter(null)} disabled={busy}><Icon name="plus" /> 新建筛选</button>{customFilters.map((filter) => <button type="button" className={String(selectedId) === String(filter.id) ? "is-active" : ""} key={filter.id} onClick={() => selectFilter(filter)} disabled={busy}><i style={{ background: filter.color || "#ffe66d" }} /> <span>{filter.name}</span></button>)}</aside>
+          <form className="dashboard-filter-editor__piece" onSubmit={save}>
             <label><span>筛选名称</span><input value={draft.name || ""} maxLength={80} onChange={(event) => update("name", event.target.value)} placeholder="例如：周末治愈清单" required /></label>
             <label><span>标签组合</span><input value={(draft.tags || []).join("、")} onChange={(event) => update("tags", event.target.value.split(/[、,，]/).map((item) => item.trim()).filter(Boolean))} placeholder="日常、治愈、原创" /></label>
             <label><span>标题关键词</span><input value={(draft.title_keywords || []).join("、")} onChange={(event) => update("title_keywords", event.target.value.split(/[、,，]/).map((item) => item.trim()).filter(Boolean))} placeholder="可选，多个词用逗号分隔" /></label>
             <fieldset><legend>匹配方式</legend><button type="button" className={(draft.match_mode || "any") === "any" ? "is-active" : ""} onClick={() => update("match_mode", "any")}><Icon name="filter" /> 匹配任意条件</button><button type="button" className={draft.match_mode === "all" ? "is-active" : ""} onClick={() => update("match_mode", "all")}><Icon name="check" /> 匹配全部条件</button></fieldset>
             <label className="dashboard-filter-color"><span>标记颜色</span><input type="color" value={draft.color || "#ffe66d"} onChange={(event) => update("color", event.target.value)} /><b style={{ background: draft.color || "#ffe66d" }}>{draft.color || "#ffe66d"}</b></label>
-            <footer>{selected && <button className="is-delete" type="button" onClick={() => closeWithMotion(() => onDelete(selected))}><Icon name="trash" /> 删除筛选</button>}<button type="button" onClick={() => closeWithMotion()}>取消</button><button className="is-save" type="submit"><Icon name="save" /> 保存筛选</button></footer>
+            {mutationError && <p className="dashboard-security-status is-error" role="alert">{mutationError}</p>}
+            <footer>{selected && <button className="is-delete" type="button" onClick={remove} disabled={busy}><Icon name="trash" /> {busy ? "处理中..." : "删除筛选"}</button>}<button type="button" onClick={() => closeWithMotion()} disabled={busy}>取消</button><button className="is-save" type="submit" disabled={busy}><Icon name="save" /> {busy ? "正在保存..." : "保存筛选"}</button></footer>
           </form>
         </div>
       </section>
@@ -167,10 +195,13 @@ export function ProfilePanel({ settings, initialTab = "profile", isDemo, onClose
   const tabRefs = useRef([]);
   const [draft, setDraft] = useState(settings);
   const [avatarPreview, setAvatarPreview] = useState(settings.avatar);
+  const [avatarFile, setAvatarFile] = useState(null);
   const [activeTab, setActiveTab] = useState(initialTab);
   const [security, setSecurity] = useState({ currentPassword: "", password: "", passwordConfirm: "" });
   const [securityStatus, setSecurityStatus] = useState({ type: "", message: "" });
   const [securityBusy, setSecurityBusy] = useState(false);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileError, setProfileError] = useState("");
   const fileRef = useRef(null);
   const update = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
   const updateSecurity = (key, value) => setSecurity((current) => ({ ...current, [key]: value }));
@@ -179,6 +210,7 @@ export function ProfilePanel({ settings, initialTab = "profile", isDemo, onClose
     const file = event.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
+    setAvatarFile(file);
     reader.onload = () => { setAvatarPreview(String(reader.result)); update("avatar", String(reader.result)); };
     reader.readAsDataURL(file);
   };
@@ -215,11 +247,23 @@ export function ProfilePanel({ settings, initialTab = "profile", isDemo, onClose
       setSecurityBusy(false);
     }
   };
+  const submitProfile = async () => {
+    if (profileBusy) return;
+    setProfileBusy(true);
+    setProfileError("");
+    try {
+      await onSave({ ...draft, avatarFile });
+      closeWithMotion();
+    } catch (error) {
+      setProfileError(readableApiError(error, "个人资料保存失败，请稍后重试。"));
+      setProfileBusy(false);
+    }
+  };
   return (
     <div className="dashboard-modal-backdrop" ref={rootRef} role="dialog" aria-modal="true" aria-label="设置个人资料">
-      <button className="dashboard-modal-backdrop__dismiss" type="button" onClick={() => closeWithMotion()} aria-label="关闭个人资料设置" />
+      <button className="dashboard-modal-backdrop__dismiss" type="button" onClick={() => closeWithMotion()} aria-label="关闭个人资料设置" disabled={profileBusy || securityBusy} />
       <section className={`dashboard-profile-modal dashboard-profile-modal--${activeTab}`} ref={panelRef}>
-        <header className="dashboard-profile-modal__head dashboard-profile-modal__piece"><div><span className="dashboard-modal-kicker">PERSONAL PROFILE</span><h2>设置个人资料</h2><p>打造专属于你的手账名片</p></div><button type="button" className="dashboard-square-button" onClick={() => closeWithMotion()} aria-label="关闭"><Icon name="close" /></button></header>
+        <header className="dashboard-profile-modal__head dashboard-profile-modal__piece"><div><span className="dashboard-modal-kicker">PERSONAL PROFILE</span><h2>设置个人资料</h2><p>打造专属于你的手账名片</p></div><button type="button" className="dashboard-square-button" onClick={() => closeWithMotion()} aria-label="关闭" disabled={profileBusy || securityBusy}><Icon name="close" /></button></header>
         <div className="dashboard-profile-modal__tabs dashboard-profile-modal__piece" role="tablist" aria-label="个人设置" onKeyDown={handleTabKeyDown}>
           <button ref={(node) => { tabRefs.current[0] = node; }} id="dashboard-profile-tab" type="button" role="tab" aria-selected={activeTab === "profile"} aria-controls="dashboard-profile-panel" className={activeTab === "profile" ? "is-active" : ""} onClick={() => changeTab("profile")}><Icon name="user" /> 基础资料</button>
           <button ref={(node) => { tabRefs.current[1] = node; }} id="dashboard-security-tab" type="button" role="tab" aria-selected={activeTab === "security"} aria-controls="dashboard-security-panel" className={activeTab === "security" ? "is-active" : ""} onClick={() => changeTab("security")}><Icon name="shield" /> 安全设置</button>
@@ -230,7 +274,8 @@ export function ProfilePanel({ settings, initialTab = "profile", isDemo, onClose
             <div className="dashboard-profile-card dashboard-profile-modal__piece"><div className="dashboard-profile-card__avatar"><DashboardAvatar src={avatarPreview} alt="当前头像" /></div><div><strong>{draft.nickname.trim() || settings.email || "未设置昵称"}</strong><small>{settings.email || "未设置邮箱"}</small><button type="button" onClick={() => fileRef.current?.click()}><Icon name="camera" /> 选择本地头像</button><em>支持 JPG、PNG、WebP，最大 5MB</em></div><input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" onChange={selectAvatar} hidden /></div>
             <label className="dashboard-profile-field dashboard-profile-modal__piece"><span><Icon name="signature" /> 昵称</span><input value={draft.nickname} maxLength={50} onChange={(event) => update("nickname", event.target.value)} placeholder={settings.email || "输入昵称"} /><small>{draft.nickname.length}/50</small></label>
             <label className="dashboard-profile-field dashboard-profile-modal__piece"><span><Icon name="quote" /> 预览页副标题</span><textarea value={draft.subtitle} maxLength={200} onChange={(event) => update("subtitle", event.target.value)} placeholder="写一句属于你的追番宣言吧" /><small>{draft.subtitle.length}/200</small></label>
-            <div className="dashboard-profile-actions dashboard-profile-modal__piece"><button type="button" onClick={() => closeWithMotion()}>暂不修改</button><button type="button" onClick={() => closeWithMotion(() => onSave(draft))}><Icon name="save" /> 保存资料</button></div>
+            {profileError && <p className="dashboard-security-status is-error dashboard-profile-modal__piece" role="alert">{profileError}</p>}
+            <div className="dashboard-profile-actions dashboard-profile-modal__piece"><button type="button" onClick={() => closeWithMotion()} disabled={profileBusy}>暂不修改</button><button type="button" onClick={submitProfile} disabled={profileBusy}><Icon name="save" /> {profileBusy ? "正在保存..." : "保存资料"}</button></div>
           </div> : activeTab === "security" ? <form id="dashboard-security-panel" role="tabpanel" aria-labelledby="dashboard-security-tab" className="dashboard-security-panel" onSubmit={submitPassword}>
             <div className="dashboard-security-intro dashboard-profile-modal__piece">
               <span className="dashboard-security-intro__icon"><Icon name="key" /></span>

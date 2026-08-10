@@ -76,7 +76,7 @@ test("dashboard wires analytics, quick status, bulk management, reminders, and r
   assert.match(sections, /继续观看/);
   assert.match(sections, /手账统计与最近动态/);
   assert.match(sections, /待完善/);
-  assert.match(dashboard, /api\.patch\(`entries\/\$\{record\.id\}\/`, \{ watch_status: nextStatus \}\)/);
+  assert.match(dashboard, /api\.patch\(`entries\/\$\{record\.id\}\/`, \{ watch_status: nextStatus \}, \{ serverStateInvalidation: false \}\)/);
   assert.match(dashboard, /runBounded\(targets/);
   assert.match(dashboard, /成功 \$\{successful\.length\}，失败 \$\{failed\}/);
   assert.match(dashboard, /params\.set\("entry", record\.id\)/);
