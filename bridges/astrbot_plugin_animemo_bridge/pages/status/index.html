@@ -1,11 +1,11 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AniMemo Bridge Status</title><link rel="stylesheet" href="./style.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AniMemo Bridge 诊断</title><link rel="stylesheet" href="./style.css"></head>
 <body>
   <main>
-    <header><h1>AniMemo Bridge</h1><div><button id="refresh" type="button">刷新状态</button><button id="ping" type="button">测试连接</button><button id="restart" type="button">重启轮询</button></div></header>
+    <header><h1>AniMemo Bridge</h1><div class="actions"><button id="refresh" type="button">刷新状态</button><button id="ping" type="button">测试连接</button><button id="restart" type="button">重启轮询器</button></div></header>
     <section id="summary" aria-live="polite">正在读取状态…</section>
-    <section><h2>投递路由</h2><div id="routes">正在读取…</div></section>
+    <section><h2>私聊投递路由</h2><div id="routes">正在读取…</div></section>
     <p id="message" role="status"></p>
   </main>
   <script type="module" src="./app.js"></script>

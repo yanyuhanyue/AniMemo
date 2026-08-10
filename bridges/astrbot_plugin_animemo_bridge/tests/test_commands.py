@@ -100,6 +100,26 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
             event = self._event("/animemo help")
             self.assertIn("pair", await bridge._command(event))
 
+    async def test_user_status_and_ping_copy_are_localized_without_changing_machine_values(self):
+        class PingClient:
+            async def ping(self):
+                return {"status": "ok"}
+
+        with tempfile.TemporaryDirectory() as temp:
+            bridge = self._bridge(temp, {"enabled": True})
+            bridge.client = PingClient()
+            status_text = await bridge._status_text()
+            self.assertIn("服务地址：", status_text)
+            self.assertIn("事件轮询器：已停止", status_text)
+            self.assertIn("HMAC 连通性：未运行", status_text)
+            self.assertIn("最近成功轮询（AstrBot 本地时区）：未运行", status_text)
+            for legacy_label in ("Server:", "Event poller:", "HMAC connectivity:", "Last error:"):
+                self.assertNotIn(legacy_label, status_text)
+
+            ping_text = await bridge._command(self._event("/animemo ping"))
+            self.assertEqual(ping_text, "AniMemo HMAC 连通性：正常")
+            self.assertEqual(bridge.last_ping, "OK")
+
     async def test_watch_commands_map_to_reference_actions(self):
         class RecordingClient:
             def __init__(self):
@@ -199,6 +219,8 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
             status = await bridge._web_status()
             self.assertFalse(status["configured"])
             self.assertEqual(status["key_id"], "未配置")
+            self.assertEqual(status["poller"], "STOPPED")
+            self.assertEqual(status["last_ping"], "NOT RUN")
 
             bridge.routes.save_private(MessageIdentity("qq", "42", "A", "private", "qq:private:42"))
             bridge.routes.save_private(MessageIdentity("telegram", "42", "B", "private", "telegram:private:42"))
