@@ -19,7 +19,7 @@ from django.contrib.auth.tokens import default_token_generator
 from django.core.cache import cache
 from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import close_old_connections
+from django.db import close_old_connections, connection
 from django.db import IntegrityError, transaction
 from django.test import RequestFactory, SimpleTestCase, TransactionTestCase, override_settings, skipUnlessDBFeature
 from django.urls import reverse
@@ -31,6 +31,7 @@ from rest_framework.exceptions import ParseError
 from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.test import APIClient, APITestCase
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from .account_security import AccountDeletionError, delete_current_account
 from .emails import EmailDeliveryError
@@ -767,6 +768,38 @@ class CookieJwtSecurityTests(APITestCase):
         }, format="json")
         self.assertEqual(forced.status_code, status.HTTP_200_OK)
         self.assert_old_session_revoked(second_access, second_refresh)
+
+
+@override_settings(REST_FRAMEWORK=RELAXED_THROTTLE_SETTINGS)
+class PostgreSQLRefreshTokenTests(TransactionTestCase):
+    def setUp(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("Refresh row-lock regression requires PostgreSQL")
+        cache.clear()
+        self.user = User.objects.create_user(
+            username="postgres-refresh-user",
+            email="postgres-refresh@example.com",
+            password="StrongPass123!",
+        )
+
+    def test_legacy_refresh_cookie_returns_401_instead_of_lock_error(self):
+        client = APIClient(enforce_csrf_checks=True)
+        csrf_response = client.get(reverse("csrf-token"))
+        self.assertEqual(csrf_response.status_code, status.HTTP_200_OK)
+
+        legacy_refresh = RefreshToken.for_user(self.user)
+        client.cookies[settings.REFRESH_COOKIE_NAME] = str(legacy_refresh)
+        response = client.post(
+            reverse("token_refresh"),
+            {},
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_response.data["csrf_token"],
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["code"], "session_expired")
+        self.assertEqual(response.cookies[settings.REFRESH_COOKIE_NAME]["max-age"], 0)
+        self.assertFalse(BlacklistedToken.objects.filter(token__jti=legacy_refresh["jti"]).exists())
 
 
 @override_settings(REST_FRAMEWORK=RELAXED_THROTTLE_SETTINGS)

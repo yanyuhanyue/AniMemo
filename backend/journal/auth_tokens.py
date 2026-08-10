@@ -126,7 +126,6 @@ def rotate_refresh(raw_refresh, *, request=None):
             try:
                 outstanding = (
                     OutstandingToken.objects.select_for_update()
-                    .select_related("user")
                     .get(jti=str(jti))
                 )
             except OutstandingToken.DoesNotExist as error:
