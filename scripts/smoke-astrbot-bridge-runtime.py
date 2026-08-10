@@ -97,7 +97,7 @@ async def smoke():
 
     metadata = star_map.get(bridge_main.AniMemoBridge.__module__)
     require(metadata is not None, "AstrBot register metadata was not created")
-    require(metadata.name == PLUGIN_NAME and metadata.version == "0.1.0", "register metadata is invalid")
+    require(metadata.name == PLUGIN_NAME and metadata.version == "0.1.1", "register metadata is invalid")
     handler = star_handlers_registry.get_handler_by_full_name("main_animemo")
     require(handler is not None, "@filter.command did not register the animemo handler")
     require(

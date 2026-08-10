@@ -75,6 +75,45 @@ def _config_value(config, key):
     return value
 
 
+def _config_bool(config, key):
+    """Normalize values that may have passed through JSON or environment layers."""
+    value = _config_value(config, key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    return bool(DEFAULT_CONFIG[key])
+
+
+def _config_int(config, key):
+    value = _config_value(config, key)
+    if isinstance(value, bool):
+        raise ValueError(f"{key} 必须是整数。")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    raise ValueError(f"{key} 必须是整数。")
+
+
+def _validated_timing(config):
+    poll_wait = _config_int(config, "poll_wait_seconds")
+    request_timeout = _config_int(config, "request_timeout_seconds")
+    if not 0 <= poll_wait <= 25:
+        raise ValueError("poll_wait_seconds 必须在 0 到 25 之间。")
+    if not 5 <= request_timeout <= 120:
+        raise ValueError("request_timeout_seconds 必须在 5 到 120 之间。")
+    if request_timeout <= poll_wait:
+        raise ValueError("request_timeout_seconds 必须大于 poll_wait_seconds。")
+    return poll_wait, request_timeout
+
+
 def _developer_allowed(event):
     is_admin = getattr(event, "is_admin", None)
     return bool(is_admin()) if callable(is_admin) else False
@@ -110,7 +149,7 @@ def _watch_action_result(action, result):
     return "动作执行完成。"
 
 
-@register("astrbot_plugin_animemo_bridge", "AniMemo", "AniMemo Integration Protocol v1 Bridge", "0.1.0")
+@register("astrbot_plugin_animemo_bridge", "AniMemo", "AniMemo Integration Protocol v1 Bridge", "0.1.1")
 class AniMemoBridge(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config or {})
@@ -155,33 +194,35 @@ class AniMemoBridge(Star):
                 "Clear one masked AniMemo Bridge route",
             )
             self._web_registered = True
-        if not bool(_config_value(self.config, "enabled")):
+        if not _config_bool(self.config, "enabled"):
             return
         try:
-            verify_tls = bool(_config_value(self.config, "verify_tls"))
+            poll_wait, request_timeout = _validated_timing(self.config)
+            verify_tls = _config_bool(self.config, "verify_tls")
             if not verify_tls:
                 logger.warning("AniMemo Bridge TLS verification is disabled; use this only for local development")
             bridge_config = BridgeConfig.from_values(
                 _config_value(self.config, "animemo_base_url"),
                 _config_value(self.config, "key_id"),
                 _config_value(self.config, "secret"),
-                timeout_seconds=max(float(_config_value(self.config, "request_timeout_seconds")), float(_config_value(self.config, "poll_wait_seconds")) + 5),
+                timeout_seconds=request_timeout,
                 verify_tls=verify_tls,
             )
-        except ValueError:
-            self.configuration_error = "凭证配置不完整"
-            logger.warning("AniMemo Bridge disabled until credentials are configured")
+        except ValueError as error:
+            message = str(error)
+            self.configuration_error = "凭证配置不完整" if "secret" in message or "key id" in message else "配置无效"
+            logger.warning("AniMemo Bridge disabled until configuration is valid: %s", self.configuration_error)
             return
         self.client = AsyncAniMemoClient(bridge_config)
-        if bool(_config_value(self.config, "poll_events")):
+        if _config_bool(self.config, "poll_events"):
             self.poller = EventPoller(
                 client=self.client,
                 context=self.context,
                 routes=self.routes,
                 state=self.state,
                 logger=logger,
-                wait_seconds=int(_config_value(self.config, "poll_wait_seconds")),
-                developer=bool(_config_value(self.config, "developer_commands")),
+                wait_seconds=poll_wait,
+                developer=_config_bool(self.config, "developer_commands"),
             )
             self.poller.start()
 
@@ -221,7 +262,7 @@ class AniMemoBridge(Star):
         return {"status": self.last_ping}
 
     async def _web_restart(self, _request=None):
-        if not self.client or not bool(_config_value(self.config, "poll_events")):
+        if not self.client or not _config_bool(self.config, "poll_events"):
             return {"status": "STOPPED"}
         if self.poller:
             await self.poller.stop()
@@ -231,8 +272,8 @@ class AniMemoBridge(Star):
             routes=self.routes,
             state=self.state,
             logger=logger,
-            wait_seconds=int(_config_value(self.config, "poll_wait_seconds")),
-            developer=bool(_config_value(self.config, "developer_commands")),
+            wait_seconds=_validated_timing(self.config)[0],
+            developer=_config_bool(self.config, "developer_commands"),
         )
         self.poller.start()
         return {"status": self.poller.status}
@@ -299,7 +340,7 @@ class AniMemoBridge(Star):
             if result:
                 self.routes.save_private(identity)
             return await _reply(event, "AniMemo 绑定成功。" if result else "AniMemo 绑定请求已提交。")
-        if not identity.is_private and not bool(_config_value(self.config, "allow_group_commands")):
+        if not identity.is_private and not _config_bool(self.config, "allow_group_commands"):
             return await _reply(event, "群聊业务命令默认关闭，请在私聊中使用。")
         if command == "status":
             return await _reply(event, await self._status_text())
@@ -353,7 +394,7 @@ class AniMemoBridge(Star):
                 return await _reply(event, f"动作失败：{type(error).__name__}。")
             return await _reply(event, _watch_action_result(action, result))
         if command == "action":
-            if not bool(_config_value(self.config, "developer_commands")) or not _developer_allowed(event):
+            if not _config_bool(self.config, "developer_commands") or not _developer_allowed(event):
                 return await _reply(event, "developer action 已关闭。")
             if len(parts) < 3:
                 return await _reply(event, "用法：/animemo action <plugin.action> <json>")
@@ -372,7 +413,7 @@ class AniMemoBridge(Star):
                 return await _reply(event, f"动作失败：{type(error).__name__}。")
             return await _reply(event, _watch_action_result("action", result))
         if command == "debug":
-            if not bool(_config_value(self.config, "developer_commands")) or not _developer_allowed(event):
+            if not _config_bool(self.config, "developer_commands") or not _developer_allowed(event):
                 return await _reply(event, "developer debug 已关闭。")
             return await _reply(event, f"event route count={self.routes.count()} cursor={self.state.cursor}")
         return await _reply(event, "未知命令，请使用 /animemo help。")
