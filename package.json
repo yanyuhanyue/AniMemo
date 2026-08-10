@@ -15,6 +15,7 @@
     "qa:watch-history:runtime": "node qa/watch_history_runtime_e2e.mjs",
     "qa:auth-focus": "node tests/auth-field-focus-e2e.mjs",
     "qa:dashboard-initial-request": "node tests/dashboard-initial-request-e2e.mjs",
+    "qa:dashboard-mutations": "node tests/dashboard-mutation-e2e.mjs",
     "qa:install-browser": "node scripts/install-playwright-browser.mjs",
     "qa:record": "node scripts/record-webm.mjs",
     "qa:record:featured": "node scripts/record-webm.mjs home-to-featured featured-open featured-tabs featured-tabs-rapid",

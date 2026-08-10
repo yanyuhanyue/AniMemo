@@ -38,3 +38,16 @@ test("successful mutation mapping covers journal, history, sync, and settings do
   assert.equal(events[1].entityId, 7);
   unsubscribe();
 });
+
+test("request-level invalidation can be suppressed or narrowed for locally reconciled mutations", () => {
+  const events = [];
+  const unsubscribe = subscribeServerState((event) => events.push(event));
+  invalidateServerStateForRequest({ method: "delete", url: "entries/7/", serverStateInvalidation: false });
+  invalidateServerStateForRequest({
+    method: "patch",
+    url: "entries/7/",
+    serverStateInvalidation: { domains: ["analytics"], entityId: 7 },
+  });
+  assert.deepEqual(events, [{ domains: ["analytics"], entityId: 7 }]);
+  unsubscribe();
+});

@@ -45,6 +45,14 @@ function pathWithoutQuery(url = "") {
 export function invalidateServerStateForRequest(config = {}) {
   const method = String(config.method || "get").toLowerCase();
   if (["get", "head", "options"].includes(method)) return;
+  if (config.serverStateInvalidation === false) return;
+  if (config.serverStateInvalidation?.domains) {
+    invalidateServerState(
+      config.serverStateInvalidation.domains,
+      config.serverStateInvalidation.entityId ?? null,
+    );
+    return;
+  }
   const path = pathWithoutQuery(config.url);
   const entryMatch = path.match(/^entries\/(\d+)/)
     || path.match(/^external-sync\/providers\/[^/]+\/entries\/(\d+)/);
