@@ -148,6 +148,7 @@ let entryPatchRequests = 0;
 let entryDeleteRequests = 0;
 let entryCreateRequests = 0;
 let settingsPatchRequests = 0;
+let filterCreateRequests = 0;
 let filterPatchRequests = 0;
 let filterDeleteRequests = 0;
 const consoleErrors = [];
@@ -196,6 +197,7 @@ try {
 
     if (path === "filters/" && method === "GET") return json(route, { results: state.filters });
     if (path === "filters/" && method === "POST") {
+      filterCreateRequests += 1;
       if (state.failFilterSave) return json(route, { detail: "筛选保存失败" }, 500);
       const saved = { id: 10, ...request.postDataJSON() };
       state.filters.push(saved);
@@ -406,6 +408,22 @@ try {
   await waitFor(() => entryRequests.length === quickFilterEntryRequestCount + 1);
   assert.equal(filterDeleteRequests, 2);
 
+  await page.getByRole("button", { name: "编辑自定义快速筛选" }).click();
+  await page.getByRole("button", { name: "新建筛选" }).click();
+  await page.getByLabel("筛选名称").fill("新建筛选回归");
+  const beforeFilterCreateRequests = entryRequests.length;
+  await page.getByRole("button", { name: "保存筛选" }).click();
+  await page.locator(".dashboard-filter-editor").waitFor({ state: "detached" });
+  await waitFor(() => entryRequests.length === beforeFilterCreateRequests + 1);
+  assert.equal(filterCreateRequests, 1, "new quick filter must use the server POST path");
+  await page.getByRole("button", { name: "新建筛选回归" }).waitFor({ state: "visible" });
+
+  await page.getByRole("button", { name: "编辑自定义快速筛选" }).click();
+  await page.getByRole("button", { name: "删除筛选" }).click();
+  await page.locator(".dashboard-filter-editor").waitFor({ state: "detached" });
+  await waitFor(() => entryRequests.length === beforeFilterCreateRequests + 2);
+  assert.equal(filterDeleteRequests, 3, "created quick filter must delete through the server path");
+
   const beforeFailureRaceRequests = entryRequests.length;
   state.entryPatchDelay = 600;
   state.failEntryPatch = true;
@@ -432,6 +450,28 @@ try {
   await page.getByRole("button", { name: /插件中心/ }).click();
   await page.waitForURL("**/plugins");
   await wait(700);
+
+  await page.goto(`${baseUrl}/dashboard`, { waitUntil: "networkidle" });
+  await page.getByText("新增番剧", { exact: true }).first().waitFor({ state: "visible" });
+  await page.getByRole("button", { name: /添加番剧/ }).first().click();
+  await page.locator(".dashboard-add-modal").waitFor({ state: "visible" });
+  await page.locator(".dashboard-add-smart-field input").fill("删除竞态番剧");
+  await page.getByLabel("放送季度").fill("2026-08");
+  await page.getByRole("button", { name: /创建并加入手账/ }).click();
+  await page.locator(".dashboard-add-modal").waitFor({ state: "detached" });
+  await page.getByText("删除竞态番剧", { exact: true }).first().waitFor({ state: "visible" });
+
+  const beforeDeleteRaceRequests = entryRequests.length;
+  state.entryDeleteDelay = 600;
+  await openEditor("删除竞态番剧");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "删除私人记录" }).click();
+  await page.getByLabel("排序规则 (默认)").selectOption("score-desc");
+  await waitFor(() => entryRequests.length >= beforeDeleteRaceRequests + 1, 5000);
+  await page.locator(".anime-edit-modal").waitFor({ state: "detached" });
+  await page.getByText("删除竞态番剧", { exact: true }).first().waitFor({ state: "detached" });
+  assert.equal(entryDeleteRequests, 7, "stale DELETE response must reconcile against the changed query");
+
   assert.equal(consoleErrors.length, 0, `browser console errors: ${consoleErrors.join(" | ")}`);
 
   process.stdout.write("dashboard mutation browser regression: PASS\n");
