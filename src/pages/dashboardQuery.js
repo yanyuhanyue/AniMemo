@@ -33,6 +33,10 @@ export function buildDashboardQueryParams(query, { page = 1, includeFacets = fal
   return params;
 }
 
+export function buildDashboardQueryKey(query) {
+  return buildDashboardQueryParams(query, { page: 1, includeFacets: true }).toString();
+}
+
 export function getDashboardNextPage(payload) {
   if (!payload?.next) return null;
   try {

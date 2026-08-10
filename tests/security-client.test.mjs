@@ -91,6 +91,8 @@ test("rotates staff CSRF and sends the current access token before logout cleanu
 test("keeps the staff dashboard refresh interval bounded without four-second polling", () => {
   assert.match(adminDashboardSource, /intervalMs: 20000/);
   assert.doesNotMatch(adminDashboardSource, /intervalMs: 4000/);
+  assert.match(adminDashboardSource, /审核队列每 20 秒自动同步/);
+  assert.doesNotMatch(adminDashboardSource, /审核队列每 4 秒自动同步/);
 });
 
 test("uses the shared CSRF cookie flow for ordinary login and handles unavailable security services", () => {

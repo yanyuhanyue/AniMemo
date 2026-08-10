@@ -16,6 +16,7 @@ import {
 import {
   appendUniqueDashboardRecords,
   buildDashboardQueryParams,
+  buildDashboardQueryKey,
   getDashboardNextPage,
 } from "./dashboardQuery.js";
 
@@ -89,7 +90,11 @@ export function useDashboardData({ navigate, entryQuery = {} }) {
     entryQuery.year,
     quickFilters,
   ]);
-  const requestQueryKey = useMemo(() => JSON.stringify(requestQuery), [requestQuery]);
+  const requestQueryRef = useRef(requestQuery);
+  requestQueryRef.current = requestQuery;
+  const presetColorsRef = useRef(presetColors);
+  presetColorsRef.current = presetColors;
+  const requestQueryKey = useMemo(() => buildDashboardQueryKey(requestQuery), [requestQuery]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearch(String(entryQuery.search || "")), 300);
@@ -171,13 +176,13 @@ export function useDashboardData({ navigate, entryQuery = {} }) {
     const controller = new AbortController();
     requestControllerRef.current?.abort();
     requestControllerRef.current = controller;
-    const params = buildDashboardQueryParams(requestQuery, { page, includeFacets: page === 1 });
+    const params = buildDashboardQueryParams(requestQueryRef.current, { page, includeFacets: page === 1 });
     try {
       const response = await api.get("entries/", { params, signal: controller.signal });
       if (generation !== requestGenerationRef.current) return;
       const payload = response.data || {};
       const items = Array.isArray(payload) ? payload : (payload.results || []);
-      const mapped = items.map((item) => apiToRecord(item, presetColors));
+      const mapped = items.map((item) => apiToRecord(item, presetColorsRef.current));
       setRecords((current) => append ? appendUniqueDashboardRecords(current, mapped) : mapped);
       setTotalCount(Number.isFinite(Number(payload.count)) ? Number(payload.count) : mapped.length);
       setNextPage(getDashboardNextPage(payload));
@@ -206,7 +211,7 @@ export function useDashboardData({ navigate, entryQuery = {} }) {
         else setIsInitialLoading(false);
       }
     }
-  }, [presetColors, requestQuery]);
+  }, [requestQueryKey]);
 
   useEffect(() => {
     if (isDemo) {
