@@ -1,3 +1,4 @@
+import hashlib
 import logging
 
 from django.conf import settings
@@ -22,7 +23,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 
 from .emails import EmailDeliveryError, send_transactional_email
 from .account_security import AccountDeletionError, delete_current_account
-from .auth_tokens import issue_token_pair, revoke_current_access_token, rotate_refresh
+from .auth_tokens import RefreshReplayError, issue_token_pair, revoke_access_token, rotate_refresh
 from .auth_service import authenticate_with_second_factor
 from .admin_security_middleware import clear_staff_second_factor, mark_staff_second_factor_verified
 from accounts.models import LoginEvent
@@ -38,7 +39,13 @@ from plugin_host.hooks import RegistrationHookRejected, RegistrationHookUnavaila
 from .serializers import RegistrationCompleteSerializer, RegistrationRequestSerializer, RegistrationVerifySerializer
 from .staff_services import get_security_profile, record_audit, record_login_event, resolve_staff_role, staff_capabilities, update_user_password
 from plugin_host.permissions import plugin_permissions_for_user
-from .web_auth_adapter import clear_refresh_cookie, no_store, require_anti_abuse_challenge, set_refresh_cookie
+from .web_auth_adapter import (
+    access_token_from_request,
+    clear_refresh_cookie,
+    no_store,
+    require_anti_abuse_challenge,
+    set_refresh_cookie,
+)
 from .openapi_serializers import (
     AccessTokenResponseSerializer,
     AccountDeleteRequestSerializer,
@@ -198,7 +205,17 @@ class CookieTokenRefreshView(APIView):
         if not raw_refresh:
             return no_store(Response({"code": "authentication_required", "detail": "刷新凭据缺失，请重新登录。"}, status=status.HTTP_401_UNAUTHORIZED))
         try:
-            user, access, rotated = rotate_refresh(raw_refresh, request=request)
+            user, access, rotated = rotate_refresh(raw_refresh)
+        except RefreshReplayError as error:
+            record_audit(
+                request,
+                action="security.refresh_replay_rejected",
+                target=error.user,
+                metadata={"token_jti_hash": hashlib.sha256(error.jti.encode("utf-8")).hexdigest()[:16]},
+            )
+            response = Response({"code": "session_expired", "detail": "登录会话已失效，请重新登录。"}, status=status.HTTP_401_UNAUTHORIZED)
+            clear_refresh_cookie(response)
+            return no_store(response)
         except (TokenError, AuthenticationFailed, ValueError, TypeError):
             response = Response({"code": "session_expired", "detail": "登录会话已失效，请重新登录。"}, status=status.HTTP_401_UNAUTHORIZED)
             clear_refresh_cookie(response)
@@ -225,7 +242,7 @@ class LogoutView(APIView):
                 RefreshToken(raw_refresh).blacklist()
             except TokenError:
                 pass
-        revoke_current_access_token(request)
+        revoke_access_token(access_token_from_request(request))
         clear_staff_second_factor(request)
         session_logout(request._request)
         response = Response({"detail": "已安全退出。"})

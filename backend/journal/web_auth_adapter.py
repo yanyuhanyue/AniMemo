@@ -6,6 +6,13 @@ from .anti_abuse import challenge_from_payload, verify_anti_abuse_challenge
 from .network import client_ip
 
 
+def access_token_from_request(request):
+    header = str(request.META.get("HTTP_AUTHORIZATION") or "")
+    if not header.lower().startswith("bearer "):
+        return ""
+    return header[7:].strip()
+
+
 def refresh_cookie_options():
     return {
         "path": settings.REFRESH_COOKIE_PATH,

@@ -5,10 +5,11 @@ from django.db import transaction
 from rest_framework.exceptions import AuthenticationFailed
 
 from .auth_service import verify_staff_second_factor
-from .auth_tokens import revoke_current_access_token
+from .auth_tokens import revoke_access_token
 from accounts.models import UserSecurityProfile
 from plugin_host.sdk import UserHookContext, run_filter, run_hook
 from .staff_services import record_audit, revoke_user_sessions
+from .web_auth_adapter import access_token_from_request
 
 
 User = get_user_model()
@@ -97,7 +98,7 @@ def delete_current_account(*, user, current_password, otp="", recovery_code="", 
         ):
             raise AccountDeletionError("账户删除策略拒绝本次操作。", "before_delete_hook_denied")
 
-        revoke_current_access_token(request) if request is not None else None
+        revoke_access_token(access_token_from_request(request)) if request is not None else None
         revoke_user_sessions(locked_user)
         if request is not None:
             record_audit(

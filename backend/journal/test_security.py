@@ -714,6 +714,24 @@ class CookieJwtSecurityTests(APITestCase):
         rejected = self.refresh(client, csrf)
         self.assertEqual(rejected.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    @patch("journal.auth_views.record_audit")
+    def test_refresh_replay_audit_remains_in_the_web_adapter_flow(self, record_audit):
+        client, login = self.login()
+        old_refresh = login.cookies[settings.REFRESH_COOKIE_NAME].value
+        csrf = self.csrf_token(client)
+        self.assertEqual(self.refresh(client, csrf).status_code, status.HTTP_200_OK)
+        client.cookies[settings.REFRESH_COOKIE_NAME] = old_refresh
+
+        rejected = self.refresh(client, csrf)
+
+        self.assertEqual(rejected.status_code, status.HTTP_401_UNAUTHORIZED)
+        replay_call = next(
+            call for call in record_audit.call_args_list
+            if call.kwargs.get("action") == "security.refresh_replay_rejected"
+        )
+        self.assertEqual(replay_call.kwargs["target"], self.user)
+        self.assertEqual(len(replay_call.kwargs["metadata"]["token_jti_hash"]), 16)
+
     def assert_old_session_revoked(self, access, refresh):
         access_client = APIClient()
         access_client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
