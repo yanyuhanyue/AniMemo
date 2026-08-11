@@ -136,13 +136,76 @@ def mark_needs_reauthorization(connection):
     )
 
 
+def _refresh_access_token(connection, provider):
+    pending_error = None
+    pending_cause = None
+    refreshed_access_token = None
+    with transaction.atomic():
+        current = UserExternalAccountConnection.objects.select_for_update().get(pk=connection.pk)
+        try:
+            credentials = decrypt_credentials(current.credential_ciphertext)
+        except ExternalAccountCredentialError as error:
+            current.status = UserExternalAccountConnection.Status.NEEDS_REAUTHORIZATION
+            current.save(update_fields=["status", "updated_at"])
+            pending_error = account_token_invalid()
+            pending_cause = error
+        else:
+            should_refresh = (
+                current.auth_method == UserExternalAccountConnection.AuthMethod.OAUTH
+                and current.expires_at is not None
+                and current.expires_at <= timezone.now() + timedelta(seconds=30)
+            )
+            if not should_refresh:
+                connection.expires_at = current.expires_at
+                connection.status = current.status
+                return credentials["access_token"]
+
+            refresh_token = credentials.get("refresh_token")
+            if not refresh_token or not provider.oauth_available():
+                current.status = UserExternalAccountConnection.Status.NEEDS_REAUTHORIZATION
+                current.save(update_fields=["status", "updated_at"])
+                pending_error = account_token_invalid()
+            else:
+                try:
+                    refreshed = provider.refresh_oauth_token(refresh_token)
+                    profile = provider.verify_account(refreshed["access_token"])
+                except ExternalAccountError as error:
+                    current.status = UserExternalAccountConnection.Status.NEEDS_REAUTHORIZATION
+                    current.save(update_fields=["status", "updated_at"])
+                    pending_error = error
+                else:
+                    if profile["external_user_id"] != current.external_user_id:
+                        current.status = UserExternalAccountConnection.Status.NEEDS_REAUTHORIZATION
+                        current.save(update_fields=["status", "updated_at"])
+                        pending_error = account_identity_mismatch()
+                    else:
+                        current.credential_ciphertext = encrypt_credentials(refreshed)
+                        current.credential_key_version = CredentialCipher.version
+                        current.expires_at = _expires_at(refreshed["expires_in"])
+                        current.external_username = profile["external_username"]
+                        current.display_name = profile["display_name"]
+                        current.metadata = profile["metadata"]
+                        current.status = UserExternalAccountConnection.Status.CONNECTED
+                        current.verified_at = timezone.now()
+                        current.last_used_at = current.verified_at
+                        current.save()
+                        connection.expires_at = current.expires_at
+                        connection.status = current.status
+                        refreshed_access_token = refreshed["access_token"]
+
+    if pending_error is not None:
+        if pending_cause is not None:
+            raise pending_error from pending_cause
+        raise pending_error
+    return refreshed_access_token
+
+
 def access_token(connection, provider):
     try:
         credentials = decrypt_credentials(connection.credential_ciphertext)
     except ExternalAccountCredentialError as error:
         mark_needs_reauthorization(connection)
         raise account_token_invalid() from error
-    refresh_token = credentials.get("refresh_token")
     should_refresh = (
         connection.auth_method == UserExternalAccountConnection.AuthMethod.OAUTH
         and connection.expires_at is not None
@@ -150,35 +213,7 @@ def access_token(connection, provider):
     )
     if not should_refresh:
         return credentials["access_token"]
-    if not refresh_token or not provider.oauth_available():
-        mark_needs_reauthorization(connection)
-        raise account_token_invalid()
-    try:
-        refreshed = provider.refresh_oauth_token(refresh_token)
-        profile = provider.verify_account(refreshed["access_token"])
-    except ExternalAccountError:
-        mark_needs_reauthorization(connection)
-        raise
-    if profile["external_user_id"] != connection.external_user_id:
-        mark_needs_reauthorization(connection)
-        raise account_identity_mismatch()
-    encrypted = encrypt_credentials(refreshed)
-    with transaction.atomic():
-        current = UserExternalAccountConnection.objects.select_for_update().get(pk=connection.pk)
-        if current.external_user_id != profile["external_user_id"]:
-            raise account_identity_mismatch()
-        current.credential_ciphertext = encrypted
-        current.credential_key_version = CredentialCipher.version
-        current.expires_at = _expires_at(refreshed["expires_in"])
-        current.external_username = profile["external_username"]
-        current.display_name = profile["display_name"]
-        current.metadata = profile["metadata"]
-        current.status = UserExternalAccountConnection.Status.CONNECTED
-        current.verified_at = timezone.now()
-        current.last_used_at = current.verified_at
-        current.save()
-        connection.expires_at = current.expires_at
-    return refreshed["access_token"]
+    return _refresh_access_token(connection, provider)
 
 
 def verify_connection(*, user, provider_slug):
