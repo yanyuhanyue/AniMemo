@@ -11,6 +11,7 @@ from journal.external_accounts.connections import (
 )
 from journal.external_accounts.errors import ExternalAccountError
 from journal.external_accounts.registry import get_account_provider
+from journal.domain_services import JournalEntryService
 from journal.models import (
     ExternalCollectionSyncState,
     ExternalMediaIdentity,
@@ -276,7 +277,7 @@ def _assign_remote_value(entry, *, field, remote_value):
     else:
         raise sync_value_unsupported("远端字段值无法无损写入 AniMemo。")
     model_field = entry._meta.get_field(field)
-    setattr(entry, field, model_field.clean(value, entry))
+    return model_field.clean(value, entry)
 
 
 def _assert_fingerprints(payload, plan):
@@ -290,6 +291,8 @@ def _assert_fingerprints(payload, plan):
 
 
 def apply_collection_sync(*, user, provider_slug, entry_id, preview_token, actions):
+    from journal.serializers_entries import JournalEntrySerializer
+
     payload = decode_preview_token(preview_token)
     _assert_token_request(
         payload,
@@ -341,12 +344,24 @@ def apply_collection_sync(*, user, provider_slug, entry_id, preview_token, actio
 
         by_field = {item["field"]: item for item in plan["fields"]}
         local_updated_fields = []
+        updated_values = {}
         for field, action in selected.items():
             if action == "pull_remote":
-                _assign_remote_value(entry, field=field, remote_value=by_field[field]["remote"])
+                updated_values[field] = _assign_remote_value(
+                    entry,
+                    field=field,
+                    remote_value=by_field[field]["remote"],
+                )
                 local_updated_fields.append(field)
         if local_updated_fields:
-            entry.save(update_fields=[*local_updated_fields, "updated_at"])
+            JournalEntryService(user).update_from_fields(
+                entry.pk,
+                updated_values,
+                serializer_class=JournalEntrySerializer,
+                source="external-sync",
+                allowed_fields=set(updated_values),
+            )
+            entry.refresh_from_db()
 
         resulting_local = local_snapshot(entry)
         for field in selected:

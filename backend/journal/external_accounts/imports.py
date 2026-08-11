@@ -12,6 +12,7 @@ from journal.external_media.services import (
     lock_identity_owner,
     prepare_identity,
 )
+from journal.domain_services import JournalEntryService
 from journal.models import ExternalImportSession, ExternalMediaIdentity, JournalEntry
 
 from .connections import connection_token_for_use, mark_needs_reauthorization
@@ -107,22 +108,30 @@ def _airing_period(metadata):
 
 
 def _create_imported_entry(user, prepared, row):
+    from journal.serializers_entries import JournalEntrySerializer
+
     metadata = prepared.metadata
     rating = row.get("remote_rating")
-    entry = JournalEntry.objects.create(
-        user=user,
-        title=str(metadata.get("title") or row.get("title") or f"{prepared.provider} #{prepared.external_id}")[:200],
-        japanese_title=str(metadata.get("japanese_title") or "")[:200],
-        airing_period=_airing_period(metadata)[:50],
-        studio=str(metadata.get("studio") or "")[:120],
-        episodes=str(metadata.get("episodes") or "")[:30],
-        description=str(metadata.get("summary") or "")[:10000],
-        poster_url=str(metadata.get("poster_url") or "")[:1000],
-        tags=[str(tag)[:100] for tag in (metadata.get("tags") or [])[:30]],
-        personal_score=Decimal(str(rating)) if rating is not None else None,
-        watch_status=row.get("remote_status") or JournalEntry.WatchStatus.PLANNED,
-        review=str(row.get("remote_comment") or "")[:10000],
+    values = {
+        "title": str(metadata.get("title") or row.get("title") or f"{prepared.provider} #{prepared.external_id}")[:200],
+        "japanese_title": str(metadata.get("japanese_title") or "")[:200],
+        "airing_period": _airing_period(metadata)[:50],
+        "studio": str(metadata.get("studio") or "")[:120],
+        "episodes": str(metadata.get("episodes") or "")[:30],
+        "description": str(metadata.get("summary") or "")[:10000],
+        "poster_url": str(metadata.get("poster_url") or "")[:1000],
+        "tags": [str(tag)[:100] for tag in (metadata.get("tags") or [])[:30]],
+        "personal_score": Decimal(str(rating)) if rating is not None else None,
+        "watch_status": row.get("remote_status") or JournalEntry.WatchStatus.PLANNED,
+        "review": str(row.get("remote_comment") or "")[:10000],
+    }
+    dto = JournalEntryService(user).create_from_fields(
+        values,
+        serializer_class=JournalEntrySerializer,
+        source="external-account-import",
+        allowed_fields=set(values),
     )
+    entry = JournalEntry.objects.get(pk=dto["entry_id"], user=user)
     identity = create_prepared_identity(entry, prepared)
     _record_import_provenance(identity, row)
     return entry
@@ -141,19 +150,24 @@ def _record_import_provenance(identity, row):
 
 
 def _apply_explicit_user_fields(entry, row, fields):
-    changed = []
+    from journal.serializers_entries import JournalEntrySerializer
+
+    values = {}
     if "personal_score" in fields and row.get("remote_rating") is not None:
-        entry.personal_score = Decimal(str(row["remote_rating"]))
-        changed.append("personal_score")
+        values["personal_score"] = Decimal(str(row["remote_rating"]))
     if "watch_status" in fields and row.get("remote_status") in JournalEntry.WatchStatus.values:
-        entry.watch_status = row["remote_status"]
-        changed.append("watch_status")
+        values["watch_status"] = row["remote_status"]
     if "review" in fields and row.get("remote_comment"):
-        entry.review = str(row["remote_comment"])[:10000]
-        changed.append("review")
-    if changed:
-        entry.save(update_fields=[*changed, "updated_at"])
-    return changed
+        values["review"] = str(row["remote_comment"])[:10000]
+    if values:
+        JournalEntryService(entry.user).update_from_fields(
+            entry.pk,
+            values,
+            serializer_class=JournalEntrySerializer,
+            source="external-account-import",
+            allowed_fields=set(values),
+        )
+    return list(values)
 
 
 def _apply_import_item(*, user, provider_slug, row, action, prepared):

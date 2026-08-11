@@ -12,6 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .data_bundle import DataBundleError, export_data_bundle, import_data_bundle, preview_data_bundle
+from .domain_services import JournalEntryService, JournalEntryServiceError
 from .import_parsers import LimitedImportJSONParser
 from .models import JournalEntry
 from .serializers import JournalEntrySerializer
@@ -249,11 +250,23 @@ class ImportEntriesView(APIView):
         commit_errors = list(prepared["errors"])
         try:
             with transaction.atomic():
+                service = JournalEntryService(request.user)
                 for index, normalized in enumerate(prepared["ready_rows"], start=1):
-                    serializer = JournalEntrySerializer(data=normalized, context={"request": request})
-                    if not serializer.is_valid():
-                        raise ValueError(json.dumps({"row": index, "errors": serializer.errors}, ensure_ascii=False))
-                    serializer.save(user=request.user)
+                    try:
+                        service.create_from_fields(
+                            normalized,
+                            serializer_class=JournalEntrySerializer,
+                            source="csv",
+                            context={"request": request},
+                            allowed_fields=set(normalized),
+                        )
+                    except JournalEntryServiceError as error:
+                        raise ValueError(
+                            json.dumps(
+                                {"row": index, "errors": {"record": [error.detail]}},
+                                ensure_ascii=False,
+                            )
+                        ) from error
                     created += 1
         except ValueError as error:
             created = 0

@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from journal.domain_services import JournalEntryService
 from journal.models import ExternalMediaIdentity, JournalEntry
 from journal.poster_security import PosterUrlValidationError, validate_poster_url
 
@@ -123,6 +124,8 @@ def unbind_external_identity(*, entry, user, provider_slug):
 
 
 def refresh_external_identity(*, entry, user, provider_slug):
+    from journal.serializers_entries import JournalEntrySerializer
+
     provider = get_provider(provider_slug)
     current_identity = ExternalMediaIdentity.objects.filter(entry=entry, provider=provider.slug).first()
     if current_identity is None:
@@ -145,6 +148,7 @@ def refresh_external_identity(*, entry, user, provider_slug):
         provider_values = _entry_values(metadata)
         changed_fields = {}
         applied_fields = []
+        update_values = {}
         if identity.is_metadata_source:
             for field in SAFE_AUTO_FIELDS:
                 provider_value = provider_values.get(field)
@@ -154,11 +158,18 @@ def refresh_external_identity(*, entry, user, provider_slug):
                 if current_value == provider_value:
                     continue
                 changed_fields[field] = {"current": current_value, "provider": provider_value}
-                setattr(locked_entry, field, provider_value)
+                update_values[field] = provider_value
                 applied_fields.append(field)
 
         if applied_fields:
-            locked_entry.save(update_fields=[*applied_fields, "updated_at"])
+            JournalEntryService(user).update_from_fields(
+                locked_entry.pk,
+                update_values,
+                serializer_class=JournalEntrySerializer,
+                source="external-media",
+                allowed_fields=set(update_values),
+            )
+            locked_entry.refresh_from_db()
         identity.canonical_url = provider.canonical_url(identity.external_id)
         identity.metadata = metadata
         identity.metadata_schema_version = 1
@@ -171,6 +182,8 @@ def refresh_external_identity(*, entry, user, provider_slug):
 
 
 def set_metadata_source(*, entry, user, provider_slug, apply_metadata):
+    from journal.serializers_entries import JournalEntrySerializer
+
     if not isinstance(apply_metadata, bool):
         raise ValueError("apply_metadata must be an explicit boolean")
     provider = get_provider(provider_slug)
@@ -200,6 +213,7 @@ def set_metadata_source(*, entry, user, provider_slug, apply_metadata):
         changed_fields = {}
         if apply_metadata:
             provider_values = _entry_values(selected.metadata)
+            update_values = {}
             for field in SAFE_AUTO_FIELDS:
                 provider_value = provider_values.get(field)
                 if provider_value in (None, ""):
@@ -208,10 +222,17 @@ def set_metadata_source(*, entry, user, provider_slug, apply_metadata):
                 if current_value == provider_value:
                     continue
                 changed_fields[field] = {"current": current_value, "provider": provider_value}
-                setattr(locked_entry, field, provider_value)
+                update_values[field] = provider_value
                 applied_fields.append(field)
             if applied_fields:
-                locked_entry.save(update_fields=[*applied_fields, "updated_at"])
+                JournalEntryService(locked_user).update_from_fields(
+                    locked_entry.pk,
+                    update_values,
+                    serializer_class=JournalEntrySerializer,
+                    source="external-media",
+                    allowed_fields=set(update_values),
+                )
+                locked_entry.refresh_from_db()
         return selected, applied_fields, changed_fields
 
 
