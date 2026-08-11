@@ -139,6 +139,7 @@ def classify_paths(paths: list[str], *, force_full: bool = False) -> dict[str, s
         or _has(path.lower(), "shared-contract", "public-contract")
         for path in non_docs
     )
+    media_storage = any("media_storage" in path.lower() or "test_media_storage" in path.lower() for path in non_docs)
 
     signals = [
         frontend,
@@ -168,7 +169,7 @@ def classify_paths(paths: list[str], *, force_full: bool = False) -> dict[str, s
     run_bootstrap = ci or deployment or full_gate
     run_plugins = plugin or integration or shared_contract or full_gate
     run_bridge = bridge or integration or shared_contract or full_gate
-    run_postgres = auth or api_contract or migration or integration or shared_contract or full_gate
+    run_postgres = auth or api_contract or migration or integration or shared_contract or media_storage or full_gate
     run_runtime = run_bridge or full_gate
 
     result = {
