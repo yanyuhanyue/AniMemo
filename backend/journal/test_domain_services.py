@@ -26,7 +26,7 @@ class JournalEntryServiceTests(TestCase):
             self.service.get(JournalEntry.objects.filter(user=self.other).values_list("pk", flat=True).get())
 
     def test_plugin_mutations_share_serializer_allowlist_and_hooks(self):
-        with patch("journal.domain_services.run_hook") as run_hook:
+        with patch("journal.domain_services.publish_event") as run_hook:
             created = self.service.create_from_fields(
                 {"title": "Created", "watch_status": "completed"},
                 serializer_class=JournalEntrySerializer,
