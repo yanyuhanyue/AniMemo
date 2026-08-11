@@ -1,4 +1,3 @@
-import json
 import sys
 import tempfile
 import unittest
@@ -18,9 +17,15 @@ class RoutingTests(unittest.TestCase):
             self.assertTrue(store.save_private(MessageIdentity("qq", "42", "A", "private", "qq:private:42")))
             self.assertFalse(store.save_private(MessageIdentity("qq", "42", "A", "group", "qq:group:7")))
             self.assertEqual(store.get("qq", "42")["umo"], "qq:private:42")
+            fixed_updated_at = "2026-08-11T01:09:52.242673+00:00"
+            store.get("qq", "42")["updated_at"] = fixed_updated_at
+            store.save()
             reloaded = RouteStore(path)
             self.assertEqual(reloaded.count(), 1)
-            self.assertNotIn("42", json.dumps(reloaded.masked_routes(), ensure_ascii=False))
+            self.assertEqual(
+                reloaded.masked_routes(),
+                [{"platform": "qq", "external_user_id": "…73475cb40a", "updated_at": fixed_updated_at}],
+            )
 
     def test_corrupt_state_is_backed_up(self):
         with tempfile.TemporaryDirectory() as temp:
