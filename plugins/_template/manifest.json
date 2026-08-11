@@ -11,6 +11,7 @@
   "license": "MIT",
   "installationMode": "user",
   "runtimes": ["frontend", "backend"],
+  "coreCapabilities": [],
   "frontend": { "exposure": "authenticated" },
   "extensions": ["frontend.page", "frontend.navigation", "backend.api", "settings", "storage", "integration.actions", "integration.events"],
   "backend": { "entry": "backend/plugin.py" },

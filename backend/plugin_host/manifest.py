@@ -17,6 +17,7 @@ EXTENSIONS = {
     "hooks", "storage", "catalog.importer", "catalog.metadata",
     "integration.actions", "integration.events",
 }
+CORE_CAPABILITIES = {"journal", "watch_history", "analytics"}
 HOOKS = SUPPORTED_HOOKS
 POLICY_KEYS = {"storesPersonalData", "usesExternalNetwork", "acceptsFileUploads", "retainsDataOnDisable"}
 
@@ -74,6 +75,16 @@ def validate_manifest(manifest: dict, *, directory_name: str | None = None) -> d
     extensions = manifest.get("extensions")
     if not isinstance(extensions, list) or not set(extensions) <= EXTENSIONS:
         raise ManifestError("extensions 包含未知扩展")
+    core_capabilities = manifest.get("coreCapabilities", [])
+    if (
+        not isinstance(core_capabilities, list)
+        or any(not isinstance(item, str) for item in core_capabilities)
+        or len(core_capabilities) != len(set(core_capabilities))
+        or not set(core_capabilities) <= CORE_CAPABILITIES
+    ):
+        raise ManifestError("coreCapabilities 包含未知或重复能力")
+    if core_capabilities and "backend" not in runtimes:
+        raise ManifestError("coreCapabilities 只能由 backend runtime 声明")
     integrations = manifest.get("integrations")
     if integrations is not None:
         if not isinstance(integrations, dict) or set(integrations) - {"actions", "events"}:
@@ -132,6 +143,8 @@ def validate_manifest(manifest: dict, *, directory_name: str | None = None) -> d
     settings_definitions = manifest.get("settings", [])
     if not isinstance(settings_definitions, list):
         raise ManifestError("settings 必须是数组")
+    if settings_definitions and isinstance(extensions, list) and "settings" not in set(extensions):
+        raise ManifestError("settings definition 必须声明 settings 扩展")
     setting_keys = set()
     for definition in settings_definitions:
         if not isinstance(definition, dict):

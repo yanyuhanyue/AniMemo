@@ -59,6 +59,7 @@ INTEGRATION_EXTENSIONS = {
     "actions": "integration.actions",
     "events": "integration.events",
 }
+CORE_CAPABILITIES = {"journal", "watch_history", "analytics"}
 
 
 def _boundary_error(detail=""):
@@ -175,6 +176,19 @@ def read_manifest(slug: str) -> dict:
         raise SystemExit("manifest installationMode must be user or system")
     if manifest.get("installationMode") == "user" and not set(manifest.get("hooks") or []) <= USER_SCOPED_HOOKS:
         raise SystemExit("USER plugins may only declare user-scoped journal/column hooks")
+    core_capabilities = manifest.get("coreCapabilities", [])
+    if (
+        not isinstance(core_capabilities, list)
+        or any(not isinstance(item, str) for item in core_capabilities)
+        or len(core_capabilities) != len(set(core_capabilities))
+        or not set(core_capabilities) <= CORE_CAPABILITIES
+    ):
+        raise SystemExit("manifest coreCapabilities contains unknown or duplicate capability")
+    if core_capabilities and "backend" not in set(manifest.get("runtimes") or []):
+        raise SystemExit("manifest coreCapabilities requires backend runtime")
+    settings = manifest.get("settings") or []
+    if settings and "settings" not in set(manifest.get("extensions") or []):
+        raise SystemExit("manifest settings definitions require settings extension")
     integrations = manifest.get("integrations")
     if integrations is not None:
         if not isinstance(integrations, dict) or set(integrations) - set(INTEGRATION_EXTENSIONS):

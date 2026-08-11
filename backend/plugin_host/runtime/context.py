@@ -6,6 +6,7 @@ from uuid import uuid4
 import requests
 
 from plugin_host.hooks import KNOWN_HOOKS, hook_failure_mode
+from plugin_host.errors import HostCapabilityError
 from plugin_host.storage import PluginStorage
 
 from .routes import PluginApi
@@ -13,6 +14,18 @@ from .routes import PluginApi
 
 class ExternalNetworkDenied(PermissionError):
     pass
+
+
+class _UndeclaredCoreCapability:
+    def __init__(self, name):
+        self.name = name
+
+    def bind(self, _actor):
+        raise HostCapabilityError(
+            "capability_not_declared",
+            f"插件未在 Manifest 声明 Core capability：{self.name}。",
+            403,
+        )
 
 
 @dataclass
@@ -36,9 +49,11 @@ class PluginContext:
 
         self.api = PluginApi(self.slug, self.manifest)
         self.integrations = PluginIntegrations(self.slug, self.manifest, self.runtime_id)
-        self.journal = PluginJournalCapability(self.slug)
-        self.watch_history = PluginWatchHistoryCapability(self.slug)
-        self.analytics = PluginAnalyticsCapability(self.slug)
+        declared = set(self.manifest.get("coreCapabilities") or [])
+        self.core_capabilities = frozenset(declared)
+        self.journal = PluginJournalCapability(self.slug) if "journal" in declared else _UndeclaredCoreCapability("journal")
+        self.watch_history = PluginWatchHistoryCapability(self.slug) if "watch_history" in declared else _UndeclaredCoreCapability("watch_history")
+        self.analytics = PluginAnalyticsCapability(self.slug) if "analytics" in declared else _UndeclaredCoreCapability("analytics")
 
     @property
     def hook_owner(self):
@@ -46,16 +61,22 @@ class PluginContext:
 
     @property
     def system_settings(self):
+        if "settings" not in set(self.manifest.get("extensions") or []):
+            raise HostCapabilityError("capability_not_declared", "插件未声明 settings 扩展。", 403)
         from plugin_host.sdk.settings import get_system_settings
 
         return get_system_settings(self.slug)
 
     def user_settings(self, user):
+        if "settings" not in set(self.manifest.get("extensions") or []):
+            raise HostCapabilityError("capability_not_declared", "插件未声明 settings 扩展。", 403)
         from plugin_host.sdk.settings import get_user_settings
 
         return get_user_settings(self.slug, user)
 
     def storage(self, *, user=None, namespace="default"):
+        if "storage" not in set(self.manifest.get("extensions") or []):
+            raise HostCapabilityError("capability_not_declared", "插件未声明 storage 扩展。", 403)
         return PluginStorage(self.slug, user=user, namespace=namespace)
 
     def register_hook(self, hook_name, callback, *, priority=100, failure_mode=None):

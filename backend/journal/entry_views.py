@@ -20,6 +20,7 @@ from .external_media.services import (
     set_metadata_source,
     unbind_external_identity,
 )
+from .domain_services import JournalEntryService
 from .models import Column, JournalEntry, QuickFilter, UserSettings, WatchHistoryRecord
 from .pagination import FlexiblePageNumberPagination
 from .permissions import IsOwner
@@ -195,12 +196,10 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
         return response
 
     def perform_create(self, serializer):
-        entry = serializer.save(user=self.request.user)
-        run_hook("journal.after_create", JournalHookContext(user_id=entry.user_id, journal_entry_id=entry.pk, source="api"))
+        JournalEntryService(self.request.user).create(serializer, source="api")
 
     def perform_update(self, serializer):
-        entry = serializer.save()
-        run_hook("journal.after_update", JournalHookContext(user_id=entry.user_id, journal_entry_id=entry.pk, source="api"))
+        JournalEntryService(self.request.user).update(serializer, source="api")
 
     def perform_destroy(self, instance):
         entry_id, user_id = instance.pk, instance.user_id

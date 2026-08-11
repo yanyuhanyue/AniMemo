@@ -17,7 +17,7 @@ def create_plugin(host):
 /api/v1/plugins/blank-plugin/<path>
 ```
 
-Runtime Plugin 不注册 Django App、URLConf、model 或 migration，也不需要重启 Django。后端接口必须通过 `host.api.get/post/put/patch/delete(path, handler=..., access="user"|"staff", permission=...)` 注册；`access=user` 要求当前用户已安装并启用插件，`access=staff` 的 `permission` 必须存在于 Manifest。插件通过 `host.system_settings`、`host.user_settings(user)`、`host.storage(...)`、`host.register_hook(...)` 和声明了外部网络权限后的 `host.request_json(...)` 使用宿主能力。
+Runtime Plugin 不注册 Django App、URLConf、model 或 migration，也不需要重启 Django。后端接口必须通过 `host.api.get/post/put/patch/delete(path, handler=..., access="user"|"staff", permission=...)` 注册；`access=user` 要求当前用户已安装并启用插件，`access=staff` 的 `permission` 必须存在于 Manifest。需要 Core Journal、Watch History 或 Analytics 时，先在 Manifest 的 `coreCapabilities` 中声明，再通过 `host.journal`、`host.watch_history` 或 `host.analytics` 绑定当前 actor；未声明的能力会被 Host 拒绝。`settings` 与 `storage` 仍是独立扩展，必须分别声明后才能使用 `host.system_settings`、`host.user_settings(user)` 或 `host.storage(...)`。插件通过 `host.register_hook(...)` 和声明了外部网络权限后的 `host.request_json(...)` 使用其他宿主能力。
 
 需要 Django model、migration、系统依赖或独立进程的 Extended Plugin 当前不受支持，安装器会拒绝相关 manifest 字段。
 

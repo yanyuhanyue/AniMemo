@@ -12,15 +12,14 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 
-from plugin_host.runtime.capabilities import HostCapabilityError
-from plugin_host.storage import PluginStorage, PluginStorageLimitError
+from plugin_host.sdk import HostCapabilityError, PluginStorageLimitError
 
 from .src.anime_journal_watch_history_importer.bangumi import BangumiError, resolve_group, resolve_subject_id
 from .src.anime_journal_watch_history_importer.parser import build_preview, normalize_title
 
 
 PLUGIN_SLUG = "watch-history-importer"
-PLUGIN_VERSION = "0.4.1"
+PLUGIN_VERSION = "0.4.2"
 MAX_FILES = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
 INTEGRATION_TEXT_MAX_BYTES = 120 * 1024
@@ -29,14 +28,12 @@ BRUSH_TAG_RE = re.compile(r"^(?:首|二|三|四|五|六|七|八|九|十|\d+|X)�
 YEAR_TAG_RE = re.compile(r"^\d{4}年?$")
 
 
-def _store(user, namespace):
-    return PluginStorage(PLUGIN_SLUG, user=user, namespace=namespace)
+def _store(host, user, namespace):
+    return host.storage(user=user, namespace=namespace)
 
 
-def _config(user):
-    from plugin_host.sdk.settings import get_user_settings
-
-    return {"resolve_batch_size": 6, "unmatched_policy": "review", **get_user_settings(PLUGIN_SLUG, user)}
+def _config(host, user):
+    return {"resolve_batch_size": 6, "unmatched_policy": "review", **host.user_settings(user)}
 
 
 def _batch_key(batch_id):
@@ -98,17 +95,17 @@ def _validate_batch_size(batch):
         )
 
 
-def _get_batch(user, batch_id):
-    batch = _store(user, "batches").get(_batch_key(batch_id))
+def _get_batch(host, user, batch_id):
+    batch = _store(host, user, "batches").get(_batch_key(batch_id))
     if not isinstance(batch, dict):
         return None
     return batch
 
 
-def _save_batch(user, batch):
+def _save_batch(host, user, batch):
     _validate_batch_size(batch)
     try:
-        _store(user, "batches").set_bounded(
+        _store(host, user, "batches").set_bounded(
             batch["id"],
             batch,
             max_value_bytes=_batch_max_bytes(),
@@ -124,7 +121,7 @@ def _save_batch(user, batch):
     return batch
 
 
-def _selected_groups(user, batch, raw_excluded):
+def _selected_groups(host, user, batch, raw_excluded):
     groups = batch.get("payload", {}).get("groups", [])
     if not isinstance(raw_excluded, list) or any(
         isinstance(value, bool) or not isinstance(value, int)
@@ -160,7 +157,7 @@ def _selected_groups(user, batch, raw_excluded):
         for group in selected
         if group.get("resolution", {}).get("status") != "matched"
     ]
-    if unresolved and _config(user).get("unmatched_policy", "review") == "review":
+    if unresolved and _config(host, user).get("unmatched_policy", "review") == "review":
         raise HostCapabilityError(
             "manual_review_required",
             f"仍有 {len(unresolved)} 部番剧需要人工选择 Bangumi 条目。",
@@ -365,7 +362,7 @@ class WatchHistoryPlugin:
         user = actor.user
         with transaction.atomic():
             batch_row = (
-                _store(user, "batches")
+                _store(self.host, user, "batches")
                 .collection()
                 .select_for_update()
                 .filter(key=_batch_key(batch_id))
@@ -387,7 +384,7 @@ class WatchHistoryPlugin:
             if batch.get("status") == "imported":
                 return _stored_import_result(batch), batch
 
-            selected, excluded = _selected_groups(user, batch, raw_excluded)
+            selected, excluded = _selected_groups(self.host, user, batch, raw_excluded)
             prepared = [
                 (group, _import_history_records(group.get("records", []), history))
                 for group in selected
@@ -406,7 +403,7 @@ class WatchHistoryPlugin:
                 for title in (entry["title"], entry["japanese_title"])
                 if normalize_title(title)
             }
-            subject_store = _store(actor.user, "subjects")
+            subject_store = _store(self.host, actor.user, "subjects")
             for group, incoming_history in prepared:
                 resolution = group.get("resolution", {})
                 entry = (
@@ -503,13 +500,13 @@ class WatchHistoryPlugin:
 
     def status(self, request):
         batches = list(
-            _store(request.user, "batches")
+            _store(self.host, request.user, "batches")
             .collection()
             .order_by("-updated_at", "-pk")
             .values("value")[: _batch_max_per_user()]
         )
         values = [item["value"] for item in batches]
-        return Response({"status": "ok", "plugin": {"id": "com.anime-journal.watch-history-importer", "slug": PLUGIN_SLUG, "version": PLUGIN_VERSION}, "config": _config(request.user), "batches": [_serialize_batch(value, include_groups=False) for value in values]})
+        return Response({"status": "ok", "plugin": {"id": "com.anime-journal.watch-history-importer", "slug": PLUGIN_SLUG, "version": PLUGIN_VERSION}, "config": _config(self.host, request.user), "batches": [_serialize_batch(value, include_groups=False) for value in values]})
 
     def preview(self, request):
         files = request.FILES.getlist("files")
@@ -549,7 +546,7 @@ class WatchHistoryPlugin:
             "imported_at": None,
         }
         try:
-            _save_batch(request.user, batch)
+            _save_batch(self.host, request.user, batch)
         except HostCapabilityError as error:
             return Response(
                 {"code": error.code, "detail": error.detail},
@@ -558,17 +555,17 @@ class WatchHistoryPlugin:
         return Response(_serialize_batch(batch), status=status.HTTP_201_CREATED)
 
     def batch(self, request, batch_id):
-        batch = _get_batch(request.user, batch_id)
+        batch = _get_batch(self.host, request.user, batch_id)
         if batch is None:
             return Response({"code": "batch_missing", "detail": "导入批次不存在。"}, status=status.HTTP_404_NOT_FOUND)
         return Response(_serialize_batch(batch))
 
     def resolve_next(self, request, batch_id):
-        batch = _get_batch(request.user, batch_id)
+        batch = _get_batch(self.host, request.user, batch_id)
         if batch is None:
             return Response({"code": "batch_missing", "detail": "导入批次不存在。"}, status=status.HTTP_404_NOT_FOUND)
         payload = batch.get("payload") or {}
-        indexes = [index for index, group in enumerate(payload.get("groups", [])) if group.get("resolution", {}).get("status") == "pending"][: max(1, min(int(_config(request.user).get("resolve_batch_size", 6)), 12))]
+        indexes = [index for index, group in enumerate(payload.get("groups", [])) if group.get("resolution", {}).get("status") == "pending"][: max(1, min(int(_config(self.host, request.user).get("resolve_batch_size", 6)), 12))]
         errors = []
         for index in indexes:
             try:
@@ -582,7 +579,7 @@ class WatchHistoryPlugin:
         batch["error"] = "\n".join(errors)
         batch["updated_at"] = timezone.now().isoformat()
         try:
-            _save_batch(request.user, batch)
+            _save_batch(self.host, request.user, batch)
         except HostCapabilityError as error:
             return Response(
                 {"code": error.code, "detail": error.detail},
@@ -591,7 +588,7 @@ class WatchHistoryPlugin:
         return Response(_serialize_batch(batch))
 
     def select_subject(self, request, batch_id):
-        batch = _get_batch(request.user, batch_id)
+        batch = _get_batch(self.host, request.user, batch_id)
         try:
             index = int(request.data.get("group_index"))
             subject_id = int(request.data.get("bangumi_id"))
@@ -607,7 +604,7 @@ class WatchHistoryPlugin:
         batch["error"] = ""
         batch["updated_at"] = timezone.now().isoformat()
         try:
-            _save_batch(request.user, batch)
+            _save_batch(self.host, request.user, batch)
         except HostCapabilityError as error:
             return Response(
                 {"code": error.code, "detail": error.detail},

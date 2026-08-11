@@ -88,3 +88,32 @@ class ManifestV2Tests(SimpleTestCase):
                     integrations={"events": [{"name": "done"}, {"name": "done"}]},
                 )
             )
+
+    def test_core_capabilities_require_backend_and_are_known_unique(self):
+        manifest = self.valid_manifest(
+            runtimes=["backend"],
+            backend={"entry": "backend/plugin.py"},
+            extensions=["backend.api"],
+            coreCapabilities=["journal", "analytics"],
+        )
+        self.assertEqual(validate_manifest(manifest)["coreCapabilities"], ["journal", "analytics"])
+        with self.assertRaisesRegex(ManifestError, "只能由 backend"):
+            validate_manifest(self.valid_manifest(coreCapabilities=["journal"]))
+        with self.assertRaises(ManifestError):
+            validate_manifest(self.valid_manifest(
+                runtimes=["backend"],
+                backend={"entry": "backend/plugin.py"},
+                extensions=["backend.api"],
+                coreCapabilities=["journal", "journal"],
+            ))
+        with self.assertRaises(ManifestError):
+            validate_manifest(self.valid_manifest(
+                runtimes=["backend"],
+                backend={"entry": "backend/plugin.py"},
+                extensions=["backend.api"],
+                coreCapabilities=["unknown"],
+            ))
+        with self.assertRaises(ManifestError):
+            validate_manifest(self.valid_manifest(coreCapabilities=[{"name": "journal"}]))
+        with self.assertRaisesRegex(ManifestError, "settings definition"):
+            validate_manifest(self.valid_manifest(settings=[{"key": "enabled", "scope": "user"}]))

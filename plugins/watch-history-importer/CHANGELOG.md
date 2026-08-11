@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- 通过 Manifest 明确声明 `journal` 与 `watch_history` Core capability。
+- 通过 Host SDK 门面访问设置、存储与错误类型，移除官方插件对宿主内部模块的直接依赖。
+- 复用 Core `JournalEntryService` 的条目 DTO、owner 隔离、serializer 校验与 mutation hook 边界。
+
 ## 0.4.1
 
 - 限制单次 TXT 总上传量、持久化批次大小与每用户批次数，并由标准维护任务清理过期批次。
