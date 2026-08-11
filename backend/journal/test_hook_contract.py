@@ -60,7 +60,7 @@ class SupportedHookEmitterTests(TestCase):
         self.assertEqual(user_hook.call_args.args[1].user_id, user.pk)
 
     def test_journal_crud_hooks_run_from_real_api_flow(self):
-        with patch("journal.domain_services.run_hook") as mutation_hook:
+        with patch("journal.domain_services.publish_event") as mutation_hook:
             created = self.client.post(reverse("entry-list"), {"title": "Hook Entry"}, format="json")
             self.assertEqual(created.status_code, 201)
             entry_id = created.data["id"]
@@ -133,7 +133,7 @@ class SupportedHookEmitterTests(TestCase):
 class UserDeleteHookContractTests(TestCase):
     def test_before_delete_denial_is_fail_closed(self):
         user = User.objects.create_user(username="hook-denied", password="StrongPass123!")
-        with patch("journal.account_security.run_filter", return_value=False) as before, patch("journal.account_security.run_hook") as after:
+        with patch("journal.account_security.run_policy", return_value=False) as before, patch("journal.account_security.publish_event") as after:
             with self.assertRaises(AccountDeletionError) as raised:
                 delete_current_account(user=user, current_password="StrongPass123!")
         self.assertEqual(raised.exception.reason, "before_delete_hook_denied")
@@ -152,7 +152,7 @@ class UserDeleteHookContractTests(TestCase):
         def after(_hook_name, context):
             seen["after"] = context
 
-        with patch("journal.account_security.run_filter", side_effect=allow), patch("journal.account_security.run_hook", side_effect=after):
+        with patch("journal.account_security.run_policy", side_effect=allow), patch("journal.account_security.publish_event", side_effect=after):
             delete_current_account(user=user, current_password="StrongPass123!")
         self.assertEqual(seen["before"].user_id, user.pk)
         self.assertEqual(seen["after"].user_id, user.pk)

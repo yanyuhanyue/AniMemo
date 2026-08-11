@@ -4,8 +4,7 @@ from django.db import transaction
 from django.db.models import Q
 from rest_framework.exceptions import ValidationError
 
-from plugin_host.hooks import run_hook
-
+from .mutation_ports import JournalMutationContext, publish_event
 from .models import JournalEntry
 
 
@@ -63,11 +62,9 @@ class JournalEntryService:
             entry = serializer.save(user=self.user)
         except ValidationError as error:
             raise JournalEntryServiceError("invalid_entry", error.detail) from error
-        from plugin_host.sdk.types import JournalHookContext
-
-        run_hook(
+        publish_event(
             "journal.after_create",
-            JournalHookContext(user_id=entry.user_id, journal_entry_id=entry.pk, source=source),
+            JournalMutationContext(user_id=entry.user_id, journal_entry_id=entry.pk, source=source),
         )
         return self.to_dto(entry)
 
@@ -97,11 +94,9 @@ class JournalEntryService:
             entry = serializer.save()
         except ValidationError as error:
             raise JournalEntryServiceError("invalid_entry", error.detail) from error
-        from plugin_host.sdk.types import JournalHookContext
-
-        run_hook(
+        publish_event(
             "journal.after_update",
-            JournalHookContext(user_id=entry.user_id, journal_entry_id=entry.pk, source=source),
+            JournalMutationContext(user_id=entry.user_id, journal_entry_id=entry.pk, source=source),
         )
         return self.to_dto(entry)
 
@@ -134,11 +129,9 @@ class JournalEntryService:
             entry = self._owned_entry(entry_id, lock=True)
             user_id = entry.user_id
             entry.delete()
-        from plugin_host.sdk.types import JournalHookContext
-
-        run_hook(
+        publish_event(
             "journal.after_delete",
-            JournalHookContext(user_id=user_id, journal_entry_id=entry_id, source=source),
+            JournalMutationContext(user_id=user_id, journal_entry_id=entry_id, source=source),
         )
         return {"entry_id": entry_id, "deleted": True}
 

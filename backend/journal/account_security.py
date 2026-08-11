@@ -7,7 +7,7 @@ from rest_framework.exceptions import AuthenticationFailed
 from .auth_service import verify_staff_second_factor
 from .auth_tokens import revoke_access_token
 from accounts.models import UserSecurityProfile
-from plugin_host.sdk import UserHookContext, run_filter, run_hook
+from .mutation_ports import UserDeletionContext, publish_event, run_policy
 from .staff_services import record_audit, revoke_user_sessions
 from .web_auth_adapter import access_token_from_request
 
@@ -83,13 +83,13 @@ def delete_current_account(*, user, current_password, otp="", recovery_code="", 
             "is_staff": locked_user.is_staff,
             "is_superuser": locked_user.is_superuser,
         }
-        hook_context = UserHookContext(
+        hook_context = UserDeletionContext(
             user_id=locked_user.pk,
             actor_id=getattr(getattr(request, "user", None), "pk", None) if request is not None else None,
             source="account-delete",
         )
         try:
-            allowed = run_filter("user.before_delete", True, hook_context)
+            allowed = run_policy("user.before_delete", True, hook_context)
         except Exception as error:
             raise AccountDeletionError("账户删除策略拒绝本次操作。", "before_delete_hook_failed") from error
         if allowed is False or (
@@ -110,5 +110,5 @@ def delete_current_account(*, user, current_password, otp="", recovery_code="", 
                 metadata={"second_factor_method": second_factor_method},
             )
         locked_user.delete()
-        run_hook("user.after_delete", hook_context)
+        publish_event("user.after_delete", hook_context)
         return snapshot

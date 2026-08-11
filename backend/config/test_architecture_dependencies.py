@@ -54,6 +54,12 @@ class ArchitectureDependencyContractTests(SimpleTestCase):
             "rest_framework.views",
             "rest_framework.viewsets",
         })
+        self.assertFalse(any(module.startswith("plugin_host") for module in imports))
+
+    def test_account_security_uses_domain_owned_policy_and_event_ports(self):
+        imports = imported_modules(BACKEND_ROOT / "journal" / "account_security.py", "journal")
+
+        self.assertFalse(any(module.startswith("plugin_host") for module in imports))
 
     def test_official_plugin_uses_only_the_public_host_sdk_surface(self):
         imports = imported_modules(REPOSITORY_ROOT / "plugins" / "watch-history-importer" / "backend" / "plugin.py")
