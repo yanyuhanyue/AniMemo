@@ -303,3 +303,7 @@ Production deploy: NOT RUN until separate acceptance phase
 ```
 
 完成以上条件后，下一步才是 `Deployment / Updater Hardening`，而不是在 Closure 中顺便实现 Mobile、Marketplace 或 UI/UX 2.0。
+
+## Execution Update (2026-08-12)
+
+本轮执行结果记录在 `docs/architecture-debt-closure-report-20260812.md`：DA-TD1-002、DA-TD1-003、DA-TD1-005 CLOSED；DA-TD1-001、DA-TD1-004 因 stop condition BLOCKED。PR #54/#55/#56 均已通过 CI/Release Gate 并 squash merge；生产部署与 smoke NOT RUN。

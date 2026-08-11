@@ -1088,6 +1088,7 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
             return StoragePoolService.create_media(key, b"payload", content_type="image/webp")
         finally:
             close_old_connections()
+            connection.close()
 
     def test_first_r2_upload_serializes_physical_identity_update(self):
         backend = r2_backend("first-upload-r2", 10)
@@ -1114,6 +1115,7 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
                 return "updated"
             finally:
                 close_old_connections()
+                connection.close()
 
         adapter_factory = lambda candidate: self.BlockingAdapter(candidate, write_started, release_write, observed_identity)
         with patch.object(StoragePoolService, "adapter_for", side_effect=adapter_factory):
@@ -1166,6 +1168,7 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
                     return "updated"
                 finally:
                     close_old_connections()
+                    connection.close()
 
             adapter_factory = lambda candidate: self.BlockingAdapter(candidate, write_started, release_write, observed_identity)
             with patch.object(StoragePoolService, "adapter_for", side_effect=adapter_factory):
@@ -1203,6 +1206,7 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
                 return response.status_code, response.data.get("code")
             finally:
                 close_old_connections()
+                connection.close()
 
         adapter_factory = lambda candidate: self.BlockingAdapter(candidate, write_started, release_write, observed_identity)
         with patch.object(StoragePoolService, "adapter_for", side_effect=adapter_factory):
@@ -1238,6 +1242,7 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
                 return serializer.save().config_version
             finally:
                 close_old_connections()
+                connection.close()
 
         with patch("site_config.media_storage.r2.boto3.client", side_effect=[first_client, refreshed_client]) as factory:
             self.assertIs(DynamicR2Backend.client_for(backend), first_client)
