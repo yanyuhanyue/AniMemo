@@ -275,6 +275,34 @@ class ExternalAccountApiTests(APITestCase):
         BANGUMI_OAUTH_CLIENT_SECRET="client-secret",
         BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/external-accounts/bangumi/callback/",
     )
+    @patch("journal.external_accounts.providers.bangumi.BangumiAccountProvider.refresh_oauth_token")
+    def test_expired_oauth_refresh_failure_persists_reauthorization(self, refresh):
+        connection = self.create_connection()
+        connection.auth_method = "oauth"
+        connection.credential_ciphertext = encrypt_credentials({
+            "access_token": "expired-access-token",
+            "refresh_token": "refresh-token-value",
+            "expires_in": 1,
+        })
+        connection.expires_at = timezone.now() - timedelta(seconds=1)
+        connection.save()
+        refresh.side_effect = account_token_invalid()
+
+        response = self.client.post(
+            reverse("external-account-verify", kwargs={"provider": "bangumi"}),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        connection.refresh_from_db()
+        self.assertEqual(connection.status, "needs_reauthorization")
+
+    @override_settings(
+        BANGUMI_OAUTH_CLIENT_ID="client-id",
+        BANGUMI_OAUTH_CLIENT_SECRET="client-secret",
+        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/external-accounts/bangumi/callback/",
+    )
     def test_oauth_state_is_hashed_bound_single_use_and_callback_hides_code(self):
         authorize = self.client.post(reverse("external-account-authorize", kwargs={"provider": "bangumi"}), {}, format="json")
         self.assertEqual(authorize.status_code, status.HTTP_200_OK, authorize.data)
