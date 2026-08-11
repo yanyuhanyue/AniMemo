@@ -35,4 +35,4 @@ source-specific document
 
 `journal.0004` 将 `watch-history-importer` 的历史 `PluginData(namespace="watch_history")` 严格迁移为关系行，保留顺序、备注和额外 metadata。无法安全规范化时迁移 fail closed；成功后删除原 canonical PluginData，不 read-through、dual-write 或 write-through。
 
-Importer `0.4.0` 通过用户绑定的 `host.journal` 与 `host.watch_history` 调用 Core。`dataCompatibility.rollbackFloor=0.4.0` 阻止回滚到会重新写第二份 PluginData 的 `0.3.x`。
+Importer `0.4.1` 通过用户绑定的 `host.journal` 与 `host.watch_history` 调用 Core。持久化批次受单批大小、每用户行数和 7 天 retention 限制；批次行锁保证并发提交只执行一次，Core mutation 与批次状态在同一事务内提交，完成事件使用 robust on-commit 投递。`dataCompatibility.rollbackFloor=0.4.0` 阻止回滚到会重新写第二份 PluginData 的 `0.3.x`。

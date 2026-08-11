@@ -16,6 +16,7 @@ class MaintenanceRunnerTests(SimpleTestCase):
         self.assertEqual(output.getvalue().splitlines(), list(TASKS))
         self.assertIn("audit_orphan_media", TASKS)
         self.assertIn("cleanup_integration_events", TASKS)
+        self.assertIn("cleanup_watch_history_import_batches", TASKS)
         self.assertNotIn("delete", " ".join(TASKS))
 
     @patch("journal.management.commands.run_maintenance.call_command")

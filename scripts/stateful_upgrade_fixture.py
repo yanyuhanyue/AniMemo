@@ -50,6 +50,15 @@ def _runtime_path(slug, version):
     return Path(settings.PLUGIN_ROOT) / "runtime" / slug / version
 
 
+def _bundled_plugin_release(slug):
+    from django.conf import settings
+
+    manifest_path = Path(settings.BASE_DIR).parent / "plugins" / slug / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _assert(manifest.get("slug") == slug, f"Bundled plugin manifest slug is invalid: {manifest_path}")
+    return manifest["version"], manifest["dataCompatibility"]["rollbackFloor"]
+
+
 def _verify_package_blob(blob, *, slug, version):
     from plugin_host.package import inspect_package
 
@@ -454,8 +463,15 @@ def verify_state(input_path):
     _assert(deployment.current_version.review_status == PluginVersion.ReviewStatus.APPROVED, "Current official PluginVersion is not approved.")
     _assert(deployment.current_version.published_at is not None, "Current official PluginVersion is not published.")
     if core_history_applied:
-        _assert(deployment.current_version.version == "0.4.0", "Importer 0.4.0 is not active after cutover.")
-        _assert(deployment.rollback_floor == "0.4.0", "Importer rollback floor is not 0.4.0.")
+        expected_version, expected_floor = _bundled_plugin_release(project.slug)
+        _assert(
+            deployment.current_version.version == expected_version,
+            f"Importer {expected_version} is not active after cutover.",
+        )
+        _assert(
+            deployment.rollback_floor == expected_floor,
+            f"Importer rollback floor is not {expected_floor}.",
+        )
     else:
         _assert(deployment.current_version.version == fixture["base_plugin_version"], "Base importer version changed before upgrade.")
     _verify_package_blob(

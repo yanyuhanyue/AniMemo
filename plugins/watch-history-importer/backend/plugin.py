@@ -1,24 +1,26 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 from urllib.parse import quote
 from uuid import uuid4
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 
 from plugin_host.runtime.capabilities import HostCapabilityError
-from plugin_host.storage import PluginStorage
+from plugin_host.storage import PluginStorage, PluginStorageLimitError
 
 from .src.anime_journal_watch_history_importer.bangumi import BangumiError, resolve_group, resolve_subject_id
 from .src.anime_journal_watch_history_importer.parser import build_preview, normalize_title
 
 
 PLUGIN_SLUG = "watch-history-importer"
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.4.1"
 MAX_FILES = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
 INTEGRATION_TEXT_MAX_BYTES = 120 * 1024
@@ -58,16 +60,130 @@ def _import_history_records(records, history):
     ])
 
 
-def _get_batch(request, batch_id):
-    batch = _store(request.user, "batches").get(_batch_key(batch_id))
+def _batch_max_bytes():
+    return int(getattr(settings, "WATCH_HISTORY_IMPORT_BATCH_MAX_BYTES", 40 * 1024 * 1024))
+
+
+def _batch_max_per_user():
+    return int(getattr(settings, "WATCH_HISTORY_IMPORT_BATCH_MAX_PER_USER", 4))
+
+
+def _batch_retention_seconds():
+    return int(getattr(settings, "WATCH_HISTORY_IMPORT_BATCH_RETENTION_SECONDS", 604800))
+
+
+def _total_upload_max_bytes():
+    return int(getattr(settings, "WATCH_HISTORY_IMPORT_TOTAL_UPLOAD_MAX_BYTES", 4 * 1024 * 1024))
+
+
+def _batch_size(batch):
+    try:
+        return len(
+            json.dumps(batch, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+    except (TypeError, ValueError) as error:
+        raise HostCapabilityError(
+            "invalid_import_batch",
+            "导入批次包含无法保存的数据。",
+        ) from error
+
+
+def _validate_batch_size(batch):
+    maximum = _batch_max_bytes()
+    if _batch_size(batch) > maximum:
+        raise HostCapabilityError(
+            "batch_too_large",
+            f"导入批次超过 {maximum // (1024 * 1024)} MiB 上限。",
+            413,
+        )
+
+
+def _get_batch(user, batch_id):
+    batch = _store(user, "batches").get(_batch_key(batch_id))
     if not isinstance(batch, dict):
         return None
     return batch
 
 
-def _save_batch(request, batch):
-    _store(request.user, "batches").set(batch["id"], batch)
+def _save_batch(user, batch):
+    _validate_batch_size(batch)
+    try:
+        _store(user, "batches").set_bounded(
+            batch["id"],
+            batch,
+            max_value_bytes=_batch_max_bytes(),
+            max_rows=_batch_max_per_user(),
+            retention_seconds=_batch_retention_seconds(),
+        )
+    except PluginStorageLimitError as error:
+        raise HostCapabilityError(
+            "batch_too_large",
+            f"导入批次超过 {_batch_max_bytes() // (1024 * 1024)} MiB 上限。",
+            413,
+        ) from error
     return batch
+
+
+def _selected_groups(user, batch, raw_excluded):
+    groups = batch.get("payload", {}).get("groups", [])
+    if not isinstance(raw_excluded, list) or any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in raw_excluded
+    ):
+        raise HostCapabilityError(
+            "invalid_excluded_group_indices",
+            "排除项必须是番剧分组索引列表。",
+        )
+    if any(value < 0 or value >= len(groups) for value in raw_excluded):
+        raise HostCapabilityError(
+            "invalid_excluded_group_indices",
+            "排除项包含不存在的番剧分组。",
+        )
+    excluded = set(raw_excluded)
+    selected = [group for index, group in enumerate(groups) if index not in excluded]
+    if not selected:
+        raise HostCapabilityError(
+            "empty_import_selection",
+            "至少保留一部番剧后才能正式导入。",
+        )
+    if any(
+        group.get("resolution", {}).get("status") == "pending"
+        for group in selected
+    ):
+        raise HostCapabilityError(
+            "resolution_pending",
+            "仍有番剧尚未完成 Bangumi 匹配。",
+            409,
+        )
+    unresolved = [
+        group
+        for group in selected
+        if group.get("resolution", {}).get("status") != "matched"
+    ]
+    if unresolved and _config(user).get("unmatched_policy", "review") == "review":
+        raise HostCapabilityError(
+            "manual_review_required",
+            f"仍有 {len(unresolved)} 部番剧需要人工选择 Bangumi 条目。",
+            409,
+        )
+    return selected, excluded
+
+
+def _stored_import_result(batch):
+    result = batch.get("result")
+    if isinstance(result, dict):
+        return result
+    summary = batch.get("summary") or {}
+    excluded = int(summary.get("excluded_groups") or 0)
+    return {
+        "batch_id": batch["id"],
+        "imported_entries": int(summary.get("imported_entries") or 0),
+        "imported_records": int(summary.get("imported_history_records") or 0),
+        "excluded_groups": excluded,
+        "created": 0,
+        "updated": 0,
+        "skipped": excluded,
+    }
 
 
 def _summary(payload):
@@ -191,18 +307,22 @@ class WatchHistoryPlugin:
         except HostCapabilityError as error:
             return {"code": error.code, "detail": error.detail}, error.status_code
         if result["created"]:
-            self.host.integrations.emit(
-                context.user,
-                "history-updated",
-                {
-                    "entry_id": entry["entry_id"],
-                    "title": entry["title"],
-                    "watched_on": result["record"]["watched_on"],
-                    "brush_label": result["record"]["brush_label"],
-                    "episode_start": result["record"]["episode_start"],
-                    "episode_end": result["record"]["episode_end"],
-                    "count": 1,
-                },
+            event_payload = {
+                "entry_id": entry["entry_id"],
+                "title": entry["title"],
+                "watched_on": result["record"]["watched_on"],
+                "brush_label": result["record"]["brush_label"],
+                "episode_start": result["record"]["episode_start"],
+                "episode_end": result["record"]["episode_end"],
+                "count": 1,
+            }
+            transaction.on_commit(
+                lambda: self.host.integrations.emit(
+                    context.user,
+                    "history-updated",
+                    event_payload,
+                ),
+                robust=True,
             )
         return {"entry_id": entry["entry_id"], **result}
 
@@ -229,40 +349,56 @@ class WatchHistoryPlugin:
         batch_id = str(payload.get("batch_id") or "").strip()
         if not batch_id:
             return {"code": "batch_missing", "detail": "batch_id 必填。"}, 400
-        batch = _store(context.user, "batches").get(batch_id)
-        if not isinstance(batch, dict):
-            return {"code": "batch_missing", "detail": "导入批次不存在。"}, 404
-        groups = batch.get("payload", {}).get("groups", [])
-        excluded = {int(value) for value in payload.get("excluded_group_indices", []) if isinstance(value, int) and not isinstance(value, bool)}
-        selected = [group for index, group in enumerate(groups) if index not in excluded]
-        if not selected:
-            return {"code": "empty_import_selection", "detail": "至少保留一部番剧后才能正式导入。"}, 400
-        if any(group.get("resolution", {}).get("status") == "pending" for group in selected):
-            return {"code": "resolution_pending", "detail": "仍有番剧尚未完成 Bangumi 匹配。"}, 409
-        if batch.get("target_user_id") != context.user.pk:
-            return {"code": "batch_owner_mismatch", "detail": "导入批次不属于当前账号。"}, 404
         try:
-            result = self._commit_selected(context, batch, selected, excluded)
+            result, _batch = self._commit_batch(
+                context,
+                batch_id,
+                payload.get("excluded_group_indices", []),
+            )
         except HostCapabilityError as error:
             return {"code": error.code, "detail": error.detail}, error.status_code
-        self.host.integrations.emit(context.user, "import-completed", result)
         return result
 
-    def _commit_selected(self, actor, batch, selected, excluded):
+    def _commit_batch(self, actor, batch_id, raw_excluded):
         journal = self.host.journal.bind(actor)
         history = self.host.watch_history.bind(actor)
-        prepared = [
-            (group, _import_history_records(group.get("records", []), history))
-            for group in selected
-            if group.get("resolution", {}).get("status") == "matched"
-            and group.get("resolution", {}).get("bangumi_id")
-        ]
-        imported_entries = set()
-        imported_records = 0
-        created_entries = 0
-        updated_records = 0
-        skipped_records = 0
+        user = actor.user
         with transaction.atomic():
+            batch_row = (
+                _store(user, "batches")
+                .collection()
+                .select_for_update()
+                .filter(key=_batch_key(batch_id))
+                .first()
+            )
+            if batch_row is None or not isinstance(batch_row.value, dict):
+                raise HostCapabilityError(
+                    "batch_missing",
+                    "导入批次不存在。",
+                    404,
+                )
+            batch = batch_row.value
+            if batch.get("target_user_id") != user.pk:
+                raise HostCapabilityError(
+                    "batch_owner_mismatch",
+                    "导入批次不属于当前账号。",
+                    404,
+                )
+            if batch.get("status") == "imported":
+                return _stored_import_result(batch), batch
+
+            selected, excluded = _selected_groups(user, batch, raw_excluded)
+            prepared = [
+                (group, _import_history_records(group.get("records", []), history))
+                for group in selected
+                if group.get("resolution", {}).get("status") == "matched"
+                and group.get("resolution", {}).get("bangumi_id")
+            ]
+            imported_entries = set()
+            imported_records = 0
+            created_entries = 0
+            updated_records = 0
+            skipped_records = 0
             entries = journal.list_entries(limit=500)
             by_title = {
                 normalize_title(title): entry
@@ -330,31 +466,48 @@ class WatchHistoryPlugin:
                 imported_records += merged["created"]
                 updated_records += merged["created"]
                 skipped_records += merged["skipped"]
-        result = {
-            "batch_id": batch["id"],
-            "imported_entries": len(imported_entries),
-            "imported_records": imported_records,
-            "excluded_groups": len(excluded),
-            "created": created_entries,
-            "updated": updated_records,
-            "skipped": skipped_records + len(excluded),
-        }
-        batch["status"] = "imported"
-        batch["imported_at"] = timezone.now().isoformat()
-        batch["summary"] = {
-            **batch.get("summary", {}),
-            "imported_entries": len(imported_entries),
-            "imported_history_records": imported_records,
-            "selected_groups": len(selected),
-            "excluded_groups": len(excluded),
-            "excluded_group_indices": sorted(excluded),
-        }
-        batch["updated_at"] = timezone.now().isoformat()
-        _store(actor.user, "batches").set(batch["id"], batch)
-        return result
+            result = {
+                "batch_id": batch["id"],
+                "imported_entries": len(imported_entries),
+                "imported_records": imported_records,
+                "excluded_groups": len(excluded),
+                "created": created_entries,
+                "updated": updated_records,
+                "skipped": skipped_records + len(excluded),
+            }
+            batch["status"] = "imported"
+            batch["imported_at"] = timezone.now().isoformat()
+            batch["summary"] = {
+                **batch.get("summary", {}),
+                "imported_entries": len(imported_entries),
+                "imported_history_records": imported_records,
+                "selected_groups": len(selected),
+                "excluded_groups": len(excluded),
+                "excluded_group_indices": sorted(excluded),
+            }
+            batch["result"] = result
+            batch["updated_at"] = timezone.now().isoformat()
+            _validate_batch_size(batch)
+            batch_row.value = batch
+            batch_row.save(update_fields=["value", "updated_at"])
+            event_payload = dict(result)
+            transaction.on_commit(
+                lambda: self.host.integrations.emit(
+                    user,
+                    "import-completed",
+                    event_payload,
+                ),
+                robust=True,
+            )
+        return result, batch
 
     def status(self, request):
-        batches = list(_store(request.user, "batches").collection().values("value")[:8])
+        batches = list(
+            _store(request.user, "batches")
+            .collection()
+            .order_by("-updated_at", "-pk")
+            .values("value")[: _batch_max_per_user()]
+        )
         values = [item["value"] for item in batches]
         return Response({"status": "ok", "plugin": {"id": "com.anime-journal.watch-history-importer", "slug": PLUGIN_SLUG, "version": PLUGIN_VERSION}, "config": _config(request.user), "batches": [_serialize_batch(value, include_groups=False) for value in values]})
 
@@ -362,6 +515,15 @@ class WatchHistoryPlugin:
         files = request.FILES.getlist("files")
         if not files or len(files) > MAX_FILES:
             return Response({"code": "invalid_files", "detail": f"请选择 1 至 {MAX_FILES} 个 TXT 文件。"}, status=status.HTTP_400_BAD_REQUEST)
+        total_bytes = sum(max(0, int(getattr(upload, "size", 0) or 0)) for upload in files)
+        if total_bytes > _total_upload_max_bytes():
+            return Response(
+                {
+                    "code": "files_too_large",
+                    "detail": f"TXT 文件总大小不能超过 {_total_upload_max_bytes() // (1024 * 1024)} MiB。",
+                },
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
         try:
             documents = []
             for upload in files:
@@ -386,17 +548,23 @@ class WatchHistoryPlugin:
             "updated_at": timezone.now().isoformat(),
             "imported_at": None,
         }
-        _save_batch(request, batch)
+        try:
+            _save_batch(request.user, batch)
+        except HostCapabilityError as error:
+            return Response(
+                {"code": error.code, "detail": error.detail},
+                status=error.status_code,
+            )
         return Response(_serialize_batch(batch), status=status.HTTP_201_CREATED)
 
     def batch(self, request, batch_id):
-        batch = _get_batch(request, batch_id)
+        batch = _get_batch(request.user, batch_id)
         if batch is None:
             return Response({"code": "batch_missing", "detail": "导入批次不存在。"}, status=status.HTTP_404_NOT_FOUND)
         return Response(_serialize_batch(batch))
 
     def resolve_next(self, request, batch_id):
-        batch = _get_batch(request, batch_id)
+        batch = _get_batch(request.user, batch_id)
         if batch is None:
             return Response({"code": "batch_missing", "detail": "导入批次不存在。"}, status=status.HTTP_404_NOT_FOUND)
         payload = batch.get("payload") or {}
@@ -413,11 +581,17 @@ class WatchHistoryPlugin:
         batch["status"] = "ready" if batch["summary"]["pending"] == 0 else "resolving"
         batch["error"] = "\n".join(errors)
         batch["updated_at"] = timezone.now().isoformat()
-        _save_batch(request, batch)
+        try:
+            _save_batch(request.user, batch)
+        except HostCapabilityError as error:
+            return Response(
+                {"code": error.code, "detail": error.detail},
+                status=error.status_code,
+            )
         return Response(_serialize_batch(batch))
 
     def select_subject(self, request, batch_id):
-        batch = _get_batch(request, batch_id)
+        batch = _get_batch(request.user, batch_id)
         try:
             index = int(request.data.get("group_index"))
             subject_id = int(request.data.get("bangumi_id"))
@@ -432,37 +606,24 @@ class WatchHistoryPlugin:
         batch["status"] = "ready" if batch["summary"]["pending"] == 0 else "resolving"
         batch["error"] = ""
         batch["updated_at"] = timezone.now().isoformat()
-        _save_batch(request, batch)
+        try:
+            _save_batch(request.user, batch)
+        except HostCapabilityError as error:
+            return Response(
+                {"code": error.code, "detail": error.detail},
+                status=error.status_code,
+            )
         return Response(_serialize_batch(batch))
 
     def commit(self, request, batch_id):
-        batch = _get_batch(request, batch_id)
-        if batch is None:
-            return Response({"code": "batch_missing", "detail": "导入批次不存在。"}, status=status.HTTP_404_NOT_FOUND)
-        groups = batch.get("payload", {}).get("groups", [])
-        raw_excluded = request.data.get("excluded_group_indices", [])
-        if not isinstance(raw_excluded, list) or any(isinstance(value, bool) or not isinstance(value, int) for value in raw_excluded):
-            return Response({"code": "invalid_excluded_group_indices", "detail": "排除项必须是番剧分组索引列表。"}, status=status.HTTP_400_BAD_REQUEST)
-        excluded = set(raw_excluded)
-        selected = [group for index, group in enumerate(groups) if index not in excluded]
-        if not selected:
-            return Response({"code": "empty_import_selection", "detail": "至少保留一部番剧后才能正式导入。"}, status=status.HTTP_400_BAD_REQUEST)
-        if any(group.get("resolution", {}).get("status") == "pending" for group in selected):
-            return Response({"code": "resolution_pending", "detail": "仍有番剧尚未完成 Bangumi 匹配。"}, status=status.HTTP_409_CONFLICT)
-        unresolved = [group for group in selected if group.get("resolution", {}).get("status") != "matched"]
-        if unresolved and _config(request.user).get("unmatched_policy", "review") == "review":
-            return Response({"code": "manual_review_required", "detail": f"仍有 {len(unresolved)} 部番剧需要人工选择 Bangumi 条目。"}, status=status.HTTP_409_CONFLICT)
-        if batch.get("target_user_id") != request.user.pk:
-            return Response({"code": "batch_owner_mismatch", "detail": "导入批次不属于当前账号。"}, status=status.HTTP_404_NOT_FOUND)
         try:
-            result = self._commit_selected(request, batch, selected, excluded)
+            _result, batch = self._commit_batch(
+                request,
+                batch_id,
+                request.data.get("excluded_group_indices", []),
+            )
         except HostCapabilityError as error:
             return Response({"code": error.code, "detail": error.detail}, status=error.status_code)
-        self.host.integrations.emit(
-            request.user,
-            "import-completed",
-            result,
-        )
         return Response(_serialize_batch(batch))
 
 
