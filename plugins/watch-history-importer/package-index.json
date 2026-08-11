@@ -2,12 +2,12 @@
   "packageVersion": 1,
   "pluginId": "com.anime-journal.watch-history-importer",
   "slug": "watch-history-importer",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "files": [
     {
       "path": "backend/plugin.py",
-      "size": 22471,
-      "sha256": "794834d31ccb6e69c8ede466717874e4888ba34ee9ba64f5d9a7b22a44dfea33"
+      "size": 26299,
+      "sha256": "16b7cbe69003379065a9c05e81e8229544733cf743276e61dae06e7702a82e31"
     },
     {
       "path": "backend/src/__init__.py",
@@ -37,12 +37,12 @@
     {
       "path": "frontend/plugin.js",
       "size": 28816,
-      "sha256": "7088230d42179756dd7869ae7c58191dc7d51cfbfcdaf90792cb81d78928af8a"
+      "sha256": "f267be358d5faada61204703d4058bec1328b40e91942a3b2ee33cd7f9cbf0d8"
     },
     {
       "path": "manifest.json",
       "size": 2252,
-      "sha256": "327f3f752a1591353a60cbee59dc790da87ee5f17cbf9118143c4e3dc8cf6e55"
+      "sha256": "ebd644cc4a07dca4e517b55294f32b8ff35a955eb21534c53f1d4282640e4d11"
     }
   ]
 }

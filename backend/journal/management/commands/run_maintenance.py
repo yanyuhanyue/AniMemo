@@ -10,6 +10,7 @@ TASKS = (
     "purge_expired_revoked_tokens",
     "cleanup_external_account_sessions",
     "cleanup_integration_events",
+    "cleanup_watch_history_import_batches",
     "refresh_media_storage_usage",
     "audit_orphan_media",
 )

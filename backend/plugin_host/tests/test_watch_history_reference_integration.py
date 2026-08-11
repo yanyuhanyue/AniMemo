@@ -3,8 +3,10 @@ import tempfile
 import time
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -12,7 +14,12 @@ from rest_framework.test import APIClient
 
 from accounts.models import User
 from integrations.authentication import sign_hmac_request
-from integrations.models import ExternalIdentityBinding, IntegrationConnection, IntegrationEvent
+from integrations.models import (
+    ExternalIdentityBinding,
+    IntegrationActionReceipt,
+    IntegrationConnection,
+    IntegrationEvent,
+)
 from journal.models import JournalEntry, WatchHistoryRecord
 from plugin_host.models import PluginData, PluginProject
 from plugin_host.runtime import runtime_registry
@@ -81,10 +88,11 @@ class WatchHistoryReferenceIntegrationTests(TestCase):
         )
 
     def test_history_actions_are_bound_to_current_user_and_emit_sanitized_event(self):
-        added = self.signed_action(
-            "history-add",
-            {"entry_id": self.entry.pk, "watched_on": "2026-08-09", "episode_start": 7, "episode_end": 7},
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            added = self.signed_action(
+                "history-add",
+                {"entry_id": self.entry.pk, "watched_on": "2026-08-09", "episode_start": 7, "episode_end": 7},
+            )
         self.assertEqual(added.status_code, 200, added.data)
         self.assertTrue(added.data["created"])
         event = IntegrationEvent.objects.get(plugin_slug="watch-history-importer", event_name="history-updated")
@@ -168,6 +176,45 @@ class WatchHistoryReferenceIntegrationTests(TestCase):
         rejected = self.signed_action("import-preview", {"text": "x" * (120 * 1024 + 1)})
         self.assertEqual(rejected.status_code, 400, rejected.data)
         self.assertEqual(rejected.data["code"], "invalid_text")
+
+    def test_web_preview_enforces_total_upload_and_stored_batch_limits(self):
+        client = APIClient()
+        client.force_authenticate(self.user)
+        with override_settings(WATCH_HISTORY_IMPORT_TOTAL_UPLOAD_MAX_BYTES=10):
+            total_too_large = client.post(
+                "/api/plugins/watch-history-importer/preview/",
+                {
+                    "files": [
+                        SimpleUploadedFile("2026-a.txt", b"123456"),
+                        SimpleUploadedFile("2026-b.txt", b"123456"),
+                    ]
+                },
+                format="multipart",
+            )
+        self.assertEqual(total_too_large.status_code, 413, total_too_large.data)
+        self.assertEqual(total_too_large.data["code"], "files_too_large")
+
+        with override_settings(
+            WATCH_HISTORY_IMPORT_TOTAL_UPLOAD_MAX_BYTES=1024,
+            WATCH_HISTORY_IMPORT_BATCH_MAX_BYTES=64,
+        ):
+            batch_too_large = client.post(
+                "/api/plugins/watch-history-importer/preview/",
+                {
+                    "files": [
+                        SimpleUploadedFile(
+                            "2026.txt",
+                            "1月1日 首刷 测试动画 第1集".encode(),
+                        )
+                    ]
+                },
+                format="multipart",
+            )
+        self.assertEqual(batch_too_large.status_code, 413, batch_too_large.data)
+        self.assertEqual(batch_too_large.data["code"], "batch_too_large")
+        self.assertFalse(
+            PluginData.objects.filter(plugin=self.project, namespace="batches").exists()
+        )
 
     def test_import_commit_uses_shared_watch_history_validation(self):
         batch_id = uuid4().hex
@@ -299,6 +346,112 @@ class WatchHistoryReferenceIntegrationTests(TestCase):
             "metadata": {},
         })
         self.assertFalse(PluginData.objects.filter(plugin=self.project, namespace="watch_history").exists())
+
+    def test_import_commit_event_failure_does_not_return_false_failure(self):
+        batch_id = uuid4().hex
+        batch_row = PluginData.objects.create(
+            plugin=self.project,
+            namespace="batches",
+            user=self.user,
+            key=batch_id,
+            value={
+                "id": batch_id,
+                "status": "ready",
+                "summary": {},
+                "target_user_id": self.user.pk,
+                "payload": {
+                    "groups": [{
+                        "source_title": self.entry.title,
+                        "resolution": {
+                            "status": "matched",
+                            "bangumi_id": 789,
+                            "title": self.entry.title,
+                            "japanese_title": "",
+                            "tags": [],
+                        },
+                        "records": [{
+                            "watch_date": "2026-08-11",
+                            "watch_date_label": "",
+                            "brush": 1,
+                            "brush_label": "首刷",
+                            "episode_range": {"start": 1, "end": 1},
+                            "notes": [],
+                        }],
+                    }],
+                },
+            },
+        )
+        request_id = "event-failure-does-not-fail-import"
+
+        with patch(
+            "integrations.plugin_sdk.PluginIntegrations.emit",
+            side_effect=RuntimeError("event unavailable"),
+        ), self.captureOnCommitCallbacks(execute=True):
+            response = self.signed_action(
+                "import-commit",
+                {"batch_id": batch_id},
+                request_id=request_id,
+            )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(
+            IntegrationActionReceipt.objects.get(request_id=request_id).status,
+            IntegrationActionReceipt.Status.COMPLETED,
+        )
+        self.assertTrue(WatchHistoryRecord.objects.filter(entry=self.entry).exists())
+        batch_row.refresh_from_db()
+        self.assertEqual(batch_row.value["status"], "imported")
+
+    def test_import_commit_replays_imported_batch_for_new_request_id(self):
+        batch_id = uuid4().hex
+        PluginData.objects.create(
+            plugin=self.project,
+            namespace="batches",
+            user=self.user,
+            key=batch_id,
+            value={
+                "id": batch_id,
+                "status": "ready",
+                "summary": {},
+                "target_user_id": self.user.pk,
+                "payload": {
+                    "groups": [{
+                        "source_title": self.entry.title,
+                        "resolution": {
+                            "status": "matched",
+                            "bangumi_id": 790,
+                            "title": self.entry.title,
+                            "japanese_title": "",
+                            "tags": [],
+                        },
+                        "records": [{
+                            "watch_date": "2026-08-11",
+                            "watch_date_label": "",
+                            "brush": 1,
+                            "brush_label": "首刷",
+                            "episode_range": {"start": 1, "end": 1},
+                            "notes": [],
+                        }],
+                    }],
+                },
+            },
+        )
+
+        first = self.signed_action(
+            "import-commit",
+            {"batch_id": batch_id},
+            request_id="batch-replay-first",
+        )
+        second = self.signed_action(
+            "import-commit",
+            {"batch_id": batch_id},
+            request_id="batch-replay-second",
+        )
+
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertEqual(second.data, first.data)
+        self.assertEqual(WatchHistoryRecord.objects.filter(entry=self.entry).count(), 1)
 
     def test_entries_search_does_not_cross_tenant(self):
         response = self.signed_action("entries-search", {"query": "芙莉莲"})

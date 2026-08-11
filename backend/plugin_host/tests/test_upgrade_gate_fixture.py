@@ -13,7 +13,7 @@ SCRIPTS = Path(__file__).resolve().parents[3] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from stateful_upgrade_fixture import FixtureError, seed_state, verify_state
+from stateful_upgrade_fixture import FixtureError, _bundled_plugin_release, seed_state, verify_state
 
 
 class StatefulUpgradeFixtureTests(TestCase):
@@ -49,3 +49,15 @@ class StatefulUpgradeFixtureTests(TestCase):
 
         with self.assertRaisesRegex(FixtureError, "PluginData"):
             verify_state(self.fixture_path)
+
+    def test_bundled_release_uses_the_current_container_manifest(self):
+        base_dir = Path(self.temporary.name) / "base" / "backend"
+        manifest_dir = base_dir.parent / "plugins" / "watch-history-importer"
+        manifest_dir.mkdir(parents=True)
+        (manifest_dir / "manifest.json").write_text(
+            '{"slug":"watch-history-importer","version":"0.4.0","dataCompatibility":{"rollbackFloor":"0.4.0"}}',
+            encoding="utf-8",
+        )
+
+        with override_settings(BASE_DIR=base_dir):
+            self.assertEqual(_bundled_plugin_release("watch-history-importer"), ("0.4.0", "0.4.0"))

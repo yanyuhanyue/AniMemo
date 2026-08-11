@@ -218,6 +218,12 @@ class PluginData(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        indexes = [
+            models.Index(
+                fields=("plugin", "namespace", "updated_at"),
+                name="plugin_data_retention_idx",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=("plugin", "namespace", "key"),
