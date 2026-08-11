@@ -7,7 +7,7 @@ python backend/manage.py run_maintenance
 python backend/manage.py run_maintenance --task purge_expired_revoked_tokens
 ```
 
-当前入口只包含非破坏性任务：过期注册、撤销 token、外部账号会话、媒体使用量刷新，以及只读孤立媒体审计。`audit_orphan_media` 默认只列出文件，删除必须显式传入它自己的 `--delete` 参数，不会由总入口触发。
+当前入口只包含非破坏性任务：过期注册、撤销 token、外部账号会话、Integration 事件与已完成动作回执清理、媒体使用量刷新，以及只读孤立媒体审计。Integration 默认清理超过 1 天的已 ACK 事件、超过 7 天的未 ACK 事件，以及超过 7 天的 completed/failed 动作回执；pending 回执不会被维护任务删除。`audit_orphan_media` 默认只列出文件，删除必须显式传入它自己的 `--delete` 参数，不会由总入口触发。
 
 ## Query evidence
 

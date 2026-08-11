@@ -72,7 +72,14 @@ def _normalize_handler_result(result):
         raise IntegrationDispatchError("invalid_action_response", "插件动作返回了无效状态码。", 500)
     if payload is None:
         payload = {}
-    _json_size(payload)
+    if _json_size(payload) > int(
+        getattr(settings, "INTEGRATION_ACTION_RESPONSE_MAX_BYTES", 262144)
+    ):
+        raise IntegrationDispatchError(
+            "action_response_too_large",
+            "插件动作响应超过允许大小。",
+            502,
+        )
     return payload, status_code
 
 

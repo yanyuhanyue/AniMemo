@@ -66,6 +66,8 @@ def make_integration_package(slug, version="1.0.0"):
         host.integrations.register_action('echo', self.echo)
     def echo(self, context, payload):
         self.calls += 1
+        if payload.get('response_bytes'):
+            return {'content': 'x' * int(payload['response_bytes'])}
         return {'user': context.user.username, 'calls': self.calls, 'version': self.host.version, 'payload': payload}
     def health_check(self):
         return True
@@ -367,6 +369,110 @@ class IntegrationAPITestCase(TestCase):
         own.refresh_from_db()
         self.assertIsNotNone(own.acked_at)
 
+    @override_settings(
+        INTEGRATION_ACKED_EVENT_RETENTION_SECONDS=100,
+        INTEGRATION_UNACKED_EVENT_RETENTION_SECONDS=200,
+        INTEGRATION_ACTION_RECEIPT_RETENTION_SECONDS=300,
+    )
+    def test_cleanup_removes_expired_events_and_completed_receipts(self):
+        now = timezone.now()
+        event_fields = {
+            "connection": self.connection,
+            "user": self.user,
+            "platform": "qq",
+            "external_user_id": "cleanup",
+            "plugin_slug": "demo",
+            "event_name": "notice",
+        }
+        old_acked = IntegrationEvent.objects.create(
+            **event_fields,
+            payload={"old": "acked"},
+            acked_at=now,
+        )
+        recent_acked = IntegrationEvent.objects.create(
+            **event_fields,
+            payload={"recent": "acked"},
+            acked_at=now,
+        )
+        old_unacked = IntegrationEvent.objects.create(
+            **event_fields,
+            payload={"old": "unacked"},
+        )
+        recent_unacked = IntegrationEvent.objects.create(
+            **event_fields,
+            payload={"recent": "unacked"},
+        )
+        IntegrationEvent.objects.filter(pk=old_acked.pk).update(
+            created_at=now - timedelta(seconds=101),
+            acked_at=now - timedelta(seconds=101),
+        )
+        IntegrationEvent.objects.filter(pk=recent_acked.pk).update(
+            created_at=now - timedelta(seconds=99),
+            acked_at=now - timedelta(seconds=99),
+        )
+        IntegrationEvent.objects.filter(pk=old_unacked.pk).update(
+            created_at=now - timedelta(seconds=201),
+        )
+        IntegrationEvent.objects.filter(pk=recent_unacked.pk).update(
+            created_at=now - timedelta(seconds=199),
+        )
+
+        old_completed = IntegrationActionReceipt.objects.create(
+            connection=self.connection,
+            request_id="cleanup-completed",
+            action="demo.echo",
+            status=IntegrationActionReceipt.Status.COMPLETED,
+            response_status=200,
+            completed_at=now,
+        )
+        old_failed = IntegrationActionReceipt.objects.create(
+            connection=self.connection,
+            request_id="cleanup-failed",
+            action="demo.echo",
+            status=IntegrationActionReceipt.Status.FAILED,
+            response_status=500,
+            completed_at=now,
+        )
+        recent_completed = IntegrationActionReceipt.objects.create(
+            connection=self.connection,
+            request_id="cleanup-recent",
+            action="demo.echo",
+            status=IntegrationActionReceipt.Status.COMPLETED,
+            response_status=200,
+            completed_at=now,
+        )
+        old_pending = IntegrationActionReceipt.objects.create(
+            connection=self.connection,
+            request_id="cleanup-pending",
+            action="demo.echo",
+        )
+        IntegrationActionReceipt.objects.filter(
+            pk__in=(old_completed.pk, old_failed.pk)
+        ).update(
+            created_at=now - timedelta(seconds=301),
+            completed_at=now - timedelta(seconds=301),
+        )
+        IntegrationActionReceipt.objects.filter(pk=recent_completed.pk).update(
+            created_at=now - timedelta(seconds=299),
+            completed_at=now - timedelta(seconds=299),
+        )
+        IntegrationActionReceipt.objects.filter(pk=old_pending.pk).update(
+            created_at=now - timedelta(seconds=301),
+        )
+
+        output = StringIO()
+        call_command("cleanup_integration_events", stdout=output)
+
+        self.assertFalse(IntegrationEvent.objects.filter(pk=old_acked.pk).exists())
+        self.assertFalse(IntegrationEvent.objects.filter(pk=old_unacked.pk).exists())
+        self.assertTrue(IntegrationEvent.objects.filter(pk=recent_acked.pk).exists())
+        self.assertTrue(IntegrationEvent.objects.filter(pk=recent_unacked.pk).exists())
+        self.assertFalse(IntegrationActionReceipt.objects.filter(pk=old_completed.pk).exists())
+        self.assertFalse(IntegrationActionReceipt.objects.filter(pk=old_failed.pk).exists())
+        self.assertTrue(IntegrationActionReceipt.objects.filter(pk=recent_completed.pk).exists())
+        self.assertTrue(IntegrationActionReceipt.objects.filter(pk=old_pending.pk).exists())
+        self.assertIn("deleted acked=1 unacked=1 receipts=2", output.getvalue())
+
 
 @override_settings(PLUGIN_MIN_FREE_DISK_MB=0)
 class IntegrationActionRuntimeTests(TestCase):
@@ -438,6 +544,26 @@ class IntegrationActionRuntimeTests(TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(second.data["calls"], 1)
         self.assertEqual(IntegrationActionReceipt.objects.get(request_id="req-1").status, "completed")
+
+    @override_settings(INTEGRATION_ACTION_RESPONSE_MAX_BYTES=128)
+    def test_oversized_action_response_is_bounded_and_replayed_as_failure(self):
+        first = self.signed_action("req-large-response", {"response_bytes": 512})
+        second = self.signed_action("req-large-response", {"response_bytes": 1})
+
+        expected = {
+            "code": "action_response_too_large",
+            "detail": "插件动作响应超过允许大小。",
+        }
+        self.assertEqual(first.status_code, 502)
+        self.assertEqual(first.data, expected)
+        self.assertEqual(first["X-AniMemo-Idempotent-Replay"], "false")
+        self.assertEqual(second.status_code, 502)
+        self.assertEqual(second.data, expected)
+        self.assertEqual(second["X-AniMemo-Idempotent-Replay"], "true")
+        receipt = IntegrationActionReceipt.objects.get(request_id="req-large-response")
+        self.assertEqual(receipt.status, IntegrationActionReceipt.Status.FAILED)
+        self.assertEqual(receipt.response_status, 502)
+        self.assertEqual(receipt.response_payload, expected)
 
     def test_user_installation_and_connection_boundaries_are_enforced(self):
         install_for_user(self.project, user=self.other)
