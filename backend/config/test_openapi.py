@@ -55,8 +55,27 @@ class ApiDocumentationTests(SimpleTestCase):
         self.assertEqual(refresh["security"], [{"refreshCookie": []}])
         self.assertIn("X-CSRFToken", {parameter["name"] for parameter in refresh["parameters"]})
         token_properties = paths["/api/v1/token/"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+        self.assertEqual(set(token_properties["challenge"]["required"]), {"provider", "token"})
         self.assertIn("cf-turnstile-response", token_properties)
+        self.assertTrue(token_properties["cf-turnstile-response"]["deprecated"])
         self.assertNotIn("cf_turnstile_response", token_properties)
+
+        for challenge_path in (
+            "/api/v1/auth/register/request/",
+            "/api/v1/auth/register/complete/",
+            "/api/v1/auth/password-reset/",
+            "/api/v1/auth/password-reset-confirm/",
+        ):
+            request_schema = paths[challenge_path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+            component_name = request_schema["$ref"].rsplit("/", 1)[-1]
+            properties = schema["components"]["schemas"][component_name]["properties"]
+            challenge_component = properties["challenge"]["$ref"].rsplit("/", 1)[-1]
+            self.assertEqual(
+                set(schema["components"]["schemas"][challenge_component]["required"]),
+                {"provider", "token"},
+            )
+            self.assertTrue(properties["cf-turnstile-response"]["deprecated"])
+            self.assertNotIn("cf_turnstile_response", properties)
 
         entries = paths["/api/v1/entries/"]["get"]
         self.assertEqual(

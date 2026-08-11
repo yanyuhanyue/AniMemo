@@ -21,7 +21,8 @@ from site_config.models import SiteSettings
 from plugin_host.models import PluginDeployment, UserPluginInstallation
 from plugin_host.registry import PluginRegistryError, discover_plugins
 
-from .auth_tokens import create_refresh_token, no_store, set_refresh_cookie
+from .auth_tokens import create_refresh_token
+from .web_auth_adapter import no_store, set_refresh_cookie
 from .csv_security import safe_csv_value
 from .models import AdminAuditLog, Column, JournalEntry, QuickFilter, UserSettings
 from .security import (
