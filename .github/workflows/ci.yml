@@ -23,7 +23,7 @@ jobs:
   frontend:
     name: frontend
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -31,8 +31,14 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - run: npm run lint
       - run: npm run build
       - run: npm test
+      - name: Install Chromium for critical browser regressions
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
+        run: npx playwright install --with-deps chromium
+      - run: npm run qa:critical
 
   backend:
     name: backend
@@ -56,6 +62,7 @@ jobs:
             scripts/requirements-tools.txt
       - run: python -m pip install -r backend/requirements.txt
       - run: python -m pip install -r scripts/requirements-tools.txt
+      - run: python -m ruff check --select E9,F63,F7,F82 backend bridges scripts
       - run: python -m compileall -q backend
       - run: python manage.py check
         working-directory: backend

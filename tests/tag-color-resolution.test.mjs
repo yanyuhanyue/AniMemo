@@ -33,3 +33,10 @@ test("keeps deliberate palette choices and custom hex colors", () => {
     { 泡面番: "yellow", 纪念色: "#123456" },
   );
 });
+
+test("normalizes saved palette keys before resolving tag colors", () => {
+  assert.deepEqual(
+    resolveTagColors(["泡面番"], { 泡面番: "  YELLOW  " }, {}),
+    { 泡面番: "yellow" },
+  );
+});

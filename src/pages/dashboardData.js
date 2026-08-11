@@ -121,7 +121,7 @@ export function importIdentity(value) {
   return String(value || "")
     .normalize("NFKC")
     .toLocaleLowerCase()
-    .replace(/[\s《》「」『』【】〔〕〈〉·・:：,，。.!！?？'\"“”‘’\-—_]/g, "");
+    .replace(/[\s《》「」『』【】〔〕〈〉·・:：,，。.!！?？'"“”‘’\-—_]/g, "");
 }
 
 export function importIdentityValues(record) {

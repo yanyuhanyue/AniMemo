@@ -283,6 +283,7 @@ export function DashboardPage() {
     importBusy,
     importData,
     importError,
+    importFile,
     importOpen,
     importPreview,
   } = useDashboardImport({ isDemo, presetColors, records, setRecords, refreshEntries, flash });

@@ -47,10 +47,12 @@ const server = spawn(process.execPath, [resolve(projectRoot, "node_modules/vite/
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const entryRequests = [];
+let importPreviewRequests = 0;
 const consoleErrors = [];
 page.on("console", (message) => {
   if (message.type() === "error") consoleErrors.push(message.text());
 });
+page.on("pageerror", (error) => consoleErrors.push(error.message));
 
 try {
   await waitFor(async () => {
@@ -86,6 +88,17 @@ try {
       await wait(120);
       return json(route, {});
     }
+    if (path === "import/" && request.method() === "POST") {
+      importPreviewRequests += 1;
+      assert.match(request.headers()["content-type"] || "", /^multipart\/form-data;/);
+      return json(route, {
+        total: 1,
+        ready: 1,
+        skipped_duplicates: 0,
+        errors: [],
+        items: [{ row: 1, title: "导入回归番剧", status: "ready", reason: "等待导入" }],
+      });
+    }
     if (path === "entries/" && request.method() === "GET") {
       entryRequests.push(url);
       return json(route, {
@@ -120,6 +133,21 @@ try {
   assert.match(await presetTag.getAttribute("class"), /\btag-rose\b/, "late tag presets must redecorate loaded entries without refetching");
   assert.equal(entryRequests[0].searchParams.get("page"), "1");
   assert.equal(entryRequests[0].searchParams.get("page_size"), "48");
+
+  const importInput = page.locator('input[type="file"][accept*=".json"]');
+  await importInput.setInputFiles({
+    name: "critical-import.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({ format: "animemo-data-bundle", schema_version: 1, entries: [] })),
+  });
+  const importDialog = page.getByRole("dialog", { name: "确认导入手账" });
+  await importDialog.waitFor({ state: "visible" });
+  await importDialog.getByText("critical-import.json", { exact: true }).waitFor({ state: "visible" });
+  await importDialog.getByText("导入回归番剧", { exact: true }).waitFor({ state: "visible" });
+  assert.equal(importPreviewRequests, 1, "opening import preview must issue exactly one multipart request");
+  assert.equal(entryRequests.length, 1, "import preview must not invalidate or reload journal entries");
+  await importDialog.getByRole("button", { name: "取消" }).click();
+  await importDialog.waitFor({ state: "detached" });
 
   const search = page.getByPlaceholder("输入番剧中文或日文名...");
   await search.fill("进击的巨人");

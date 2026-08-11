@@ -62,8 +62,8 @@ export function isCustomTagColor(value) {
 }
 
 export function tagColorKey(tag, value, presetColors = FALLBACK_COLOR_MAP) {
-  if (COLOR_KEYS.has(value)) return value;
   const normalized = String(value || "").trim().toLowerCase();
+  if (COLOR_KEYS.has(normalized)) return normalized;
   return presetColors[tag] || FALLBACK_COLOR_MAP[tag] || generatedTagColorKey(tag);
 }
 
