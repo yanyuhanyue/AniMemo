@@ -26,12 +26,12 @@ The facade preserves the existing imports used by the Web application and offici
 | Module | Contract responsibility |
 | --- | --- |
 | `backend/journal/auth_tokens.py` | Token issuance, validation, rotation, replay defense, revocation and session-version semantics |
-| `backend/journal/web_auth_adapter.py` | Refresh-cookie attributes, cookie set/clear, no-store response headers, request IP and challenge extraction |
+| `backend/journal/web_auth_adapter.py` | Refresh-cookie attributes, cookie set/clear, no-store response headers, request IP, Bearer credential and challenge extraction |
 | `backend/journal/anti_abuse.py` | Provider-neutral challenge value, provider adapter lookup and fail-closed verification |
 | `backend/journal/turnstile.py` | Cloudflare Turnstile provider verification using only a token and remote IP |
 | `backend/journal/auth_views.py` | HTTP endpoint orchestration, serializers, throttles, audit and auth-service calls |
 
-Token core must not write cookies or construct HTTP responses. Provider verification must not receive a Django or DRF request object.
+Token core accepts raw token credentials and must not read Django/DRF requests, write cookies or construct HTTP responses. Refresh replay auditing remains in the Web endpoint orchestration. Provider verification must not receive a Django or DRF request object.
 
 ## Web Session Lifecycle
 
@@ -96,7 +96,7 @@ Mobile implementation is deferred. A future adapter may reuse API paths, challen
 
 - Frontend boundary tests import `apiCore` and `authSession` in a non-browser Node environment.
 - Runtime tests cover shared refresh, claim merging, challenge payload compatibility, CSRF rotation and authenticated logout cleanup.
-- Backend boundary tests assert that token core exports no cookie/HTTP helpers and that provider verification receives only provider data.
+- Backend boundary tests assert that token core accepts raw credentials instead of HTTP requests, exports no cookie/HTTP helpers, preserves refresh replay auditing in the Web flow, and passes only provider data to challenge verification.
 - Security regression covers login, refresh, logout, invalid/expired/replayed credentials, CSRF, password changes, registration, 2FA, recovery codes, staff sessions and revocation.
 - OpenAPI publishes canonical `challenge` schemas and marks `cf-turnstile-response` deprecated.
 

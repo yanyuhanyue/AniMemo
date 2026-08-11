@@ -54,6 +54,31 @@ export default [
     },
   },
   {
+    files: ["src/lib/apiCore.js", "src/lib/authSession.js"],
+    rules: {
+      "no-restricted-globals": [
+        "error",
+        "window",
+        "document",
+        "localStorage",
+        "sessionStorage",
+        "navigator",
+        "location",
+      ],
+      "no-restricted-imports": ["error", {
+        paths: [
+          "axios",
+          "react",
+          "react-dom",
+          "react-router-dom",
+          "./api.js",
+          "./webApiTransport.js",
+          "./webAuthAdapter.js",
+        ],
+      }],
+    },
+  },
+  {
     files: nodeFiles,
     languageOptions: {
       globals: {

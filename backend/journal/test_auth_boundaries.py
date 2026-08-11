@@ -1,3 +1,4 @@
+from inspect import signature
 from unittest.mock import patch
 
 from django.test import SimpleTestCase, override_settings
@@ -9,7 +10,7 @@ from .anti_abuse import (
     verify_anti_abuse_challenge,
 )
 from . import auth_tokens
-from .web_auth_adapter import clear_refresh_cookie, no_store, set_refresh_cookie
+from .web_auth_adapter import access_token_from_request, clear_refresh_cookie, no_store, set_refresh_cookie
 
 
 class AntiAbuseContractTests(SimpleTestCase):
@@ -57,6 +58,15 @@ class WebAuthAdapterContractTests(SimpleTestCase):
     def test_token_core_does_not_export_cookie_or_http_response_adapters(self):
         for name in ("set_refresh_cookie", "clear_refresh_cookie", "refresh_cookie_options", "no_store"):
             self.assertFalse(hasattr(auth_tokens, name), name)
+
+    def test_token_core_accepts_credentials_not_http_requests(self):
+        self.assertNotIn("request", signature(auth_tokens.rotate_refresh).parameters)
+        self.assertNotIn("request", signature(auth_tokens.revoke_access_token).parameters)
+
+    def test_web_adapter_extracts_bearer_access_credentials(self):
+        request = type("Request", (), {"META": {"HTTP_AUTHORIZATION": "Bearer access-token"}})()
+
+        self.assertEqual(access_token_from_request(request), "access-token")
 
     @override_settings(
         REFRESH_COOKIE_NAME="refresh",
