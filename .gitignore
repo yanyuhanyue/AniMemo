@@ -38,3 +38,4 @@ deliverables/
 *.ajplugin
 *.zip
 *.tar.gz
+/docs/production-hotfix-20260810.md
