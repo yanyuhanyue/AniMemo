@@ -48,7 +48,7 @@ jobs:
   fast-fail:
     name: ci-fast-fail
     needs: classify
-    if: needs.classify.outputs.docs_only != 'true'
+    if: github.event_name != 'push' && needs.classify.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -69,7 +69,7 @@ jobs:
   frontend:
     name: frontend
     needs: [classify, fast-fail]
-    if: needs.classify.outputs.run_frontend == 'true'
+    if: github.event_name != 'push' && needs.classify.outputs.run_frontend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -91,7 +91,7 @@ jobs:
   backend:
     name: backend
     needs: [classify, fast-fail]
-    if: needs.classify.outputs.run_backend == 'true'
+    if: github.event_name != 'push' && needs.classify.outputs.run_backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -127,7 +127,7 @@ jobs:
   bootstrap-smoke:
     name: bootstrap-smoke (${{ matrix.os }})
     needs: [classify, fast-fail]
-    if: needs.classify.outputs.run_bootstrap == 'true'
+    if: github.event_name != 'push' && needs.classify.outputs.run_bootstrap == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -155,7 +155,7 @@ jobs:
   postgres:
     name: postgres
     needs: [classify, fast-fail]
-    if: needs.classify.outputs.run_postgres == 'true'
+    if: github.event_name != 'push' && needs.classify.outputs.run_postgres == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -208,7 +208,7 @@ jobs:
   plugins:
     name: plugins
     needs: [classify, fast-fail]
-    if: needs.classify.outputs.run_plugins == 'true'
+    if: github.event_name != 'push' && needs.classify.outputs.run_plugins == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -235,7 +235,7 @@ jobs:
   astrbot-bridge:
     name: astrbot-bridge
     needs: [classify, fast-fail]
-    if: needs.classify.outputs.run_bridge == 'true'
+    if: github.event_name != 'push' && needs.classify.outputs.run_bridge == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -251,7 +251,7 @@ jobs:
   astrbot-runtime:
     name: astrbot-runtime (${{ matrix.astrbot_ref }})
     needs: [classify, fast-fail]
-    if: needs.classify.outputs.run_runtime == 'true'
+    if: github.event_name != 'push' && needs.classify.outputs.run_runtime == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
