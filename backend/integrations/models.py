@@ -162,6 +162,12 @@ class IntegrationActionReceipt(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=("status", "completed_at"),
+                name="integration_receipt_gc_idx",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=("connection", "request_id"),

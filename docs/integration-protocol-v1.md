@@ -108,7 +108,7 @@ HMAC
 
 `payload.user_id` 等字段只是普通不可信 payload，不能改变宿主解析出的用户。`installationMode=user` 时，未安装或已禁用都拒绝，网关不会自动安装插件。
 
-每个 `connection + request_id` 只有一个收据。已完成重试直接返回已存响应；并发重复请求在收据完成前不会再次执行副作用动作。
+每个 `connection + request_id` 只有一个收据。已完成重试直接返回已存响应；并发重复请求在收据完成前不会再次执行副作用动作。Action request 与 response 默认都限制为 256 KiB；插件返回不可序列化或过大的响应时，Gateway 会保存稳定的失败回执，而不会把原始响应写入数据库。completed/failed 回执默认保留 7 天，保留期内的 `request_id` 才提供跨请求重放保证；pending 回执不会由常规维护任务删除。
 
 ## Events、Poll 与 ACK
 
@@ -128,7 +128,7 @@ POST /api/integrations/v1/events/ack/
 {"event_ids": [1, 2, 3]}
 ```
 
-`limit` 最大 100，`wait` 最大 25 秒。事件使用数据库单调递增主键作为稳定 `event_id`，连接只能读取和 ACK 自己的事件。可通过系统 cron 定期运行 `python manage.py cleanup_integration_events`：已 ACK 事件默认保留 1 天，未 ACK 事件默认保留 7 天。
+`limit` 最大 100，`wait` 最大 25 秒。事件使用数据库单调递增主键作为稳定 `event_id`，连接只能读取和 ACK 自己的事件。标准 `python manage.py run_maintenance` 会调用 `cleanup_integration_events`：已 ACK 事件默认保留 1 天，未 ACK 事件默认保留 7 天，同时清理超过保留期的 completed/failed 动作回执。
 
 ## Credential Boundary
 

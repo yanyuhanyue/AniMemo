@@ -9,6 +9,7 @@ TASKS = (
     "purge_expired_pending_registrations",
     "purge_expired_revoked_tokens",
     "cleanup_external_account_sessions",
+    "cleanup_integration_events",
     "refresh_media_storage_usage",
     "audit_orphan_media",
 )
