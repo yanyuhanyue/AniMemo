@@ -136,8 +136,8 @@ export function AdminDashboardPage() {
   const panelRef = useRef(null);
   const toastRef = useRef(null);
 
-  const apiBase = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || `${window.location.origin}/api`;
-  const adminUrl = location.state?.adminUrl || `${apiBase.replace(/\/api\/?$/, "")}/admin/`;
+  const apiBase = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || `${window.location.origin}/api/v1`;
+  const adminUrl = location.state?.adminUrl || `${apiBase.replace(/\/api(?:\/v1)?\/?$/, "")}/admin/`;
 
   const load = useCallback((options = {}) => {
     if (loadInFlightRef.current) return loadInFlightRef.current;

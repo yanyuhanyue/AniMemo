@@ -14,7 +14,7 @@ def create_plugin(host):
 宿主通过固定路径分发 API：
 
 ```text
-/api/plugins/blank-plugin/<path>
+/api/v1/plugins/blank-plugin/<path>
 ```
 
 Runtime Plugin 不注册 Django App、URLConf、model 或 migration，也不需要重启 Django。后端接口必须通过 `host.api.get/post/put/patch/delete(path, handler=..., access="user"|"staff", permission=...)` 注册；`access=user` 要求当前用户已安装并启用插件，`access=staff` 的 `permission` 必须存在于 Manifest。插件通过 `host.system_settings`、`host.user_settings(user)`、`host.storage(...)`、`host.register_hook(...)` 和声明了外部网络权限后的 `host.request_json(...)` 使用宿主能力。
@@ -40,7 +40,7 @@ python scripts\pluginctl.py pack blank-plugin
 用户从市场安装并启用插件后，模板会请求：
 
 ```text
-GET /api/plugins/blank-plugin/status/
+GET /api/v1/plugins/blank-plugin/status/
 ```
 
 权限由 Manifest 的 `frontend.exposure` 和 handler 自己声明的 `permission` 在 metadata、asset、backend dispatch 三处统一执行。拥有某个插件权限不会自动获得该插件的其他接口；未授权请求由宿主拒绝。

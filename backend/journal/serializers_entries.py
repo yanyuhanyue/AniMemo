@@ -281,5 +281,5 @@ class JournalEntrySerializer(serializers.ModelSerializer):
     def get_share_url(self, obj):
         request = self.context.get("request")
         if not request:
-            return f"/api/shared/{obj.share_slug}/"
-        return request.build_absolute_uri(f"/api/shared/{obj.share_slug}/")
+            return f"/api/v1/shared/{obj.share_slug}/"
+        return request.build_absolute_uri(f"/api/v1/shared/{obj.share_slug}/")

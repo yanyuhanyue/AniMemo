@@ -84,7 +84,7 @@ services:
       context: ..
       dockerfile: deploy/frontend.Dockerfile
       args:
-        VITE_API_BASE_URL: /api
+        VITE_API_BASE_URL: /api/v1
         VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:?VITE_TURNSTILE_SITE_KEY is required}
     depends_on:
       api:

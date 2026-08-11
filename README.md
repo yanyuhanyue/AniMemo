@@ -71,7 +71,7 @@ python backend/manage.py runserver 8000
 npm run dev -- --host 0.0.0.0
 ```
 
-前端默认访问 `http://localhost:5173`，API 默认是 `http://localhost:8000/api/`。开发环境中后端不可用时，登录页会进入只写浏览器 `localStorage` 的演示模式；生产构建不会启用这个回退。
+前端默认访问 `http://localhost:5173`，canonical API 是 `http://localhost:8000/api/v1/`。现有 `/api/` Core 路径仅作为兼容别名保留；开发环境中后端不可用时，登录页会进入只写浏览器 `localStorage` 的演示模式，生产构建不会启用这个回退。
 
 首页数据按以下顺序加载：`VITE_PUBLIC_SHOWCASE_SLUG` 对应的公开 API、当前浏览器里的私人手账数据、仓库演示数据。配置公开手账 UUID 后，页面会在重新聚焦及每 60 秒自动刷新，统计卡始终由当前记录实时聚合。
 
@@ -79,14 +79,14 @@ npm run dev -- --host 0.0.0.0
 
 | 模块 | 路径 |
 |---|---|
-| JWT | `GET /api/auth/csrf/`、`POST /api/token/`、`POST /api/token/refresh/`、`POST /api/auth/logout/` |
-| 注册与邮件 | `POST /api/auth/register/request/`、`POST /api/auth/register/verify/`、`POST /api/auth/register/complete/`、`/api/auth/password-reset/` |
-| 手账 CRUD | `/api/entries/` |
-| 快捷筛选 | `/api/filters/` |
-| 专栏投稿 | `/api/columns/`、`POST /api/columns/{id}/submit/` |
-| 导入导出 | `/api/import/`、`/api/export/` |
-| 个人设置 | `/api/settings/me/` |
-| 公开展示 | `/api/showcase/{public_slug}/`、`/api/shared/{share_slug}/` |
+| JWT | `GET /api/v1/auth/csrf/`、`POST /api/v1/token/`、`POST /api/v1/token/refresh/`、`POST /api/v1/auth/logout/` |
+| 注册与邮件 | `POST /api/v1/auth/register/request/`、`POST /api/v1/auth/register/verify/`、`POST /api/v1/auth/register/complete/`、`/api/v1/auth/password-reset/` |
+| 手账 CRUD | `/api/v1/entries/` |
+| 快捷筛选 | `/api/v1/filters/` |
+| 专栏投稿 | `/api/v1/columns/`、`POST /api/v1/columns/{id}/submit/` |
+| 导入导出 | `/api/v1/import/`、`/api/v1/export/` |
+| 个人设置 | `/api/v1/settings/me/` |
+| 公开展示 | `/api/v1/showcase/{public_slug}/`、`/api/v1/shared/{share_slug}/` |
 | 健康检查 | `/health/` |
 | OpenAPI Schema | `GET /api/schema/` |
 | Swagger UI | `GET /api/docs/` |
@@ -162,8 +162,8 @@ sudo sh deploy/deploy.sh \
 ## 认证与安全部署
 
 - access token 只保存在浏览器运行内存；refresh token 只存入 `HttpOnly` Cookie，JSON 和 Web Storage 均不返回或保存 refresh。
-- 页面刷新时，前端先从 `/api/auth/csrf/` 获取 Django CSRF token，再携带 Cookie 和 `X-CSRFToken` 调用刷新接口。多个并发 401 共用一次 refresh 请求。
-- 未配置 `VITE_API_BASE_URL` 时，浏览器默认通过同源 `/api` 访问后端；本地 Vite 开发与预览均由代理转发到 Django，避免 Cookie、CSRF 与 CSP 的跨端口分歧。
+- 页面刷新时，前端先从 `/api/v1/auth/csrf/` 获取 Django CSRF token，再携带 Cookie 和 `X-CSRFToken` 调用刷新接口。多个并发 401 共用一次 refresh 请求。
+- 未配置 `VITE_API_BASE_URL` 时，浏览器默认通过同源 `/api/v1` 访问后端；本地 Vite 开发与预览均由代理转发到 Django，避免 Cookie、CSRF 与 CSP 的跨端口分歧。
 - refresh/logout 必须允许 credentials，生产前端来源必须同时精确列入 `CORS_ALLOWED_ORIGINS` 与 `CSRF_TRUSTED_ORIGINS`。不要用通配符 origin 配合 credentials。
 - 同站部署使用 `SameSite=Lax`；确需跨站时使用 `SameSite=None` 且必须保持 `Secure=true` 和 HTTPS。
 - 工作人员 2FA 保持可选：未启用时密码正确即可进入自定义工作人员后台；启用后，普通 JWT 与工作人员登录都必须完成 TOTP 或一次性恢复码验证后才签发凭据。Django Admin 始终要求已启用并完成 2FA。

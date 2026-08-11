@@ -5,9 +5,10 @@ from django.http import JsonResponse
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerSplitView
 import config.openapi  # noqa: F401 - registers the authentication extension
-from journal.auth_views import CookieTokenRefreshView, EmailTokenObtainPairView
 from plugin_host.views import PluginAssetView, PluginPreviewAssetView
 from plugin_host.runtime.dispatch import PluginDispatch
+
+from .api_urls import urlpatterns as core_api_urlpatterns
 
 
 class CSPCompatibleSwaggerView(SpectacularSwaggerSplitView):
@@ -25,13 +26,14 @@ urlpatterns = [
     path("health/", health),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", CSPCompatibleSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
-    path("api/token/", EmailTokenObtainPairView.as_view(), name="token_obtain_pair"),
-    path("api/token/refresh/", CookieTokenRefreshView.as_view(), name="token_refresh"),
-    path("api/", include("journal.urls")),
+    path("api/v1/", include((core_api_urlpatterns, "api-v1"), namespace="api-v1")),
+    path("api/", include(core_api_urlpatterns)),
     path("api/integrations/v1/", include("integrations.urls")),
     path("plugin-assets/session/<str:asset_session>/<slug>/<version>/<path:asset>", PluginAssetView.as_view(), name="plugin-asset-session"),
     path("plugin-assets/<slug>/<version>/<path:asset>", PluginAssetView.as_view(), name="plugin-asset"),
     path("plugin-previews/session/<str:preview_session>/<slug>/<version>/<path:asset>", PluginPreviewAssetView.as_view(), name="plugin-preview-asset-session"),
+    path("api/v1/plugins/<slug>/<path:plugin_path>", PluginDispatch.as_view(), name="plugin-dispatch-v1"),
+    path("api/v1/plugins/<slug>/", PluginDispatch.as_view(), name="plugin-dispatch-root-v1"),
     path("api/plugins/<slug>/<path:plugin_path>", PluginDispatch.as_view(), name="plugin-dispatch"),
     path("api/plugins/<slug>/", PluginDispatch.as_view(), name="plugin-dispatch-root"),
 ]

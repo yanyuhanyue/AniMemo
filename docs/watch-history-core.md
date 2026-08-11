@@ -10,8 +10,8 @@ Core 负责规范化、校验、关系型持久化、CRUD、排序和幂等。�
 
 Core API：
 
-- `GET/POST/PUT /api/entries/{entry_id}/watch-history/`
-- `PATCH/DELETE /api/entries/{entry_id}/watch-history/{record_id}/`
+- `GET/POST/PUT /api/v1/entries/{entry_id}/watch-history/`
+- `PATCH/DELETE /api/v1/entries/{entry_id}/watch-history/{record_id}/`
 
 条目列表只返回 `watch_history_count` 与 `last_watched_on`，详情界面打开观看记录页签时才读取完整记录。
 
