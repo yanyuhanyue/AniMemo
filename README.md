@@ -54,8 +54,6 @@ anime-journal/
 
 文档入口：[`API 错误契约`](docs/api-errors.md)、[`前端状态与路由架构`](docs/frontend-architecture.md)、[`依赖更新工作流`](docs/dependencies.md)、[`维护与调度`](docs/maintenance.md)、[`插件开发`](docs/plugin-development.md)、[`集成协议`](docs/integration-protocol-v1.md) 和 [`生产部署`](docs/deployment-vps.md)。
 
-本次实际生产 hotfix 的审计记录见 [`2026-08-10 Production Hotfix`](docs/production-hotfix-20260810.md)。
-
 手动启动仍然支持。复制 `.env.development.example` 为 `.env`，然后运行：
 
 ```bash
