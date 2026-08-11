@@ -39,17 +39,27 @@ class IntegrationHMACAuthenticationScheme(OpenApiAuthenticationExtension):
         }
 
 
-def exclude_dynamic_plugin_runtime(endpoints):
-    """Keep arbitrary plugin runtime paths out of the stable core schema."""
+def select_stable_contract_routes(endpoints):
+    """Publish canonical Core v1 and the independently frozen Integration v1."""
 
     dynamic_paths = {
+        "/api/v1/plugins/{slug}/",
+        "/api/v1/plugins/{slug}/{plugin_path}",
         "/api/plugins/{slug}/",
         "/api/plugins/{slug}/{plugin_path}",
         "/plugin-assets/session/{asset_session}/{slug}/{version}/{asset}",
         "/plugin-assets/{slug}/{version}/{asset}",
         "/plugin-previews/session/{preview_session}/{slug}/{version}/{asset}",
     }
-    return [endpoint for endpoint in endpoints if endpoint[0] not in dynamic_paths]
+    return [
+        endpoint
+        for endpoint in endpoints
+        if endpoint[0] not in dynamic_paths
+        and (
+            endpoint[0].startswith("/api/v1/")
+            or endpoint[0].startswith("/api/integrations/v1/")
+        )
+    ]
 
 
 class BusinessAPIViewSchemaExtension(OpenApiViewExtension):
@@ -104,4 +114,35 @@ def stabilize_operation_ids(result, generator, request, public):
                 candidate = f"{stem}_{method.lower()}"
             used.add(candidate)
             operation["operationId"] = candidate
+    return result
+
+
+def attach_error_contract(result, generator, request, public):
+    """Attach the canonical machine-readable error shape to every operation."""
+
+    def error_response(description):
+        return {
+            "description": description,
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/ApiError"},
+                },
+            },
+        }
+
+    for path, path_item in result.get("paths", {}).items():
+        for method, operation in path_item.items():
+            if method.lower() not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            responses = operation.setdefault("responses", {})
+            responses.setdefault("429", error_response("请求频率超过限制。"))
+            responses.setdefault("default", error_response("符合 AniMemo API Error Contract 的错误响应。"))
+            if method.lower() in {"post", "put", "patch", "delete"}:
+                responses.setdefault("400", error_response("请求参数或资源状态无效。"))
+            if "{" in path:
+                responses.setdefault("404", error_response("资源不存在或对当前调用者不可见。"))
+            security = operation.get("security")
+            if security and {} not in security:
+                responses.setdefault("401", error_response("认证凭据缺失、无效或已过期。"))
+                responses.setdefault("403", error_response("调用者无权执行该操作。"))
     return result

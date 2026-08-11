@@ -3,8 +3,8 @@ import axios from "axios";
 import { invalidateServerStateForRequest } from "./serverState.js";
 
 function defaultApiUrl() {
-  if (typeof window !== "undefined") return `${window.location.origin}/api`;
-  return "http://localhost:8000/api";
+  if (typeof window !== "undefined") return `${window.location.origin}/api/v1`;
+  return "http://localhost:8000/api/v1";
 }
 
 const runtimeEnv = import.meta.env || {};

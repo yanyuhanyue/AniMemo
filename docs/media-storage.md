@@ -22,8 +22,8 @@ The command reports only backend slugs and `success/failed/skipped` counts. It n
 
 The media storage admin API and UI are Superuser-only:
 
-- `GET/POST /api/staff/system/media-storage/`
-- `GET/PATCH/DELETE /api/staff/system/media-storage/<id>/`
-- `POST /api/staff/system/media-storage/<id>/actions/`
+- `GET/POST /api/v1/staff/system/media-storage/`
+- `GET/PATCH/DELETE /api/v1/staff/system/media-storage/<id>/`
+- `POST /api/v1/staff/system/media-storage/<id>/actions/`
 
 Use `action=test-connection`, `refresh-usage`, `set-active`, `toggle-writes`, or `clear-credentials` for explicit operations. Production without any configured backend starts normally and returns `MEDIA_STORAGE_SETUP_REQUIRED` for new media writes; it never silently falls back to a local directory.

@@ -1,6 +1,6 @@
 # Analytics Core
 
-`journal.analytics.build_user_analytics()` 是 AniMemo 个人统计的权威定义。网站 `/api/stats/me/` 与只读插件能力 `host.analytics` 共用该服务，未来年度报告不得另写 ORM 统计口径。
+`journal.analytics.build_user_analytics()` 是 AniMemo 个人统计的权威定义。网站 `/api/v1/stats/me/` 与只读插件能力 `host.analytics` 共用该服务，未来年度报告不得另写 ORM 统计口径。
 
 当前指标：
 

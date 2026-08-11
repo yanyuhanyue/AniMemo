@@ -102,7 +102,7 @@ try {
   page.on("pageerror", (error) => consoleErrors.push(error.message));
 
   await page.route("**/api/**", async (route) => {
-    const path = new URL(route.request().url()).pathname.replace(/^\/api\//, "");
+    const path = new URL(route.request().url()).pathname.replace(/^\/api\/v1\//, "");
     if (path === "site-settings/") return json(route, { site_name: "AniMemo", trusted_poster_hosts: [] });
     if (path === "plugins/enabled/") return json(route, { plugins: [], manifests: {} });
     if (path === "auth/csrf/") return json(route, { csrf_token: "browser-test-token" });

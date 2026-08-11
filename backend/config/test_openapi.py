@@ -17,10 +17,10 @@ class ApiDocumentationTests(SimpleTestCase):
         self.assertTrue(schema["openapi"].startswith("3."))
         paths = schema["paths"]
         for path, method in (
-            ("/api/entries/", "get"),
-            ("/api/entries/{id}/", "get"),
-            ("/api/token/", "post"),
-            ("/api/token/refresh/", "post"),
+            ("/api/v1/entries/", "get"),
+            ("/api/v1/entries/{id}/", "get"),
+            ("/api/v1/token/", "post"),
+            ("/api/v1/token/refresh/", "post"),
             ("/api/integrations/v1/actions/", "post"),
             ("/api/integrations/v1/events/", "get"),
         ):
@@ -34,8 +34,13 @@ class ApiDocumentationTests(SimpleTestCase):
             if isinstance(operation, dict) and operation.get("operationId")
         ]
         self.assertEqual(len(operation_ids), len(set(operation_ids)))
-        self.assertTrue(paths["/api/entries/"]["get"]["operationId"].endswith("_list"))
-        self.assertTrue(paths["/api/entries/{id}/"]["get"]["operationId"].endswith("_retrieve"))
+        self.assertTrue(paths["/api/v1/entries/"]["get"]["operationId"].endswith("_list"))
+        self.assertTrue(paths["/api/v1/entries/{id}/"]["get"]["operationId"].endswith("_retrieve"))
+        self.assertFalse(any(path.startswith("/api/") and not path.startswith(("/api/v1/", "/api/integrations/v1/")) for path in paths))
+        self.assertNotIn("/api/entries/", paths)
+        self.assertNotIn("/api/token/", paths)
+        self.assertNotIn("/api/v1/plugins/{slug}/", paths)
+        self.assertNotIn("/api/v1/plugins/{slug}/{plugin_path}", paths)
         self.assertNotIn("/api/plugins/{slug}/", paths)
         self.assertNotIn("/api/plugins/{slug}/{plugin_path}", paths)
         self.assertFalse(any("plugin-assets" in path or "plugin-previews" in path for path in paths))
@@ -45,13 +50,21 @@ class ApiDocumentationTests(SimpleTestCase):
         self.assertEqual(schemes["refreshCookie"]["in"], "cookie")
         self.assertEqual(schemes["integrationHmac"]["name"], "X-AniMemo-Key-Id")
 
-        refresh = paths["/api/token/refresh/"]["post"]
+        refresh = paths["/api/v1/token/refresh/"]["post"]
         self.assertNotIn("requestBody", refresh)
         self.assertEqual(refresh["security"], [{"refreshCookie": []}])
         self.assertIn("X-CSRFToken", {parameter["name"] for parameter in refresh["parameters"]})
-        token_properties = paths["/api/token/"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+        token_properties = paths["/api/v1/token/"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
         self.assertIn("cf-turnstile-response", token_properties)
         self.assertNotIn("cf_turnstile_response", token_properties)
+
+        entries = paths["/api/v1/entries/"]["get"]
+        self.assertEqual(
+            entries["responses"]["401"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ApiError",
+        )
+        self.assertIn("429", entries["responses"])
+        self.assertIn("default", entries["responses"])
 
         hmac = paths["/api/integrations/v1/actions/"]["post"]
         self.assertEqual(

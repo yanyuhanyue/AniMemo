@@ -29,8 +29,8 @@ test("keeps JWTs out of browser storage and restores access through the refresh 
 });
 
 test("keeps the browser and cookie API on the same origin", () => {
-  assert.match(apiSource, /window\.location\.origin}\/api/);
-  assert.doesNotMatch(apiSource, /window\.location\.hostname}:8000\/api/);
+  assert.match(apiSource, /window\.location\.origin}\/api\/v1/);
+  assert.doesNotMatch(apiSource, /window\.location\.hostname}:8000\/api\/v1/);
 });
 
 test("preserves staff claims when profile data is merged after cookie refresh", () => {

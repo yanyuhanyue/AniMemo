@@ -440,16 +440,17 @@ REST_FRAMEWORK = {
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "AniMemo API",
-    "DESCRIPTION": "AniMemo 番剧手账、观看记录、外部账号与插件平台 API。",
+    "DESCRIPTION": "AniMemo Core API v1 与独立冻结的 Integration Protocol v1。旧 /api/ Core 路径仅用于兼容，不进入正式 schema。",
     "VERSION": ANIME_JOURNAL_VERSION,
     "SERVE_INCLUDE_SCHEMA": False,
     "SERVE_PERMISSIONS": ["rest_framework.permissions.AllowAny"],
     "SCHEMA_PATH_PREFIX": r"/api",
-    "PREPROCESSING_HOOKS": ["config.openapi.exclude_dynamic_plugin_runtime"],
+    "PREPROCESSING_HOOKS": ["config.openapi.select_stable_contract_routes"],
     "SWAGGER_UI_DIST": "SIDECAR",
     "SWAGGER_UI_FAVICON_HREF": "SIDECAR",
     "POSTPROCESSING_HOOKS": [
         "config.openapi.stabilize_operation_ids",
+        "config.openapi.attach_error_contract",
         "drf_spectacular.hooks.postprocess_schema_enums",
     ],
     "COMPONENT_SPLIT_REQUEST": True,
