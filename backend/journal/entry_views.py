@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from plugin_host.permissions import plugin_permissions_for_user
-from plugin_host.sdk import ColumnHookContext, JournalHookContext, run_hook
+from plugin_host.sdk import ColumnHookContext, run_hook
 from django.db import connection
 from django.db.models import Case, Count, F, IntegerField, Max, Min, OuterRef, Q, Subquery, Value, When
 from django.db.models.expressions import RawSQL
@@ -202,9 +202,7 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
         JournalEntryService(self.request.user).update(serializer, source="api")
 
     def perform_destroy(self, instance):
-        entry_id, user_id = instance.pk, instance.user_id
-        super().perform_destroy(instance)
-        run_hook("journal.after_delete", JournalHookContext(user_id=user_id, journal_entry_id=entry_id, source="api"))
+        JournalEntryService(self.request.user).delete(instance.pk, source="api")
 
     @action(detail=True, methods=["get", "post"], url_path="external-identities")
     def external_identities(self, request, pk=None):

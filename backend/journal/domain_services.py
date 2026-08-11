@@ -30,8 +30,9 @@ class JournalEntryService:
         self.user = user
 
     @classmethod
-    def validate_fields(cls, fields):
-        if not isinstance(fields, dict) or set(fields) - cls.writable_fields:
+    def validate_fields(cls, fields, *, allowed_fields=None):
+        allowed = cls.writable_fields if allowed_fields is None else frozenset(allowed_fields)
+        if not isinstance(fields, dict) or set(fields) - allowed:
             raise JournalEntryServiceError("invalid_entry", "番剧条目 DTO 包含不允许的字段。")
         return dict(fields)
 
@@ -70,9 +71,20 @@ class JournalEntryService:
         )
         return self.to_dto(entry)
 
-    def create_from_fields(self, fields, *, serializer_class, source="core", context=None):
+    def create_from_fields(
+        self,
+        fields,
+        *,
+        serializer_class,
+        source="core",
+        context=None,
+        allowed_fields=None,
+    ):
         self._require_user()
-        serializer = serializer_class(data=self.validate_fields(fields), context=context or {})
+        serializer = serializer_class(
+            data=self.validate_fields(fields, allowed_fields=allowed_fields),
+            context=context or {},
+        )
         self._validate(serializer)
         return self.create(serializer, source=source)
 
@@ -93,18 +105,42 @@ class JournalEntryService:
         )
         return self.to_dto(entry)
 
-    def update_from_fields(self, entry_id, fields, *, serializer_class, source="core", context=None):
+    def update_from_fields(
+        self,
+        entry_id,
+        fields,
+        *,
+        serializer_class,
+        source="core",
+        context=None,
+        allowed_fields=None,
+    ):
         self._require_user()
         with transaction.atomic():
             entry = self._owned_entry(entry_id, lock=True)
             serializer = serializer_class(
                 entry,
-                data=self.validate_fields(fields),
+                data=self.validate_fields(fields, allowed_fields=allowed_fields),
                 partial=True,
                 context=context or {},
             )
             self._validate(serializer)
             return self.update(serializer, source=source)
+
+    def delete(self, entry_id, *, source="core"):
+        """Permanently delete one owner-scoped entry and emit one mutation hook."""
+        self._require_user()
+        with transaction.atomic():
+            entry = self._owned_entry(entry_id, lock=True)
+            user_id = entry.user_id
+            entry.delete()
+        from plugin_host.sdk.types import JournalHookContext
+
+        run_hook(
+            "journal.after_delete",
+            JournalHookContext(user_id=user_id, journal_entry_id=entry_id, source=source),
+        )
+        return {"entry_id": entry_id, "deleted": True}
 
     @classmethod
     def to_dto(cls, entry):

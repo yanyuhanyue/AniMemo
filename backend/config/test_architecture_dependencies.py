@@ -64,3 +64,24 @@ class ArchitectureDependencyContractTests(SimpleTestCase):
 
         self.assertEqual(private_host_imports, set())
         self.assertFalse(any(module == "journal" or module.startswith("journal.") for module in imports))
+
+    def test_journal_mutation_adapters_use_the_authoritative_application_seam(self):
+        adapter_paths = (
+            BACKEND_ROOT / "journal" / "entry_views.py",
+            BACKEND_ROOT / "journal" / "import_export_views.py",
+            BACKEND_ROOT / "journal" / "data_bundle" / "services.py",
+            BACKEND_ROOT / "journal" / "external_accounts" / "imports.py",
+            BACKEND_ROOT / "journal" / "external_media" / "services.py",
+            BACKEND_ROOT / "journal" / "external_sync" / "services.py",
+        )
+        for path in adapter_paths:
+            for node in ast.walk(parsed(path)):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                    continue
+                target = node.func.value
+                if node.func.attr == "create" and isinstance(target, ast.Attribute):
+                    if target.attr == "objects" and isinstance(target.value, ast.Name) and target.value.id == "JournalEntry":
+                        self.fail(f"{path.name} bypasses JournalEntryService with JournalEntry.objects.create")
+                if node.func.attr in {"save", "delete"} and isinstance(target, ast.Name):
+                    if target.id in {"entry", "locked_entry"}:
+                        self.fail(f"{path.name} mutates JournalEntry directly through {target.id}.{node.func.attr}()")

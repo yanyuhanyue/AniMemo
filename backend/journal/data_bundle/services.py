@@ -3,7 +3,9 @@ from __future__ import annotations
 from django.db import transaction
 from django.utils import timezone
 
+from journal.domain_services import JournalEntryService
 from journal.models import ExternalMediaIdentity, JournalEntry
+from journal.serializers_entries import JournalEntrySerializer
 from journal.watch_history import WatchHistoryValidationError, replace_history
 
 from .serializers import DataBundleSerializer
@@ -160,8 +162,15 @@ def import_data_bundle(*, user, payload):
                 "Data Bundle 只能恢复到空手账；已有数据请先使用 CSV 有损导入。",
             )
         created = 0
+        service = JournalEntryService(locked_user)
         for item in entries:
-            entry = JournalEntry.objects.create(user=locked_user, **item["entry"])
+            dto = service.create_from_fields(
+                item["entry"],
+                serializer_class=JournalEntrySerializer,
+                source="bundle",
+                allowed_fields=set(item["entry"]),
+            )
+            entry = JournalEntry.objects.get(pk=dto["entry_id"], user=locked_user)
             ExternalMediaIdentity.objects.bulk_create([
                 ExternalMediaIdentity(entry=entry, **identity)
                 for identity in item["external_identities"]
