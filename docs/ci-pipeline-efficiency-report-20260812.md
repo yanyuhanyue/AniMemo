@@ -15,7 +15,7 @@
 | bridge | Bridge + runtime |
 | dependencies / CI / deployment / shared contract / mixed high-risk | full CI + Release Gate |
 
-`merge_group` 与手动 workflow_dispatch 强制完整门禁。PR 使用可取消 concurrency；main push 与 merge_group 不取消正在运行的验证。main push 的 Release Gate 只运行轻量 `post-merge-sanity`，昂贵 Docker/stateful upgrade 留给 PR high-risk 与 merge queue。
+`merge_group` 与手动 workflow_dispatch 强制完整门禁。PR 使用可取消 concurrency；main push 与 merge_group 不取消正在运行的验证。main push 的 CI product jobs 与 Release Gate 的昂贵 Docker/stateful jobs 均跳过，只运行轻量 sanity；昂贵验证留给 PR high-risk 与 merge queue。
 
 ## Fast-fail and duplicate-work controls
 
@@ -32,6 +32,7 @@
 - `PR end-to-end time improvement: N/A`；在后续至少采集一条 docs-only、backend-only、frontend-only 和 high-risk merge_group run 后再计算 P50/P95。
 - `Duplicate build count: 1`（frontend job 内单次 build；无新增重复 build）。
 - `Merge queue repository setting: NOT RUN`；本轮只在 workflow 中加入 `merge_group` 触发与完整门禁，没有改仓库保护设置。
+- main post-merge evidence：CI `31514756504` PASS（changed-files PASS，backend/frontend/PostgreSQL/plugins/Bridge/runtime/bootstrap/fast-fail skipped）；Release Gate `31514756716` PASS（`post-merge-sanity` PASS，Docker/stateful skipped）。
 
 ## Operational boundary
 

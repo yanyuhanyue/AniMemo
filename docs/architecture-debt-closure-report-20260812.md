@@ -31,7 +31,7 @@
 - PR #54：CI + Release Gate 全部通过并 squash merge。
 - PR #55：CI + Release Gate 全部通过并 squash merge。
 - PR #56：changed-files、fast-fail、frontend、backend、PostgreSQL、plugin、Bridge/runtime、bootstrap、Docker、stateful-upgrade 全部通过并 squash merge。
-- main after merge：`47f404b`；post-merge workflow 以该 SHA 的最终运行结果为准。
+- main after report merge：`ed6a673`；CI run `31514756504` PASS（昂贵 product jobs skipped），Release Gate `31514756716` PASS（仅 `post-merge-sanity`，Docker/stateful skipped）。
 
 ## Remaining decisions
 
