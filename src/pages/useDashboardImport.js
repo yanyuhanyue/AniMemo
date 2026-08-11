@@ -41,7 +41,7 @@ export function useDashboardImport({ isDemo, presetColors, records, setRecords, 
         const formData = new FormData();
         formData.append("file", file);
         formData.append("preview", "true");
-        const response = await api.post("import/", formData);
+        const response = await api.post("import/", formData, { serverStateInvalidation: false });
         setImportPreview(response.data || {});
         return;
       }
@@ -147,6 +147,7 @@ export function useDashboardImport({ isDemo, presetColors, records, setRecords, 
     importBusy,
     importData,
     importError,
+    importFile,
     importOpen,
     importPreview,
   };

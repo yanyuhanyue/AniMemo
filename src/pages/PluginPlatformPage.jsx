@@ -48,6 +48,7 @@ export function PluginPlatformPage({ authUser }) {
   }, []);
 
   useEffect(() => { if (authUser) void load(); }, [authUser, load]);
+  const visibleMarket = useMemo(() => tab === "installed" ? installedRows : marketplace, [installedRows, marketplace, tab]);
   if (!authUser) return <Navigate to="/login" replace state={{ from: "/plugins" }} />;
 
   const flash = (message) => {
@@ -186,8 +187,6 @@ export function PluginPlatformPage({ authUser }) {
       setError(readableApiError(requestError, action === "submit" ? "提交审核失败。" : "生成预览失败。"));
     } finally { setBusy(""); }
   };
-
-  const visibleMarket = useMemo(() => tab === "installed" ? installedRows : marketplace, [installedRows, marketplace, tab]);
 
   return (
     <main className="plugin-platform-page">

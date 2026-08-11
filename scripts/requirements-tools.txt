@@ -1,2 +1,3 @@
 # Tooling used to regenerate and verify backend/requirements.txt.
 pip-tools==7.6.0
+ruff==0.16.2

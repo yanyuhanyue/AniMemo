@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "lint": "eslint src tests scripts plugins bridges vite.config.mjs postcss.config.js tailwind.config.js --max-warnings 0",
     "preview": "vite preview",
     "test:plugins": "node scripts/validate-plugins.mjs",
     "test": "npm run test:plugins && node --test tests/*.test.mjs",
@@ -14,6 +15,7 @@
     "qa:watch-history:selection": "node qa/watch_history_importer_selection.mjs",
     "qa:watch-history:runtime": "node qa/watch_history_runtime_e2e.mjs",
     "qa:auth-focus": "node tests/auth-field-focus-e2e.mjs",
+    "qa:critical": "npm run qa:auth-focus && npm run qa:dashboard-initial-request && npm run qa:dashboard-mutations",
     "qa:dashboard-initial-request": "node tests/dashboard-initial-request-e2e.mjs",
     "qa:dashboard-mutations": "node tests/dashboard-mutation-e2e.mjs",
     "qa:install-browser": "node scripts/install-playwright-browser.mjs",
@@ -39,6 +41,10 @@
     "vite": "6.4.3"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1"
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.62.1",
+    "eslint": "^10.8.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.9.0"
   }
 }

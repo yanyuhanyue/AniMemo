@@ -5,9 +5,11 @@ they do not replace production runtime validation.
 
 ## Core CI
 
-- `frontend`: builds the application and runs frontend tests.
-- `backend`: compiles Python, runs Django checks, verifies no missing migrations,
-  and runs the backend test suite.
+- `frontend`: runs JavaScript/React Hooks static checks, builds the application,
+  runs frontend tests, and executes the self-contained critical browser
+  regressions for authentication and Dashboard data/mutations.
+- `backend`: runs Python static correctness checks, compiles Python, runs Django
+  checks, verifies no missing migrations, and runs the backend test suite.
 - `postgres`: runs concurrency coverage against PostgreSQL and Redis.
 - `plugins`: validates/builds plugin artifacts and enforces official package
   immutability.
@@ -71,6 +73,16 @@ with `upgrade_base_sha` set to the exact last deployed production commit when
 that commit differs from the previous commit on `main`.
 
 ## Local commands
+
+Run the static correctness and critical browser gates after installing the
+project dependencies and building the frontend:
+
+```bash
+npm run lint
+python -m ruff check --select E9,F63,F7,F82 backend bridges scripts
+npm run build
+npm run qa:critical
+```
 
 Resolve and audit the comparison refs:
 
