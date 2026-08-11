@@ -9,6 +9,7 @@ const integrationNamePattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const roles = new Set(["reviewer", "user_manager", "operator", "administrator"]);
 const runtimes = new Set(["frontend", "backend"]);
 const extensions = new Set(["frontend.page", "frontend.navigation", "backend.api", "settings", "hooks", "storage", "catalog.importer", "catalog.metadata", "integration.actions", "integration.events"]);
+const coreCapabilities = new Set(["journal", "watch_history", "analytics"]);
 const hooks = new Set(["registration.before_request", "registration.before_complete", "registration.after_complete", "journal.after_create", "journal.after_update", "journal.after_delete", "column.after_publish", "column.after_delete", "user.after_created", "user.before_delete", "user.after_delete"]);
 const userScopedHooks = new Set(["journal.after_create", "journal.after_update", "journal.after_delete", "column.after_publish", "column.after_delete"]);
 
@@ -27,6 +28,20 @@ function validateManifest(directory, manifest, { enforceDirectoryName = true } =
   requireValue(semverPattern.test(manifest.version || ""), "version 必须符合 SemVer", errors);
   requireValue(Array.isArray(manifest.runtimes) && manifest.runtimes.every((item) => runtimes.has(item)), "runtimes 只能声明 frontend/backend", errors);
   requireValue(Array.isArray(manifest.extensions) && manifest.extensions.every((item) => extensions.has(item)), "extensions 包含未知扩展", errors);
+  const declaredCoreCapabilities = manifest.coreCapabilities ?? [];
+  requireValue(
+    Array.isArray(declaredCoreCapabilities)
+      && new Set(declaredCoreCapabilities).size === declaredCoreCapabilities.length
+      && declaredCoreCapabilities.every((item) => coreCapabilities.has(item)),
+    "coreCapabilities 包含未知或重复能力",
+    errors,
+  );
+  if (Array.isArray(declaredCoreCapabilities) && declaredCoreCapabilities.length) {
+    requireValue(Array.isArray(manifest.runtimes) && manifest.runtimes.includes("backend"), "coreCapabilities 只能由 backend runtime 声明", errors);
+  }
+  if (Array.isArray(manifest.settings) && manifest.settings.length) {
+    requireValue(Array.isArray(manifest.extensions) && manifest.extensions.includes("settings"), "settings definition 必须声明 settings 扩展", errors);
+  }
   if (manifest.integrations !== undefined) {
     requireValue(manifest.integrations && typeof manifest.integrations === "object" && !Array.isArray(manifest.integrations), "integrations 必须是对象", errors);
     requireValue(Object.keys(manifest.integrations || {}).every((key) => ["actions", "events"].includes(key)), "integrations 只能包含 actions/events", errors);

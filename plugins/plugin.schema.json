@@ -41,6 +41,10 @@
         "catalog.importer", "catalog.metadata", "integration.actions", "integration.events"
       ] }
     },
+    "coreCapabilities": {
+      "type": "array", "uniqueItems": true,
+      "items": { "enum": ["journal", "watch_history", "analytics"] }
+    },
     "integrations": {
       "type": "object", "additionalProperties": false,
       "properties": {
@@ -100,6 +104,28 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": { "coreCapabilities": { "minItems": 1 } },
+        "required": ["coreCapabilities"]
+      },
+      "then": {
+        "properties": {
+          "runtimes": { "contains": { "const": "backend" } }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "settings": { "minItems": 1 } },
+        "required": ["settings"]
+      },
+      "then": {
+        "properties": {
+          "extensions": { "contains": { "const": "settings" } }
+        }
+      }
+    },
     {
       "if": { "properties": { "installationMode": { "const": "user" } }, "required": ["installationMode"] },
       "then": {

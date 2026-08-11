@@ -15,13 +15,27 @@ Integration handlers never receive connection secrets or HMAC material.
 
 ## User-scoped Core capabilities
 
-Backend runtimes can bind narrow Core capabilities to an authenticated request or Integration action context:
+Backend runtimes must opt into each narrow Core capability in `manifest.json` before binding it:
+
+```json
+{"coreCapabilities": ["journal", "watch_history"]}
+```
+
+The Host rejects undeclared capabilities. `settings` and `storage` are separate
+extensions and are also rejected unless the corresponding extension is declared.
+Backend runtimes can then bind narrow Core capabilities to an authenticated request or Integration action context:
 
 - `host.journal.bind(actor)`: DTO-only entry list/get/create/update.
 - `host.watch_history.bind(actor)`: normalize/list/add/merge through Core Watch History.
 - `host.analytics.bind(actor)`: read-only authoritative Core analytics.
 
 The actor's authenticated `user` is authoritative. Capabilities never accept an arbitrary `user_id`, verify the user's enabled installation on every call, and are revoked immediately when the plugin is disabled. They return DTOs rather than ORM objects and do not expose a generic database interface.
+
+Journal DTO serialization, owner-scoped lookup, serializer validation, create/update
+mutations and `journal.after_create` / `journal.after_update` hook dispatch are
+owned by the Core `JournalEntryService`. Web API and plugin transports use that
+same boundary; the service owns the mutation transaction and plugin callbacks are
+best-effort according to the existing open hook policy.
 
 ## Official plugin version immutability
 

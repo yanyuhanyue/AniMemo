@@ -1,22 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from django.db import transaction
-from django.db.models import Q
-from rest_framework.exceptions import ValidationError
-
 from plugin_host.permissions import enabled_user_plugin
+from plugin_host.errors import HostCapabilityError
 
-
-@dataclass(frozen=True)
-class HostCapabilityError(ValueError):
-    code: str
-    detail: object
-    status_code: int = 400
-
-    def __str__(self):
-        return str(self.detail)
+from journal.domain_services import JournalEntryService, JournalEntryServiceError
 
 
 class _Capability:
@@ -42,93 +29,45 @@ class PluginJournalCapability:
 
 
 class BoundJournalCapability(_Capability):
-    writable_fields = {
-        "title",
-        "japanese_title",
-        "airing_period",
-        "studio",
-        "episodes",
-        "description",
-        "poster_url",
-        "baike_url",
-        "tags",
-        "tag_colors",
-        "personal_score",
-        "watch_status",
-        "review",
-        "visibility",
-    }
-
     def get_entry(self, entry_id):
-        return _entry_dto(self._owned_entry(entry_id))
+        try:
+            return JournalEntryService(self.user()).get(entry_id)
+        except JournalEntryServiceError as error:
+            raise HostCapabilityError(error.code, error.detail, error.status_code) from error
 
     def list_entries(self, *, query="", limit=100):
-        from journal.models import JournalEntry
-
-        user = self.user()
-        limit = max(1, min(int(limit), 500))
-        rows = JournalEntry.objects.filter(user=user, deleted_at__isnull=True).order_by("pk")
-        normalized_query = str(query or "").strip()[:120]
-        if normalized_query:
-            rows = rows.filter(
-                Q(title__icontains=normalized_query)
-                | Q(japanese_title__icontains=normalized_query)
-            )
-        return [_entry_dto(entry) for entry in rows[:limit]]
+        try:
+            return JournalEntryService(self.user()).list(query=query, limit=limit)
+        except JournalEntryServiceError as error:
+            raise HostCapabilityError(error.code, error.detail, error.status_code) from error
 
     def create_entry(self, fields):
         from journal.serializers_entries import JournalEntrySerializer
 
-        user = self.user()
-        serializer = JournalEntrySerializer(data=self._fields(fields))
-        self._validate(serializer)
-        with transaction.atomic():
-            entry = serializer.save(user=user)
-        return _entry_dto(entry)
+        try:
+            return JournalEntryService(self.user()).create_from_fields(
+                self._fields(fields),
+                serializer_class=JournalEntrySerializer,
+                source="plugin",
+            )
+        except JournalEntryServiceError as error:
+            raise HostCapabilityError(error.code, error.detail, error.status_code) from error
 
     def update_entry(self, entry_id, fields):
-        from journal.models import JournalEntry
         from journal.serializers_entries import JournalEntrySerializer
 
-        user = self.user()
-        with transaction.atomic():
-            try:
-                entry = JournalEntry.objects.select_for_update().get(
-                    pk=entry_id,
-                    user=user,
-                    deleted_at__isnull=True,
-                )
-            except (TypeError, ValueError, JournalEntry.DoesNotExist) as error:
-                raise HostCapabilityError("entry_not_found", "番剧条目不存在。", 404) from error
-            serializer = JournalEntrySerializer(entry, data=self._fields(fields), partial=True)
-            self._validate(serializer)
-            entry = serializer.save()
-        return _entry_dto(entry)
-
-    def _owned_entry(self, entry_id):
-        from journal.models import JournalEntry
-
-        user = self.user()
         try:
-            return JournalEntry.objects.get(
-                pk=entry_id,
-                user=user,
-                deleted_at__isnull=True,
+            return JournalEntryService(self.user()).update_from_fields(
+                entry_id,
+                self._fields(fields),
+                serializer_class=JournalEntrySerializer,
+                source="plugin",
             )
-        except (TypeError, ValueError, JournalEntry.DoesNotExist) as error:
-            raise HostCapabilityError("entry_not_found", "番剧条目不存在。", 404) from error
+        except JournalEntryServiceError as error:
+            raise HostCapabilityError(error.code, error.detail, error.status_code) from error
 
     def _fields(self, fields):
-        if not isinstance(fields, dict) or set(fields) - self.writable_fields:
-            raise HostCapabilityError("invalid_entry", "番剧条目 DTO 包含不允许的字段。")
-        return dict(fields)
-
-    @staticmethod
-    def _validate(serializer):
-        try:
-            serializer.is_valid(raise_exception=True)
-        except ValidationError as error:
-            raise HostCapabilityError("invalid_entry", error.detail) from error
+        return JournalEntryService.validate_fields(fields)
 
 
 class PluginWatchHistoryCapability:
@@ -212,26 +151,6 @@ class BoundWatchHistoryCapability(_Capability):
         except (TypeError, ValueError, JournalEntry.DoesNotExist) as error:
             raise HostCapabilityError("entry_not_found", "番剧条目不存在。", 404) from error
         return user, entry
-
-
-def _entry_dto(entry):
-    return {
-        "entry_id": entry.pk,
-        "title": entry.title,
-        "japanese_title": entry.japanese_title,
-        "airing_period": entry.airing_period,
-        "studio": entry.studio,
-        "episodes": entry.episodes,
-        "description": entry.description,
-        "poster_url": entry.poster_url,
-        "baike_url": entry.baike_url,
-        "tags": list(entry.tags or []),
-        "tag_colors": dict(entry.tag_colors or {}),
-        "personal_score": entry.personal_score,
-        "watch_status": entry.watch_status,
-        "review": entry.review,
-        "visibility": entry.visibility,
-    }
 
 
 def _history_dto(record):

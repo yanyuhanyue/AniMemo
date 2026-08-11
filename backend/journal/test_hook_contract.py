@@ -60,7 +60,7 @@ class SupportedHookEmitterTests(TestCase):
         self.assertEqual(user_hook.call_args.args[1].user_id, user.pk)
 
     def test_journal_crud_hooks_run_from_real_api_flow(self):
-        with patch("journal.entry_views.run_hook") as hook:
+        with patch("journal.domain_services.run_hook") as mutation_hook, patch("journal.entry_views.run_hook") as delete_hook:
             created = self.client.post(reverse("entry-list"), {"title": "Hook Entry"}, format="json")
             self.assertEqual(created.status_code, 201)
             entry_id = created.data["id"]
@@ -68,8 +68,11 @@ class SupportedHookEmitterTests(TestCase):
             self.assertEqual(updated.status_code, 200)
             deleted = self.client.delete(reverse("entry-detail", kwargs={"pk": entry_id}))
             self.assertEqual(deleted.status_code, 204)
-        self.assertEqual([call.args[0] for call in hook.call_args_list], [
-            "journal.after_create", "journal.after_update", "journal.after_delete",
+        self.assertEqual([call.args[0] for call in mutation_hook.call_args_list], [
+            "journal.after_create", "journal.after_update",
+        ])
+        self.assertEqual([call.args[0] for call in delete_hook.call_args_list], [
+            "journal.after_delete",
         ])
 
     def test_column_publish_fires_only_on_transition_and_delete_fires_after_delete(self):
