@@ -2,7 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const apiSource = readFileSync(new URL("../src/lib/api.js", import.meta.url), "utf8");
+const apiFacadeSource = readFileSync(new URL("../src/lib/api.js", import.meta.url), "utf8");
+const apiCoreSource = readFileSync(new URL("../src/lib/apiCore.js", import.meta.url), "utf8");
+const authSessionSource = readFileSync(new URL("../src/lib/authSession.js", import.meta.url), "utf8");
+const webTransportSource = readFileSync(new URL("../src/lib/webApiTransport.js", import.meta.url), "utf8");
+const webAuthSource = readFileSync(new URL("../src/lib/webAuthAdapter.js", import.meta.url), "utf8");
+const apiSource = [apiFacadeSource, apiCoreSource, authSessionSource, webTransportSource, webAuthSource].join("\n");
 const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
 const pluginRuntimeSource = readFileSync(new URL("../src/plugins/sdk/PluginRuntimeContext.jsx", import.meta.url), "utf8");
 const adminPanelsSource = readFileSync(new URL("../src/components/admin/AdminSystemPanel.jsx", import.meta.url), "utf8");
@@ -21,21 +26,22 @@ const removedRouteStaffField = ["route", "requires", "Admin"].join("\\.");
 test("keeps JWTs out of browser storage and restores access through the refresh cookie", () => {
   assert.doesNotMatch(apiSource, /localStorage\.setItem\([^\n]*(?:access|refresh)/i);
   assert.doesNotMatch(apiSource, /sessionStorage\.setItem\([^\n]*(?:access|refresh)/i);
-  assert.match(apiSource, /let accessToken = null/);
-  assert.match(apiSource, /localStorage\.removeItem\(LEGACY_ACCESS_KEY\)/);
-  assert.match(apiSource, /cookiePost\("token\/refresh\/"\)/);
-  assert.match(apiSource, /"X-CSRFToken"/);
-  assert.match(apiSource, /withCredentials: true/);
+  assert.match(authSessionSource, /let accessToken = null/);
+  assert.match(webAuthSource, /storage\?\.removeItem\(LEGACY_ACCESS_KEY\)/);
+  assert.match(webAuthSource, /cookiePost\(AUTH_ENDPOINTS\.refresh\)/);
+  assert.match(webAuthSource, /"X-CSRFToken"/);
+  assert.match(webTransportSource, /withCredentials: true/);
 });
 
 test("keeps the browser and cookie API on the same origin", () => {
-  assert.match(apiSource, /window\.location\.origin}\/api\/v1/);
+  assert.match(apiCoreSource, /API_ROOT_PATH = `\/api\/\$\{API_VERSION\}`/);
+  assert.match(apiFacadeSource, /browser\?\.location\?\.origin/);
   assert.doesNotMatch(apiSource, /window\.location\.hostname}:8000\/api\/v1/);
 });
 
 test("preserves staff claims when profile data is merged after cookie refresh", () => {
-  assert.match(apiSource, /authUser = \{ \.\.\.\(authUser \|\| \{\}\), \.\.\.\(data \|\| \{\}\) \}/);
-  assert.doesNotMatch(apiSource, /authUser = data \|\| authUser/);
+  assert.match(authSessionSource, /authUser = \{ \.\.\.\(authUser \|\| \{\}\), \.\.\.\(user \|\| \{\}\) \}/);
+  assert.doesNotMatch(authSessionSource, /authUser = user \|\| authUser/);
 });
 
 test("shares one refresh promise across concurrent 401 responses", () => {
@@ -79,11 +85,11 @@ test("turns HTTP 429 into a retryable user-facing message", () => {
 });
 
 test("rotates staff CSRF and sends the current access token before logout cleanup", () => {
-  assert.match(apiSource, /cookiePost\("auth\/staff-login\/"/);
-  assert.match(apiSource, /ensureCsrfToken\(\{ force: true \}\)/);
-  assert.match(apiSource, /includeAccess: true/);
-  assert.match(apiSource, /headers\.Authorization = `Bearer \$\{accessToken\}`/);
-  assert.match(apiSource, /finally \{\s*clearTokens\(\);\s*clearCsrfToken\(\)/s);
+  assert.match(webAuthSource, /cookiePost\(\s*AUTH_ENDPOINTS\.staffLogin/);
+  assert.match(webAuthSource, /ensureCsrfToken\(\{ force: true \}\)/);
+  assert.match(webAuthSource, /includeAccess: true/);
+  assert.match(webAuthSource, /headers\.Authorization = `Bearer \$\{accessToken\}`/);
+  assert.match(webAuthSource, /finally \{\s*clearTokens\(\);\s*clearCsrfToken\(\)/s);
   assert.match(adminDashboardSource, /await authApi\.logout\(\)/);
   assert.match(dashboardSource, /await authApi\.logout\(\)/);
 });
@@ -96,8 +102,9 @@ test("keeps the staff dashboard refresh interval bounded without four-second pol
 });
 
 test("uses the shared CSRF cookie flow for ordinary login and handles unavailable security services", () => {
-  assert.match(apiSource, /cookiePost\("token\/", \{ username, password, "cf-turnstile-response": turnstileToken \}\)/);
-  assert.match(apiSource, /authApi = \{[\s\S]*clearCsrfToken\(\);[\s\S]*ensureCsrfToken\(\{ force: true \}\)/);
+  assert.match(webAuthSource, /withAntiAbuseChallenge\(\{ username, password \}, challenge\)/);
+  assert.match(webAuthSource, /const authApi = Object\.freeze\(\{[\s\S]*clearCsrfToken\(\);[\s\S]*ensureCsrfToken\(\{ force: true \}\)/);
+  assert.match(apiCoreSource, /next\["cf-turnstile-response"\] = challenge\.token/);
   assert.match(apiSource, /status === 503/);
   assert.match(apiSource, /安全服务暂时繁忙/);
 });

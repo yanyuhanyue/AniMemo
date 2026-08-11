@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const authPage = readFileSync(new URL("../src/pages/UserAuthPage.jsx", import.meta.url), "utf8");
-const apiSource = readFileSync(new URL("../src/lib/api.js", import.meta.url), "utf8");
+const apiSource = readFileSync(new URL("../src/lib/webAuthAdapter.js", import.meta.url), "utf8");
 const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
 
 test("registration UI has email-only request and verified completion stages", () => {
@@ -16,9 +16,10 @@ test("registration UI has email-only request and verified completion stages", ()
 });
 
 test("registration tokens use the CSRF cookie client and routes are exposed", () => {
-  assert.match(apiSource, /registerRequest: \(email, turnstileToken = ""\) => cookiePost\("auth\/register\/request\//);
-  assert.match(apiSource, /verifyRegistration: \(token\) => cookiePost\("auth\/register\/verify\//);
-  assert.match(apiSource, /completeRegistration: \(payload, turnstileToken = ""\) => cookiePost\("auth\/register\/complete\//);
+  assert.match(apiSource, /registerRequest: \(email, challenge = ""\) => cookiePost\(/);
+  assert.match(apiSource, /verifyRegistration: \(token\) => cookiePost\(AUTH_ENDPOINTS\.registerVerify/);
+  assert.match(apiSource, /completeRegistration: \(payload, challenge = ""\) => cookiePost\(/);
+  assert.match(apiSource, /withAntiAbuseChallenge/);
   assert.match(appSource, /path="\/register" element=\{<UserAuthPage \/>\}/);
   assert.match(appSource, /path="\/register\/verify" element=\{<UserAuthPage \/>\}/);
 });

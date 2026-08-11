@@ -22,7 +22,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 
 from .emails import EmailDeliveryError, send_transactional_email
 from .account_security import AccountDeletionError, delete_current_account
-from .auth_tokens import clear_refresh_cookie, issue_token_pair, no_store, revoke_current_access_token, rotate_refresh, set_refresh_cookie
+from .auth_tokens import issue_token_pair, revoke_current_access_token, rotate_refresh
 from .auth_service import authenticate_with_second_factor
 from .admin_security_middleware import clear_staff_second_factor, mark_staff_second_factor_verified
 from accounts.models import LoginEvent
@@ -38,7 +38,7 @@ from plugin_host.hooks import RegistrationHookRejected, RegistrationHookUnavaila
 from .serializers import RegistrationCompleteSerializer, RegistrationRequestSerializer, RegistrationVerifySerializer
 from .staff_services import get_security_profile, record_audit, record_login_event, resolve_staff_role, staff_capabilities, update_user_password
 from plugin_host.permissions import plugin_permissions_for_user
-from .turnstile import require_turnstile
+from .web_auth_adapter import clear_refresh_cookie, no_store, require_anti_abuse_challenge, set_refresh_cookie
 from .openapi_serializers import (
     AccessTokenResponseSerializer,
     AccountDeleteRequestSerializer,
@@ -108,7 +108,7 @@ class EmailTokenObtainPairView(TokenObtainPairView):
 
     @extend_schema(request=OpenApiRequest(TOKEN_LOGIN_REQUEST_SCHEMA), responses=LoginResponseSerializer, auth=[])
     def post(self, request, *args, **kwargs):
-        turnstile_response = require_turnstile(request)
+        turnstile_response = require_anti_abuse_challenge(request)
         if turnstile_response is not None:
             return turnstile_response
         response = super().post(request, *args, **kwargs)
@@ -130,7 +130,7 @@ class StaffLoginView(APIView):
 
     @extend_schema(request=OpenApiRequest(TOKEN_LOGIN_REQUEST_SCHEMA), responses=LoginResponseSerializer, auth=[])
     def post(self, request):
-        turnstile_response = require_turnstile(request)
+        turnstile_response = require_anti_abuse_challenge(request)
         if turnstile_response is not None:
             return turnstile_response
         account = str(request.data.get("username", "")).strip()
@@ -252,7 +252,7 @@ class RegisterView(RegistrationThrottleAuditMixin, APIView):
 
     @extend_schema(request=RegistrationRequestSerializer, responses=MessageResponseSerializer, auth=[])
     def post(self, request):
-        turnstile_response = require_turnstile(request)
+        turnstile_response = require_anti_abuse_challenge(request)
         if turnstile_response is not None:
             return turnstile_response
         site_settings = SiteSettings.load()
@@ -334,7 +334,7 @@ class CompleteRegistrationView(RegistrationThrottleAuditMixin, APIView):
 
     @extend_schema(request=RegistrationCompleteSerializer, responses=MessageResponseSerializer, auth=[])
     def post(self, request):
-        turnstile_response = require_turnstile(request)
+        turnstile_response = require_anti_abuse_challenge(request)
         if turnstile_response is not None:
             return turnstile_response
         serializer = RegistrationCompleteSerializer(data=request.data)
@@ -373,7 +373,7 @@ class PasswordResetView(APIView):
 
     @extend_schema(request=PasswordResetRequestSerializer, responses=MessageResponseSerializer, auth=[])
     def post(self, request):
-        turnstile_response = require_turnstile(request)
+        turnstile_response = require_anti_abuse_challenge(request)
         if turnstile_response is not None:
             return turnstile_response
         email = serializers.EmailField().run_validation(request.data.get("email", ""))
@@ -402,7 +402,7 @@ class PasswordResetConfirmView(APIView):
 
     @extend_schema(request=PasswordResetConfirmRequestSerializer, responses=MessageResponseSerializer, auth=[])
     def post(self, request):
-        turnstile_response = require_turnstile(request)
+        turnstile_response = require_anti_abuse_challenge(request)
         if turnstile_response is not None:
             return turnstile_response
         try:

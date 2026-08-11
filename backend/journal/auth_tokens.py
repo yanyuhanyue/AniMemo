@@ -62,43 +62,6 @@ def revoke_current_access_token(request):
         return False
 
 
-def refresh_cookie_options():
-    return {
-        "path": settings.REFRESH_COOKIE_PATH,
-        "domain": settings.REFRESH_COOKIE_DOMAIN,
-        "samesite": settings.REFRESH_COOKIE_SAMESITE,
-        "secure": settings.REFRESH_COOKIE_SECURE,
-    }
-
-
-def set_refresh_cookie(response, refresh):
-    response.set_cookie(
-        key=settings.REFRESH_COOKIE_NAME,
-        value=str(refresh),
-        httponly=True,
-        max_age=int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
-        **refresh_cookie_options(),
-    )
-    return response
-
-
-def clear_refresh_cookie(response):
-    options = refresh_cookie_options()
-    options.pop("secure", None)
-    response.delete_cookie(
-        key=settings.REFRESH_COOKIE_NAME,
-        **options,
-    )
-    return response
-
-
-def no_store(response):
-    response["Cache-Control"] = "no-store"
-    response["Pragma"] = "no-cache"
-    response["X-Content-Type-Options"] = "nosniff"
-    return response
-
-
 def user_from_refresh(refresh):
     user_id = refresh.get(api_settings.USER_ID_CLAIM)
     if user_id is None:

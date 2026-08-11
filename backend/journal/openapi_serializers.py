@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from .serializers_auth import AntiAbuseChallengeRequestSerializer
+
 
 TOKEN_LOGIN_REQUEST_SCHEMA = {
     "type": "object",
@@ -9,7 +11,15 @@ TOKEN_LOGIN_REQUEST_SCHEMA = {
         "password": {"type": "string", "writeOnly": True},
         "otp": {"type": "string", "writeOnly": True},
         "recovery_code": {"type": "string", "writeOnly": True},
-        "cf-turnstile-response": {"type": "string", "writeOnly": True},
+        "challenge": {
+            "type": "object",
+            "properties": {
+                "provider": {"type": "string"},
+                "token": {"type": "string", "writeOnly": True},
+            },
+            "required": ["provider", "token"],
+        },
+        "cf-turnstile-response": {"type": "string", "writeOnly": True, "deprecated": True},
     },
 }
 
@@ -40,17 +50,15 @@ class LoginResponseSerializer(AccessTokenResponseSerializer):
     remaining_recovery_codes = serializers.IntegerField(required=False, allow_null=True)
 
 
-class PasswordResetRequestSerializer(serializers.Serializer):
+class PasswordResetRequestSerializer(AntiAbuseChallengeRequestSerializer):
     email = serializers.EmailField()
-    cf_turnstile_response = serializers.CharField(required=False, allow_blank=True, write_only=True, source="cf-turnstile-response")
 
 
-class PasswordResetConfirmRequestSerializer(serializers.Serializer):
+class PasswordResetConfirmRequestSerializer(AntiAbuseChallengeRequestSerializer):
     uid = serializers.CharField()
     token = serializers.CharField()
     password = serializers.CharField(write_only=True)
     password_confirm = serializers.CharField(write_only=True)
-    cf_turnstile_response = serializers.CharField(required=False, allow_blank=True, write_only=True, source="cf-turnstile-response")
 
 
 class PasswordChangeRequestSerializer(serializers.Serializer):
