@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
   workflow_dispatch:
     inputs:
       upgrade_base_sha:
@@ -13,15 +14,45 @@ on:
         type: string
 
 concurrency:
-  group: release-gate-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-gate-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  classify:
+    name: release-changed-files
+    runs-on: ubuntu-latest
+    outputs:
+      run_release_full: ${{ steps.classify.outputs.run_release_full }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: classify
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: python scripts/ci_classify.py --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA" --github-output "$GITHUB_OUTPUT"
+
+  post-merge-sanity:
+    name: post-merge-sanity
+    needs: classify
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python scripts/ci_classify.py --self-test
+      - run: git diff --check
+      - run: python -m compileall -q scripts
+
   docker:
     name: docker
+    needs: classify
+    if: github.event_name != 'push' && needs.classify.outputs.run_release_full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -107,6 +138,8 @@ jobs:
 
   stateful-upgrade:
     name: stateful-upgrade
+    needs: classify
+    if: github.event_name != 'push' && needs.classify.outputs.run_release_full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
