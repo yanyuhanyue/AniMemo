@@ -1155,14 +1155,14 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
             def update_root():
                 close_old_connections()
                 try:
-                instance = MediaStorageBackend.objects.get(pk=backend.pk)
-                serializer = MediaStorageBackendSerializer(instance, data={"local_root": "secondary"}, partial=True)
-                update_started.set()
-                try:
-                    serializer.is_valid(raise_exception=True)
-                    serializer.save()
-                except StoragePhysicalIdentityLocked:
-                    return "locked"
+                    instance = MediaStorageBackend.objects.get(pk=backend.pk)
+                    serializer = MediaStorageBackendSerializer(instance, data={"local_root": "secondary"}, partial=True)
+                    update_started.set()
+                    try:
+                        serializer.is_valid(raise_exception=True)
+                        serializer.save()
+                    except StoragePhysicalIdentityLocked:
+                        return "locked"
                     return "updated"
                 finally:
                     close_old_connections()
