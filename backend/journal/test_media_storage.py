@@ -5,7 +5,6 @@ import os
 import requests
 import stat
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from io import StringIO
@@ -44,7 +43,7 @@ from site_config.media_storage.usage import (
     managed_usage_bytes,
     refresh_cloudflare_usage,
 )
-from site_config.models import CloudflareR2Account, MediaObject, MediaStorageBackend, MediaStoragePoolSettings
+from site_config.models import CloudflareR2Account, MediaObject, MediaStorageBackend, MediaStoragePoolSettings, MediaWriteReservation
 from site_config.storage_units import BINARY_GIB_BYTES, DECIMAL_GB_BYTES
 from .models import AdminAuditLog, JournalEntry
 from .admin import CloudflareR2AccountAdmin, MediaObjectAdmin, MediaStorageBackendAdmin, MediaStoragePoolSettingsAdmin
@@ -583,6 +582,37 @@ class MediaIdentityAndRuntimeTests(TestCase):
         self.assertEqual(media.storage_backend_id, second.pk)
         self.assertEqual(MediaStoragePoolSettings.load().preferred_write_backend_id, second.pk)
 
+    def test_external_write_runs_outside_reservation_transaction_and_finalizes(self):
+        backend = r2_backend("reservation-seam", 10, used=0, warning=800, limit=900)
+        adapter = self.FakeAdapter("reservation-seam")
+        observed_atomic_states = []
+        baseline_atomic_depth = len(connection.atomic_blocks)
+        original_write = adapter.write
+
+        def write_outside_transaction(*args, **kwargs):
+            observed_atomic_states.append(len(connection.atomic_blocks))
+            return original_write(*args, **kwargs)
+
+        adapter.write = write_outside_transaction
+        with patch.object(StoragePoolService, "adapter_for", return_value=adapter):
+            media = StoragePoolService.create_media("users/1/reservation.webp", b"payload")
+
+        self.assertEqual(observed_atomic_states, [baseline_atomic_depth])
+        reservation = MediaWriteReservation.objects.get(pk=media.pk)
+        self.assertEqual(reservation.status, MediaWriteReservation.Status.FINALIZED)
+        self.assertEqual(reservation.sha256, media.sha256)
+
+    def test_pending_reservation_counts_toward_quota(self):
+        backend = r2_backend("reservation-quota", 10, used=0, warning=800, limit=900)
+        MediaWriteReservation.objects.create(
+            storage_backend=backend,
+            object_key="users/1/reserved.webp",
+            size_bytes=899,
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        self.assertEqual(managed_usage_bytes(backend), 899)
+        self.assertFalse(StoragePoolService.state_for(backend, incoming_size_bytes=2).writable)
+
     def test_dynamic_r2_client_rebuilds_when_config_version_changes(self):
         backend = r2_backend("runtime-r2", 10)
         clients = [Mock(name="client-v1"), Mock(name="client-v2"), Mock(name="client-v3")]
@@ -1075,9 +1105,9 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
                     data={"bucket_name": "changed-during-upload"},
                     partial=True,
                 )
-                serializer.is_valid(raise_exception=True)
                 update_started.set()
                 try:
+                    serializer.is_valid(raise_exception=True)
                     serializer.save()
                 except StoragePhysicalIdentityLocked:
                     return "locked"
@@ -1092,11 +1122,10 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
                 self.assertTrue(write_started.wait(timeout=10))
                 update = executor.submit(update_bucket)
                 self.assertTrue(update_started.wait(timeout=10))
-                time.sleep(0.2)
-                self.assertFalse(update.done(), "Backend update did not wait for the upload row lock.")
+                result = update.result(timeout=5)
+                self.assertEqual(result, "locked")
                 release_write.set()
                 media = upload.result(timeout=20)
-                result = update.result(timeout=20)
 
         backend.refresh_from_db()
         self.assertEqual(result, "locked")
@@ -1128,9 +1157,9 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
                 try:
                     instance = MediaStorageBackend.objects.get(pk=backend.pk)
                     serializer = MediaStorageBackendSerializer(instance, data={"local_root": "secondary"}, partial=True)
-                    serializer.is_valid(raise_exception=True)
                     update_started.set()
                     try:
+                        serializer.is_valid(raise_exception=True)
                         serializer.save()
                     except StoragePhysicalIdentityLocked:
                         return "locked"
@@ -1145,11 +1174,10 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
                     self.assertTrue(write_started.wait(timeout=10))
                     update = executor.submit(update_root)
                     self.assertTrue(update_started.wait(timeout=10))
-                    time.sleep(0.2)
-                    self.assertFalse(update.done(), "Local root update did not wait for the upload row lock.")
+                    result = update.result(timeout=5)
+                    self.assertEqual(result, "locked")
                     release_write.set()
                     media = upload.result(timeout=20)
-                    result = update.result(timeout=20)
 
             backend.refresh_from_db()
             self.assertEqual(result, "locked")
@@ -1183,11 +1211,11 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
                 self.assertTrue(write_started.wait(timeout=10))
                 deletion = executor.submit(delete_backend)
                 self.assertTrue(delete_started.wait(timeout=10))
-                time.sleep(0.2)
-                self.assertFalse(deletion.done(), "Backend delete did not wait for the upload row lock.")
+                delete_status, delete_code = deletion.result(timeout=5)
+                self.assertEqual(delete_status, 409)
+                self.assertEqual(delete_code, "STORAGE_IN_USE")
                 release_write.set()
                 media = upload.result(timeout=20)
-                delete_status, delete_code = deletion.result(timeout=20)
 
         self.assertTrue(MediaStorageBackend.objects.filter(pk=backend.pk).exists())
         self.assertEqual(media.storage_backend_id, backend.pk)

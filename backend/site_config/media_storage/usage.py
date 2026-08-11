@@ -7,7 +7,7 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
-from site_config.models import CloudflareR2Account, MediaObject, MediaStorageBackend
+from site_config.models import CloudflareR2Account, MediaObject, MediaStorageBackend, MediaWriteReservation
 
 
 MAX_ANALYTICS_RESPONSE_BYTES = 1024 * 1024
@@ -46,10 +46,15 @@ class CloudflareAnalyticsInvalidResponse(CloudflareAnalyticsError):
 def managed_usage_bytes(backend_or_id):
     """Return bytes currently indexed by Anime Journal for one backend."""
     backend_id = getattr(backend_or_id, "pk", backend_or_id)
-    total = MediaObject.objects.filter(storage_backend_id=backend_id).aggregate(
+    media_total = MediaObject.objects.filter(storage_backend_id=backend_id).aggregate(
         total=Sum("size_bytes")
     )["total"]
-    return max(0, int(total or 0))
+    reserved_total = MediaWriteReservation.objects.filter(
+        storage_backend_id=backend_id,
+        status=MediaWriteReservation.Status.PENDING,
+        expires_at__gt=timezone.now(),
+    ).aggregate(total=Sum("size_bytes"))["total"]
+    return max(0, int(media_total or 0) + int(reserved_total or 0))
 
 
 def account_backends(account_or_backend):
@@ -64,10 +69,15 @@ def account_backends(account_or_backend):
 
 
 def account_managed_usage_bytes(account_or_backend):
-    total = MediaObject.objects.filter(
+    media_total = MediaObject.objects.filter(
         storage_backend__in=account_backends(account_or_backend),
     ).aggregate(total=Sum("size_bytes"))["total"]
-    return max(0, int(total or 0))
+    reserved_total = MediaWriteReservation.objects.filter(
+        storage_backend__in=account_backends(account_or_backend),
+        status=MediaWriteReservation.Status.PENDING,
+        expires_at__gt=timezone.now(),
+    ).aggregate(total=Sum("size_bytes"))["total"]
+    return max(0, int(media_total or 0) + int(reserved_total or 0))
 
 
 def account_actual_usage_bytes(account_or_backend):
@@ -87,6 +97,13 @@ def effective_account_usage(account_or_backend):
         return 0
     managed_rows = MediaObject.objects.filter(storage_backend__in=backends).values("storage_backend_id").annotate(total=Sum("size_bytes"))
     managed_by_backend = {row["storage_backend_id"]: max(0, int(row["total"] or 0)) for row in managed_rows}
+    reserved_rows = MediaWriteReservation.objects.filter(
+        storage_backend__in=backends,
+        status=MediaWriteReservation.Status.PENDING,
+        expires_at__gt=timezone.now(),
+    ).values("storage_backend_id").annotate(total=Sum("size_bytes"))
+    for row in reserved_rows:
+        managed_by_backend[row["storage_backend_id"]] = managed_by_backend.get(row["storage_backend_id"], 0) + max(0, int(row["total"] or 0))
     return sum(
         max(
             managed_by_backend.get(backend.pk, 0),

@@ -211,12 +211,23 @@ class MediaStorageBackend(models.Model):
         physical_fields = {"backend_type", "bucket_name", "endpoint_url", "cloudflare_account_ref", "local_root"}
         checks_physical_identity = update_fields is None or bool(physical_fields.intersection(update_fields))
         if self.pk and checks_physical_identity:
-            previous = type(self).objects.filter(pk=self.pk).first()
-            if previous and previous.physical_identity() != self.physical_identity() and previous.media_objects.exists():
-                raise ValidationError({
-                    "code": "STORAGE_PHYSICAL_IDENTITY_LOCKED",
-                    "detail": "Storage contains media objects and its physical location cannot be changed.",
-                })
+            from django.db import transaction
+
+            with transaction.atomic():
+                previous = type(self).objects.select_for_update().filter(pk=self.pk).first()
+                has_active_reservation = MediaWriteReservation.objects.filter(
+                    storage_backend_id=self.pk,
+                    status=MediaWriteReservation.Status.PENDING,
+                ).exists()
+                if previous and previous.physical_identity() != self.physical_identity() and (
+                    previous.media_objects.exists() or has_active_reservation
+                ):
+                    raise ValidationError({
+                        "code": "STORAGE_PHYSICAL_IDENTITY_LOCKED",
+                        "detail": "Storage contains media objects or an active media write reservation, so its physical location cannot be changed.",
+                    })
+                super().save(*args, **kwargs)
+            return
         super().save(*args, **kwargs)
 
     def set_access_key_id(self, value):
@@ -303,6 +314,46 @@ class MediaObject(models.Model):
 
     def __str__(self):
         return f"{self.storage_backend.slug}:{self.object_key}"
+
+
+class MediaWriteReservation(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "写入中"
+        FINALIZED = "finalized", "已完成"
+        ABANDONED = "abandoned", "已放弃"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    storage_backend = models.ForeignKey(
+        MediaStorageBackend,
+        on_delete=models.PROTECT,
+        related_name="media_write_reservations",
+    )
+    object_key = models.CharField(max_length=500)
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    content_type = models.CharField(max_length=120, blank=True, default="")
+    sha256 = models.CharField(max_length=64, blank=True, default="")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    finalized_at = models.DateTimeField(blank=True, null=True)
+    abandoned_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status", "expires_at"], name="media_reservation_gc_idx"),
+            models.Index(fields=["storage_backend", "status"], name="media_reservation_backend_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["storage_backend", "object_key"],
+                condition=Q(status="pending"),
+                name="unique_pending_media_reservation",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.storage_backend.slug}:{self.object_key} ({self.status})"
 
 
 class TagDefinition(models.Model):
