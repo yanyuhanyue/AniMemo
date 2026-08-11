@@ -355,6 +355,7 @@ else:
     STORAGES["default"] = {"BACKEND": "site_config.media_storage.storage.StoragePoolStorage"}
 
 MEDIA_LOCAL_STORAGE_ROOT = Path(os.getenv("MEDIA_LOCAL_STORAGE_ROOT", BASE_DIR / "managed-media")).resolve()
+MEDIA_WRITE_RESERVATION_TTL_SECONDS = int(os.getenv("MEDIA_WRITE_RESERVATION_TTL_SECONDS", "3600"))
 
 POSTER_UPLOAD_MAX_BYTES = int(os.getenv("POSTER_UPLOAD_MAX_BYTES", str(5 * 1024 * 1024)))
 POSTER_STORAGE_QUOTA_BYTES = int(os.getenv("POSTER_STORAGE_QUOTA_BYTES", str(500 * 1024 * 1024)))

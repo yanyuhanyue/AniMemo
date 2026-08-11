@@ -11,6 +11,7 @@ TASKS = (
     "cleanup_external_account_sessions",
     "cleanup_integration_events",
     "cleanup_watch_history_import_batches",
+    "reconcile_media_write_reservations",
     "refresh_media_storage_usage",
     "audit_orphan_media",
 )

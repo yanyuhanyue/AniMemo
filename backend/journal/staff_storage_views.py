@@ -90,7 +90,7 @@ class StaffMediaStorageDetailView(APIView):
     def delete(self, request, pk):
         with transaction.atomic():
             backend = MediaStorageBackend.objects.select_for_update().get(pk=pk)
-            if backend.media_objects.exists():
+            if backend.media_objects.exists() or backend.media_write_reservations.filter(status="pending").exists():
                 return Response({"detail": "该存储仍被媒体对象引用。", "code": "STORAGE_IN_USE"}, status=status.HTTP_409_CONFLICT)
             before = {"name": backend.name, "slug": backend.slug, "backend_type": backend.backend_type}
             try:

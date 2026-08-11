@@ -209,7 +209,12 @@ class MediaStorageBackendSerializer(serializers.ModelSerializer):
 
     @staticmethod
     def _enforce_physical_identity_lock(instance, attrs, backend_type, account_id):
-        if instance is None or not instance.media_objects.exists():
+        if instance is None or not (
+            instance.media_objects.exists()
+            or instance.media_write_reservations.filter(
+                status="pending",
+            ).exists()
+        ):
             return
         changed = backend_type != instance.backend_type
         if not changed and backend_type == MediaStorageBackend.BackendType.CLOUDFLARE_R2:

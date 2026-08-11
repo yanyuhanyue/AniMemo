@@ -1,8 +1,11 @@
 import hashlib
 from dataclasses import dataclass
+from datetime import timedelta
 
+from django.conf import settings
 from django.db import transaction
-from site_config.models import MediaObject, MediaStorageBackend, MediaStoragePoolSettings
+from django.utils import timezone
+from site_config.models import MediaObject, MediaStorageBackend, MediaStoragePoolSettings, MediaWriteReservation
 
 from .common import MediaStorageExhausted, MediaStorageOffline, MediaStorageSetupRequired, UnsafeObjectKey, safe_object_key
 from .local import DynamicLocalBackend
@@ -111,69 +114,131 @@ class StoragePoolService:
         return backend
 
     @classmethod
-    def create_media(cls, object_key, content, *, content_type="application/octet-stream"):
-        object_key = safe_object_key(object_key)
-        data = bytes(content)
-        backend = None
-        adapter = None
-        physical_write_succeeded = False
-        try:
-            with transaction.atomic():
-                # This single row lock serializes quota decisions until the
-                # matching MediaObject row is committed.
-                pool = MediaStoragePoolSettings.objects.select_for_update().get_or_create(pk=1)[0]
-                candidate_ids = []
-                if pool.preferred_write_backend_id:
-                    candidate_ids.append(pool.preferred_write_backend_id)
-                candidate_ids.extend(
-                    MediaStorageBackend.objects.exclude(pk__in=candidate_ids)
-                    .order_by("priority", "id")
-                    .values_list("pk", flat=True)
-                )
-                if not candidate_ids:
-                    if not MediaStorageBackend.objects.exists():
-                        raise MediaStorageSetupRequired("尚未配置可用的媒体存储。")
-                    raise MediaStorageExhausted("所有媒体存储均已停止新写入。")
-                last_error = None
-                for candidate_id in candidate_ids:
-                    try:
-                        candidate = MediaStorageBackend.objects.select_for_update().get(pk=candidate_id)
-                    except MediaStorageBackend.DoesNotExist:
-                        continue
-                    if not cls.state_for(candidate, incoming_size_bytes=len(data)).writable:
-                        continue
-                    try:
-                        # Build the adapter only from the row-locked, current
-                        # physical identity and credential version.
-                        candidate_adapter = cls.adapter_for(candidate)
-                        candidate_adapter.write(object_key, data, content_type=content_type)
-                    except MediaStorageOffline as error:
-                        last_error = error
-                        continue
-                    backend, adapter = candidate, candidate_adapter
-                    physical_write_succeeded = True
-                    break
-                if backend is None:
-                    raise MediaStorageExhausted("所有媒体存储当前均不可用。") from last_error
-                media = MediaObject.objects.create(
-                    storage_backend=backend,
+    def _reserve_media(cls, object_key, data, *, content_type, sha256, excluded_backend_ids):
+        now = timezone.now()
+        expires_at = now + timedelta(
+            seconds=max(60, int(getattr(settings, "MEDIA_WRITE_RESERVATION_TTL_SECONDS", 3600)))
+        )
+        with transaction.atomic():
+            # Only the short reservation transaction holds the pool and
+            # backend row locks. The following adapter.write happens after
+            # this transaction has committed.
+            pool = MediaStoragePoolSettings.objects.select_for_update().get_or_create(pk=1)[0]
+            candidate_ids = []
+            if pool.preferred_write_backend_id:
+                candidate_ids.append(pool.preferred_write_backend_id)
+            candidate_ids.extend(
+                MediaStorageBackend.objects.exclude(pk__in=candidate_ids)
+                .order_by("priority", "id")
+                .values_list("pk", flat=True)
+            )
+            if not candidate_ids:
+                if not MediaStorageBackend.objects.exists():
+                    raise MediaStorageSetupRequired("尚未配置可用的媒体存储。")
+                raise MediaStorageExhausted("所有媒体存储当前均不可用。")
+            for candidate_id in candidate_ids:
+                if candidate_id in excluded_backend_ids:
+                    continue
+                try:
+                    candidate = MediaStorageBackend.objects.select_for_update().get(pk=candidate_id)
+                except MediaStorageBackend.DoesNotExist:
+                    continue
+                if not cls.state_for(candidate, incoming_size_bytes=len(data)).writable:
+                    continue
+                reservation = MediaWriteReservation.objects.create(
+                    storage_backend=candidate,
                     object_key=object_key,
                     size_bytes=len(data),
                     content_type=str(content_type or "")[:120],
-                    sha256=hashlib.sha256(data).hexdigest(),
+                    sha256=sha256,
+                    expires_at=expires_at,
                 )
-                if pool.preferred_write_backend_id != backend.pk:
-                    pool.preferred_write_backend = backend
+                if pool.preferred_write_backend_id != candidate.pk:
+                    pool.preferred_write_backend = candidate
                     pool.save(update_fields=["preferred_write_backend", "updated_at"])
-        except Exception:
-            if physical_write_succeeded and adapter is not None:
+                return reservation, candidate
+        raise MediaStorageExhausted("所有媒体存储当前均不可用。")
+
+    @staticmethod
+    def _abandon_reservation(reservation):
+        with transaction.atomic():
+            current = MediaWriteReservation.objects.select_for_update().get(pk=reservation.pk)
+            if current.status == MediaWriteReservation.Status.PENDING:
+                current.status = MediaWriteReservation.Status.ABANDONED
+                current.abandoned_at = timezone.now()
+                current.save(update_fields=["status", "abandoned_at"])
+
+    @staticmethod
+    def _finalize_reservation(reservation):
+        with transaction.atomic():
+            current = MediaWriteReservation.objects.select_for_update().get(pk=reservation.pk)
+            if current.status != MediaWriteReservation.Status.PENDING:
+                raise MediaStorageExhausted("媒体写入预留已不再有效。")
+            if current.expires_at <= timezone.now():
+                current.status = MediaWriteReservation.Status.ABANDONED
+                current.abandoned_at = timezone.now()
+                current.save(update_fields=["status", "abandoned_at"])
+                raise MediaStorageExhausted("媒体写入预留已过期。")
+            media = MediaObject.objects.create(
+                id=current.pk,
+                storage_backend=current.storage_backend,
+                object_key=current.object_key,
+                size_bytes=current.size_bytes,
+                content_type=current.content_type,
+                sha256=current.sha256,
+            )
+            current.status = MediaWriteReservation.Status.FINALIZED
+            current.finalized_at = timezone.now()
+            current.save(update_fields=["status", "finalized_at"])
+            return media
+
+    @classmethod
+    def create_media(cls, object_key, content, *, content_type="application/octet-stream"):
+        object_key = safe_object_key(object_key)
+        data = bytes(content)
+        sha256 = hashlib.sha256(data).hexdigest()
+        excluded_backend_ids = set()
+        last_error = None
+        while True:
+            try:
+                reservation, backend = cls._reserve_media(
+                    object_key,
+                    data,
+                    content_type=content_type,
+                    sha256=sha256,
+                    excluded_backend_ids=excluded_backend_ids,
+                )
+            except MediaStorageExhausted as error:
+                if last_error is not None:
+                    raise MediaStorageExhausted("所有媒体存储当前均不可用。") from last_error
+                raise error
+
+            adapter = None
+            try:
+                adapter = cls.adapter_for(backend)
+                adapter.write(object_key, data, content_type=content_type)
+            except MediaStorageOffline as error:
+                last_error = error
+                excluded_backend_ids.add(backend.pk)
+                cls._abandon_reservation(reservation)
+                continue
+            except Exception:
+                cls._abandon_reservation(reservation)
+                raise
+
+            try:
+                media = cls._finalize_reservation(reservation)
+            except Exception:
+                cls._abandon_reservation(reservation)
                 try:
                     adapter.delete(object_key)
                 except Exception:
-                    # Preserve the original transaction error; cleanup is
-                    # retried by operational tooling if the backend is offline.
+                    # Preserve the original transaction error. The abandoned
+                    # reservation records the exact object for later audit;
+                    # maintenance never deletes remote objects implicitly.
                     pass
-            raise
+                raise
+            break
         media._storage_adapter = adapter
         return media
 
