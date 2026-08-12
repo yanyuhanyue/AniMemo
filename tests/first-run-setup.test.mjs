@@ -8,6 +8,12 @@ const setupPageSource = readFileSync(new URL("../src/pages/SetupPage.jsx", impor
 const adminLoginSource = readFileSync(new URL("../src/pages/AdminLoginPage.jsx", import.meta.url), "utf8");
 const apiSource = readFileSync(new URL("../src/lib/webAuthAdapter.js", import.meta.url), "utf8");
 const gitignoreSource = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
+const browserHarnessSources = [
+  "auth-field-focus-e2e.mjs",
+  "dashboard-initial-request-e2e.mjs",
+  "dashboard-mutation-e2e.mjs",
+  "performance-frontend-e2e.mjs",
+].map((filename) => [filename, readFileSync(new URL(filename, import.meta.url), "utf8")]);
 
 
 test("uninitialized installations are gated to the browser first-run route", () => {
@@ -38,4 +44,10 @@ test("successful setup hands an explicit completion message to staff login", () 
 
 test("local first-run private state cannot be added to Git accidentally", () => {
   assert.match(gitignoreSource, /^\/runtime\/private\/$/m);
+});
+
+test("browser harnesses declare an initialized installation instead of bypassing the gate", () => {
+  for (const [filename, source] of browserHarnessSources) {
+    assert.match(source, /path === "setup\/status\/"[\s\S]*state: "initialized"/, filename);
+  }
 });

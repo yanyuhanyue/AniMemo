@@ -178,6 +178,7 @@ try {
     const path = url.pathname.replace(/^\/api\/v1\//, "");
     const method = request.method();
 
+    if (path === "setup/status/") return json(route, { state: "initialized", accepting_setup: false, expires_at: null });
     if (path === "auth/csrf/") return json(route, { csrf_token: "browser-test-token" });
     if (path === "token/refresh/") return json(route, { access: "browser-test-access", user: { id: 7, username: "browser-test", is_staff: false } });
     if (path === "auth/me/") return json(route, { id: 7, username: "browser-test", is_staff: false });

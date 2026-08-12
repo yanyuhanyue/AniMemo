@@ -612,7 +612,7 @@ class FirstRunSetupPostgreSQLConcurrencyTests(TransactionTestCase):
 
     def setUp(self):
         super().setUp()
-        self.installation = InstallationState.load()
+        self.installation, _created = InstallationState.objects.get_or_create(pk=1)
         self.installation.status = InstallationState.Status.UNINITIALIZED
         self.installation.setup_code_hash = ""
         self.installation.setup_code_issued_at = None
