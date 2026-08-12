@@ -52,32 +52,36 @@ class FakeSource:
             if item["release"]["channel"] in accepted
         ]
 
-    def fetch_verified(self, version, updater_version="1.0.0"):
+    def fetch_verified(self, version, updater_version="1.0.0", refresh=False):
         return self.manifests[version]
 
 
 class FakeDeployment:
-    def __init__(self): self.calls = []
+    def __init__(self):
+        self.calls = []
+        self.enabled_plugin_apis = {2}
     def preflight(self, item): self.calls.append("preflight")
     def verify_recent_backup(self): self.calls.append("backup_check")
     def backup_database(self, operation_id): self.calls.append("backup")
     def pull(self, item): self.calls.append("pull")
     def migrate(self, item): self.calls.append("migrate")
     def bootstrap(self, item): self.calls.append("bootstrap")
-    def inspect_enabled_plugin_apis(self, item): return {2}
+    def inspect_enabled_plugin_apis(self, item):
+        self.calls.append("inspect_plugins")
+        return self.enabled_plugin_apis
     def switch(self, item): self.calls.append(f"switch:{item['release']['version']}")
     def verify_health(self, item): self.calls.append("health")
 
 
 class UpdateAgentTests(unittest.TestCase):
-    def make_agent(self, directory):
+    def make_agent(self, directory, *, runtime_refresh_seconds=30):
         current = manifest("v1.0.0", "1")
         target = manifest("v1.0.1", "2")
         root = Path(directory)
         slots = ReleaseSlots(root / "releases")
         slots.import_current(current)
         runtime = RuntimeState(root / "state")
-        runtime.initialize_from_manifest(current)
+        runtime.initialize_from_manifest(current, enabled_plugin_apis={2})
         operations = OperationStore(root / "state")
         source = FakeSource([current, target])
         deployment = FakeDeployment()
@@ -98,6 +102,7 @@ class UpdateAgentTests(unittest.TestCase):
             runtime_state=runtime,
             executor=executor,
             background=False,
+            runtime_refresh_seconds=runtime_refresh_seconds,
         )
         return agent, deployment
 
@@ -139,6 +144,26 @@ class UpdateAgentTests(unittest.TestCase):
             self.assertTrue(all(item["channel"] == "stable" for item in releases["releases"]))
             self.assertEqual(operation["status"], "succeeded")
             self.assertEqual(logs["events"][-1]["status"], "succeeded")
+
+    def test_status_exposes_live_previous_compatibility_for_rollback_ux(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory, runtime_refresh_seconds=0)
+            target = agent.source.manifests["v1.0.1"]
+            target["compatibility"]["database"]["appAccepts"].append("animemo-db-v2")
+            target["compatibility"]["pluginSdk"]["supportedApis"].append(3)
+            plan = agent.dispatch({"operation": "plan_update", "params": {"version": "v1.0.1"}})
+            agent.dispatch({
+                "operation": "apply_update",
+                "params": {"planId": plan["planId"], "confirmation": "APPLY v1.0.1"},
+            })
+            agent.runtime_state.update(databaseContract="animemo-db-v2")
+            agent.executor.deployment.enabled_plugin_apis = {3}
+
+            status = agent.dispatch({"operation": "get_status", "params": {}})
+
+            self.assertFalse(status["previousCompatibility"]["allowed"])
+            self.assertEqual(status["previousCompatibility"]["decision"], "unsafe_downgrade")
+            self.assertEqual(status["runtime"]["enabledPluginApis"], [3])
 
     def test_background_executor_exception_is_persisted_in_operation_journal(self):
         with tempfile.TemporaryDirectory() as directory:

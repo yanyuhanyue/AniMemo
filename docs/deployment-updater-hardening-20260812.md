@@ -98,11 +98,19 @@ The Agent has powerful host authority because Docker access is effectively privi
 - bounded RPC and redacted logs;
 - Django receives only the socket, never Docker authority.
 
+Agent state、plans、CURRENT/PREVIOUS/history、runtime compatibility、global lock、Release cache 与 backup 输出都绑定固定词法 root。目录 symlink/junction、状态或 backup hard link、可预测临时文件和非 socket 占用的 RPC 路径会被拒绝；JSON、runtime env 与 gzip backup 使用随机私有临时文件、`0600`、fsync 和 atomic replace，不会通过预置 link 读写固定 root 之外内容。
+
+Preflight 现在明确阻断低磁盘/低内存、Docker/Compose 不可用、PostgreSQL/Redis/API/Web 不健康、当前 `/health/` 或 `/` 失败，以及 backup gate 不满足。无 migration 在 pull 前完整验证近期 backup；有 migration 在 pull 前确认固定 backup root 可写，并在 migration 前创建新 backup。
+
+切换后的 stable window 不再以单次 HTTP 200 作为成功：每次 observation 都验证 API/Web health 与 restart count、`/health/`、`/`、`/login`、`/api/schema/`、`/api/docs/`，并扫描同一窗口内 stdout/stderr 的 HTTP 5xx 与 critical logs。`runtime-images.env` 与 JSON state 都使用 `0600`、fsync 和 atomic replace；Operation journal 在持久化边界统一脱敏。
+
 Full contract: `docs/update-agent-v1.md`.
 
 ## Compatibility, migration and rollback
 
-Safe Switch is computed from live database/configuration contracts, enabled Plugin SDK APIs and target app acceptance. The model is explicit application compatibility metadata, not migration filename comparison.
+Safe Switch is computed from live database/configuration contracts, actual enabled Plugin SDK APIs and target app acceptance. Bootstrap inspects the current exact API image instead of treating all Core-supported APIs as enabled. Staff status/list/plan use a short read-only cache; apply and rollback force a fresh inspection before switching. The model is explicit application compatibility metadata, not migration filename comparison.
+
+Plan 中持久化的 Manifest 只作为 exact immutable binding。apply 和 rollback 进入 `FETCHING` 时都会绕过 Release cache，再次验证 exact GitHub tag、Release metadata、checksums 与 attestations；`VERIFYING` 要求重新取得的 Manifest 与 plan/PREVIOUS 完全一致。任何同版本内容差异都在 pull/migration/switch 前失败。
 
 - no migration: recent verified backup required; automatic app rollback can be safe;
 - additive backward-compatible migration: fresh backup, explicit migration, possible app rollback with database retained;
@@ -112,7 +120,7 @@ Database reverse migration and automatic database restore are absent by design.
 
 ## Staff UX and API
 
-The real Staff system surface shows CURRENT/PREVIOUS identities, channel selection, compatibility, exact confirmation, migration/rollback facts, persistent Operation progress and history. Stable is the default; RC/Beta require superuser, with Beta marked experimental. Mutation endpoints require staff capability, CSRF, throttle and audit records. Both apply and rollback return a durable background Operation rather than keeping an HTTP request open for host work.
+The real Staff system surface shows CURRENT/PREVIOUS identities, channel selection, compatibility, exact confirmation, migration/rollback facts, persistent Operation progress and history. PREVIOUS has its own live compatibility result; an Unsafe Downgrade is visibly blocked and the rollback controls are disabled before the Agent's final server-side recheck. Stable is the default; RC/Beta require superuser, with Beta marked experimental. Mutation endpoints require staff capability, CSRF, throttle and audit records. Both apply and rollback return a durable background Operation rather than keeping an HTTP request open for host work.
 
 ## Bootstrap and cutover
 

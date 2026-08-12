@@ -4,7 +4,6 @@ import re
 
 from .errors import RequestRejected
 
-
 RELEASE_VERSION = re.compile(
     r"^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:beta|rc)\.[1-9][0-9]*)?$"
 )

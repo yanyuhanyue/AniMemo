@@ -1,26 +1,33 @@
 from __future__ import annotations
 
-import hashlib
 import gzip
+import hashlib
+import http.client
 import json
 import os
+import re
 import shutil
+import stat
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from release.contract import API_REPOSITORY, WEB_REPOSITORY
 
 from .commands import CommandRunner
 from .errors import CommandFailed, StateError
-from .state import _atomic_json
-
+from .state import _atomic_json, _atomic_text
 
 PRODUCTION_APP_ROOT = Path("/opt/1panel/docker/compose/anime-journal/app")
 PRODUCTION_DATA_ROOT = Path("/data/anime-journal")
 PRODUCTION_STATE_ROOT = Path("/var/lib/animemo-updater")
 MAX_BACKUP_AGE = timedelta(hours=24)
+MIN_AVAILABLE_MEMORY = 512 * 1024 * 1024
+HEALTH_PATHS = ("/health/", "/", "/login", "/api/schema/", "/api/docs/")
+HTTP_5XX_LOG = re.compile(r'"\s5\d\d(?:\s|$)')
+CRITICAL_LOG = re.compile(r"(?im)(?:^|\b)(?:traceback \(most recent call last\)|critical|fatal|panic)(?:\b|:)")
 
 
 @dataclass(frozen=True)
@@ -52,14 +59,102 @@ class HostPaths:
 
 
 class ImmutableComposeDeployment:
-    def __init__(self, paths: HostPaths, *, runner=None, stable_observations: int = 3, observation_seconds: int = 5):
+    def __init__(
+        self,
+        paths: HostPaths,
+        *,
+        runner=None,
+        stable_observations: int = 3,
+        observation_seconds: int = 5,
+        memory_info_path: Path = Path("/proc/meminfo"),
+        http_probe=None,
+    ):
         self.paths = paths
         self.runner = runner or CommandRunner()
         self.stable_observations = stable_observations
         self.observation_seconds = observation_seconds
+        self.memory_info_path = memory_info_path
+        self.http_probe = http_probe or self._http_probe
         self.compose_file = self.paths.app_root / "deploy" / "docker-compose.yml"
         self.env_file = self.paths.app_root / ".env.production"
         self.runtime_env = self.paths.state_root / "runtime-images.env"
+
+    def _env_value(self, name: str, default: str = "") -> str:
+        for raw_line in self.env_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == name:
+                return value.strip().strip("\"'")
+        return default
+
+    @staticmethod
+    def _http_probe(path: str, *, host: str, port: int, forwarded_proto: str) -> int:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request("GET", path, headers={"Host": host, "X-Forwarded-Proto": forwarded_proto})
+            response = connection.getresponse()
+            response.read()
+            return response.status
+        finally:
+            connection.close()
+
+    def _public_endpoint(self) -> tuple[str, int, str]:
+        parsed = urlparse(self._env_value("FRONTEND_URL"))
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise StateError("AniMemo FRONTEND_URL is unavailable for local health checks")
+        raw_port = self._env_value("ANIME_JOURNAL_PORT", "8088")
+        try:
+            port = int(raw_port)
+        except ValueError as error:
+            raise StateError("AniMemo loopback HTTP port is invalid") from error
+        if not 1 <= port <= 65535:
+            raise StateError("AniMemo loopback HTTP port is invalid")
+        return parsed.hostname, port, parsed.scheme
+
+    def _container_state(self, manifest: dict[str, object], service: str) -> tuple[str, int]:
+        container = self._compose(manifest, "ps", "-q", service, timeout=30).stdout.strip()
+        if not container:
+            raise StateError(f"AniMemo {service} container is unavailable")
+        result = self.runner.run(
+            [
+                "/usr/bin/docker", "inspect", "--format",
+                "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}} {{.RestartCount}}",
+                container,
+            ],
+            timeout=30,
+        ).stdout.split()
+        if len(result) != 2:
+            raise StateError(f"AniMemo {service} container state is invalid")
+        try:
+            restarts = int(result[1])
+        except ValueError as error:
+            raise StateError(f"AniMemo {service} container restart count is invalid") from error
+        return result[0], restarts
+
+    def _verify_http_paths(self, paths: tuple[str, ...]) -> None:
+        host, port, forwarded_proto = self._public_endpoint()
+        for path in paths:
+            try:
+                status = self.http_probe(path, host=host, port=port, forwarded_proto=forwarded_proto)
+            except OSError as error:
+                raise StateError(f"AniMemo HTTP contract failed for {path}") from error
+            if status != 200:
+                raise StateError(f"AniMemo HTTP contract failed for {path}: HTTP {status}")
+
+    def _verify_recent_logs(self, manifest: dict[str, object], *, since: str) -> None:
+        for service in ["api", "web"]:
+            container = self._compose(manifest, "ps", "-q", service, timeout=30).stdout.strip()
+            if not container:
+                raise StateError(f"AniMemo {service} container is unavailable")
+            result = self.runner.run(
+                ["/usr/bin/docker", "logs", "--since", since, container],
+                timeout=30,
+            )
+            logs = f"{result.stdout}\n{result.stderr}"
+            if HTTP_5XX_LOG.search(logs) or CRITICAL_LOG.search(logs):
+                raise StateError(f"AniMemo {service} logs failed the stable observation gate")
 
     @staticmethod
     def image_environment(manifest: dict[str, object]) -> dict[str, str]:
@@ -92,20 +187,65 @@ class ImmutableComposeDeployment:
         usage = shutil.disk_usage(self.paths.data_root)
         if usage.free < 2 * 1024 * 1024 * 1024:
             raise StateError("AniMemo data root has less than 2 GiB free")
+        try:
+            memory_fields = {
+                key: value
+                for key, value in (
+                    line.split(":", 1)
+                    for line in self.memory_info_path.read_text(encoding="utf-8").splitlines()
+                    if ":" in line
+                )
+            }
+            available_kib = int(memory_fields["MemAvailable"].strip().split()[0])
+        except (OSError, KeyError, ValueError, IndexError) as error:
+            raise StateError("AniMemo host available memory cannot be determined") from error
+        if available_kib * 1024 < MIN_AVAILABLE_MEMORY:
+            raise StateError("AniMemo host has less than 512 MiB available memory")
         self.runner.run(["/usr/bin/docker", "version", "--format", "{{.Server.Version}}"], timeout=15)
         self._compose(manifest, "config", "--quiet", timeout=30)
         services = set(self._compose(manifest, "ps", "--services", "--filter", "status=running", timeout=30).stdout.split())
         if not {"postgres", "redis", "api", "web"}.issubset(services):
             raise StateError("AniMemo Compose project is not fully running")
+        for service in ["postgres", "redis", "api", "web"]:
+            status, _ = self._container_state(manifest, service)
+            if status != "healthy":
+                raise StateError(f"AniMemo {service} container is not healthy")
+        self._verify_http_paths(("/health/", "/"))
+        if manifest["compatibility"]["database"]["migration"]["required"]:
+            backup_root = self.paths.data_root / "backups"
+            if not backup_root.is_dir() or backup_root.is_symlink() or not os.access(backup_root, os.W_OK):
+                raise StateError("AniMemo backup root is unavailable for a fresh migration backup")
+        else:
+            self.verify_recent_backup()
 
     def verify_recent_backup(self, *, now: datetime | None = None) -> None:
-        metadata_files = sorted((self.paths.data_root / "backups").glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        backup_root = self.paths.data_root / "backups"
+        if not backup_root.is_dir() or backup_root.is_symlink():
+            raise StateError("AniMemo backup root is unavailable")
+        metadata_files = sorted(backup_root.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
         if not metadata_files:
             raise StateError("No verified AniMemo database backup metadata is available")
-        payload = json.loads(metadata_files[0].read_text(encoding="utf-8"))
+        metadata = metadata_files[0]
+        metadata_stat = metadata.lstat()
+        if metadata.is_symlink() or not stat.S_ISREG(metadata_stat.st_mode) or metadata_stat.st_nlink != 1:
+            raise StateError("Latest backup metadata must not be a link")
+        try:
+            payload = json.loads(metadata.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise StateError("Latest backup metadata is invalid") from error
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(payload.get("path"), str)
+            or not payload["path"]
+            or not isinstance(payload.get("compressedSha256"), str)
+        ):
+            raise StateError("Latest backup metadata is invalid")
         backup = Path(payload["path"])
-        if backup.parent.resolve() != (self.paths.data_root / "backups").resolve() or not backup.is_file():
+        if backup.parent.resolve() != backup_root.resolve() or not backup.is_file():
             raise StateError("Latest backup metadata points outside the AniMemo backup root")
+        backup_stat = backup.lstat()
+        if backup.is_symlink() or not stat.S_ISREG(backup_stat.st_mode) or backup_stat.st_nlink != 1:
+            raise StateError("Latest AniMemo database backup must not be a link")
         digest = hashlib.sha256(backup.read_bytes()).hexdigest()
         if digest != payload.get("compressedSha256"):
             raise StateError("Latest AniMemo database backup checksum is invalid")
@@ -142,6 +282,7 @@ class ImmutableComposeDeployment:
             target,
             cwd=self.paths.app_root,
             timeout=600,
+            root=self.paths.data_root,
         )
         compressed_digest = hashlib.sha256(target.read_bytes()).hexdigest()
         metadata = {
@@ -151,7 +292,11 @@ class ImmutableComposeDeployment:
             "compressedSha256": compressed_digest,
             **result,
         }
-        _atomic_json(target.with_suffix(target.suffix + ".json"), metadata)
+        _atomic_json(
+            target.with_suffix(target.suffix + ".json"),
+            metadata,
+            root=self.paths.data_root,
+        )
         return str(target)
 
     def pull(self, manifest: dict[str, object]) -> None:
@@ -181,31 +326,22 @@ class ImmutableComposeDeployment:
         return set(values)
 
     def switch(self, manifest: dict[str, object]) -> None:
-        self.paths.state_root.mkdir(parents=True, exist_ok=True)
         env = self.image_environment(manifest)
-        self.runtime_env.write_text(
+        _atomic_text(
+            self.runtime_env,
             f"ANIMEMO_API_IMAGE={env['ANIMEMO_API_IMAGE']}\nANIMEMO_WEB_IMAGE={env['ANIMEMO_WEB_IMAGE']}\n",
-            encoding="utf-8",
-            newline="\n",
+            root=self.paths.state_root,
         )
-        os.chmod(self.runtime_env, 0o600)
         self._compose(manifest, "up", "-d", "--no-deps", "--force-recreate", "api", "web", timeout=600)
 
     def verify_health(self, manifest: dict[str, object]) -> None:
+        observation_started = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         for observation in range(self.stable_observations):
             for service in ["api", "web"]:
-                container = self._compose(manifest, "ps", "-q", service, timeout=30).stdout.strip()
-                if not container:
-                    raise CommandFailed(f"{service} container is unavailable")
-                result = self.runner.run(
-                    [
-                        "/usr/bin/docker", "inspect", "--format",
-                        "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}} {{.RestartCount}}",
-                        container,
-                    ],
-                    timeout=30,
-                ).stdout.split()
-                if result != ["healthy", "0"]:
+                status, restarts = self._container_state(manifest, service)
+                if status != "healthy" or restarts != 0:
                     raise CommandFailed(f"{service} failed stable health observation")
+            self._verify_http_paths(HEALTH_PATHS)
+            self._verify_recent_logs(manifest, since=observation_started)
             if observation + 1 < self.stable_observations:
                 time.sleep(self.observation_seconds)

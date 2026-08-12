@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -8,6 +10,20 @@ from pathlib import Path
 from release.contract import build_manifest
 from updater.errors import StateError
 from updater.slots import ReleaseSlots
+
+
+def link_directory(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            raise
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
 
 def manifest(version: str, digit: str):
@@ -79,6 +95,82 @@ class ReleaseSlotTests(unittest.TestCase):
             slots.restore_previous(operation_id="c" * 32)
             self.assertEqual(slots.read()["current"]["release"]["version"], "v1.0.1")
             self.assertEqual(slots.read()["previous"]["release"]["version"], "v1.0.0")
+
+    def test_import_rejects_a_history_directory_link_without_partial_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release_root = root / "releases"
+            outside = root / "outside"
+            release_root.mkdir()
+            outside.mkdir()
+            link_directory(release_root / "history", outside)
+            slots = ReleaseSlots(release_root)
+
+            with self.assertRaisesRegex(StateError, "directory"):
+                slots.import_current(manifest("v1.0.0", "1"))
+
+            self.assertFalse((release_root / "CURRENT.json").exists())
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_read_rejects_a_linked_release_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            ReleaseSlots(outside).import_current(manifest("v1.0.0", "1"))
+            link_directory(root / "releases", outside)
+            slots = ReleaseSlots(root / "releases")
+
+            with self.assertRaisesRegex(StateError, "directory"):
+                slots.read()
+
+    def test_read_rejects_a_linked_history_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release_root = root / "releases"
+            outside = root / "outside"
+            first = manifest("v1.0.0", "1")
+            ReleaseSlots(release_root).import_current(first)
+            stored_history = release_root / "history"
+            outside.mkdir()
+            for item in stored_history.iterdir():
+                item.replace(outside / item.name)
+            stored_history.rmdir()
+            link_directory(stored_history, outside)
+            slots = ReleaseSlots(release_root)
+
+            with self.assertRaisesRegex(StateError, "directory"):
+                slots.read()
+
+    def test_read_rejects_a_hard_linked_current_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release_root = root / "releases"
+            outside_root = root / "outside"
+            release_root.mkdir()
+            ReleaseSlots(outside_root).import_current(manifest("v1.0.0", "1"))
+            (release_root / "CURRENT.json").hardlink_to(outside_root / "CURRENT.json")
+            slots = ReleaseSlots(release_root)
+
+            with self.assertRaisesRegex(StateError, "file"):
+                slots.read()
+
+    def test_read_rejects_a_hard_linked_history_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release_root = root / "releases"
+            outside_root = root / "outside"
+            first = manifest("v1.0.0", "1")
+            ReleaseSlots(release_root).import_current(first)
+            ReleaseSlots(outside_root).import_current(first)
+            history_name = "v1.0.0.json"
+            (release_root / "history" / history_name).unlink()
+            (release_root / "history" / history_name).hardlink_to(
+                outside_root / "history" / history_name
+            )
+            slots = ReleaseSlots(release_root)
+
+            with self.assertRaisesRegex(StateError, "file"):
+                slots.read()
 
 
 if __name__ == "__main__":

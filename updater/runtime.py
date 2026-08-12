@@ -18,7 +18,6 @@ from .slots import ReleaseSlots
 from .source import GitHubReleaseSource
 from .state import OperationStore
 
-
 PRODUCTION_SOCKET_PATH = Path("/run/animemo-updater/updater.sock")
 PRODUCTION_BOOTSTRAP_MANIFEST = Path("/var/lib/animemo-updater/bootstrap/release-manifest.json")
 
@@ -32,6 +31,7 @@ class HostAgentRuntime:
     bootstrap_manifest: Path
     slots: ReleaseSlots
     runtime_state: RuntimeState
+    deployment: ImmutableComposeDeployment
     agent: UpdateAgent
     server: UnixRpcServer
 
@@ -43,7 +43,7 @@ class HostAgentRuntime:
         socket_path: Path,
         bootstrap_manifest: Path,
         background: bool = True,
-    ) -> "HostAgentRuntime":
+    ) -> HostAgentRuntime:
         state_root = paths.state_root
         slots = ReleaseSlots(state_root / "releases")
         runtime_state = RuntimeState(state_root)
@@ -75,12 +75,13 @@ class HostAgentRuntime:
             bootstrap_manifest=bootstrap_manifest,
             slots=slots,
             runtime_state=runtime_state,
+            deployment=deployment,
             agent=agent,
             server=server,
         )
 
     @classmethod
-    def production(cls) -> "HostAgentRuntime":
+    def production(cls) -> HostAgentRuntime:
         return cls._build(
             paths=HostPaths.production(),
             socket_path=PRODUCTION_SOCKET_PATH,
@@ -97,7 +98,7 @@ class HostAgentRuntime:
         socket_path: Path,
         bootstrap_manifest: Path,
         background: bool = False,
-    ) -> "HostAgentRuntime":
+    ) -> HostAgentRuntime:
         return cls._build(
             paths=HostPaths.testing(app=app_root, data=data_root, state=state_root),
             socket_path=socket_path.resolve(),
@@ -134,11 +135,19 @@ class HostAgentRuntime:
         if current is not None:
             if current != manifest:
                 raise StateError("Bootstrap manifest conflicts with partially imported CURRENT")
-            self.runtime_state.initialize_from_manifest(manifest)
+            enabled_plugin_apis = self.deployment.inspect_enabled_plugin_apis(manifest)
+            self.runtime_state.initialize_from_manifest(
+                manifest,
+                enabled_plugin_apis=enabled_plugin_apis,
+            )
             return self._identity(manifest)
 
+        enabled_plugin_apis = self.deployment.inspect_enabled_plugin_apis(manifest)
         self.slots.import_current(manifest)
-        self.runtime_state.initialize_from_manifest(manifest)
+        self.runtime_state.initialize_from_manifest(
+            manifest,
+            enabled_plugin_apis=enabled_plugin_apis,
+        )
         return self._identity(manifest)
 
     def status(self) -> dict[str, object]:

@@ -31,7 +31,7 @@ def manifest():
         application_rollback="safe",
         configuration_contract="animemo-config-v1",
         configuration_accepts=["animemo-config-v1"],
-        plugin_sdk_apis=[2],
+        plugin_sdk_apis=[1, 2],
         promoted_from="v1.0.0-rc.1",
     )
 
@@ -97,11 +97,13 @@ class HostAgentCliTests(unittest.TestCase):
                 bootstrap_manifest=bootstrap_manifest,
             )
 
-            identity = runtime.import_current()
+            with patch.object(runtime.deployment, "inspect_enabled_plugin_apis", return_value={2}):
+                identity = runtime.import_current()
 
             self.assertEqual(identity["version"], "v1.0.0")
             self.assertEqual(runtime.slots.read()["current"], manifest())
             self.assertEqual(runtime.runtime_state.read()["databaseContract"], "animemo-db-v1")
+            self.assertEqual(runtime.runtime_state.read()["enabledPluginApis"], [2])
             with self.assertRaisesRegex(StateError, "already initialized"):
                 runtime.import_current()
 

@@ -116,7 +116,7 @@ class LinuxUpdaterE2ETests(unittest.TestCase):
             slots = ReleaseSlots(root / "releases")
             slots.import_current(first)
             runtime_state = RuntimeState(root / "state")
-            runtime_state.initialize_from_manifest(first)
+            runtime_state.initialize_from_manifest(first, enabled_plugin_apis={2})
             operations = OperationStore(root / "state")
             deployment = IsolatedDeployment()
             deployment.live_version = first["release"]["version"]

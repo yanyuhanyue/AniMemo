@@ -6,11 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from release.contract import build_manifest
-from updater.compatibility import DeploymentContext, plan_switch
 from updater.executor import UpdateExecutor
+from updater.runtime_state import RuntimeState
 from updater.slots import ReleaseSlots
 from updater.state import OperationStore
-from updater.runtime_state import RuntimeState
 
 
 def manifest(
@@ -48,16 +47,17 @@ class FakeReleaseSource:
         self.target = target
         self.verified = []
 
-    def fetch_verified(self, version):
-        self.verified.append(version)
+    def fetch_verified(self, version, updater_version="1.0.0", refresh=False):
+        self.verified.append((version, refresh))
         return self.target
 
 
 class FakeDeployment:
-    def __init__(self, *, fail_at=None):
+    def __init__(self, *, fail_at=None, enabled_plugin_apis=None):
         self.fail_at = fail_at
         self.failed = False
         self.calls = []
+        self.enabled_plugin_apis = enabled_plugin_apis or {2}
 
     def _call(self, name, *args):
         self.calls.append((name, *args))
@@ -73,7 +73,7 @@ class FakeDeployment:
     def bootstrap(self, manifest): self._call("bootstrap", manifest["release"]["version"])
     def switch(self, manifest): self._call("switch", manifest["release"]["version"])
     def verify_health(self, manifest): self._call("verify_health", manifest["release"]["version"])
-    def inspect_enabled_plugin_apis(self, manifest): self._call("inspect_enabled_plugin_apis", manifest["release"]["version"]); return {2}
+    def inspect_enabled_plugin_apis(self, manifest): self._call("inspect_enabled_plugin_apis", manifest["release"]["version"]); return self.enabled_plugin_apis
 
 
 class UpdateExecutorTests(unittest.TestCase):
@@ -83,7 +83,7 @@ class UpdateExecutorTests(unittest.TestCase):
         slots.import_current(current)
         store = OperationStore(root / "state")
         runtime_state = RuntimeState(root / "state")
-        runtime_state.initialize_from_manifest(current)
+        runtime_state.initialize_from_manifest(current, enabled_plugin_apis={2})
         executor = UpdateExecutor(
             store=store,
             slots=slots,
@@ -127,6 +127,23 @@ class UpdateExecutorTests(unittest.TestCase):
             self.assertNotIn("switch", [call[0] for call in deployment.calls])
             self.assertEqual(slots.read()["current"]["release"]["version"], "v1.0.0")
 
+    def test_apply_refetches_and_rejects_a_release_that_differs_from_the_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = manifest("v1.0.0", "1")
+            planned = manifest("v1.0.1", "2")
+            changed = manifest("v1.0.1", "3")
+            deployment = FakeDeployment()
+            executor, store, slots = self.setup_executor(directory, current, changed, deployment)
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+
+            executor.apply(operation["id"], planned)
+
+            self.assertEqual(executor.release_source.verified, [("v1.0.1", True)])
+            self.assertEqual(store.get(operation["id"])["status"], "failed_pre_switch")
+            self.assertNotIn("pull", [call[0] for call in deployment.calls])
+            self.assertNotIn("switch", [call[0] for call in deployment.calls])
+            self.assertEqual(slots.read()["current"]["release"]["version"], "v1.0.0")
+
     def test_health_failure_rolls_back_only_the_application_when_safe(self):
         with tempfile.TemporaryDirectory() as directory:
             current = manifest("v1.0.0", "1", accepts=["animemo-db-v1", "animemo-db-v2"])
@@ -146,13 +163,47 @@ class UpdateExecutorTests(unittest.TestCase):
             current = manifest("v1.0.0", "1")
             target = manifest("v1.1.0", "2", migration=True, rollback="conditional", contract="animemo-db-v2", accepts=["animemo-db-v1", "animemo-db-v2"])
             deployment = FakeDeployment(fail_at="verify_health")
-            executor, store, slots = self.setup_executor(directory, current, target, deployment)
+            executor, store, _ = self.setup_executor(directory, current, target, deployment)
             operation = store.create("apply_update", {"version": "v1.1.0"})
 
             executor.apply(operation["id"], target)
 
             self.assertEqual(store.get(operation["id"])["status"], "manual_recovery_required")
             self.assertEqual(len([call for call in deployment.calls if call[0] == "switch"]), 1)
+
+    def test_rollback_rechecks_actual_enabled_plugin_apis_before_switch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = manifest("v1.1.0", "2")
+            previous = manifest("v1.0.0", "1")
+            deployment = FakeDeployment(enabled_plugin_apis={3})
+            executor, store, slots = self.setup_executor(directory, current, previous, deployment)
+            slots.promote(previous, operation_id="seed")
+            slots.restore_previous(operation_id="seed-restore")
+            operation = store.create("rollback_previous", {"version": "v1.0.0"})
+
+            executor.rollback(operation["id"], previous)
+
+            self.assertEqual(store.get(operation["id"])["status"], "failed_pre_switch")
+            self.assertNotIn("switch", [call[0] for call in deployment.calls])
+
+    def test_rollback_refetches_and_rejects_a_release_that_differs_from_previous(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = manifest("v1.1.0", "2")
+            previous = manifest("v1.0.0", "1")
+            changed = manifest("v1.0.0", "3")
+            deployment = FakeDeployment()
+            executor, store, slots = self.setup_executor(directory, current, changed, deployment)
+            slots.promote(previous, operation_id="seed")
+            slots.restore_previous(operation_id="seed-restore")
+            operation = store.create("rollback_previous", {"version": "v1.0.0"})
+
+            executor.rollback(operation["id"], previous)
+
+            self.assertEqual(executor.release_source.verified, [("v1.0.0", True)])
+            self.assertEqual(store.get(operation["id"])["status"], "failed_pre_switch")
+            self.assertNotIn("pull", [call[0] for call in deployment.calls])
+            self.assertNotIn("switch", [call[0] for call in deployment.calls])
+            self.assertEqual(slots.read()["current"]["release"]["version"], "v1.1.0")
 
 
 if __name__ == "__main__":

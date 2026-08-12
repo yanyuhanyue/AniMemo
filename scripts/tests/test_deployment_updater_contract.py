@@ -5,7 +5,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -51,6 +50,50 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("/run/animemo-updater 0750 animemo-updater animemo-api", tmpfiles)
         self.assertIn("socket.AF_UNIX", server)
         self.assertNotIn("socket.AF_INET, socket.SOCK_STREAM", server)
+
+    def test_agent_preflight_and_stable_window_cover_the_public_contract(self):
+        deployment = (ROOT / "updater/deployment.py").read_text(encoding="utf-8")
+
+        self.assertIn("MIN_AVAILABLE_MEMORY = 512 * 1024 * 1024", deployment)
+        self.assertIn('HEALTH_PATHS = ("/health/", "/", "/login", "/api/schema/", "/api/docs/")', deployment)
+        self.assertIn('["postgres", "redis", "api", "web"]', deployment)
+        self.assertIn('self._verify_http_paths(("/health/", "/"))', deployment)
+        self.assertIn('["/usr/bin/docker", "logs", "--since", since, container]', deployment)
+        self.assertIn('logs = f"{result.stdout}\\n{result.stderr}"', deployment)
+        self.assertIn("self.verify_recent_backup()", deployment)
+
+    def test_agent_switch_is_scoped_and_plugin_compatibility_uses_live_state(self):
+        deployment = (ROOT / "updater/deployment.py").read_text(encoding="utf-8")
+        executor = (ROOT / "updater/executor.py").read_text(encoding="utf-8")
+        command = (
+            ROOT / "backend/plugin_host/management/commands/list_enabled_plugin_apis.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"up", "-d", "--no-deps", "--force-recreate", "api", "web"', deployment)
+        self.assertIn('"python", "manage.py", "list_enabled_plugin_apis"', deployment)
+        self.assertIn("inspect_enabled_plugin_apis(current)", executor)
+        self.assertIn("inspect_enabled_plugin_apis(target_manifest)", executor)
+        self.assertIn("refresh=True", executor)
+        self.assertIn("verified_manifest != target_manifest", executor)
+        self.assertIn("verified_manifest != previous_manifest", executor)
+        self.assertIn("PluginDeployment.objects.filter(enabled=True)", command)
+        self.assertNotIn("[2]", command)
+
+    def test_agent_private_files_and_socket_are_bound_to_fixed_roots(self):
+        commands = (ROOT / "updater/commands.py").read_text(encoding="utf-8")
+        deployment = (ROOT / "updater/deployment.py").read_text(encoding="utf-8")
+        server = (ROOT / "updater/server.py").read_text(encoding="utf-8")
+        state = (ROOT / "updater/state.py").read_text(encoding="utf-8")
+
+        self.assertIn("tempfile.mkstemp", commands)
+        self.assertIn("_ensure_private_directory(root, path.parent)", commands)
+        self.assertIn("root=self.paths.data_root", deployment)
+        self.assertIn("root=self.paths.state_root", deployment)
+        self.assertIn("tempfile.mkstemp", state)
+        self.assertIn("metadata.st_nlink != 1", state)
+        self.assertIn("opened.st_nlink != 1", state)
+        self.assertIn("stat.S_ISSOCK(existing.st_mode)", server)
+        self.assertNotIn("self.socket_path.unlink(missing_ok=True)", server)
 
     def test_installer_only_manages_animemo_updater_assets(self):
         installer = (ROOT / "deploy/install-updater.sh").read_text(encoding="utf-8")

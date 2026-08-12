@@ -14,4 +14,4 @@ class Command(BaseCommand):
         for deployment in deployments:
             manifest = deployment.current_version.manifest_snapshot
             values.add(int(manifest["sdkApi"]))
-        self.stdout.write(json.dumps(sorted(values or {2})))
+        self.stdout.write(json.dumps(sorted(values)))

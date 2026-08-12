@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-
 _HEADER = re.compile(r"(?i)(authorization\s*:\s*(?:bearer|basic)\s+)[^\s,;]+")
 _KEY_VALUE = re.compile(
     r"(?i)\b([A-Z0-9_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*=\s*)([^\s,;]+)"

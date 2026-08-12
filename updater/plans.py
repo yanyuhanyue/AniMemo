@@ -9,7 +9,12 @@ from pathlib import Path
 from release.contract import validate_manifest
 
 from .errors import RequestRejected, StateError
-from .state import _atomic_json
+from .state import (
+    _absolute,
+    _atomic_json,
+    _read_private_text,
+    _validate_private_directory,
+)
 
 
 def _now() -> datetime:
@@ -23,7 +28,8 @@ def _manifest_hash(manifest: dict[str, object]) -> str:
 
 class PlanStore:
     def __init__(self, root: Path, *, ttl_seconds: int = 900):
-        self.root = root.resolve() / "plans"
+        self.state_root = _absolute(root)
+        self.root = self.state_root / "plans"
         self.ttl_seconds = ttl_seconds
 
     def _path(self, plan_id: str) -> Path:
@@ -43,11 +49,12 @@ class PlanStore:
             "manifest": manifest,
             "plan": plan,
         }
-        _atomic_json(self._path(payload["id"]), payload)
+        _atomic_json(self._path(payload["id"]), payload, root=self.state_root)
         return payload
     def get(self, plan_id: str) -> dict[str, object]:
+        _validate_private_directory(self.state_root, self.root)
         try:
-            payload = json.loads(self._path(plan_id).read_text(encoding="utf-8"))
+            payload = json.loads(_read_private_text(self.state_root, self._path(plan_id)))
             validate_manifest(payload["manifest"])
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise RequestRejected("Update plan is unavailable") from error
@@ -63,5 +70,5 @@ class PlanStore:
         if payload.get("consumedAt"):
             raise RequestRejected("Update plan has already been consumed")
         payload["consumedAt"] = _now().isoformat().replace("+00:00", "Z")
-        _atomic_json(self._path(plan_id), payload)
+        _atomic_json(self._path(plan_id), payload, root=self.state_root)
         return payload

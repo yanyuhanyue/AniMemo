@@ -13,7 +13,7 @@ AniMemo 的权威发布身份由 Git tag 与 `release-manifest.json` 共同给�
 
 ## Channels and version resolution
 
-所有通道都在 `yanyuhanyue/AniMemo`：
+所有通道都在 `yanyuhanyue/AniMemo`。Release Consumer 同时验证 tag 语义与 GitHub Release metadata：Stable 必须 `prerelease=false`，Beta/RC 必须 `prerelease=true`，draft 或 metadata/channel 不一致都拒绝：
 
 ```text
 v1.1.0-beta.1  GitHub Pre-release，可继续功能调整
