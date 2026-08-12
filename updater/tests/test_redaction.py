@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import unittest
 
 from updater.redaction import redact
@@ -160,6 +161,39 @@ class RedactionTests(unittest.TestCase):
         self.assertIn("token_type: access", value)
         self.assertIn("status=401", value)
         self.assertIn("request_id=req-11", value)
+
+    def test_truncated_private_key_blocks_are_redacted_to_end_of_diagnostic(self):
+        value = redact(
+            "PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\n"
+            "truncated-private-material\n"
+            "still-private"
+        )
+
+        self.assert_secrets_removed(value, "truncated-private-material", "still-private")
+        self.assertIn("[REDACTED]", value)
+
+    def test_excessive_nested_depth_fails_closed(self):
+        nested: object = {"password": "deep-secret"}
+        for _ in range(12):
+            nested = {"level": nested}
+
+        structured = redact(nested)
+        serialized = redact(json.dumps(nested))
+
+        self.assert_secrets_removed(structured, "deep-secret")
+        self.assert_secrets_removed(serialized, "deep-secret")
+        self.assertIn("[REDACTED]", structured)
+        self.assertIn("[REDACTED]", serialized)
+
+    def test_large_harmless_text_has_a_bounded_scan_cost(self):
+        value = "a" * 100_000
+
+        started = time.monotonic()
+        output = redact(value)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(output, value)
+        self.assertLess(elapsed, 2.0)
 
     def test_url_credentials_and_secret_query_parameters_are_redacted(self):
         value = redact(

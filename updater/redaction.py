@@ -134,13 +134,13 @@ _AUTH_SCHEMES = {
 }
 
 _URL_CREDENTIALS = re.compile(
-    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<user>[^:/@\s?#]*):(?P<password>[^/@\s?#]+)@"
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]{0,31}://)(?P<user>[^:/@\s?#]*):(?P<password>[^/@\s?#]+)@"
 )
 _URL_KEY = r"[A-Za-z%][A-Za-z0-9_.%+-]{0,191}"
 _URL_PARAMETER = re.compile(rf"(?P<prefix>[?&#;](?P<key>{_URL_KEY})=)(?P<value>[^&#;\s]*)")
 _SENSITIVE_URL_KEYS = {"sig", "signature"}
 _PEM_PRIVATE_KEY = re.compile(
-    r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----",
+    r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|\Z)",
     re.DOTALL,
 )
 _CLI_FLAG = re.compile(rf"^--(?P<key>{_KEY})(?P<equals>=?)(?P<value>.*)$")
@@ -163,7 +163,7 @@ def _is_sensitive_key(key: object) -> bool:
 
 def _redact_json_text(value: str, depth: int) -> tuple[bool, str]:
     if depth >= _MAX_JSON_DEPTH:
-        return False, value
+        return True, _REDACTED
     try:
         parsed = json.loads(value)
     except (TypeError, ValueError):
@@ -181,7 +181,7 @@ def _redact_json_text(value: str, depth: int) -> tuple[bool, str]:
 
 def _scrub_structure(value: object, depth: int = 0) -> object:
     if depth >= _MAX_JSON_DEPTH:
-        return value
+        return _REDACTED
     if isinstance(value, Mapping):
         return {
             key: _REDACTED if _is_sensitive_key(key) else _scrub_structure(item, depth + 1)
