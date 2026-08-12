@@ -1,0 +1,132 @@
+# AniMemo Update Agent v1 Contract
+
+AniMemo Update Agent 是独立的 Host Service，也是不可变 Core Release 的 Release Consumer。Django 只通过本地 Unix Socket 请求白名单操作；Docker、Compose、Release cache、备份与持久 Operation journal 的权限都留在 Agent 进程内。
+
+## Fixed authority
+
+生产资源固定为：
+
+```text
+application: /opt/1panel/docker/compose/anime-journal/app
+data:        /data/anime-journal
+state:       /var/lib/animemo-updater
+socket:      /run/animemo-updater/updater.sock
+repository:  yanyuhanyue/AniMemo
+API image:   ghcr.io/yanyuhanyue/animemo-api
+Web image:   ghcr.io/yanyuhanyue/animemo-web
+project:     anime-journal
+services:    migration, bootstrap, api, web
+```
+
+生产 CLI 不接受路径、repository、URL、image、Compose project、service 或 command 参数。`HostPaths.production()` 也拒绝替换固定路径。测试可使用显式 testing factory，但它不进入生产 CLI。
+
+Agent 需要读取固定应用树，写入自己的 state/cache、AniMemo data backup 目录和 runtime socket，并访问 Docker daemon。Docker access is effectively privileged；systemd hardening 只缩小无关主机表面，不能把该进程描述为完全 sandboxed。
+
+## Local RPC
+
+Socket mode 是 `0660`，目录 mode 是 `0750`，属主/组为 `animemo-updater:animemo-api`。API 容器只挂载 `/run/animemo-updater`，从不挂载 `/var/run/docker.sock`。Agent 不监听 TCP。
+
+请求是单行 JSON：
+
+```json
+{"operation":"get_status","params":{}}
+```
+
+最大请求为 64 KiB，最大响应为 1 MiB。允许操作只有：
+
+- `get_status`
+- `list_releases`
+- `check_update`
+- `plan_update`
+- `apply_update`
+- `rollback_previous`
+- `get_operation`
+- `get_logs`
+
+禁止 `run_command`、`shell`、`exec`、`docker`、`compose`、`file_write`、`download_url`，也禁止在合法操作里夹带 service/path/image/repository/URL。子进程始终使用固定 executable 与 argv list，`shell=False`；备份所需的容器内 `sh -c` 是固定字符串，不含请求输入。
+
+## Release verification
+
+Release discovery 只访问 `yanyuhanyue/AniMemo`。下载固定资产 `release-manifest.json` 与 `checksums.txt` 后，Agent 验证：
+
+1. tag、channel、SemVer、40 位 commit 与 Manifest schema；
+2. checksum 和固定 repository/platform/digest；
+3. minimum updater version 与 database/configuration/Plugin SDK contract；
+4. API/Web OCI attestation 的 repository、release workflow 与应用 commit；
+5. Manifest attestation 的 repository、签署 workflow 与 `provenance.sourceCommit`。
+
+Stable Manifest 保留 RC 的应用 commit 和 API/Web digest，但由 promotion workflow 的 commit 签署，因此 `release.commit` 与 `provenance.sourceCommit` 是两个明确身份。
+
+## Compatibility and rollback
+
+计划输入是 CURRENT、live database/configuration contract、enabled Plugin SDK API 与目标 Manifest。结果只有：
+
+- **Safe Switch**：目标应用接受所有 live contracts；
+- **Application Rollback**：旧应用接受当前 contracts，可只切回 API/Web；
+- **Unsafe Downgrade**：任一 live contract 被拒绝，必须阻断。
+
+Agent 不把 Django migration 文件号当 database schema version，不执行 reverse migration，不自动 restore database。迁移成功后若新应用 health 失败，仅在 PREVIOUS 接受新 database contract 时回退应用；数据库仍保持新 contract。
+
+## Operation lifecycle
+
+每次 apply/rollback 都先创建持久 Operation，HTTP/RPC 调用立即返回；后台线程更新 journal。全局跨进程 lock 防止 update/rollback 并发执行。
+
+```text
+idle
+→ preflight
+→ fetching
+→ verifying
+→ backup (when migration is required)
+→ pulling
+→ migrating (when required)
+→ switching
+→ verifying_health
+→ succeeded
+```
+
+失败终态为 `failed_pre_switch`、`rolled_back` 或 `manual_recovery_required`。Agent 重启会把 switch 前未完成 Operation 标为 `failed_pre_switch`；migration/switch 已开始的 Operation 标为 `manual_recovery_required`，绝不自动重放 migration。
+
+## Backup and switch
+
+无 migration 时必须已有不超过 24 小时的 verified backup：metadata 路径位于固定 backup root、compressed SHA-256 匹配、UTC timestamp 合法、gzip 流可完整解压。有 migration 时 Agent 创建新的 `pg_dump` gzip 与 metadata；失败则不 pull/migrate/switch。
+
+切换只执行：
+
+```text
+pull API@sha256
+pull Web@sha256
+optional migration job
+bootstrap job
+up --no-deps --force-recreate api web
+stable health observations
+```
+
+PostgreSQL、Redis、Docker daemon、OpenResty、cloudflared 与其他 VPS 服务都不在 Agent 的操作集合中。
+
+## Installation and bootstrap
+
+手动安装或升级 Agent：
+
+```bash
+sudo sh deploy/install-updater.sh
+```
+
+安装器只写 `/opt/animemo-updater`、`/var/lib/animemo-updater`、`/run/animemo-updater`、自身 systemd/sysusers/tmpfiles 资产和 `/usr/local/bin/animemo-updater`。每个 Updater 版本安装到独立目录，再原子切换 `current` symlink；启动失败时恢复旧 symlink。它不部署 AniMemo、不导入 CURRENT、不重启 Docker 或其他服务。
+
+公开 GitHub Release assets 与 attestations 优先匿名读取。确实需要认证时，只在 Agent Host 配置 read-only contents/packages credential：GitHub CLI 使用固定 `GH_CONFIG_DIR=/var/lib/animemo-updater/gh`，GHCR Docker credential 保存在 Agent 用户的 Host home/config。token 不进入数据库、Staff UI、API/RPC、Manifest、Operation journal 或日志；不得使用 repo write、admin 或 workflow token。凭据安装、轮换和撤销是人工 Host 运维动作，不属于 Agent allowlist。
+
+一次性 CURRENT bootstrap：
+
+```bash
+sudo sh deploy/bootstrap-updater.sh /path/to/verified/release-manifest.json
+```
+
+脚本把 operator 已验证的 Manifest 复制到固定 bootstrap 路径，再以 Agent 用户执行 `import-current`。导入会重新验证 Manifest，并且无论内容是否相同都拒绝第二次执行。生产 cutover 前必须另外证明运行 API/Web 的 exact digest 与该 Manifest 一致。
+
+## Staff interface and errors
+
+Staff Update API 属于 `manage_system`，Stable 默认可见；只有 superuser 可见 RC/Beta。所有 mutation 需要 CSRF，使用 scoped throttling，并写 staff audit。apply 必须输入 `APPLY <version>`，rollback 必须输入 `ROLLBACK PREVIOUS`。
+
+Agent unavailable 返回 503 `updater_unavailable`；兼容性、并发或 operation state 冲突返回 409；其他拒绝返回稳定 `{code, detail}`。日志在写入 journal 和返回 RPC 前执行 secret redaction。
+
+Update Agent endpoints 不属于普通 Public SDK，也不向 Plugin SDK 或 Integration Protocol v1 暴露。

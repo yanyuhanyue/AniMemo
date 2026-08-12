@@ -96,12 +96,13 @@
     "provenance": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "issuer", "predicateType", "workflow"],
+      "required": ["repository", "issuer", "predicateType", "workflow", "sourceCommit"],
       "properties": {
         "repository": {"const": "yanyuhanyue/AniMemo"},
         "issuer": {"const": "github-actions"},
         "predicateType": {"const": "https://slsa.dev/provenance/v1"},
-        "workflow": {"enum": [".github/workflows/release.yml", ".github/workflows/promote-release.yml"]}
+        "workflow": {"enum": [".github/workflows/release.yml", ".github/workflows/promote-release.yml"]},
+        "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
       }
     },
     "artifacts": {

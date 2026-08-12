@@ -31,11 +31,13 @@ COPY backend /app/backend
 COPY plugins /app/plugins
 RUN useradd --create-home --uid 10001 animejournal \
     && mkdir -p /app/runtime/plugins /app/logs \
-    && chown -R animejournal:animejournal /app/runtime /app/logs /app/backend /app/plugins
+    && chown -R animejournal:animejournal /app/runtime /app/logs /app/backend /app/plugins \
+    && ANIME_JOURNAL_BUILD_STATIC=1 python /app/backend/manage.py collectstatic --noinput \
+    && chown -R animejournal:animejournal /app/backend/staticfiles
 WORKDIR /app/backend
 
 USER animejournal
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "python manage.py migrate && python manage.py sync_official_plugins && python manage.py collectstatic --noinput && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 4 --timeout 120"]
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "2", "--threads", "4", "--timeout", "120"]

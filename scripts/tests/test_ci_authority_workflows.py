@@ -78,11 +78,11 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             "astrbot-runtime",
         ):
             self.assertIn("inputs.force_full ||", self.job(ci, name), name)
-        for name in ("docker", "stateful-upgrade"):
+        for name in ("updater-isolated", "docker", "stateful-upgrade"):
             self.assertIn("inputs.force_full ||", self.job(release, name), name)
 
         self.assertEqual(ci.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 9)
-        self.assertEqual(release.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 4)
+        self.assertEqual(release.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 5)
         self.assertIn(
             "repository: AstrBotDevs/AstrBot\n          ref: ${{ matrix.astrbot_ref }}",
             ci,

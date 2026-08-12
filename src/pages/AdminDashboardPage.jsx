@@ -5,6 +5,7 @@ import { Icon } from "../components/Icon.jsx";
 import { PluginManagementPanel } from "../components/admin/PluginManagementPanel.jsx";
 import { AdminResourcePanel, AdminSystemPanel } from "../components/admin/AdminControlPanels.jsx";
 import { AdminMediaStoragePanel } from "../components/admin/AdminMediaStoragePanel.jsx";
+import { AdminUpdatePanel } from "../components/admin/AdminUpdatePanel.jsx";
 import { TagManagementPanel } from "../components/admin/TagManagementPanel.jsx";
 import { api, authApi, clearTokens, getStoredTokens, readableApiError } from "../lib/api.js";
 import { createLiveRefreshController } from "../lib/liveRefresh.js";
@@ -52,6 +53,7 @@ const tabs = [
   ["recycle", "回收站", "trash", "moderate_content"],
   ["audit", "审计日志", "history", "view_audit"],
   ["operations", "系统运维", "bolt", ""],
+  ["updates", "系统更新", "history", "manage_system"],
   ["storage", "媒体存储", "upload", "superuser"],
   ["tags", "标签管理", "tags", "manage_system"],
   ["plugins", "插件中心", "puzzle", "manage_system"],
@@ -67,6 +69,7 @@ const tabMeta = {
   recycle: { kicker: "RECYCLE BIN", title: "回收站", description: "恢复已隐藏内容，保留完整的管理操作轨迹。" },
   audit: { kicker: "AUDIT TRAIL", title: "审计日志", description: "按管理员、对象与时间追踪后台操作差异。" },
   operations: { kicker: "SYSTEM OPERATIONS", title: "系统运维", description: "检查服务状态、导出备份并管理两步验证。" },
+  updates: { kicker: "RELEASE CONSUMER", title: "系统更新", description: "验证不可变 Release，安全切换 API / Web，并查看应用层回退能力。" },
   storage: { kicker: "MEDIA STORAGE POOL", title: "媒体存储", description: "管理 R2 与本地媒体后端、写入优先级和容量保护。" },
   tags: { kicker: "TAG DIRECTORY", title: "标签管理", description: "统一维护公共标签、默认颜色与快捷预设。" },
   plugins: { kicker: "PLUGIN CONTROL", title: "插件中心", description: "检查插件兼容性、运行状态和受控部署配置。" },
@@ -438,6 +441,7 @@ export function AdminDashboardPage() {
 
               {["columns", "journals", "users", "entries", "recycle", "audit"].includes(tab) && <AdminResourcePanel kind={tab} viewer={data.viewer} onNotice={flash} onError={setError} />}
               {tab === "operations" && <AdminSystemPanel viewer={data.viewer} onNotice={flash} onError={setError} />}
+              {tab === "updates" && <AdminUpdatePanel viewer={data.viewer} onNotice={flash} onError={setError} />}
               {tab === "storage" && <AdminMediaStoragePanel viewer={data.viewer} onNotice={flash} onError={setError} />}
               {tab === "tags" && <TagManagementPanel onNotice={flash} onError={setError} />}
               {tab === "plugins" && <PluginManagementPanel onNotice={flash} />}

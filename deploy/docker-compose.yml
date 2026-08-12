@@ -1,5 +1,24 @@
 name: anime-journal
 
+x-api-common: &api-common
+  image: ${ANIMEMO_API_IMAGE:?ANIMEMO_API_IMAGE must be an immutable ghcr.io/yanyuhanyue/animemo-api@sha256 digest}
+  env_file:
+    - ../.env.production
+  environment:
+    TZ: Asia/Shanghai
+  volumes:
+    - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/plugins:/app/runtime/plugins
+    - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/logs:/app/logs
+    - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/backups:/app/backups
+    - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/media:/data/anime-journal/media
+  networks:
+    - anime-journal
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -42,28 +61,28 @@ services:
       retries: 12
       start_period: 5s
 
+  migration:
+    <<: *api-common
+    profiles: [release-jobs]
+    restart: "no"
+    command: ["python", "manage.py", "migrate", "--noinput"]
+
+  bootstrap:
+    <<: *api-common
+    profiles: [release-jobs]
+    restart: "no"
+    command: ["python", "manage.py", "sync_official_plugins"]
+
   api:
+    <<: *api-common
     container_name: anime-journal-api
-    build:
-      context: ..
-      dockerfile: deploy/backend.Dockerfile
-    env_file:
-      - ../.env.production
-    environment:
-      TZ: Asia/Shanghai
     restart: unless-stopped
     volumes:
       - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/plugins:/app/runtime/plugins
       - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/logs:/app/logs
       - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/backups:/app/backups
       - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/media:/data/anime-journal/media
-    networks:
-      - anime-journal
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - /run/animemo-updater:/run/animemo-updater:rw
     logging:
       driver: json-file
       options: {max-size: "50m", max-file: "7"}
@@ -79,13 +98,8 @@ services:
       start_period: 20s
 
   web:
+    image: ${ANIMEMO_WEB_IMAGE:?ANIMEMO_WEB_IMAGE must be an immutable ghcr.io/yanyuhanyue/animemo-web@sha256 digest}
     container_name: anime-journal-web
-    build:
-      context: ..
-      dockerfile: deploy/frontend.Dockerfile
-      args:
-        VITE_API_BASE_URL: /api/v1
-        VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:?VITE_TURNSTILE_SITE_KEY is required}
     depends_on:
       api:
         condition: service_healthy

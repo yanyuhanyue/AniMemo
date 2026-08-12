@@ -1,0 +1,40 @@
+[Unit]
+Description=AniMemo restricted host Update Agent
+Documentation=https://github.com/yanyuhanyue/AniMemo
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=animemo-updater
+Group=animemo-api
+SupplementaryGroups=docker
+Environment=HOME=/var/lib/animemo-updater
+Environment=GH_CONFIG_DIR=/var/lib/animemo-updater/gh
+WorkingDirectory=/opt/animemo-updater/current
+ExecStart=/usr/local/bin/animemo-updater serve
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+# Docker socket access is effectively privileged. These directives reduce the
+# unrelated host surface; they do not sandbox Docker authority.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/opt/1panel/docker/compose/anime-journal/app /opt/animemo-updater
+ReadWritePaths=/var/lib/animemo-updater /data/anime-journal /run/animemo-updater
+RuntimeDirectory=animemo-updater
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

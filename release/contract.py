@@ -195,7 +195,9 @@ def build_manifest(
     plugin_sdk_apis: list[int],
     promoted_from: str | None = None,
     provenance_workflow: str = ".github/workflows/release.yml",
+    provenance_source_commit: str | None = None,
 ) -> dict[str, object]:
+    source_commit = provenance_source_commit or commit
     payload = {
         "schemaVersion": 1,
         "release": {
@@ -230,6 +232,7 @@ def build_manifest(
             "issuer": "github-actions",
             "predicateType": "https://slsa.dev/provenance/v1",
             "workflow": provenance_workflow,
+            "sourceCommit": source_commit,
         },
         "artifacts": {"manifest": "release-manifest.json", "checksums": "checksums.txt"},
     }
@@ -286,7 +289,13 @@ def validate_manifest(payload: dict[str, object], *, updater_version: str | None
         )
 
 
-def promote_manifest(rc_manifest: dict[str, object], *, existing_tags: list[str], created_at: datetime | str | None = None) -> dict[str, object]:
+def promote_manifest(
+    rc_manifest: dict[str, object],
+    *,
+    existing_tags: list[str],
+    provenance_source_commit: str,
+    created_at: datetime | str | None = None,
+) -> dict[str, object]:
     validate_manifest(rc_manifest)
     rc_release = rc_manifest["release"]
     match = PRERELEASE_TAG.fullmatch(rc_release["version"])
@@ -306,5 +315,6 @@ def promote_manifest(rc_manifest: dict[str, object], *, existing_tags: list[str]
     )
     promoted["releaseNotes"]["tag"] = stable_tag
     promoted["provenance"]["workflow"] = ".github/workflows/promote-release.yml"
+    promoted["provenance"]["sourceCommit"] = provenance_source_commit
     validate_manifest(promoted)
     return promoted
