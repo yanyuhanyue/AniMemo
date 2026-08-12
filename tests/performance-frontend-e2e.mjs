@@ -433,7 +433,9 @@ async function installObservers(page, { controllableVisibility = false } = {}) {
         const latest = entries.at(-1);
         if (latest) globalThis.__frontendPerf.lcp = latest.startTime;
       }).observe({ type: "largest-contentful-paint", buffered: true });
-    } catch {}
+    } catch {
+      // Chromium builds without this entry type still provide the remaining probe evidence.
+    }
     try {
       new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
@@ -443,14 +445,18 @@ async function installObservers(page, { controllableVisibility = false } = {}) {
           }
         }
       }).observe({ type: "layout-shift", buffered: true });
-    } catch {}
+    } catch {
+      // Chromium builds without this entry type still provide the remaining probe evidence.
+    }
     try {
       new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
           globalThis.__frontendPerf.longTasks.push({ startTime: entry.startTime, duration: entry.duration });
         }
       }).observe({ type: "longtask", buffered: true });
-    } catch {}
+    } catch {
+      // Chromium builds without this entry type still provide the remaining probe evidence.
+    }
   }, { forceVisibility: controllableVisibility });
 }
 
@@ -898,7 +904,8 @@ async function auditUpdateOperationPolling(browser) {
   await visiblePage.goto(`${baseUrl}/admin-control`, { waitUntil: "domcontentloaded" });
   await visiblePage.getByText("注册用户", { exact: true }).waitFor({ state: "visible" });
   await openActiveUpdatePanel(visiblePage);
-  await waitFor(() => visibleState.updateOperationRequests >= 2, 7_500);
+  await waitFor(() => visibleState.updateOperationRequests >= 1, 4_000);
+  await wait(3_250);
   const overlapEvidence = {
     response_delay_ms: visibleState.updateOperationDelayMs,
     requests_started: visibleState.updateOperationRequests,
@@ -915,20 +922,20 @@ async function auditUpdateOperationPolling(browser) {
   await hiddenPage.getByText("注册用户", { exact: true }).waitFor({ state: "visible" });
   await openActiveUpdatePanel(hiddenPage);
   await hiddenPage.evaluate(() => globalThis.__setFrontendPerfVisibility("hidden"));
-  await waitFor(() => hiddenState.updateOperationRequests >= 1, 4_000);
+  await wait(3_250);
   const hiddenEvidence = {
     visibility: "hidden",
     requests_after_one_interval: hiddenState.updateOperationRequests,
   };
   await hiddenContext.close();
 
-  assert.ok(overlapEvidence.maximum_in_flight >= 2, "Slow Update Operation responses currently overlap across the 2.5 second interval");
-  assert.ok(hiddenEvidence.requests_after_one_interval >= 1, "Hidden Update Operation tabs currently continue polling");
+  assert.equal(overlapEvidence.maximum_in_flight, 1, "Slow Update Operation responses must not overlap across the 2.5 second interval");
+  assert.equal(hiddenEvidence.requests_after_one_interval, 0, "Hidden Update Operation tabs must not continue polling");
   return {
     configured_interval_ms: 2_500,
     authority: "AUXILIARY — deterministic browser mock; no real Update Agent operation was invoked",
-    hidden_tab_suppression: "FAIL",
-    overlap_coalescing: "FAIL",
+    hidden_tab_suppression: "PASS",
+    overlap_coalescing: "PASS",
     visible_slow_response: overlapEvidence,
     hidden_tab: hiddenEvidence,
   };

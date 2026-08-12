@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from collections import Counter
@@ -159,7 +160,7 @@ def build_probe_context(seed_result: SeedResult):
     integration = IntegrationConnection.objects.get(pk=seed_result.integration_connection_id)
     owner_entry_count = JournalEntry.objects.filter(user=owner, deleted_at__isnull=True).count()
     total_pages = ceil(owner_entry_count / 48)
-    client_defaults = {"SERVER_NAME": "localhost"}
+    client_defaults = {"SERVER_NAME": os.getenv("PERFORMANCE_SERVER_NAME", "localhost")}
     owner_client = APIClient(**client_defaults)
     _refresh, owner_access = issue_token_pair(owner)
     owner_client.credentials(HTTP_AUTHORIZATION=f"Bearer {owner_access}")
