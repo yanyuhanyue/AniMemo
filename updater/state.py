@@ -117,24 +117,31 @@ def _atomic_json(path: Path, payload: dict[str, object], *, root: Path | None = 
 def _read_private_text(root: Path, path: Path) -> str:
     root = _absolute(root)
     path = _absolute(path)
-    _validate_private_directory(root, path.parent)
-    metadata = path.lstat()
-    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        raise StateError("Private state file must be a single-link regular file")
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+    for attempt in range(20):
+        _validate_private_directory(root, path.parent)
+        metadata = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise StateError("Private state file must be a single-link regular file")
-        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-            descriptor = -1
-            return handle.read()
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink > 1:
+                raise StateError("Private state file must be a single-link regular file")
+            if opened.st_nlink == 0:
+                if attempt == 19:
+                    raise StateError("Private state file changed repeatedly during read")
+                time.sleep(0.005)
+                continue
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                descriptor = -1
+                return handle.read()
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    raise StateError("Private state file is unavailable")
 
 
 class OperationStore:
