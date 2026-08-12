@@ -37,12 +37,16 @@ class UpdateAgent:
     def recover(self) -> list[str]:
         return self.operations.recover_incomplete()
 
-    def _context(self) -> DeploymentContext:
+    def _context(self, *, refresh_plugins: bool = True) -> DeploymentContext:
         slots = self.slots.read()
         current = slots["current"]
         if current is None:
             raise RequestRejected("CURRENT release identity is not initialized")
-        runtime = self._refresh_enabled_plugin_apis(current)
+        runtime = (
+            self._refresh_enabled_plugin_apis(current)
+            if refresh_plugins
+            else self.runtime_state.read()
+        )
         return DeploymentContext(
             current_manifest=current,
             database_contract=runtime["databaseContract"],
@@ -74,7 +78,8 @@ class UpdateAgent:
     def _status(self):
         slots = self.slots.read()
         operations = sorted(self.operations.list(), key=lambda item: item["createdAt"], reverse=True)
-        context = self._context()
+        blocked = self.operations.recovery_block()
+        context = self._context(refresh_plugins=blocked is None)
         runtime = self.runtime_state.read()
         previous_compatibility = (
             plan_switch(context, slots["previous"], updater_version=__version__).as_dict()
@@ -87,6 +92,16 @@ class UpdateAgent:
             "previous": self._identity(slots["previous"]),
             "previousCompatibility": previous_compatibility,
             "runtime": runtime,
+            "recoveryBlock": (
+                {
+                    "required": True,
+                    "operationId": blocked["id"],
+                    "since": blocked["updatedAt"],
+                    "detail": blocked["events"][-1]["detail"],
+                }
+                if blocked is not None
+                else None
+            ),
             "operation": operations[0] if operations else None,
             "history": [
                 {
@@ -100,7 +115,7 @@ class UpdateAgent:
 
     def _list_releases(self, params):
         releases = self.source.list_releases(params["channel"], refresh=params.get("refresh", False))
-        current = self._context()
+        current = self._context(refresh_plugins=self.operations.recovery_block() is None)
         planned = []
         for release in releases:
             try:
@@ -122,6 +137,7 @@ class UpdateAgent:
         return {"channel": params["channel"], "releases": planned}
 
     def _plan_update(self, version: str):
+        self.operations.require_recovery_clear()
         manifest = self.source.fetch_verified(version, updater_version=__version__)
         switch = plan_switch(self._context(), manifest, updater_version=__version__)
         stored = self.plans.create(manifest, switch.as_dict())
@@ -161,6 +177,7 @@ class UpdateAgent:
             lock_lease.__exit__(None, None, None)
 
     def _apply(self, params):
+        self.operations.require_recovery_clear()
         stored = self.plans.get(params["planId"])
         version = stored["manifest"]["release"]["version"]
         if params["confirmation"] != f"APPLY {version}":
@@ -170,6 +187,7 @@ class UpdateAgent:
         lock_lease = self.executor.acquire_lock()
         handed_off = False
         try:
+            self.operations.require_recovery_clear()
             stored = self.plans.consume(params["planId"])
             operation = self.operations.create("apply_update", {"version": version, "planId": stored["id"]})
             if self.background:
@@ -191,6 +209,7 @@ class UpdateAgent:
         lock_lease = self.executor.acquire_lock()
         handed_off = False
         try:
+            self.operations.require_recovery_clear()
             slots = self.slots.read()
             previous = slots["previous"]
             if previous is None:

@@ -34,6 +34,51 @@ def link_directory(link: Path, target: Path) -> None:
 
 
 class OperationStateTests(unittest.TestCase):
+    def test_recovery_target_and_pending_contract_transition_are_immutable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationStore(Path(directory) / "state")
+            operation = store.create("apply_update", {"version": "v1.1.0"})
+            target = {
+                "release": {"version": "v1.1.0", "commit": "2" * 40},
+                "compatibility": {
+                    "database": {"contract": "animemo-db-v2"},
+                    "configuration": {"contract": "animemo-config-v2"},
+                },
+            }
+
+            store.bind_recovery_target(operation["id"], target)
+            store.bind_recovery_target(operation["id"], target)
+            store.mark_contract_transition_pending(
+                operation["id"],
+                "database",
+                before="animemo-db-v1",
+                after="animemo-db-v2",
+            )
+
+            pending = store.get(operation["id"])["recovery"]["pendingContractTransitions"]
+            self.assertEqual(
+                pending,
+                {"database": {"before": "animemo-db-v1", "after": "animemo-db-v2"}},
+            )
+            with self.assertRaisesRegex(StateError, "different"):
+                store.bind_recovery_target(
+                    operation["id"],
+                    {**target, "release": {"version": "v1.1.0", "commit": "3" * 40}},
+                )
+            with self.assertRaisesRegex(StateError, "already bound"):
+                store.mark_contract_transition_pending(
+                    operation["id"],
+                    "database",
+                    before="animemo-db-v1",
+                    after="animemo-db-v3",
+                )
+
+            store.resolve_contract_transition(operation["id"], "database")
+            self.assertEqual(
+                store.get(operation["id"])["recovery"]["pendingContractTransitions"],
+                {},
+            )
+
     def test_operation_transitions_are_persisted_atomically(self):
         with tempfile.TemporaryDirectory() as directory:
             store = OperationStore(Path(directory))
@@ -183,6 +228,22 @@ class OperationStateTests(unittest.TestCase):
             self.assertEqual(store.get(safe["id"])["status"], "failed_pre_switch")
             self.assertEqual(store.get(risky["id"])["status"], "manual_recovery_required")
             self.assertEqual(set(recovered), {safe["id"], risky["id"]})
+
+    def test_manual_recovery_is_a_durable_global_block_until_reconciled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationStore(Path(directory))
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+            for status in [
+                "preflight", "fetching", "verifying", "pulling", "migrating",
+                "manual_recovery_required",
+            ]:
+                store.transition(operation["id"], status)
+
+            self.assertEqual(store.recovery_block()["id"], operation["id"])
+            store.transition(operation["id"], "reconciled", detail="live state verified")
+
+            self.assertIsNone(store.recovery_block())
+            self.assertEqual(store.get(operation["id"])["status"], "reconciled")
 
     def test_global_lock_is_cross_process_and_crash_aware(self):
         with tempfile.TemporaryDirectory() as directory:

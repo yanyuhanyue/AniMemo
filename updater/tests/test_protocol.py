@@ -26,6 +26,10 @@ class ProtocolAllowlistTests(unittest.TestCase):
     def test_arbitrary_control_surfaces_are_rejected(self):
         attacks = [
             {"operation": "run_command", "params": {"command": "rm -rf /"}},
+            {
+                "operation": "reconcile",
+                "params": {"operationId": "a" * 32, "confirmation": "RECONCILE " + "a" * 32},
+            },
             {"operation": "apply_update", "params": {"planId": "a" * 32, "confirmation": "APPLY v1.0.0", "service": "postgres"}},
             {"operation": "plan_update", "params": {"version": "v1.0.0", "compose_path": "/other/project"}},
             {"operation": "plan_update", "params": {"version": "v1.0.0", "image": "evil/repo:latest"}},

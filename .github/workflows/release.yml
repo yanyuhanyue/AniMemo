@@ -76,6 +76,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
           test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"
+          test "$UPGRADE_BASE_SHA" != "$GITHUB_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
           git rev-parse --verify "$UPGRADE_BASE_SHA^{commit}"
           git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$GITHUB_SHA"
@@ -188,7 +189,8 @@ jobs:
           file: deploy/backend.Dockerfile
           platforms: linux/amd64
           push: false
-          outputs: type=oci,dest=${{ runner.temp }}/animemo-api.oci.tar
+          load: true
+          tags: animemo-release-api:${{ github.sha }}
           build-args: |
             ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}
             ANIMEMO_COMMIT=${{ github.sha }}
@@ -201,13 +203,24 @@ jobs:
           file: deploy/frontend.Dockerfile
           platforms: linux/amd64
           push: false
-          outputs: type=oci,dest=${{ runner.temp }}/animemo-web.oci.tar
+          load: true
+          tags: animemo-release-web:${{ github.sha }}
           build-args: |
             VITE_API_BASE_URL=/api/v1
             VITE_TURNSTILE_SITE_KEY=1x00000000000000000000AA
             ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}
             ANIMEMO_COMMIT=${{ github.sha }}
             ANIMEMO_CHANNEL=${{ inputs.channel }}
+      - name: Start and accept the exact locally built API and Web images
+        shell: bash
+        run: >-
+          bash scripts/rehearse-release-images.sh
+          --confirm-isolated
+          --api-image "animemo-release-api:$GITHUB_SHA"
+          --web-image "animemo-release-web:$GITHUB_SHA"
+          --version "${{ needs.preflight.outputs.release_tag }}"
+          --commit "$GITHUB_SHA"
+          --channel "${{ inputs.channel }}"
       - name: Generate and validate manifest, checksums, and unsigned provenance input plan
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
@@ -218,16 +231,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-output
+          python -m release.cli generate-deployment-contract \
+            --root . --output release-output/deployment-contract.json
           python -m release.cli generate-manifest \
             --version "$RELEASE_TAG" --channel "${{ inputs.channel }}" \
             --commit "$GITHUB_SHA" --created-at "$CREATED_AT" \
             --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
             --compatibility-file release/compatibility.json \
+            --deployment-contract-file release-output/deployment-contract.json \
+            --deployment-root . \
             --output release-output/release-manifest.json
           python -m release.cli validate-manifest \
             --manifest release-output/release-manifest.json --updater-version 1.0.0
           python -m release.cli write-checksums \
-            --output release-output/checksums.txt release-output/release-manifest.json
+            --output release-output/checksums.txt \
+            release-output/release-manifest.json release-output/deployment-contract.json
           (cd release-output && sha256sum --check checksums.txt)
           python -m release.cli generate-provenance-plan \
             --version "$RELEASE_TAG" --commit "$GITHUB_SHA" --created-at "$CREATED_AT" \
@@ -246,6 +264,8 @@ jobs:
               "$(jq -r '.images.api.digest' release-output/stable-manifest.dry-run.json)"
             test "$(jq -r '.images.web.digest' release-output/release-manifest.json)" = \
               "$(jq -r '.images.web.digest' release-output/stable-manifest.dry-run.json)"
+            test "$(jq -cS '.deployment' release-output/release-manifest.json)" = \
+              "$(jq -cS '.deployment' release-output/stable-manifest.dry-run.json)"
           fi
       - uses: actions/upload-artifact@v4
         with:
@@ -295,14 +315,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and publish API image once
+      - name: Build API image once without publishing
         id: api
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/backend.Dockerfile
           platforms: linux/amd64
-          push: true
+          push: false
+          load: true
           tags: |
             ${{ env.API_REPOSITORY }}:${{ needs.preflight.outputs.release_tag }}
             ${{ env.API_REPOSITORY }}:sha-${{ github.sha }}
@@ -310,14 +331,15 @@ jobs:
             ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}
             ANIMEMO_COMMIT=${{ github.sha }}
             ANIMEMO_CHANNEL=${{ inputs.channel }}
-      - name: Build and publish Web image once
+      - name: Build Web image once without publishing
         id: web
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/frontend.Dockerfile
           platforms: linux/amd64
-          push: true
+          push: false
+          load: true
           tags: |
             ${{ env.WEB_REPOSITORY }}:${{ needs.preflight.outputs.release_tag }}
             ${{ env.WEB_REPOSITORY }}:sha-${{ github.sha }}
@@ -327,40 +349,81 @@ jobs:
             ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}
             ANIMEMO_COMMIT=${{ github.sha }}
             ANIMEMO_CHANNEL=${{ inputs.channel }}
+      - name: Start and accept the exact images before any external publication
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        shell: bash
+        run: >-
+          bash scripts/rehearse-release-images.sh
+          --confirm-isolated
+          --api-image "$API_REPOSITORY:$RELEASE_TAG"
+          --web-image "$WEB_REPOSITORY:$RELEASE_TAG"
+          --version "$RELEASE_TAG"
+          --commit "$GITHUB_SHA"
+          --channel "${{ inputs.channel }}"
+      - name: Publish only the already rehearsed images
+        id: published
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_image() {
+            local repository="$1"
+            local output digest sha_digest
+            output="$(docker push "$repository:$RELEASE_TAG" 2>&1)"
+            printf '%s\n' "$output" >&2
+            digest="$(sed -nE 's/.*digest: (sha256:[0-9a-f]{64}).*/\1/p' <<<"$output" | tail -n 1)"
+            test -n "$digest"
+            output="$(docker push "$repository:sha-$GITHUB_SHA" 2>&1)"
+            printf '%s\n' "$output" >&2
+            sha_digest="$(sed -nE 's/.*digest: (sha256:[0-9a-f]{64}).*/\1/p' <<<"$output" | tail -n 1)"
+            test "$sha_digest" = "$digest"
+            printf '%s' "$digest"
+          }
+          api_digest="$(publish_image "$API_REPOSITORY")"
+          web_digest="$(publish_image "$WEB_REPOSITORY")"
+          echo "api_digest=$api_digest" >> "$GITHUB_OUTPUT"
+          echo "web_digest=$web_digest" >> "$GITHUB_OUTPUT"
       - name: Attest API image provenance
         uses: actions/attest@v4
         with:
           subject-name: ${{ env.API_REPOSITORY }}
-          subject-digest: ${{ steps.api.outputs.digest }}
+          subject-digest: ${{ steps.published.outputs.api_digest }}
           push-to-registry: true
           create-storage-record: false
       - name: Attest Web image provenance
         uses: actions/attest@v4
         with:
           subject-name: ${{ env.WEB_REPOSITORY }}
-          subject-digest: ${{ steps.web.outputs.digest }}
+          subject-digest: ${{ steps.published.outputs.web_digest }}
           push-to-registry: true
           create-storage-record: false
       - name: Generate and validate immutable release assets
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           CREATED_AT: ${{ needs.preflight.outputs.created_at }}
-          API_DIGEST: ${{ steps.api.outputs.digest }}
-          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          API_DIGEST: ${{ steps.published.outputs.api_digest }}
+          WEB_DIGEST: ${{ steps.published.outputs.web_digest }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-output
+          python -m release.cli generate-deployment-contract \
+            --root . --output release-output/deployment-contract.json
           python -m release.cli generate-manifest \
             --version "$RELEASE_TAG" --channel "${{ inputs.channel }}" \
             --commit "$GITHUB_SHA" --created-at "$CREATED_AT" \
             --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
             --compatibility-file release/compatibility.json \
+            --deployment-contract-file release-output/deployment-contract.json \
+            --deployment-root . \
             --output release-output/release-manifest.json
           python -m release.cli validate-manifest \
             --manifest release-output/release-manifest.json --updater-version 1.0.0
           python -m release.cli write-checksums \
-            --output release-output/checksums.txt release-output/release-manifest.json
+            --output release-output/checksums.txt \
+            release-output/release-manifest.json release-output/deployment-contract.json
           (cd release-output && sha256sum --check checksums.txt)
       - name: Attest release manifest provenance
         uses: actions/attest@v4
@@ -369,8 +432,8 @@ jobs:
       - name: Verify published OCI and file attestations
         env:
           GH_TOKEN: ${{ github.token }}
-          API_DIGEST: ${{ steps.api.outputs.digest }}
-          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          API_DIGEST: ${{ steps.published.outputs.api_digest }}
+          WEB_DIGEST: ${{ steps.published.outputs.web_digest }}
         shell: bash
         run: |
           set -euo pipefail
@@ -381,6 +444,9 @@ jobs:
             --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-digest "$GITHUB_SHA"
           gh attestation verify release-output/release-manifest.json \
+            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA"
+          gh attestation verify release-output/deployment-contract.json \
             --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-digest "$GITHUB_SHA"
       - name: Create immutable tag and GitHub Pre-release
@@ -395,5 +461,6 @@ jobs:
           git tag --annotate "$RELEASE_TAG" "$GITHUB_SHA" --message "AniMemo $RELEASE_TAG"
           git push origin "refs/tags/$RELEASE_TAG"
           gh release create "$RELEASE_TAG" \
-            release-output/release-manifest.json release-output/checksums.txt \
+            release-output/release-manifest.json release-output/deployment-contract.json \
+            release-output/checksums.txt \
             --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false --generate-notes

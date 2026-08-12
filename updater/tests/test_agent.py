@@ -9,7 +9,7 @@ from pathlib import Path
 
 from release.contract import build_manifest
 from updater.agent import UpdateAgent
-from updater.errors import RequestRejected
+from updater.errors import RecoveryRequired, RequestRejected
 from updater.executor import UpdateExecutor
 from updater.plans import PlanStore
 from updater.runtime_state import RuntimeState
@@ -26,6 +26,11 @@ def manifest(version: str, digit: str):
         created_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
         api_digest="sha256:" + digit * 64,
         web_digest="sha256:" + digit * 64,
+        deployment_contract_sha256="sha256:0be5fdf5f87275755e06a2e2b6523c24e16d6aa1db48d8d58e8cfea969b674df",
+        deployment_files=[
+            {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
+            {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
+        ],
         minimum_updater_version="1.0.0",
         database_contract="animemo-db-v1",
         database_accepts=["animemo-db-v1"],
@@ -69,8 +74,8 @@ class FakeDeployment:
     def inspect_enabled_plugin_apis(self, item):
         self.calls.append("inspect_plugins")
         return self.enabled_plugin_apis
-    def switch(self, item): self.calls.append(f"switch:{item['release']['version']}")
-    def verify_health(self, item): self.calls.append("health")
+    def switch(self, item, *, live_contracts=None): self.calls.append(f"switch:{item['release']['version']}")
+    def verify_health(self, item, *, live_contracts=None): self.calls.append("health")
 
 
 class UpdateAgentTests(unittest.TestCase):
@@ -105,6 +110,46 @@ class UpdateAgentTests(unittest.TestCase):
             runtime_refresh_seconds=runtime_refresh_seconds,
         )
         return agent, deployment
+
+    @staticmethod
+    def enter_manual_recovery(agent):
+        operation = agent.operations.create("apply_update", {"version": "v1.0.1"})
+        for status in [
+            "preflight", "fetching", "verifying", "pulling", "migrating",
+            "manual_recovery_required",
+        ]:
+            agent.operations.transition(operation["id"], status)
+        return operation
+
+    def test_manual_recovery_blocks_all_mutations_but_keeps_observation_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, deployment = self.make_agent(directory)
+            plan = agent.dispatch({"operation": "plan_update", "params": {"version": "v1.0.1"}})
+            blocked = self.enter_manual_recovery(agent)
+            deployment.inspect_enabled_plugin_apis = lambda manifest: (_ for _ in ()).throw(
+                RuntimeError("live application unavailable")
+            )
+
+            status = agent.dispatch({"operation": "get_status", "params": {}})
+            logs = agent.dispatch({
+                "operation": "get_logs",
+                "params": {"operationId": blocked["id"], "limit": 100},
+            })
+
+            self.assertEqual(status["recoveryBlock"]["operationId"], blocked["id"])
+            self.assertEqual(logs["events"][-1]["status"], "manual_recovery_required")
+            for request in [
+                {"operation": "plan_update", "params": {"version": "v1.0.1"}},
+                {
+                    "operation": "apply_update",
+                    "params": {"planId": plan["planId"], "confirmation": "APPLY v1.0.1"},
+                },
+                {"operation": "rollback_previous", "params": {"confirmation": "ROLLBACK PREVIOUS"}},
+            ]:
+                with self.subTest(operation=request["operation"]), self.assertRaises(RecoveryRequired):
+                    agent.dispatch(request)
+
+            self.assertIsNone(agent.plans.get(plan["planId"])["consumedAt"])
 
     def test_plan_and_apply_are_bound_to_exact_verified_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

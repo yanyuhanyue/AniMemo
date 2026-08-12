@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
 from .errors import UpdaterError
 from .redaction import redact
 from .runtime import production_runtime
+
+
+OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _operation_id(value: str) -> str:
+    if not OPERATION_ID.fullmatch(value):
+        raise argparse.ArgumentTypeError("operation id must be 32 lowercase hexadecimal characters")
+    return value
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -18,6 +28,12 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("serve", help="serve the fixed local Unix Socket")
     commands.add_parser("status", help="print observable Agent status")
     commands.add_parser("import-current", help="one-time import from the fixed bootstrap manifest")
+    reconcile = commands.add_parser(
+        "reconcile",
+        help="verify live CURRENT state and resolve one manual recovery block",
+    )
+    reconcile.add_argument("--operation-id", required=True, type=_operation_id)
+    reconcile.add_argument("--confirmation", required=True)
     commands.add_parser("version", help="print the installed Updater version")
     return parser
 
@@ -44,6 +60,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "import-current":
             _print(runtime.import_current())
+            return 0
+        if args.command == "reconcile":
+            _print(runtime.reconcile(args.operation_id, args.confirmation))
             return 0
     except UpdaterError as error:
         _print({"ok": False, "error": {"code": error.code, "detail": redact(error)}}, stream=sys.stderr)

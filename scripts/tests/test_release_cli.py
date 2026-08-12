@@ -47,7 +47,13 @@ class ReleaseCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "release-manifest.json"
+            deployment_contract = root / "deployment-contract.json"
             checksums = root / "checksums.txt"
+            self.run_cli(
+                "generate-deployment-contract",
+                "--root", ROOT,
+                "--output", deployment_contract,
+            )
             self.run_cli(
                 "generate-manifest",
                 "--version", "v1.0.0-rc.1",
@@ -57,12 +63,56 @@ class ReleaseCliTests(unittest.TestCase):
                 "--api-digest", API_DIGEST,
                 "--web-digest", WEB_DIGEST,
                 "--compatibility-file", ROOT / "release" / "compatibility.json",
+                "--deployment-contract-file", deployment_contract,
+                "--deployment-root", ROOT,
                 "--output", target,
             )
             self.run_cli("validate-manifest", "--manifest", target, "--updater-version", "1.0.0")
-            self.run_cli("write-checksums", "--output", checksums, target)
-            expected = hashlib.sha256(target.read_bytes()).hexdigest()
-            self.assertEqual(checksums.read_text(encoding="utf-8"), f"{expected}  release-manifest.json\n")
+            self.run_cli(
+                "write-checksums", "--output", checksums, target, deployment_contract
+            )
+            expected_manifest = hashlib.sha256(target.read_bytes()).hexdigest()
+            expected_deployment = hashlib.sha256(deployment_contract.read_bytes()).hexdigest()
+            self.assertEqual(
+                checksums.read_text(encoding="utf-8"),
+                f"{expected_manifest}  release-manifest.json\n"
+                f"{expected_deployment}  deployment-contract.json\n",
+            )
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["deployment"]["contractSha256"],
+                "sha256:" + expected_deployment,
+            )
+
+    def test_generate_manifest_rejects_deployment_source_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "source"
+            (source_root / "deploy").mkdir(parents=True)
+            (source_root / "updater").mkdir()
+            compose = source_root / "deploy" / "docker-compose.yml"
+            overlay = source_root / "updater" / "docker-compose.runtime.yml"
+            compose.write_text("services: {}\n", encoding="utf-8")
+            overlay.write_text("services: {}\n", encoding="utf-8")
+            contract = root / "deployment-contract.json"
+            self.run_cli("generate-deployment-contract", "--root", source_root, "--output", contract)
+            compose.write_text("services:\n  changed: {}\n", encoding="utf-8")
+
+            completed = self.run_cli(
+                "generate-manifest",
+                "--version", "v1.0.0-rc.1",
+                "--channel", "rc",
+                "--commit", COMMIT,
+                "--created-at", "2026-08-12T10:00:00Z",
+                "--api-digest", API_DIGEST,
+                "--web-digest", WEB_DIGEST,
+                "--compatibility-file", ROOT / "release" / "compatibility.json",
+                "--deployment-contract-file", contract,
+                "--deployment-root", source_root,
+                "--output", root / "release-manifest.json",
+                expected=2,
+            )
+            self.assertIn("checksum differs", completed.stderr)
 
     def test_generate_provenance_plan_is_machine_readable(self):
         with tempfile.TemporaryDirectory() as directory:

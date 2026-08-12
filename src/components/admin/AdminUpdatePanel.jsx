@@ -55,6 +55,8 @@ export function AdminUpdatePanel({ viewer, onNotice, onError }) {
   const operation = status?.operation;
   const operationActive = ACTIVE_UPDATE_STATES.has(operation?.status);
   const previousCompatibility = status?.previousCompatibility;
+  const recoveryBlock = status?.recoveryBlock;
+  const recoveryBlocked = Boolean(recoveryBlock?.required);
 
   const loadStatus = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -127,13 +129,15 @@ export function AdminUpdatePanel({ viewer, onNotice, onError }) {
       <div className="admin-update-runtime"><span>Updater <b>{status?.updaterVersion}</b></span><span>DB Contract <b>{status?.runtime?.databaseContract}</b></span><span>Plugin SDK <b>{status?.runtime?.enabledPluginApis?.join(", ") || "—"}</b></span></div>
     </section>
 
+    {recoveryBlocked && <section className="admin-panel admin-update-experimental" role="alert"><Icon name="warning" /><div><b>更新已进入人工恢复阻断</b><span>操作 {recoveryBlock.operationId?.slice(0, 8)} 的现场状态尚未确认；请由服务器管理员完成现场对账，网页端不能解除该阻断。</span></div></section>}
+
     <section className="admin-panel admin-update-releases">
       <header><div><h3>可用版本</h3><p>计划阶段会验证 Release、checksums、GitHub attestation 与兼容性。</p></div><div className="admin-update-channels" aria-label="发布通道">{["stable", ...(viewer.is_superuser ? ["rc", "beta"] : [])].map((value) => <button type="button" key={value} className={channel === value ? "is-active" : ""} aria-pressed={channel === value} onClick={() => { setChannel(value); setPlan(null); }}>{channelLabel(value)}</button>)}</div></header>
       {channel === "beta" && <div className="admin-update-experimental" role="note"><Icon name="warning" /><div><b>Beta 是开发验证通道</b><span>功能仍可能变化，不是默认生产验收候选。</span></div></div>}
       <div className="admin-update-release-list">{available.length ? available.map((release) => <article key={release.version}>
         <div><b>{release.version}</b><span>{channelLabel(release.channel)} · {release.publishedAt ? new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium" }).format(new Date(release.publishedAt)) : "时间未知"}</span></div>
         <CompatibilityBadge value={release.compatibility} />
-        <button type="button" disabled={submitting || operationActive || release.compatibility?.allowed === false} onClick={() => createPlan(release.version)}>查看并确认</button>
+        <button type="button" disabled={submitting || operationActive || recoveryBlocked || release.compatibility?.allowed === false} onClick={() => createPlan(release.version)}>查看并确认</button>
       </article>) : <div className="admin-update-empty">当前通道没有比运行版本更新或不同的 Release。</div>}</div>
     </section>
 
@@ -142,8 +146,8 @@ export function AdminUpdatePanel({ viewer, onNotice, onError }) {
       <div className="admin-update-plan-route"><ReleaseIdentity label="FROM" value={plan.from} /><Icon name="arrow-right" /><ReleaseIdentity label="TO" value={plan.to} /></div>
       <CompatibilityBadge value={plan.compatibility} />
       <dl><div><dt>数据库迁移</dt><dd>{plan.compatibility?.migrationRequired ? `需要 · ${plan.compatibility.migrationPolicy}` : "不需要"}</dd></div><div><dt>数据库自动回退</dt><dd>永不执行</dd></div><div><dt>影响服务</dt><dd>{plan.affectedServices?.join(" / ")}</dd></div></dl>
-      <label><span>输入 <b>APPLY {selectedPlanVersion}</b> 确认</span><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" spellCheck="false" /></label>
-      <button className="admin-update-apply" type="button" disabled={submitting || confirmation !== `APPLY ${selectedPlanVersion}`} onClick={applyPlan}><Icon name="bolt" /> {submitting ? "正在提交..." : `更新到 ${selectedPlanVersion}`}</button>
+      <label><span>输入 <b>APPLY {selectedPlanVersion}</b> 确认</span><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" spellCheck="false" disabled={recoveryBlocked} /></label>
+      <button className="admin-update-apply" type="button" disabled={submitting || recoveryBlocked || confirmation !== `APPLY ${selectedPlanVersion}`} onClick={applyPlan}><Icon name="bolt" /> {submitting ? "正在提交..." : `更新到 ${selectedPlanVersion}`}</button>
     </section>}
 
     <section className="admin-panel admin-update-progress"><header><div><h3>真实操作进度</h3><p>每一步都来自 Agent 的持久 operation journal。</p></div></header><OperationProgress operation={operation} /></section>
@@ -151,7 +155,7 @@ export function AdminUpdatePanel({ viewer, onNotice, onError }) {
     <section className="admin-panel admin-update-history">
       <header><div><h3>版本历史与应用回退</h3><p>回退只切换 API / Web；数据库保留当前 schema。</p></div></header>
       <div className="admin-update-history-list">{(status?.history || []).map((item) => <article key={`${item.version}-${item.commit}`}><div><b>{item.version}</b><span>{channelLabel(item.channel)} · {item.commit?.slice(0, 8)}</span></div>{item.version === currentVersion ? <strong className="is-current">当前版本</strong> : <CompatibilityBadge value={item.compatibility} />}</article>)}</div>
-      {status?.previous && <div className="admin-update-rollback"><div><b>回退到 PREVIOUS：{status.previous.version}</b><span>仅在兼容性允许时执行，不恢复数据库备份。</span><CompatibilityBadge value={previousCompatibility} /></div><label><span>输入 ROLLBACK PREVIOUS</span><input value={rollbackConfirmation} onChange={(event) => setRollbackConfirmation(event.target.value)} autoComplete="off" spellCheck="false" disabled={previousCompatibility?.allowed === false} /></label><button type="button" disabled={submitting || operationActive || previousCompatibility?.allowed === false || rollbackConfirmation !== "ROLLBACK PREVIOUS"} onClick={rollback}><Icon name="history" /> 回退应用</button></div>}
+      {status?.previous && <div className="admin-update-rollback"><div><b>回退到 PREVIOUS：{status.previous.version}</b><span>仅在兼容性允许时执行，不恢复数据库备份。</span><CompatibilityBadge value={previousCompatibility} /></div><label><span>输入 ROLLBACK PREVIOUS</span><input value={rollbackConfirmation} onChange={(event) => setRollbackConfirmation(event.target.value)} autoComplete="off" spellCheck="false" disabled={recoveryBlocked || previousCompatibility?.allowed === false} /></label><button type="button" disabled={submitting || operationActive || recoveryBlocked || previousCompatibility?.allowed === false || rollbackConfirmation !== "ROLLBACK PREVIOUS"} onClick={rollback}><Icon name="history" /> 回退应用</button></div>}
     </section>
   </div>;
 }

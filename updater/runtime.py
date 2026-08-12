@@ -153,6 +153,11 @@ class HostAgentRuntime:
     def status(self) -> dict[str, object]:
         return self.agent.dispatch({"operation": "get_status", "params": {}})
 
+    def reconcile(self, operation_id: str, confirmation: str) -> dict[str, object]:
+        if confirmation != f"RECONCILE {operation_id}":
+            raise StateError("Host reconciliation confirmation does not match the operation")
+        return self.agent.executor.reconcile(operation_id)
+
     def serve_forever(self) -> None:
         self.server.serve_forever()
 

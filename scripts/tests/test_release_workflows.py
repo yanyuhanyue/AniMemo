@@ -4,16 +4,50 @@ import unittest
 from pathlib import Path
 
 import yaml
+from yaml.constructor import ConstructorError
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
+class UniqueKeyLoader(yaml.BaseLoader):
+    pass
+
+
+def _construct_unique_mapping(loader, node, deep=False):
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key ({key})",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 def workflow(name):
     # PyYAML parses the YAML 1.1 word `on` as bool; BaseLoader preserves keys.
-    return yaml.load((ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    return yaml.load(
+        (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8"),
+        Loader=UniqueKeyLoader,
+    )
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
+    def test_all_workflows_reject_duplicate_mapping_keys(self):
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            with self.subTest(workflow=path.name):
+                yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+
     def test_ci_and_release_gate_are_reusable_full_gates(self):
         ci = workflow("ci.yml")
         gate = workflow("release-gate.yml")
@@ -144,6 +178,40 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertGreaterEqual(source.count("ANIMEMO_COMMIT=${{ github.sha }}"), 4)
         self.assertIn("VITE_TURNSTILE_SITE_KEY=1x00000000000000000000AA", source)
         self.assertIn("promote-manifest", source)
+        self.assertEqual(source.count("scripts/rehearse-release-images.sh"), 2)
+        self.assertIn("Start and accept the exact images before any external publication", source)
+        self.assertIn("Publish only the already rehearsed images", source)
+        self.assertNotIn("Build and publish API image once", source)
+        publish_section = source.index("  publish:\n")
+        rehearse = source.index("Start and accept the exact images before any external publication", publish_section)
+        publish = source.index("Publish only the already rehearsed images", publish_section)
+        self.assertLess(rehearse, publish)
+        self.assertNotIn("push: true", source[publish_section:publish])
+
+    def test_release_contract_assets_and_real_upgrade_delta_are_fail_closed(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        promotion = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
+        gate = (ROOT / "scripts" / "stateful-upgrade-gate.sh").read_text(encoding="utf-8")
+
+        self.assertEqual(release.count("generate-deployment-contract"), 2)
+        self.assertGreaterEqual(release.count("deployment-contract.json"), 8)
+        self.assertGreaterEqual(promotion.count("deployment-contract.json"), 7)
+        self.assertIn('test "$UPGRADE_BASE_SHA" != "$GITHUB_SHA"', release)
+        self.assertIn('if [[ "$BASE_SHA" == "$HEAD_SHA" ]]', gate)
+        self.assertIn('merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"', gate)
+
+    def test_exact_image_rehearsal_is_runner_scoped_and_read_only(self):
+        source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(encoding="utf-8")
+
+        self.assertIn('--confirm-isolated', source)
+        self.assertIn('${GITHUB_ACTIONS:-}', source)
+        self.assertIn('$RUNNER_TEMP/animemo-release-images.', source)
+        self.assertIn('down -v --remove-orphans', source)
+        self.assertIn('scripts/ci_first_run.py', source)
+        self.assertIn('--code-stdin', source)
+        self.assertNotIn('docker push', source)
+        self.assertNotIn('docker system prune', source)
+        self.assertNotIn('docker builder prune', source)
 
     def test_stable_notes_start_at_previous_stable_when_one_exists(self):
         source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
@@ -162,6 +230,25 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("RC_COMMIT == STABLE_COMMIT", source)
         self.assertIn("RC_API_DIGEST == STABLE_API_DIGEST", source)
         self.assertIn("RC_WEB_DIGEST == STABLE_WEB_DIGEST", source)
+
+    def test_stable_promotion_revalidates_authority_before_external_mutation(self):
+        promotion = workflow("promote-release.yml")
+        publish = promotion["jobs"]["publish"]
+        self.assertEqual(publish["steps"][0]["with"]["ref"], "${{ github.sha }}")
+
+        source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
+        publish_source = source[source.index("  publish:\n") :]
+        before_first_mutation = publish_source[: publish_source.index("crane tag")]
+        for guard in (
+            'test "$(git rev-parse origin/main)" = "$GITHUB_SHA"',
+            '! git ls-remote --exit-code --tags origin "refs/tags/$STABLE_TAG"',
+            '! gh release view "$STABLE_TAG" --repo "$GITHUB_REPOSITORY"',
+        ):
+            self.assertIn(guard, before_first_mutation)
+        self.assertNotIn(
+            'test "$(git rev-parse origin/main)" = "$GITHUB_SHA"',
+            publish_source[publish_source.index("crane tag") :],
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -13,6 +14,10 @@ from packaging.version import InvalidVersion, Version
 REPOSITORY = "yanyuhanyue/AniMemo"
 API_REPOSITORY = "ghcr.io/yanyuhanyue/animemo-api"
 WEB_REPOSITORY = "ghcr.io/yanyuhanyue/animemo-web"
+DEPLOYMENT_CONTRACT_PATHS = (
+    "deploy/docker-compose.yml",
+    "updater/docker-compose.runtime.yml",
+)
 SCHEMA_PATH = Path(__file__).with_name("release-manifest.schema.json")
 STABLE_TAG = re.compile(r"^v(?P<base>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$")
 PRERELEASE_TAG = re.compile(
@@ -22,6 +27,76 @@ PRERELEASE_TAG = re.compile(
 
 class ReleaseContractError(ValueError):
     pass
+
+
+def _canonical_json(payload: dict[str, object]) -> bytes:
+    return (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def validate_deployment_contract(
+    payload: object,
+    *,
+    root: Path | None = None,
+) -> dict[str, object]:
+    if not isinstance(payload, dict) or set(payload) != {"schemaVersion", "files"}:
+        raise ReleaseContractError("Deployment contract has an invalid shape")
+    if payload["schemaVersion"] != 1 or not isinstance(payload["files"], list):
+        raise ReleaseContractError("Deployment contract has an unsupported schema")
+    files = payload["files"]
+    if [item.get("path") for item in files if isinstance(item, dict)] != list(
+        DEPLOYMENT_CONTRACT_PATHS
+    ):
+        raise ReleaseContractError("Deployment contract files are incomplete or unordered")
+    for item in files:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "sha256"}
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(item["sha256"]))
+        ):
+            raise ReleaseContractError("Deployment contract file identity is invalid")
+        if root is not None:
+            source = root / item["path"]
+            if source.is_symlink() or not source.is_file():
+                raise ReleaseContractError(
+                    f"Deployment contract source is unavailable: {item['path']}"
+                )
+            if _file_sha256(source) != item["sha256"]:
+                raise ReleaseContractError(
+                    f"Deployment contract source checksum differs: {item['path']}"
+                )
+    return payload
+
+
+def build_deployment_contract(root: Path) -> dict[str, object]:
+    root = root.resolve()
+    files: list[dict[str, str]] = []
+    for relative in DEPLOYMENT_CONTRACT_PATHS:
+        source = root / relative
+        if source.is_symlink() or not source.is_file():
+            raise ReleaseContractError(
+                f"Deployment contract source is unavailable: {relative}"
+            )
+        files.append({"path": relative, "sha256": _file_sha256(source)})
+    payload = {
+        "schemaVersion": 1,
+        "files": files,
+    }
+    return validate_deployment_contract(payload, root=root)
+
+
+def deployment_contract_digest(payload: dict[str, object]) -> str:
+    validate_deployment_contract(payload)
+    return "sha256:" + hashlib.sha256(_canonical_json(payload)).hexdigest()
 
 
 def _version(value: str, *, label: str) -> Version:
@@ -184,6 +259,8 @@ def build_manifest(
     created_at: datetime | str,
     api_digest: str,
     web_digest: str,
+    deployment_contract_sha256: str,
+    deployment_files: list[dict[str, str]],
     minimum_updater_version: str,
     database_contract: str,
     database_accepts: list[str],
@@ -194,10 +271,15 @@ def build_manifest(
     configuration_accepts: list[str],
     plugin_sdk_apis: list[int],
     promoted_from: str | None = None,
-    provenance_workflow: str = ".github/workflows/release.yml",
+    provenance_workflow: str | None = None,
     provenance_source_commit: str | None = None,
 ) -> dict[str, object]:
     source_commit = provenance_source_commit or commit
+    workflow = provenance_workflow or (
+        ".github/workflows/promote-release.yml"
+        if channel == "stable"
+        else ".github/workflows/release.yml"
+    )
     payload = {
         "schemaVersion": 1,
         "release": {
@@ -210,6 +292,10 @@ def build_manifest(
         "images": {
             "api": {"repository": API_REPOSITORY, "digest": api_digest, "platform": "linux/amd64"},
             "web": {"repository": WEB_REPOSITORY, "digest": web_digest, "platform": "linux/amd64"},
+        },
+        "deployment": {
+            "contractSha256": deployment_contract_sha256,
+            "files": copy.deepcopy(deployment_files),
         },
         "minimumUpdaterVersion": minimum_updater_version,
         "compatibility": {
@@ -231,10 +317,14 @@ def build_manifest(
             "repository": REPOSITORY,
             "issuer": "github-actions",
             "predicateType": "https://slsa.dev/provenance/v1",
-            "workflow": provenance_workflow,
+            "workflow": workflow,
             "sourceCommit": source_commit,
         },
-        "artifacts": {"manifest": "release-manifest.json", "checksums": "checksums.txt"},
+        "artifacts": {
+            "manifest": "release-manifest.json",
+            "deploymentContract": "deployment-contract.json",
+            "checksums": "checksums.txt",
+        },
     }
     validate_manifest(payload)
     return payload
@@ -265,6 +355,28 @@ def validate_manifest(payload: dict[str, object], *, updater_version: str | None
             raise ReleaseContractError("Stable promotedFrom must be an RC for the exact stable version")
     elif not prerelease or prerelease.group("channel") != channel or release["promotedFrom"] is not None:
         raise ReleaseContractError("Prerelease version, channel, and promotedFrom are inconsistent")
+
+    if payload["releaseNotes"]["tag"] != version:
+        raise ReleaseContractError("Release notes tag must equal the immutable release version")
+    provenance = payload["provenance"]
+    if channel == "stable":
+        if provenance["workflow"] != ".github/workflows/promote-release.yml":
+            raise ReleaseContractError("Stable provenance must use the promotion workflow")
+    elif (
+        provenance["workflow"] != ".github/workflows/release.yml"
+        or provenance["sourceCommit"] != release["commit"]
+    ):
+        raise ReleaseContractError(
+            "Prerelease provenance must bind the producer workflow and release commit"
+        )
+
+    deployment = payload["deployment"]
+    embedded_contract = {"schemaVersion": 1, "files": deployment["files"]}
+    validate_deployment_contract(embedded_contract)
+    if deployment_contract_digest(embedded_contract) != deployment["contractSha256"]:
+        raise ReleaseContractError(
+            "Deployment contract digest does not bind the declared deployment files"
+        )
 
     database = payload["compatibility"]["database"]
     migration = database["migration"]

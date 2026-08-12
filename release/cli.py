@@ -8,12 +8,15 @@ from pathlib import Path
 
 from .contract import (
     ReleaseContractError,
+    build_deployment_contract,
     build_manifest,
     build_provenance_plan,
+    deployment_contract_digest,
     previous_stable_tag,
     promote_manifest,
     resolve_prerelease,
     validate_manifest,
+    validate_deployment_contract,
 )
 
 
@@ -30,7 +33,11 @@ def _read_json(path: Path) -> dict[str, object]:
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def _write_outputs(path: Path | None, payload: dict[str, object]) -> None:
@@ -65,6 +72,8 @@ def _generate(args) -> dict[str, object]:
     database = compatibility["database"]
     configuration = compatibility["configuration"]
     plugin_sdk = compatibility["pluginSdk"]
+    deployment_contract = _read_json(args.deployment_contract_file)
+    validate_deployment_contract(deployment_contract, root=args.deployment_root.resolve())
     if plugin_sdk.get("manifestSchema") != 2 or plugin_sdk.get("runtime") != "trusted-in-process":
         raise ReleaseContractError("Compatibility policy must preserve Plugin Manifest v2 trusted in-process runtime")
     payload = build_manifest(
@@ -74,6 +83,8 @@ def _generate(args) -> dict[str, object]:
         created_at=args.created_at,
         api_digest=args.api_digest,
         web_digest=args.web_digest,
+        deployment_contract_sha256=deployment_contract_digest(deployment_contract),
+        deployment_files=deployment_contract["files"],
         minimum_updater_version=compatibility["minimumUpdaterVersion"],
         database_contract=database["contract"],
         database_accepts=database["appAccepts"],
@@ -88,6 +99,12 @@ def _generate(args) -> dict[str, object]:
     return payload
 
 
+def _generate_deployment_contract(args) -> dict[str, object]:
+    payload = build_deployment_contract(args.root)
+    _write_json(args.output, payload)
+    return payload
+
+
 def _validate(args) -> dict[str, object]:
     payload = _read_json(args.manifest)
     validate_manifest(payload, updater_version=args.updater_version or None)
@@ -97,6 +114,7 @@ def _validate(args) -> dict[str, object]:
         "commit": payload["release"]["commit"],
         "apiDigest": payload["images"]["api"]["digest"],
         "webDigest": payload["images"]["web"]["digest"],
+        "deploymentContractSha256": payload["deployment"]["contractSha256"],
     }
 
 
@@ -165,8 +183,15 @@ def _parser() -> argparse.ArgumentParser:
     generate.add_argument("--api-digest", required=True)
     generate.add_argument("--web-digest", required=True)
     generate.add_argument("--compatibility-file", type=Path, required=True)
+    generate.add_argument("--deployment-contract-file", type=Path, required=True)
+    generate.add_argument("--deployment-root", type=Path, required=True)
     generate.add_argument("--output", type=Path, required=True)
     generate.set_defaults(handler=_generate)
+
+    deployment = subparsers.add_parser("generate-deployment-contract")
+    deployment.add_argument("--root", type=Path, required=True)
+    deployment.add_argument("--output", type=Path, required=True)
+    deployment.set_defaults(handler=_generate_deployment_contract)
 
     validate = subparsers.add_parser("validate-manifest")
     validate.add_argument("--manifest", type=Path, required=True)

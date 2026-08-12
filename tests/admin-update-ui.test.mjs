@@ -6,6 +6,7 @@ import { compatibilityPresentation, updateStateLabel } from "../src/components/a
 
 const component = readFileSync(new URL("../src/components/admin/AdminUpdatePanel.jsx", import.meta.url), "utf8");
 const page = readFileSync(new URL("../src/pages/AdminDashboardPage.jsx", import.meta.url), "utf8");
+const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 
 test("staff update surface preserves Stable default and gates prerelease channels to superusers", () => {
   assert.match(component, /useState\("stable"\)/);
@@ -32,4 +33,15 @@ test("unsafe downgrade and manual recovery have explicit user-facing states", ()
   assert.match(component, /release\.compatibility\?\.allowed === false/);
   assert.match(component, /status\?\.previousCompatibility/);
   assert.match(component, /previousCompatibility\?\.allowed === false/);
+  assert.match(component, /status\?\.recoveryBlock/);
+  assert.match(component, /recoveryBlocked/);
+  assert.match(component, /服务器管理员完成现场对账/);
+});
+
+test("frontend identifies its immutable artifact separately from effective updater state", () => {
+  assert.match(html, /animemo-artifact-version/);
+  assert.match(html, /%VITE_ANIMEMO_VERSION%/);
+  assert.match(html, /animemo-artifact-commit/);
+  assert.match(html, /animemo-artifact-channel/);
+  assert.match(component, /status\?\.current/);
 });

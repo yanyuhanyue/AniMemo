@@ -29,8 +29,12 @@ def link_directory(link: Path, target: Path) -> None:
 
 
 class FakeRunner:
-    def __init__(self, manifest, *, exact_release=None):
+    def __init__(self, manifest, *, exact_release=None, deployment_contract=None):
         self.manifest = manifest
+        self.deployment_contract = deployment_contract or {
+            "schemaVersion": 1,
+            "files": manifest["deployment"]["files"],
+        }
         self.calls = []
         self.exact_release = exact_release or {
             "tag_name": manifest["release"]["version"],
@@ -55,9 +59,15 @@ class FakeRunner:
             output = Path(argv[argv.index("--dir") + 1])
             output.mkdir(parents=True, exist_ok=True)
             encoded = (json.dumps(self.manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+            deployment_encoded = (
+                json.dumps(self.deployment_contract, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+            ).encode()
             (output / "release-manifest.json").write_bytes(encoded)
+            (output / "deployment-contract.json").write_bytes(deployment_encoded)
             (output / "checksums.txt").write_text(
-                f"{hashlib.sha256(encoded).hexdigest()}  release-manifest.json\n", encoding="utf-8"
+                f"{hashlib.sha256(encoded).hexdigest()}  release-manifest.json\n"
+                f"{hashlib.sha256(deployment_encoded).hexdigest()}  deployment-contract.json\n",
+                encoding="utf-8",
             )
             return type("Result", (), {"stdout": ""})()
         return type("Result", (), {"stdout": "Verified"})()
@@ -71,6 +81,11 @@ def stable_manifest():
         created_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
         api_digest="sha256:" + "a" * 64,
         web_digest="sha256:" + "b" * 64,
+        deployment_contract_sha256="sha256:0be5fdf5f87275755e06a2e2b6523c24e16d6aa1db48d8d58e8cfea969b674df",
+        deployment_files=[
+            {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
+            {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
+        ],
         minimum_updater_version="1.0.0",
         database_contract="animemo-db-v1",
         database_accepts=["animemo-db-v1"],
@@ -109,12 +124,37 @@ class GitHubReleaseSourceTests(unittest.TestCase):
             self.assertEqual(fetched, stable_manifest())
             calls = [" ".join(call) for call in runner.calls]
             self.assertTrue(any("release download v1.0.0 --repo yanyuhanyue/AniMemo" in call for call in calls))
-            self.assertEqual(sum("attestation verify" in call for call in calls), 3)
+            self.assertEqual(sum("attestation verify" in call for call in calls), 4)
             image_calls = [call for call in calls if "attestation verify oci://" in call]
             manifest_call = next(call for call in calls if "attestation verify" in call and "release-manifest.json" in call)
+            deployment_call = next(
+                call for call in calls
+                if "attestation verify" in call and "deployment-contract.json" in call
+            )
             self.assertTrue(all(f"--source-digest {'1' * 40}" in call for call in image_calls))
             self.assertIn(f"--source-digest {stable_manifest()['provenance']['sourceCommit']}", manifest_call)
+            self.assertIn(
+                f"--source-digest {stable_manifest()['provenance']['sourceCommit']}",
+                deployment_call,
+            )
             self.assertTrue(all("evil" not in call for call in calls))
+
+    def test_tampered_deployment_contract_is_rejected_even_with_matching_checksum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            changed = {
+                "schemaVersion": 1,
+                "files": [
+                    {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "f" * 64},
+                    {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
+                ],
+            }
+            source = GitHubReleaseSource(
+                Path(directory),
+                runner=FakeRunner(stable_manifest(), deployment_contract=changed),
+            )
+
+            with self.assertRaisesRegex(RequestRejected, "differs from the release manifest"):
+                source.fetch_verified("v1.0.0")
 
     def test_release_source_never_accepts_url_or_repository(self):
         with tempfile.TemporaryDirectory() as directory:

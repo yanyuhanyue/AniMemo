@@ -10,7 +10,7 @@ from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .errors import OperationInProgress, StateError
+from .errors import OperationInProgress, RecoveryRequired, StateError
 from .redaction import redact
 
 TERMINAL_STATES = {
@@ -19,6 +19,7 @@ TERMINAL_STATES = {
     "failed_post_switch",
     "rolled_back",
     "manual_recovery_required",
+    "reconciled",
 }
 TRANSITIONS = {
     "idle": {"preflight", "failed_pre_switch"},
@@ -26,11 +27,13 @@ TRANSITIONS = {
     "fetching": {"verifying", "failed_pre_switch"},
     "verifying": {"backup", "pulling", "failed_pre_switch"},
     "backup": {"pulling", "failed_pre_switch"},
-    "pulling": {"migrating", "switching", "failed_pre_switch"},
-    "migrating": {"switching", "manual_recovery_required"},
+    "pulling": {"migrating", "bootstrapping", "switching", "failed_pre_switch"},
+    "migrating": {"bootstrapping", "manual_recovery_required"},
+    "bootstrapping": {"switching", "manual_recovery_required"},
     "switching": {"verifying_health", "rolling_back", "failed_post_switch", "manual_recovery_required"},
     "verifying_health": {"succeeded", "rolling_back", "rolled_back", "failed_post_switch", "manual_recovery_required"},
     "rolling_back": {"rolled_back", "manual_recovery_required"},
+    "manual_recovery_required": {"reconciled"},
 }
 PRE_SWITCH_RECOVERY = {"idle", "preflight", "fetching", "verifying", "backup", "pulling"}
 
@@ -198,6 +201,76 @@ class OperationStore:
         _atomic_json(self._path(operation_id), payload, root=self.root)
         return payload
 
+    def bind_recovery_target(
+        self,
+        operation_id: str,
+        manifest: dict[str, object],
+    ) -> dict[str, object]:
+        payload = self.get(operation_id)
+        if payload.get("kind") != "apply_update" or not isinstance(manifest, dict):
+            raise StateError("Recovery target is invalid for this operation")
+        target = json.loads(json.dumps(manifest))
+        recovery = payload.setdefault(
+            "recovery",
+            {"targetManifest": target, "pendingContractTransitions": {}},
+        )
+        if (
+            not isinstance(recovery, dict)
+            or recovery.get("targetManifest") != target
+            or not isinstance(recovery.get("pendingContractTransitions"), dict)
+        ):
+            raise StateError("Recovery target is already bound to different state")
+        payload["updatedAt"] = _now()
+        _atomic_json(self._path(operation_id), payload, root=self.root)
+        return payload
+
+    def mark_contract_transition_pending(
+        self,
+        operation_id: str,
+        kind: str,
+        *,
+        before: str,
+        after: str,
+    ) -> dict[str, object]:
+        if kind not in {"database", "configuration"}:
+            raise StateError("Recovery contract kind is invalid")
+        if not all(isinstance(value, str) and value for value in (before, after)):
+            raise StateError("Recovery contract transition is invalid")
+        payload = self.get(operation_id)
+        recovery = payload.get("recovery")
+        if not isinstance(recovery, dict) or not isinstance(
+            recovery.get("targetManifest"),
+            dict,
+        ):
+            raise StateError("Recovery target is not bound")
+        pending = recovery.get("pendingContractTransitions")
+        if not isinstance(pending, dict):
+            raise StateError("Recovery contract state is invalid")
+        transition = {"before": before, "after": after}
+        if kind in pending and pending[kind] != transition:
+            raise StateError("Recovery contract transition is already bound")
+        pending[kind] = transition
+        payload["updatedAt"] = _now()
+        _atomic_json(self._path(operation_id), payload, root=self.root)
+        return payload
+
+    def resolve_contract_transition(
+        self,
+        operation_id: str,
+        kind: str,
+    ) -> dict[str, object]:
+        if kind not in {"database", "configuration"}:
+            raise StateError("Recovery contract kind is invalid")
+        payload = self.get(operation_id)
+        recovery = payload.get("recovery")
+        pending = recovery.get("pendingContractTransitions") if isinstance(recovery, dict) else None
+        if not isinstance(pending, dict) or kind not in pending:
+            raise StateError("Recovery contract transition is not pending")
+        del pending[kind]
+        payload["updatedAt"] = _now()
+        _atomic_json(self._path(operation_id), payload, root=self.root)
+        return payload
+
     def list(self) -> list[dict[str, object]]:
         _validate_private_directory(self.root, self.operations)
         if not self.operations.exists():
@@ -206,6 +279,23 @@ class OperationStore:
         for path in sorted(self.operations.glob("*.json")):
             result.append(self.get(path.stem))
         return result
+
+    def recovery_block(self) -> dict[str, object] | None:
+        blocked = [
+            payload
+            for payload in self.list()
+            if payload["status"] == "manual_recovery_required"
+        ]
+        if not blocked:
+            return None
+        return max(blocked, key=lambda payload: (payload["updatedAt"], payload["id"]))
+
+    def require_recovery_clear(self) -> None:
+        blocked = self.recovery_block()
+        if blocked is not None:
+            raise RecoveryRequired(
+                f"Manual recovery operation {blocked['id']} must be reconciled on the host"
+            )
 
     def recover_incomplete(self) -> list[str]:
         recovered = []
