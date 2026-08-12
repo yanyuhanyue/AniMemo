@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yanyuhanyue/AniMemo/blob/main/release/release-manifest.schema.json",
+  "title": "AniMemo Release Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "release", "images", "minimumUpdaterVersion", "compatibility", "releaseNotes", "provenance", "artifacts"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "channel", "commit", "createdAt", "promotedFrom"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:beta|rc)\\.[1-9][0-9]*)?$"},
+        "channel": {"enum": ["beta", "rc", "stable"]},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "promotedFrom": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"}
+          ]
+        }
+      }
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "web"],
+      "properties": {
+        "api": {"$ref": "#/$defs/apiImage"},
+        "web": {"$ref": "#/$defs/webImage"}
+      }
+    },
+    "minimumUpdaterVersion": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["database", "configuration", "pluginSdk"],
+      "properties": {
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contract", "appAccepts", "migration", "applicationRollback"],
+          "properties": {
+            "contract": {"$ref": "#/$defs/contractId"},
+            "appAccepts": {"$ref": "#/$defs/contractList"},
+            "migration": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["required", "policy"],
+              "properties": {
+                "required": {"type": "boolean"},
+                "policy": {"enum": ["none", "additive-backward-compatible", "breaking-blocked"]}
+              }
+            },
+            "applicationRollback": {"enum": ["safe", "conditional", "blocked"]}
+          }
+        },
+        "configuration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contract", "appAccepts"],
+          "properties": {
+            "contract": {"$ref": "#/$defs/contractId"},
+            "appAccepts": {"$ref": "#/$defs/contractList"}
+          }
+        },
+        "pluginSdk": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["manifestSchema", "supportedApis", "runtime"],
+          "properties": {
+            "manifestSchema": {"const": 2},
+            "supportedApis": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "integer", "minimum": 1}
+            },
+            "runtime": {"const": "trusted-in-process"}
+          }
+        }
+      }
+    },
+    "releaseNotes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": {"const": "yanyuhanyue/AniMemo"},
+        "tag": {"type": "string"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "issuer", "predicateType", "workflow"],
+      "properties": {
+        "repository": {"const": "yanyuhanyue/AniMemo"},
+        "issuer": {"const": "github-actions"},
+        "predicateType": {"const": "https://slsa.dev/provenance/v1"},
+        "workflow": {"enum": [".github/workflows/release.yml", ".github/workflows/promote-release.yml"]}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "checksums"],
+      "properties": {
+        "manifest": {"const": "release-manifest.json"},
+        "checksums": {"const": "checksums.txt"}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "contractId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{2,63}$"},
+    "contractList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/contractId"}
+    },
+    "apiImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "platform"],
+      "properties": {
+        "repository": {"const": "ghcr.io/yanyuhanyue/animemo-api"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "platform": {"const": "linux/amd64"}
+      }
+    },
+    "webImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "platform"],
+      "properties": {
+        "repository": {"const": "ghcr.io/yanyuhanyue/animemo-web"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "platform": {"const": "linux/amd64"}
+      }
+    }
+  }
+}

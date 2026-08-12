@@ -29,6 +29,9 @@ class CiClassificationTests(unittest.TestCase):
             "backend/journal/migrations/0002_add.py",
             ".github/workflows/ci.yml",
             "backend/requirements.in",
+            "release/contract.py",
+            "scripts/tests/test_release_contract.py",
+            "updater/agent.py",
         ):
             with self.subTest(path=path):
                 self.assertEqual(classify_paths([path])["full_gate"], "true")
