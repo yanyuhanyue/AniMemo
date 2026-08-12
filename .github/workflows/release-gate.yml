@@ -114,6 +114,7 @@ jobs:
           data_root="$RUNNER_TEMP/anime-journal-data"
           mkdir -p "$data_root"/plugins "$data_root"/logs "$data_root"/backups "$data_root"/media "$data_root"/postgres "$data_root"/redis
           chmod -R a+rwx "$data_root"
+          sudo install -d -m 0700 -o 10001 -g 10001 "$data_root/private"
           cat > .env.production <<EOF
           DEBUG=false
           DJANGO_SECRET_KEY=ci-only-secret-key-012345678901234567890123456789012345678901234567890
