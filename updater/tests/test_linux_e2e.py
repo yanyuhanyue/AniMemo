@@ -48,6 +48,7 @@ def manifest(
 class LocalReleaseSource:
     def __init__(self, manifests):
         self.manifests = manifests
+        self.verified = []
 
     def list_releases(self, channel, *, refresh=False):
         return [
@@ -59,7 +60,8 @@ class LocalReleaseSource:
             for item in reversed(list(self.manifests.values()))
         ]
 
-    def fetch_verified(self, version, *, updater_version="1.0.0"):
+    def fetch_verified(self, version, *, updater_version="1.0.0", refresh=False):
+        self.verified.append((version, refresh))
         return self.manifests[version]
 
 
@@ -116,7 +118,7 @@ class LinuxUpdaterE2ETests(unittest.TestCase):
             slots = ReleaseSlots(root / "releases")
             slots.import_current(first)
             runtime_state = RuntimeState(root / "state")
-            runtime_state.initialize_from_manifest(first)
+            runtime_state.initialize_from_manifest(first, enabled_plugin_apis={2})
             operations = OperationStore(root / "state")
             deployment = IsolatedDeployment()
             deployment.live_version = first["release"]["version"]
@@ -176,6 +178,10 @@ class LinuxUpdaterE2ETests(unittest.TestCase):
             self.assertEqual(slots.read()["previous"]["release"]["version"], "v1.1.0-rc.1")
             self.assertEqual(runtime_state.read()["databaseContract"], "animemo-db-v2")
             self.assertEqual([call[0] for call in deployment.calls].count("migrate"), 1)
+            self.assertEqual(
+                source.verified[-2:],
+                [("v1.1.0-rc.1", True), ("v1.0.0-rc.1", True)],
+            )
 
 
 if __name__ == "__main__":

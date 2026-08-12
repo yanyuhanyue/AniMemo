@@ -47,7 +47,7 @@ Socket mode 是 `0660`，目录 mode 是 `0750`，属主/组为 `animemo-updater
 
 ## Release verification
 
-Release discovery 只访问 `yanyuhanyue/AniMemo`。下载固定资产 `release-manifest.json` 与 `checksums.txt` 后，Agent 验证：
+Release discovery 只访问 `yanyuhanyue/AniMemo`，并把 tag SemVer 通道与 GitHub Release 的 `draft/prerelease` metadata 绑定；错误标记的 Stable/RC/Beta 不进入可用列表。下载固定资产 `release-manifest.json` 与 `checksums.txt` 后，Agent 验证：
 
 1. tag、channel、SemVer、40 位 commit 与 Manifest schema；
 2. checksum 和固定 repository/platform/digest；
@@ -59,7 +59,7 @@ Stable Manifest 保留 RC 的应用 commit 和 API/Web digest，但由 promotion
 
 ## Compatibility and rollback
 
-计划输入是 CURRENT、live database/configuration contract、enabled Plugin SDK API 与目标 Manifest。结果只有：
+计划输入是 CURRENT、live database/configuration contract、实际 enabled Plugin SDK API 与目标 Manifest。一次性 bootstrap 通过当前 exact API image 的固定管理命令初始化真实启用集合；Staff status/list/plan 最多缓存该只读检查 30 秒，apply/rollback 在执行边界强制刷新。结果只有：
 
 - **Safe Switch**：目标应用接受所有 live contracts；
 - **Application Rollback**：旧应用接受当前 contracts，可只切回 API/Web；
@@ -84,11 +84,11 @@ idle
 → succeeded
 ```
 
-失败终态为 `failed_pre_switch`、`rolled_back` 或 `manual_recovery_required`。Agent 重启会把 switch 前未完成 Operation 标为 `failed_pre_switch`；migration/switch 已开始的 Operation 标为 `manual_recovery_required`，绝不自动重放 migration。
+失败终态为 `failed_pre_switch`、`rolled_back` 或 `manual_recovery_required`。Agent 重启会把 switch 前未完成 Operation 标为 `failed_pre_switch`；migration/switch 已开始的 Operation 标为 `manual_recovery_required`，绝不自动重放 migration。所有 event detail 在 `OperationStore` 的唯一持久化边界统一 redaction；调用方遗漏脱敏也不能把常见 password/token/Authorization/URL credential 明文写入 journal。
 
 ## Backup and switch
 
-无 migration 时必须已有不超过 24 小时的 verified backup：metadata 路径位于固定 backup root、compressed SHA-256 匹配、UTC timestamp 合法、gzip 流可完整解压。有 migration 时 Agent 创建新的 `pg_dump` gzip 与 metadata；失败则不 pull/migrate/switch。
+Preflight 固定检查至少 2 GiB 可用磁盘、至少 512 MiB `MemAvailable`、Docker/Compose、PostgreSQL/Redis/API/Web container health、当前 `/health/` 与 `/`。无 migration 时必须已有不超过 24 小时的 verified backup：metadata 路径位于固定 backup root、compressed SHA-256 匹配、UTC timestamp 合法、gzip 流可完整解压。有 migration 时 preflight 先确认固定 backup root 可写，随后 Agent 创建新的 `pg_dump` gzip 与 metadata；失败则不 pull/migrate/switch。
 
 切换只执行：
 
@@ -100,6 +100,12 @@ bootstrap job
 up --no-deps --force-recreate api web
 stable health observations
 ```
+
+`runtime-images.env` 以 `0600` 写入临时文件、fsync、atomic replace 并同步目录，避免半写状态或通过预置 link 改写 state root 外文件。每次 stable observation 要求 API/Web healthy、restart count 为零、`/health/`、`/`、`/login`、`/api/schema/`、`/api/docs/` 均为 HTTP 200，并扫描观察窗口内 API/Web stdout 与 stderr；HTTP 5xx 或 critical/fatal/panic/Traceback 会使 health gate 失败。原始日志不写入 Operation detail。
+
+固定 state/data/cache root 及其受管子目录不能是 symlink 或 junction；Operation、plan、runtime、CURRENT/PREVIOUS/history、lock、Release asset 与 backup/metadata 必须是私有单链接普通文件。所有原子写和 gzip backup 使用系统独占创建的随机临时文件。Unix RPC 只会清理真实的陈旧 socket 节点；同名普通文件、目录或 link 会阻止启动，而不会被删除。
+
+Plan 保存的是已经验证过的 exact Manifest 和哈希绑定，但它不替代执行期验证。apply/rollback 在 `FETCHING` 阶段强制绕过 Release cache，重新验证 exact tag、GitHub Release metadata、checksums 和 attestations；`VERIFYING` 阶段要求结果与 plan 或 PREVIOUS 槽位完全一致，任何差异都进入 `failed_pre_switch`，不执行 pull、migration 或 switch。
 
 PostgreSQL、Redis、Docker daemon、OpenResty、cloudflared 与其他 VPS 服务都不在 Agent 的操作集合中。
 
@@ -127,6 +133,6 @@ sudo sh deploy/bootstrap-updater.sh /path/to/verified/release-manifest.json
 
 Staff Update API 属于 `manage_system`，Stable 默认可见；只有 superuser 可见 RC/Beta。所有 mutation 需要 CSRF，使用 scoped throttling，并写 staff audit。apply 必须输入 `APPLY <version>`，rollback 必须输入 `ROLLBACK PREVIOUS`。
 
-Agent unavailable 返回 503 `updater_unavailable`；兼容性、并发或 operation state 冲突返回 409；其他拒绝返回稳定 `{code, detail}`。日志在写入 journal 和返回 RPC 前执行 secret redaction。
+Agent unavailable 返回 503 `updater_unavailable`；兼容性、并发或 operation state 冲突返回 409；其他拒绝返回稳定 `{code, detail}`。PREVIOUS 的实时 compatibility 随 status DTO 返回，Staff UI 会展示判定并禁用 Unsafe Downgrade；rollback RPC 仍在执行前再次裁决。日志在写入 journal 和返回 RPC 前执行 secret redaction。
 
 Update Agent endpoints 不属于普通 Public SDK，也不向 Plugin SDK 或 Integration Protocol v1 暴露。

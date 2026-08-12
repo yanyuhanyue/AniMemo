@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import stat
+import tempfile
 import time
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .errors import OperationInProgress, StateError
-
+from .redaction import redact
 
 TERMINAL_STATES = {
     "succeeded",
@@ -37,12 +39,54 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _atomic_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    data = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+def _absolute(path: Path) -> Path:
+    return Path(os.path.abspath(path))
+
+
+def _is_directory_link(path: Path) -> bool:
+    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+
+
+def _validate_private_directory(root: Path, directory: Path, *, create: bool = False) -> None:
+    root = _absolute(root)
+    directory = _absolute(directory)
     try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        relative = directory.relative_to(root)
+    except ValueError as error:
+        raise StateError("Private state directory escapes its fixed root") from error
+    current = root
+    for part in (Path(), *relative.parts):
+        if part != Path():
+            current /= part
+        if _is_directory_link(current):
+            raise StateError("Private state directory must not be a link")
+        if not current.exists():
+            if not create:
+                return
+            current.mkdir(mode=0o700)
+        if _is_directory_link(current) or not current.is_dir():
+            raise StateError("Private state directory is unavailable")
+
+
+def _ensure_private_directory(root: Path, directory: Path) -> None:
+    _validate_private_directory(root, directory, create=True)
+
+
+def _atomic_text(path: Path, data: str, *, root: Path | None = None) -> None:
+    path = _absolute(path)
+    if root is None:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    else:
+        _ensure_private_directory(root, path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             os.chmod(temporary, 0o600)
             handle.write(data)
             handle.flush()
@@ -66,9 +110,36 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _atomic_json(path: Path, payload: dict[str, object], *, root: Path | None = None) -> None:
+    _atomic_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", root=root)
+
+
+def _read_private_text(root: Path, path: Path) -> str:
+    root = _absolute(root)
+    path = _absolute(path)
+    _validate_private_directory(root, path.parent)
+    metadata = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise StateError("Private state file must be a single-link regular file")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise StateError("Private state file must be a single-link regular file")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            return handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 class OperationStore:
     def __init__(self, root: Path):
-        self.root = root.resolve()
+        self.root = _absolute(root)
         self.operations = self.root / "operations"
 
     def _path(self, operation_id: str) -> Path:
@@ -88,15 +159,16 @@ class OperationStore:
             "metadata": metadata,
             "events": [{"status": "idle", "at": timestamp, "detail": "operation created"}],
         }
-        _atomic_json(self._path(operation_id), payload)
+        _atomic_json(self._path(operation_id), payload, root=self.root)
         return payload
 
     def get(self, operation_id: str) -> dict[str, object]:
+        _validate_private_directory(self.root, self.operations)
         path = self._path(operation_id)
         error = None
         for attempt in range(20):
             try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload = json.loads(_read_private_text(self.root, path))
                 break
             except (FileNotFoundError, PermissionError, json.JSONDecodeError) as current_error:
                 error = current_error
@@ -115,11 +187,12 @@ class OperationStore:
         timestamp = _now()
         payload["status"] = status
         payload["updatedAt"] = timestamp
-        payload["events"].append({"status": status, "at": timestamp, "detail": detail})
-        _atomic_json(self._path(operation_id), payload)
+        payload["events"].append({"status": status, "at": timestamp, "detail": redact(detail)})
+        _atomic_json(self._path(operation_id), payload, root=self.root)
         return payload
 
     def list(self) -> list[dict[str, object]]:
+        _validate_private_directory(self.root, self.operations)
         if not self.operations.exists():
             return []
         result = []
@@ -143,12 +216,35 @@ class OperationStore:
 
 class UpdateLock(AbstractContextManager):
     def __init__(self, path: Path):
-        self.path = path.resolve()
+        absolute = _absolute(path)
+        self.root = absolute.parent
+        self.path = absolute
         self.handle = None
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.handle = self.path.open("a+b")
+        _ensure_private_directory(self.root, self.root)
+        try:
+            existing = self.path.lstat()
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and (
+            self.path.is_symlink()
+            or not stat.S_ISREG(existing.st_mode)
+            or existing.st_nlink != 1
+        ):
+            raise StateError("Update lock file must be a private regular file")
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.path, flags, 0o600)
+        except OSError as error:
+            raise StateError("Update lock file is unavailable") from error
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            os.close(descriptor)
+            raise StateError("Update lock file must be a private regular file")
+        self.handle = os.fdopen(descriptor, "r+b")
         os.chmod(self.path, 0o600)
         try:
             if os.name == "nt":

@@ -48,10 +48,10 @@ Do not print secrets or use real user credentials for smoke. If a dedicated smok
 4. Install the reviewed Agent package with `deploy/install-updater.sh`; verify only Agent-owned files/service changed.
 5. Verify systemd status, journal, Updater version, socket path/mode/group and absence of any TCP listener.
 6. Perform the one-time legacy-to-digest cutover using the exact RC images and explicit migration/bootstrap jobs. Replace only API/Web; preserve PostgreSQL/Redis container IDs and data mounts.
-7. Observe API/Web health for the defined stable window and require restart count zero.
+7. Observe the defined stable window: every observation requires API/Web healthy, restart count zero, HTTP 200 from `/health/`, `/`, `/login`, `/api/schema/`, `/api/docs/`, and no HTTP 5xx or critical/fatal/panic/Traceback in API/Web stdout or stderr since the window began.
 8. Run public health, frontend, schema/docs, plugin, Integration/Bridge, media reservation and dedicated authenticated smoke checks.
-9. Import the exact already-verified RC Manifest as CURRENT once. Confirm a repeated import is rejected.
-10. Confirm Staff UI shows the same CURRENT version, commit and API/Web digests and no PREVIOUS unless a real Agent switch has occurred.
+9. Import the exact already-verified RC Manifest as CURRENT once. Confirm it records the actual enabled Plugin SDK APIs and rejects a repeated import.
+10. Confirm Staff UI shows the same CURRENT version, commit and API/Web digests, the actual enabled Plugin SDK APIs, and no PREVIOUS unless a real Agent switch has occurred.
 11. Perform one scoped API/Web restart and repeat health/data/plugin/integration/media checks. PostgreSQL/Redis and unrelated VPS services must retain identity and health.
 
 If the RC contains a migration, acceptance must prove its plan is expected and additive/backward-compatible before execution. Migration failure stops before switch and never triggers reverse migration or automatic restore.
@@ -83,6 +83,7 @@ Also prove in isolation or an approved non-production acceptance environment:
 - concurrent apply/rollback is rejected by the global lock;
 - Agent restart marks pre-switch work failed and post-migration/switch work manual recovery;
 - repeated rollback swaps CURRENT/PREVIOUS predictably;
+- PREVIOUS compatibility updates after plugin enable/disable changes and unsafe rollback controls stay disabled;
 - RPC size limits and socket permissions hold.
 
 ## Shared VPS safety

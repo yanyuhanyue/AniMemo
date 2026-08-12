@@ -4,30 +4,48 @@ import json
 from pathlib import Path
 
 from .errors import StateError
-from .state import _atomic_json
+from .state import (
+    _absolute,
+    _atomic_json,
+    _read_private_text,
+    _validate_private_directory,
+)
 
 
 class RuntimeState:
     """Persist contracts that describe the live host, not merely CURRENT app."""
 
     def __init__(self, root: Path):
-        self.path = root.resolve() / "runtime.json"
+        self.root = _absolute(root)
+        self.path = self.root / "runtime.json"
 
-    def initialize_from_manifest(self, manifest: dict[str, object]) -> dict[str, object]:
+    def initialize_from_manifest(
+        self,
+        manifest: dict[str, object],
+        *,
+        enabled_plugin_apis: set[int],
+    ) -> dict[str, object]:
         if self.path.exists():
             return self.read()
         compatibility = manifest["compatibility"]
+        supported_apis = set(compatibility["pluginSdk"]["supportedApis"])
+        if (
+            not all(isinstance(value, int) and value > 0 for value in enabled_plugin_apis)
+            or not enabled_plugin_apis.issubset(supported_apis)
+        ):
+            raise StateError("Enabled Plugin SDK APIs are invalid for CURRENT")
         payload = {
             "databaseContract": compatibility["database"]["contract"],
             "configurationContract": compatibility["configuration"]["contract"],
-            "enabledPluginApis": sorted(compatibility["pluginSdk"]["supportedApis"]),
+            "enabledPluginApis": sorted(enabled_plugin_apis),
         }
         self.write(payload)
         return payload
 
     def read(self) -> dict[str, object]:
+        _validate_private_directory(self.root, self.root)
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            payload = json.loads(_read_private_text(self.root, self.path))
         except (OSError, json.JSONDecodeError) as error:
             raise StateError("Runtime compatibility state is unavailable") from error
         if (
@@ -42,7 +60,7 @@ class RuntimeState:
         return payload
 
     def write(self, payload: dict[str, object]) -> None:
-        _atomic_json(self.path, payload)
+        _atomic_json(self.path, payload, root=self.root)
 
     def update(self, **changes) -> dict[str, object]:
         payload = self.read()

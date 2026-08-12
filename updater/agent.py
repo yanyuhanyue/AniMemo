@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from . import __version__
 from .compatibility import DeploymentContext, plan_switch
@@ -21,6 +22,7 @@ class UpdateAgent:
         runtime_state,
         executor,
         background: bool = True,
+        runtime_refresh_seconds: int = 30,
     ):
         self.source = source
         self.operations = operations
@@ -29,6 +31,8 @@ class UpdateAgent:
         self.runtime_state = runtime_state
         self.executor = executor
         self.background = background
+        self.runtime_refresh_seconds = runtime_refresh_seconds
+        self._runtime_refreshed_at = 0.0
 
     def recover(self) -> list[str]:
         return self.operations.recover_incomplete()
@@ -38,7 +42,7 @@ class UpdateAgent:
         current = slots["current"]
         if current is None:
             raise RequestRejected("CURRENT release identity is not initialized")
-        runtime = self.runtime_state.read()
+        runtime = self._refresh_enabled_plugin_apis(current)
         return DeploymentContext(
             current_manifest=current,
             database_contract=runtime["databaseContract"],
@@ -58,15 +62,31 @@ class UpdateAgent:
             "webDigest": manifest["images"]["web"]["digest"],
         }
 
+    def _refresh_enabled_plugin_apis(self, current) -> dict[str, object]:
+        now = time.monotonic()
+        if now - self._runtime_refreshed_at >= self.runtime_refresh_seconds:
+            enabled = sorted(self.executor.deployment.inspect_enabled_plugin_apis(current))
+            runtime = self.runtime_state.update(enabledPluginApis=enabled)
+            self._runtime_refreshed_at = now
+            return runtime
+        return self.runtime_state.read()
+
     def _status(self):
         slots = self.slots.read()
         operations = sorted(self.operations.list(), key=lambda item: item["createdAt"], reverse=True)
         context = self._context()
+        runtime = self.runtime_state.read()
+        previous_compatibility = (
+            plan_switch(context, slots["previous"], updater_version=__version__).as_dict()
+            if slots["previous"] is not None
+            else None
+        )
         return {
             "updaterVersion": __version__,
             "current": self._identity(slots["current"]),
             "previous": self._identity(slots["previous"]),
-            "runtime": self.runtime_state.read(),
+            "previousCompatibility": previous_compatibility,
+            "runtime": runtime,
             "operation": operations[0] if operations else None,
             "history": [
                 {
@@ -87,7 +107,7 @@ class UpdateAgent:
                 manifest = self.source.fetch_verified(release["version"], updater_version=__version__)
                 switch = plan_switch(current, manifest, updater_version=__version__)
                 planned.append({**release, "compatibility": switch.as_dict()})
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - one bad Release must not abort discovery
                 planned.append({
                     **release,
                     "compatibility": {
@@ -119,7 +139,7 @@ class UpdateAgent:
     def _run_apply(self, operation_id, manifest, lock_lease):
         try:
             self.executor.apply(operation_id, manifest, lock_held=True)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - worker failures must become durable operation state
             operation = self.operations.get(operation_id)
             if operation["status"] in TERMINAL_STATES:
                 return
@@ -131,7 +151,7 @@ class UpdateAgent:
     def _run_rollback(self, operation_id, manifest, lock_lease):
         try:
             self.executor.rollback(operation_id, manifest, lock_held=True)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - worker failures must become durable operation state
             operation = self.operations.get(operation_id)
             if operation["status"] in TERMINAL_STATES:
                 return

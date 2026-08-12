@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import os
 import socket
+import stat
 from pathlib import Path
 
-from .errors import UpdaterError
+from .errors import StateError, UpdaterError
 from .redaction import redact
-
 
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
@@ -24,7 +24,7 @@ class UnixRpcServer:
             return {"ok": True, "result": self.agent.dispatch(request)}
         except UpdaterError as error:
             return {"ok": False, "error": {"code": error.code, "detail": redact(error)}}
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - local RPC never exposes an unframed server exception
             return {"ok": False, "error": {"code": "internal_error", "detail": redact(error)}}
 
     def _handle(self, connection):
@@ -52,9 +52,18 @@ class UnixRpcServer:
             }, separators=(",", ":")).encode("utf-8") + b"\n"
         connection.sendall(encoded)
 
+    def _remove_stale_socket(self) -> None:
+        try:
+            existing = self.socket_path.lstat()
+        except FileNotFoundError:
+            return
+        if self.socket_path.is_symlink() or not stat.S_ISSOCK(existing.st_mode):
+            raise StateError("Updater socket path is occupied by a non-socket file")
+        self.socket_path.unlink()
+
     def _listen(self):
         self.socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
-        self.socket_path.unlink(missing_ok=True)
+        self._remove_stale_socket()
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(self.socket_path))
         os.chmod(self.socket_path, self.socket_mode)
@@ -68,7 +77,7 @@ class UnixRpcServer:
             connection, _ = server.accept()
             with connection:
                 self._handle(connection)
-        self.socket_path.unlink(missing_ok=True)
+        self._remove_stale_socket()
 
     def serve_forever(self):
         self.agent.recover()

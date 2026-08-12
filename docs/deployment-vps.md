@@ -26,7 +26,7 @@ GitHub Release Producer
 /data/anime-journal/{postgres,redis,plugins,logs,backups,media}
 /opt/animemo-updater
 /var/lib/animemo-updater
-/run/animemo-updater/agent.sock
+/run/animemo-updater/updater.sock
 ```
 
 生产 Compose 只接受 Manifest 给出的 digest identity：
@@ -44,12 +44,15 @@ ANIMEMO_WEB_IMAGE=ghcr.io/yanyuhanyue/animemo-web@sha256:<digest>
 
 正常更新由 Staff 系统通过本地 Unix Socket 请求 Host Agent。Agent 固定执行：
 
-1. 验证 Release Manifest、checksums、OCI digest 与 GitHub attestations。
-2. 根据 CURRENT、目标 Manifest 和 live contracts 计算 Safe Switch、Application Rollback 或 Unsafe Downgrade。
-3. 验证近期备份；有 migration 时先创建并完整校验新备份。
-4. 按 digest pull API/Web。
-5. 需要时以目标 API image 运行一次性 `migration` job，然后运行 `bootstrap` job。
-6. 只替换 AniMemo API/Web，观察稳定 health window 并更新 CURRENT/PREVIOUS。
+1. 验证 Release Manifest、checksums、GitHub Release 的 draft/prerelease metadata、OCI digest 与 GitHub attestations。
+2. Preflight 检查固定路径、至少 2 GiB 可用磁盘、至少 512 MiB `MemAvailable`、Docker/Compose、PostgreSQL/Redis/API/Web container health、当前 `/health/` 与 `/`，以及 backup gate。
+3. 根据 CURRENT、目标 Manifest 和 live contracts 计算 Safe Switch、Application Rollback 或 Unsafe Downgrade。实际启用的 Plugin SDK API 从当前 API image 读取；Staff status/list/plan 最多缓存 30 秒，apply/rollback 执行前再次强制刷新。
+4. 无 migration 时，preflight 完整验证 24 小时内的 backup metadata、compressed SHA-256、UTC timestamp 与 gzip 流；有 migration 时先确认固定 backup root 可写，再创建并完整校验新备份。
+5. 按 digest pull API/Web；需要时以目标 API image 运行一次性 `migration` job，然后运行 `bootstrap` job。
+6. 只替换 AniMemo API/Web。`runtime-images.env` 使用 `0600`、fsync 与 atomic replace，不跟随预置 link 原地写入。
+7. 稳定窗口每次检查 API/Web container health、restart count、`/health/`、`/`、`/login`、`/api/schema/`、`/api/docs/`，并扫描观察窗口内 API/Web stdout+stderr 的 HTTP 5xx 与 critical/fatal/panic/Traceback；通过后才更新 CURRENT/PREVIOUS。
+
+执行 apply 或 rollback 时，Agent 不直接信任 plan/PREVIOUS 中已缓存的 Release 结果：它会绕过 Release cache 再验证 exact tag、Release metadata、checksums 与 attestations，并要求 Manifest 与绑定内容完全一致。state、cache、backup 及其受管子目录拒绝 symlink/junction 与 hard link；原子状态和 gzip backup 使用随机私有临时文件。RPC 启动只清理真实 socket，不删除同名普通文件。
 
 API 容器启动命令只运行 Gunicorn，不隐式执行 migration、bootstrap 或 static collection。数据库 migration 永远是显式 one-shot job。普通 Application Rollback 只切换 API/Web；不会 reverse migration，也不会自动 restore 数据库。
 
@@ -71,7 +74,7 @@ sudo sh deploy/install-updater.sh
 sudo sh deploy/bootstrap-updater.sh /path/to/verified/release-manifest.json
 ```
 
-`import-current` 无论 Manifest 是否相同都拒绝第二次导入。后续 CURRENT/PREVIOUS 只能由成功的 Agent Operation 维护。
+`import-current` 会用 Manifest 的 exact API digest 执行固定只读检查，记录真实启用的 Plugin SDK API，而不是把 Core 支持列表误当成启用列表。无论 Manifest 是否相同都拒绝第二次导入。后续 CURRENT/PREVIOUS 只能由成功的 Agent Operation 维护。
 
 ## Agent credentials
 
@@ -121,7 +124,7 @@ verified backup path/checksum/time
 
 `release.commit` 是应用构建 commit；`provenance.sourceCommit` 是实际运行 Release/Promotion 签署 workflow 的 commit。Stable 保留 RC 的应用 commit 和 image digests，但 Stable Manifest 可由较新的 promotion workflow commit 签署；两者不得混为一个字段。
 
-生产验收至少覆盖本机与公网 `/`、`/login`、`/health/`、`/api/schema/`、`/api/docs/`，关键认证回归、Journal/Watch History/Analytics、Integration/Bridge、官方插件状态、API/Web logs、CURRENT/PREVIOUS 和 scoped restart persistence。没有专用 smoke identity 时，有效 refresh 明确记录 `NOT RUN`，不得使用真实用户凭据凑证据。
+生产验收至少覆盖本机与公网 `/`、`/login`、`/health/`、`/api/schema/`、`/api/docs/`，关键认证回归、Journal/Watch History/Analytics、Integration/Bridge、官方插件状态、API/Web logs、CURRENT/PREVIOUS/PREVIOUS compatibility 和 scoped restart persistence。没有专用 smoke identity 时，有效 refresh 明确记录 `NOT RUN`，不得使用真实用户凭据凑证据。
 
 不得执行全局 Docker prune、volume prune、Docker daemon restart、PostgreSQL/Redis restart、共享 OpenResty restart 或 cloudflared 修改。不得删除备份、自动 restore 数据库、手工修改插件 CAS 或未知远程媒体对象。
 

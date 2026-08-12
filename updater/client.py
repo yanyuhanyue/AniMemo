@@ -6,7 +6,6 @@ from pathlib import Path
 
 from .errors import UpdaterError
 
-
 MAX_RESPONSE_BYTES = 1024 * 1024
 
 

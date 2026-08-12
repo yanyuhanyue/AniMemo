@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
-import socket
 import os
+import socket
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from updater.client import AgentUnavailable, MAX_RESPONSE_BYTES, UnixAgentClient
+from updater.client import MAX_RESPONSE_BYTES, AgentUnavailable, UnixAgentClient
+from updater.errors import StateError
 from updater.server import MAX_REQUEST_BYTES, UnixRpcServer
 
 
@@ -18,6 +21,22 @@ class EchoAgent:
 
 
 class UnixRpcTests(unittest.TestCase):
+    def test_server_refuses_to_delete_a_regular_file_at_the_socket_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "updater.sock"
+            path.write_text("DO_NOT_DELETE\n", encoding="utf-8")
+            server = UnixRpcServer(path, EchoAgent())
+            fake_socket = SimpleNamespace(
+                AF_UNIX=1,
+                SOCK_STREAM=1,
+                socket=lambda *_args: (_ for _ in ()).throw(AssertionError("socket must not be opened")),
+            )
+
+            with patch("updater.server.socket", fake_socket), self.assertRaisesRegex(StateError, "socket path"):
+                server.serve_once()
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "DO_NOT_DELETE\n")
+
     def test_one_json_request_round_trips_over_unix_socket(self):
         if not hasattr(socket, "AF_UNIX"):
             self.skipTest("AF_UNIX unavailable")

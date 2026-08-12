@@ -53,6 +53,7 @@ export function AdminUpdatePanel({ viewer, onNotice, onError }) {
   const [submitting, setSubmitting] = useState(false);
   const operation = status?.operation;
   const operationActive = ACTIVE_UPDATE_STATES.has(operation?.status);
+  const previousCompatibility = status?.previousCompatibility;
 
   const loadStatus = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -146,7 +147,7 @@ export function AdminUpdatePanel({ viewer, onNotice, onError }) {
     <section className="admin-panel admin-update-history">
       <header><div><h3>版本历史与应用回退</h3><p>回退只切换 API / Web；数据库保留当前 schema。</p></div></header>
       <div className="admin-update-history-list">{(status?.history || []).map((item) => <article key={`${item.version}-${item.commit}`}><div><b>{item.version}</b><span>{channelLabel(item.channel)} · {item.commit?.slice(0, 8)}</span></div>{item.version === currentVersion ? <strong className="is-current">当前版本</strong> : <CompatibilityBadge value={item.compatibility} />}</article>)}</div>
-      {status?.previous && <div className="admin-update-rollback"><div><b>回退到 PREVIOUS：{status.previous.version}</b><span>仅在兼容性允许时执行，不恢复数据库备份。</span></div><label><span>输入 ROLLBACK PREVIOUS</span><input value={rollbackConfirmation} onChange={(event) => setRollbackConfirmation(event.target.value)} autoComplete="off" spellCheck="false" /></label><button type="button" disabled={submitting || operationActive || rollbackConfirmation !== "ROLLBACK PREVIOUS"} onClick={rollback}><Icon name="history" /> 回退应用</button></div>}
+      {status?.previous && <div className="admin-update-rollback"><div><b>回退到 PREVIOUS：{status.previous.version}</b><span>仅在兼容性允许时执行，不恢复数据库备份。</span><CompatibilityBadge value={previousCompatibility} /></div><label><span>输入 ROLLBACK PREVIOUS</span><input value={rollbackConfirmation} onChange={(event) => setRollbackConfirmation(event.target.value)} autoComplete="off" spellCheck="false" disabled={previousCompatibility?.allowed === false} /></label><button type="button" disabled={submitting || operationActive || previousCompatibility?.allowed === false || rollbackConfirmation !== "ROLLBACK PREVIOUS"} onClick={rollback}><Icon name="history" /> 回退应用</button></div>}
     </section>
   </div>;
 }

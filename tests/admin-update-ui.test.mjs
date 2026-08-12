@@ -30,4 +30,6 @@ test("unsafe downgrade and manual recovery have explicit user-facing states", ()
   assert.equal(compatibilityPresentation({ decision: "application_rollback", allowed: true }).label, "应用层可回退");
   assert.equal(updateStateLabel("manual_recovery_required"), "需要人工恢复");
   assert.match(component, /release\.compatibility\?\.allowed === false/);
+  assert.match(component, /status\?\.previousCompatibility/);
+  assert.match(component, /previousCompatibility\?\.allowed === false/);
 });

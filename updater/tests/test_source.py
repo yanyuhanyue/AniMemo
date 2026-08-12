@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -12,10 +14,30 @@ from updater.errors import RequestRejected
 from updater.source import GitHubReleaseSource
 
 
+def link_directory(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            raise
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
 class FakeRunner:
-    def __init__(self, manifest):
+    def __init__(self, manifest, *, exact_release=None):
         self.manifest = manifest
         self.calls = []
+        self.exact_release = exact_release or {
+            "tag_name": manifest["release"]["version"],
+            "draft": False,
+            "prerelease": manifest["release"]["channel"] != "stable",
+            "published_at": "2026-08-12T01:00:00Z",
+        }
 
     def run(self, argv, **kwargs):
         self.calls.append(tuple(argv))
@@ -24,8 +46,11 @@ class FakeRunner:
                 {"tag_name": "v1.0.0-rc.10", "draft": False, "prerelease": True, "published_at": "2026-08-12T01:00:00Z"},
                 {"tag_name": "v1.0.0-rc.2", "draft": False, "prerelease": True, "published_at": "2026-08-11T01:00:00Z"},
                 {"tag_name": "v1.0.0", "draft": False, "prerelease": False, "published_at": "2026-08-10T01:00:00Z"},
+                {"tag_name": "v1.0.1", "draft": False, "prerelease": True, "published_at": "2026-08-12T03:00:00Z"},
                 {"tag_name": "v1.1.0-beta.1", "draft": False, "prerelease": True, "published_at": "2026-08-12T02:00:00Z"},
             ])})()
+        if argv[1:3] == ["api", f"repos/yanyuhanyue/AniMemo/releases/tags/{self.manifest['release']['version']}"]:
+            return type("Result", (), {"stdout": json.dumps(self.exact_release)})()
         if argv[1:3] == ["release", "download"]:
             output = Path(argv[argv.index("--dir") + 1])
             output.mkdir(parents=True, exist_ok=True)
@@ -97,6 +122,51 @@ class GitHubReleaseSourceTests(unittest.TestCase):
             for version in ["https://evil.example/release", "evil/repo:v1", "v1.0.0;id"]:
                 with self.subTest(version=version), self.assertRaises(RequestRejected):
                     source.fetch_verified(version)
+
+    def test_exact_release_metadata_must_match_the_manifest_channel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = FakeRunner(
+                stable_manifest(),
+                exact_release={
+                    "tag_name": "v1.0.0",
+                    "draft": False,
+                    "prerelease": True,
+                    "published_at": "2026-08-12T01:00:00Z",
+                },
+            )
+            source = GitHubReleaseSource(Path(directory), runner=runner)
+
+            with self.assertRaisesRegex(RequestRejected, "metadata"):
+                source.fetch_verified("v1.0.0")
+
+    def test_release_download_does_not_follow_precreated_cache_asset_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = GitHubReleaseSource(root / "cache", runner=FakeRunner(stable_manifest()))
+            destination = source.cache_root / "v1.0.0"
+            destination.mkdir(parents=True)
+            outside = root / "outside.json"
+            outside.write_text("DO_NOT_CHANGE\n", encoding="utf-8")
+            (destination / "release-manifest.json").hardlink_to(outside)
+
+            source.fetch_verified("v1.0.0")
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "DO_NOT_CHANGE\n")
+
+    def test_release_download_rejects_a_linked_cache_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            link_directory(root / "cache", outside)
+            runner = FakeRunner(stable_manifest())
+            source = GitHubReleaseSource(root / "cache", runner=runner)
+
+            with self.assertRaisesRegex(RequestRejected, "cache directory"):
+                source.fetch_verified("v1.0.0")
+
+            self.assertEqual(runner.calls, [])
+            self.assertEqual(list(outside.iterdir()), [])
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ class UpdateExecutor:
             self.deployment.switch(current)
             self.deployment.verify_health(current)
             self.store.transition(operation_id, "rolled_back", detail="previous application restored; database retained")
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - every switch failure must enter recovery state
             self.store.transition(operation_id, "manual_recovery_required", detail=f"application rollback failed: {error}")
 
     def apply(
@@ -79,7 +79,15 @@ class UpdateExecutor:
                 self.store.transition(operation_id, "preflight", detail="checking fixed AniMemo host resources")
                 self.deployment.preflight(target_manifest)
                 self.store.transition(operation_id, "fetching", detail="loading exact GitHub release assets")
+                verified_manifest = self.release_source.fetch_verified(
+                    target_manifest["release"]["version"],
+                    updater_version=self.updater_version,
+                    refresh=True,
+                )
                 self.store.transition(operation_id, "verifying", detail="validating release identity and provenance")
+                if verified_manifest != target_manifest:
+                    raise CompatibilityError("Verified release differs from the planned immutable manifest")
+                target_manifest = verified_manifest
                 current_plugins = sorted(self.deployment.inspect_enabled_plugin_apis(current))
                 self.runtime_state.update(enabledPluginApis=current_plugins)
                 plan = plan_switch(self._context(current), target_manifest, updater_version=self.updater_version)
@@ -115,7 +123,7 @@ class UpdateExecutor:
                 return self.store.transition(operation_id, "succeeded", detail="release switch completed")
             except CompatibilityError as error:
                 return self.store.transition(operation_id, "failed_pre_switch", detail=str(error))
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - every execution failure must be journaled
                 status = self.store.get(operation_id)["status"]
                 if status == "migrating":
                     return self.store.transition(operation_id, "manual_recovery_required", detail=f"migration failed; database was not reversed: {error}")
@@ -139,7 +147,17 @@ class UpdateExecutor:
                 self.store.transition(operation_id, "preflight", detail="checking application rollback compatibility")
                 self.deployment.preflight(previous_manifest)
                 self.store.transition(operation_id, "fetching", detail="loading PREVIOUS immutable release")
+                verified_manifest = self.release_source.fetch_verified(
+                    previous_manifest["release"]["version"],
+                    updater_version=self.updater_version,
+                    refresh=True,
+                )
                 self.store.transition(operation_id, "verifying", detail="validating PREVIOUS against live runtime contracts")
+                if verified_manifest != previous_manifest:
+                    raise CompatibilityError("Verified PREVIOUS differs from the stored immutable manifest")
+                previous_manifest = verified_manifest
+                current_plugins = sorted(self.deployment.inspect_enabled_plugin_apis(current))
+                self.runtime_state.update(enabledPluginApis=current_plugins)
                 plan = plan_switch(self._context(current), previous_manifest, updater_version=self.updater_version)
                 if not plan.allowed:
                     raise CompatibilityError(",".join(plan.reasons))
@@ -154,7 +172,7 @@ class UpdateExecutor:
                 return self.store.transition(operation_id, "rolled_back", detail="application rollback completed; database retained")
             except CompatibilityError as error:
                 return self.store.transition(operation_id, "failed_pre_switch", detail=str(error))
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - every execution failure must be journaled
                 status = self.store.get(operation_id)["status"]
                 if status in {"switching", "verifying_health"}:
                     try:
@@ -162,6 +180,6 @@ class UpdateExecutor:
                         self.deployment.switch(current)
                         self.deployment.verify_health(current)
                         return self.store.transition(operation_id, "rolled_back", detail="rollback attempt reverted to current application")
-                    except Exception as rollback_error:
+                    except Exception as rollback_error:  # noqa: BLE001 - failed recovery requires manual state
                         return self.store.transition(operation_id, "manual_recovery_required", detail=f"rollback recovery failed: {rollback_error}")
                 return self.store.transition(operation_id, "failed_pre_switch", detail=str(error))

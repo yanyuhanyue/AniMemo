@@ -5,9 +5,7 @@ import unittest
 from datetime import datetime, timezone
 
 from release.contract import build_manifest
-
 from updater.compatibility import DeploymentContext, plan_switch
-
 
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
