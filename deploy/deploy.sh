@@ -406,7 +406,7 @@ if [ "$MODE" = bootstrap ] && docker volume inspect anime-journal-data >/dev/nul
     docker volume rm anime-journal-data >/dev/null
 fi
 
-stage_compose up -d postgres redis
+stage_compose up -d --wait --wait-timeout 120 postgres redis
 stage_compose run --rm --no-deps migration
 stage_compose run --rm --no-deps bootstrap
 

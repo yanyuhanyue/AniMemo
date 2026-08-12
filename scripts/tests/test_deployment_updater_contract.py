@@ -79,9 +79,11 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         compose = "-f deploy/docker-compose.yml -f deploy/docker-compose.build.yml"
 
         self.assertIn(compose, workflow)
+        ready = workflow.index(f"{compose} up -d --wait --wait-timeout 120 postgres redis")
         migration = workflow.index(f"{compose} run --rm --no-deps migration")
         bootstrap = workflow.index(f"{compose} run --rm --no-deps bootstrap")
         switch = workflow.index(f"{compose} up -d --no-deps api web")
+        self.assertLess(ready, migration)
         self.assertLess(migration, bootstrap)
         self.assertLess(bootstrap, switch)
 
@@ -106,9 +108,11 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("--break-glass", deploy)
         self.assertIn("normal updates use the AniMemo Update Agent", deploy)
         self.assertIn("deploy/docker-compose.build.yml", deploy)
+        ready = deploy.index('stage_compose up -d --wait --wait-timeout 120 postgres redis')
         migration = deploy.index('stage_compose run --rm --no-deps migration')
         bootstrap = deploy.index('stage_compose run --rm --no-deps bootstrap')
         switch = deploy.index('live_compose up -d --no-deps --force-recreate api web')
+        self.assertLess(ready, migration)
         self.assertLess(migration, bootstrap)
         self.assertLess(bootstrap, switch)
         self.assertNotIn("stage_compose down", deploy)

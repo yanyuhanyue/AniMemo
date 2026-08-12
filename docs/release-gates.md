@@ -145,7 +145,7 @@ official version retains the original `AAA` blob instead of being rewritten to
 
 The `docker` job validates `EMPTY DATABASE -> CURRENT RELEASE` with the base
 production Compose plus `deploy/docker-compose.build.yml`. It builds API/Web,
-starts PostgreSQL and Redis, runs the explicit target `migration` and
+starts PostgreSQL and Redis, waits for both healthchecks, runs the explicit target `migration` and
 `bootstrap` jobs, then starts API/Web and checks health, frontend and fresh
 contract state. API startup does not own migration orchestration.
 

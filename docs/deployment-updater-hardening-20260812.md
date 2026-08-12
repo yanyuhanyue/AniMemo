@@ -74,7 +74,7 @@ Fresh Gate order:
 
 ```text
 build api/web
-→ start postgres/redis
+→ start postgres/redis and wait for healthy
 → migration
 → bootstrap
 → start api/web
