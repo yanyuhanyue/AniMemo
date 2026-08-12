@@ -3,6 +3,116 @@
 AniMemo uses complementary CI gates. They prevent unsafe releases earlier, but
 they do not replace production runtime validation.
 
+## Personal Repository Mode
+
+The current `yanyuhanyue/AniMemo` repository does **not** have GitHub Merge
+Queue enabled. The authoritative merge flow is therefore:
+
+```text
+PR Fast Gate
+-> Pre-Merge Full Gate
+-> Squash Merge
+-> main Lightweight Verify
+```
+
+`merge_group` remains enabled in the CI workflow definitions as future-ready
+support for a later GitHub Organization / Merge Queue migration. It is not the
+active merge authority in Personal Repository Mode. A push to `main` is also
+not authoritative full-regression evidence; it runs lightweight post-merge
+verification only.
+
+The protected branch should require these stable aggregate contexts with strict
+base freshness and administrator enforcement:
+
+- `pr-fast-gate`
+- `pre-merge-authority`
+
+Subsystem jobs such as `frontend`, `backend`, `postgres`, and `plugins` are
+selective implementation details of PR Fast and must not be individual required
+contexts. A legitimate docs-only or single-subsystem PR skips jobs outside its
+risk classification.
+
+## Gate levels
+
+1. **Development:** targeted local tests for the change being implemented.
+2. **PR Fast Gate:** changed-file classification, fast-fail checks, affected
+   subsystem gates, and immediate full fan-out for CI/deployment/high-risk
+   changes.
+3. **Pre-Merge Full Gate:** one full regression plus Release Gate for the exact
+   final PR head against current `main`.
+4. **main:** lightweight post-merge verification only.
+5. **RC:** the full RC Release Gate, build-once artifacts, and immutable
+   promotion described by the release contract.
+
+## PR Fast Gate
+
+Ordinary PR updates use `scripts/ci_classify.py` to select the affected gates.
+Docs-only, frontend-only, and backend-only changes do not automatically pay for
+the complete matrix. CI workflows, deployment files, Dockerfiles, dependency
+definitions, release scripts, classifier changes, shared contracts, and other
+high-risk combinations force the full CI and Release Gate immediately.
+
+The stable `pr-fast-gate` aggregate succeeds only when classification and every
+selected PR job succeed; unselected jobs may skip. A newer PR commit cancels the
+older PR Fast run.
+
+## Authoritative Pre-Merge Full Gate
+
+When implementation is complete and the PR is ready to squash, dispatch
+`Pre-Merge Full Gate` from `main` with:
+
+- the PR number;
+- the exact 40-character final head SHA.
+
+The workflow runs only from the trusted current default-branch definition. Its
+preflight reads the live pull request and rejects the request unless all of the
+following remain true:
+
+- the PR number is unchanged and the PR is open;
+- the base branch is `main` in `yanyuhanyue/AniMemo`;
+- the head repository is also `yanyuhanyue/AniMemo`;
+- the live PR head equals the expected head SHA;
+- the PR head contains the current `origin/main` commit.
+
+If the branch is behind `main`, update/rebase/merge current `main` into the PR
+branch using the repository's safe update mechanism, wait for the new PR Fast
+result, and dispatch again with the new head SHA. The gate does not simulate
+Merge Queue semantics and does not authorize a stale-base candidate.
+
+After preflight, the workflow pins every AniMemo checkout to that exact candidate
+SHA and forces:
+
+- complete frontend, backend, bootstrap, PostgreSQL, plugin, Bridge, and runtime
+  regression coverage;
+- fresh Docker validation;
+- stateful Base-to-Current upgrade validation;
+- the complete Release Gate.
+
+It then reloads the PR and current `main`, repeats the PR/head/base/freshness
+validation, and publishes the `pre-merge-authority` commit status on the exact
+candidate SHA. Any full-gate failure or movement of the PR or base publishes a
+failure. A successful status authorizes only that PR head against the base
+snapshot revalidated at completion.
+
+Commit statuses are SHA-bound. If the PR receives another commit after a pass,
+the old success remains only on the old SHA and the new head has no valid
+`pre-merge-authority`; run PR Fast and Pre-Merge Full again. Pre-Merge runs use a
+separate per-PR, non-canceling concurrency group, so a PR Fast update cannot
+cancel an authority run.
+
+The normal operator flow is:
+
+```bash
+head_sha="$(gh pr view <pr-number> --json headRefOid --jq .headRefOid)"
+gh workflow run pre-merge-full.yml --ref main \
+  -f pr_number=<pr-number> \
+  -f expected_head_sha="$head_sha"
+```
+
+Squash merge only after both `pr-fast-gate` and `pre-merge-authority` are green
+on the current head. The same final head normally receives one authoritative
+Full Regression; `main` does not repeat it.
+
 ## Core CI
 
 - `frontend`: runs JavaScript/React Hooks static checks, builds the application,
@@ -64,13 +174,19 @@ Base/Head resolution is shared by both gates:
 - Pull request: `github.event.pull_request.base.sha` -> `github.sha`.
 - Push: `github.event.before` -> `github.sha`.
 - New-branch/all-zero push: `HEAD^` fallback.
-- `workflow_dispatch`: optional `upgrade_base_sha`, otherwise `HEAD^`.
+- Direct Full CI dispatch: required `comparison_base_sha` -> required
+  `candidate_sha`.
+- Direct Release Gate dispatch: required `upgrade_base_sha` -> required
+  `candidate_sha`.
+- Pre-Merge dispatch: validated current `origin/main` -> validated exact PR head.
+- `workflow_call`: the trusted Pre-Merge workflow supplies the validated base,
+  candidate, and `force_full: true` inputs.
 - Local invocation: explicit refs are preferred; otherwise `HEAD^`.
 
-`HEAD^` is only a convenience fallback. It is not proof of the currently
-deployed production release. Before a release, manually dispatch Release Gate
-with `upgrade_base_sha` set to the exact last deployed production commit when
-that commit differs from the previous commit on `main`.
+`HEAD^` is only a local convenience fallback. It is not proof of the currently
+deployed production release. RC release validation must use the exact audited
+release base required by the release workflow; Pre-Merge instead always uses the
+live current `main` commit as its Base-to-Current comparison.
 
 ## Local commands
 

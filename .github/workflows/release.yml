@@ -126,14 +126,18 @@ jobs:
     needs: preflight
     uses: ./.github/workflows/ci.yml
     with:
-      upgrade_base_sha: ${{ inputs.upgrade_base_sha }}
+      candidate_sha: ${{ github.sha }}
+      comparison_base_sha: ${{ inputs.upgrade_base_sha }}
+      force_full: true
 
   full-release-gate:
     name: full-release-gate
     needs: preflight
     uses: ./.github/workflows/release-gate.yml
     with:
+      candidate_sha: ${{ github.sha }}
       upgrade_base_sha: ${{ inputs.upgrade_base_sha }}
+      force_full: true
 
   dry-run:
     name: read-only-release-dry-run

@@ -8,19 +8,36 @@ on:
   merge_group:
   workflow_call:
     inputs:
-      upgrade_base_sha:
-        description: Audited production/base SHA for release validation
+      candidate_sha:
+        description: Exact candidate commit to validate
         required: true
         type: string
+      comparison_base_sha:
+        description: Audited base commit used for changed-file and plugin comparison
+        required: true
+        type: string
+      force_full:
+        description: Force the authoritative full regression matrix
+        required: true
+        type: boolean
   workflow_dispatch:
     inputs:
-      upgrade_base_sha:
-        description: Optional known production/base SHA for official plugin comparison
-        required: false
+      candidate_sha:
+        description: Exact candidate commit to validate
+        required: true
         type: string
+      comparison_base_sha:
+        description: Audited base commit used for comparison
+        required: true
+        type: string
+      force_full:
+        description: Force the full regression matrix
+        required: true
+        default: true
+        type: boolean
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ inputs.candidate_sha || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -43,22 +60,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
           fetch-depth: 0
       - id: classify
         env:
-          GITHUB_EVENT_NAME: ${{ inputs.upgrade_base_sha && 'workflow_call' || github.event_name }}
-          CI_BASE_SHA: ${{ inputs.upgrade_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before) }}
-          CI_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          GITHUB_EVENT_NAME: ${{ inputs.force_full && 'workflow_call' || github.event_name }}
+          CI_FORCE_FULL: ${{ inputs.force_full || false }}
+          CI_BASE_SHA: ${{ inputs.comparison_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before) }}
+          CI_HEAD_SHA: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
         run: python scripts/ci_classify.py --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA" --github-output "$GITHUB_OUTPUT"
 
   fast-fail:
     name: ci-fast-fail
     needs: classify
-    if: github.event_name != 'push' && needs.classify.outputs.docs_only != 'true'
+    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.docs_only != 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
       - name: Validate changed-files classifier
         run: python scripts/ci_classify.py --self-test
       - name: Validate tracked text
@@ -67,7 +88,7 @@ jobs:
   docs-only:
     name: docs-only
     needs: classify
-    if: needs.classify.outputs.docs_only == 'true'
+    if: ${{ !inputs.force_full && needs.classify.outputs.docs_only == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - run: echo "Documentation-only change; product gates are not required."
@@ -75,11 +96,13 @@ jobs:
   frontend:
     name: frontend
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && needs.classify.outputs.run_frontend == 'true'
+    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_frontend == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -97,7 +120,7 @@ jobs:
   backend:
     name: backend
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && needs.classify.outputs.run_backend == 'true'
+    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_backend == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -108,6 +131,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -133,7 +157,7 @@ jobs:
   bootstrap-smoke:
     name: bootstrap-smoke (${{ matrix.os }})
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && needs.classify.outputs.run_bootstrap == 'true'
+    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_bootstrap == 'true')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -142,6 +166,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -161,7 +187,7 @@ jobs:
   postgres:
     name: postgres
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && needs.classify.outputs.run_postgres == 'true'
+    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_postgres == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -199,6 +225,8 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -214,12 +242,13 @@ jobs:
   plugins:
     name: plugins
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && needs.classify.outputs.run_plugins == 'true'
+    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_plugins == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
@@ -236,11 +265,13 @@ jobs:
       - run: python scripts/pluginctl.py build watch-history-importer
       - name: Check official plugin immutable package identities
         env:
-          RELEASE_BASE_SHA: ${{ inputs.upgrade_base_sha || '' }}
+          COMPARISON_BASE_SHA: ${{ inputs.comparison_base_sha || '' }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
         shell: bash
         run: |
-          if [[ -n "$RELEASE_BASE_SHA" ]]; then
-            python scripts/check_official_plugin_immutability.py --base "$RELEASE_BASE_SHA" --head "$GITHUB_SHA" --head-root .
+          if [[ -n "$COMPARISON_BASE_SHA" ]]; then
+            python scripts/check_official_plugin_immutability.py \
+              --base "$COMPARISON_BASE_SHA" --head "$CANDIDATE_SHA" --head-root .
           else
             python scripts/check_official_plugin_immutability.py --head-root .
           fi
@@ -249,11 +280,13 @@ jobs:
   astrbot-bridge:
     name: astrbot-bridge
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && needs.classify.outputs.run_bridge == 'true'
+    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_bridge == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -265,7 +298,7 @@ jobs:
   astrbot-runtime:
     name: astrbot-runtime (${{ matrix.astrbot_ref }})
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && needs.classify.outputs.run_runtime == 'true'
+    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_runtime == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -276,6 +309,8 @@ jobs:
           - 30e20318cbaaa2e1ba57f3e0eee265d9ee98115c
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
       - uses: actions/checkout@v4
         with:
           repository: AstrBotDevs/AstrBot
@@ -299,3 +334,23 @@ jobs:
         run: python scripts/smoke-astrbot-bridge-loader.py --runtime-root .astrbot-runtime --plugin-zip "${{ runner.temp }}/astrbot_plugin_animemo_bridge-0.1.3.zip" --label "${{ matrix.astrbot_ref }} package loader"
       - name: Prove schema loader gate red and green
         run: python scripts/prove-astrbot-bridge-schema-gate.py --runtime-root .astrbot-runtime --plugin-zip "${{ runner.temp }}/astrbot_plugin_animemo_bridge-0.1.3.zip"
+
+  pr-fast-gate:
+    name: pr-fast-gate
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: [classify, fast-fail, docs-only, frontend, backend, bootstrap-smoke, postgres, plugins, astrbot-bridge, astrbot-runtime]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every selected PR Fast job to pass or skip
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {name: job["result"] for name, job in needs.items() if job["result"] not in {"success", "skipped"}}
+          if failed:
+              print(json.dumps(failed, sort_keys=True), file=sys.stderr)
+              raise SystemExit(1)
+          PY

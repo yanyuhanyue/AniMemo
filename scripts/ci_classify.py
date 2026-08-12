@@ -52,6 +52,10 @@ def _has(path: str, *parts: str) -> bool:
     return any(part in path for part in parts)
 
 
+def force_full_for_event(event_name: str, *, explicitly_forced: bool = False) -> bool:
+    return explicitly_forced or event_name in {"merge_group", "workflow_dispatch", "workflow_call"}
+
+
 def classify_paths(paths: list[str], *, force_full: bool = False) -> dict[str, str]:
     normalized = sorted({str(PurePosixPath(path.replace("\\", "/"))) for path in paths if path})
     non_docs = [path for path in normalized if not _is_docs(path)]
@@ -161,7 +165,7 @@ def classify_paths(paths: list[str], *, force_full: bool = False) -> dict[str, s
     full_gate = force_full or any(
         (ci, dependencies, deployment, auth, api_contract, migration, shared_contract)
     ) or (frontend and backend) or (backend and (plugin or bridge or integration))
-    docs_only = bool(normalized) and not non_docs
+    docs_only = bool(normalized) and not non_docs and not force_full
     if not normalized:
         docs_only = False
         full_gate = True
@@ -255,7 +259,10 @@ def main() -> int:
         self_test()
         return 0
 
-    force_full = os.getenv("GITHUB_EVENT_NAME") in {"merge_group", "workflow_dispatch", "workflow_call"}
+    force_full = force_full_for_event(
+        os.getenv("GITHUB_EVENT_NAME", ""),
+        explicitly_forced=os.getenv("CI_FORCE_FULL", "").strip().lower() == "true",
+    )
     paths = args.files if args.files else changed_paths(args.base, args.head)
     result = classify_paths(paths, force_full=force_full)
     result["changed_files"] = json.dumps(sorted(paths), ensure_ascii=False)

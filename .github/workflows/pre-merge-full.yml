@@ -1,0 +1,158 @@
+name: Pre-Merge Full Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open pull request number targeting main
+        required: true
+        type: number
+      expected_head_sha:
+        description: Exact 40-character pull request head SHA to authorize
+        required: true
+        type: string
+
+concurrency:
+  group: pre-merge-full-pr-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: pre-merge-snapshot
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      pr_number: ${{ steps.snapshot.outputs.pr_number }}
+      head_sha: ${{ steps.snapshot.outputs.head_sha }}
+      base_sha: ${{ steps.snapshot.outputs.base_sha }}
+      head_ref: ${{ steps.snapshot.outputs.head_ref }}
+    steps:
+      - name: Require the trusted default-branch workflow definition
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Read current PR and main identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force origin main
+          current_main_sha="$(git rev-parse origin/main)"
+          test "$GITHUB_SHA" = "$current_main_sha"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/${{ inputs.pr_number }}" > "$RUNNER_TEMP/pr.json"
+          echo "CURRENT_MAIN_SHA=$current_main_sha" >> "$GITHUB_ENV"
+      - name: Bind the authority run to the exact PR, head, and current main
+        id: snapshot
+        env:
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force origin "+$EXPECTED_HEAD_SHA:refs/remotes/origin/pre-merge-candidate"
+          python scripts/ci_premerge.py \
+            --pr-json "$RUNNER_TEMP/pr.json" \
+            --pr-number "${{ inputs.pr_number }}" \
+            --expected-head-sha "$EXPECTED_HEAD_SHA" \
+            --current-main-sha "$CURRENT_MAIN_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --repo . --verify-freshness --github-output "$GITHUB_OUTPUT"
+      - name: Mark exact candidate as pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
+        shell: bash
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=pending \
+            -f context=pre-merge-authority \
+            -f description="Full regression and release gate running for PR #${{ inputs.pr_number }}" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  full-regression:
+    name: full-regression
+    needs: preflight
+    uses: ./.github/workflows/ci.yml
+    with:
+      candidate_sha: ${{ needs.preflight.outputs.head_sha }}
+      comparison_base_sha: ${{ needs.preflight.outputs.base_sha }}
+      force_full: true
+
+  full-release-gate:
+    name: full-release-gate
+    needs: preflight
+    uses: ./.github/workflows/release-gate.yml
+    with:
+      candidate_sha: ${{ needs.preflight.outputs.head_sha }}
+      upgrade_base_sha: ${{ needs.preflight.outputs.base_sha }}
+      force_full: true
+
+  authority:
+    name: pre-merge-authority
+    if: ${{ always() && needs.preflight.result == 'success' }}
+    needs: [preflight, full-regression, full-release-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Revalidate the exact candidate after all full gates
+        id: final
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          FULL_REGRESSION_RESULT: ${{ needs.full-regression.result }}
+          FULL_RELEASE_GATE_RESULT: ${{ needs.full-release-gate.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FULL_REGRESSION_RESULT" = "success"
+          test "$FULL_RELEASE_GATE_RESULT" = "success"
+          git fetch --force origin main "+$HEAD_SHA:refs/remotes/origin/pre-merge-candidate"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/${{ needs.preflight.outputs.pr_number }}" > "$RUNNER_TEMP/pr.json"
+          current_main_sha="$(git rev-parse origin/main)"
+          python scripts/ci_premerge.py \
+            --pr-json "$RUNNER_TEMP/pr.json" \
+            --pr-number "${{ needs.preflight.outputs.pr_number }}" \
+            --expected-head-sha "$HEAD_SHA" \
+            --current-main-sha "$current_main_sha" \
+            --repository "$GITHUB_REPOSITORY" \
+            --repo . --verify-freshness
+      - name: Publish the exact candidate authority result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          FINAL_OUTCOME: ${{ steps.final.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$FINAL_OUTCOME" = "success" ]]; then
+            state=success
+            description="Exact PR head and current main passed all pre-merge gates"
+          else
+            state=failure
+            description="Stale PR identity, stale base, or a full gate failed"
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state="$state" \
+            -f context=pre-merge-authority \
+            -f description="$description" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          test "$state" = success
