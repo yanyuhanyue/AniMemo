@@ -1,6 +1,6 @@
 import unittest
 
-from scripts.ci_classify import classify_paths
+from scripts.ci_classify import classify_paths, force_full_for_event
 
 
 class CiClassificationTests(unittest.TestCase):
@@ -52,6 +52,20 @@ class CiClassificationTests(unittest.TestCase):
         result = classify_paths(["src/App.jsx"], force_full=True)
         self.assertEqual(result["full_gate"], "true")
         for name in ("run_backend", "run_plugins", "run_bridge", "run_postgres", "run_bootstrap"):
+            self.assertEqual(result[name], "true", name)
+
+    def test_authority_events_force_full_but_pr_and_main_push_do_not(self):
+        self.assertTrue(force_full_for_event("merge_group"))
+        self.assertTrue(force_full_for_event("workflow_dispatch"))
+        self.assertTrue(force_full_for_event("workflow_call"))
+        self.assertFalse(force_full_for_event("pull_request"))
+        self.assertFalse(force_full_for_event("push"))
+
+    def test_forced_docs_change_runs_the_full_gate(self):
+        result = classify_paths(["docs/release-gates.md"], force_full=True)
+        self.assertEqual(result["docs_only"], "false")
+        self.assertEqual(result["full_gate"], "true")
+        for name in ("run_frontend", "run_backend", "run_plugins", "run_bridge", "run_postgres"):
             self.assertEqual(result[name], "true", name)
 
 
