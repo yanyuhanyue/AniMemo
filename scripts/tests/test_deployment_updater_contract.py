@@ -137,6 +137,11 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         gate = (ROOT / "scripts/stateful-upgrade-gate.sh").read_text(encoding="utf-8")
 
         self.assertIn('BUILD_OVERRIDE_FILE="$CURRENT_ROOT/deploy/docker-compose.build.yml"', gate)
+        self.assertIn(
+            'local compose_files=(-f "$source_root/deploy/docker-compose.yml" -f "$BUILD_OVERRIDE_FILE")',
+            gate,
+        )
+        self.assertNotIn('if [[ "$source_root" == "$CURRENT_ROOT" ]]', gate)
         migration = gate.index('compose "$CURRENT_ROOT" run --rm --no-deps migration')
         bootstrap = gate.index('compose "$CURRENT_ROOT" run --rm --no-deps bootstrap')
         switch = gate.index('compose "$CURRENT_ROOT" up -d --no-deps --force-recreate api')

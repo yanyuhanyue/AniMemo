@@ -98,10 +98,7 @@ BASE_ADDED=false
 compose() {
   local source_root="$1"
   shift
-  local compose_files=(-f "$source_root/deploy/docker-compose.yml")
-  if [[ "$source_root" == "$CURRENT_ROOT" ]]; then
-    compose_files+=(-f "$BUILD_OVERRIDE_FILE")
-  fi
+  local compose_files=(-f "$source_root/deploy/docker-compose.yml" -f "$BUILD_OVERRIDE_FILE")
   compose_files+=(-f "$OVERRIDE_FILE")
   UPGRADE_SOURCE_ROOT="$source_root" \
   STATEFUL_UPGRADE_HELPER_ROOT="$CURRENT_ROOT" \
