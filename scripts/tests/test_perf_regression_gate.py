@@ -64,13 +64,18 @@ def backend_report(dataset, count):
     }
 
 
-def resource_report(*, errors=0):
+def resource_report(*, errors=0, unique_users=20):
     runs = [
         {"mode": "concurrency", "concurrency": level, "errors": errors}
         for level in (1, 5, 10, 20)
     ]
     runs.append({"mode": "sustained", "concurrency": 5, "errors": errors, "elapsed_seconds": 1500})
     return {
+        "virtual_users": {
+            "provided": 20,
+            "unique_usernames": unique_users,
+            "unique_entry_ids": unique_users,
+        },
         "load": {"runs": runs, "hard_failures": []},
         "resources": {"hard_failures": [], "sampling_errors": [], "summary": {"samples": 100}},
     }
@@ -101,6 +106,19 @@ class PerformanceRegressionGateTests(unittest.TestCase):
         result = evaluate(resource=resource_report(errors=1))
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("resource:request_errors", result["sections"]["resource"]["failures"])
+
+    def test_resource_shared_virtual_identity_is_red_capable(self):
+        result = evaluate(resource=resource_report(unique_users=1))
+
+        self.assertEqual(result["status"], "FAIL")
+        self.assertIn(
+            "resource:virtual_users:shared_identity",
+            result["sections"]["resource"]["failures"],
+        )
+        self.assertIn(
+            "resource:virtual_users:shared_entry",
+            result["sections"]["resource"]["failures"],
+        )
 
 
 if __name__ == "__main__":

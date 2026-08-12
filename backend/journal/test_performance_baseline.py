@@ -1,3 +1,6 @@
+import io
+import json
+
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -5,12 +8,17 @@ from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
-from rest_framework.test import APIClient
-
-from journal.models import ExternalMediaIdentity, JournalEntry
 from performance.contract import DATASETS, has_query_scaling_regression
-from performance.probe import EXPECTED_STATUS_CODES, duplicate_query_summary, normalize_sql
-from performance.seed import seed_backend_performance_data
+from performance.probe import (
+    EXPECTED_STATUS_CODES,
+    duplicate_query_summary,
+    normalize_sql,
+)
+from performance.seed import provision_load_user_journeys, seed_backend_performance_data
+from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import AccessToken
+
+from journal.models import ExternalMediaIdentity, JournalEntry, WatchHistoryRecord
 
 
 class PerformanceMeasurementContractTests(TestCase):
@@ -57,6 +65,49 @@ class PerformanceMeasurementContractTests(TestCase):
             JournalEntry.objects.filter(user_id=second.owner_id, deleted_at__isnull=True).count(),
             50,
         )
+
+    def test_load_user_journeys_are_distinct_owned_read_fixtures(self):
+        seed_backend_performance_data("small")
+
+        identities = provision_load_user_journeys(5)
+
+        self.assertEqual(len(identities), 5)
+        self.assertEqual(len({identity.username for identity in identities}), 5)
+        self.assertEqual(len({identity.entry_id for identity in identities}), 5)
+        for identity in identities:
+            entry = JournalEntry.objects.get(pk=identity.entry_id)
+            self.assertEqual(entry.user.username, identity.username)
+            self.assertIn("anime", entry.title.lower())
+            self.assertTrue(WatchHistoryRecord.objects.filter(entry=entry).exists())
+
+    def test_load_identity_command_requires_isolation_confirmation(self):
+        with self.assertRaisesRegex(CommandError, "confirm-isolated"):
+            call_command("provision_performance_load_identities", count=5, stdout=io.StringIO())
+
+    def test_load_identity_command_emits_unique_owned_tokens(self):
+        output = io.StringIO()
+
+        call_command(
+            "provision_performance_load_identities",
+            dataset="small",
+            count=5,
+            token_minutes=40,
+            confirm_isolated=True,
+            stdout=output,
+        )
+
+        payload = json.loads(output.getvalue())
+        identities = payload["identities"]
+        self.assertEqual(len(identities), 5)
+        self.assertEqual(len({item["username"] for item in identities}), 5)
+        self.assertEqual(len({item["entry_id"] for item in identities}), 5)
+        self.assertEqual(len({item["access_token"] for item in identities}), 5)
+        for item in identities:
+            token = AccessToken(item["access_token"])
+            self.assertIn("sv", token)
+            self.assertGreaterEqual(int(token["exp"]) - int(token["iat"]), 40 * 60)
+            entry = JournalEntry.objects.get(pk=item["entry_id"])
+            self.assertEqual(entry.user.username, item["username"])
 
 
 class JournalPerformanceQueryGuardTests(TestCase):

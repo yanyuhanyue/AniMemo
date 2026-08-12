@@ -162,7 +162,6 @@ jobs:
       COMPOSE_PROJECT_NAME: animemo-perf-${{ github.run_id }}-${{ github.run_attempt }}
       COMPOSE_HTTP_TIMEOUT: "120"
       COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.build.yml:deploy/docker-compose.performance.yml
-      PERF_OWNER_PASSWORD: PerfOnly-Owner-2026!
       PERF_ADMIN_PASSWORD: PerfOnly-Admin-2026!
     steps:
       - uses: actions/checkout@v4
@@ -251,15 +250,33 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          seed_json="$(docker compose --env-file .env.production exec -T \
-            -e PERF_OWNER_PASSWORD="$PERF_OWNER_PASSWORD" \
+          identities_file="$RUNNER_TEMP/animemo-performance-identities-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          docker compose --env-file .env.production exec -T \
             -e PERF_ADMIN_PASSWORD="$PERF_ADMIN_PASSWORD" \
-            api python manage.py shell -c \
-            'import json, os; from django.contrib.auth import get_user_model; from performance.seed import seed_backend_performance_data, OWNER_USERNAME, ADMIN_USERNAME; result=seed_backend_performance_data("large", reset=True); User=get_user_model(); owner=User.objects.get(username=OWNER_USERNAME); owner.set_password(os.environ["PERF_OWNER_PASSWORD"]); owner.save(update_fields=["password"]); admin=User.objects.get(username=ADMIN_USERNAME); admin.set_password(os.environ["PERF_ADMIN_PASSWORD"]); admin.save(update_fields=["password"]); print(json.dumps({"history_entry_id": result.history_entry_id, "detail_entry_id": result.detail_entry_id}))' \
-            | tail -n 1)"
-          printf '%s\n' "$seed_json" | tee artifacts/seed.json
-          python3 -c 'import json, sys; value=json.load(sys.stdin); assert int(value["history_entry_id"]) > 0' <<<"$seed_json"
-          echo "PERF_ENTRY_ID=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["history_entry_id"])' <<<"$seed_json")" >> "$GITHUB_ENV"
+            api python manage.py provision_performance_load_identities \
+              --dataset large \
+              --count 20 \
+              --token-minutes 40 \
+              --staff-password-env PERF_ADMIN_PASSWORD \
+              --confirm-isolated \
+            > "$identities_file"
+          chmod 600 "$identities_file"
+          python3 - "$identities_file" > artifacts/seed.json <<'PY'
+          import json
+          import sys
+
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          identities = payload["identities"]
+          assert len(identities) == 20
+          assert len({item["username"] for item in identities}) == 20
+          assert len({item["entry_id"] for item in identities}) == 20
+          print(json.dumps({
+              "dataset": payload["dataset"],
+              "journal_entries": payload["journal_entries"],
+              "virtual_users": len(identities),
+          }, sort_keys=True))
+          PY
+          echo "PERF_IDENTITIES_FILE=$identities_file" >> "$GITHUB_ENV"
       - name: Run the 1/5/10/20-user and 25-minute isolated workload
         shell: bash
         run: |
@@ -269,11 +286,9 @@ jobs:
           python scripts/perf/isolated_run.py \
             --confirm-isolated \
             --base-url http://perf.example.test:8088 \
-            --username perf-v1-owner \
-            --password-env PERF_OWNER_PASSWORD \
+            --identities-file "$PERF_IDENTITIES_FILE" \
             --staff-username perf-v1-admin \
             --staff-password-env PERF_ADMIN_PASSWORD \
-            --entry-id "$PERF_ENTRY_ID" \
             --search-term anime \
             --iterations-per-user 2 \
             --sustained-concurrency 5 \

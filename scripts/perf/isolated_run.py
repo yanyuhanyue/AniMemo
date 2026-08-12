@@ -7,6 +7,7 @@ import dataclasses
 import json
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -48,19 +49,58 @@ except ModuleNotFoundError:  # Support ``python scripts/perf/isolated_run.py``.
     )
 
 
+@dataclass(frozen=True)
+class VirtualUserIdentity:
+    username: str
+    access_token: str
+    entry_id: int
+
+
+def load_virtual_user_identities(path: Path, *, required_count: int) -> tuple[VirtualUserIdentity, ...]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise HarnessConfigurationError(f"unable to read isolated identities file: {error}") from error
+    raw_identities = payload.get("identities") if isinstance(payload, dict) else None
+    if not isinstance(raw_identities, list):
+        raise HarnessConfigurationError("isolated identities file must contain an identities list")
+
+    identities = []
+    for item in raw_identities:
+        if not isinstance(item, dict):
+            raise HarnessConfigurationError("each isolated identity must be an object")
+        username = str(item.get("username") or "").strip()
+        access_token = str(item.get("access_token") or "").strip()
+        try:
+            entry_id = int(item.get("entry_id"))
+        except (TypeError, ValueError) as error:
+            raise HarnessConfigurationError("each isolated identity requires a positive entry_id") from error
+        if not username or not access_token or entry_id <= 0:
+            raise HarnessConfigurationError("each isolated identity requires username, access_token, and entry_id")
+        identities.append(VirtualUserIdentity(username, access_token, entry_id))
+
+    if len(identities) < required_count:
+        raise HarnessConfigurationError(
+            f"isolated identities file provides {len(identities)} users; {required_count} are required"
+        )
+    if len({item.username for item in identities}) != len(identities):
+        raise HarnessConfigurationError("isolated virtual-user usernames must be unique")
+    if len({item.access_token for item in identities}) != len(identities):
+        raise HarnessConfigurationError("isolated virtual-user access tokens must be unique")
+    if len({item.entry_id for item in identities}) != len(identities):
+        raise HarnessConfigurationError("isolated virtual-user entry ids must be unique")
+    return tuple(identities)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--confirm-isolated", action="store_true", required=True)
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--username", required=True)
-    parser.add_argument("--password-env", required=True)
-    parser.add_argument("--otp-env", default="")
-    parser.add_argument("--challenge-env", default="")
+    parser.add_argument("--identities-file", type=Path, required=True)
     parser.add_argument("--staff-username", default="")
     parser.add_argument("--staff-password-env", default="")
     parser.add_argument("--staff-otp-env", default="")
     parser.add_argument("--staff-challenge-env", default="")
-    parser.add_argument("--entry-id", type=int, required=True)
     parser.add_argument("--search-term", default="anime")
     parser.add_argument("--iterations-per-user", type=int, default=2)
     parser.add_argument("--sustained-concurrency", type=int, choices=CONCURRENCY_LEVELS, default=5)
@@ -108,11 +148,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.duration_seconds <= 0 or args.resource_interval_seconds <= 0:
         raise HarnessConfigurationError("duration and resource interval must be positive")
 
-    user_credentials = EnvironmentCredentials.from_environment(
-        username=args.username,
-        password_environment=args.password_env,
-        otp_environment=args.otp_env,
-        challenge_environment=args.challenge_env,
+    identities = load_virtual_user_identities(
+        args.identities_file,
+        required_count=max(CONCURRENCY_LEVELS),
     )
     staff_credentials = None
     if args.staff_username or args.staff_password_env:
@@ -123,44 +161,47 @@ def main(argv: Sequence[str] | None = None) -> int:
             challenge_environment=args.staff_challenge_env,
         )
 
-    scenario = build_read_scenario(
-        entry_id=args.entry_id,
-        search_term=args.search_term,
-        include_staff=staff_credentials is not None,
-    )
     bootstrap_client = AuthenticatedHttpClient(
         base_url=base_url,
-        user_credentials=user_credentials,
+        user_credentials=EnvironmentCredentials(identities[0].username, "preissued-token-only"),
         staff_credentials=staff_credentials,
         timeout_seconds=args.timeout_seconds,
         insecure_tls=args.insecure_tls,
     )
-    initial_tokens = {"user": bootstrap_client.authenticate("user")}
+    shared_tokens = {}
     if staff_credentials is not None:
-        initial_tokens["staff"] = bootstrap_client.authenticate("staff")
+        shared_tokens["staff"] = bootstrap_client.authenticate("staff")
     token_lock = threading.Lock()
 
     def token_provider(scope: str) -> str:
         with token_lock:
-            return initial_tokens[scope]
+            return shared_tokens[scope]
 
     def token_refresher(scope: str, rejected_token: str) -> str:
         with token_lock:
-            if initial_tokens.get(scope) != rejected_token:
-                return initial_tokens[scope]
-            initial_tokens[scope] = bootstrap_client.refresh(scope)
-            return initial_tokens[scope]
+            if shared_tokens.get(scope) != rejected_token:
+                return shared_tokens[scope]
+            shared_tokens[scope] = bootstrap_client.refresh(scope)
+            return shared_tokens[scope]
 
-    def client_factory() -> AuthenticatedHttpClient:
+    def client_factory(worker_index: int) -> AuthenticatedHttpClient:
+        identity = identities[worker_index]
         return AuthenticatedHttpClient(
             base_url=base_url,
-            user_credentials=user_credentials,
+            user_credentials=EnvironmentCredentials(identity.username, "preissued-token-only"),
             staff_credentials=staff_credentials,
             timeout_seconds=args.timeout_seconds,
             insecure_tls=args.insecure_tls,
-            initial_tokens=initial_tokens,
+            initial_tokens={"user": identity.access_token, **shared_tokens},
             token_provider=token_provider,
             token_refresher=token_refresher,
+        )
+
+    def request_factory(worker_index: int):
+        return build_read_scenario(
+            entry_id=identities[worker_index].entry_id,
+            search_term=args.search_term,
+            include_staff=staff_credentials is not None,
         )
 
     resource_sampler = DockerResourceSampler(
@@ -199,7 +240,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             load_summaries.append(
                 run_concurrency_level(
                     client_factory=client_factory,
-                    requests=scenario,
+                    request_factory=request_factory,
                     concurrency=concurrency,
                     iterations_per_user=args.iterations_per_user,
                 )
@@ -207,7 +248,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         load_summaries.append(
             run_sustained(
                 client_factory=client_factory,
-                requests=scenario,
+                request_factory=request_factory,
                 concurrency=args.sustained_concurrency,
                 duration_seconds=args.duration_seconds,
                 think_time_seconds=args.think_time_seconds,
@@ -238,7 +279,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "sustained_minutes": SUSTAINED_MINUTES,
             "configured_duration_seconds": args.duration_seconds,
         },
-        "scenario": [dataclasses.asdict(request) for request in scenario],
+        "virtual_users": {
+            "provided": len(identities),
+            "unique_usernames": len({identity.username for identity in identities}),
+            "unique_entry_ids": len({identity.entry_id for identity in identities}),
+        },
+        "scenario": [dataclasses.asdict(request) for request in request_factory(0)],
         "load": {
             "runs": [summary.to_dict() for summary in load_summaries],
             "hard_failures": sorted({reason for summary in load_summaries for reason in summary.hard_failures}),

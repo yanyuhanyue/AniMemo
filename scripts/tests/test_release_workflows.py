@@ -5,7 +5,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -69,6 +68,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn('--dataset "$dataset"', source)
         self.assertIn("CONCURRENCY_LEVELS", source)
         self.assertIn("--duration-seconds 1500", source)
+        self.assertIn("provision_performance_load_identities", source)
+        self.assertIn("--identities-file", source)
+        self.assertNotIn("--username perf-v1-owner", source)
+        self.assertIn("$RUNNER_TEMP/animemo-performance-identities-", source)
+        self.assertIn('chmod 600 "$identities_file"', source)
+        self.assertNotIn('tee artifacts/seed.json', source)
         self.assertIn("SESSION_COOKIE_SECURE=false", source)
         self.assertIn("CSRF_COOKIE_SECURE=false", source)
         self.assertIn("REFRESH_COOKIE_SECURE=false", source)
