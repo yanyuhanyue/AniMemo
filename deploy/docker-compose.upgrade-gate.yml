@@ -18,6 +18,7 @@ services:
       - ${ANIME_JOURNAL_DATA_ROOT}/logs:/app/logs
       - ${ANIME_JOURNAL_DATA_ROOT}/backups:/app/backups
       - ${ANIME_JOURNAL_DATA_ROOT}/media:/data/anime-journal/media
+      - ${ANIME_JOURNAL_DATA_ROOT}/private:/app/runtime/private
       - ${STATEFUL_UPGRADE_HELPER_ROOT:?STATEFUL_UPGRADE_HELPER_ROOT is required}/scripts:/app/ci-scripts:ro
       - ${STATEFUL_UPGRADE_META_ROOT:?STATEFUL_UPGRADE_META_ROOT is required}:/app/ci-meta
     networks: !override
@@ -34,6 +35,7 @@ services:
       - ${ANIME_JOURNAL_DATA_ROOT}/logs:/app/logs
       - ${ANIME_JOURNAL_DATA_ROOT}/backups:/app/backups
       - ${ANIME_JOURNAL_DATA_ROOT}/media:/data/anime-journal/media
+      - ${ANIME_JOURNAL_DATA_ROOT}/private:/app/runtime/private
       - ${STATEFUL_UPGRADE_HELPER_ROOT:?STATEFUL_UPGRADE_HELPER_ROOT is required}/scripts:/app/ci-scripts:ro
       - ${STATEFUL_UPGRADE_META_ROOT:?STATEFUL_UPGRADE_META_ROOT is required}:/app/ci-meta
     networks: !override
@@ -42,7 +44,6 @@ services:
   bootstrap:
     container_name: ${COMPOSE_PROJECT_NAME}-bootstrap
     image: ${ANIMEMO_API_IMAGE:-animemo-upgrade-api:current}
-    command: ["python", "manage.py", "sync_official_plugins"]
     env_file: !override
       - ${STATEFUL_UPGRADE_ENV_FILE:?STATEFUL_UPGRADE_ENV_FILE is required}
     volumes: !override
@@ -50,6 +51,7 @@ services:
       - ${ANIME_JOURNAL_DATA_ROOT}/logs:/app/logs
       - ${ANIME_JOURNAL_DATA_ROOT}/backups:/app/backups
       - ${ANIME_JOURNAL_DATA_ROOT}/media:/data/anime-journal/media
+      - ${ANIME_JOURNAL_DATA_ROOT}/private:/app/runtime/private
     networks: !override
       - upgrade-gate
 

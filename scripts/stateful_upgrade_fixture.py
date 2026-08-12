@@ -118,6 +118,28 @@ def seed_state(output_path):
         if updates:
             user.save(update_fields=updates)
 
+        if _migration_applied("site", "0003_installation_state"):
+            from site_config.models import InstallationState
+
+            installation_state = InstallationState.load()
+            installation_state.status = InstallationState.Status.INITIALIZED
+            installation_state.setup_code_hash = ""
+            installation_state.setup_code_issued_at = None
+            installation_state.setup_code_expires_at = None
+            installation_state.failed_attempts = 0
+            installation_state.initialized_at = timezone.now()
+            installation_state.initialized_by = actor
+            installation_state.save(update_fields=[
+                "status",
+                "setup_code_hash",
+                "setup_code_issued_at",
+                "setup_code_expires_at",
+                "failed_attempts",
+                "initialized_at",
+                "initialized_by",
+                "updated_at",
+            ])
+
     call_command("sync_official_plugins", verbosity=1)
 
     with transaction.atomic():
@@ -490,6 +512,26 @@ def verify_state(input_path):
     if not fixture["base_integrations_0001_applied"]:
         _assert(integrations_applied, "Current release did not apply integrations.0001_initial over the existing database.")
 
+    installation_state_status = "NOT_APPLICABLE_BASE"
+    if _migration_applied("site", "0003_installation_state"):
+        from django.conf import settings
+        from site_config.models import InstallationState
+
+        installation_state = InstallationState.load()
+        _assert(
+            installation_state.status == InstallationState.Status.INITIALIZED,
+            "Existing database was incorrectly reopened for first-run setup.",
+        )
+        _assert(
+            not installation_state.setup_code_hash,
+            "Existing database retained an active first-run setup hash.",
+        )
+        _assert(
+            not Path(settings.FIRST_RUN_SETUP_CODE_PATH).exists(),
+            "Existing database emitted a first-run setup plaintext file.",
+        )
+        installation_state_status = "PRESERVED_INITIALIZED"
+
     report = {
         "user": "PASS",
         "journal_entry": "PASS",
@@ -518,6 +560,7 @@ def verify_state(input_path):
         "runtime": runtime_version,
         "base_integrations_0001_applied": fixture["base_integrations_0001_applied"],
         "current_integrations_0001_applied": integrations_applied,
+        "installation_state": installation_state_status,
     }
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     print("Stateful upgrade persistence verification: PASS")

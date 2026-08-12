@@ -184,6 +184,7 @@ jobs:
           data_root="$RUNNER_TEMP/animemo-performance-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$data_root"/plugins "$data_root"/logs "$data_root"/backups "$data_root"/media "$data_root"/postgres "$data_root"/redis
           chmod -R a+rwx "$data_root"
+          sudo install -d -m 0700 -o 10001 -g 10001 "$data_root/private"
           cat > .env.production <<EOF
           DEBUG=false
           DJANGO_SECRET_KEY=ci-only-performance-secret-key-012345678901234567890123456789012345678901234567890
@@ -245,6 +246,21 @@ jobs:
             -H 'Host: perf.example.test' \
             http://127.0.0.1:8088/ | grep -q '<div id="root">'
           echo '127.0.0.1 perf.example.test' | sudo tee -a /etc/hosts >/dev/null
+      - name: Complete and lock the real first-run setup API
+        shell: bash
+        run: |
+          set -euo pipefail
+          ANIMEMO_CI_SETUP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          export ANIMEMO_CI_SETUP_PASSWORD
+          sudo cat "$PERF_DATA_ROOT/private/setup-code" |
+            python3 scripts/ci_first_run.py \
+              --confirm-isolated \
+              --code-stdin \
+              --base-url http://127.0.0.1:8088 \
+              --host perf.example.test \
+              --username ci-bootstrap-admin \
+              --email ci-bootstrap-admin@example.test \
+              --password-env ANIMEMO_CI_SETUP_PASSWORD
       - name: Seed the isolated users and LARGE-shaped read dataset
         shell: bash
         run: |

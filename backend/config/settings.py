@@ -85,6 +85,20 @@ ANIME_JOURNAL_COMMIT = os.getenv("ANIME_JOURNAL_COMMIT", "unknown")
 ANIME_JOURNAL_RELEASE_CHANNEL = os.getenv("ANIME_JOURNAL_RELEASE_CHANNEL", "development")
 ANIMEMO_UPDATER_SOCKET = os.getenv("ANIMEMO_UPDATER_SOCKET", "/run/animemo-updater/updater.sock")
 ANIMEMO_UPDATER_TIMEOUT_SECONDS = float(os.getenv("ANIMEMO_UPDATER_TIMEOUT_SECONDS", "10"))
+_first_run_setup_code_default = str(
+    BASE_DIR.parent / "runtime" / "private" / "setup-code"
+)
+FIRST_RUN_SETUP_CODE_PATH = Path(
+    os.getenv("FIRST_RUN_SETUP_CODE_PATH", "").strip() or _first_run_setup_code_default
+)
+if not FIRST_RUN_SETUP_CODE_PATH.is_absolute():
+    raise ImproperlyConfigured("FIRST_RUN_SETUP_CODE_PATH 必须是固定绝对路径。")
+FIRST_RUN_SETUP_CODE_TTL_SECONDS = int(os.getenv("FIRST_RUN_SETUP_CODE_TTL_SECONDS", "3600"))
+FIRST_RUN_SETUP_MAX_ATTEMPTS = int(os.getenv("FIRST_RUN_SETUP_MAX_ATTEMPTS", "8"))
+if not 300 <= FIRST_RUN_SETUP_CODE_TTL_SECONDS <= 86400:
+    raise ImproperlyConfigured("FIRST_RUN_SETUP_CODE_TTL_SECONDS 必须介于 300 与 86400 秒。")
+if not 3 <= FIRST_RUN_SETUP_MAX_ATTEMPTS <= 20:
+    raise ImproperlyConfigured("FIRST_RUN_SETUP_MAX_ATTEMPTS 必须介于 3 与 20。")
 PLUGIN_ROOT = Path(os.getenv("PLUGIN_PACKAGE_ROOT") or os.getenv("PLUGIN_ROOT") or ("/app/runtime/plugins" if not DEBUG else BASE_DIR.parent / "plugins"))
 PLUGIN_ASSET_SESSION_SECONDS = int(os.getenv("PLUGIN_ASSET_SESSION_SECONDS", "120"))
 PLUGIN_PREVIEW_SESSION_SECONDS = int(os.getenv("PLUGIN_PREVIEW_SESSION_SECONDS", "600"))
@@ -430,6 +444,10 @@ REST_FRAMEWORK = {
         "register_complete_ip": os.getenv("THROTTLE_REGISTER_COMPLETE_IP_RATE", "10/hour"),
         "register_complete_account": os.getenv("THROTTLE_REGISTER_COMPLETE_PENDING_RATE", "5/hour"),
         "register_complete_combined": os.getenv("THROTTLE_REGISTER_COMPLETE_COMBINED_RATE", "5/hour"),
+        "first_run_setup": os.getenv("THROTTLE_FIRST_RUN_SETUP_RATE", "10/hour"),
+        "first_run_setup_ip": os.getenv("THROTTLE_FIRST_RUN_SETUP_IP_RATE", "10/hour"),
+        "first_run_setup_account": os.getenv("THROTTLE_FIRST_RUN_SETUP_ACCOUNT_RATE", "8/hour"),
+        "first_run_setup_combined": os.getenv("THROTTLE_FIRST_RUN_SETUP_COMBINED_RATE", "8/hour"),
         "two_factor": os.getenv("THROTTLE_TWO_FACTOR_RATE", "2/min"),
         "two_factor_ip": os.getenv("THROTTLE_TWO_FACTOR_IP_RATE", os.getenv("THROTTLE_TWO_FACTOR_RATE", "10/10min")),
         "two_factor_account": os.getenv("THROTTLE_TWO_FACTOR_ACCOUNT_RATE", "5/10min"),

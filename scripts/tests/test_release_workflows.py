@@ -87,6 +87,22 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn('CANDIDATE_SHA: ${{ inputs.candidate_sha }}', source)
         self.assertIn('test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"', source)
 
+    def test_fresh_docker_gates_complete_the_real_one_time_setup_api(self):
+        release_gate = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8")
+        performance = (ROOT / ".github" / "workflows" / "performance.yml").read_text(encoding="utf-8")
+
+        for source in (release_gate, performance):
+            self.assertIn("scripts/ci_first_run.py", source)
+            self.assertIn("--confirm-isolated", source)
+            self.assertIn("--code-stdin", source)
+            self.assertIn("sudo cat", source)
+            self.assertIn(".example.test", source)
+        self.assertIn("RELEASE_GATE_DATA_ROOT", release_gate)
+        self.assertIn("PERF_DATA_ROOT", performance)
+        self.assertIn("CSRF_COOKIE_SECURE=false", release_gate)
+        self.assertNotIn("private/setup-code | tee", release_gate)
+        self.assertNotIn("private/setup-code | tee", performance)
+
     def test_release_performance_is_rc_only_but_beta_dependencies_remain_live(self):
         release = workflow("release.yml")
         performance = release["jobs"]["performance"]

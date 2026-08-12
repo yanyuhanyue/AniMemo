@@ -133,12 +133,16 @@ jobs:
           TURNSTILE_ENABLED=false
           VITE_TURNSTILE_SITE_KEY=ci-site-key
           SECURE_SSL_REDIRECT=false
+          SESSION_COOKIE_SECURE=false
+          CSRF_COOKIE_SECURE=false
+          REFRESH_COOKIE_SECURE=false
           ALLOW_INSECURE_PRODUCTION_COOKIES=true
           ANIME_JOURNAL_PORT=8088
           ANIME_JOURNAL_DATA_ROOT=$data_root
           ANIMEMO_API_IMAGE=anime-journal-api:release-gate
           ANIMEMO_WEB_IMAGE=anime-journal-web:release-gate
           EOF
+          echo "RELEASE_GATE_DATA_ROOT=$data_root" >> "$GITHUB_ENV"
       - name: Select candidate Compose contract
         shell: bash
         run: |
@@ -185,6 +189,21 @@ jobs:
           done
           curl --fail --silent --show-error -H 'Host: ci.example.test' http://127.0.0.1:8088/ | grep -q '<div id="root">'
           docker compose --env-file .env.production ps
+      - name: Complete and lock the real first-run setup API
+        shell: bash
+        run: |
+          set -euo pipefail
+          ANIMEMO_CI_SETUP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          export ANIMEMO_CI_SETUP_PASSWORD
+          sudo cat "$RELEASE_GATE_DATA_ROOT/private/setup-code" |
+            python3 scripts/ci_first_run.py \
+              --confirm-isolated \
+              --code-stdin \
+              --base-url http://127.0.0.1:8088 \
+              --host ci.example.test \
+              --username ci-bootstrap-admin \
+              --email ci-bootstrap-admin@example.test \
+              --password-env ANIMEMO_CI_SETUP_PASSWORD
       - name: Verify fresh D1A routes, pull-only capability, and empty sync state
         run: >-
           docker compose --env-file .env.production exec -T api

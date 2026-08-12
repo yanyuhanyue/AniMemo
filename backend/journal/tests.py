@@ -14,7 +14,7 @@ from rest_framework.test import APIClient, APITestCase
 import requests
 
 from accounts.models import StaffProfile, UserSecurityProfile
-from site_config.models import SiteSettings, TagDefinition
+from site_config.models import InstallationState, SiteSettings, TagDefinition
 from .models import AdminAuditLog, Column, JournalEntry, UserSettings
 from .security import _totp_at
 
@@ -25,6 +25,9 @@ User = get_user_model()
 class JournalApiTests(APITestCase):
     def setUp(self):
         cache.clear()
+        installation = InstallationState.load()
+        installation.status = InstallationState.Status.INITIALIZED
+        installation.save(update_fields=["status", "updated_at"])
         self.user = User.objects.create_user(username="collector", email="collector@example.com", password="StrongPass123!")
         self.other = User.objects.create_user(username="other", email="other@example.com", password="StrongPass123!")
         self.client.force_authenticate(self.user)

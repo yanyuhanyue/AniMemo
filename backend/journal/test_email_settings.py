@@ -6,7 +6,7 @@ from django.urls import reverse
 from rest_framework.test import APITestCase
 
 from accounts.models import StaffProfile
-from site_config.models import SiteSettings
+from site_config.models import InstallationState, SiteSettings
 
 
 User = get_user_model()
@@ -15,6 +15,9 @@ User = get_user_model()
 @override_settings(RESEND_API_KEY="", RESEND_FROM_EMAIL="Anime Journal <env@example.com>")
 class StaffEmailSettingsTests(APITestCase):
     def setUp(self):
+        installation = InstallationState.load()
+        installation.status = InstallationState.Status.INITIALIZED
+        installation.save(update_fields=["status", "updated_at"])
         self.admin = User.objects.create_user(
             username="email-admin",
             password="test-password",

@@ -17,6 +17,7 @@ export function AdminLoginPage() {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
+  const completionMessage = typeof location.state?.message === "string" ? location.state.message : "";
 
   useLayoutEffect(() => {
     const context = gsap.context(() => {
@@ -137,7 +138,10 @@ export function AdminLoginPage() {
               ? <AuthField icon="shield" label="两步验证码" inputMode="numeric" value={form.otp} onChange={(event) => setForm((current) => ({ ...current, otp: event.target.value.replace(/\D/g, "").slice(0, 6) }))} placeholder="输入 6 位验证码" required autoComplete="one-time-code" />
               : <AuthField icon="shield" label="一次性恢复码" type="password" value={form.recoveryCode} onChange={(event) => setForm((current) => ({ ...current, recoveryCode: event.target.value.toUpperCase().replace(/\s/g, "") }))} placeholder="例如 ABCD-EFGH-IJKL" required autoComplete="off" />}
           </>}
-          <div className="staff-auth-message" aria-live="polite">{error && <p className="form-message error" role="alert">{error}</p>}</div>
+          <div className="staff-auth-message" aria-live="polite">
+            {!error && completionMessage && <p className="form-message success">{completionMessage}</p>}
+            {error && <p className="form-message error" role="alert">{error}</p>}
+          </div>
           <TurnstileWidget ref={turnstileRef} variant="staff" size="flexible" mountDelay={900} />
           <button className="staff-auth-submit" type="submit" disabled={loading}><Icon name="login" /> {loading ? "正在验证工作人员权限..." : "进入管理控制室"}</button>
         </form>

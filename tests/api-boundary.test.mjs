@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import {
   API_ROOT_PATH,
   AUTH_ENDPOINTS,
+  INSTALLATION_ENDPOINTS,
   isAuthInfrastructureRequest,
   normalizeAntiAbuseChallenge,
   resolveApiBaseUrl,
@@ -99,6 +100,36 @@ test("Web Auth Adapter shares one refresh request and keeps refresh credentials 
   assert.equal(refreshRequests, 1);
   assert.deepEqual(adapter.getStoredTokens(), { access: "access", refresh: null });
   assert.equal(removed.length >= 4, true);
+});
+
+test("First-run adapter reads public status and submits the code through the CSRF cookie flow", async () => {
+  const session = createAuthSession();
+  const gets = [];
+  const posts = [];
+  const adapter = createWebAuthAdapter({
+    api: {},
+    cookieClient: {
+      get: async (path) => {
+        gets.push(path);
+        if (path === AUTH_ENDPOINTS.csrf) return { data: { csrf_token: "csrf" } };
+        return { data: { state: "uninitialized", accepting_setup: true } };
+      },
+      post: async (path, data, config) => {
+        posts.push({ path, data, headers: config.headers });
+        return { data: { state: "initialized" } };
+      },
+    },
+    session,
+  });
+
+  const statusResponse = await adapter.setupApi.status();
+  const completionResponse = await adapter.setupApi.complete({ code: "one-time-code" });
+
+  assert.equal(statusResponse.data.state, "uninitialized");
+  assert.deepEqual(gets, [INSTALLATION_ENDPOINTS.status, AUTH_ENDPOINTS.csrf]);
+  assert.equal(posts[0].path, INSTALLATION_ENDPOINTS.complete);
+  assert.equal(posts[0].headers["X-CSRFToken"], "csrf");
+  assert.deepEqual(completionResponse.data, { state: "initialized" });
 });
 
 test("Web Auth Adapter preserves staff claims when initializeAuth merges profile data", async () => {

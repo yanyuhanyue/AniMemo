@@ -36,7 +36,7 @@ test("smoke test requires HTTP 200 and valid health JSON", () => {
 
 test("legacy ZIP deployer is explicit bootstrap or break-glass recovery", () => {
   const deploy = read("../deploy/deploy.sh");
-  const admin = read("../deploy/create-admin.sh");
+  assert.equal(existsSync(new URL("../deploy/create-admin.sh", import.meta.url)), false);
   assert.match(deploy, /DEFAULT_APP_ROOT=\/opt\/1panel\/docker\/compose\/anime-journal\/app/);
   assert.match(deploy, /DEFAULT_DATA_ROOT=\/data\/anime-journal/);
   assert.match(deploy, /--bootstrap/);
@@ -44,6 +44,7 @@ test("legacy ZIP deployer is explicit bootstrap or break-glass recovery", () => 
   assert.match(deploy, /normal updates use the AniMemo Update Agent/);
   assert.match(deploy, /--reset-data/);
   assert.match(deploy, /--reset-data requires --bootstrap/);
+  assert.match(deploy, /--create-admin[\s\S]*removed[\s\S]*\/setup/);
   assert.match(deploy, /tr -d '\\r' < "\$SHA_FILE"/);
   assert.match(deploy, /ARCHIVE%\.zip/);
   assert.match(deploy, /ARCHIVE_BACKEND=python3/);
@@ -58,7 +59,16 @@ test("legacy ZIP deployer is explicit bootstrap or break-glass recovery", () => 
   assert.doesNotMatch(deploy, /docker\s+(?:system|volume)\s+prune/);
   assert.doesNotMatch(deploy, /docker compose .*down .*--volumes/);
   assert.match(deploy, /re-anime\.cc\.conf/);
-  assert.match(admin, /stored_password=.*PASSWORD_FILE/);
-  assert.match(admin, /PASSWORD=\$stored_password/);
-  assert.match(admin, /password was not reset/);
+  assert.doesNotMatch(deploy, /createsuperuser|get_or_create\(username|ANIME_JOURNAL_ADMIN_PASSWORD/);
+});
+
+test("operator docs use the browser first-run flow and current deploy modes", () => {
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const localDevelopment = readFileSync(new URL("../docs/local-development.md", import.meta.url), "utf8");
+
+  assert.match(readme, /docs\/first-run-bootstrap\.md/);
+  assert.match(readme, /--bootstrap/);
+  assert.doesNotMatch(readme, /--fresh|anime-journal-initial-admin/);
+  assert.match(localDevelopment, /\/setup/);
+  assert.doesNotMatch(localDevelopment, /createsuperuser/);
 });

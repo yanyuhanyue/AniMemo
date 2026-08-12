@@ -36,6 +36,12 @@ qa/.playwright-screenshots/
 /qa-*.json
 deliverables/
 *.ajplugin
+/plugins/.locks/
+/plugins/packages/
+/plugins/previews/
+/plugins/runtime/
+/plugins/staging/
+/runtime/private/
 *.zip
 *.tar.gz
 /docs/production-hotfix-20260810.md

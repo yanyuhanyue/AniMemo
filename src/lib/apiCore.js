@@ -17,6 +17,11 @@ export const AUTH_ENDPOINTS = Object.freeze({
   account: "auth/account/",
 });
 
+export const INSTALLATION_ENDPOINTS = Object.freeze({
+  status: "setup/status/",
+  complete: "setup/",
+});
+
 export function resolveApiBaseUrl({ configuredBaseUrl = "", origin = "", fallbackOrigin = "http://localhost:8000" } = {}) {
   const configured = String(configuredBaseUrl || "").trim();
   if (configured) return configured.replace(/\/$/, "");
