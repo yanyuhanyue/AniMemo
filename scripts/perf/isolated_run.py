@@ -56,12 +56,6 @@ class VirtualUserIdentity:
     entry_id: int
 
 
-def virtual_user_client_ip(worker_index: int) -> str:
-    if worker_index < 0 or worker_index >= 254:
-        raise HarnessConfigurationError("isolated virtual-user index is outside the test address range")
-    return f"198.18.0.{worker_index + 1}"
-
-
 def load_virtual_user_identities(path: Path, *, required_count: int) -> tuple[VirtualUserIdentity, ...]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -173,7 +167,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         staff_credentials=staff_credentials,
         timeout_seconds=args.timeout_seconds,
         insecure_tls=args.insecure_tls,
-        client_ip="198.18.255.254",
     )
     shared_tokens = {}
     if staff_credentials is not None:
@@ -199,7 +192,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             staff_credentials=staff_credentials,
             timeout_seconds=args.timeout_seconds,
             insecure_tls=args.insecure_tls,
-            client_ip=virtual_user_client_ip(worker_index),
             initial_tokens={"user": identity.access_token, **shared_tokens},
             token_provider=token_provider,
             token_refresher=token_refresher,

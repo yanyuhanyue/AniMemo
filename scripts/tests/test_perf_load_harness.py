@@ -4,7 +4,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from scripts.perf.isolated_run import load_virtual_user_identities, virtual_user_client_ip
+from scripts.perf.isolated_run import load_virtual_user_identities
 from scripts.perf.load_harness import (
     AuthenticatedHttpClient,
     EnvironmentCredentials,
@@ -43,10 +43,6 @@ class _ManualClock:
 
 
 class PerformanceLoadHarnessTests(unittest.TestCase):
-    def test_virtual_user_client_ips_are_unique_benchmark_addresses(self):
-        self.assertEqual(virtual_user_client_ip(0), "198.18.0.1")
-        self.assertEqual(virtual_user_client_ip(19), "198.18.0.20")
-        self.assertEqual(len({virtual_user_client_ip(index) for index in range(20)}), 20)
     def test_isolated_identity_file_requires_unique_complete_users(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "identities.json"
@@ -130,33 +126,6 @@ class PerformanceLoadHarnessTests(unittest.TestCase):
 
         self.assertEqual(result.status_code, 200)
         self.assertEqual(client._tokens["user"], "preissued-test-token")
-
-    def test_client_identity_is_validated_and_sent_only_by_the_isolated_harness(self):
-        with self.assertRaises(HarnessConfigurationError):
-            AuthenticatedHttpClient(
-                base_url="https://animemo-perf.example.test",
-                user_credentials=EnvironmentCredentials("perf-user", "test-password"),
-                client_ip="not-an-ip",
-            )
-
-        client = AuthenticatedHttpClient(
-            base_url="https://animemo-perf.example.test",
-            user_credentials=EnvironmentCredentials("perf-user", "test-password"),
-            client_ip="198.18.0.7",
-            initial_tokens={"user": "preissued-test-token"},
-        )
-        captured = {}
-
-        def fake_open(_request, timeout):
-            captured["headers"] = dict(_request.header_items())
-            captured["timeout"] = timeout
-            raise AssertionError("request capture only")
-
-        client._opener("user").open = fake_open
-        with self.assertRaises(AssertionError):
-            client._json_request("user", "/api/v1/entries/", method="GET")
-        headers = {key.lower(): value for key, value in captured["headers"].items()}
-        self.assertEqual(headers["x-animemo-perf-client"], "198.18.0.7")
 
     def test_read_scenario_covers_required_journeys_without_product_writes(self):
         requests = build_read_scenario(entry_id=42, search_term="星际牛仔", include_staff=True)

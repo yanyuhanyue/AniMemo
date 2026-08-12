@@ -12,7 +12,6 @@ import argparse
 import concurrent.futures
 import dataclasses
 import http.cookiejar
-import ipaddress
 import json
 import os
 import random
@@ -316,7 +315,6 @@ class AuthenticatedHttpClient:
         staff_credentials: EnvironmentCredentials | None = None,
         timeout_seconds: float = 20.0,
         insecure_tls: bool = False,
-        client_ip: str = "",
         initial_tokens: Mapping[str, str] | None = None,
         token_provider: Callable[[str], str] | None = None,
         token_refresher: Callable[[str, str], str] | None = None,
@@ -326,12 +324,6 @@ class AuthenticatedHttpClient:
         self.staff_credentials = staff_credentials
         self.timeout_seconds = timeout_seconds
         self.insecure_tls = insecure_tls
-        self.client_ip = str(client_ip or "").strip()
-        if self.client_ip:
-            try:
-                ipaddress.ip_address(self.client_ip)
-            except ValueError as error:
-                raise HarnessConfigurationError(f"invalid isolated client IP: {self.client_ip}") from error
         self.token_provider = token_provider
         self.token_refresher = token_refresher
         self._tokens: dict[str, str] = {
@@ -364,8 +356,6 @@ class AuthenticatedHttpClient:
     ) -> tuple[int, bytes, Mapping[str, str]]:
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         request_headers = {"Accept": "application/json", "User-Agent": "AniMemo-Perf-Harness/1.0"}
-        if self.client_ip:
-            request_headers["X-AniMemo-Perf-Client"] = self.client_ip
         if payload is not None:
             request_headers["Content-Type"] = "application/json"
         request_headers.update(headers or {})
