@@ -76,13 +76,16 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
 
     def test_fresh_release_gate_uses_build_override_and_explicit_jobs(self):
         workflow = (ROOT / ".github/workflows/release-gate.yml").read_text(encoding="utf-8")
-        compose = "-f deploy/docker-compose.yml -f deploy/docker-compose.build.yml"
 
-        self.assertIn(compose, workflow)
-        ready = workflow.index(f"{compose} up -d --wait --wait-timeout 120 postgres redis")
-        migration = workflow.index(f"{compose} run --rm --no-deps migration")
-        bootstrap = workflow.index(f"{compose} run --rm --no-deps bootstrap")
-        switch = workflow.index(f"{compose} up -d --no-deps api web")
+        self.assertIn('if [[ -f deploy/docker-compose.build.yml ]]; then', workflow)
+        self.assertIn(
+            "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",
+            workflow,
+        )
+        ready = workflow.index("up -d --wait --wait-timeout 120 postgres redis")
+        migration = workflow.index("run --rm --no-deps migration")
+        bootstrap = workflow.index("run --rm --no-deps bootstrap")
+        switch = workflow.index("up -d --no-deps api web")
         self.assertLess(ready, migration)
         self.assertLess(migration, bootstrap)
         self.assertLess(bootstrap, switch)

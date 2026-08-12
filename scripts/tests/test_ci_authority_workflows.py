@@ -97,6 +97,37 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("github.event_name != 'push'", release)
         self.assertIn("name: post-merge-sanity", release)
 
+    def test_release_gate_bootstraps_both_legacy_and_explicit_job_compose_contracts(self):
+        release = self.source("release-gate.yml")
+
+        self.assertIn("ANIMEMO_API_IMAGE=anime-journal-api:release-gate", release)
+        self.assertIn("ANIMEMO_WEB_IMAGE=anime-journal-web:release-gate", release)
+        self.assertIn('if [[ -f deploy/docker-compose.build.yml ]]; then', release)
+        self.assertIn(
+            "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",
+            release,
+        )
+        self.assertIn("COMPOSE_FILE=deploy/docker-compose.yml", release)
+        self.assertIn("docker compose --env-file .env.production build api web", release)
+        self.assertIn(
+            "docker compose --env-file .env.production up -d --wait --wait-timeout 120 postgres redis",
+            release,
+        )
+        self.assertIn(
+            "docker compose --env-file .env.production run --rm --no-deps migration",
+            release,
+        )
+        self.assertIn(
+            "docker compose --env-file .env.production run --rm --no-deps bootstrap",
+            release,
+        )
+        self.assertIn(
+            "docker compose --env-file .env.production up -d --no-deps api web",
+            release,
+        )
+        self.assertIn("docker compose --env-file .env.production build\n", release)
+        self.assertIn("docker compose --env-file .env.production up -d\n", release)
+
 
 if __name__ == "__main__":
     unittest.main()
