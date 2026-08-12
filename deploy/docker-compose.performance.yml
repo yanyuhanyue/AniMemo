@@ -1,0 +1,26 @@
+services:
+  postgres:
+    container_name: ${COMPOSE_PROJECT_NAME}-postgres
+
+  redis:
+    container_name: ${COMPOSE_PROJECT_NAME}-redis
+
+  migration:
+    volumes:
+      - ../scripts/perf:/app/scripts/perf:ro
+
+  bootstrap:
+    volumes:
+      - ../scripts/perf:/app/scripts/perf:ro
+
+  api:
+    container_name: ${COMPOSE_PROJECT_NAME}-api
+    volumes:
+      - ../scripts/perf:/app/scripts/perf:ro
+
+  web:
+    container_name: ${COMPOSE_PROJECT_NAME}-web
+
+networks:
+  anime-journal:
+    name: ${COMPOSE_PROJECT_NAME}

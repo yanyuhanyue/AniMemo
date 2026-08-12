@@ -139,10 +139,35 @@ jobs:
       upgrade_base_sha: ${{ inputs.upgrade_base_sha }}
       force_full: true
 
+  performance:
+    name: rc-performance
+    if: ${{ inputs.channel == 'rc' }}
+    needs: preflight
+    uses: ./.github/workflows/performance.yml
+    with:
+      candidate_sha: ${{ github.sha }}
+
+  release-authority:
+    name: release-authority
+    if: ${{ always() }}
+    needs: [preflight, full-ci, full-release-gate, performance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Enforce channel-aware Release Producer authority
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/release_authority.py
+
   dry-run:
     name: read-only-release-dry-run
     if: ${{ inputs.dry_run }}
-    needs: [preflight, full-ci, full-release-gate]
+    needs: [preflight, release-authority]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -232,7 +257,7 @@ jobs:
   publish:
     name: publish-immutable-prerelease
     if: ${{ !inputs.dry_run }}
-    needs: [preflight, full-ci, full-release-gate]
+    needs: [preflight, release-authority]
     runs-on: ubuntu-latest
     permissions:
       contents: write

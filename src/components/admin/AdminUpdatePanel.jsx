@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api, csrfApi, readableApiError } from "../../lib/api.js";
+import { createLiveRefreshController } from "../../lib/liveRefresh.js";
 import { Icon } from "../Icon.jsx";
 import {
   ACTIVE_UPDATE_STATES,
@@ -74,14 +75,17 @@ export function AdminUpdatePanel({ viewer, onNotice, onError }) {
   useEffect(() => { void Promise.all([loadStatus(), loadReleases()]); }, [loadReleases, loadStatus]);
   useEffect(() => {
     if (!operationActive || !operation?.id) return undefined;
-    const timer = window.setInterval(async () => {
-      try {
-        const { data } = await api.get(`staff/system/updates/operations/${operation.id}/`);
-        setStatus((current) => ({ ...current, operation: data }));
-        if (!ACTIVE_UPDATE_STATES.has(data.status)) await loadStatus({ silent: true });
-      } catch (error) { onError(readableApiError(error, "更新进度读取失败。")); }
-    }, 2500);
-    return () => window.clearInterval(timer);
+    const liveRefresh = createLiveRefreshController({
+      intervalMs: 2500,
+      refresh: async () => {
+        try {
+          const { data } = await api.get(`staff/system/updates/operations/${operation.id}/`);
+          setStatus((current) => ({ ...current, operation: data }));
+          if (!ACTIVE_UPDATE_STATES.has(data.status)) await loadStatus({ silent: true });
+        } catch (error) { onError(readableApiError(error, "更新进度读取失败。")); }
+      },
+    });
+    return () => liveRefresh.dispose();
   }, [loadStatus, onError, operation?.id, operationActive]);
 
   const selectedPlanVersion = plan?.to?.version || "";

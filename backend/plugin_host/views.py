@@ -5,6 +5,7 @@ from pathlib import Path
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import signing
+from django.db.models import Count, Prefetch
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -86,10 +87,12 @@ def serialize_marketplace_project(project, *, user=None):
     deployment = getattr(project, "deployment", None)
     current_version = deployment.current_version if deployment else None
     manifest = current_version.manifest_snapshot if current_version else {}
-    versions = project.versions.filter(
-        published_at__isnull=False,
-        revoked_at__isnull=True,
-    ).order_by("-published_at")
+    versions = getattr(project, "marketplace_published_versions", None)
+    if versions is None:
+        versions = project.versions.filter(
+            published_at__isnull=False,
+            revoked_at__isnull=True,
+        ).order_by("-published_at")
     payload = {
         "id": project.pk,
         "plugin_id": project.plugin_id,
@@ -115,10 +118,18 @@ def serialize_marketplace_project(project, *, user=None):
             }
             for version in versions
         ],
-        "install_count": project.user_installations.count(),
+        "install_count": (
+            project.marketplace_install_count
+            if hasattr(project, "marketplace_install_count")
+            else project.user_installations.count()
+        ),
     }
     if user and getattr(user, "is_authenticated", False):
-        installation = project.user_installations.filter(user=user).first()
+        installations = getattr(project, "marketplace_user_installations", None)
+        if installations is None:
+            installation = project.user_installations.filter(user=user).first()
+        else:
+            installation = installations[0] if installations else None
         payload["installation"] = {
             "enabled": installation.enabled,
             "config": installation.config,
@@ -374,6 +385,10 @@ class MarketplaceView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
+        published_versions = PluginVersion.objects.filter(
+            published_at__isnull=False,
+            revoked_at__isnull=True,
+        ).order_by("-published_at")
         projects = PluginProject.objects.filter(
             status=PluginProject.Status.ACTIVE,
             installation_mode=PluginProject.InstallationMode.USER,
@@ -381,7 +396,19 @@ class MarketplaceView(APIView):
             deployment__healthy=True,
             deployment__current_version__published_at__isnull=False,
             deployment__current_version__revoked_at__isnull=True,
-        ).select_related("deployment", "deployment__current_version")
+        ).select_related("owner", "deployment", "deployment__current_version").annotate(
+            marketplace_install_count=Count("user_installations", distinct=True),
+        ).prefetch_related(
+            Prefetch("versions", queryset=published_versions, to_attr="marketplace_published_versions"),
+        )
+        if request.user and request.user.is_authenticated:
+            projects = projects.prefetch_related(
+                Prefetch(
+                    "user_installations",
+                    queryset=UserPluginInstallation.objects.filter(user=request.user),
+                    to_attr="marketplace_user_installations",
+                ),
+            )
         return Response({"plugins": [serialize_marketplace_project(project, user=request.user) for project in projects]})
 
 
@@ -662,15 +689,21 @@ class StaffPluginReviewQueueView(APIView):
             review_status=PluginVersion.ReviewStatus.APPROVED,
             published_at__isnull=True,
             revoked_at__isnull=True,
-        ).select_related("plugin").prefetch_related("submissions")
+        ).select_related("plugin").prefetch_related(
+            Prefetch("submissions", to_attr="review_submissions"),
+        )
         deployments = PluginDeployment.objects.select_related(
             "plugin", "current_version", "previous_version",
-        ).prefetch_related("plugin__user_installations")
+        ).annotate(review_install_count=Count("plugin__user_installations", distinct=True))
         market_versions = PluginVersion.objects.filter(
             published_at__isnull=False,
             revoked_at__isnull=True,
             plugin__installation_mode=PluginProject.InstallationMode.USER,
-        ).select_related("plugin").prefetch_related("submissions")
+        ).select_related("plugin").annotate(
+            review_install_count=Count("plugin__user_installations", distinct=True),
+        ).prefetch_related(
+            Prefetch("submissions", to_attr="review_submissions"),
+        )
         return Response({
             "submissions": [{
                 "id": row.pk, "version_id": row.plugin_version_id,
@@ -682,7 +715,7 @@ class StaffPluginReviewQueueView(APIView):
             "approved_versions": [{
                 "id": version.pk, "project": version.plugin.slug, "version": version.version,
                 "runtime_types": version.runtime_types,
-                "security_report": version.submissions.first().security_report if version.submissions.first() else {},
+                "security_report": version.review_submissions[0].security_report if version.review_submissions else {},
             } for version in approved],
             "deployments": [{
                 "slug": deployment.plugin.slug,
@@ -695,7 +728,7 @@ class StaffPluginReviewQueueView(APIView):
                 "status": deployment.status,
                 "published": bool(deployment.current_version.published_at),
                 "revoked": bool(deployment.current_version.revoked_at),
-                "install_count": deployment.plugin.user_installations.count(),
+                "install_count": deployment.review_install_count,
                 "disk_bytes": deployment.disk_bytes,
                 "last_error": deployment.last_error,
             } for deployment in deployments],
@@ -706,8 +739,8 @@ class StaffPluginReviewQueueView(APIView):
                 "version": version.version,
                 "runtime_types": version.runtime_types,
                 "published_at": version.published_at,
-                "install_count": version.plugin.user_installations.count(),
-                "security_report": version.submissions.first().security_report if version.submissions.first() else {},
+                "install_count": version.review_install_count,
+                "security_report": version.review_submissions[0].security_report if version.review_submissions else {},
             } for version in market_versions],
         })
 

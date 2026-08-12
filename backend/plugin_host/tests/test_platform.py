@@ -1,17 +1,22 @@
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 
 from journal.models import AdminAuditLog
 from plugin_host.models import (
     PluginData,
     PluginDeployment,
+    PluginPackageBlob,
     PluginProject,
     PluginSubmission,
     PluginUploadAttempt,
@@ -71,6 +76,293 @@ class PluginPlatformApiTests(APITestCase):
 
     def _cas_files(self):
         return list((Path(self.root.name) / "packages" / "sha256").rglob("*.ajplugin"))
+
+    def _create_marketplace_fixture(self, count, *, start_index=0):
+        published_at = timezone.now()
+        for index in range(start_index, start_index + count):
+            slug = f"market-{index:03d}"
+            project = PluginProject.objects.create(
+                plugin_id=f"com.example.{slug}",
+                slug=slug,
+                name=f"Marketplace {index:03d}",
+                description=f"Marketplace fixture {index:03d}",
+                owner=self.owner,
+            )
+            older_blob = PluginPackageBlob.objects.create(
+                sha256=f"{index * 2:064x}", size_bytes=1, storage_path=f"fixtures/{slug}-1.0.0"
+            )
+            current_blob = PluginPackageBlob.objects.create(
+                sha256=f"{index * 2 + 1:064x}", size_bytes=1, storage_path=f"fixtures/{slug}-2.0.0"
+            )
+            older = PluginVersion.objects.create(
+                plugin=project,
+                version="1.0.0",
+                package_blob=older_blob,
+                manifest_snapshot={"permissions": [], "dataPolicy": {"retention": "fixture"}},
+                runtime_types=["frontend"],
+                review_status=PluginVersion.ReviewStatus.APPROVED,
+                published_at=published_at - timedelta(days=1),
+                created_by=self.owner,
+            )
+            current = PluginVersion.objects.create(
+                plugin=project,
+                version="2.0.0",
+                package_blob=current_blob,
+                manifest_snapshot={
+                    "permissions": [{"code": "journal.read", "name": "Read journal"}],
+                    "dataPolicy": {"retention": "current"},
+                },
+                runtime_types=["frontend", "backend"],
+                review_status=PluginVersion.ReviewStatus.APPROVED,
+                published_at=published_at,
+                created_by=self.owner,
+            )
+            PluginDeployment.objects.create(
+                plugin=project,
+                current_version=current,
+                enabled=True,
+                healthy=True,
+                status=PluginDeployment.Status.ENABLED,
+            )
+            UserPluginInstallation.objects.create(
+                user=self.owner,
+                plugin=project,
+                enabled=index % 2 == 0,
+                config={"index": index},
+            )
+            if index % 2 == 0:
+                UserPluginInstallation.objects.create(
+                    user=self.other,
+                    plugin=project,
+                    enabled=True,
+                )
+
+            self.assertEqual(older.plugin_id, current.plugin_id)
+
+    def test_marketplace_api_batches_per_plugin_reads_and_preserves_payload_semantics(self):
+        self._create_marketplace_fixture(5)
+        with CaptureQueriesContext(connection) as small_queries:
+            small_response = self.client.get("/api/plugins/marketplace/")
+
+        self.assertEqual(small_response.status_code, 200, small_response.data)
+        small_payload = small_response.data["plugins"]
+        self.assertEqual([item["slug"] for item in small_payload], [f"market-{i:03d}" for i in range(5)])
+        self.assertEqual(small_payload[0]["published_version"], "2.0.0")
+        self.assertEqual([item["version"] for item in small_payload[0]["versions"]], ["2.0.0", "1.0.0"])
+        self.assertEqual(small_payload[0]["runtime_types"], ["frontend", "backend"])
+        self.assertEqual(small_payload[0]["permissions"], [{"code": "journal.read", "name": "Read journal"}])
+        self.assertEqual(small_payload[0]["dataPolicy"], {"retention": "current"})
+        self.assertEqual(small_payload[0]["install_count"], 2)
+        self.assertEqual(small_payload[0]["installation"], {"enabled": True, "config": {"index": 0}})
+        self.assertEqual(small_payload[1]["install_count"], 1)
+        self.assertEqual(small_payload[1]["installation"], {"enabled": False, "config": {"index": 1}})
+
+        self._create_marketplace_fixture(15, start_index=5)
+        with CaptureQueriesContext(connection) as medium_queries:
+            medium_response = self.client.get("/api/plugins/marketplace/")
+
+        self.assertEqual(medium_response.status_code, 200, medium_response.data)
+        medium_payload = medium_response.data["plugins"]
+        self.assertEqual(len(medium_payload), 20)
+        self.assertEqual([item["slug"] for item in medium_payload], [f"market-{i:03d}" for i in range(20)])
+        self.assertEqual(
+            len(medium_queries),
+            len(small_queries),
+            f"marketplace query count grew with fixture size: {len(small_queries)} -> {len(medium_queries)}",
+        )
+
+        self._create_marketplace_fixture(30, start_index=20)
+        with CaptureQueriesContext(connection) as large_queries:
+            large_response = self.client.get("/api/plugins/marketplace/")
+
+        self.assertEqual(large_response.status_code, 200, large_response.data)
+        self.assertEqual(len(large_response.data["plugins"]), 50)
+        self.assertEqual(
+            len(large_queries),
+            len(small_queries),
+            f"marketplace query count grew with fixture size: {len(small_queries)} -> {len(large_queries)}",
+        )
+
+    def _create_staff_review_fixture(self, count, *, start_index=0):
+        published_at = timezone.now()
+        for index in range(start_index, start_index + count):
+            slug = f"review-{index:03d}"
+            project = PluginProject.objects.create(
+                plugin_id=f"com.example.{slug}",
+                slug=slug,
+                name=f"Review {index:03d}",
+                description=f"Review fixture {index:03d}",
+                owner=self.owner,
+            )
+            blobs = [
+                PluginPackageBlob.objects.create(
+                    sha256=f"{index * 10 + version_index:064x}",
+                    size_bytes=1,
+                    storage_path=f"fixtures/{slug}-{version_index}.ajplugin",
+                )
+                for version_index in range(4)
+            ]
+            previous = PluginVersion.objects.create(
+                plugin=project,
+                version="1.0.0",
+                package_blob=blobs[0],
+                manifest_snapshot={},
+                runtime_types=["frontend"],
+                review_status=PluginVersion.ReviewStatus.APPROVED,
+                published_at=published_at - timedelta(days=2),
+                created_by=self.owner,
+            )
+            current = PluginVersion.objects.create(
+                plugin=project,
+                version="2.0.0",
+                package_blob=blobs[1],
+                manifest_snapshot={},
+                runtime_types=["frontend", "backend"],
+                review_status=PluginVersion.ReviewStatus.APPROVED,
+                published_at=published_at - timedelta(days=1),
+                created_by=self.owner,
+            )
+            approved = PluginVersion.objects.create(
+                plugin=project,
+                version="3.0.0",
+                package_blob=blobs[2],
+                manifest_snapshot={},
+                runtime_types=["frontend"],
+                review_status=PluginVersion.ReviewStatus.APPROVED,
+                created_by=self.owner,
+            )
+            submitted = PluginVersion.objects.create(
+                plugin=project,
+                version="4.0.0",
+                package_blob=blobs[3],
+                manifest_snapshot={},
+                runtime_types=["frontend"],
+                review_status=PluginVersion.ReviewStatus.SUBMITTED,
+                created_by=self.owner,
+            )
+            PluginSubmission.objects.create(
+                plugin_version=previous,
+                submitter=self.owner,
+                status=PluginSubmission.Status.APPROVED,
+                security_report={"source": "previous"},
+            )
+            PluginSubmission.objects.create(
+                plugin_version=current,
+                submitter=self.owner,
+                status=PluginSubmission.Status.APPROVED,
+                security_report={"source": "current"},
+            )
+            PluginSubmission.objects.create(
+                plugin_version=approved,
+                submitter=self.owner,
+                status=PluginSubmission.Status.APPROVED,
+                security_report={"source": "approved"},
+            )
+            submitted_row = PluginSubmission.objects.create(
+                plugin_version=submitted,
+                submitter=self.owner,
+                security_report={"source": "submitted"},
+            )
+            PluginDeployment.objects.create(
+                plugin=project,
+                current_version=current,
+                previous_version=previous,
+                enabled=True,
+                healthy=True,
+                status=PluginDeployment.Status.ENABLED,
+                disk_bytes=123,
+            )
+            UserPluginInstallation.objects.create(user=self.owner, plugin=project)
+            UserPluginInstallation.objects.create(user=self.other, plugin=project)
+            if index == start_index:
+                expected = {
+                    "project": project,
+                    "previous": previous,
+                    "current": current,
+                    "approved": approved,
+                    "submitted": submitted_row,
+                }
+        return expected
+
+    def test_staff_review_queue_query_count_is_bounded_and_preserves_payload_semantics(self):
+        expected = self._create_staff_review_fixture(1)
+        admin_client = APIClient()
+        admin_client.force_authenticate(self.admin)
+
+        with CaptureQueriesContext(connection) as small_queries:
+            small_response = admin_client.get("/api/staff/plugins/review/")
+
+        self.assertEqual(small_response.status_code, 200, small_response.data)
+        small_payload = small_response.data
+        self.assertEqual(small_payload["submissions"], [{
+            "id": expected["submitted"].pk,
+            "version_id": expected["submitted"].plugin_version_id,
+            "project": expected["project"].slug,
+            "version": "4.0.0",
+            "runtime_types": ["frontend"],
+            "submitter": self.owner.get_username(),
+            "security_report": {"source": "submitted"},
+        }])
+        self.assertEqual(small_payload["approved_versions"], [{
+            "id": expected["approved"].pk,
+            "project": expected["project"].slug,
+            "version": "3.0.0",
+            "runtime_types": ["frontend"],
+            "security_report": {"source": "approved"},
+        }])
+        self.assertEqual(small_payload["deployments"], [{
+            "slug": expected["project"].slug,
+            "name": expected["project"].name,
+            "version_id": expected["current"].pk,
+            "version": "2.0.0",
+            "previous_version": "1.0.0",
+            "enabled": True,
+            "healthy": True,
+            "status": PluginDeployment.Status.ENABLED,
+            "published": True,
+            "revoked": False,
+            "install_count": 2,
+            "disk_bytes": 123,
+            "last_error": "",
+        }])
+        marketplace_by_version = {item["version"]: item for item in small_payload["marketplace_versions"]}
+        self.assertEqual(marketplace_by_version, {
+            "1.0.0": {
+                "id": expected["previous"].pk,
+                "project": expected["project"].slug,
+                "name": expected["project"].name,
+                "version": "1.0.0",
+                "runtime_types": ["frontend"],
+                "published_at": marketplace_by_version["1.0.0"]["published_at"],
+                "install_count": 2,
+                "security_report": {"source": "previous"},
+            },
+            "2.0.0": {
+                "id": expected["current"].pk,
+                "project": expected["project"].slug,
+                "name": expected["project"].name,
+                "version": "2.0.0",
+                "runtime_types": ["frontend", "backend"],
+                "published_at": marketplace_by_version["2.0.0"]["published_at"],
+                "install_count": 2,
+                "security_report": {"source": "current"},
+            },
+        })
+
+        self._create_staff_review_fixture(4, start_index=1)
+        with CaptureQueriesContext(connection) as large_queries:
+            large_response = admin_client.get("/api/staff/plugins/review/")
+
+        self.assertEqual(large_response.status_code, 200, large_response.data)
+        self.assertLessEqual(
+            len(large_queries),
+            len(small_queries) + 4,
+            f"staff review query count grew with plugin scale: {len(small_queries)} -> {len(large_queries)}",
+        )
+        self.assertEqual(len(large_response.data["submissions"]), 5)
+        self.assertEqual(len(large_response.data["approved_versions"]), 5)
+        self.assertEqual(len(large_response.data["deployments"]), 5)
+        self.assertEqual(len(large_response.data["marketplace_versions"]), 10)
 
     def test_developer_review_publish_marketplace_and_install_flow(self):
         project, version = self._create_and_upload()

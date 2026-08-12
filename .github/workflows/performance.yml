@@ -1,0 +1,367 @@
+name: Performance Baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit to measure
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit to measure
+        required: true
+        type: string
+
+concurrency:
+  group: animemo-performance-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: frontend-production-probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Prove the exact frontend candidate identity
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Install Chromium for the production browser probe
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
+        run: npx playwright install --with-deps chromium
+      - name: Run deterministic frontend performance probe
+        env:
+          FRONTEND_PERF_COMMIT: ${{ inputs.candidate_sha }}
+          FRONTEND_PERF_OUTPUT: ${{ github.workspace }}/artifacts/frontend.json
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
+        run: |
+          mkdir -p artifacts
+          node tests/performance-frontend-e2e.mjs
+      - name: Upload frontend evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-frontend
+          path: artifacts/frontend.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  backend:
+    name: backend-postgresql-probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEBUG: "true"
+      DJANGO_SECRET_KEY: ci-only-performance-secret-key-012345678901234567890123456789012345678901234567890
+      CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
+      FRONTEND_URL: http://perf.example.test:8088
+      ALLOWED_HOSTS: perf.example.test
+      PERFORMANCE_SERVER_NAME: perf.example.test
+      DATABASE_URL: postgresql://anime_journal:ci-password@127.0.0.1:5432/anime_journal
+      POSTGRES_DB: anime_journal
+      POSTGRES_USER: anime_journal
+      POSTGRES_PASSWORD: ci-password
+      REDIS_URL: redis://127.0.0.1:6379/0
+      TURNSTILE_ENABLED: "false"
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: anime_journal
+          POSTGRES_USER: anime_journal
+          POSTGRES_PASSWORD: ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U anime_journal -d anime_journal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Prove the exact backend candidate identity
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: python -m pip install -r backend/requirements.txt
+      - name: Apply migrations to the ephemeral PostgreSQL service
+        working-directory: backend
+        run: python manage.py migrate --noinput
+      - name: Measure SMALL, MEDIUM, and LARGE PostgreSQL paths
+        working-directory: backend
+        run: |
+          mkdir -p ../artifacts
+          for dataset in small medium large; do
+            python manage.py benchmark_backend_performance \
+              --dataset "$dataset" \
+              --explain \
+              --output "../artifacts/backend-$dataset.json"
+          done
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          for dataset in ("small", "medium", "large"):
+              report = json.loads(Path(f"../artifacts/backend-{dataset}.json").read_text())
+              assert report["mode"] == "POSTGRESQL_AUTHORITATIVE", report["mode"]
+              assert report["database"] == {
+                  "vendor": "postgresql",
+                  "authoritative": True,
+                  "explain_analyze_buffers": True,
+              }, report["database"]
+          PY
+      - name: Upload backend evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-backend
+          path: artifacts/backend-*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  isolated-resource-load:
+    name: isolated-resource-load
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      COMPOSE_PROJECT_NAME: animemo-perf-${{ github.run_id }}-${{ github.run_attempt }}
+      COMPOSE_HTTP_TIMEOUT: "120"
+      COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.build.yml:deploy/docker-compose.performance.yml
+      PERF_OWNER_PASSWORD: PerfOnly-Owner-2026!
+      PERF_ADMIN_PASSWORD: PerfOnly-Admin-2026!
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Prove the exact isolated-load candidate identity
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: docker/setup-buildx-action@v3
+      - name: Prepare the disposable production-like environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_root="$RUNNER_TEMP/animemo-performance-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$data_root"/plugins "$data_root"/logs "$data_root"/backups "$data_root"/media "$data_root"/postgres "$data_root"/redis
+          chmod -R a+rwx "$data_root"
+          cat > .env.production <<EOF
+          DEBUG=false
+          DJANGO_SECRET_KEY=ci-only-performance-secret-key-012345678901234567890123456789012345678901234567890
+          CREDENTIAL_ENCRYPTION_KEY=a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
+          POSTGRES_DB=anime_journal
+          POSTGRES_USER=anime_journal
+          POSTGRES_PASSWORD=ci-password
+          DATABASE_URL=postgresql://anime_journal:ci-password@postgres:5432/anime_journal
+          DATABASE_SSL_REQUIRE=false
+          REDIS_URL=redis://redis:6379/0
+          ALLOWED_HOSTS=perf.example.test
+          FRONTEND_URL=https://perf.example.test
+          CORS_ALLOWED_ORIGINS=https://perf.example.test
+          CSRF_TRUSTED_ORIGINS=https://perf.example.test
+          TRUSTED_PROXY_IPS=172.28.0.0/16
+          TURNSTILE_ENABLED=false
+          VITE_TURNSTILE_SITE_KEY=ci-site-key
+          SECURE_SSL_REDIRECT=false
+          SESSION_COOKIE_SECURE=false
+          CSRF_COOKIE_SECURE=false
+          REFRESH_COOKIE_SECURE=false
+          ALLOW_INSECURE_PRODUCTION_COOKIES=true
+          ANIME_JOURNAL_PORT=8088
+          ANIME_JOURNAL_DATA_ROOT=$data_root
+          ANIMEMO_API_IMAGE=animemo-perf-api:candidate
+          ANIMEMO_WEB_IMAGE=animemo-perf-web:candidate
+          EOF
+          echo "PERF_DATA_ROOT=$data_root" >> "$GITHUB_ENV"
+      - name: Validate the isolated Compose contract
+        run: docker compose --env-file .env.production config
+      - name: Build the candidate API and Web images
+        run: docker compose --env-file .env.production build api web
+      - name: Start PostgreSQL and Redis, then run release jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env.production up -d --wait --wait-timeout 120 postgres redis
+          docker compose --env-file .env.production run --rm --no-deps migration
+          docker compose --env-file .env.production run --rm --no-deps bootstrap
+          docker compose --env-file .env.production up -d --no-deps api web
+      - name: Wait for the candidate Web/API health endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error \
+              -H 'Host: perf.example.test' \
+              http://127.0.0.1:8088/health/ \
+              | python3 -c "import json, sys; assert json.load(sys.stdin).get('status') == 'ok'"; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              docker compose --env-file .env.production ps
+              exit 1
+            fi
+            sleep 5
+          done
+          curl --fail --silent --show-error \
+            -H 'Host: perf.example.test' \
+            http://127.0.0.1:8088/ | grep -q '<div id="root">'
+          echo '127.0.0.1 perf.example.test' | sudo tee -a /etc/hosts >/dev/null
+      - name: Seed the isolated users and LARGE-shaped read dataset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          seed_json="$(docker compose --env-file .env.production exec -T \
+            -e PERF_OWNER_PASSWORD="$PERF_OWNER_PASSWORD" \
+            -e PERF_ADMIN_PASSWORD="$PERF_ADMIN_PASSWORD" \
+            api python manage.py shell -c \
+            'import json, os; from django.contrib.auth import get_user_model; from performance.seed import seed_backend_performance_data, OWNER_USERNAME, ADMIN_USERNAME; result=seed_backend_performance_data("large", reset=True); User=get_user_model(); owner=User.objects.get(username=OWNER_USERNAME); owner.set_password(os.environ["PERF_OWNER_PASSWORD"]); owner.save(update_fields=["password"]); admin=User.objects.get(username=ADMIN_USERNAME); admin.set_password(os.environ["PERF_ADMIN_PASSWORD"]); admin.save(update_fields=["password"]); print(json.dumps({"history_entry_id": result.history_entry_id, "detail_entry_id": result.detail_entry_id}))' \
+            | tail -n 1)"
+          printf '%s\n' "$seed_json" | tee artifacts/seed.json
+          python3 -c 'import json, sys; value=json.load(sys.stdin); assert int(value["history_entry_id"]) > 0' <<<"$seed_json"
+          echo "PERF_ENTRY_ID=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["history_entry_id"])' <<<"$seed_json")" >> "$GITHUB_ENV"
+      - name: Run the 1/5/10/20-user and 25-minute isolated workload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          python -c 'from scripts.perf.contract import CONCURRENCY_LEVELS; assert CONCURRENCY_LEVELS == (1, 5, 10, 20)'
+          python scripts/perf/isolated_run.py \
+            --confirm-isolated \
+            --base-url http://perf.example.test:8088 \
+            --username perf-v1-owner \
+            --password-env PERF_OWNER_PASSWORD \
+            --staff-username perf-v1-admin \
+            --staff-password-env PERF_ADMIN_PASSWORD \
+            --entry-id "$PERF_ENTRY_ID" \
+            --search-term anime \
+            --iterations-per-user 2 \
+            --sustained-concurrency 5 \
+            --duration-seconds 1500 \
+            --think-time-seconds 0.35 \
+            --timeout-seconds 20 \
+            --compose-project "$COMPOSE_PROJECT_NAME" \
+            --postgres-user anime_journal \
+            --postgres-database anime_journal \
+            --resource-interval-seconds 15 \
+            --output artifacts/resource-load.json
+      - name: Capture scoped Compose state and logs
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          docker compose --env-file .env.production ps --all > artifacts/compose-ps.txt 2>&1 || true
+          docker compose --env-file .env.production logs --no-color > artifacts/compose.log 2>&1 || true
+      - name: Upload isolated resource/load evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-resource-load
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Print isolated logs on failure
+        if: ${{ failure() }}
+        run: docker compose --env-file .env.production logs --no-color
+      - name: Remove only this disposable performance Compose project
+        if: ${{ always() }}
+        run: docker compose --env-file .env.production down -v --remove-orphans
+
+  regression-gate:
+    name: performance-regression-gate
+    if: ${{ always() }}
+    needs: [frontend, backend, isolated-resource-load]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Require every performance evidence producer to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {
+              name: job["result"]
+              for name, job in needs.items()
+              if job["result"] != "success"
+          }
+          if failed:
+              raise SystemExit(json.dumps(failed, sort_keys=True))
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          name: performance-frontend
+          path: artifacts/frontend
+      - uses: actions/download-artifact@v4
+        with:
+          name: performance-backend
+          path: artifacts/backend
+      - uses: actions/download-artifact@v4
+        with:
+          name: performance-resource-load
+          path: artifacts/resource
+      - name: Evaluate the deterministic performance regression gate
+        run: |
+          python scripts/perf/regression_gate.py \
+            --frontend artifacts/frontend/frontend.json \
+            --backend artifacts/backend/backend-small.json \
+            --backend artifacts/backend/backend-medium.json \
+            --backend artifacts/backend/backend-large.json \
+            --resource artifacts/resource/resource-load.json \
+            --output artifacts/regression-gate.json
+      - name: Upload the aggregate regression gate evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-regression-gate
+          path: artifacts/regression-gate.json
+          if-no-files-found: warn
+          retention-days: 14
