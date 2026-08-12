@@ -202,19 +202,15 @@ def complete_first_run_setup(*, code, username, email, password, request):
             ])
             rejection = SetupCompletionError("setup_code_expired", "初始化码已过期，请在服务器上重新生成。", 410)
         elif not check_password(code, installation.setup_code_hash):
-            installation.failed_attempts += 1
-            if installation.failed_attempts >= settings.FIRST_RUN_SETUP_MAX_ATTEMPTS:
-                delete_private_setup_code(settings.FIRST_RUN_SETUP_CODE_PATH)
-                installation.setup_code_hash = ""
-                installation.setup_code_issued_at = None
-                installation.setup_code_expires_at = None
-                rejection = SetupCompletionError("setup_code_locked", "初始化码尝试次数已用尽，请在服务器上重新生成。", 429)
-            else:
-                rejection = SetupCompletionError("invalid_setup_code", "初始化码无效。", 400)
+            # Public brute-force attempts are bounded per IP/account by the
+            # shared API throttles. A global destructive attempt limit would
+            # instead let any remote client invalidate the operator's secret.
+            installation.failed_attempts = min(
+                installation.failed_attempts + 1,
+                settings.FIRST_RUN_SETUP_MAX_ATTEMPTS,
+            )
+            rejection = SetupCompletionError("invalid_setup_code", "初始化码无效。", 400)
             installation.save(update_fields=[
-                "setup_code_hash",
-                "setup_code_issued_at",
-                "setup_code_expires_at",
                 "failed_attempts",
                 "updated_at",
             ])
