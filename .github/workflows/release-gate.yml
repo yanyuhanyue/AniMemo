@@ -116,13 +116,40 @@ jobs:
           ALLOW_INSECURE_PRODUCTION_COOKIES=true
           ANIME_JOURNAL_PORT=8088
           ANIME_JOURNAL_DATA_ROOT=$data_root
+          ANIMEMO_API_IMAGE=anime-journal-api:release-gate
+          ANIMEMO_WEB_IMAGE=anime-journal-web:release-gate
           EOF
+      - name: Select candidate Compose contract
+        shell: bash
+        run: |
+          if [[ -f deploy/docker-compose.build.yml ]]; then
+            echo "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml" >> "$GITHUB_ENV"
+            echo "EXPLICIT_RELEASE_JOBS=true" >> "$GITHUB_ENV"
+          else
+            echo "COMPOSE_FILE=deploy/docker-compose.yml" >> "$GITHUB_ENV"
+            echo "EXPLICIT_RELEASE_JOBS=false" >> "$GITHUB_ENV"
+          fi
       - name: Validate Compose configuration
-        run: docker compose --env-file .env.production -f deploy/docker-compose.yml config
+        run: docker compose --env-file .env.production config
       - name: Build production images
-        run: docker compose --env-file .env.production -f deploy/docker-compose.yml build
+        shell: bash
+        run: |
+          if [[ "$EXPLICIT_RELEASE_JOBS" == "true" ]]; then
+            docker compose --env-file .env.production build api web
+          else
+            docker compose --env-file .env.production build
+          fi
       - name: Start production-like stack
-        run: docker compose --env-file .env.production -f deploy/docker-compose.yml up -d
+        shell: bash
+        run: |
+          if [[ "$EXPLICIT_RELEASE_JOBS" == "true" ]]; then
+            docker compose --env-file .env.production up -d --wait --wait-timeout 120 postgres redis
+            docker compose --env-file .env.production run --rm --no-deps migration
+            docker compose --env-file .env.production run --rm --no-deps bootstrap
+            docker compose --env-file .env.production up -d --no-deps api web
+          else
+            docker compose --env-file .env.production up -d
+          fi
       - name: Run health and frontend smoke checks
         shell: bash
         run: |
@@ -131,16 +158,16 @@ jobs:
               break
             fi
             if [[ "$attempt" == 30 ]]; then
-              docker compose --env-file .env.production -f deploy/docker-compose.yml ps
+              docker compose --env-file .env.production ps
               exit 1
             fi
             sleep 5
           done
           curl --fail --silent --show-error -H 'Host: ci.example.test' http://127.0.0.1:8088/ | grep -q '<div id="root">'
-          docker compose --env-file .env.production -f deploy/docker-compose.yml ps
+          docker compose --env-file .env.production ps
       - name: Verify fresh D1A routes, pull-only capability, and empty sync state
         run: >-
-          docker compose --env-file .env.production -f deploy/docker-compose.yml exec -T api
+          docker compose --env-file .env.production exec -T api
           python manage.py shell -c
           "from django.db import connection; from django.urls import resolve, reverse;
           from journal.external_accounts.providers.bangumi import BangumiAccountProvider;
@@ -160,10 +187,10 @@ jobs:
           print('Fresh D1A pull-only gate: PASS')"
       - name: Print logs on failure
         if: failure()
-        run: docker compose --env-file .env.production -f deploy/docker-compose.yml logs --no-color
+        run: docker compose --env-file .env.production logs --no-color
       - name: Cleanup
         if: always()
-        run: docker compose --env-file .env.production -f deploy/docker-compose.yml down -v
+        run: docker compose --env-file .env.production down -v
 
   stateful-upgrade:
     name: stateful-upgrade
