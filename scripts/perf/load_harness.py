@@ -12,6 +12,7 @@ import argparse
 import concurrent.futures
 import dataclasses
 import http.cookiejar
+import ipaddress
 import json
 import os
 import random
@@ -27,7 +28,11 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from scripts.perf.contract import CONCURRENCY_LEVELS, SUSTAINED_MINUTES, nearest_rank
+    from scripts.perf.contract import (
+        CONCURRENCY_LEVELS,
+        SUSTAINED_MINUTES,
+        nearest_rank,
+    )
 except ModuleNotFoundError:  # Support ``python scripts/perf/load_harness.py``.
     from contract import CONCURRENCY_LEVELS, SUSTAINED_MINUTES, nearest_rank
 
@@ -226,22 +231,28 @@ def summarize_results(
 
 def run_concurrency_level(
     *,
-    client_factory: Callable[[], Any],
-    requests: Sequence[ReadRequest],
+    client_factory: Callable[[int], Any],
+    requests: Sequence[ReadRequest] | None = None,
+    request_factory: Callable[[int], Sequence[ReadRequest]] | None = None,
     concurrency: int,
     iterations_per_user: int = 1,
     clock: Callable[[], float] = time.monotonic,
 ) -> LoadSummary:
-    if concurrency <= 0 or iterations_per_user <= 0 or not requests:
+    if concurrency <= 0 or iterations_per_user <= 0:
         raise HarnessConfigurationError("concurrency, iterations, and requests must be positive")
+    if (requests is None) == (request_factory is None):
+        raise HarnessConfigurationError("provide exactly one of requests or request_factory")
 
-    def worker() -> list[RequestResult]:
-        client = client_factory()
-        return [client.get(request) for _ in range(iterations_per_user) for request in requests]
+    def worker(worker_index: int) -> list[RequestResult]:
+        client = client_factory(worker_index)
+        worker_requests = tuple(request_factory(worker_index) if request_factory else requests or ())
+        if not worker_requests:
+            raise HarnessConfigurationError("each virtual user requires at least one request")
+        return [client.get(request) for _ in range(iterations_per_user) for request in worker_requests]
 
     started = clock()
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
-        result_groups = list(executor.map(lambda _index: worker(), range(concurrency)))
+        result_groups = list(executor.map(worker, range(concurrency)))
     elapsed = max(0.0, clock() - started)
     return summarize_results(
         mode="concurrency",
@@ -253,25 +264,31 @@ def run_concurrency_level(
 
 def run_sustained(
     *,
-    client_factory: Callable[[], Any],
-    requests: Sequence[ReadRequest],
+    client_factory: Callable[[int], Any],
+    requests: Sequence[ReadRequest] | None = None,
+    request_factory: Callable[[int], Sequence[ReadRequest]] | None = None,
     concurrency: int,
     duration_seconds: float,
     think_time_seconds: float = 0.35,
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> LoadSummary:
-    if concurrency <= 0 or duration_seconds <= 0 or not requests:
+    if concurrency <= 0 or duration_seconds <= 0:
         raise HarnessConfigurationError("concurrency, duration, and requests must be positive")
+    if (requests is None) == (request_factory is None):
+        raise HarnessConfigurationError("provide exactly one of requests or request_factory")
     started = clock()
     deadline = started + duration_seconds
 
     def worker(worker_index: int) -> list[RequestResult]:
-        client = client_factory()
+        client = client_factory(worker_index)
+        worker_requests = tuple(request_factory(worker_index) if request_factory else requests or ())
+        if not worker_requests:
+            raise HarnessConfigurationError("each virtual user requires at least one request")
         measured: list[RequestResult] = []
-        offset = worker_index % len(requests)
+        offset = worker_index % len(worker_requests)
         while clock() < deadline:
-            request = requests[(offset + len(measured)) % len(requests)]
+            request = worker_requests[(offset + len(measured)) % len(worker_requests)]
             measured.append(client.get(request))
             if think_time_seconds > 0:
                 sleeper(think_time_seconds)
@@ -299,6 +316,7 @@ class AuthenticatedHttpClient:
         staff_credentials: EnvironmentCredentials | None = None,
         timeout_seconds: float = 20.0,
         insecure_tls: bool = False,
+        client_ip: str = "",
         initial_tokens: Mapping[str, str] | None = None,
         token_provider: Callable[[str], str] | None = None,
         token_refresher: Callable[[str, str], str] | None = None,
@@ -308,6 +326,12 @@ class AuthenticatedHttpClient:
         self.staff_credentials = staff_credentials
         self.timeout_seconds = timeout_seconds
         self.insecure_tls = insecure_tls
+        self.client_ip = str(client_ip or "").strip()
+        if self.client_ip:
+            try:
+                ipaddress.ip_address(self.client_ip)
+            except ValueError as error:
+                raise HarnessConfigurationError(f"invalid isolated client IP: {self.client_ip}") from error
         self.token_provider = token_provider
         self.token_refresher = token_refresher
         self._tokens: dict[str, str] = {
@@ -340,6 +364,8 @@ class AuthenticatedHttpClient:
     ) -> tuple[int, bytes, Mapping[str, str]]:
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         request_headers = {"Accept": "application/json", "User-Agent": "AniMemo-Perf-Harness/1.0"}
+        if self.client_ip:
+            request_headers["X-AniMemo-Perf-Client"] = self.client_ip
         if payload is not None:
             request_headers["Content-Type"] = "application/json"
         request_headers.update(headers or {})
@@ -545,7 +571,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             initial_tokens[scope] = bootstrap_client.refresh(scope)
             return initial_tokens[scope]
 
-    def client_factory() -> AuthenticatedHttpClient:
+    def client_factory(_worker_index: int) -> AuthenticatedHttpClient:
         return AuthenticatedHttpClient(
             base_url=base_url,
             user_credentials=user_credentials,

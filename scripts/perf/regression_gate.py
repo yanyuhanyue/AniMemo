@@ -158,10 +158,19 @@ def validate_resource(report: Mapping[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
     load = report.get("load") or {}
     resources = report.get("resources") or {}
+    virtual_users = report.get("virtual_users") or {}
     failures.extend(f"resource:load:{item}" for item in load.get("hard_failures") or [])
     failures.extend(f"resource:runtime:{item}" for item in resources.get("hard_failures") or [])
     if resources.get("sampling_errors"):
         failures.append("resource:sampling_error")
+
+    required_virtual_users = max(CONCURRENCY_LEVELS)
+    if int(virtual_users.get("provided") or 0) < required_virtual_users:
+        failures.append("resource:virtual_users:insufficient")
+    if int(virtual_users.get("unique_usernames") or 0) < required_virtual_users:
+        failures.append("resource:virtual_users:shared_identity")
+    if int(virtual_users.get("unique_entry_ids") or 0) < required_virtual_users:
+        failures.append("resource:virtual_users:shared_entry")
 
     runs = load.get("runs") or []
     concurrency = sorted(
@@ -186,6 +195,11 @@ def validate_resource(report: Mapping[str, Any]) -> dict[str, Any]:
         "failures": sorted(set(failures)),
         "concurrency_levels": concurrency,
         "sustained_seconds": float(sustained[0].get("elapsed_seconds") or 0) if sustained else 0,
+        "virtual_users": {
+            "provided": int(virtual_users.get("provided") or 0),
+            "unique_usernames": int(virtual_users.get("unique_usernames") or 0),
+            "unique_entry_ids": int(virtual_users.get("unique_entry_ids") or 0),
+        },
     }
 
 

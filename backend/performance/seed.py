@@ -6,13 +6,21 @@ import hashlib
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from accounts.models import StaffProfile, UserSecurityProfile
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
-
-from accounts.models import StaffProfile, UserSecurityProfile
-from integrations.models import ExternalIdentityBinding, IntegrationConnection, IntegrationEvent
-from journal.models import ExternalMediaIdentity, JournalEntry, UserSettings, WatchHistoryRecord
+from integrations.models import (
+    ExternalIdentityBinding,
+    IntegrationConnection,
+    IntegrationEvent,
+)
+from journal.models import (
+    ExternalMediaIdentity,
+    JournalEntry,
+    UserSettings,
+    WatchHistoryRecord,
+)
 from journal.watch_history.validation import semantic_digest_from_values
 from plugin_host.models import (
     PluginDeployment,
@@ -25,11 +33,12 @@ from plugin_host.models import (
 
 from .contract import DATASETS
 
-
 NAMESPACE = "perf-v1"
 OWNER_USERNAME = f"{NAMESPACE}-owner"
 ADMIN_USERNAME = f"{NAMESPACE}-admin"
 USER_PREFIX = f"{NAMESPACE}-user-"
+LOAD_ENTRY_PREFIX = "Anime Load Journey"
+LOAD_ENTRIES_PER_USER = 50
 PLUGIN_PREFIX = f"{NAMESPACE}-plugin-"
 PLUGIN_STORAGE_PREFIX = f"{NAMESPACE}/packages/"
 INTEGRATION_PROVIDER = NAMESPACE
@@ -51,6 +60,12 @@ class SeedResult:
     integration_connection_id: str
 
 
+@dataclass(frozen=True)
+class LoadUserJourney:
+    username: str
+    entry_id: int
+
+
 def dataset_shape(name):
     try:
         return DATASETS[str(name).lower()]
@@ -66,6 +81,80 @@ def reset_backend_performance_data():
     PluginProject.objects.filter(slug__startswith=PLUGIN_PREFIX).delete()
     PluginPackageBlob.objects.filter(storage_path__startswith=PLUGIN_STORAGE_PREFIX).delete()
     get_user_model().objects.filter(username__startswith=f"{NAMESPACE}-").delete()
+
+
+@transaction.atomic
+def provision_load_user_journeys(count, *, entries_per_user=LOAD_ENTRIES_PER_USER):
+    """Give each isolated virtual user an owned, read-only Journey fixture."""
+
+    count = int(count)
+    entries_per_user = int(entries_per_user)
+    if count <= 0 or entries_per_user <= 0:
+        raise ValueError("load identity and entry counts must be positive")
+
+    user_model = get_user_model()
+    supporting_users = list(
+        user_model.objects.filter(username__startswith=USER_PREFIX).order_by("username")
+    )
+    users = supporting_users[:count]
+    if len(users) != count:
+        raise ValueError(f"requested {count} load identities but only {len(users)} are seeded")
+
+    JournalEntry.objects.filter(user__in=users, title__startswith=LOAD_ENTRY_PREFIX).delete()
+    statuses = [choice for choice, _label in JournalEntry.WatchStatus.choices]
+    entries = []
+    for user_index, user in enumerate(users):
+        for entry_index in range(entries_per_user):
+            entries.append(
+                JournalEntry(
+                    user=user,
+                    title=f"{LOAD_ENTRY_PREFIX} {user_index:02d}-{entry_index:03d} anime",
+                    japanese_title=f"負荷測定 {user_index:02d}-{entry_index:03d}",
+                    airing_period=f"{2000 + entry_index % 27}-01",
+                    studio=f"Load Studio {entry_index % 10:02d}",
+                    episodes=str(12 + entry_index % 14),
+                    description="Isolated virtual-user read fixture",
+                    tags=["anime", f"load-{entry_index % 5}"],
+                    tag_colors={"anime": "#4ecdc4"},
+                    personal_score=f"{6 + entry_index % 40 / 10:.2f}",
+                    watch_status=statuses[entry_index % len(statuses)],
+                    review="isolated load journey",
+                    visibility=JournalEntry.Visibility.PRIVATE,
+                )
+            )
+    JournalEntry.objects.bulk_create(entries, batch_size=500)
+
+    first_entries = {}
+    for entry in JournalEntry.objects.filter(
+        user__in=users,
+        title__startswith=LOAD_ENTRY_PREFIX,
+    ).order_by("user_id", "id"):
+        first_entries.setdefault(entry.user_id, entry)
+
+    watched_on = date(2026, 1, 1)
+    WatchHistoryRecord.objects.bulk_create(
+        [
+            WatchHistoryRecord(
+                entry=first_entries[user.pk],
+                watched_on=watched_on,
+                watched_label=watched_on.isoformat(),
+                brush_number=1,
+                brush_label="負荷測定",
+                episode_start=1,
+                episode_end=1,
+                notes=["isolated-load"],
+                metadata={"source": "performance-load"},
+                sequence=1,
+                semantic_key=semantic_digest_from_values(watched_on, "負荷測定", 1, 1),
+            )
+            for user in users
+        ],
+        batch_size=100,
+    )
+    return tuple(
+        LoadUserJourney(username=user.username, entry_id=first_entries[user.pk].pk)
+        for user in users
+    )
 
 
 def _manifest(index):
