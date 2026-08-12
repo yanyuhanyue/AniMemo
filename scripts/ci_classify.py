@@ -255,7 +255,7 @@ def main() -> int:
         self_test()
         return 0
 
-    force_full = os.getenv("GITHUB_EVENT_NAME") in {"merge_group", "workflow_dispatch"}
+    force_full = os.getenv("GITHUB_EVENT_NAME") in {"merge_group", "workflow_dispatch", "workflow_call"}
     paths = args.files if args.files else changed_paths(args.base, args.head)
     result = classify_paths(paths, force_full=force_full)
     result["changed_files"] = json.dumps(sorted(paths), ensure_ascii=False)

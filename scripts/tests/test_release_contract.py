@@ -10,8 +10,10 @@ from pathlib import Path
 from release.contract import (
     ReleaseContractError,
     assert_tag_absent,
+    build_provenance_plan,
     build_manifest,
     promote_manifest,
+    previous_stable_tag,
     resolve_prerelease,
     validate_manifest,
 )
@@ -82,6 +84,16 @@ class VersionResolutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ReleaseContractError, "already exists"):
             assert_tag_absent("v1.0.0-rc.1", ["v1.0.0-rc.1"])
 
+    def test_previous_stable_ignores_prereleases_and_target(self):
+        self.assertEqual(
+            previous_stable_tag(
+                ["v1.0.0", "v1.1.0-beta.1", "v1.1.0", "v1.2.0-rc.1"],
+                target="v1.2.0",
+            ),
+            "v1.1.0",
+        )
+        self.assertIsNone(previous_stable_tag(["v1.0.0-rc.1"], target="v1.0.0"))
+
 
 class ManifestContractTests(unittest.TestCase):
     def test_valid_manifest_round_trips_through_versioned_schema(self):
@@ -149,6 +161,36 @@ class ManifestContractTests(unittest.TestCase):
             target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             loaded = json.loads(target.read_text(encoding="utf-8"))
         self.assertEqual(loaded, payload)
+
+
+class ProvenancePlanTests(unittest.TestCase):
+    def test_dry_run_plan_binds_both_images_to_commit_and_workflow(self):
+        plan = build_provenance_plan(
+            version="v1.0.0-rc.1",
+            commit=COMMIT,
+            api_digest=API_DIGEST,
+            web_digest=WEB_DIGEST,
+            created_at="2026-08-12T10:00:00Z",
+        )
+        self.assertEqual(plan["predicateType"], "https://slsa.dev/provenance/v1")
+        self.assertEqual(plan["predicate"]["buildDefinition"]["resolvedDependencies"][0]["digest"]["gitCommit"], COMMIT)
+        self.assertEqual(
+            plan["subject"],
+            [
+                {"name": "ghcr.io/yanyuhanyue/animemo-api", "digest": {"sha256": "1" * 64}},
+                {"name": "ghcr.io/yanyuhanyue/animemo-web", "digest": {"sha256": "2" * 64}},
+            ],
+        )
+
+    def test_dry_run_plan_rejects_mutable_or_malformed_identity(self):
+        with self.assertRaises(ReleaseContractError):
+            build_provenance_plan(
+                version="latest",
+                commit=COMMIT,
+                api_digest=API_DIGEST,
+                web_digest=WEB_DIGEST,
+                created_at="2026-08-12T10:00:00Z",
+            )
 
 
 if __name__ == "__main__":

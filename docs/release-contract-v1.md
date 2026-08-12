@@ -89,6 +89,8 @@ predicate: https://slsa.dev/provenance/v1
 
 Stable Manifest 由 `.github/workflows/promote-release.yml` 签署，同时仍保留并验证 RC images 的原 build provenance。仓库不保存长期签名私钥，不定义自制密码协议。GitHub 官方文档确认 container image 可用 `actions/attest` 的 `subject-name`/`subject-digest` 和 `push-to-registry`，并可用 `gh attestation verify oci://... -R yanyuhanyue/AniMemo` 验证。
 
+Release Dry Run 只有 `contents: read`，会构建本地 OCI archive、生成 Manifest/checksum，并输出 `provenance-plan.unsigned.json` 来验证 SLSA subject、commit 与 workflow 输入。该文件明确不是密码学签名；只有非 Dry Run 的 publish job 才申请 `id-token: write` / `attestations: write`，调用 `actions/attest` 产生可验证证明。
+
 ## Tool interface
 
 工具入口为 `python -m release.cli`：
@@ -97,6 +99,8 @@ Stable Manifest 由 `.github/workflows/promote-release.yml` 签署，同时仍�
 resolve-version
 generate-manifest
 validate-manifest
+generate-provenance-plan
+previous-stable
 promote-manifest
 write-checksums
 ```

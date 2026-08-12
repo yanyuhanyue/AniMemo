@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
   merge_group:
+  workflow_call:
+    inputs:
+      upgrade_base_sha:
+        description: Audited production/base SHA for BASE to CURRENT validation
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       upgrade_base_sha:
@@ -32,8 +38,8 @@ jobs:
           fetch-depth: 0
       - id: classify
         env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          CI_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          GITHUB_EVENT_NAME: ${{ inputs.upgrade_base_sha && 'workflow_call' || github.event_name }}
+          CI_BASE_SHA: ${{ inputs.upgrade_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before) }}
           CI_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: python scripts/ci_classify.py --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA" --github-output "$GITHUB_OUTPUT"
 
@@ -157,6 +163,8 @@ jobs:
         run: echo "STATEFUL_UPGRADE_TEMP_ROOT=$RUNNER_TEMP/animemo-upgrade-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - name: Resolve audited upgrade refs
         id: refs
+        env:
+          INPUT_UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha || '' }}
         run: python scripts/ci_refs.py --github-output "$GITHUB_OUTPUT"
       - name: Run BASE to CURRENT stateful production upgrade gate
         shell: bash

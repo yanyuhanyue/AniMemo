@@ -80,6 +80,8 @@ def _validate_cookie_domain(value, *, setting_name, production):
 DEBUG = env_bool("DEBUG", False)
 
 ANIME_JOURNAL_VERSION = os.getenv("ANIME_JOURNAL_VERSION", "0.0.0")
+ANIME_JOURNAL_COMMIT = os.getenv("ANIME_JOURNAL_COMMIT", "unknown")
+ANIME_JOURNAL_RELEASE_CHANNEL = os.getenv("ANIME_JOURNAL_RELEASE_CHANNEL", "development")
 PLUGIN_ROOT = Path(os.getenv("PLUGIN_PACKAGE_ROOT") or os.getenv("PLUGIN_ROOT") or ("/app/runtime/plugins" if not DEBUG else BASE_DIR.parent / "plugins"))
 PLUGIN_ASSET_SESSION_SECONDS = int(os.getenv("PLUGIN_ASSET_SESSION_SECONDS", "120"))
 PLUGIN_PREVIEW_SESSION_SECONDS = int(os.getenv("PLUGIN_PREVIEW_SESSION_SECONDS", "600"))

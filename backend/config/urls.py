@@ -18,7 +18,17 @@ class CSPCompatibleSwaggerView(SpectacularSwaggerSplitView):
 
 
 def health(_request):
-    return JsonResponse({"status": "ok", "service": "anime-journal-api"})
+    return JsonResponse(
+        {
+            "status": "ok",
+            "service": "anime-journal-api",
+            "release": {
+                "version": settings.ANIME_JOURNAL_VERSION,
+                "commit": settings.ANIME_JOURNAL_COMMIT,
+                "channel": settings.ANIME_JOURNAL_RELEASE_CHANNEL,
+            },
+        }
+    )
 
 
 urlpatterns = [

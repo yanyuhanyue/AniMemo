@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
   merge_group:
+  workflow_call:
+    inputs:
+      upgrade_base_sha:
+        description: Audited production/base SHA for release validation
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       upgrade_base_sha:
@@ -40,8 +46,8 @@ jobs:
           fetch-depth: 0
       - id: classify
         env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          CI_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          GITHUB_EVENT_NAME: ${{ inputs.upgrade_base_sha && 'workflow_call' || github.event_name }}
+          CI_BASE_SHA: ${{ inputs.upgrade_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before) }}
           CI_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: python scripts/ci_classify.py --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA" --github-output "$GITHUB_OUTPUT"
 
@@ -229,7 +235,15 @@ jobs:
       - run: python scripts/pluginctl.py validate
       - run: python scripts/pluginctl.py build watch-history-importer
       - name: Check official plugin immutable package identities
-        run: python scripts/check_official_plugin_immutability.py --head-root .
+        env:
+          RELEASE_BASE_SHA: ${{ inputs.upgrade_base_sha || '' }}
+        shell: bash
+        run: |
+          if [[ -n "$RELEASE_BASE_SHA" ]]; then
+            python scripts/check_official_plugin_immutability.py --base "$RELEASE_BASE_SHA" --head "$GITHUB_SHA" --head-root .
+          else
+            python scripts/check_official_plugin_immutability.py --head-root .
+          fi
       - run: python scripts/pluginctl.py pack watch-history-importer
 
   astrbot-bridge:

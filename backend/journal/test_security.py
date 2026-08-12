@@ -128,7 +128,12 @@ class ProductionHealthSecurityTests(SimpleTestCase):
             HTTP_X_FORWARDED_PROTO="https",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.json(), {"status": "ok", "service": "anime-journal-api"})
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(response.json()["service"], "anime-journal-api")
+        self.assertEqual(
+            response.json()["release"],
+            {"version": "0.0.0", "commit": "unknown", "channel": "development"},
+        )
 
     def test_plain_http_health_request_still_redirects_to_https(self):
         response = self.client.get("/health/", HTTP_HOST="app.example.com")

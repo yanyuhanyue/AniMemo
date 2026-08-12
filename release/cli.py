@@ -9,6 +9,8 @@ from pathlib import Path
 from .contract import (
     ReleaseContractError,
     build_manifest,
+    build_provenance_plan,
+    previous_stable_tag,
     promote_manifest,
     resolve_prerelease,
     validate_manifest,
@@ -37,6 +39,7 @@ def _write_outputs(path: Path | None, payload: dict[str, object]) -> None:
     names = {
         "targetVersion": "target_version",
         "releaseTag": "release_tag",
+        "previousStable": "previous_stable",
         "sequence": "sequence",
     }
     with path.open("a", encoding="utf-8") as output:
@@ -97,6 +100,24 @@ def _validate(args) -> dict[str, object]:
     }
 
 
+def _generate_provenance_plan(args) -> dict[str, object]:
+    payload = build_provenance_plan(
+        version=args.version,
+        commit=args.commit,
+        created_at=args.created_at,
+        api_digest=args.api_digest,
+        web_digest=args.web_digest,
+    )
+    _write_json(args.output, payload)
+    return payload
+
+
+def _previous_stable(args) -> dict[str, object]:
+    payload = {"previousStable": previous_stable_tag(_read_tags(args.tags_file), target=args.target) or ""}
+    _write_outputs(args.github_output, payload)
+    return payload
+
+
 def _promote(args) -> dict[str, object]:
     payload = promote_manifest(
         _read_json(args.rc_manifest),
@@ -129,6 +150,12 @@ def _parser() -> argparse.ArgumentParser:
     resolve.add_argument("--github-output", type=Path)
     resolve.set_defaults(handler=_resolve)
 
+    previous = subparsers.add_parser("previous-stable")
+    previous.add_argument("--tags-file", type=Path, required=True)
+    previous.add_argument("--target", required=True)
+    previous.add_argument("--github-output", type=Path)
+    previous.set_defaults(handler=_previous_stable)
+
     generate = subparsers.add_parser("generate-manifest")
     generate.add_argument("--version", required=True)
     generate.add_argument("--channel", required=True)
@@ -144,6 +171,15 @@ def _parser() -> argparse.ArgumentParser:
     validate.add_argument("--manifest", type=Path, required=True)
     validate.add_argument("--updater-version", default="")
     validate.set_defaults(handler=_validate)
+
+    provenance = subparsers.add_parser("generate-provenance-plan")
+    provenance.add_argument("--version", required=True)
+    provenance.add_argument("--commit", required=True)
+    provenance.add_argument("--created-at", required=True)
+    provenance.add_argument("--api-digest", required=True)
+    provenance.add_argument("--web-digest", required=True)
+    provenance.add_argument("--output", type=Path, required=True)
+    provenance.set_defaults(handler=_generate_provenance_plan)
 
     promote = subparsers.add_parser("promote-manifest")
     promote.add_argument("--rc-manifest", type=Path, required=True)
