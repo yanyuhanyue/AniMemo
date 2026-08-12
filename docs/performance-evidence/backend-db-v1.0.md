@@ -1,59 +1,20 @@
-# AniMemo v1.0 Backend / Database Performance Evidence — Wave 1
+# AniMemo v1.0 Backend / PostgreSQL Performance Evidence
 
 Date: 2026-08-12
 
-Branch: `perf/backend-db-baseline`
+Candidate: `b2fc5c00774aee07e6fc61a055afc46b17b062e9`
 
-Measurement contract: `docs/performance-benchmark-contract-v1.0.md`
+Workflow run: [Performance Baseline #31610568595](https://github.com/yanyuhanyue/AniMemo/actions/runs/31610568595)
 
-This document contains Wave 1 measurement evidence only. No product logic, migration, workflow, release, updater, API, Auth, Plugin SDK or Integration Protocol contract was changed.
+Job: `backend-postgresql-probe` — PASS
 
-## Environment and authority
+## Authority and method
 
-| Item | Result |
-| --- | --- |
-| Local OS | Windows |
-| Local database | SQLite |
-| Docker | Unavailable |
-| Local PostgreSQL | Unavailable |
-| Authoritative Ubuntu + PostgreSQL + Redis API latency | **NOT RUN** |
-| PostgreSQL `EXPLAIN (ANALYZE, BUFFERS)` | **NOT RUN** |
-| Local SQLite use | Query shape, duplicate-query, payload and seed/probe validation only |
+The final probe ran on `ubuntu-latest` with PostgreSQL 16 and Redis 7. Each endpoint received two warm-up requests and ten measured requests. Reports record HTTP status, median/p95 latency, query count, normalized duplicate-query count, response bytes and item count. Selected LARGE hot paths include `EXPLAIN (ANALYZE, BUFFERS)`.
 
-SQLite timings are deliberately omitted from the JSON summary (`NOT AUTHORITATIVE — SQLite query-shape mode`). The local observations below must not be represented as PostgreSQL latency or production capacity.
+All measured requests returned HTTP 200. PostgreSQL mode was `POSTGRESQL_AUTHORITATIVE`; SQLite timings are not used below.
 
-## Harness delivered
-
-- `performance/seed.py` deterministically generates the shared SMALL / MEDIUM / LARGE shapes without a large fixture file.
-- `benchmark_backend_performance` defaults to PostgreSQL-only and refuses SQLite unless `--allow-sqlite-query-shape` is explicitly supplied.
-- Every endpoint receives 2 warm-up requests and 10 measured requests.
-- Every measured result records status code, query count, normalized duplicate-query executions, response bytes and item count.
-- `--explain` is PostgreSQL-only and captures up to three slowest unique read queries per selected hot path using `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`.
-- Any unexpected non-200 response aborts the harness instead of producing a misleading report.
-- Generated data is isolated under the `perf-v1-*` namespace, and reset deletes only that namespace.
-
-Ubuntu/PostgreSQL invocation after the branch is available in an isolated runner:
-
-```bash
-cd backend
-python manage.py migrate --noinput
-python manage.py benchmark_backend_performance \
-  --dataset small \
-  --explain \
-  --output ../artifacts/backend-small-postgresql.json
-python manage.py benchmark_backend_performance \
-  --dataset medium \
-  --explain \
-  --output ../artifacts/backend-medium-postgresql.json
-python manage.py benchmark_backend_performance \
-  --dataset large \
-  --explain \
-  --output ../artifacts/backend-large-postgresql.json
-```
-
-Required environment is the existing isolated CI contract: Ubuntu, PostgreSQL, Redis, DEBUG-safe test configuration and no production credentials.
-
-## Generated dataset shape
+## Dataset contract
 
 | Dataset | Journal entries | Supporting users | Plugins | Watch History | Integration events |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -61,135 +22,72 @@ Required environment is the existing isolated CI contract: Ubuntu, PostgreSQL, R
 | MEDIUM | 1,000 | 50 | 20 | 500 | 1,000 |
 | LARGE | 10,000 | 100 | 50 | 5,000 | 1,000 |
 
-The owner dataset includes bounded tags, 27 years, all watch statuses, scores/null scores, descriptions, external identities with metadata summaries and a 500-record Watch History target at MEDIUM/LARGE. Supporting users include profiles/settings/staff roles. Plugin data includes immutable versions, deployments, approved submissions and bounded installations. Integration data includes two connections, user bindings and queued events.
+## Journal, Dashboard and Watch History
 
-## Local query-shape evidence
-
-All listed values are the median over 10 measured requests after 2 warm-ups. Status was HTTP 200 for every run.
-
-### Journal, Dashboard and Watch History
-
-| Probe | SMALL queries / bytes / items | MEDIUM queries / bytes / items | LARGE queries / bytes / items |
-| --- | --- | --- | --- |
-| Journal page 1 | 6 / 45,436 / 48 | 6 / 45,774 / 48 | 6 / 47,170 / 48 |
-| Journal middle page | 6 / 45,436 / 48 | 6 / 45,759 / 48 | 6 / 45,870 / 48 |
-| Journal page 48 | N/A | N/A | 6 / 46,391 / 48 |
-| Journal status filter | 6 / 9,053 / 10 | 6 / 44,009 / 48 | 6 / 44,135 / 48 |
-| Journal score sort | 6 / 45,467 / 48 | 6 / 46,449 / 48 | 6 / 46,728 / 48 |
-| Journal facets | 7 / 45,744 / 48 | 7 / 46,082 / 48 | 7 / 47,478 / 48 |
-| Watch History page 1 | 5 / 8,230 / 25 | 6 / 33,364 / 100 | 6 / 33,415 / 100 |
-| Watch History page 5 | 6 / 67 / 0 | 6 / 32,886 / 100 | 6 / 32,935 / 100 |
-
-Query-count interpretation:
-
-- Journal pagination, filter, sort and LARGE page 48 stay bounded at six queries in SQLite query-shape mode.
-- Facets stay at seven queries, but implementation inspection confirms facets iterate every owner entry's `tags` and `airing_period`. PostgreSQL latency/rows scanned are required before assigning a final performance severity.
-- Watch History pagination remains bounded at five/six queries and 100 serialized records per page.
-
-### Auth/session, Staff and Integration diagnostics
+Each cell is `median / p95 ms · median queries`.
 
 | Probe | SMALL | MEDIUM | LARGE |
-| --- | --- | --- | --- |
-| Auth `/auth/me/` queries / bytes | 8 / 600 | 8 / 600 | 8 / 600 |
-| Staff Dashboard queries / bytes / users | 19 / 7,704 / 12 | 19 / 22,842 / 52 | 19 / 41,486 / 100 |
-| Integration connections queries / bytes | 4 / 275 | 4 / 275 | 4 / 275 |
-| Integration bindings queries / bytes / returned bindings | 4 / 391 / 1 | 4 / 391 / 1 | 4 / 391 / 1 |
-| Integration events queries / bytes / returned events | 3 / 14,172 / 50 | 3 / 14,270 / 50 | 3 / 14,371 / 50 |
-
-Interpretation:
-
-- Auth/session, Staff Dashboard and Integration diagnostics have bounded query counts across generated dataset growth.
-- Each HMAC Integration events request still executes the frozen authentication path that updates `IntegrationConnection.last_seen_at`; sustained write amplification remains a measurement candidate for the resource/load workstream, not a finding from this local read probe.
-- Login password hashing / Turnstile wall-clock latency is not represented by `/auth/me/`; authoritative login/session timing remains **NOT RUN** until the isolated PostgreSQL/Redis run.
-
-### Plugin Platform
-
-| Probe | SMALL (5 plugins) | MEDIUM (20 plugins) | LARGE (50 plugins) |
 | --- | ---: | ---: | ---: |
-| Marketplace queries | 16 | 61 | 151 |
-| Marketplace duplicate executions | 12 | 57 | 147 |
-| Marketplace bytes | 2,799 | 11,173 | 27,913 |
-| Installed plugin list queries | 4 | 4 | 4 |
-| Installed plugin list bytes | 2,498 | 9,965 | 24,895 |
-| Staff Plugin Review queries | 14 | 29 | 59 |
-| Staff Plugin Review duplicate executions | 4 | 19 | 49 |
-| Staff Plugin Review bytes | 2,524 | 9,882 | 24,582 |
+| Journal page 1 | 32.0 / 33.7 · 6 | 37.2 / 85.4 · 6 | 128.2 / 132.6 · 6 |
+| Journal middle page | 32.1 / 81.8 · 6 | 38.3 / 43.4 · 6 | 142.0 / 156.1 · 6 |
+| Journal page 48 | N/A | N/A | 133.2 / 199.2 · 6 |
+| Status filter | 14.6 / 16.1 · 6 | 28.6 / 30.5 · 6 | 49.1 / 110.5 · 6 |
+| Score sort | 31.8 / 39.1 · 6 | 40.9 / 109.7 · 6 | 128.4 / 129.7 · 6 |
+| Journal facets | 33.9 / 35.3 · 7 | 45.7 / 47.2 · 7 | 175.8 / 232.9 · 7 |
+| Journal detail | 11.4 / 11.6 · 6 | 12.0 / 14.2 · 6 | 11.4 / 12.0 · 6 |
+| Watch History page 1 | 8.1 / 8.7 · 5 | 15.0 / 17.7 · 6 | 15.2 / 68.5 · 6 |
+| Watch History deep page | 6.5 / 6.8 · 6 | 14.8 / 16.7 · 6 | 15.0 / 18.1 · 6 |
 
-Installed plugin list remains bounded at four queries. Marketplace and Staff Plugin Review do not.
+Pagination, filtering, sorting and Watch History remain query-count bounded across dataset growth. LARGE page 48 returns 48 records and does not introduce an N+1.
 
-## Proposed findings
+## Auth, Plugin, Staff and Integration
 
-### PERF-BE-PROPOSED-001
+| Probe | SMALL | MEDIUM | LARGE |
+| --- | ---: | ---: | ---: |
+| Auth session | 11.1 / 12.4 · 8 | 12.8 / 13.9 · 8 | 20.1 / 22.0 · 8 |
+| Plugin marketplace | 6.7 / 8.1 · 2 | 9.3 / 11.3 · 2 | 16.0 / 18.4 · 2 |
+| Installed plugins | 6.4 / 6.7 · 4 | 7.7 / 9.4 · 4 | 11.0 / 16.8 · 4 |
+| Staff dashboard | 21.7 / 22.8 · 19 | 28.1 / 29.5 · 19 | 198.4 / 201.3 · 19 |
+| Staff plugin review | 13.2 / 14.8 · 8 | 16.4 / 82.2 · 8 | 22.7 / 23.8 · 8 |
+| Integration connections | 4.8 / 4.9 · 4 | 4.8 / 6.3 · 4 | 4.8 / 4.9 · 4 |
+| Integration bindings | 5.9 / 6.8 · 4 | 5.6 / 5.8 · 4 | 5.7 / 5.8 · 4 |
+| Integration events | 5.4 / 5.7 · 3 | 5.4 / 6.3 · 3 | 5.1 / 5.3 · 3 |
 
-| Field | Evidence |
-| --- | --- |
-| Proposed Severity | **PERF1 (PROPOSED)** |
-| Area | Plugin Platform backend |
-| Journey | Public Plugin Marketplace initial load |
-| Dataset | SMALL / MEDIUM / LARGE, 5 / 20 / 50 plugins |
-| Evidence | Queries scale 16 → 61 → 151; duplicate executions scale 12 → 57 → 147 |
-| Before | SQLite query-shape only; PostgreSQL latency **NOT RUN** |
-| Root Cause | `MarketplaceView` iterates projects; `serialize_marketplace_project` separately loads owner, published versions and installation count for each project. Captured normalized shapes each execute N times. |
-| Suggested Fix | Preserve API v1 payload; batch/select/prefetch owner and published versions and annotate installation count. Verify with the same SMALL/MEDIUM/LARGE probe. |
-| Contract Risk | Low if response fields/order/visibility semantics remain unchanged; API v1 is frozen. |
-| Owner | Backend / Plugin Platform |
+Plugin marketplace and Staff plugin review now remain bounded at 2 and 8 queries respectively through 50 plugins.
 
-Why proposed PERF1: this is a deterministic, high-frequency list N+1 with approximately `3N + 1` queries. Final severity must be assigned at the finding barrier after PostgreSQL timing and current expected marketplace scale are considered.
+## LARGE EXPLAIN highlights
 
-### PERF-BE-PROPOSED-002
+| Probe / statement | Actual rows | Execution | Shared hits | Shared reads | Temp I/O |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Journal facets main page | 48 | 64.4 ms | 47,115 | 0 | 0 / 0 |
+| Journal facets count | 1 | 40.4 ms | 46,923 | 0 | 0 / 0 |
+| Facet tags/airing scan | 10,000 | 5.9 ms | 406 | 0 | 0 / 0 |
+| Journal page 48 main page | 48 | 71.6 ms | 56,139 | 0 | 0 / 0 |
+| Marketplace project aggregate | 50 | 1.8 ms | 464 | 0 | 0 / 0 |
+| Staff review deployment aggregate | 50 | 1.8 ms | 364 | 0 | 0 / 0 |
+| Integration events page | 50 | 0.04 ms | 5 | 0 | 0 / 0 |
 
-| Field | Evidence |
-| --- | --- |
-| Proposed Severity | **PERF1 (PROPOSED)** |
-| Area | Staff / Plugin Platform backend |
-| Journey | Staff Plugin Review initial load |
-| Dataset | SMALL / MEDIUM / LARGE, 5 / 20 / 50 marketplace versions |
-| Evidence | Queries scale 14 → 29 → 59; duplicate executions scale 4 → 19 → 49 |
-| Before | SQLite query-shape only; PostgreSQL latency **NOT RUN** |
-| Root Cause | `StaffPluginReviewQueueView` calls `version.plugin.user_installations.count()` once per marketplace version. Captured COUNT shape executes N times. |
-| Suggested Fix | Preserve the Staff response contract and annotate/batch installation counts; verify with the same probe. |
-| Contract Risk | Low if Staff payload semantics are unchanged. |
-| Owner | Backend / Staff + Plugin Platform |
+The owner-wide facet scan is real but completes in 5.9 ms at 10,000 entries in this isolated run; total facet endpoint p95 is 232.9 ms. It is therefore PERF2, not a v1.0 blocker. The higher journal cost is concentrated in the annotated page/count query shape and remains bounded at the supported personal/small-scale dataset.
 
-Why proposed PERF1: this is deterministic N+1 growth on a polling-capable Staff page. Final severity must account for frontend polling evidence and PostgreSQL results at the barrier.
+## PERF1 before / after
 
-## Candidate risks requiring PostgreSQL or load evidence
+| Finding | Before query counts | After query counts | Result |
+| --- | --- | --- | --- |
+| PERF-BE-001 Marketplace N+1 | 16 / 61 / 151 | 2 / 2 / 2 | FIXED |
+| PERF-BE-002 Staff Plugin Review N+1 | 14 / 29 / 59 | 8 / 8 / 8 | FIXED |
 
-These are not findings yet:
+The fix uses selected/prefetched relations and annotated installation counts while preserving API v1 payload, ordering and visibility semantics.
 
-- Dashboard facets performs an owner-wide values scan even though query count is constant. Need PostgreSQL latency, rows and buffers at 1k/10k.
-- Offset pagination including page 48 has constant query count locally. Need PostgreSQL `EXPLAIN ANALYZE BUFFERS` to characterize offset/count cost.
-- Integration HMAC polling updates `last_seen_at` on every authenticated request. Need sustained/concurrent PostgreSQL write and resource evidence.
-- Staff Dashboard response grows to 41,486 bytes for 100 users but query count is constant. Need browser/polling evidence before severity.
-- Plugin lists are intentionally unpaginated under the current API. The measured N+1 must be addressed without silently changing the frozen API v1 contract.
+## Final finding decisions
 
-## Tests and local commands
-
-```powershell
-$env:DEBUG='true'
-$env:TURNSTILE_ENABLED='false'
-python manage.py test journal.test_performance_baseline -v 2
-```
-
-Result: **7 passed**. Coverage includes shared dataset contract, red-capable query scaling helper, duplicate SQL normalization, SQLite refusal, non-200 rejection contract, exact/repeatable SMALL seed and Journal list query-count scaling.
-
-```powershell
-python manage.py benchmark_backend_performance --dataset small  --allow-sqlite-query-shape --output $env:TEMP/animemo-backend-small-query-shape.json
-python manage.py benchmark_backend_performance --dataset medium --allow-sqlite-query-shape --output $env:TEMP/animemo-backend-medium-query-shape.json
-python manage.py benchmark_backend_performance --dataset large  --allow-sqlite-query-shape --output $env:TEMP/animemo-backend-large-query-shape.json
-```
-
-Result: all 16 probes returned HTTP 200; LARGE included Dashboard page 48. Outputs stayed outside the repository and are auxiliary only.
+- `PERF-BE-001`: PERF1, FIXED in PR #68.
+- `PERF-BE-002`: PERF1, FIXED in PR #68.
+- `PERF-DB-001`: PERF2, DEFERRED — Dashboard facets still scan owner tags/airing data; optimize only with the same PostgreSQL probe and unchanged API v1 facets.
+- `PERF-API-001`: PERF2, DEFERRED — Integration authentication still observes `last_seen_at`; a dedicated sustained Integration poll/write benchmark is required before changing Protocol v1 behavior.
 
 ## Limitations
 
-```text
-POSTGRESQL AUTHORITATIVE LATENCY: NOT RUN
-POSTGRESQL EXPLAIN ANALYZE BUFFERS: NOT RUN
-REDIS-AUTHORITY RESULT: NOT RUN
-CONCURRENCY 1/5/10/20: NOT RUN BY THIS WORKSTREAM
-SUSTAINED 25 MINUTES: NOT RUN BY THIS WORKSTREAM
-PRODUCTION PERFORMANCE TEST: NOT RUN
-PRODUCTION DATABASE: NOT RUN
-SSH: NOT RUN
-```
+- PostgreSQL is isolated CI, not production hardware or production data.
+- Remote Turnstile, Bangumi, R2 and other external I/O were not benchmarked.
+- The isolated mixed workload does not exercise sustained Integration long polling, so write-amplification remains a v1.1 measurement item.
+- Production database, SSH, deploy and production performance testing: NOT RUN.

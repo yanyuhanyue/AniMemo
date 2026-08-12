@@ -1,122 +1,76 @@
-# AniMemo v1.0 Resource / Load Evidence — Wave 1
+# AniMemo v1.0 Resource / Load Evidence
 
 Date: 2026-08-12
 
-Workstream: Resource / Load / Sustained Runtime
+Candidate: `b2fc5c00774aee07e6fc61a055afc46b17b062e9`
 
-Base contract commit: `0f865f4c5b43b36de1fde847ee8ac0d6f99ce6ab`
+Workflow run: [Performance Baseline #31610568595](https://github.com/yanyuhanyue/AniMemo/actions/runs/31610568595)
 
-## Scope and authority
+Job: `isolated-resource-load` — PASS
 
-This workstream adds measurement harness and evidence only. It does not change frontend/backend product behavior, migrations, CI authority, release/updater behavior, or frozen v1 contracts.
+## Authority and isolation
 
-Authoritative results require an isolated Ubuntu runner with PostgreSQL and Redis. This Windows machine has no Docker runtime, so no PostgreSQL/Redis/resource/load result was generated locally. Unit tests below validate the harness and safety boundaries only.
+The workload ran on a disposable Ubuntu Compose project with the candidate API/Web images, PostgreSQL and Redis. The target was the isolated local host `perf.example.test:8088`; the harness rejects the production domain, production IP and production Compose/container names.
 
-| Evidence | Status | Authority |
-| --- | --- | --- |
-| Harness unit tests | PASS (14/14) | Tool correctness only |
-| 1-user isolated load | NOT RUN | Await Ubuntu Actions isolated stack |
-| 5-user isolated load | NOT RUN | Await Ubuntu Actions isolated stack |
-| 10-user isolated load | NOT RUN | Await Ubuntu Actions isolated stack |
-| 20-user isolated load | NOT RUN | Await Ubuntu Actions isolated stack |
-| 25-minute sustained load | NOT RUN | Await Ubuntu Actions isolated stack |
-| API/Web/PostgreSQL/Redis resources | NOT RUN | Await Ubuntu Actions isolated stack |
+The seed contained 10,000 journal entries and 20 virtual users. The artifact reported 20 unique usernames and 20 unique entry IDs. Access tokens existed only in `$RUNNER_TEMP`; uploaded `seed.json` contains only dataset, journal-entry count and virtual-user count.
 
-No production host, production credential, SSH session, production database, R2 write, deploy, or update was used.
+## Concurrency and sustained results
 
-## Implemented harness
+| Mode | Users | Requests | Errors | HTTP 5xx | p50 | p95 | Throughput |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Burst | 1 | 12 | 0 | 0 | 20.6 ms | 99.3 ms | 28.7 req/s |
+| Burst | 5 | 60 | 0 | 0 | 42.4 ms | 155.3 ms | 80.0 req/s |
+| Burst | 10 | 120 | 0 | 0 | 96.8 ms | 263.3 ms | 82.1 req/s |
+| Burst | 20 | 240 | 0 | 0 | 197.0 ms | 424.3 ms | 87.9 req/s |
+| Sustained | 5 | 20,039 | 0 | 0 | 24.8 ms | 50.9 ms | 13.4 req/s |
 
-`scripts/perf/isolated_run.py` is the preferred single entry point. It:
+The sustained workload ran for `1,500.368 s`; total workload elapsed time including burst stages was `1,509.68 s`. There were no transport errors, unexpected statuses or hard failures.
 
-- requires explicit `--confirm-isolated`, base URL, generated entry ID, Compose project, PostgreSQL database/user, and test credential environment-variable names;
-- rejects `re-anime.cc`, all its subdomains, and `45.207.221.83` before network traffic;
-- performs one explicit user login and optional Staff login before measured traffic, then reuses the issued test token so authentication throttling is not mistaken for read-load behavior;
-- refreshes the shared isolated session under a lock when the 10-minute access token expires, preventing a concurrent re-login stampede during the 25-minute run;
-- loops read-only Dashboard, filter/search, entry detail, watch history, enabled plugins, and optional Staff health journeys;
-- runs concurrency levels 1, 5, 10, and 20, then a 25-minute sustained scenario;
-- records request count, error rate, HTTP 5xx, transport errors, p50, p95, throughput, response bytes, and per-journey summaries;
-- samples API/Web/PostgreSQL/Redis container CPU and memory through `docker stats`;
-- samples PostgreSQL active/max connections with read-only `pg_stat_activity`/`current_setting` SQL;
-- samples Redis memory and key count with read-only `INFO memory` and `DBSIZE`;
-- rejects the fixed production Compose project/container names in addition to rejecting the production HTTP hosts;
-- hard-fails only deterministic conditions: HTTP 5xx, unexpected statuses, recognized connection exhaustion, database max-connection exhaustion, sustained monotonic memory/Redis/key growth beyond explicit absolute limits, or incomplete resource sampling;
-- records latency without a percentage latency hard gate.
+### Sustained journey latency
 
-The scenario performs only `GET` product requests after the normal isolated-test login. Passwords, OTP values, and optional Turnstile test tokens are read from environment variables and are not accepted as CLI values or written to reports.
+| Journey | Requests | p50 | p95 | Errors |
+| --- | ---: | ---: | ---: | ---: |
+| Dashboard with facets | 3,339 | 29.3 ms | 40.4 ms | 0 |
+| Filter/search | 3,339 | 27.4 ms | 36.3 ms | 0 |
+| Entry detail | 3,340 | 12.5 ms | 16.1 ms | 0 |
+| Watch History | 3,340 | 8.5 ms | 11.6 ms | 0 |
+| Enabled plugins | 3,341 | 12.5 ms | 18.2 ms | 0 |
+| Staff health | 3,340 | 46.3 ms | 62.5 ms | 0 |
 
-## Authoritative isolated command
+## Resource evidence
 
-The coordinator-owned Ubuntu Actions workflow can run the existing isolated Compose stack and deterministic seed, export generated test credentials, then invoke:
+| Resource | Start | End | Peak / maximum |
+| --- | ---: | ---: | ---: |
+| API memory | 194.9 MiB | 215.5 MiB | 219.8 MiB |
+| API memory growth | — | +20.6 MiB | below 512 MiB runaway sentinel |
+| API CPU | — | — | 169.99% |
+| Web memory | 5.6 MiB | 5.1 MiB | 5.8 MiB |
+| PostgreSQL memory | 64.9 MiB | 70.0 MiB | 70.6 MiB |
+| PostgreSQL CPU | — | — | 43.29% |
+| PostgreSQL connections | 14 | 14 | 14 / 100 |
+| Redis application memory | 1,379.6 KiB | 1,295.4 KiB | 1,379.6 KiB |
+| Redis keys | 21 | 6 | 27 |
 
-```bash
-python -m scripts.perf.isolated_run \
-  --confirm-isolated \
-  --base-url http://127.0.0.1:8088 \
-  --username animemo-perf-user \
-  --password-env ANIMEMO_PERF_PASSWORD \
-  --staff-username animemo-perf-staff \
-  --staff-password-env ANIMEMO_PERF_STAFF_PASSWORD \
-  --staff-otp-env ANIMEMO_PERF_STAFF_OTP \
-  --entry-id "$ANIMEMO_PERF_ENTRY_ID" \
-  --search-term anime \
-  --compose-project "$COMPOSE_PROJECT_NAME" \
-  --postgres-user "$POSTGRES_USER" \
-  --postgres-database "$POSTGRES_DB" \
-  --duration-seconds 1500 \
-  --resource-interval-seconds 15 \
-  --output artifacts/performance/resource-load.json
-```
+There were 87 complete resource samples and no sampling error. API memory did not grow monotonically into the configured runaway boundary; PostgreSQL connections remained at 14% of the configured maximum; Redis memory and key count ended below their starting values.
 
-If the isolated Compose file does not use `${COMPOSE_PROJECT_NAME}-{api,web,postgres,redis}`, pass the four explicit `--*-container` options. Do not point this command at a shared host or production.
+## Harness correction evidence
 
-The 512 MiB API-memory, 256 MiB Redis-memory, and 50,000-key growth defaults are first-pass absolute runaway sentinels, not latency budgets. The authoritative baseline should retain the raw samples and may tighten these only after repeated isolated runs establish normal variance.
+The first authoritative run, [#31602499414](https://github.com/yanyuhanyue/AniMemo/actions/runs/31602499414), reused one authenticated owner identity across nominal workers. DRF correctly throttled that shared user at `300/min`, producing exactly 28 HTTP 429 responses in the 20-user stage and 9,042 in the sustained stage. This was a virtual-user modeling defect, not evidence that production limits should be raised.
 
-## Local verification
+PR #69 provisioned distinct user identities, data ownership and JWTs. On the exact merged main candidate:
 
-```text
-python -m unittest scripts.tests.test_perf_load_harness scripts.tests.test_perf_load_resources -v
-PASS — 14 tests
+| Check | Before | After |
+| --- | ---: | ---: |
+| Provided virtual users | 1 shared identity | 20 |
+| Unique usernames | 1 | 20 |
+| Unique entry IDs | 1 shared owner entry | 20 |
+| 20-user HTTP 429 | 28 | 0 |
+| Sustained HTTP 429 | 9,042 | 0 |
+| Production throttle change | — | none |
 
-python -m py_compile scripts/perf/load_harness.py scripts/perf/resource_sampler.py scripts/perf/isolated_run.py
-PASS
+## Final finding decision
 
-python scripts/perf/load_harness.py --help
-PASS
-
-python scripts/perf/resource_sampler.py --help
-PASS
-
-python scripts/perf/isolated_run.py --help
-PASS
-```
-
-## Findings
-
-No runtime performance finding is asserted because the authoritative PostgreSQL/Redis run is **NOT RUN**. When the isolated run produces evidence, any finding must use the shared schema below and keep severity explicitly proposed until the coordinator's finding barrier:
-
-```text
-ID: PERF-RES-xxx
-Proposed Severity: PERF0 / PERF1 / PERF2 / PERF3
-Area:
-Journey:
-Dataset:
-Evidence:
-Before:
-Root Cause:
-Suggested Fix:
-Contract Risk:
-Owner:
-```
-
-Current measured findings: **NONE — AUTHORITATIVE RUN NOT RUN**.
-
-## Limitations
-
-- The harness measures small-scale stability, not capacity. It intentionally stops at 20 concurrent virtual users.
-- A shared access token models concurrent reads for one seeded account; it avoids login-throttle noise but does not model many independently authenticated accounts.
-- Staff health can include its existing external dependency checks; that latency is recorded as journey evidence but has no first-version latency gate.
-- Container metrics are point samples, not kernel-level profiling.
-- Resource growth requires at least four monotonically non-decreasing samples plus an absolute growth limit before being called runaway; raw samples remain available for coordinator review.
+No resource/load PERF0 or PERF1 remains open. The aggregate regression gate accepted all four concurrency levels, the 25-minute sustained run, complete resource sampling and distinct virtual-user identities.
 
 ## Production boundary
 
