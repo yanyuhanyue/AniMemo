@@ -19,7 +19,16 @@ from stateful_upgrade_fixture import FixtureError, _bundled_plugin_release, seed
 class StatefulUpgradeFixtureTests(TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.settings = override_settings(PLUGIN_ROOT=Path(self.temporary.name) / "plugins", PLUGIN_MIN_FREE_DISK_MB=0)
+        private_root = Path(self.temporary.name) / "private"
+        private_root.mkdir(mode=0o700)
+        self.setup_code_path = private_root / "setup-code"
+        self.setup_code_path.write_text("stale-base-setup-code\n", encoding="utf-8")
+        self.setup_code_path.chmod(0o600)
+        self.settings = override_settings(
+            PLUGIN_ROOT=Path(self.temporary.name) / "plugins",
+            PLUGIN_MIN_FREE_DISK_MB=0,
+            FIRST_RUN_SETUP_CODE_PATH=self.setup_code_path,
+        )
         self.settings.enable()
         self.fixture_path = Path(self.temporary.name) / "fixture.json"
 
@@ -42,6 +51,7 @@ class StatefulUpgradeFixtureTests(TestCase):
         self.assertEqual(report["credential_encryption"], "PASS")
         self.assertFalse(get_user_model().objects.get(pk=fixture["user_id"]).is_staff)
         self.assertTrue(self.fixture_path.is_file())
+        self.assertFalse(self.setup_code_path.exists())
 
     def test_verify_rejects_changed_plugin_data(self):
         fixture = seed_state(self.fixture_path)
