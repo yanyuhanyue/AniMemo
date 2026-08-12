@@ -77,11 +77,14 @@ def _validate_cookie_domain(value, *, setting_name, production):
     return domain
 
 
-DEBUG = env_bool("DEBUG", False)
+BUILD_STATIC = env_bool("ANIME_JOURNAL_BUILD_STATIC", False)
+DEBUG = env_bool("DEBUG", BUILD_STATIC)
 
 ANIME_JOURNAL_VERSION = os.getenv("ANIME_JOURNAL_VERSION", "0.0.0")
 ANIME_JOURNAL_COMMIT = os.getenv("ANIME_JOURNAL_COMMIT", "unknown")
 ANIME_JOURNAL_RELEASE_CHANNEL = os.getenv("ANIME_JOURNAL_RELEASE_CHANNEL", "development")
+ANIMEMO_UPDATER_SOCKET = os.getenv("ANIMEMO_UPDATER_SOCKET", "/run/animemo-updater/updater.sock")
+ANIMEMO_UPDATER_TIMEOUT_SECONDS = float(os.getenv("ANIMEMO_UPDATER_TIMEOUT_SECONDS", "10"))
 PLUGIN_ROOT = Path(os.getenv("PLUGIN_PACKAGE_ROOT") or os.getenv("PLUGIN_ROOT") or ("/app/runtime/plugins" if not DEBUG else BASE_DIR.parent / "plugins"))
 PLUGIN_ASSET_SESSION_SECONDS = int(os.getenv("PLUGIN_ASSET_SESSION_SECONDS", "120"))
 PLUGIN_PREVIEW_SESSION_SECONDS = int(os.getenv("PLUGIN_PREVIEW_SESSION_SECONDS", "600"))
@@ -438,6 +441,8 @@ REST_FRAMEWORK = {
         "external_import_preview": os.getenv("THROTTLE_EXTERNAL_IMPORT_PREVIEW_RATE", "12/hour"),
         "external_import_apply": os.getenv("THROTTLE_EXTERNAL_IMPORT_APPLY_RATE", "10/hour"),
         "import": os.getenv("THROTTLE_IMPORT_RATE", "5/hour"),
+        "staff_update_check": os.getenv("THROTTLE_STAFF_UPDATE_CHECK_RATE", "30/min"),
+        "staff_update_mutation": os.getenv("THROTTLE_STAFF_UPDATE_MUTATION_RATE", "6/hour"),
     },
 }
 

@@ -4,6 +4,8 @@ Production media uses `site_config.media_storage.storage.StoragePoolStorage`. Th
 
 Every production upload creates a `site_config.models.MediaObject` row. Existing `ImageField` values contain a stable `media-objects/<uuid>` reference, and the row records the original backend plus object key. Reads, URLs, deletes, and replacements resolve through that row rather than guessing from the current preferred backend.
 
+External storage writes use an additive `MediaWriteReservation`: a short database transaction reserves backend capacity, the adapter writes outside that transaction, and a second short transaction creates the `MediaObject` and finalizes the reservation. Failed or expired reservations become `abandoned`. Reconciliation never deletes a remote object; an abandoned row is evidence for operator review, not deletion authority.
+
 R2 credentials are encrypted with `config.credentials.CredentialCipher` using the independent `CREDENTIAL_ENCRYPTION_KEY`. The API exposes only `*_configured` flags. R2 client caches are keyed by `config_version`, so a backend edit is picked up by every worker on its next operation without a restart.
 
 Cloudflare usage snapshots are observability data only. The hard write guard uses the strongly consistent sum of `MediaObject.size_bytes` for the selected backend and conservatively takes `max(managed_usage, last_known_cloudflare_snapshot)`. There is no Redis snapshot/delta reset race. Local backends use `shutil.disk_usage`, reserve `min_free_warning_bytes` / `min_free_block_bytes` for the operating system and services, and include the incoming upload size before writing. Write blocking never prevents reads or cleanup.
@@ -27,3 +29,9 @@ The media storage admin API and UI are Superuser-only:
 - `POST /api/v1/staff/system/media-storage/<id>/actions/`
 
 Use `action=test-connection`, `refresh-usage`, `set-active`, `toggle-writes`, or `clear-credentials` for explicit operations. Production without any configured backend starts normally and returns `MEDIA_STORAGE_SETUP_REQUIRED` for new media writes; it never silently falls back to a local directory.
+
+## Remote orphan runbook
+
+Maintenance may mark expired pending reservations `abandoned` and may audit database state, but it does not enumerate or delete R2 objects. To investigate a suspected orphan, an operator must bind the evidence to one exact backend and object key, verify the reservation size/SHA and remote object metadata/content, and prove that no `MediaObject`, stable media reference or active reservation owns it. Delete only that known key with an explicitly approved backend operation, then retain the before/after evidence.
+
+Never bulk-delete a prefix and never delete an unknown remote object merely because it is absent from the current database. When identity or ownership is uncertain, preserve the object. During this hardening phase, R2 production write and cleanup are **NOT RUN**.

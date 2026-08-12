@@ -51,6 +51,15 @@ Stable Manifest 的 `promotedFrom` 指向 RC tag；发布说明范围是 previou
 - GitHub Actions/SLSA provenance identity；
 - Manifest 与 checksum 文件名。
 
+Manifest 中两个 commit 身份有不同职责：
+
+```text
+release.commit          = 构建 API/Web 的应用 commit
+provenance.sourceCommit = 实际运行签署该 Manifest workflow 的 commit
+```
+
+Beta/RC 通常由同一 Release workflow 产生，因此两者可相同。Stable 不重新 build，继续保留 RC 的 `release.commit` 与 API/Web digests，但 Stable Manifest 由 promotion workflow 签署，所以 `provenance.sourceCommit` 可以是后续 commit。消费者必须按各自语义验证，不能把 Stable promotion commit 冒充应用构建 commit。
+
 Schema 拒绝 image `tag` 字段、缺失 digest、非 40 位 commit、未知字段和未知 schema version。
 
 ## Compatibility model
@@ -87,7 +96,7 @@ source digest: manifest commit
 predicate: https://slsa.dev/provenance/v1
 ```
 
-Stable Manifest 由 `.github/workflows/promote-release.yml` 签署，同时仍保留并验证 RC images 的原 build provenance。仓库不保存长期签名私钥，不定义自制密码协议。GitHub 官方文档确认 container image 可用 `actions/attest` 的 `subject-name`/`subject-digest` 和 `push-to-registry`，并可用 `gh attestation verify oci://... -R yanyuhanyue/AniMemo` 验证。
+这里的 Manifest source digest 使用 `provenance.sourceCommit`；OCI build provenance 仍绑定 `release.commit` 和 exact image digest。Stable Manifest 由 `.github/workflows/promote-release.yml` 签署，同时仍保留并验证 RC images 的原 build provenance。仓库不保存长期签名私钥，不定义自制密码协议。GitHub 官方文档确认 container image 可用 `actions/attest` 的 `subject-name`/`subject-digest` 和 `push-to-registry`，并可用 `gh attestation verify oci://... -R yanyuhanyue/AniMemo` 验证。
 
 Release Dry Run 只有 `contents: read`，会构建本地 OCI archive、生成 Manifest/checksum，并输出 `provenance-plan.unsigned.json` 来验证 SLSA subject、commit 与 workflow 输入。该文件明确不是密码学签名；只有非 Dry Run 的 publish job 才申请 `id-token: write` / `attestations: write`，调用 `actions/attest` 产生可验证证明。
 

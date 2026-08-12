@@ -122,6 +122,7 @@ def _promote(args) -> dict[str, object]:
     payload = promote_manifest(
         _read_json(args.rc_manifest),
         existing_tags=_read_tags(args.tags_file),
+        provenance_source_commit=args.provenance_source_commit,
         created_at=args.created_at or None,
     )
     _write_json(args.output, payload)
@@ -184,6 +185,7 @@ def _parser() -> argparse.ArgumentParser:
     promote = subparsers.add_parser("promote-manifest")
     promote.add_argument("--rc-manifest", type=Path, required=True)
     promote.add_argument("--tags-file", type=Path, required=True)
+    promote.add_argument("--provenance-source-commit", required=True)
     promote.add_argument("--created-at", default="")
     promote.add_argument("--output", type=Path, required=True)
     promote.set_defaults(handler=_promote)

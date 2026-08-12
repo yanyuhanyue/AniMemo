@@ -23,6 +23,36 @@ services:
     networks: !override
       - upgrade-gate
 
+  migration:
+    container_name: ${COMPOSE_PROJECT_NAME}-migration
+    image: ${ANIMEMO_API_IMAGE:-animemo-upgrade-api:current}
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    env_file: !override
+      - ${STATEFUL_UPGRADE_ENV_FILE:?STATEFUL_UPGRADE_ENV_FILE is required}
+    volumes: !override
+      - ${ANIME_JOURNAL_DATA_ROOT:?ANIME_JOURNAL_DATA_ROOT is required}/plugins:/app/runtime/plugins
+      - ${ANIME_JOURNAL_DATA_ROOT}/logs:/app/logs
+      - ${ANIME_JOURNAL_DATA_ROOT}/backups:/app/backups
+      - ${ANIME_JOURNAL_DATA_ROOT}/media:/data/anime-journal/media
+      - ${STATEFUL_UPGRADE_HELPER_ROOT:?STATEFUL_UPGRADE_HELPER_ROOT is required}/scripts:/app/ci-scripts:ro
+      - ${STATEFUL_UPGRADE_META_ROOT:?STATEFUL_UPGRADE_META_ROOT is required}:/app/ci-meta
+    networks: !override
+      - upgrade-gate
+
+  bootstrap:
+    container_name: ${COMPOSE_PROJECT_NAME}-bootstrap
+    image: ${ANIMEMO_API_IMAGE:-animemo-upgrade-api:current}
+    command: ["python", "manage.py", "sync_official_plugins"]
+    env_file: !override
+      - ${STATEFUL_UPGRADE_ENV_FILE:?STATEFUL_UPGRADE_ENV_FILE is required}
+    volumes: !override
+      - ${ANIME_JOURNAL_DATA_ROOT:?ANIME_JOURNAL_DATA_ROOT is required}/plugins:/app/runtime/plugins
+      - ${ANIME_JOURNAL_DATA_ROOT}/logs:/app/logs
+      - ${ANIME_JOURNAL_DATA_ROOT}/backups:/app/backups
+      - ${ANIME_JOURNAL_DATA_ROOT}/media:/data/anime-journal/media
+    networks: !override
+      - upgrade-gate
+
   web:
     container_name: ${COMPOSE_PROJECT_NAME}-web
     networks: !override

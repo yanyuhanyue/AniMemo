@@ -92,11 +92,17 @@ DATA_ROOT="$TEMP_ROOT/data"
 META_ROOT="$TEMP_ROOT/meta"
 ENV_FILE="$TEMP_ROOT/upgrade.env"
 OVERRIDE_FILE="$CURRENT_ROOT/deploy/docker-compose.upgrade-gate.yml"
+BUILD_OVERRIDE_FILE="$CURRENT_ROOT/deploy/docker-compose.build.yml"
 BASE_ADDED=false
 
 compose() {
   local source_root="$1"
   shift
+  local compose_files=(-f "$source_root/deploy/docker-compose.yml")
+  if [[ "$source_root" == "$CURRENT_ROOT" ]]; then
+    compose_files+=(-f "$BUILD_OVERRIDE_FILE")
+  fi
+  compose_files+=(-f "$OVERRIDE_FILE")
   UPGRADE_SOURCE_ROOT="$source_root" \
   STATEFUL_UPGRADE_HELPER_ROOT="$CURRENT_ROOT" \
   STATEFUL_UPGRADE_META_ROOT="$META_ROOT" \
@@ -106,8 +112,7 @@ compose() {
     docker compose \
       --project-name "$PROJECT_NAME" \
       --env-file "$ENV_FILE" \
-      -f "$source_root/deploy/docker-compose.yml" \
-      -f "$OVERRIDE_FILE" \
+      "${compose_files[@]}" \
       "$@"
 }
 
@@ -213,6 +218,8 @@ STATEFUL_UPGRADE_META_ROOT=$META_ROOT
 STATEFUL_UPGRADE_HELPER_ROOT=$CURRENT_ROOT
 UPGRADE_SOURCE_ROOT=$CURRENT_ROOT
 COMPOSE_PROJECT_NAME=$PROJECT_NAME
+ANIMEMO_API_IMAGE=$PROJECT_NAME-api:current
+ANIMEMO_WEB_IMAGE=$PROJECT_NAME-web:current
 EOF
 
 echo "Upgrade Base SHA: $BASE_SHA"
@@ -238,14 +245,24 @@ echo "== Seed representative persistent Base state =="
 compose "$BASE_ROOT" exec -T api python /app/ci-scripts/stateful_upgrade_fixture.py seed --output /app/ci-meta/base-state.json
 compose "$BASE_ROOT" exec -T api python manage.py migrate --check
 compose "$BASE_ROOT" exec -T api python /app/ci-scripts/stateful_upgrade_fixture.py verify --input /app/ci-meta/base-state.json
+BASE_POSTGRES_ID="$(compose "$BASE_ROOT" ps -q postgres)"
+BASE_REDIS_ID="$(compose "$BASE_ROOT" ps -q redis)"
+[[ -n "$BASE_POSTGRES_ID" && -n "$BASE_REDIS_ID" ]] || { echo "Persistent service identity is unavailable." >&2; exit 1; }
 
 echo "== Build Current API without touching persistent services =="
 compose "$CURRENT_ROOT" config --quiet
 compose "$CURRENT_ROOT" build api
 
+echo "== Run explicit Current migration and bootstrap jobs =="
+compose "$CURRENT_ROOT" run --rm --no-deps migration
+compose "$CURRENT_ROOT" run --rm --no-deps bootstrap
+
 echo "== Replace only the API container with Current =="
 compose "$CURRENT_ROOT" up -d --no-deps --force-recreate api
 wait_for_api "$CURRENT_ROOT" "CURRENT"
+[[ "$(compose "$CURRENT_ROOT" ps -q postgres)" == "$BASE_POSTGRES_ID" ]] || { echo "PostgreSQL container was unexpectedly replaced." >&2; exit 1; }
+[[ "$(compose "$CURRENT_ROOT" ps -q redis)" == "$BASE_REDIS_ID" ]] || { echo "Redis container was unexpectedly replaced." >&2; exit 1; }
+echo "PostgreSQL and Redis containers were retained"
 compose "$CURRENT_ROOT" exec -T api python manage.py migrate --check
 compose "$CURRENT_ROOT" exec -T api python manage.py showmigrations --plan
 compose "$CURRENT_ROOT" exec -T api python /app/ci-scripts/stateful_upgrade_fixture.py verify --input /app/ci-meta/base-state.json

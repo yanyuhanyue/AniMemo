@@ -28,6 +28,7 @@ transport.setUnauthorizedHandler(webAuth.handleUnauthorized);
 
 export const api = transport.api;
 export const authApi = webAuth.authApi;
+export const csrfApi = webAuth.csrfApi;
 export const clearCsrfToken = webAuth.clearCsrfToken;
 export const clearTokens = webAuth.clearTokens;
 export const getAccessToken = session.getAccessToken;

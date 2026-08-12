@@ -102,6 +102,7 @@ class ManifestContractTests(unittest.TestCase):
         self.assertEqual(payload["schemaVersion"], 1)
         self.assertEqual(payload["images"]["api"]["digest"], API_DIGEST)
         self.assertEqual(payload["compatibility"]["pluginSdk"]["supportedApis"], [2])
+        self.assertEqual(payload["provenance"]["sourceCommit"], COMMIT)
         self.assertNotIn("tag", payload["images"]["api"])
 
     def test_manifest_rejects_missing_or_mutable_image_identity(self):
@@ -140,19 +141,25 @@ class ManifestContractTests(unittest.TestCase):
 
     def test_stable_manifest_can_only_promote_exact_rc_artifacts(self):
         rc = manifest()
-        stable = promote_manifest(rc, existing_tags=["v0.9.0"])
+        promotion_commit = "b" * 40
+        stable = promote_manifest(
+            rc,
+            existing_tags=["v0.9.0"],
+            provenance_source_commit=promotion_commit,
+        )
         validate_manifest(stable)
         self.assertEqual(stable["release"]["version"], "v1.0.0")
         self.assertEqual(stable["release"]["promotedFrom"], "v1.0.0-rc.1")
         self.assertEqual(stable["release"]["commit"], rc["release"]["commit"])
         self.assertEqual(stable["images"], rc["images"])
+        self.assertEqual(stable["provenance"]["sourceCommit"], promotion_commit)
 
         with self.assertRaisesRegex(ReleaseContractError, "already exists"):
-            promote_manifest(rc, existing_tags=["v1.0.0"])
+            promote_manifest(rc, existing_tags=["v1.0.0"], provenance_source_commit=promotion_commit)
 
         beta = manifest(version="v1.0.0-beta.1", channel="beta")
         with self.assertRaisesRegex(ReleaseContractError, "RC"):
-            promote_manifest(beta, existing_tags=[])
+            promote_manifest(beta, existing_tags=[], provenance_source_commit=promotion_commit)
 
     def test_manifest_file_is_canonical_utf8_json(self):
         payload = manifest()

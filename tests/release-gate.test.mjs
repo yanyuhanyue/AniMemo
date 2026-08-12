@@ -18,9 +18,11 @@ test("API healthcheck is secure-forwarded and validates status and body", () => 
 });
 
 test("production frontend receives only the public Turnstile build value", () => {
-  const compose = read("../deploy/docker-compose.yml");
+  const productionCompose = read("../deploy/docker-compose.yml");
+  const buildCompose = read("../deploy/docker-compose.build.yml");
   const dockerfile = read("../deploy/frontend.Dockerfile");
-  assert.match(compose, /VITE_TURNSTILE_SITE_KEY: \$\{VITE_TURNSTILE_SITE_KEY:\?VITE_TURNSTILE_SITE_KEY is required\}/);
+  assert.doesNotMatch(productionCompose, /VITE_TURNSTILE_SITE_KEY/);
+  assert.match(buildCompose, /VITE_TURNSTILE_SITE_KEY: \$\{VITE_TURNSTILE_SITE_KEY:\?VITE_TURNSTILE_SITE_KEY is required\}/);
   assert.match(dockerfile, /ARG VITE_TURNSTILE_SITE_KEY/);
   assert.doesNotMatch(dockerfile, /TURNSTILE_SECRET/);
 });
@@ -32,25 +34,27 @@ test("smoke test requires HTTP 200 and valid health JSON", () => {
   assert.match(smoke, /X-Forwarded-Proto: https/);
 });
 
-test("one-site deployer keeps update safe and reset explicit", () => {
+test("legacy ZIP deployer is explicit bootstrap or break-glass recovery", () => {
   const deploy = read("../deploy/deploy.sh");
   const admin = read("../deploy/create-admin.sh");
   assert.match(deploy, /DEFAULT_APP_ROOT=\/opt\/1panel\/docker\/compose\/anime-journal\/app/);
   assert.match(deploy, /DEFAULT_DATA_ROOT=\/data\/anime-journal/);
-  assert.match(deploy, /MODE=update/);
-  assert.match(deploy, /--fresh/);
+  assert.match(deploy, /--bootstrap/);
+  assert.match(deploy, /--break-glass/);
+  assert.match(deploy, /normal updates use the AniMemo Update Agent/);
   assert.match(deploy, /--reset-data/);
-  assert.match(deploy, /--reset-data is non-interactive; add --yes to confirm/);
+  assert.match(deploy, /--reset-data requires --bootstrap/);
   assert.match(deploy, /tr -d '\\r' < "\$SHA_FILE"/);
   assert.match(deploy, /ARCHIVE%\.zip/);
   assert.match(deploy, /ARCHIVE_BACKEND=python3/);
   assert.match(deploy, /from zipfile import ZipFile/);
+  assert.match(deploy, /deploy\/docker-compose\.build\.yml/);
+  assert.match(deploy, /run --rm --no-deps migration/);
+  assert.match(deploy, /run --rm --no-deps bootstrap/);
+  assert.match(deploy, /up -d --no-deps --force-recreate api web/);
   assert.match(deploy, /docker volume rm anime-journal-data/);
-  assert.match(deploy, /anime-journal-api:predeploy-/);
-  assert.match(deploy, /anime-journal-web:predeploy-/);
-  assert.match(deploy, /restore_previous_images/);
-  assert.match(deploy, /STACK_STOPPED=1/);
-  assert.match(deploy, /restoring the previous Anime Journal app tree and images/);
+  assert.doesNotMatch(deploy, /stage_compose down/);
+  assert.doesNotMatch(deploy, /STACK_STOPPED/);
   assert.doesNotMatch(deploy, /docker\s+(?:system|volume)\s+prune/);
   assert.doesNotMatch(deploy, /docker compose .*down .*--volumes/);
   assert.match(deploy, /re-anime\.cc\.conf/);

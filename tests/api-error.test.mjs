@@ -46,3 +46,16 @@ test("readableApiError uses the stable CSRF code", () => {
     "安全验证已过期，请刷新页面后重试。",
   );
 });
+
+test("readableApiError preserves the scoped updater unavailable detail", () => {
+  assert.equal(
+    readableApiError({
+      response: {
+        status: 503,
+        data: { code: "updater_unavailable", detail: "系统更新服务暂时不可用，请联系服务器管理员。" },
+        headers: {},
+      },
+    }),
+    "系统更新服务暂时不可用，请联系服务器管理员。",
+  );
+});

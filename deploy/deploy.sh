@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-# One-site production deployer. It deliberately knows only the Anime Journal
-# paths so a failed release cannot turn into a server-wide cleanup.
+# Legacy bootstrap / break-glass deployer only. Normal updates use the AniMemo
+# Update Agent with immutable GHCR digests and never call this script.
 
 DEFAULT_APP_ROOT=/opt/1panel/docker/compose/anime-journal/app
 DEFAULT_RELEASE_ROOT=/opt/1panel/docker/compose/anime-journal/releases
@@ -18,8 +18,7 @@ OPENRESTY_CONTAINER=${ANIME_JOURNAL_OPENRESTY_CONTAINER:-$DEFAULT_OPENRESTY_CONT
 ARCHIVE=${ANIME_JOURNAL_ARCHIVE:-}
 SHA_FILE=${ANIME_JOURNAL_SHA256_FILE:-}
 ENV_SOURCE=${ANIME_JOURNAL_ENV_FILE:-}
-MODE=update
-FRESH_REQUESTED=0
+MODE=
 RESET_DATA=0
 CREATE_ADMIN=0
 CONFIRM_RESET=0
@@ -28,40 +27,43 @@ SKIP_OPENRESTY=0
 usage() {
     cat <<'EOF'
 Usage:
-  sudo sh deploy/deploy.sh --archive /tmp/anime-journal.zip [options]
+  sudo sh deploy/deploy.sh --bootstrap --archive /tmp/anime-journal.zip [options]
+  sudo sh deploy/deploy.sh --break-glass --archive /tmp/anime-journal.zip [options]
+
+Modes (exactly one is required):
+  --bootstrap          First installation or one-time legacy-to-Updater cutover.
+  --break-glass        Manual recovery when the immutable Update Agent path cannot run.
 
 Options:
-  --archive PATH       Core release ZIP (required)
-  --sha256 PATH        SHA-256 file; defaults to PATH.sha256
-  --env-file PATH      Existing production env; otherwise keep app/.env.production
-  --fresh              Replace only the Anime Journal app tree and remove legacy
-                       anime-journal-data volume. Persistent bind-mounted data stays.
-  --reset-data         Also clear Anime Journal PostgreSQL/Redis/media data.
-                       Requires --fresh and --yes (or an interactive confirmation).
-  --create-admin       Create the initial superuser once deployment passes smoke tests.
-  --yes                Confirm destructive --reset-data operation.
-  --skip-openresty     Do not install or reload the re-anime.cc site config.
-  --app-root PATH      Override the exact Anime Journal app path.
-  --release-root PATH  Override the exact Anime Journal release archive path.
-  --data-root PATH     Override the Anime Journal persistent data path.
+  --archive PATH       Legacy Core source ZIP (required).
+  --sha256 PATH        SHA-256 file; defaults to PATH.sha256.
+  --env-file PATH      Existing production env; otherwise keep app/.env.production.
+  --reset-data         Bootstrap-only destructive reset of AniMemo data. Requires --yes
+                       or an interactive exact confirmation.
+  --create-admin       Bootstrap-only initial superuser creation after smoke passes.
+  --yes                Confirm --reset-data in non-interactive use.
+  --skip-openresty     Do not install or reload the AniMemo site config.
+  --app-root PATH      Override the exact AniMemo app path.
+  --release-root PATH  Override the exact AniMemo legacy archive path.
+  --data-root PATH     Override the AniMemo persistent data path.
   --openresty-conf PATH
-                       Override the single Anime Journal OpenResty config path.
+                       Override the single AniMemo OpenResty config path.
   --openresty-container NAME
                        Override the OpenResty container name.
   -h, --help           Show this help.
 
-Update is the default and never deletes application data. Use --fresh only for
-the first migration or a deliberate code-tree replacement.
+This path performs a server-side source build and is not a normal update path.
+It never automatically reverses migrations or restores the database.
 EOF
 }
 
 die() {
-    echo "Anime Journal deploy: $*" >&2
+    echo "Anime Journal legacy deploy: $*" >&2
     exit 1
 }
 
 log() {
-    echo "[anime-journal] $*"
+    echo "[anime-journal legacy] $*"
 }
 
 require_cmd() {
@@ -91,8 +93,6 @@ assert_safe_target() {
         ""|/|/opt|/data|/var|/etc|/root|/home)
             die "$label is a dangerous broad target: $path"
             ;;
-    esac
-    case "$path" in
         *..*|*\"*|*\'*|*\`*)
             die "$label contains an unsafe path: $path"
             ;;
@@ -101,6 +101,16 @@ assert_safe_target() {
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --bootstrap)
+            [ -z "$MODE" ] || die "choose exactly one of --bootstrap or --break-glass"
+            MODE=bootstrap
+            shift
+            ;;
+        --break-glass)
+            [ -z "$MODE" ] || die "choose exactly one of --bootstrap or --break-glass"
+            MODE=break-glass
+            shift
+            ;;
         --archive)
             [ "$#" -ge 2 ] || die "--archive requires a path"
             ARCHIVE=$2
@@ -115,11 +125,6 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] || die "--env-file requires a path"
             ENV_SOURCE=$2
             shift 2
-            ;;
-        --fresh)
-            MODE=fresh
-            FRESH_REQUESTED=1
-            shift
             ;;
         --reset-data)
             RESET_DATA=1
@@ -170,7 +175,7 @@ while [ "$#" -gt 0 ]; do
             shift
             break
             ;;
-        -* )
+        -*)
             die "unknown option: $1"
             ;;
         *)
@@ -182,16 +187,18 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo is fine)"
+[ -n "$MODE" ] || die "choose exactly one of --bootstrap or --break-glass; normal updates use the AniMemo Update Agent"
 [ -n "$ARCHIVE" ] || die "--archive is required"
+if [ "$RESET_DATA" -eq 1 ] && [ "$MODE" != bootstrap ]; then
+    die "--reset-data requires --bootstrap"
+fi
+if [ "$CREATE_ADMIN" -eq 1 ] && [ "$MODE" != bootstrap ]; then
+    die "--create-admin requires --bootstrap"
+fi
 
-require_cmd docker
-require_cmd sha256sum
-require_cmd awk
-require_cmd sed
-require_cmd tr
-require_cmd find
-require_cmd mktemp
-require_cmd install
+for command in docker sha256sum awk sed tr find mktemp install; do
+    require_cmd "$command"
+done
 
 if command -v unzip >/dev/null 2>&1; then
     ARCHIVE_BACKEND=unzip
@@ -252,9 +259,8 @@ SHA_FILE=$(canonical_path "$SHA_FILE")
 
 assert_safe_target "app root" "$APP_ROOT"
 assert_safe_target "release root" "$RELEASE_ROOT"
-assert_safe_target "data root" "${DATA_ROOT:-/data/anime-journal}"
+assert_safe_target "data root" "${DATA_ROOT:-$DEFAULT_DATA_ROOT}"
 assert_safe_target "OpenResty config" "$OPENRESTY_CONF"
-
 if [ "$APP_ROOT" != "$DEFAULT_APP_ROOT" ] || [ "$RELEASE_ROOT" != "$DEFAULT_RELEASE_ROOT" ] || [ "$OPENRESTY_CONF" != "$DEFAULT_OPENRESTY_CONF" ]; then
     [ "${ANIME_JOURNAL_ALLOW_CUSTOM_PATHS:-0}" = 1 ] || die "custom server paths require ANIME_JOURNAL_ALLOW_CUSTOM_PATHS=1"
 fi
@@ -266,7 +272,6 @@ if [ -n "$ENV_SOURCE" ]; then
     ENV_SOURCE=$(canonical_path "$ENV_SOURCE")
     [ -f "$ENV_SOURCE" ] || die "production env not found: $ENV_SOURCE"
 fi
-
 if [ -z "$DATA_ROOT" ] && [ -n "$ENV_SOURCE" ]; then
     DATA_ROOT=$(sed -n 's/^ANIME_JOURNAL_DATA_ROOT=//p' "$ENV_SOURCE" | sed 's/\r$//' | tail -n 1 | tr -d "\"'")
 fi
@@ -280,9 +285,6 @@ case "$RELEASE_ROOT/" in
     "$APP_ROOT/"*) die "release archive directory must live outside the app root: $RELEASE_ROOT" ;;
 esac
 
-if [ "$RESET_DATA" -eq 1 ] && [ "$FRESH_REQUESTED" -ne 1 ]; then
-    die "--reset-data requires --fresh"
-fi
 if [ "$RESET_DATA" -eq 1 ] && [ "$CONFIRM_RESET" -ne 1 ] && [ ! -t 0 ]; then
     die "--reset-data is non-interactive; add --yes to confirm"
 fi
@@ -310,69 +312,37 @@ for entry in $zip_entries; do
     esac
 done
 
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/anime-journal-deploy.XXXXXX")
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/anime-journal-legacy.XXXXXX")
 EXTRACT_ROOT=$TMP_ROOT/release
-PREVIOUS_APP=$TMP_ROOT/previous-app
 OPENRESTY_BACKUP=$TMP_ROOT/openresty.conf
-mkdir -p "$EXTRACT_ROOT"
-SWAPPED=0
-STACK_STOPPED=0
 OPENRESTY_CHANGED=0
-API_ROLLBACK_TAG=
-WEB_ROLLBACK_TAG=
-
-restore_previous_images() {
-    [ -z "$API_ROLLBACK_TAG" ] || docker image tag "$API_ROLLBACK_TAG" anime-journal-api:latest >/dev/null 2>&1 || true
-    [ -z "$WEB_ROLLBACK_TAG" ] || docker image tag "$WEB_ROLLBACK_TAG" anime-journal-web:latest >/dev/null 2>&1 || true
-}
-
-remove_rollback_image_tags() {
-    [ -z "$API_ROLLBACK_TAG" ] || docker image rm "$API_ROLLBACK_TAG" >/dev/null 2>&1 || true
-    [ -z "$WEB_ROLLBACK_TAG" ] || docker image rm "$WEB_ROLLBACK_TAG" >/dev/null 2>&1 || true
-}
+mkdir -p "$EXTRACT_ROOT"
 
 cleanup() {
     status=$?
     set +e
-    if [ "$status" -ne 0 ] && [ "$STACK_STOPPED" -eq 1 ]; then
-        log "deployment failed; restoring the previous Anime Journal app tree and images"
-        if [ -d "$APP_ROOT" ] && [ -f "$APP_ROOT/.env.production" ]; then
-            (cd "$APP_ROOT" && docker compose --env-file .env.production -f deploy/docker-compose.yml down --remove-orphans) >/dev/null 2>&1 || true
-        fi
-        if [ "$SWAPPED" -eq 1 ]; then
-            [ -d "$APP_ROOT" ] && rm -rf "$APP_ROOT"
-            [ -d "$PREVIOUS_APP" ] && mv "$PREVIOUS_APP" "$APP_ROOT"
-        fi
-        restore_previous_images
-        if [ -f "$APP_ROOT/.env.production" ]; then
-            (cd "$APP_ROOT" && docker compose --env-file .env.production -f deploy/docker-compose.yml up -d) >/dev/null 2>&1 || true
-        fi
-    fi
     if [ "$status" -ne 0 ] && [ "$OPENRESTY_CHANGED" -eq 1 ] && [ -f "$OPENRESTY_BACKUP" ]; then
         install -m 0644 "$OPENRESTY_BACKUP" "$OPENRESTY_CONF" >/dev/null 2>&1 || true
         docker exec "$OPENRESTY_CONTAINER" openresty -s reload >/dev/null 2>&1 || docker exec "$OPENRESTY_CONTAINER" nginx -s reload >/dev/null 2>&1 || true
     fi
-    remove_rollback_image_tags
     rm -rf "$TMP_ROOT"
+    if [ "$status" -ne 0 ]; then
+        echo "Legacy deploy failed. Database state was not reversed; inspect migration/bootstrap output before manual recovery." >&2
+    fi
     exit "$status"
 }
 trap cleanup EXIT INT TERM
 
 archive_extract "$ARCHIVE" "$EXTRACT_ROOT" || die "cannot extract release archive"
-[ -f "$EXTRACT_ROOT/deploy/docker-compose.yml" ] || die "archive is missing deploy/docker-compose.yml"
-[ -f "$EXTRACT_ROOT/deploy/deploy.sh" ] || die "archive is missing deploy/deploy.sh"
-[ -f "$EXTRACT_ROOT/deploy/create-admin.sh" ] || die "archive is missing deploy/create-admin.sh"
-[ -f "$EXTRACT_ROOT/deploy/prepare-host.sh" ] || die "archive is missing deploy/prepare-host.sh"
-[ -f "$EXTRACT_ROOT/deploy/smoke-test.sh" ] || die "archive is missing deploy/smoke-test.sh"
-[ -f "$EXTRACT_ROOT/deploy/openresty-re-anime.conf" ] || die "archive is missing deploy/openresty-re-anime.conf"
-[ -f "$EXTRACT_ROOT/.env.production.example" ] || die "archive is missing .env.production.example"
-[ -f "$EXTRACT_ROOT/package.json" ] || die "archive is missing package.json"
+for required in \
+    deploy/docker-compose.yml deploy/docker-compose.build.yml deploy/deploy.sh \
+    deploy/create-admin.sh deploy/prepare-host.sh deploy/smoke-test.sh \
+    deploy/openresty-re-anime.conf .env.production.example package.json; do
+    [ -f "$EXTRACT_ROOT/$required" ] || die "archive is missing $required"
+done
 [ ! -e "$EXTRACT_ROOT/.env.production" ] || die "release archive must not contain a real .env.production"
 [ -z "$(find "$EXTRACT_ROOT" -type l -print -quit)" ] || die "release archive must not contain symlinks"
-
-if [ -z "$ENV_SOURCE" ]; then
-    die "no production env found; create .env.production or pass --env-file"
-fi
+[ -n "$ENV_SOURCE" ] || die "no production env found; create .env.production or pass --env-file"
 cp "$ENV_SOURCE" "$EXTRACT_ROOT/.env.production"
 chmod 0600 "$EXTRACT_ROOT/.env.production"
 
@@ -395,71 +365,81 @@ ANIME_JOURNAL_DATA_ROOT=$DATA_ROOT
 export ANIME_JOURNAL_DATA_ROOT
 sh "$EXTRACT_ROOT/deploy/prepare-host.sh"
 
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+ANIMEMO_API_IMAGE=anime-journal-api:legacy-$stamp
+ANIMEMO_WEB_IMAGE=anime-journal-web:legacy-$stamp
+export ANIMEMO_API_IMAGE ANIMEMO_WEB_IMAGE
+
 stage_compose() {
-    (cd "$EXTRACT_ROOT" && docker compose --env-file .env.production -f deploy/docker-compose.yml "$@")
+    (cd "$EXTRACT_ROOT" && docker compose \
+        --project-name anime-journal \
+        --env-file .env.production \
+        -f deploy/docker-compose.yml \
+        -f deploy/docker-compose.build.yml \
+        "$@")
 }
-stage_compose config -q
 
-rollback_suffix=$(date -u +%Y%m%dT%H%M%SZ)-$$
-if docker image inspect anime-journal-api:latest >/dev/null 2>&1; then
-    API_ROLLBACK_TAG=anime-journal-api:predeploy-$rollback_suffix
-    docker image tag anime-journal-api:latest "$API_ROLLBACK_TAG"
-fi
-if docker image inspect anime-journal-web:latest >/dev/null 2>&1; then
-    WEB_ROLLBACK_TAG=anime-journal-web:predeploy-$rollback_suffix
-    docker image tag anime-journal-web:latest "$WEB_ROLLBACK_TAG"
-fi
-if [ -n "$API_ROLLBACK_TAG$WEB_ROLLBACK_TAG" ]; then
-    log "current Anime Journal images preserved for automatic rollback"
-fi
+live_compose() {
+    (cd "$APP_ROOT" && docker compose \
+        --project-name anime-journal \
+        --env-file .env.production \
+        -f deploy/docker-compose.yml \
+        "$@")
+}
 
-stage_compose build
-
-stage_compose down --remove-orphans || die "could not stop the current Anime Journal Compose project"
-STACK_STOPPED=1
+stage_compose config --quiet
+stage_compose build api web
 
 if [ "$RESET_DATA" -eq 1 ]; then
-    log "clearing only Anime Journal data under $DATA_ROOT"
+    if [ -d "$APP_ROOT" ] && [ -f "$APP_ROOT/.env.production" ]; then
+        live_compose stop api web postgres redis || die "could not stop the exact AniMemo project for reset"
+    fi
+    log "clearing only AniMemo data under $DATA_ROOT"
     for directory in postgres redis plugins logs backups media; do
-        [ -e "$DATA_ROOT/$directory" ] && rm -rf "$DATA_ROOT/$directory"
+        [ ! -e "$DATA_ROOT/$directory" ] || rm -rf "$DATA_ROOT/$directory"
     done
     sh "$EXTRACT_ROOT/deploy/prepare-host.sh"
 fi
 
-if [ "$FRESH_REQUESTED" -eq 1 ] && docker volume inspect anime-journal-data >/dev/null 2>&1; then
-    log "removing the legacy Anime Journal named volume anime-journal-data"
+if [ "$MODE" = bootstrap ] && docker volume inspect anime-journal-data >/dev/null 2>&1; then
+    log "removing the legacy AniMemo named volume anime-journal-data"
     docker volume rm anime-journal-data >/dev/null
 fi
 
+stage_compose up -d --wait --wait-timeout 120 postgres redis
+stage_compose run --rm --no-deps migration
+stage_compose run --rm --no-deps bootstrap
+
 mkdir -p "$(dirname "$APP_ROOT")" "$RELEASE_ROOT"
+PREVIOUS_APP=
 if [ -d "$APP_ROOT" ]; then
+    PREVIOUS_APP=$RELEASE_ROOT/app-before-$stamp
+    [ ! -e "$PREVIOUS_APP" ] || die "legacy recovery tree already exists: $PREVIOUS_APP"
     mv "$APP_ROOT" "$PREVIOUS_APP"
+    log "previous application tree retained at $PREVIOUS_APP"
 fi
 mv "$EXTRACT_ROOT" "$APP_ROOT"
-SWAPPED=1
 
-cd "$APP_ROOT"
-docker compose --env-file .env.production -f deploy/docker-compose.yml up -d --remove-orphans
-sh deploy/smoke-test.sh
+live_compose up -d --no-deps --force-recreate api web
+(cd "$APP_ROOT" && sh deploy/smoke-test.sh)
 
 if [ "$SKIP_OPENRESTY" -eq 0 ]; then
     if [ -f "$OPENRESTY_CONF" ]; then
         cp "$OPENRESTY_CONF" "$OPENRESTY_BACKUP"
     fi
-    install -m 0644 deploy/openresty-re-anime.conf "$OPENRESTY_CONF"
+    install -m 0644 "$APP_ROOT/deploy/openresty-re-anime.conf" "$OPENRESTY_CONF"
     OPENRESTY_CHANGED=1
     if ! docker exec "$OPENRESTY_CONTAINER" openresty -t >/dev/null 2>&1; then
         docker exec "$OPENRESTY_CONTAINER" nginx -t >/dev/null 2>&1 || die "OpenResty rejected $OPENRESTY_CONF"
     fi
     docker exec "$OPENRESTY_CONTAINER" openresty -s reload >/dev/null 2>&1 || docker exec "$OPENRESTY_CONTAINER" nginx -s reload >/dev/null 2>&1 || die "OpenResty reload failed"
-    log "re-anime.cc OpenResty config installed and reloaded"
+    log "AniMemo OpenResty config installed and reloaded"
 fi
 
 if [ "$CREATE_ADMIN" -eq 1 ]; then
-    sh deploy/create-admin.sh
+    (cd "$APP_ROOT" && sh deploy/create-admin.sh)
 fi
 
-stamp=$(date -u +%Y%m%dT%H%M%SZ)
 archive_name=$(basename "$ARCHIVE")
 sha_name=$(basename "$SHA_FILE")
 if [ "$ARCHIVE" != "$RELEASE_ROOT/$archive_name" ]; then
@@ -467,9 +447,9 @@ if [ "$ARCHIVE" != "$RELEASE_ROOT/$archive_name" ]; then
 fi
 tr -d '\r' < "$SHA_FILE" > "$RELEASE_ROOT/$sha_name"
 cat > "$RELEASE_ROOT/current.json" <<EOF
-{"archive":"$archive_name","sha256":"$actual_sha","deployed_at_utc":"$stamp","mode":"$MODE"}
+{"archive":"$archive_name","sha256":"$actual_sha","deployed_at_utc":"$stamp","mode":"$MODE","normal_update_path":"animemo-updater"}
 EOF
 
-[ "$SWAPPED" -eq 1 ] && [ -d "$PREVIOUS_APP" ] && rm -rf "$PREVIOUS_APP"
-SWAPPED=0
-log "deployment complete: $archive_name ($MODE)"
+trap - EXIT INT TERM
+rm -rf "$TMP_ROOT"
+log "legacy $MODE complete: $archive_name; normal future updates must use the AniMemo Update Agent"

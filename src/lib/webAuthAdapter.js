@@ -123,8 +123,19 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
     deleteAccount: (payload) => api.delete(AUTH_ENDPOINTS.account, { data: payload }),
   });
 
+  const csrfApi = Object.freeze({
+    async post(path, data = {}, config = {}) {
+      const token = await ensureCsrfToken();
+      return api.post(path, data, {
+        ...config,
+        headers: { ...(config.headers || {}), ...(token ? { "X-CSRFToken": token } : {}) },
+      });
+    },
+  });
+
   return Object.freeze({
     authApi,
+    csrfApi,
     clearCsrfToken,
     clearTokens,
     getStoredTokens: () => ({ access: session.getAccessToken(), refresh: null }),

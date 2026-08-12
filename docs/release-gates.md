@@ -84,6 +84,8 @@ SHA and forces:
 
 - complete frontend, backend, bootstrap, PostgreSQL, plugin, Bridge, and runtime
   regression coverage;
+- restricted Updater tests on Ubuntu, including Unix Socket/RPC limits and the
+  isolated A -> B -> health -> Application Rollback A scenario;
 - fresh Docker validation;
 - stateful Base-to-Current upgrade validation;
 - the complete Release Gate.
@@ -141,9 +143,11 @@ official version retains the original `AAA` blob instead of being rewritten to
 
 ## Fresh Docker release gate
 
-The existing `docker` job validates `EMPTY DATABASE -> CURRENT RELEASE`. It
-builds the production images, starts the full stack, checks `/health/`, and
-checks the frontend root. This proves a fresh install works.
+The `docker` job validates `EMPTY DATABASE -> CURRENT RELEASE` with the base
+production Compose plus `deploy/docker-compose.build.yml`. It builds API/Web,
+starts PostgreSQL and Redis, waits for both healthchecks, runs the explicit target `migration` and
+`bootstrap` jobs, then starts API/Web and checks health, frontend and fresh
+contract state. API startup does not own migration orchestration.
 
 ## Stateful upgrade gate
 
@@ -152,16 +156,18 @@ recreating persistent state:
 
 1. Create an isolated Compose project and runner-temporary data root.
 2. Check out Base in a detached Git worktree.
-3. Build/start Base PostgreSQL, Redis, and API.
+3. Build/start Base PostgreSQL, Redis, and API using the Base release's audited
+   historical behavior, then record PostgreSQL and Redis container IDs.
 4. Seed a user, journal entry, user plugin installation, `watch_history`
    `PluginData`, official project/version/blob/deployment, CAS, and runtime.
-5. Build Current and replace only the API container.
-6. Let the normal container command run migrations, `sync_official_plugins`,
-   static collection, and Gunicorn against the existing data.
+5. Build Current with the current build override.
+6. Run Current's explicit `migration` and `bootstrap` jobs, then replace only
+   Current API while retaining the recorded PostgreSQL and Redis containers.
 7. Verify migrations, health, seeded state, immutable versions, original official
    PackageBlob retention, CAS, deployment, runtime reconciliation, and Integration
    Protocol migration coverage.
-8. Restart Current API once and verify the state again.
+8. Restart Current API once, prove the data-service container IDs are unchanged,
+   and verify the state again.
 
 The job never runs `down -v` between Base and Current. Cleanup is scoped to the
 Compose project label, its temporary worktree, and its temporary data directory.

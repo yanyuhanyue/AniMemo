@@ -100,6 +100,7 @@ export function parseApiError(error, fallback = "操作失败，请稍后重试�
 export function readableApiError(error, fallback = "操作失败，请稍后重试。") {
   const status = error?.response?.status;
   const parsed = parseApiError(error, fallback);
+  if (parsed.code === "updater_unavailable") return parsed.detail || fallback;
   if (status === 503 || parsed.code === "service_unavailable") return "安全服务暂时繁忙，请稍后重试。";
   if (parsed.code === "csrf_failed") return "安全验证已过期，请刷新页面后重试。";
   if (status === 429 || parsed.code === "rate_limited") {

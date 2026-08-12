@@ -1,158 +1,140 @@
 # VPS Deployment
 
-AniMemo 的生产部署分为两种流程：
+AniMemo 的正常生产更新路径是可信、不可变 Release 加受限 Host Update Agent：
 
-- **完整发布**：使用 `deploy/deploy.sh` 替换应用树，执行 Compose 构建、完整 smoke test，并按需要安装/重载 AniMemo 专用 OpenResty 配置。
-- **Scoped hotfix**：只替换 AniMemo 的 API/Web 请求服务，保留 PostgreSQL、Redis、共享 OpenResty、Cloudflare 和其他 Compose 项目。生产 hotfix 不使用临时 merge ref，必须使用已经合并到 `main` 的真实 merge SHA。
+```text
+GitHub Release Producer
+→ release-manifest.json + checksums + attestations
+→ GHCR API/Web repository@sha256:digest
+→ AniMemo Update Agent
+→ explicit migration/bootstrap
+→ scoped API/Web switch
+→ health/smoke
+```
 
-## Production Layout
+`deploy/deploy.sh` 不再是普通发布入口。它只允许显式 `--bootstrap` 或 `--break-glass`，使用 core ZIP 在服务器构建 API/Web，供首次安装、旧架构切换或 Update Agent 无法运行时人工恢复。日常更新不得用 ZIP、`git pull` 或服务器端 build 替代 immutable Release。
 
-默认生产路径与 Compose 文件如下：
+本轮只实现和验证部署基础设施；生产安装、更新、迁移和 smoke 均为 **NOT RUN**。
+
+## Production layout
+
+固定生产路径：
 
 ```text
 /opt/1panel/docker/compose/anime-journal/app
 /opt/1panel/docker/compose/anime-journal/app/deploy/docker-compose.yml
 /data/anime-journal/{postgres,redis,plugins,logs,backups,media}
+/opt/animemo-updater
+/var/lib/animemo-updater
+/run/animemo-updater/agent.sock
 ```
 
-所有 Compose 命令都要显式指定生产环境文件和 Compose 文件：
+生产 Compose 只接受 Manifest 给出的 digest identity：
 
-```bash
-cd /opt/1panel/docker/compose/anime-journal/app
-docker compose --env-file .env.production -f deploy/docker-compose.yml ps
+```text
+ANIMEMO_API_IMAGE=ghcr.io/yanyuhanyue/animemo-api@sha256:<digest>
+ANIMEMO_WEB_IMAGE=ghcr.io/yanyuhanyue/animemo-web@sha256:<digest>
 ```
 
-`.env.production` 只保存在服务器，不进入发布 ZIP。生产环境必须保持 `DEBUG=false`、PostgreSQL、Redis、HTTPS、精确的 `ALLOWED_HOSTS`/CORS/CSRF 来源、Secure Cookie、可信代理网段和 `TURNSTILE_ENABLED=true`。同源部署默认使用 `SameSite=Lax`；跨站部署必须让 Session、CSRF、Refresh 三类 Cookie 一致使用 `SameSite=None; Secure`。
+`deploy/docker-compose.yml` 没有 API/Web `build:`。`deploy/docker-compose.build.yml` 只供 CI、bootstrap 和 break-glass 使用。所有人工 Compose 命令都必须显式指定 `.env.production` 与 Compose 文件；禁止 mutable `latest` 作为部署身份。
 
-## Full Release
+`.env.production` 只保存在服务器，不进入 Release 或 ZIP。生产环境必须保持 `DEBUG=false`、PostgreSQL、Redis、HTTPS、精确的 `ALLOWED_HOSTS`/CORS/CSRF 来源、Secure Cookie、可信代理网段和 `TURNSTILE_ENABLED=true`。同源部署默认使用 `SameSite=Lax`；跨站部署必须让 Session、CSRF、Refresh 三类 Cookie 一致使用 `SameSite=None; Secure`。
 
-完整发布使用已经生成并校验过的 core-only ZIP 和 SHA 文件：
+## Normal update
+
+正常更新由 Staff 系统通过本地 Unix Socket 请求 Host Agent。Agent 固定执行：
+
+1. 验证 Release Manifest、checksums、OCI digest 与 GitHub attestations。
+2. 根据 CURRENT、目标 Manifest 和 live contracts 计算 Safe Switch、Application Rollback 或 Unsafe Downgrade。
+3. 验证近期备份；有 migration 时先创建并完整校验新备份。
+4. 按 digest pull API/Web。
+5. 需要时以目标 API image 运行一次性 `migration` job，然后运行 `bootstrap` job。
+6. 只替换 AniMemo API/Web，观察稳定 health window 并更新 CURRENT/PREVIOUS。
+
+API 容器启动命令只运行 Gunicorn，不隐式执行 migration、bootstrap 或 static collection。数据库 migration 永远是显式 one-shot job。普通 Application Rollback 只切换 API/Web；不会 reverse migration，也不会自动 restore 数据库。
+
+PostgreSQL、Redis、Docker daemon、共享 OpenResty、cloudflared、AstrBot、NapCat、Gotify 和其他 Compose 项目不在 Agent 的允许操作集合中。Django 只挂载 `/run/animemo-updater`，永远不挂载 Docker socket。
+
+## Install or upgrade the Host Agent
+
+从经过审计的本地应用树手动安装或升级 Agent：
 
 ```bash
-sudo sh deploy/deploy.sh \
+sudo sh deploy/install-updater.sh
+```
+
+安装器只管理 AniMemo Updater 自身目录、launcher、systemd/sysusers/tmpfiles 资产。每个版本安装到独立目录，再原子切换 `current` symlink；服务启动失败时恢复旧 symlink。它不会部署 AniMemo、导入 CURRENT、重启 Docker 或触碰其他宿主机服务。
+
+首次切换前，在人工证明运行中的 API/Web digest 与已验证 Manifest 完全一致后，执行一次性 CURRENT bootstrap：
+
+```bash
+sudo sh deploy/bootstrap-updater.sh /path/to/verified/release-manifest.json
+```
+
+`import-current` 无论 Manifest 是否相同都拒绝第二次导入。后续 CURRENT/PREVIOUS 只能由成功的 Agent Operation 维护。
+
+## Agent credentials
+
+公开 GitHub Release assets 和 attestations 优先匿名读取。只有仓库或 GHCR 实际要求认证时，才在 Agent Host 配置最小只读凭据：
+
+- GitHub credential 仅允许读取 repository contents/packages；不得使用 repo write、admin 或 workflow token。
+- `GH_CONFIG_DIR=/var/lib/animemo-updater/gh`；token 只存在宿主机 secret/GitHub CLI config，不进入 AniMemo 数据库、Staff UI、API 请求、Operation journal 或日志。
+- GHCR Docker credential只保存在 Agent 用户的 Host home/config 中，由 Docker 客户端读取；不得复制进应用容器或 `.env.production`。
+- 安装、轮换和撤销凭据是人工 Host 运维动作；Agent API 不提供写入或展示 credential 的操作。
+
+Docker socket access is effectively privileged。systemd hardening 只缩小无关主机表面，不能把 Agent 描述为完全 sandboxed。
+
+## Bootstrap and break-glass ZIP path
+
+只有首次安装、旧架构 cutover 或 Agent 已不可用且人工批准恢复时，才允许：
+
+```bash
+sudo sh deploy/deploy.sh --bootstrap \
+  --archive /tmp/anime-journal-core-<stamp>.zip \
+  --sha256 /tmp/anime-journal-core-<stamp>.sha256
+
+sudo sh deploy/deploy.sh --break-glass \
   --archive /tmp/anime-journal-core-<stamp>.zip \
   --sha256 /tmp/anime-journal-core-<stamp>.sha256
 ```
 
-首次从旧架构迁移时才使用 `--fresh`；清空本站数据必须额外使用 `--reset-data --yes`。这些选项只允许作用于 AniMemo 明确的数据目录，禁止使用全局 Docker prune、`down -v` 或其他 Compose 项目的 `down`。
+脚本校验 core-only ZIP 和 SHA，使用 build override 构建 API/Web，显式运行 migration/bootstrap，再只替换 API/Web。它不会自动 reverse migration 或 restore 数据库。`--reset-data --yes` 仅属于明确的首次 bootstrap destructive reset；不得用于普通更新或 break-glass。
 
-完整发布脚本会：
+ZIP/current.json 归档只保留为 legacy evidence，不是 signed OCI release identity，也不得被静默导入为 Agent CURRENT。
 
-1. 校验发布 ZIP 的 SHA、路径、符号链接和 core-only 内容。
-2. 复制服务器上的 `.env.production`，校验数据根目录与媒体根目录。
-3. 校验 Compose 配置，构建 API/Web 镜像并保留旧镜像标签用于失败恢复。
-4. 启动 AniMemo Compose 项目并执行 `deploy/smoke-test.sh`。
-5. 默认只安装并重载 AniMemo 专用的 OpenResty 配置，不重启 OpenResty 容器。
-6. 将发布归档与 `current.json` 保存到 `/opt/1panel/docker/compose/anime-journal/releases`。
+## Preflight, backup and acceptance
 
-## Scoped Hotfix
-
-适用于只修复 API/Web 代码、没有数据库 schema 变化的生产 hotfix。执行前先在 GitHub 审计 PR：
-
-```bash
-git fetch origin
-git rev-parse origin/main
-git log --oneline --decorate -10
-git merge-base --is-ancestor <HOTFIX_HEAD_SHA> <HOTFIX_MERGE_SHA>
-```
-
-必须记录以下四个身份，并确认生产最终 checkout 与 merge SHA 完全一致：
+任何未来生产切换都必须先记录：
 
 ```text
-PREVIOUS_PRODUCTION_SHA
-HOTFIX_HEAD_SHA
-HOTFIX_MERGE_SHA
-FINAL_PRODUCTION_SHA == HOTFIX_MERGE_SHA
+RELEASE VERSION
+RELEASE CHANNEL
+release.commit
+provenance.sourceCommit
+API repository@digest
+WEB repository@digest
+CURRENT/PREVIOUS
+database/configuration contracts
+enabled Plugin SDK APIs
+verified backup path/checksum/time
 ```
 
-不要把 GitHub PR 的 temporary/test merge ref 当作生产 release identity；如果 PR head 发生变化，先重新审计新增 commit 和 required checks。
+`release.commit` 是应用构建 commit；`provenance.sourceCommit` 是实际运行 Release/Promotion 签署 workflow 的 commit。Stable 保留 RC 的应用 commit 和 image digests，但 Stable Manifest 可由较新的 promotion workflow commit 签署；两者不得混为一个字段。
 
-### Preflight and migration boundary
+生产验收至少覆盖本机与公网 `/`、`/login`、`/health/`、`/api/schema/`、`/api/docs/`，关键认证回归、Journal/Watch History/Analytics、Integration/Bridge、官方插件状态、API/Web logs、CURRENT/PREVIOUS 和 scoped restart persistence。没有专用 smoke identity 时，有效 refresh 明确记录 `NOT RUN`，不得使用真实用户凭据凑证据。
 
-在生产服务器执行只读预检：
+不得执行全局 Docker prune、volume prune、Docker daemon restart、PostgreSQL/Redis restart、共享 OpenResty restart 或 cloudflared 修改。不得删除备份、自动 restore 数据库、手工修改插件 CAS 或未知远程媒体对象。
 
-```bash
-cd /opt/1panel/docker/compose/anime-journal/app
-git rev-parse HEAD
-docker compose --env-file .env.production -f deploy/docker-compose.yml ps
-df -hT /
-free -h
-gzip -t /data/anime-journal/backups/<verified-backup>.sql.gz
-```
-
-没有 schema 变化的 hotfix 必须明确记录：
-
-```bash
-docker compose --env-file .env.production -f deploy/docker-compose.yml \
-  exec -T api python manage.py check
-docker compose --env-file .env.production -f deploy/docker-compose.yml \
-  exec -T api python manage.py makemigrations --check --dry-run
-git diff --name-status <PREVIOUS_PRODUCTION_SHA> <HOTFIX_MERGE_SHA> -- 'backend/**/migrations/'
-```
-
-若无 migration 变化，`NEW MIGRATION` 和 `MIGRATION RUN` 均为 `NOT APPLICABLE`。不要 reverse migration、不要回滚到旧 schema，也不要为了 hotfix 重做数据转换。API 容器启动时即使执行了正常的 migrate 命令，也必须确认输出为 `No migrations to apply`。
-
-### Build and replacement scope
-
-只构建 AniMemo 的 API/Web：
-
-```bash
-docker compose --env-file .env.production -f deploy/docker-compose.yml build api web
-docker compose --env-file .env.production -f deploy/docker-compose.yml \
-  up -d --no-deps --force-recreate api web
-```
-
-不要构建或重启 PostgreSQL、Redis，也不要触碰 AstrBot、NapCat、Gotify、dailyhub、PHP、Cloudflare 或全局 OpenResty。确认 API/Web 容器 image digest 与本次构建记录一致，Compose 端口仍为 `127.0.0.1:8088->80/tcp`。
-
-### Acceptance checks
-
-至少完成以下检查并保留输出：
-
-- 本机与公网的 `/`、`/login`、`/health/`、`/api/schema/`、`/api/docs/` 均为 HTTP 200。
-- Swagger 使用同源 sidecar，未引用 jsDelivr 等外部脚本。
-- `DEBUG=false`、Turnstile 已配置且 fail-closed、Session/CSRF/Refresh Cookie 的 Secure/SameSite 配置未降低。
-- 缺少 CSRF 的 refresh 返回 `403 csrf_failed`。
-- 过期或 legacy refresh 返回 `401 session_expired`，不得返回 PostgreSQL outer-join lock 500，并确认 refresh cookie 被清除。
-- 若没有专用 smoke identity，将有效 refresh 明确标记 `NOT RUN`，不要使用真实用户凭据。
-- 读取 Journal、Watch History、Analytics、外部集成和官方插件状态；插件必须记录版本、enabled/healthy、rollback floor 和 package SHA。
-- 扫描 API/Web scoped logs，不得出现 Traceback、HTTP 500、`FOR UPDATE cannot be applied to the nullable side of an outer join`、DB/Redis/plugin runtime error。
-
-### Scoped restart persistence
-
-初次替换成功后只重启请求服务：
-
-```bash
-docker compose --env-file .env.production -f deploy/docker-compose.yml restart api web
-```
-
-等待 API/Web healthy 后，重复 health、legacy refresh 回归、插件状态、关键数据计数和日志扫描。禁止重启 PostgreSQL、Redis、Docker daemon、OpenResty 或 cloudflared。
-
-## Backup and final report
-
-Hotfix 不需要因为代码-only 变更重复制作数据库备份，但必须确认既有 full backup 仍存在、SHA-256 一致且 `gzip -t` 通过。不得删除备份、restore 数据库或手工修改插件 CAS。
-
-最终报告只使用以下状态：`PASS`、`FAIL`、`NOT RUN`、`NOT APPLICABLE`。至少包含：
+最终报告只使用 `PASS`、`FAIL`、`NOT RUN`、`NOT APPLICABLE`。本阶段固定为：
 
 ```text
-PR MERGE:
-CI:
-RELEASE GATE:
-NEW MIGRATION:
-MIGRATION RUN:
-DATABASE RESTORE:
-LEGACY/EXPIRED REFRESH 401:
-VALID REFRESH:
-NO OUTER-JOIN LOCK 500:
-API:
-WEB:
-HEALTH:
-SWAGGER:
-WATCH HISTORY:
-OFFICIAL PLUGIN:
-SCOPED RESTART:
-POST-RESTART REFRESH:
-POST-RESTART HEALTH:
-PRODUCTION HOTFIX:
+PRODUCTION DEPLOY: NOT RUN
+PRODUCTION UPDATE AGENT INSTALL: NOT RUN
+PRODUCTION RC: NOT RUN
+PRODUCTION SMOKE: NOT RUN
+DATABASE PRODUCTION MIGRATION: NOT RUN
+DATABASE RESTORE: NOT RUN
+R2 PRODUCTION WRITE: NOT RUN
+R2 CLEANUP: NOT RUN
+SSH: NOT RUN
 ```
-
-只有当真实 merge SHA 已部署、refresh PostgreSQL 回归不再 500、API/Web 在 scoped restart 后仍 healthy、没有 migration/data rollback，且共享 VPS 其他服务未受影响时，才能报告 `PRODUCTION HOTFIX: PASS`。

@@ -12,6 +12,15 @@ from .staff_storage_views import (
     StaffMediaStorageDetailView,
     StaffMediaStorageListView,
 )
+from .staff_update_views import (
+    StaffUpdateApplyView,
+    StaffUpdateLogsView,
+    StaffUpdateOperationView,
+    StaffUpdatePlanView,
+    StaffUpdateReleasesView,
+    StaffUpdateRollbackView,
+    StaffUpdateStatusView,
+)
 from .staff_views import (
     StaffBackupView,
     StaffBulkActionView,
@@ -42,6 +51,13 @@ urlpatterns = [
     path("tags/<int:pk>/", StaffTagDefinitionDetailView.as_view(), name="staff-tag-detail"),
     path("system/health/", StaffSystemHealthView.as_view(), name="staff-system-health"),
     path("system/backup/", StaffBackupView.as_view(), name="staff-system-backup"),
+    path("system/updates/status/", StaffUpdateStatusView.as_view(), name="staff-update-status"),
+    path("system/updates/releases/", StaffUpdateReleasesView.as_view(), name="staff-update-releases"),
+    path("system/updates/plan/", StaffUpdatePlanView.as_view(), name="staff-update-plan"),
+    path("system/updates/apply/", StaffUpdateApplyView.as_view(), name="staff-update-apply"),
+    path("system/updates/rollback/", StaffUpdateRollbackView.as_view(), name="staff-update-rollback"),
+    path("system/updates/operations/<str:operation_id>/", StaffUpdateOperationView.as_view(), name="staff-update-operation"),
+    path("system/updates/operations/<str:operation_id>/logs/", StaffUpdateLogsView.as_view(), name="staff-update-logs"),
     path("system/media-storage/", StaffMediaStorageListView.as_view(), name="staff-media-storage-list"),
     path("system/media-storage/<int:pk>/", StaffMediaStorageDetailView.as_view(), name="staff-media-storage-detail"),
     path("system/media-storage/<int:pk>/actions/", StaffMediaStorageActionView.as_view(), name="staff-media-storage-action"),

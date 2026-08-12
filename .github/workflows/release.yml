@@ -213,6 +213,7 @@ jobs:
             python -m release.cli promote-manifest \
               --rc-manifest release-output/release-manifest.json \
               --tags-file "$RUNNER_TEMP/tags.txt" --created-at "$CREATED_AT" \
+              --provenance-source-commit "$GITHUB_SHA" \
               --output release-output/stable-manifest.dry-run.json
             test "$(jq -r '.release.commit' release-output/release-manifest.json)" = \
               "$(jq -r '.release.commit' release-output/stable-manifest.dry-run.json)"
