@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "minimumUpdaterVersion": "1.0.0",
+  "database": {
+    "contract": "animemo-db-v1",
+    "appAccepts": ["animemo-db-v1"],
+    "migration": {
+      "required": false,
+      "policy": "none"
+    },
+    "applicationRollback": "safe"
+  },
+  "configuration": {
+    "contract": "animemo-config-v1",
+    "appAccepts": ["animemo-config-v1"]
+  },
+  "pluginSdk": {
+    "manifestSchema": 2,
+    "supportedApis": [2],
+    "runtime": "trusted-in-process"
+  }
+}

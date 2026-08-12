@@ -123,7 +123,9 @@ def classify_paths(paths: list[str], *, force_full: bool = False) -> dict[str, s
         for path in non_docs
     )
     deployment = any(
-        path.startswith("deploy/")
+        path.startswith(("deploy/", "release/", "updater/"))
+        or path.startswith("scripts/tests/test_release")
+        or path.startswith("scripts/tests/test_updater")
         or PurePosixPath(path).name in {"Dockerfile", "docker-compose.yml", "docker-compose.yaml"}
         or _has(path.lower(), "stateful-upgrade", "release-gate")
         for path in non_docs
@@ -229,6 +231,7 @@ def self_test() -> None:
         ("migration", "full_gate"): ("migration", ["backend/journal/migrations/0002_add.py"]),
         ("ci", "full_gate"): ("ci", [".github/workflows/ci.yml"]),
         ("dependencies", "full_gate"): ("dependencies", ["backend/requirements.in"]),
+        ("deployment", "full_gate"): ("release", ["release/contract.py"]),
         ("mixed", "full_gate"): ("mixed", ["src/App.jsx", "backend/journal/services.py"]),
     }
     for expected, (label, paths) in cases.items():
@@ -236,6 +239,7 @@ def self_test() -> None:
         for key in expected:
             assert result[key] == "true", f"{label}: expected {key}=true, got {result}"
     assert classify_paths(["docs/ci.md"])["frontend"] == "false"
+    assert classify_paths(["updater/agent.py"])["deployment"] == "true"
     print("ci_classify self-test passed")
 
 

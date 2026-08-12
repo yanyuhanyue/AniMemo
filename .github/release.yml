@@ -1,0 +1,26 @@
+changelog:
+  exclude:
+    labels:
+      - duplicate
+      - invalid
+      - wontfix
+  categories:
+    - title: "🚀 新功能"
+      labels:
+        - enhancement
+    - title: "🐛 Bug 修复"
+      labels:
+        - bug
+    - title: "🏗 架构与基础设施"
+      labels:
+        - github_actions
+        - dependencies
+    - title: "🎨 Web / UI"
+      labels:
+        - javascript
+    - title: "📚 文档"
+      labels:
+        - documentation
+    - title: "其他变更"
+      labels:
+        - "*"
