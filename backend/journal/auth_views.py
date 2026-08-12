@@ -23,7 +23,13 @@ from rest_framework_simplejwt.exceptions import TokenError
 
 from .emails import EmailDeliveryError, send_transactional_email
 from .account_security import AccountDeletionError, delete_current_account
-from .auth_tokens import RefreshReplayError, issue_token_pair, revoke_access_token, rotate_refresh
+from .auth_tokens import (
+    RefreshReplayError,
+    create_refresh_token,
+    issue_token_pair,
+    revoke_access_token,
+    rotate_refresh,
+)
 from .auth_service import authenticate_with_second_factor
 from .admin_security_middleware import clear_staff_second_factor, mark_staff_second_factor_verified
 from accounts.models import LoginEvent
@@ -71,9 +77,7 @@ class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     @classmethod
     def get_token(cls, user):
-        token = super().get_token(user)
-        token["sv"] = get_security_profile(user).session_version
-        return token
+        return create_refresh_token(user)
 
     def validate(self, attrs):
         otp = attrs.pop("otp", "")

@@ -15,6 +15,7 @@ from performance.seed import (
 )
 from rest_framework_simplejwt.tokens import AccessToken
 
+from journal.auth_tokens import bind_token_to_current_installation
 from journal.staff_services import get_security_profile
 
 
@@ -60,6 +61,7 @@ class Command(BaseCommand):
             user = users[journey.username]
             token = AccessToken.for_user(user)
             token["sv"] = get_security_profile(user).session_version
+            bind_token_to_current_installation(token)
             token.set_exp(lifetime=timedelta(minutes=token_minutes))
             identities.append(
                 {
