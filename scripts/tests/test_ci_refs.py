@@ -80,3 +80,12 @@ class CIRefResolutionTests(unittest.TestCase):
         )
         self.assertEqual(refs.base, self.base)
         self.assertIn("fallback HEAD^", refs.source)
+
+    def test_workflow_call_uses_release_upgrade_base(self):
+        refs = resolve_refs(
+            repo=self.repo,
+            env={"GITHUB_EVENT_NAME": "workflow_call", "GITHUB_SHA": self.head},
+            event={"inputs": {"upgrade_base_sha": self.base}},
+        )
+        self.assertEqual((refs.base, refs.head), (self.base, self.head))
+        self.assertEqual(refs.source, "workflow_call upgrade_base_sha")

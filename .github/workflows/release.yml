@@ -1,0 +1,373 @@
+name: Release Producer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: Stable release line increment
+        required: true
+        default: patch
+        type: choice
+        options: [patch, minor, major]
+      channel:
+        description: Pre-release channel (Stable is promotion-only)
+        required: true
+        default: rc
+        type: choice
+        options: [beta, rc]
+      dry_run:
+        description: Build and validate locally without publishing tags, packages, releases, or attestations
+        required: true
+        default: true
+        type: boolean
+      target_version_override:
+        description: Bootstrap-only vMAJOR.MINOR.PATCH when no Stable tag exists
+        required: false
+        type: string
+      intended_main_sha:
+        description: Exact main commit intended for this release
+        required: true
+        type: string
+      upgrade_base_sha:
+        description: Audited deployed baseline for BASE to CURRENT validation
+        required: true
+        default: 6452b3dbfff39529c49c2bc69ede1f3d76236eee
+        type: string
+
+concurrency:
+  group: animemo-release-producer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  API_REPOSITORY: ghcr.io/yanyuhanyue/animemo-api
+  WEB_REPOSITORY: ghcr.io/yanyuhanyue/animemo-web
+
+jobs:
+  preflight:
+    name: release-preflight
+    runs-on: ubuntu-latest
+    outputs:
+      target_version: ${{ steps.version.outputs.target_version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      created_at: ${{ steps.identity.outputs.created_at }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: release/requirements.txt
+      - run: python -m pip install -r release/requirements.txt
+      - name: Prove exact clean main identity and upgrade ancestry
+        env:
+          INTENDED_MAIN_SHA: ${{ inputs.intended_main_sha }}
+          UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin main
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
+          test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          git rev-parse --verify "$UPGRADE_BASE_SHA^{commit}"
+          git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$GITHUB_SHA"
+      - name: Resolve deterministic pre-release version
+        id: version
+        env:
+          VERSION_BUMP: ${{ inputs.version_bump }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          TARGET_VERSION_OVERRIDE: ${{ inputs.target_version_override }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag --list 'v*' --sort=version:refname > "$RUNNER_TEMP/tags.txt"
+          python -m release.cli resolve-version \
+            --tags-file "$RUNNER_TEMP/tags.txt" \
+            --bump "$VERSION_BUMP" \
+            --channel "$RELEASE_CHANNEL" \
+            --target-version-override "$TARGET_VERSION_OVERRIDE" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Reject existing tag or GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release tag already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub Release already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+      - name: Record deterministic artifact identity inputs
+        id: identity
+        shell: bash
+        run: echo "created_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+      - name: Require public frontend configuration before publish
+        if: ${{ !inputs.dry_run }}
+        env:
+          TURNSTILE_SITE_KEY: ${{ vars.ANIMEMO_TURNSTILE_SITE_KEY }}
+        shell: bash
+        run: test -n "$TURNSTILE_SITE_KEY"
+
+  full-ci:
+    name: full-ci
+    needs: preflight
+    uses: ./.github/workflows/ci.yml
+    with:
+      candidate_sha: ${{ github.sha }}
+      comparison_base_sha: ${{ inputs.upgrade_base_sha }}
+      force_full: true
+
+  full-release-gate:
+    name: full-release-gate
+    needs: preflight
+    uses: ./.github/workflows/release-gate.yml
+    with:
+      candidate_sha: ${{ github.sha }}
+      upgrade_base_sha: ${{ inputs.upgrade_base_sha }}
+      force_full: true
+
+  dry-run:
+    name: read-only-release-dry-run
+    if: ${{ inputs.dry_run }}
+    needs: [preflight, full-ci, full-release-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: release/requirements.txt
+      - run: python -m pip install -r release/requirements.txt
+      - uses: docker/setup-buildx-action@v3
+      - name: Build API OCI artifact without publishing
+        id: api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/backend.Dockerfile
+          platforms: linux/amd64
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/animemo-api.oci.tar
+          build-args: |
+            ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}
+            ANIMEMO_COMMIT=${{ github.sha }}
+            ANIMEMO_CHANNEL=${{ inputs.channel }}
+      - name: Build Web OCI artifact without publishing
+        id: web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/frontend.Dockerfile
+          platforms: linux/amd64
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/animemo-web.oci.tar
+          build-args: |
+            VITE_API_BASE_URL=/api/v1
+            VITE_TURNSTILE_SITE_KEY=1x00000000000000000000AA
+            ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}
+            ANIMEMO_COMMIT=${{ github.sha }}
+            ANIMEMO_CHANNEL=${{ inputs.channel }}
+      - name: Generate and validate manifest, checksums, and unsigned provenance input plan
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          CREATED_AT: ${{ needs.preflight.outputs.created_at }}
+          API_DIGEST: ${{ steps.api.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-output
+          python -m release.cli generate-manifest \
+            --version "$RELEASE_TAG" --channel "${{ inputs.channel }}" \
+            --commit "$GITHUB_SHA" --created-at "$CREATED_AT" \
+            --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
+            --compatibility-file release/compatibility.json \
+            --output release-output/release-manifest.json
+          python -m release.cli validate-manifest \
+            --manifest release-output/release-manifest.json --updater-version 1.0.0
+          python -m release.cli write-checksums \
+            --output release-output/checksums.txt release-output/release-manifest.json
+          (cd release-output && sha256sum --check checksums.txt)
+          python -m release.cli generate-provenance-plan \
+            --version "$RELEASE_TAG" --commit "$GITHUB_SHA" --created-at "$CREATED_AT" \
+            --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
+            --output release-output/provenance-plan.unsigned.json
+          if [[ "${{ inputs.channel }}" = "rc" ]]; then
+            git tag --list 'v*' --sort=version:refname > "$RUNNER_TEMP/tags.txt"
+            python -m release.cli promote-manifest \
+              --rc-manifest release-output/release-manifest.json \
+              --tags-file "$RUNNER_TEMP/tags.txt" --created-at "$CREATED_AT" \
+              --output release-output/stable-manifest.dry-run.json
+            test "$(jq -r '.release.commit' release-output/release-manifest.json)" = \
+              "$(jq -r '.release.commit' release-output/stable-manifest.dry-run.json)"
+            test "$(jq -r '.images.api.digest' release-output/release-manifest.json)" = \
+              "$(jq -r '.images.api.digest' release-output/stable-manifest.dry-run.json)"
+            test "$(jq -r '.images.web.digest' release-output/release-manifest.json)" = \
+              "$(jq -r '.images.web.digest' release-output/stable-manifest.dry-run.json)"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-run-${{ needs.preflight.outputs.release_tag }}
+          path: release-output/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish-immutable-prerelease
+    if: ${{ !inputs.dry_run }}
+    needs: [preflight, full-ci, full-release-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: release/requirements.txt
+      - run: python -m pip install -r release/requirements.txt
+      - name: Recheck immutable release identity immediately before publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          INTENDED_MAIN_SHA: ${{ inputs.intended_main_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
+          test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"
+          ! git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1
+          ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish API image once
+        id: api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/backend.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.API_REPOSITORY }}:${{ needs.preflight.outputs.release_tag }}
+            ${{ env.API_REPOSITORY }}:sha-${{ github.sha }}
+          build-args: |
+            ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}
+            ANIMEMO_COMMIT=${{ github.sha }}
+            ANIMEMO_CHANNEL=${{ inputs.channel }}
+      - name: Build and publish Web image once
+        id: web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/frontend.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.WEB_REPOSITORY }}:${{ needs.preflight.outputs.release_tag }}
+            ${{ env.WEB_REPOSITORY }}:sha-${{ github.sha }}
+          build-args: |
+            VITE_API_BASE_URL=/api/v1
+            VITE_TURNSTILE_SITE_KEY=${{ vars.ANIMEMO_TURNSTILE_SITE_KEY }}
+            ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}
+            ANIMEMO_COMMIT=${{ github.sha }}
+            ANIMEMO_CHANNEL=${{ inputs.channel }}
+      - name: Attest API image provenance
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.API_REPOSITORY }}
+          subject-digest: ${{ steps.api.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest Web image provenance
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.WEB_REPOSITORY }}
+          subject-digest: ${{ steps.web.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Generate and validate immutable release assets
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          CREATED_AT: ${{ needs.preflight.outputs.created_at }}
+          API_DIGEST: ${{ steps.api.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-output
+          python -m release.cli generate-manifest \
+            --version "$RELEASE_TAG" --channel "${{ inputs.channel }}" \
+            --commit "$GITHUB_SHA" --created-at "$CREATED_AT" \
+            --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
+            --compatibility-file release/compatibility.json \
+            --output release-output/release-manifest.json
+          python -m release.cli validate-manifest \
+            --manifest release-output/release-manifest.json --updater-version 1.0.0
+          python -m release.cli write-checksums \
+            --output release-output/checksums.txt release-output/release-manifest.json
+          (cd release-output && sha256sum --check checksums.txt)
+      - name: Attest release manifest provenance
+        uses: actions/attest@v4
+        with:
+          subject-checksums: release-output/checksums.txt
+      - name: Verify published OCI and file attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_DIGEST: ${{ steps.api.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://$API_REPOSITORY@$API_DIGEST" \
+            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA"
+          gh attestation verify "oci://$WEB_REPOSITORY@$WEB_DIGEST" \
+            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA"
+          gh attestation verify release-output/release-manifest.json \
+            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA"
+      - name: Create immutable tag and GitHub Pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag --annotate "$RELEASE_TAG" "$GITHUB_SHA" --message "AniMemo $RELEASE_TAG"
+          git push origin "refs/tags/$RELEASE_TAG"
+          gh release create "$RELEASE_TAG" \
+            release-output/release-manifest.json release-output/checksums.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false --generate-notes

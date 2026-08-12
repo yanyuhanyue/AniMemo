@@ -70,15 +70,15 @@ def resolve_refs(*, repo=".", explicit_base="", explicit_head="", env=None, even
         else:
             base_candidate = f"{head}^"
             source = "push fallback HEAD^ (before was empty or all-zero)"
-    elif not base_candidate and event_name == "workflow_dispatch":
+    elif not base_candidate and event_name in {"workflow_dispatch", "workflow_call"}:
         inputs = event.get("inputs") or {}
         manual = str(inputs.get("upgrade_base_sha") or env.get("INPUT_UPGRADE_BASE_SHA") or "").strip()
         if manual:
             base_candidate = manual
-            source = "workflow_dispatch upgrade_base_sha"
+            source = f"{event_name} upgrade_base_sha"
         else:
             base_candidate = f"{head}^"
-            source = "workflow_dispatch fallback HEAD^"
+            source = f"{event_name} fallback HEAD^"
     elif not base_candidate:
         base_candidate = f"{head}^"
         source = "local fallback HEAD^"

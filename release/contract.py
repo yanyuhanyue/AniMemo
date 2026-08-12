@@ -48,6 +48,15 @@ def assert_tag_absent(tag: str, tags: list[str]) -> None:
         raise ReleaseContractError(f"Release tag already exists: {tag}")
 
 
+def previous_stable_tag(tags: list[str], *, target: str) -> str | None:
+    target_match = STABLE_TAG.fullmatch(target)
+    if not target_match:
+        raise ReleaseContractError(f"Invalid Stable target: {target!r}")
+    target_version = _version(target_match.group("base"), label="Stable target")
+    candidates = [(version, tag) for version, tag in _stable_tags(tags) if version < target_version]
+    return candidates[-1][1] if candidates else None
+
+
 def resolve_prerelease(
     *,
     tags: list[str],
@@ -100,6 +109,71 @@ def _timestamp(value: datetime | str) -> str:
             raise ReleaseContractError("created_at must include a timezone")
         return value.isoformat().replace("+00:00", "Z")
     return value
+
+
+def _digest_hex(value: str, *, label: str) -> str:
+    match = re.fullmatch(r"sha256:([0-9a-f]{64})", value)
+    if not match:
+        raise ReleaseContractError(f"Invalid immutable {label} digest: {value!r}")
+    return match.group(1)
+
+
+def build_provenance_plan(
+    *,
+    version: str,
+    commit: str,
+    api_digest: str,
+    web_digest: str,
+    created_at: datetime | str,
+) -> dict[str, object]:
+    """Build the unsigned SLSA subject plan used by read-only release dry-runs.
+
+    Real publish jobs replace this proof-of-input step with GitHub's OIDC-backed
+    ``actions/attest`` signature.  Keeping the dry-run unsigned is what lets the
+    job operate with only ``contents: read``.
+    """
+
+    if not (STABLE_TAG.fullmatch(version) or PRERELEASE_TAG.fullmatch(version)):
+        raise ReleaseContractError(f"Invalid immutable release version: {version!r}")
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ReleaseContractError(f"Invalid release commit: {commit!r}")
+    created = _timestamp(created_at)
+    try:
+        parsed_created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ReleaseContractError(f"Invalid provenance timestamp: {created!r}") from error
+    if parsed_created.tzinfo is None:
+        raise ReleaseContractError("Provenance timestamp must include a timezone")
+
+    return {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [
+            {"name": API_REPOSITORY, "digest": {"sha256": _digest_hex(api_digest, label="API image")}},
+            {"name": WEB_REPOSITORY, "digest": {"sha256": _digest_hex(web_digest, label="Web image")}},
+        ],
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "predicate": {
+            "buildDefinition": {
+                "buildType": f"https://github.com/{REPOSITORY}/.github/workflows/release.yml@refs/heads/main",
+                "externalParameters": {"releaseVersion": version},
+                "internalParameters": {"dryRun": True, "signed": False},
+                "resolvedDependencies": [
+                    {
+                        "uri": f"git+https://github.com/{REPOSITORY}.git@{commit}",
+                        "digest": {"gitCommit": commit},
+                    }
+                ],
+            },
+            "runDetails": {
+                "builder": {"id": "https://github.com/actions/runner"},
+                "metadata": {
+                    "invocationId": f"dry-run:{commit}:{version}",
+                    "startedOn": created,
+                    "finishedOn": created,
+                },
+            },
+        },
+    }
 
 
 def build_manifest(

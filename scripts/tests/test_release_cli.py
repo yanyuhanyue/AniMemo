@@ -64,6 +64,36 @@ class ReleaseCliTests(unittest.TestCase):
             expected = hashlib.sha256(target.read_bytes()).hexdigest()
             self.assertEqual(checksums.read_text(encoding="utf-8"), f"{expected}  release-manifest.json\n")
 
+    def test_generate_provenance_plan_is_machine_readable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "provenance-plan.json"
+            completed = self.run_cli(
+                "generate-provenance-plan",
+                "--version", "v1.0.0-rc.1",
+                "--commit", COMMIT,
+                "--created-at", "2026-08-12T10:00:00Z",
+                "--api-digest", API_DIGEST,
+                "--web-digest", WEB_DIGEST,
+                "--output", target,
+            )
+            self.assertEqual(json.loads(completed.stdout)["predicateType"], "https://slsa.dev/provenance/v1")
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["subject"][0]["digest"]["sha256"], "3" * 64)
+
+    def test_previous_stable_outputs_empty_for_bootstrap_and_latest_prior_tag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tags = root / "tags.txt"
+            outputs = root / "outputs.txt"
+            tags.write_text("v1.0.0\nv1.1.0-beta.1\nv1.1.0\nv1.2.0-rc.1\n", encoding="utf-8")
+            completed = self.run_cli(
+                "previous-stable",
+                "--tags-file", tags,
+                "--target", "v1.2.0",
+                "--github-output", outputs,
+            )
+            self.assertEqual(json.loads(completed.stdout), {"previousStable": "v1.1.0"})
+            self.assertIn("previous_stable=v1.1.0", outputs.read_text(encoding="utf-8"))
+
     def test_cli_errors_are_machine_readable_and_nonzero(self):
         completed = self.run_cli(
             "resolve-version",
