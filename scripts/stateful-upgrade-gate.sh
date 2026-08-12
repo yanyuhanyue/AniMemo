@@ -230,9 +230,12 @@ BASE_ADDED=true
 echo "== Validate isolated Base Compose configuration =="
 compose "$BASE_ROOT" config --quiet
 
-echo "== Build and boot Base postgres/redis/api =="
+echo "== Build Base API and boot persistent services =="
 compose "$BASE_ROOT" build api
-compose "$BASE_ROOT" up -d postgres redis api
+compose "$BASE_ROOT" up -d --wait --wait-timeout 120 postgres redis
+compose "$BASE_ROOT" run --rm --no-deps migration
+compose "$BASE_ROOT" run --rm --no-deps bootstrap
+compose "$BASE_ROOT" up -d --no-deps api
 if ! wait_for_api "$BASE_ROOT" "BASELINE"; then
   echo "BASELINE RELEASE CANNOT BOOT" >&2
   exit 1

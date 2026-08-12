@@ -142,10 +142,19 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             gate,
         )
         self.assertNotIn('if [[ "$source_root" == "$CURRENT_ROOT" ]]', gate)
+        base_ready = gate.index(
+            'compose "$BASE_ROOT" up -d --wait --wait-timeout 120 postgres redis'
+        )
+        base_migration = gate.index('compose "$BASE_ROOT" run --rm --no-deps migration')
+        base_bootstrap = gate.index('compose "$BASE_ROOT" run --rm --no-deps bootstrap')
+        base_api = gate.index('compose "$BASE_ROOT" up -d --no-deps api')
         migration = gate.index('compose "$CURRENT_ROOT" run --rm --no-deps migration')
         bootstrap = gate.index('compose "$CURRENT_ROOT" run --rm --no-deps bootstrap')
         switch = gate.index('compose "$CURRENT_ROOT" up -d --no-deps --force-recreate api')
         retained = gate.index('PostgreSQL and Redis containers were retained')
+        self.assertLess(base_ready, base_migration)
+        self.assertLess(base_migration, base_bootstrap)
+        self.assertLess(base_bootstrap, base_api)
         self.assertLess(migration, bootstrap)
         self.assertLess(bootstrap, switch)
         self.assertLess(switch, retained)
