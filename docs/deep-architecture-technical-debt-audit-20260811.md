@@ -1100,11 +1100,13 @@ MAINTAINABILITY: FAIL
 
 大文件本身、Auth Views/Models/test modules 的 LOC、一次性 lazy `get_or_create`、现有 facade 层、目录命名和不影响行为的 service 风格偏好，均不值得 v1.0 前处理。
 
-## Final Acceptance Matrix
+## Original Audit Acceptance Matrix (2026-08-11)
+
+以下矩阵保留原始深度审计完成时的历史证据；当前 Closure 的最终 SHA 与门禁以 `docs/architecture-debt-closure-report-20260812.md` 为准。
 
 ```text
 BASE SHA: 6452b3dbfff39529c49c2bc69ede1f3d76236eee
-FINAL MAIN SHA: fc94deb553fb1471e0bdc5419ac94847a9a0c870
+ORIGINAL AUDIT FINAL MAIN SHA: fc94deb553fb1471e0bdc5419ac94847a9a0c870
 PRIMARY AUDIT MERGE SHA: 1446cbfafd1fbabaf2982ddd7dbc706817ae64be
 REPORT FINALIZATION MERGE SHA: fc94deb553fb1471e0bdc5419ac94847a9a0c870
 
@@ -1176,7 +1178,7 @@ TOP ARCHITECTURAL HOTSPOTS: 17
 - report-finalization main CI：PASS，GitHub run `31502854586`。
 - report-finalization main Release Gate：PASS，GitHub run `31502854526`。
 
-`FINAL MAIN SHA` 记录最后一个已完整通过 main CI/Release Gate 的审计树；本次后续仅补齐报告格式，不修改 runtime、migration、dependency 或 deployment behavior，其 merge SHA 由该 PR 与最终执行结果记录，避免把文档自引用 commit hash 当作架构证据。
+原始审计矩阵中的 `ORIGINAL AUDIT FINAL MAIN SHA` 记录当时最后一个已完整通过 main CI/Release Gate 的审计树；本轮后续的 docs-only decision merge 已由 PR #59 合并，当前最终 main SHA 与对应门禁证据记录在 `docs/architecture-debt-closure-report-20260812.md`。
 
 ```text
 NEW MIGRATION: NOT APPLICABLE

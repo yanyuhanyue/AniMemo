@@ -38,7 +38,7 @@ V1.0 STRUCTURAL BLOCKERS: 0
 - PR #54：CI + Release Gate 全部通过并 squash merge。
 - PR #55：CI + Release Gate 全部通过并 squash merge。
 - PR #56：changed-files、fast-fail、frontend、backend、PostgreSQL、plugin、Bridge/runtime、bootstrap、Docker、stateful-upgrade 全部通过并 squash merge。
-- main after report merge：`ed6a673`；CI run `31514756504` PASS（昂贵 product jobs skipped），Release Gate `31514756716` PASS（仅 `post-merge-sanity`，Docker/stateful skipped）。
+- PR #59 merge：`aaf9e1c704dd22e740008d9bc4904b2a0ad40ba3`；main push CI run `31553169313` PASS（docs-only product jobs skipped），main Release Gate run `31553169314` PASS（`post-merge-sanity` PASS，Docker/stateful skipped）。
 
 ## Remaining decisions
 
@@ -66,7 +66,7 @@ TD3 DEFERRED: 5
 
 ```text
 BASE MAIN SHA: df51876f0311beec52159edd4cf33028110d78c8
-FINAL MAIN SHA: df51876f0311beec52159edd4cf33028110d78c8
+FINAL MAIN SHA: aaf9e1c704dd22e740008d9bc4904b2a0ad40ba3
 PRODUCTION STABLE BASELINE: 6452b3dbfff39529c49c2bc69ede1f3d76236eee
 
 DA-TD1-001: ACCEPTED V1.0 DEBT EXCEPTION
@@ -100,7 +100,7 @@ MIGRATION CHECK: NOT APPLICABLE (docs-only fast path)
 OPENAPI: NOT APPLICABLE (docs-only fast path)
 
 NEW MIGRATION: NOT APPLICABLE
-PR FAST GATE: NOT APPLICABLE
+PR FAST GATE: PASS
 MERGE GROUP FULL REGRESSION: NOT RUN
 RELEASE GATE: PASS
 POST-MERGE LIGHTWEIGHT VERIFY: PASS
@@ -114,4 +114,4 @@ ARCHITECTURE DEBT CLOSURE: PASS WITH ACCEPTED DEBT
 ANI MEMO V1.0 NEXT STEP: Deployment / Updater Hardening
 ```
 
-`FINAL MAIN SHA` is the last verified merged main tree. The remaining changes in this task are docs-only working-tree changes; they are not represented as a new main SHA until a normal review/merge occurs. Release Gate and post-merge lightweight evidence are inherited from the verified `df51876` main closure tree; no new code or migration gate was required for this decision-only update.
+`FINAL MAIN SHA` is the last verified merged main tree after PR #59. The main push CI and Release Gate both completed successfully for this exact SHA; no code, migration or production behavior changed in the decision-only update.
