@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
-from .errors import StateError
+from .errors import OperationInProgress, StateError
 from .state import (
+    UpdateLock,
     _absolute,
     _atomic_json,
     _read_private_text,
@@ -18,6 +21,24 @@ class RuntimeState:
     def __init__(self, root: Path):
         self.root = _absolute(root)
         self.path = self.root / "runtime.json"
+        self.lock_path = self.root / "runtime.lock"
+
+    @contextmanager
+    def _exclusive(self):
+        deadline = time.monotonic() + 10
+        while True:
+            lease = UpdateLock(self.lock_path)
+            try:
+                lease.__enter__()
+                break
+            except OperationInProgress:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            lease.__exit__(None, None, None)
 
     def initialize_from_manifest(
         self,
@@ -25,22 +46,23 @@ class RuntimeState:
         *,
         enabled_plugin_apis: set[int],
     ) -> dict[str, object]:
-        if self.path.exists():
-            return self.read()
-        compatibility = manifest["compatibility"]
-        supported_apis = set(compatibility["pluginSdk"]["supportedApis"])
-        if (
-            not all(isinstance(value, int) and value > 0 for value in enabled_plugin_apis)
-            or not enabled_plugin_apis.issubset(supported_apis)
-        ):
-            raise StateError("Enabled Plugin SDK APIs are invalid for CURRENT")
-        payload = {
-            "databaseContract": compatibility["database"]["contract"],
-            "configurationContract": compatibility["configuration"]["contract"],
-            "enabledPluginApis": sorted(enabled_plugin_apis),
-        }
-        self.write(payload)
-        return payload
+        with self._exclusive():
+            if self.path.exists():
+                return self.read()
+            compatibility = manifest["compatibility"]
+            supported_apis = set(compatibility["pluginSdk"]["supportedApis"])
+            if (
+                not all(isinstance(value, int) and value > 0 for value in enabled_plugin_apis)
+                or not enabled_plugin_apis.issubset(supported_apis)
+            ):
+                raise StateError("Enabled Plugin SDK APIs are invalid for CURRENT")
+            payload = {
+                "databaseContract": compatibility["database"]["contract"],
+                "configurationContract": compatibility["configuration"]["contract"],
+                "enabledPluginApis": sorted(enabled_plugin_apis),
+            }
+            self._write(payload)
+            return payload
 
     def read(self) -> dict[str, object]:
         _validate_private_directory(self.root, self.root)
@@ -60,10 +82,15 @@ class RuntimeState:
         return payload
 
     def write(self, payload: dict[str, object]) -> None:
+        with self._exclusive():
+            self._write(payload)
+
+    def _write(self, payload: dict[str, object]) -> None:
         _atomic_json(self.path, payload, root=self.root)
 
     def update(self, **changes) -> dict[str, object]:
-        payload = self.read()
-        payload.update(changes)
-        self.write(payload)
-        return self.read()
+        with self._exclusive():
+            payload = self.read()
+            payload.update(changes)
+            self._write(payload)
+            return self.read()

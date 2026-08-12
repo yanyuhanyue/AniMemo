@@ -10,11 +10,14 @@ from pathlib import Path
 from release.contract import (
     ReleaseContractError,
     assert_tag_absent,
+    build_deployment_contract,
     build_provenance_plan,
     build_manifest,
+    deployment_contract_digest,
     promote_manifest,
     previous_stable_tag,
     resolve_prerelease,
+    validate_deployment_contract,
     validate_manifest,
 )
 
@@ -22,6 +25,13 @@ from release.contract import (
 COMMIT = "a" * 40
 API_DIGEST = "sha256:" + "1" * 64
 WEB_DIGEST = "sha256:" + "2" * 64
+DEPLOYMENT_FILES = [
+    {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
+    {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
+]
+DEPLOYMENT_DIGEST = deployment_contract_digest(
+    {"schemaVersion": 1, "files": DEPLOYMENT_FILES}
+)
 
 
 def manifest(**overrides):
@@ -32,6 +42,8 @@ def manifest(**overrides):
         "created_at": datetime(2026, 8, 12, tzinfo=timezone.utc),
         "api_digest": API_DIGEST,
         "web_digest": WEB_DIGEST,
+        "deployment_contract_sha256": DEPLOYMENT_DIGEST,
+        "deployment_files": DEPLOYMENT_FILES,
         "minimum_updater_version": "1.0.0",
         "database_contract": "animemo-db-v1",
         "database_accepts": ["animemo-db-v1"],
@@ -96,6 +108,57 @@ class VersionResolutionTests(unittest.TestCase):
 
 
 class ManifestContractTests(unittest.TestCase):
+    def test_deployment_contract_is_canonical_complete_and_bound_to_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "deploy").mkdir()
+            (root / "updater").mkdir()
+            (root / "deploy" / "docker-compose.yml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+            (root / "updater" / "docker-compose.runtime.yml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+
+            contract = build_deployment_contract(root)
+            validate_deployment_contract(contract, root=root)
+
+        self.assertEqual(
+            [item["path"] for item in contract["files"]],
+            ["deploy/docker-compose.yml", "updater/docker-compose.runtime.yml"],
+        )
+        self.assertRegex(deployment_contract_digest(contract), r"^sha256:[0-9a-f]{64}$")
+
+    def test_deployment_contract_rejects_missing_unordered_or_tampered_files(self):
+        missing = {"schemaVersion": 1, "files": DEPLOYMENT_FILES[:1]}
+        with self.assertRaisesRegex(ReleaseContractError, "incomplete or unordered"):
+            validate_deployment_contract(missing)
+
+        unordered = {"schemaVersion": 1, "files": list(reversed(DEPLOYMENT_FILES))}
+        with self.assertRaisesRegex(ReleaseContractError, "incomplete or unordered"):
+            validate_deployment_contract(unordered)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "deploy").mkdir()
+            (root / "updater").mkdir()
+            (root / "deploy" / "docker-compose.yml").write_text("original\n", encoding="utf-8")
+            (root / "updater" / "docker-compose.runtime.yml").write_text("overlay\n", encoding="utf-8")
+            contract = build_deployment_contract(root)
+            (root / "deploy" / "docker-compose.yml").write_text("tampered\n", encoding="utf-8")
+            with self.assertRaisesRegex(ReleaseContractError, "checksum differs"):
+                validate_deployment_contract(contract, root=root)
+
+    def test_v1_release_policy_declares_the_production_baseline_migrations(self):
+        policy = json.loads((Path(__file__).parents[2] / "release" / "compatibility.json").read_text(encoding="utf-8"))
+        database = policy["database"]
+
+        self.assertEqual(
+            database["migration"],
+            {"required": True, "policy": "additive-backward-compatible"},
+        )
+        self.assertEqual(database["applicationRollback"], "conditional")
+
     def test_valid_manifest_round_trips_through_versioned_schema(self):
         payload = manifest()
         validate_manifest(payload, updater_version="1.0.0")
@@ -115,6 +178,28 @@ class ManifestContractTests(unittest.TestCase):
         mutable["images"]["api"]["tag"] = "latest"
         with self.assertRaises(ReleaseContractError):
             validate_manifest(mutable)
+
+    def test_manifest_rejects_unbound_deployment_digest(self):
+        payload = manifest()
+        payload["deployment"]["contractSha256"] = "sha256:" + "f" * 64
+        with self.assertRaisesRegex(ReleaseContractError, "does not bind"):
+            validate_manifest(payload)
+
+    def test_manifest_rejects_release_notes_and_provenance_mismatch(self):
+        wrong_notes = manifest()
+        wrong_notes["releaseNotes"]["tag"] = "v1.0.0-rc.2"
+        with self.assertRaisesRegex(ReleaseContractError, "Release notes tag"):
+            validate_manifest(wrong_notes)
+
+        wrong_workflow = manifest()
+        wrong_workflow["provenance"]["workflow"] = ".github/workflows/promote-release.yml"
+        with self.assertRaisesRegex(ReleaseContractError, "Prerelease provenance"):
+            validate_manifest(wrong_workflow)
+
+        wrong_commit = manifest()
+        wrong_commit["provenance"]["sourceCommit"] = "f" * 40
+        with self.assertRaisesRegex(ReleaseContractError, "Prerelease provenance"):
+            validate_manifest(wrong_commit)
 
     def test_manifest_rejects_invalid_commit_schema_and_compatibility(self):
         invalid_commit = manifest()
@@ -152,7 +237,17 @@ class ManifestContractTests(unittest.TestCase):
         self.assertEqual(stable["release"]["promotedFrom"], "v1.0.0-rc.1")
         self.assertEqual(stable["release"]["commit"], rc["release"]["commit"])
         self.assertEqual(stable["images"], rc["images"])
+        self.assertEqual(stable["deployment"], rc["deployment"])
+        self.assertEqual(
+            stable["artifacts"]["deploymentContract"],
+            rc["artifacts"]["deploymentContract"],
+        )
         self.assertEqual(stable["provenance"]["sourceCommit"], promotion_commit)
+
+        wrong_stable_workflow = copy.deepcopy(stable)
+        wrong_stable_workflow["provenance"]["workflow"] = ".github/workflows/release.yml"
+        with self.assertRaisesRegex(ReleaseContractError, "Stable provenance"):
+            validate_manifest(wrong_stable_workflow)
 
         with self.assertRaisesRegex(ReleaseContractError, "already exists"):
             promote_manifest(rc, existing_tags=["v1.0.0"], provenance_source_commit=promotion_commit)

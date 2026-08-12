@@ -33,6 +33,11 @@ def manifest(
         created_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
         api_digest="sha256:" + digit * 64,
         web_digest="sha256:" + digit * 64,
+        deployment_contract_sha256="sha256:0be5fdf5f87275755e06a2e2b6523c24e16d6aa1db48d8d58e8cfea969b674df",
+        deployment_files=[
+            {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
+            {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
+        ],
         minimum_updater_version="1.0.0",
         database_contract=contract,
         database_accepts=accepts,
@@ -82,11 +87,11 @@ class IsolatedDeployment:
     def bootstrap(self, manifest): self._call("bootstrap", manifest)
     def inspect_enabled_plugin_apis(self, manifest): self._call("inspect_enabled_plugin_apis", manifest); return {2}
 
-    def switch(self, manifest):
+    def switch(self, manifest, *, live_contracts=None):
         self._call("switch", manifest)
         self.live_version = manifest["release"]["version"]
 
-    def verify_health(self, manifest):
+    def verify_health(self, manifest, *, live_contracts=None):
         self._call("verify_health", manifest)
         if self.live_version != manifest["release"]["version"]:
             raise RuntimeError("isolated application identity is unhealthy")

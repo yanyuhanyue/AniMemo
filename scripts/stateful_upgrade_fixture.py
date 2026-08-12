@@ -119,6 +119,8 @@ def seed_state(output_path):
             user.save(update_fields=updates)
 
         if _migration_applied("site", "0003_installation_state"):
+            from django.conf import settings
+            from site_config.first_run import delete_private_setup_code
             from site_config.models import InstallationState
 
             installation_state = InstallationState.load()
@@ -139,6 +141,7 @@ def seed_state(output_path):
                 "initialized_by",
                 "updated_at",
             ])
+            delete_private_setup_code(settings.FIRST_RUN_SETUP_CODE_PATH)
 
     call_command("sync_official_plugins", verbosity=1)
 

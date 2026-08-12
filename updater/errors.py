@@ -10,6 +10,10 @@ class OperationInProgress(UpdaterError):
     code = "update_in_progress"
 
 
+class RecoveryRequired(UpdaterError):
+    code = "manual_recovery_required"
+
+
 class StateError(UpdaterError):
     code = "invalid_operation_state"
 

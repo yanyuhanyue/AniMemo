@@ -60,6 +60,14 @@ done
 
 BASE_SHA="$(git -C "$ROOT" rev-parse --verify "$BASE_SHA^{commit}")"
 HEAD_SHA="$(git -C "$ROOT" rev-parse --verify "$HEAD_SHA^{commit}")"
+if [[ "$BASE_SHA" == "$HEAD_SHA" ]]; then
+  echo "Stateful upgrade gate requires distinct BASE and HEAD commits." >&2
+  exit 1
+fi
+if ! git -C "$ROOT" merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"; then
+  echo "Stateful upgrade BASE must be an ancestor of HEAD." >&2
+  exit 1
+fi
 CURRENT_HEAD="$(git -C "$CURRENT_ROOT" rev-parse --verify HEAD^{commit})"
 if [[ "$CURRENT_HEAD" != "$HEAD_SHA" ]]; then
   echo "Current worktree HEAD ($CURRENT_HEAD) does not match resolved head ($HEAD_SHA)." >&2

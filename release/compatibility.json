@@ -5,10 +5,10 @@
     "contract": "animemo-db-v1",
     "appAccepts": ["animemo-db-v1"],
     "migration": {
-      "required": false,
-      "policy": "none"
+      "required": true,
+      "policy": "additive-backward-compatible"
     },
-    "applicationRollback": "safe"
+    "applicationRollback": "conditional"
   },
   "configuration": {
     "contract": "animemo-config-v1",

@@ -4,7 +4,7 @@
   "title": "AniMemo Release Manifest v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "release", "images", "minimumUpdaterVersion", "compatibility", "releaseNotes", "provenance", "artifacts"],
+  "required": ["schemaVersion", "release", "images", "deployment", "minimumUpdaterVersion", "compatibility", "releaseNotes", "provenance", "artifacts"],
   "properties": {
     "schemaVersion": {"const": 1},
     "release": {
@@ -31,6 +31,20 @@
       "properties": {
         "api": {"$ref": "#/$defs/apiImage"},
         "web": {"$ref": "#/$defs/webImage"}
+      }
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contractSha256", "files"],
+      "properties": {
+        "contractSha256": {"$ref": "#/$defs/digest"},
+        "files": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/deploymentFile"}
+        }
       }
     },
     "minimumUpdaterVersion": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
@@ -108,9 +122,10 @@
     "artifacts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["manifest", "checksums"],
+      "required": ["manifest", "deploymentContract", "checksums"],
       "properties": {
         "manifest": {"const": "release-manifest.json"},
+        "deploymentContract": {"const": "deployment-contract.json"},
         "checksums": {"const": "checksums.txt"}
       }
     }
@@ -123,6 +138,15 @@
       "minItems": 1,
       "uniqueItems": true,
       "items": {"$ref": "#/$defs/contractId"}
+    },
+    "deploymentFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"enum": ["deploy/docker-compose.yml", "updater/docker-compose.runtime.yml"]},
+        "sha256": {"$ref": "#/$defs/digest"}
+      }
     },
     "apiImage": {
       "type": "object",

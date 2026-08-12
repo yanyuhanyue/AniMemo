@@ -39,6 +39,8 @@ RC WEB DIGEST == STABLE WEB DIGEST
 
 Stable Manifest 的 `promotedFrom` 指向 RC tag；发布说明范围是 previous Stable 到 current Stable，不是 RC 到 Stable。
 
+Stable Promotion 固定 workflow dispatch 的 exact `github.sha`，并在首个外部 mutation 前重新验证该 SHA 仍是 `origin/main`、Stable tag/Release 仍不存在。该检查通过后，这个 SHA 成为不可变 publication transaction snapshot；后续普通 main 推进不会把已经开始的 exact RC transaction 中途终止。最终创建 Git tag/Release 前仍再次检查目标不存在，且 release producer concurrency 串行化 AniMemo 发布事务。
+
 ## Manifest schema
 
 权威 JSON Schema 是 `release/release-manifest.schema.json`，当前 `schemaVersion` 为 `1`。Manifest 包含：

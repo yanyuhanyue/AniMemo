@@ -65,7 +65,7 @@ Stable Manifest 保留 RC 的应用 commit 和 API/Web digest，但由 promotion
 - **Application Rollback**：旧应用接受当前 contracts，可只切回 API/Web；
 - **Unsafe Downgrade**：任一 live contract 被拒绝，必须阻断。
 
-Agent 不把 Django migration 文件号当 database schema version，不执行 reverse migration，不自动 restore database。迁移成功后若新应用 health 失败，仅在 PREVIOUS 接受新 database contract 时回退应用；数据库仍保持新 contract。
+Agent 不把 Django migration 文件号当 database schema version，不执行 reverse migration，不自动 restore database。迁移成功后若新应用 health 失败，仅在 PREVIOUS 接受全部 live database/configuration/Plugin SDK contracts 时回退应用；应用回退只替换 API/Web，live 数据与配置契约保持不变。
 
 ## Operation lifecycle
 
@@ -84,7 +84,7 @@ idle
 → succeeded
 ```
 
-失败终态为 `failed_pre_switch`、`rolled_back` 或 `manual_recovery_required`。Agent 重启会把 switch 前未完成 Operation 标为 `failed_pre_switch`；migration/switch 已开始的 Operation 标为 `manual_recovery_required`，绝不自动重放 migration。所有 event detail 在 `OperationStore` 的唯一持久化边界统一 redaction；调用方遗漏脱敏也不能把常见 password/token/Authorization/URL credential 明文写入 journal。
+失败终态为 `failed_pre_switch`、`rolled_back` 或 `manual_recovery_required`。Agent 重启会把 switch 前未完成 Operation 标为 `failed_pre_switch`；migration/switch 已开始的 Operation 标为 `manual_recovery_required`，绝不自动重放 migration。每个会改变 database/configuration contract 的命令在执行前把 exact target Manifest 与 pending transition 写入 Operation journal；正常完成后才解析为 live contract。主机显式 `reconcile` 使用 current/target exact image 的只读 migration snapshot 判定 migration 实际停在 current、target 或 indeterminate：只接受前两者，部分 migration 始终保持阻断。Bootstrap 是唯一允许在该显式恢复边界幂等重试的 mutation。所有 event detail 在 `OperationStore` 的唯一持久化边界统一 redaction；调用方遗漏脱敏也不能把常见 password/token/Authorization/URL credential 明文写入 journal。
 
 ## Backup and switch
 
@@ -106,6 +106,8 @@ stable health observations
 固定 state/data/cache root 及其受管子目录不能是 symlink 或 junction；Operation、plan、runtime、CURRENT/PREVIOUS/history、lock、Release asset 与 backup/metadata 必须是私有单链接普通文件。所有原子写和 gzip backup 使用系统独占创建的随机临时文件。Unix RPC 只会清理真实的陈旧 socket 节点；同名普通文件、目录或 link 会阻止启动，而不会被删除。
 
 Plan 保存的是已经验证过的 exact Manifest 和哈希绑定，但它不替代执行期验证。apply/rollback 在 `FETCHING` 阶段强制绕过 Release cache，重新验证 exact tag、GitHub Release metadata、checksums 和 attestations；`VERIFYING` 阶段要求结果与 plan 或 PREVIOUS 槽位完全一致，任何差异都进入 `failed_pre_switch`，不执行 pull、migration 或 switch。
+
+`reconcile` 只存在于 Host CLI，RPC 明确不暴露。它要求 exact Operation confirmation；若存在 pending contract transition，会重新验证并拉取 journal 中绑定的 exact target，且不会把 running app 自报的 Manifest contract 当作物理数据库事实。无法明确判定的状态继续保持全局 `manual_recovery_required` barrier。
 
 PostgreSQL、Redis、Docker daemon、OpenResty、cloudflared 与其他 VPS 服务都不在 Agent 的操作集合中。
 

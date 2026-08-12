@@ -29,7 +29,12 @@ def _error_response(error):
             {"code": "updater_unavailable", "detail": "系统更新服务暂时不可用，请联系服务器管理员。"},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         ))
-    conflict_codes = {"incompatible_release", "update_in_progress", "invalid_operation_state"}
+    conflict_codes = {
+        "incompatible_release",
+        "update_in_progress",
+        "invalid_operation_state",
+        "manual_recovery_required",
+    }
     status_code = status.HTTP_409_CONFLICT if error.remote_code in conflict_codes else status.HTTP_400_BAD_REQUEST
     return no_store(Response({"code": error.remote_code, "detail": str(error)}, status=status_code))
 

@@ -27,6 +27,15 @@ def health(_request):
                 "commit": settings.ANIME_JOURNAL_COMMIT,
                 "channel": settings.ANIME_JOURNAL_RELEASE_CHANNEL,
             },
+            "artifact": {
+                "version": settings.ANIME_JOURNAL_ARTIFACT_VERSION,
+                "commit": settings.ANIME_JOURNAL_ARTIFACT_COMMIT,
+                "channel": settings.ANIME_JOURNAL_ARTIFACT_CHANNEL,
+            },
+            "contracts": {
+                "database": settings.ANIME_JOURNAL_DATABASE_CONTRACT,
+                "configuration": settings.ANIME_JOURNAL_CONFIGURATION_CONTRACT,
+            },
         }
     )
 

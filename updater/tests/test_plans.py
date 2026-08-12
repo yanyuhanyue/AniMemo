@@ -20,6 +20,11 @@ def manifest():
         created_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
         api_digest="sha256:" + "a" * 64,
         web_digest="sha256:" + "b" * 64,
+        deployment_contract_sha256="sha256:0be5fdf5f87275755e06a2e2b6523c24e16d6aa1db48d8d58e8cfea969b674df",
+        deployment_files=[
+            {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
+            {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
+        ],
         minimum_updater_version="1.0.0",
         database_contract="animemo-db-v1",
         database_accepts=["animemo-db-v1"],

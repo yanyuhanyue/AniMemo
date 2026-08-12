@@ -1,6 +1,6 @@
 export const ACTIVE_UPDATE_STATES = new Set([
   "idle", "preflight", "fetching", "verifying", "backup", "pulling",
-  "migrating", "switching", "verifying_health", "rolling_back",
+  "migrating", "bootstrapping", "switching", "verifying_health", "rolling_back",
 ]);
 
 const STATE_LABELS = {
@@ -11,6 +11,7 @@ const STATE_LABELS = {
   backup: "创建数据库备份",
   pulling: "拉取不可变镜像",
   migrating: "执行数据库迁移",
+  bootstrapping: "应用幂等引导状态",
   switching: "切换 API / Web",
   verifying_health: "稳定窗口检查",
   succeeded: "更新完成",
@@ -19,6 +20,7 @@ const STATE_LABELS = {
   rolling_back: "正在回退应用",
   rolled_back: "应用已回退",
   manual_recovery_required: "需要人工恢复",
+  reconciled: "现场状态已对账",
 };
 
 export function updateStateLabel(value) {

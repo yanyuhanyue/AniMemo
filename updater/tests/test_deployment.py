@@ -9,9 +9,26 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from release.contract import build_manifest
+from release.contract import build_manifest, deployment_contract_digest
 from updater.deployment import HostPaths, ImmutableComposeDeployment
 from updater.errors import StateError
+
+
+TEST_COMPOSE_BYTES = b"services: {}\n"
+UPDATER_OVERLAY = Path(__file__).parents[1] / "docker-compose.runtime.yml"
+DEPLOYMENT_FILES = [
+    {
+        "path": "deploy/docker-compose.yml",
+        "sha256": "sha256:" + hashlib.sha256(TEST_COMPOSE_BYTES).hexdigest(),
+    },
+    {
+        "path": "updater/docker-compose.runtime.yml",
+        "sha256": "sha256:" + hashlib.sha256(UPDATER_OVERLAY.read_bytes()).hexdigest(),
+    },
+]
+DEPLOYMENT_DIGEST = deployment_contract_digest(
+    {"schemaVersion": 1, "files": DEPLOYMENT_FILES}
+)
 
 
 class FakeRunner:
@@ -20,6 +37,10 @@ class FakeRunner:
         self.service_health = {name: "healthy 0" for name in ["postgres", "redis", "api", "web"]}
         self.container_logs = {name: "" for name in ["postgres", "redis", "api", "web"]}
         self.container_errors = {name: "" for name in ["postgres", "redis", "api", "web"]}
+        self.container_images = {}
+        self.container_labels = {}
+        self.web_release_identity = {}
+        self.migration_plans = []
 
     def run(self, argv, **kwargs):
         self.calls.append((tuple(argv), kwargs))
@@ -30,12 +51,28 @@ class FakeRunner:
             stdout = f"{argv[-1]}-container\n"
         elif argv[:2] == ["/usr/bin/docker", "inspect"]:
             service = str(argv[-1]).removesuffix("-container")
-            stdout = self.service_health[service] + "\n"
+            template = argv[3]
+            if ".State.Health" in template:
+                stdout = self.service_health[service] + "\n"
+            elif ".Config.Image" in template:
+                stdout = self.container_images[service] + "\n"
+            else:
+                for label, value in self.container_labels[service].items():
+                    if label in template:
+                        stdout = value + "\n"
+                        break
+        elif argv[:2] == ["/usr/bin/docker", "exec"]:
+            stdout = "\n".join(
+                self.web_release_identity[key]
+                for key in ("version", "commit", "channel")
+            ) + "\n"
         elif argv[:2] == ["/usr/bin/docker", "logs"]:
             service = str(argv[-1]).removesuffix("-container")
             stdout = self.container_logs[service]
         elif "list_enabled_plugin_apis" in " ".join(argv):
             stdout = '[2]\n'
+        elif "showmigrations --plan" in " ".join(argv):
+            stdout = self.migration_plans.pop(0)
         stderr = ""
         if argv[:2] == ["/usr/bin/docker", "logs"]:
             service = str(argv[-1]).removesuffix("-container")
@@ -56,6 +93,8 @@ def manifest():
         created_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
         api_digest="sha256:" + "a" * 64,
         web_digest="sha256:" + "b" * 64,
+        deployment_contract_sha256=DEPLOYMENT_DIGEST,
+        deployment_files=DEPLOYMENT_FILES,
         minimum_updater_version="1.0.0",
         database_contract="animemo-db-v1",
         database_accepts=["animemo-db-v1"],
@@ -70,14 +109,14 @@ def manifest():
 
 
 class ImmutableComposeDeploymentTests(unittest.TestCase):
-    def make(self, directory, *, http_statuses=None):
+    def make(self, directory, *, http_statuses=None, release_identity=None):
         root = Path(directory)
         app = root / "app"
         data = root / "data"
         state = root / "state"
         memory_info = root / "meminfo"
         (app / "deploy").mkdir(parents=True)
-        (app / "deploy" / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+        (app / "deploy" / "docker-compose.yml").write_bytes(TEST_COMPOSE_BYTES)
         (app / ".env.production").write_text(
             "POSTGRES_USER=anime_journal\nPOSTGRES_DB=anime_journal\nFRONTEND_URL=https://ci.example.test\n",
             encoding="utf-8",
@@ -86,6 +125,27 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             (data / name).mkdir(parents=True, exist_ok=True)
         memory_info.write_text("MemAvailable:    2097152 kB\n", encoding="utf-8")
         runner = FakeRunner()
+        target = manifest()
+        runner.container_images = {
+            "api": "ghcr.io/yanyuhanyue/animemo-api@" + target["images"]["api"]["digest"],
+            "web": "ghcr.io/yanyuhanyue/animemo-web@" + target["images"]["web"]["digest"],
+        }
+        artifact_version = target["release"]["promotedFrom"]
+        artifact_identity = {
+            "org.opencontainers.image.version": artifact_version,
+            "org.opencontainers.image.revision": target["release"]["commit"],
+            "cc.animemo.release.channel": "rc",
+        }
+        runner.container_labels = {
+            "api": dict(artifact_identity),
+            "web": dict(artifact_identity),
+        }
+        effective_identity = release_identity or {
+            "version": target["release"]["version"],
+            "commit": target["release"]["commit"],
+            "channel": target["release"]["channel"],
+        }
+        runner.web_release_identity = dict(effective_identity)
         statuses = http_statuses or {}
         probes = []
 
@@ -93,12 +153,24 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             probes.append((path, host, port, forwarded_proto))
             return statuses.get(path, 200)
 
+        def release_probe(*, host, port, forwarded_proto):
+            probes.append(("release-identity", host, port, forwarded_proto))
+            return {
+                "status": "ok",
+                "release": dict(effective_identity),
+                "contracts": {
+                    "database": target["compatibility"]["database"]["contract"],
+                    "configuration": target["compatibility"]["configuration"]["contract"],
+                },
+            }
+
         deployment = ImmutableComposeDeployment(
             HostPaths.testing(app=app, data=data, state=state),
             runner=runner,
             stable_observations=1,
             memory_info_path=memory_info,
             http_probe=http_probe,
+            release_probe=release_probe,
         )
         return deployment, runner, probes
 
@@ -129,7 +201,10 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             self.assertIn(("/usr/bin/docker", "pull", "ghcr.io/yanyuhanyue/animemo-api@" + target["images"]["api"]["digest"]), commands)
             self.assertIn(("/usr/bin/docker", "pull", "ghcr.io/yanyuhanyue/animemo-web@" + target["images"]["web"]["digest"]), commands)
             switch = commands[-1]
-            self.assertEqual(switch[-6:], ("up", "-d", "--no-deps", "--force-recreate", "api", "web"))
+            self.assertEqual(
+                switch[-9:],
+                ("up", "-d", "--no-deps", "--force-recreate", "--wait", "--wait-timeout", "120", "api", "web"),
+            )
             self.assertNotIn("postgres", switch)
             self.assertNotIn("redis", switch)
 
@@ -155,7 +230,34 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
                 + target["images"]["api"]["digest"]
                 + "\nANIMEMO_WEB_IMAGE=ghcr.io/yanyuhanyue/animemo-web@"
                 + target["images"]["web"]["digest"]
-                + "\n",
+                + "\nANIMEMO_RELEASE_VERSION=v1.0.0"
+                + "\nANIMEMO_RELEASE_COMMIT=" + "1" * 40
+                + "\nANIMEMO_RELEASE_CHANNEL=stable"
+                + "\nANIMEMO_DATABASE_CONTRACT=animemo-db-v1"
+                + "\nANIMEMO_CONFIGURATION_CONTRACT=animemo-config-v1\n",
+            )
+
+    def test_switch_uses_the_authoritative_live_contracts_not_the_image_contracts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            target = manifest()
+
+            deployment.switch(
+                target,
+                live_contracts={
+                    "databaseContract": "animemo-db-v2",
+                    "configurationContract": "animemo-config-v2",
+                },
+            )
+
+            runtime = deployment.runtime_env.read_text(encoding="utf-8")
+            self.assertIn("ANIMEMO_DATABASE_CONTRACT=animemo-db-v2\n", runtime)
+            self.assertIn("ANIMEMO_CONFIGURATION_CONTRACT=animemo-config-v2\n", runtime)
+            switch_environment = runner.calls[-1][1]["env"]
+            self.assertEqual(switch_environment["ANIMEMO_DATABASE_CONTRACT"], "animemo-db-v2")
+            self.assertEqual(
+                switch_environment["ANIMEMO_CONFIGURATION_CONTRACT"],
+                "animemo-config-v2",
             )
 
     def test_switch_does_not_follow_a_precreated_atomic_temporary_link(self):
@@ -186,6 +288,61 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             self.assertEqual(commands[1][-4:], ("run", "--rm", "--no-deps", "bootstrap"))
             for _, kwargs in runner.calls:
                 self.assertEqual(kwargs["env"]["ANIMEMO_API_IMAGE"], "ghcr.io/yanyuhanyue/animemo-api@" + target["images"]["api"]["digest"])
+
+    def test_runtime_contract_inspection_uses_the_running_api_without_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            target = manifest()
+
+            contracts = deployment.inspect_runtime_contracts(target)
+
+            commands = [call[0] for call in runner.calls]
+            self.assertEqual(
+                commands[0][-8:],
+                ("exec", "-T", "api", "python", "manage.py", "migrate", "--check", "--noinput"),
+            )
+            self.assertEqual(
+                commands[1][-7:],
+                ("exec", "-T", "api", "python", "manage.py", "check", "--deploy"),
+            )
+            self.assertEqual(
+                contracts,
+                {
+                    "databaseContract": "animemo-db-v1",
+                    "configurationContract": "animemo-config-v1",
+                },
+            )
+
+    def test_database_transition_inspection_distinguishes_current_target_and_partial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            current = manifest()
+            target = manifest()
+
+            scenarios = [
+                (
+                    "current",
+                    "[X]  journal.0001_initial\n",
+                    "[X]  journal.0001_initial\n[ ]  journal.0002_additive\n",
+                ),
+                (
+                    "target",
+                    "[X]  journal.0001_initial\n",
+                    "[X]  journal.0001_initial\n[X]  journal.0002_additive\n",
+                ),
+                (
+                    "indeterminate",
+                    "[X]  journal.0001_initial\n",
+                    "[X]  journal.0001_initial\n[X]  journal.0002_a\n[ ]  journal.0003_b\n",
+                ),
+            ]
+            for expected, current_plan, target_plan in scenarios:
+                with self.subTest(expected=expected):
+                    runner.migration_plans = [current_plan, target_plan]
+                    self.assertEqual(
+                        deployment.inspect_database_transition(current, target),
+                        expected,
+                    )
 
     def test_custom_or_symlink_escape_paths_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -270,6 +427,16 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "memory"):
                 deployment.preflight(manifest())
 
+    def test_preflight_and_reconciliation_reject_deployment_file_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, _, _ = self.make(directory)
+            deployment.compose_file.write_text("services:\n  attacker: {}\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(StateError, "differs from the Manifest"):
+                deployment.preflight(manifest())
+            with self.assertRaisesRegex(StateError, "differs from the Manifest"):
+                deployment.verify_health(manifest())
+
     def test_preflight_requires_all_current_services_to_be_healthy(self):
         with tempfile.TemporaryDirectory() as directory:
             deployment, runner, _ = self.make(directory)
@@ -304,8 +471,41 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
 
             self.assertEqual(
                 [probe[0] for probe in probes],
-                ["/health/", "/", "/login", "/api/schema/", "/api/docs/"],
+                ["/health/", "/", "/login", "/api/schema/", "/api/docs/", "release-identity"],
             )
+
+    def test_stable_health_binds_exact_images_rc_artifact_and_effective_stable_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+
+            deployment.verify_health(manifest())
+
+            commands = [call[0] for call in runner.calls]
+            self.assertTrue(any(any(".Config.Image" in part for part in command) for command in commands))
+            self.assertTrue(any(any("org.opencontainers.image.version" in part for part in command) for command in commands))
+            self.assertTrue(any(command[:2] == ("/usr/bin/docker", "exec") for command in commands))
+
+    def test_stable_health_rejects_a_wrong_running_image_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            runner.container_images["web"] = "ghcr.io/yanyuhanyue/animemo-web@sha256:" + "0" * 64
+
+            with self.assertRaisesRegex(StateError, "web image identity"):
+                deployment.verify_health(manifest())
+
+    def test_stable_health_rejects_an_api_effective_identity_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, _, _ = self.make(
+                directory,
+                release_identity={
+                    "version": "v1.0.0-rc.1",
+                    "commit": "1" * 40,
+                    "channel": "rc",
+                },
+            )
+
+            with self.assertRaisesRegex(StateError, "effective release identity"):
+                deployment.verify_health(manifest())
 
     def test_stable_window_rejects_http_5xx_and_critical_logs(self):
         for log_line in [

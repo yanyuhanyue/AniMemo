@@ -16,19 +16,36 @@ from .state import (
 )
 
 
+SLOTS_SCHEMA_VERSION = 1
+
+
 class ReleaseSlots:
-    """Own the durable CURRENT, PREVIOUS, and immutable history manifests."""
+    """Own CURRENT, PREVIOUS and immutable history as one atomic generation."""
 
     def __init__(self, root: Path):
         self.root = _absolute(root)
+        self.envelope_path = self.root / "release-slots.json"
+        # Read-only legacy locations are retained solely for one-time migration.
         self.current_path = self.root / "CURRENT.json"
         self.previous_path = self.root / "PREVIOUS.json"
         self.history_root = self.root / "history"
 
-    def _validate_storage(self) -> None:
-        _ensure_private_directory(self.root, self.history_root)
+    @staticmethod
+    def _empty() -> dict[str, object]:
+        return {
+            "schemaVersion": SLOTS_SCHEMA_VERSION,
+            "generation": 0,
+            "current": None,
+            "previous": None,
+            "history": [],
+        }
 
-    def _load(self, path: Path) -> dict[str, object] | None:
+    def _validate_storage(self) -> None:
+        _ensure_private_directory(self.root, self.root)
+        if self.history_root.exists() or self.history_root.is_symlink():
+            _validate_private_directory(self.root, self.history_root)
+
+    def _load_manifest(self, path: Path) -> dict[str, object] | None:
         try:
             raw = _read_private_text(self.root, path)
         except FileNotFoundError:
@@ -40,79 +57,180 @@ class ReleaseSlots:
             raise StateError(f"Invalid release slot: {path.name}") from error
         return payload
 
-    def _history_path(self, manifest: dict[str, object]) -> Path:
-        version = str(manifest["release"]["version"])
-        return self.history_root / f"{version}.json"
-
-    def _record_history(self, manifest: dict[str, object], operation_id: str | None) -> None:
-        path = self._history_path(manifest)
-        if path.exists():
-            try:
-                existing = json.loads(_read_private_text(self.root, path))
-                existing_manifest = existing["manifest"]
-                validate_manifest(existing_manifest)
-            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-                raise StateError(f"Invalid immutable release history: {path.name}") from error
-            if existing_manifest != manifest:
-                raise StateError(f"Immutable release history conflicts for {manifest['release']['version']}")
-            return
-        _atomic_json(
-            path,
-            {"manifest": copy.deepcopy(manifest), "deployment": {"operationId": operation_id}},
-            root=self.root,
-        )
-
     @staticmethod
-    def _strip_metadata(manifest: dict[str, object] | None) -> dict[str, object] | None:
-        if manifest is None:
+    def _version(manifest: dict[str, object]) -> str:
+        return str(manifest["release"]["version"])
+
+    def _validate_envelope(self, payload: object) -> dict[str, object]:
+        if not isinstance(payload, dict) or set(payload) != {
+            "schemaVersion", "generation", "current", "previous", "history"
+        }:
+            raise StateError("Release slots envelope has an invalid shape")
+        if payload["schemaVersion"] != SLOTS_SCHEMA_VERSION:
+            raise StateError("Release slots envelope has an unsupported schema")
+        if not isinstance(payload["generation"], int) or isinstance(payload["generation"], bool) or payload["generation"] < 0:
+            raise StateError("Release slots generation is invalid")
+
+        current = payload["current"]
+        previous = payload["previous"]
+        for label, manifest in (("CURRENT", current), ("PREVIOUS", previous)):
+            if manifest is not None:
+                try:
+                    validate_manifest(manifest)
+                except (TypeError, ValueError) as error:
+                    raise StateError(f"Invalid release slot: {label}") from error
+
+        history = payload["history"]
+        if not isinstance(history, list):
+            raise StateError("Release slots history is invalid")
+        by_version: dict[str, dict[str, object]] = {}
+        for record in history:
+            if not isinstance(record, dict) or set(record) != {"manifest", "deployment"}:
+                raise StateError("Release slots history record is invalid")
+            manifest = record["manifest"]
+            deployment = record["deployment"]
+            try:
+                validate_manifest(manifest)
+            except (TypeError, ValueError) as error:
+                raise StateError("Release slots history manifest is invalid") from error
+            if not isinstance(deployment, dict) or set(deployment) != {"operationId"}:
+                raise StateError("Release slots history deployment is invalid")
+            operation_id = deployment["operationId"]
+            if operation_id is not None and not isinstance(operation_id, str):
+                raise StateError("Release slots history operation id is invalid")
+            version = self._version(manifest)
+            if version in by_version:
+                raise StateError(f"Duplicate immutable release history: {version}")
+            by_version[version] = manifest
+
+        if current is None:
+            if previous is not None or history:
+                raise StateError("Uninitialized release slots contain durable release state")
+        else:
+            current_version = self._version(current)
+            if by_version.get(current_version) != current:
+                raise StateError("CURRENT is missing from immutable release history")
+            if previous is not None:
+                previous_version = self._version(previous)
+                if previous == current:
+                    raise StateError("CURRENT and PREVIOUS must identify different releases")
+                if by_version.get(previous_version) != previous:
+                    raise StateError("PREVIOUS is missing from immutable release history")
+        return payload
+
+    def _load_envelope(self) -> dict[str, object] | None:
+        try:
+            raw = _read_private_text(self.root, self.envelope_path)
+        except FileNotFoundError:
             return None
-        result = copy.deepcopy(manifest)
-        result.pop("_deployment", None)
-        return result
+        try:
+            payload = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as error:
+            raise StateError("Release slots envelope is invalid") from error
+        return self._validate_envelope(payload)
+
+    def _legacy_envelope(self) -> dict[str, object] | None:
+        current = self._load_manifest(self.current_path)
+        previous = self._load_manifest(self.previous_path)
+        history: list[dict[str, object]] = []
+        if self.history_root.exists():
+            for path in sorted(self.history_root.glob("*.json")):
+                try:
+                    record = json.loads(_read_private_text(self.root, path))
+                    manifest = record["manifest"]
+                    deployment = record.get("deployment", {})
+                    validate_manifest(manifest)
+                except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+                    raise StateError(f"Invalid immutable release history: {path.name}") from error
+                history.append({
+                    "manifest": manifest,
+                    "deployment": {"operationId": deployment.get("operationId")},
+                })
+        if current is None and previous is None and not history:
+            return None
+        payload = {
+            "schemaVersion": SLOTS_SCHEMA_VERSION,
+            "generation": 1,
+            "current": current,
+            "previous": previous,
+            "history": history,
+        }
+        return self._validate_envelope(payload)
+
+    def _state(self) -> dict[str, object]:
+        self._validate_storage()
+        envelope = self._load_envelope()
+        if envelope is not None:
+            return envelope
+        legacy = self._legacy_envelope()
+        if legacy is None:
+            return self._empty()
+        _atomic_json(self.envelope_path, legacy, root=self.root)
+        return legacy
+
+    def _commit(self, payload: dict[str, object]) -> None:
+        self._validate_envelope(payload)
+        _atomic_json(self.envelope_path, payload, root=self.root)
+
+    def _record_history(
+        self,
+        history: list[dict[str, object]],
+        manifest: dict[str, object],
+        operation_id: str | None,
+    ) -> None:
+        version = self._version(manifest)
+        for record in history:
+            if self._version(record["manifest"]) != version:
+                continue
+            if record["manifest"] != manifest:
+                raise StateError(f"Immutable release history conflicts for {version}")
+            return
+        history.append({
+            "manifest": copy.deepcopy(manifest),
+            "deployment": {"operationId": operation_id},
+        })
+        history.sort(key=lambda item: (item["manifest"]["release"]["createdAt"], self._version(item["manifest"])))
 
     def import_current(self, manifest: dict[str, object]) -> None:
         validate_manifest(manifest)
-        self._validate_storage()
-        current = self._load(self.current_path)
-        if current is not None:
+        state = copy.deepcopy(self._state())
+        if state["current"] is not None:
             raise StateError("CURRENT is already initialized; bootstrap import is one-time")
-        _atomic_json(self.current_path, manifest, root=self.root)
-        self._record_history(manifest, None)
+        state["current"] = copy.deepcopy(manifest)
+        self._record_history(state["history"], manifest, None)
+        state["generation"] += 1
+        self._commit(state)
 
     def promote(self, manifest: dict[str, object], *, operation_id: str) -> None:
         validate_manifest(manifest)
-        self._validate_storage()
-        current = self._load(self.current_path)
-        if current is not None:
-            _atomic_json(self.previous_path, current, root=self.root)
-        _atomic_json(self.current_path, manifest, root=self.root)
-        self._record_history(manifest, operation_id)
+        state = copy.deepcopy(self._state())
+        current = state["current"]
+        if current == manifest:
+            raise StateError("CURRENT already identifies the target release")
+        state["previous"] = current
+        state["current"] = copy.deepcopy(manifest)
+        self._record_history(state["history"], manifest, operation_id)
+        state["generation"] += 1
+        self._commit(state)
 
     def restore_previous(self, *, operation_id: str) -> dict[str, object]:
-        self._validate_storage()
-        current = self._load(self.current_path)
-        previous = self._load(self.previous_path)
+        state = copy.deepcopy(self._state())
+        current = state["current"]
+        previous = state["previous"]
         if previous is None:
             raise StateError("PREVIOUS is not available")
-        if current is not None:
-            _atomic_json(self.previous_path, current, root=self.root)
-        _atomic_json(self.current_path, previous, root=self.root)
-        self._record_history(previous, operation_id)
-        return previous
+        state["current"] = previous
+        state["previous"] = current
+        self._record_history(state["history"], previous, operation_id)
+        state["generation"] += 1
+        self._commit(state)
+        return copy.deepcopy(previous)
 
     def read(self) -> dict[str, object]:
-        _validate_private_directory(self.root, self.root)
-        _validate_private_directory(self.root, self.history_root)
-        history = []
-        if self.history_root.exists():
-            for path in sorted(self.history_root.glob("*.json")):
-                payload = json.loads(_read_private_text(self.root, path))
-                manifest = payload["manifest"]
-                validate_manifest(manifest)
-                history.append({"manifest": manifest, "deployment": payload.get("deployment", {})})
-        history.sort(key=lambda item: item["manifest"]["release"]["createdAt"])
+        state = self._state()
         return {
-            "current": self._strip_metadata(self._load(self.current_path)),
-            "previous": self._strip_metadata(self._load(self.previous_path)),
-            "history": history,
+            "current": copy.deepcopy(state["current"]),
+            "previous": copy.deepcopy(state["previous"]),
+            "history": copy.deepcopy(state["history"]),
+            "generation": state["generation"],
         }

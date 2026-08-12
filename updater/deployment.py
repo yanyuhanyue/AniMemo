@@ -14,11 +14,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from release.contract import API_REPOSITORY, WEB_REPOSITORY
+from release.contract import (
+    API_REPOSITORY,
+    DEPLOYMENT_CONTRACT_PATHS,
+    WEB_REPOSITORY,
+)
 
 from .commands import CommandRunner
 from .errors import CommandFailed, StateError
-from .state import _atomic_json, _atomic_text
+from .state import _atomic_json, _atomic_text, _read_private_text
 
 PRODUCTION_APP_ROOT = Path("/opt/1panel/docker/compose/anime-journal/app")
 PRODUCTION_DATA_ROOT = Path("/data/anime-journal")
@@ -28,6 +32,17 @@ MIN_AVAILABLE_MEMORY = 512 * 1024 * 1024
 HEALTH_PATHS = ("/health/", "/", "/login", "/api/schema/", "/api/docs/")
 HTTP_5XX_LOG = re.compile(r'"\s5\d\d(?:\s|$)')
 CRITICAL_LOG = re.compile(r"(?im)(?:^|\b)(?:traceback \(most recent call last\)|critical|fatal|panic)(?:\b|:)")
+MIGRATION_PLAN_LINE = re.compile(
+    r"^\s*\[(?P<state>[ X])\]\s+(?P<name>[A-Za-z0-9_]+\.[^\s]+)\s*$"
+)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -68,6 +83,7 @@ class ImmutableComposeDeployment:
         observation_seconds: int = 5,
         memory_info_path: Path = Path("/proc/meminfo"),
         http_probe=None,
+        release_probe=None,
     ):
         self.paths = paths
         self.runner = runner or CommandRunner()
@@ -75,7 +91,9 @@ class ImmutableComposeDeployment:
         self.observation_seconds = observation_seconds
         self.memory_info_path = memory_info_path
         self.http_probe = http_probe or self._http_probe
+        self.release_probe = release_probe or self._release_probe
         self.compose_file = self.paths.app_root / "deploy" / "docker-compose.yml"
+        self.updater_compose_file = Path(__file__).with_name("docker-compose.runtime.yml")
         self.env_file = self.paths.app_root / ".env.production"
         self.runtime_env = self.paths.state_root / "runtime-images.env"
 
@@ -100,6 +118,31 @@ class ImmutableComposeDeployment:
         finally:
             connection.close()
 
+    @staticmethod
+    def _release_probe(*, host: str, port: int, forwarded_proto: str) -> dict[str, object]:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request(
+                "GET",
+                "/health/",
+                headers={"Host": host, "X-Forwarded-Proto": forwarded_proto},
+            )
+            response = connection.getresponse()
+            body = response.read()
+            if response.status != 200:
+                raise StateError(
+                    f"AniMemo effective release identity is unavailable: HTTP {response.status}"
+                )
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError as error:
+                raise StateError("AniMemo effective release identity is invalid") from error
+            if not isinstance(payload, dict):
+                raise StateError("AniMemo effective release identity is invalid")
+            return payload
+        finally:
+            connection.close()
+
     def _public_endpoint(self) -> tuple[str, int, str]:
         parsed = urlparse(self._env_value("FRONTEND_URL"))
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -114,9 +157,7 @@ class ImmutableComposeDeployment:
         return parsed.hostname, port, parsed.scheme
 
     def _container_state(self, manifest: dict[str, object], service: str) -> tuple[str, int]:
-        container = self._compose(manifest, "ps", "-q", service, timeout=30).stdout.strip()
-        if not container:
-            raise StateError(f"AniMemo {service} container is unavailable")
+        container = self._container_id(manifest, service)
         result = self.runner.run(
             [
                 "/usr/bin/docker", "inspect", "--format",
@@ -132,6 +173,18 @@ class ImmutableComposeDeployment:
         except ValueError as error:
             raise StateError(f"AniMemo {service} container restart count is invalid") from error
         return result[0], restarts
+
+    def _container_id(self, manifest: dict[str, object], service: str) -> str:
+        container = self._compose(manifest, "ps", "-q", service, timeout=30).stdout.strip()
+        if not container:
+            raise StateError(f"AniMemo {service} container is unavailable")
+        return container
+
+    def _inspect_container(self, container: str, template: str) -> str:
+        return self.runner.run(
+            ["/usr/bin/docker", "inspect", "--format", template, container],
+            timeout=30,
+        ).stdout.strip()
 
     def _verify_http_paths(self, paths: tuple[str, ...]) -> None:
         host, port, forwarded_proto = self._public_endpoint()
@@ -157,33 +210,112 @@ class ImmutableComposeDeployment:
                 raise StateError(f"AniMemo {service} logs failed the stable observation gate")
 
     @staticmethod
-    def image_environment(manifest: dict[str, object]) -> dict[str, str]:
+    def image_environment(
+        manifest: dict[str, object],
+        *,
+        live_contracts: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        release = manifest["release"]
+        compatibility = manifest["compatibility"]
+        contracts = (
+            {
+                "databaseContract": compatibility["database"]["contract"],
+                "configurationContract": compatibility["configuration"]["contract"],
+            }
+            if live_contracts is None
+            else live_contracts
+        )
+        if (
+            not isinstance(contracts, dict)
+            or set(contracts) != {"databaseContract", "configurationContract"}
+            or not all(isinstance(value, str) and value for value in contracts.values())
+        ):
+            raise StateError("Live runtime contracts are invalid")
         return {
             "ANIMEMO_API_IMAGE": f"{API_REPOSITORY}@{manifest['images']['api']['digest']}",
             "ANIMEMO_WEB_IMAGE": f"{WEB_REPOSITORY}@{manifest['images']['web']['digest']}",
+            "ANIMEMO_RELEASE_VERSION": release["version"],
+            "ANIMEMO_RELEASE_COMMIT": release["commit"],
+            "ANIMEMO_RELEASE_CHANNEL": release["channel"],
+            "ANIMEMO_DATABASE_CONTRACT": contracts["databaseContract"],
+            "ANIMEMO_CONFIGURATION_CONTRACT": contracts["configurationContract"],
         }
 
-    def _environment(self, manifest: dict[str, object]) -> dict[str, str]:
-        return {**os.environ, **self.image_environment(manifest)}
+    def _environment(
+        self,
+        manifest: dict[str, object],
+        *,
+        live_contracts: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        return {
+            **os.environ,
+            **self.image_environment(manifest, live_contracts=live_contracts),
+        }
 
-    def _compose(self, manifest: dict[str, object], *args: str, timeout: int = 300):
+    def _compose(
+        self,
+        manifest: dict[str, object],
+        *args: str,
+        timeout: int = 300,
+        live_contracts: dict[str, str] | None = None,
+    ):
+        env_files = ["--env-file", str(self.env_file)]
+        if self.runtime_env.exists() or self.runtime_env.is_symlink():
+            _read_private_text(self.paths.state_root, self.runtime_env)
+            env_files.extend(["--env-file", str(self.runtime_env)])
         return self.runner.run(
             [
                 "/usr/bin/docker", "compose",
                 "--project-name", "anime-journal",
-                "--env-file", str(self.env_file),
+                *env_files,
                 "-f", str(self.compose_file),
+                "-f", str(self.updater_compose_file),
                 *args,
             ],
             cwd=self.paths.app_root,
-            env=self._environment(manifest),
+            env=self._environment(manifest, live_contracts=live_contracts),
             timeout=timeout,
         )
 
+    def verify_deployment_contract(self, manifest: dict[str, object]) -> None:
+        declared = manifest.get("deployment", {}).get("files", [])
+        if (
+            not isinstance(declared, list)
+            or [item.get("path") for item in declared if isinstance(item, dict)]
+            != list(DEPLOYMENT_CONTRACT_PATHS)
+        ):
+            raise StateError("AniMemo deployment contract is incomplete or unordered")
+        local_files = {
+            "deploy/docker-compose.yml": self.compose_file,
+            "updater/docker-compose.runtime.yml": self.updater_compose_file,
+        }
+        for item in declared:
+            source = local_files[item["path"]]
+            try:
+                source_stat = source.lstat()
+            except OSError as error:
+                raise StateError(
+                    f"AniMemo deployment contract file is unavailable: {item['path']}"
+                ) from error
+            if (
+                source.is_symlink()
+                or not stat.S_ISREG(source_stat.st_mode)
+                or source_stat.st_nlink != 1
+            ):
+                raise StateError(
+                    f"AniMemo deployment contract file must be a private regular file: {item['path']}"
+                )
+            actual = "sha256:" + _sha256_file(source)
+            if actual != item.get("sha256"):
+                raise StateError(
+                    f"AniMemo deployment contract file differs from the Manifest: {item['path']}"
+                )
+
     def preflight(self, manifest: dict[str, object]) -> None:
-        for path in [self.compose_file, self.env_file]:
+        for path in [self.compose_file, self.updater_compose_file, self.env_file]:
             if not path.is_file() or path.is_symlink():
                 raise StateError(f"Required fixed AniMemo file is unavailable: {path.name}")
+        self.verify_deployment_contract(manifest)
         usage = shutil.disk_usage(self.paths.data_root)
         if usage.free < 2 * 1024 * 1024 * 1024:
             raise StateError("AniMemo data root has less than 2 GiB free")
@@ -246,7 +378,7 @@ class ImmutableComposeDeployment:
         backup_stat = backup.lstat()
         if backup.is_symlink() or not stat.S_ISREG(backup_stat.st_mode) or backup_stat.st_nlink != 1:
             raise StateError("Latest AniMemo database backup must not be a link")
-        digest = hashlib.sha256(backup.read_bytes()).hexdigest()
+        digest = _sha256_file(backup)
         if digest != payload.get("compressedSha256"):
             raise StateError("Latest AniMemo database backup checksum is invalid")
         try:
@@ -284,7 +416,7 @@ class ImmutableComposeDeployment:
             timeout=600,
             root=self.paths.data_root,
         )
-        compressed_digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        compressed_digest = _sha256_file(target)
         metadata = {
             "path": str(target),
             "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -325,16 +457,103 @@ class ImmutableComposeDeployment:
             raise StateError("Enabled Plugin SDK inspection returned invalid data")
         return set(values)
 
-    def switch(self, manifest: dict[str, object]) -> None:
-        env = self.image_environment(manifest)
+    def inspect_runtime_contracts(self, manifest: dict[str, object]) -> dict[str, str]:
+        self._compose(
+            manifest,
+            "exec", "-T", "api", "python", "manage.py", "migrate", "--check", "--noinput",
+            timeout=120,
+        )
+        self._compose(
+            manifest,
+            "exec", "-T", "api", "python", "manage.py", "check", "--deploy",
+            timeout=120,
+        )
+        host, port, forwarded_proto = self._public_endpoint()
+        payload = self.release_probe(
+            host=host,
+            port=port,
+            forwarded_proto=forwarded_proto,
+        )
+        contracts = payload.get("contracts") if isinstance(payload, dict) else None
+        if not isinstance(contracts, dict) or set(contracts) != {"database", "configuration"}:
+            raise StateError("Live runtime contract inspection returned invalid data")
+        if not all(isinstance(value, str) and value for value in contracts.values()):
+            raise StateError("Live runtime contract inspection returned invalid data")
+        return {
+            "databaseContract": contracts["database"],
+            "configurationContract": contracts["configuration"],
+        }
+
+    def _migration_snapshot(self, manifest: dict[str, object]) -> dict[str, bool]:
+        result = self._compose(
+            manifest,
+            "run", "--rm", "--no-deps", "api",
+            "python", "manage.py", "showmigrations", "--plan",
+            timeout=120,
+        )
+        snapshot: dict[str, bool] = {}
+        for line in result.stdout.splitlines():
+            match = MIGRATION_PLAN_LINE.fullmatch(line)
+            if match is None:
+                continue
+            name = match.group("name")
+            applied = match.group("state") == "X"
+            if name in snapshot and snapshot[name] != applied:
+                raise StateError("Database migration inspection returned conflicting state")
+            snapshot[name] = applied
+        if not snapshot:
+            raise StateError("Database migration inspection returned no migrations")
+        return snapshot
+
+    def inspect_database_transition(
+        self,
+        current: dict[str, object],
+        target: dict[str, object],
+    ) -> str:
+        current_snapshot = self._migration_snapshot(current)
+        target_snapshot = self._migration_snapshot(target)
+        current_names = set(current_snapshot)
+        target_names = set(target_snapshot)
+        if not current_names.issubset(target_names):
+            return "indeterminate"
+        if all(target_snapshot.values()):
+            return "target"
+        target_only = target_names - current_names
+        if (
+            all(current_snapshot.values())
+            and target_only
+            and all(not target_snapshot[name] for name in target_only)
+        ):
+            return "current"
+        return "indeterminate"
+
+    def switch(
+        self,
+        manifest: dict[str, object],
+        *,
+        live_contracts: dict[str, str] | None = None,
+    ) -> None:
+        env = self.image_environment(manifest, live_contracts=live_contracts)
         _atomic_text(
             self.runtime_env,
-            f"ANIMEMO_API_IMAGE={env['ANIMEMO_API_IMAGE']}\nANIMEMO_WEB_IMAGE={env['ANIMEMO_WEB_IMAGE']}\n",
+            "".join(f"{key}={value}\n" for key, value in env.items()),
             root=self.paths.state_root,
         )
-        self._compose(manifest, "up", "-d", "--no-deps", "--force-recreate", "api", "web", timeout=600)
+        self._compose(
+            manifest,
+            "up", "-d", "--no-deps", "--force-recreate",
+            "--wait", "--wait-timeout", "120", "api", "web",
+            live_contracts=live_contracts,
+            timeout=600,
+        )
 
-    def verify_health(self, manifest: dict[str, object]) -> None:
+    def verify_health(
+        self,
+        manifest: dict[str, object],
+        *,
+        live_contracts: dict[str, str] | None = None,
+    ) -> None:
+        self.verify_deployment_contract(manifest)
         observation_started = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         for observation in range(self.stable_observations):
             for service in ["api", "web"]:
@@ -343,5 +562,71 @@ class ImmutableComposeDeployment:
                     raise CommandFailed(f"{service} failed stable health observation")
             self._verify_http_paths(HEALTH_PATHS)
             self._verify_recent_logs(manifest, since=observation_started)
+            self._verify_release_identity(manifest, live_contracts=live_contracts)
             if observation + 1 < self.stable_observations:
                 time.sleep(self.observation_seconds)
+
+    def _verify_release_identity(
+        self,
+        manifest: dict[str, object],
+        *,
+        live_contracts: dict[str, str] | None = None,
+    ) -> None:
+        environment = self.image_environment(manifest, live_contracts=live_contracts)
+        release = manifest["release"]
+        artifact_version = release["promotedFrom"] or release["version"]
+        artifact_channel = "rc" if release["promotedFrom"] else release["channel"]
+        artifact = {
+            "org.opencontainers.image.version": artifact_version,
+            "org.opencontainers.image.revision": release["commit"],
+            "cc.animemo.release.channel": artifact_channel,
+        }
+        for service, image_key in (("api", "ANIMEMO_API_IMAGE"), ("web", "ANIMEMO_WEB_IMAGE")):
+            container = self._container_id(manifest, service)
+            actual_image = self._inspect_container(container, "{{.Config.Image}}")
+            if actual_image != environment[image_key]:
+                raise StateError(f"AniMemo {service} image identity differs from the Manifest")
+            for label, expected in artifact.items():
+                actual = self._inspect_container(
+                    container,
+                    '{{index .Config.Labels "' + label + '"}}',
+                )
+                if actual != expected:
+                    raise StateError(
+                        f"AniMemo {service} artifact identity differs from the Manifest"
+                    )
+
+        web_container = self._container_id(manifest, "web")
+        web_identity = self.runner.run(
+            [
+                "/usr/bin/docker", "exec", web_container, "/bin/sh", "-c",
+                'printf "%s\\n%s\\n%s\\n" "$ANIMEMO_RELEASE_VERSION" '
+                '"$ANIMEMO_RELEASE_COMMIT" "$ANIMEMO_RELEASE_CHANNEL"',
+            ],
+            timeout=30,
+        ).stdout.splitlines()
+        expected_release = {
+            "version": release["version"],
+            "commit": release["commit"],
+            "channel": release["channel"],
+        }
+        if web_identity != [
+            expected_release["version"],
+            expected_release["commit"],
+            expected_release["channel"],
+        ]:
+            raise StateError("AniMemo web effective release identity differs from the Manifest")
+
+        host, port, forwarded_proto = self._public_endpoint()
+        payload = self.release_probe(host=host, port=port, forwarded_proto=forwarded_proto)
+        expected_contracts = {
+            "database": environment["ANIMEMO_DATABASE_CONTRACT"],
+            "configuration": environment["ANIMEMO_CONFIGURATION_CONTRACT"],
+        }
+        if (
+            not isinstance(payload, dict)
+            or payload.get("status") != "ok"
+            or payload.get("release") != expected_release
+            or payload.get("contracts") != expected_contracts
+        ):
+            raise StateError("AniMemo API effective release identity differs from the Manifest")

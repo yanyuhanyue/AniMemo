@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +36,11 @@ def manifest(version: str, digit: str):
         created_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
         api_digest="sha256:" + digit * 64,
         web_digest="sha256:" + digit.upper().lower() * 64,
+        deployment_contract_sha256="sha256:0be5fdf5f87275755e06a2e2b6523c24e16d6aa1db48d8d58e8cfea969b674df",
+        deployment_files=[
+            {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
+            {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
+        ],
         minimum_updater_version="1.0.0",
         database_contract="animemo-db-v1",
         database_accepts=["animemo-db-v1"],
@@ -61,6 +68,8 @@ class ReleaseSlotTests(unittest.TestCase):
             self.assertEqual(state["current"]["release"]["version"], "v1.0.1")
             self.assertEqual(state["previous"]["release"]["version"], "v1.0.0")
             self.assertEqual([item["manifest"]["release"]["version"] for item in state["history"]], ["v1.0.0", "v1.0.1"])
+            self.assertEqual(state["generation"], 2)
+            self.assertTrue((Path(directory) / "release-slots.json").is_file())
 
     def test_failed_switch_does_not_change_slots(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -128,14 +137,9 @@ class ReleaseSlotTests(unittest.TestCase):
             root = Path(directory)
             release_root = root / "releases"
             outside = root / "outside"
-            first = manifest("v1.0.0", "1")
-            ReleaseSlots(release_root).import_current(first)
-            stored_history = release_root / "history"
             outside.mkdir()
-            for item in stored_history.iterdir():
-                item.replace(outside / item.name)
-            stored_history.rmdir()
-            link_directory(stored_history, outside)
+            release_root.mkdir()
+            link_directory(release_root / "history", outside)
             slots = ReleaseSlots(release_root)
 
             with self.assertRaisesRegex(StateError, "directory"):
@@ -147,7 +151,11 @@ class ReleaseSlotTests(unittest.TestCase):
             release_root = root / "releases"
             outside_root = root / "outside"
             release_root.mkdir()
-            ReleaseSlots(outside_root).import_current(manifest("v1.0.0", "1"))
+            outside_root.mkdir()
+            (outside_root / "CURRENT.json").write_text(
+                json.dumps(manifest("v1.0.0", "1")),
+                encoding="utf-8",
+            )
             (release_root / "CURRENT.json").hardlink_to(outside_root / "CURRENT.json")
             slots = ReleaseSlots(release_root)
 
@@ -160,16 +168,60 @@ class ReleaseSlotTests(unittest.TestCase):
             release_root = root / "releases"
             outside_root = root / "outside"
             first = manifest("v1.0.0", "1")
-            ReleaseSlots(release_root).import_current(first)
-            ReleaseSlots(outside_root).import_current(first)
+            release_root.mkdir()
+            (release_root / "CURRENT.json").write_text(json.dumps(first), encoding="utf-8")
+            (release_root / "history").mkdir()
+            (outside_root / "history").mkdir(parents=True)
             history_name = "v1.0.0.json"
-            (release_root / "history" / history_name).unlink()
+            (outside_root / "history" / history_name).write_text(
+                json.dumps({"manifest": first, "deployment": {"operationId": None}}),
+                encoding="utf-8",
+            )
             (release_root / "history" / history_name).hardlink_to(
                 outside_root / "history" / history_name
             )
             slots = ReleaseSlots(release_root)
 
             with self.assertRaisesRegex(StateError, "file"):
+                slots.read()
+
+    def test_read_rejects_a_hard_linked_atomic_envelope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            target = root / "target"
+            ReleaseSlots(source).import_current(manifest("v1.0.0", "1"))
+            target.mkdir()
+            (target / "release-slots.json").hardlink_to(source / "release-slots.json")
+
+            with self.assertRaisesRegex(StateError, "file"):
+                ReleaseSlots(target).read()
+
+    def test_failed_atomic_generation_commit_preserves_the_previous_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            slots = ReleaseSlots(Path(directory))
+            first = manifest("v1.0.0", "1")
+            second = manifest("v1.0.1", "2")
+            slots.import_current(first)
+            original = slots.read()
+
+            with mock.patch("updater.slots._atomic_json", side_effect=OSError("injected commit failure")):
+                with self.assertRaisesRegex(OSError, "injected"):
+                    slots.promote(second, operation_id="a" * 32)
+
+            self.assertEqual(slots.read(), original)
+
+    def test_read_rejects_cross_slot_inconsistency_inside_an_envelope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            slots = ReleaseSlots(root)
+            first = manifest("v1.0.0", "1")
+            slots.import_current(first)
+            envelope = json.loads((root / "release-slots.json").read_text(encoding="utf-8"))
+            envelope["previous"] = first
+            (root / "release-slots.json").write_text(json.dumps(envelope), encoding="utf-8")
+
+            with self.assertRaisesRegex(StateError, "different releases"):
                 slots.read()
 
 

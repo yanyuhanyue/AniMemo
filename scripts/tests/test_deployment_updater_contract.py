@@ -22,6 +22,25 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         for service in ("migration", "bootstrap", "api"):
             self.assertTrue(any("/private:/app/runtime/private" in volume for volume in services[service]["volumes"]))
 
+    def test_updater_runtime_overlay_injects_only_verified_effective_identity(self):
+        override = yaml.safe_load(
+            (ROOT / "updater/docker-compose.runtime.yml").read_text(encoding="utf-8")
+        )
+        services = override["services"]
+
+        for key in [
+            "ANIME_JOURNAL_VERSION",
+            "ANIME_JOURNAL_COMMIT",
+            "ANIME_JOURNAL_RELEASE_CHANNEL",
+        ]:
+            self.assertIn("ANIMEMO_RELEASE_", services["api"]["environment"][key])
+        for key in [
+            "ANIMEMO_RELEASE_VERSION",
+            "ANIMEMO_RELEASE_COMMIT",
+            "ANIMEMO_RELEASE_CHANNEL",
+        ]:
+            self.assertIn(key, services["web"]["environment"])
+
     def test_api_startup_has_no_release_orchestration(self):
         dockerfile = (ROOT / "deploy/backend.Dockerfile").read_text(encoding="utf-8")
         command = next(line for line in dockerfile.splitlines() if line.startswith("CMD "))
@@ -72,7 +91,8 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             ROOT / "backend/plugin_host/management/commands/list_enabled_plugin_apis.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('"up", "-d", "--no-deps", "--force-recreate", "api", "web"', deployment)
+        self.assertIn('"up", "-d", "--no-deps", "--force-recreate"', deployment)
+        self.assertIn('"--wait", "--wait-timeout", "120", "api", "web"', deployment)
         self.assertIn('"python", "manage.py", "list_enabled_plugin_apis"', deployment)
         self.assertIn("inspect_enabled_plugin_apis(current)", executor)
         self.assertIn("inspect_enabled_plugin_apis(target_manifest)", executor)
