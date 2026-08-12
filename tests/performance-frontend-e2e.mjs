@@ -196,6 +196,7 @@ async function handleApi(route, state) {
   const method = request.method();
   incrementCounter(state, `${method} ${path}`);
 
+  if (path === "setup/status/") return json(route, { state: "initialized", accepting_setup: false, expires_at: null });
   if (path === "auth/csrf/") return json(route, { csrf_token: "frontend-perf-csrf" });
   if (path === "token/refresh/") {
     if (!state.authenticated) return json(route, { detail: "unauthenticated" }, 401);

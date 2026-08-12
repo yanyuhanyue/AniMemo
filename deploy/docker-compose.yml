@@ -11,6 +11,7 @@ x-api-common: &api-common
     - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/logs:/app/logs
     - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/backups:/app/backups
     - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/media:/data/anime-journal/media
+    - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/private:/app/runtime/private
   networks:
     - anime-journal
   depends_on:
@@ -71,7 +72,7 @@ services:
     <<: *api-common
     profiles: [release-jobs]
     restart: "no"
-    command: ["python", "manage.py", "sync_official_plugins"]
+    command: ["python", "manage.py", "bootstrap_animemo"]
 
   api:
     <<: *api-common
@@ -82,6 +83,7 @@ services:
       - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/logs:/app/logs
       - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/backups:/app/backups
       - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/media:/data/anime-journal/media
+      - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/private:/app/runtime/private
       - /run/animemo-updater:/run/animemo-updater:rw
     logging:
       driver: json-file

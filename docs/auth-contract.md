@@ -21,6 +21,8 @@ The canonical client routes are under `/api/v1/`. Existing `/api/` routes remain
 
 The facade preserves the existing imports used by the Web application and official frontend plugins. No refresh credential is returned from `getStoredTokens`, written to `localStorage` or written to `sessionStorage`.
 
+The same Web adapter owns the additive first-run status/setup calls. It submits the one-time code through the existing CSRF cookie flow and never stores that code in browser storage. First-run state and administrator creation are defined separately in `docs/first-run-bootstrap.md`; they do not change normal login, refresh or token semantics.
+
 ## Backend Boundary
 
 | Module | Contract responsibility |
@@ -30,6 +32,7 @@ The facade preserves the existing imports used by the Web application and offici
 | `backend/journal/anti_abuse.py` | Provider-neutral challenge value, provider adapter lookup and fail-closed verification |
 | `backend/journal/turnstile.py` | Cloudflare Turnstile provider verification using only a token and remote IP |
 | `backend/journal/auth_views.py` | HTTP endpoint orchestration, serializers, throttles, audit and auth-service calls |
+| `backend/site_config/first_run.py` | One-time code file safety, installation-state transaction and first-admin creation |
 
 Token core accepts raw token credentials and must not read Django/DRF requests, write cookies or construct HTTP responses. Refresh replay auditing remains in the Web endpoint orchestration. Provider verification must not receive a Django or DRF request object.
 

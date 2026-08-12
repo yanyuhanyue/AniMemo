@@ -39,7 +39,7 @@ from .auth_tokens import create_refresh_token
 from .csv_security import safe_csv_value
 from .import_parsers import LimitedImportJSONParser
 from accounts.models import PendingRegistration, RevokedAccessToken, StaffProfile, UserSecurityProfile
-from site_config.models import SiteSettings
+from site_config.models import InstallationState, SiteSettings
 from .models import AdminAuditLog, Column, JournalEntry, UserSettings
 from plugin_host.models import PluginDeployment, PluginPackageBlob, PluginProject, PluginVersion
 from plugin_host.permissions import can_access_plugin_backend, plugin_permissions_for_user
@@ -1474,6 +1474,9 @@ class RegistrationThrottleSecurityTests(APITestCase):
 
     def setUp(self):
         cache.clear()
+        installation = InstallationState.load()
+        installation.status = InstallationState.Status.INITIALIZED
+        installation.save(update_fields=["status", "updated_at"])
         site = SiteSettings.load()
         site.registration_enabled = True
         site.email_delivery_enabled = True

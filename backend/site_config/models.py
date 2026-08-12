@@ -16,6 +16,62 @@ def site_avatar_upload_to(_instance, filename):
     return f"site/avatar/{uuid.uuid4().hex}-{filename}"
 
 
+class InstallationState(models.Model):
+    class Status(models.TextChoices):
+        UNINITIALIZED = "uninitialized", "未初始化"
+        INITIALIZING = "initializing", "初始化中"
+        INITIALIZED = "initialized", "已初始化"
+
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.UNINITIALIZED)
+    setup_code_hash = models.CharField(max_length=256, blank=True, default="", editable=False)
+    setup_code_issued_at = models.DateTimeField(blank=True, null=True, editable=False)
+    setup_code_expires_at = models.DateTimeField(blank=True, null=True, editable=False)
+    failed_attempts = models.PositiveSmallIntegerField(default=0, editable=False)
+    initialized_at = models.DateTimeField(blank=True, null=True, editable=False)
+    initialized_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="initialized_installations",
+        editable=False,
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "安装状态"
+        verbose_name_plural = "安装状态"
+
+    @classmethod
+    def load(cls):
+        return cls.objects.get(pk=1)
+
+    @classmethod
+    def is_initialized(cls):
+        return cls.objects.filter(pk=1, status=cls.Status.INITIALIZED).exists()
+
+    @property
+    def accepting_setup(self):
+        from django.utils import timezone
+
+        return bool(
+            self.status == self.Status.UNINITIALIZED
+            and self.setup_code_hash
+            and self.setup_code_expires_at
+            and self.setup_code_expires_at > timezone.now()
+        )
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        return None
+
+    def __str__(self):
+        return self.get_status_display()
+
+
 class SiteSettings(models.Model):
     site_name = models.CharField(max_length=120, default="Anime Journal")
     homepage_title = models.CharField(max_length=160, default="XuanHuang 的番剧汇总")

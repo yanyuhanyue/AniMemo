@@ -6,7 +6,7 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from site_config.models import SiteSettings, TagDefinition
+from site_config.models import InstallationState, SiteSettings, TagDefinition
 
 from .emails import EmailDeliveryDisabled, EmailDeliveryError, EmailDeliveryNotConfigured, send_transactional_email
 from .models import Column, JournalEntry, UserSettings
@@ -23,7 +23,11 @@ class PublicSiteSettingsView(APIView):
 
     def get(self, request):
         serializer = SiteSettingsSerializer(SiteSettings.load(), context={"request": request})
-        return Response(serializer.data)
+        data = dict(serializer.data)
+        data["registration_enabled"] = bool(
+            data.get("registration_enabled") and InstallationState.is_initialized()
+        )
+        return Response(data)
 
 
 class TagPresetListView(APIView):

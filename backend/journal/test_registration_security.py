@@ -15,7 +15,7 @@ from rest_framework.test import APIClient, APITestCase
 
 from .emails import EmailDeliveryError
 from accounts.models import PendingRegistration, UserSecurityProfile
-from site_config.models import SiteSettings
+from site_config.models import InstallationState, SiteSettings
 from .models import JournalEntry
 
 
@@ -38,6 +38,9 @@ class RegistrationFlowSecurityTests(APITestCase):
 
     def setUp(self):
         cache.clear()
+        installation = InstallationState.load()
+        installation.status = InstallationState.Status.INITIALIZED
+        installation.save(update_fields=["status", "updated_at"])
         site = SiteSettings.load()
         site.registration_enabled = True
         site.email_delivery_enabled = True

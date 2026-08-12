@@ -189,6 +189,7 @@ wait_for_api() {
 
 mkdir -p "$DATA_ROOT"/{plugins,logs,backups,media,postgres,redis} "$META_ROOT"
 chmod -R a+rwx "$DATA_ROOT" "$META_ROOT"
+sudo install -d -m 0700 -o 10001 -g 10001 "$DATA_ROOT/private"
 cat >"$ENV_FILE" <<EOF
 DEBUG=false
 DJANGO_SECRET_KEY=ci-only-secret-key-012345678901234567890123456789012345678901234567890

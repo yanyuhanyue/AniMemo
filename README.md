@@ -50,16 +50,18 @@ anime-journal/
 ./scripts/dev.sh --setup-only
 ```
 
-脚本使用 SQLite + LocMemCache，仅限本地开发；生产环境仍需要 PostgreSQL + Redis。不会自动创建管理员账号。详细说明见 [`docs/local-development.md`](docs/local-development.md)。
+脚本使用 SQLite + LocMemCache，仅限本地开发；生产环境仍需要 PostgreSQL + Redis。脚本不会预设管理员凭据，只会生成私有一次性初始化码，随后由浏览器 `/setup` 创建首位管理员。详细说明见 [`docs/local-development.md`](docs/local-development.md)。
 
-文档入口：[`API 错误契约`](docs/api-errors.md)、[`前端状态与路由架构`](docs/frontend-architecture.md)、[`依赖更新工作流`](docs/dependencies.md)、[`维护与调度`](docs/maintenance.md)、[`插件开发`](docs/plugin-development.md)、[`集成协议`](docs/integration-protocol-v1.md) 和 [`生产部署`](docs/deployment-vps.md)。
+文档入口：[`首次运行引导`](docs/first-run-bootstrap.md)、[`API 错误契约`](docs/api-errors.md)、[`前端状态与路由架构`](docs/frontend-architecture.md)、[`依赖更新工作流`](docs/dependencies.md)、[`维护与调度`](docs/maintenance.md)、[`插件开发`](docs/plugin-development.md)、[`集成协议`](docs/integration-protocol-v1.md) 和 [`生产部署`](docs/deployment-vps.md)。
 
 手动启动仍然支持。复制 `.env.development.example` 为 `.env`，然后运行：
 
 ```bash
 npm ci
 python -m pip install -r backend/requirements.txt
+mkdir -p runtime/private && chmod 0700 runtime/private
 python backend/manage.py migrate
+python backend/manage.py bootstrap_animemo
 python backend/manage.py runserver 8000
 ```
 
@@ -78,6 +80,7 @@ npm run dev -- --host 0.0.0.0
 | 模块 | 路径 |
 |---|---|
 | JWT | `GET /api/v1/auth/csrf/`、`POST /api/v1/token/`、`POST /api/v1/token/refresh/`、`POST /api/v1/auth/logout/` |
+| 首次运行 | `GET /api/v1/setup/status/`、`POST /api/v1/setup/` |
 | 注册与邮件 | `POST /api/v1/auth/register/request/`、`POST /api/v1/auth/register/verify/`、`POST /api/v1/auth/register/complete/`、`/api/v1/auth/password-reset/` |
 | 手账 CRUD | `/api/v1/entries/` |
 | 快捷筛选 | `/api/v1/filters/` |
@@ -127,33 +130,33 @@ REFRESH_COOKIE_SECURE=true
 
 如果前后端确实跨站，三类 Cookie 都改为 `SameSite=None` 并保持 `Secure=true`，同时将前端 origin 精确加入 CORS/CSRF 配置，禁止使用通配符。
 
-完整发布时，部署脚本会把宿主机目录准备、SHA 校验、core-only 包检查、Compose 配置校验、构建、健康检查、单站点 OpenResty 重载和 release 归档收拢到一次调用中。生产代码-only hotfix 不应直接套用完整发布脚本；应按 [`VPS Deployment`](docs/deployment-vps.md) 的 Scoped Hotfix 流程，只构建/替换 API 与 Web，并在完成 refresh PostgreSQL 回归后执行一次 API/Web scoped restart。先在服务器准备并填写唯一的 production env 文件：
+正常生产更新只使用不可变 Release 与受限 Host Update Agent。`deploy/deploy.sh` 只保留给首次安装/旧架构切换的 `--bootstrap`，或 Update Agent 无法运行时人工批准的 `--break-glass`；日常更新不得用 ZIP、`git pull` 或服务器端构建替代不可变 Release。先在服务器准备并填写唯一的 production env 文件：
 
 ```bash
 cp .env.production.example .env.production
 ```
 
-首次从旧架构迁移时，使用显式的 `--fresh`；它只替换 `/opt/1panel/docker/compose/anime-journal/app`，并删除旧的 `anime-journal-data` 命名卷，不清理新的 bind-mounted 数据：
+首次安装或旧架构切换使用显式 bootstrap 模式：
 
 ```bash
 sudo sh deploy/deploy.sh \
-  --archive /tmp/anime-journal-core-<stamp>.zip \
-  --sha256 /tmp/anime-journal-core-<stamp>.sha256 \
-  --fresh \
-  --create-admin
-```
-
-日常更新不使用 `--fresh`，默认 update 模式会保留 PostgreSQL、Redis、媒体、插件、日志和备份数据：
-
-```bash
-sudo sh deploy/deploy.sh \
+  --bootstrap \
   --archive /tmp/anime-journal-core-<stamp>.zip \
   --sha256 /tmp/anime-journal-core-<stamp>.sha256
 ```
 
-只有明确要清空本网站数据时才使用 `--fresh --reset-data --yes`；脚本只会操作 `/data/anime-journal` 下的 PostgreSQL/Redis/媒体等目录和 `anime-journal-data` 旧卷，绝不执行全局 `docker system prune`、`docker volume prune` 或其他 Compose 项目的 `down`。真实环境的 OpenResty 配置也只写入 `/opt/1panel/www/conf.d/re-anime.cc.conf`，可用 `--skip-openresty` 做本地或非 1Panel 验证。
+Update Agent 不可用且完成了人工审批时，才允许 break-glass：
 
-脚本会把发布 ZIP 与规范化为 LF 的 SHA 文件保存到 `/opt/1panel/docker/compose/anime-journal/releases`，避免 Windows CRLF 导致 Linux `sha256sum -c` 失败。`--create-admin` 只在首次建站时使用；更新时不会重置已有管理员，首次生成的凭据保存为 `/root/anime-journal-initial-admin.txt`（权限 `0600`）。
+```bash
+sudo sh deploy/deploy.sh \
+  --break-glass \
+  --archive /tmp/anime-journal-core-<stamp>.zip \
+  --sha256 /tmp/anime-journal-core-<stamp>.sha256
+```
+
+只有明确要清空本网站数据时才允许在 bootstrap 模式增加 `--reset-data --yes`；脚本只操作经校验的 AniMemo 数据根目录，绝不执行全局 `docker system prune`、`docker volume prune` 或其他 Compose 项目的 `down`。真实环境的 OpenResty 配置也只写入显式的单站点配置，可用 `--skip-openresty` 做本地或非 1Panel 验证。
+
+迁移与 bootstrap 完成后，一次性初始化码只写入 `${ANIME_JOURNAL_DATA_ROOT}/private/setup-code`（目录 `0700`、文件 `0600`），不会出现在日志、API 或构建产物。操作者读取该文件后访问 `/setup` 创建首位管理员；成功后文件立即删除，入口由数据库状态永久锁定。完整生命周期与故障恢复见 [`首次运行引导`](docs/first-run-bootstrap.md)。
 
 构建前端执行 `npm run build`，输出目录为 `dist/client`。生产镜像构建会从 `.env.production` 将公开的 `VITE_TURNSTILE_SITE_KEY` 作为 build arg 传入 Vite；后端 `TURNSTILE_SECRET` 不会传入前端构建。Smoke Test 会严格检查健康接口为 HTTP 200 且 JSON `status` 为 `ok`，再检查四个容器健康状态、Host 转发、PostgreSQL/Redis 连接，以及 Local 文件 `0644`、目录 `0755`、Nginx `/local-media/` 读取和清理。
 
@@ -210,7 +213,7 @@ python backend/manage.py check
 python backend/manage.py test journal
 ```
 
-生产前另需：换掉示例媒体、创建 Django 超级管理员、在 Admin 中设定专栏审核状态，并将域名 DNS/HTTPS 配置完成。
+生产前另需：换掉示例媒体、通过 `/setup` 完成首位管理员初始化、在 Admin 中设定专栏审核状态，并将域名 DNS/HTTPS 配置完成。
 
 ## GitHub Actions CI
 

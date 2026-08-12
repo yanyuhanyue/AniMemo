@@ -18,7 +18,9 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("ANIMEMO_API_IMAGE", services["api"]["image"])
         self.assertIn("ANIMEMO_WEB_IMAGE", services["web"]["image"])
         self.assertEqual(services["migration"]["command"], ["python", "manage.py", "migrate", "--noinput"])
-        self.assertEqual(services["bootstrap"]["command"], ["python", "manage.py", "sync_official_plugins"])
+        self.assertEqual(services["bootstrap"]["command"], ["python", "manage.py", "bootstrap_animemo"])
+        for service in ("migration", "bootstrap", "api"):
+            self.assertTrue(any("/private:/app/runtime/private" in volume for volume in services[service]["volumes"]))
 
     def test_api_startup_has_no_release_orchestration(self):
         dockerfile = (ROOT / "deploy/backend.Dockerfile").read_text(encoding="utf-8")
@@ -27,6 +29,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("gunicorn", command)
         self.assertNotIn("migrate", command)
         self.assertNotIn("sync_official_plugins", command)
+        self.assertNotIn("bootstrap_animemo", command)
         self.assertNotIn("collectstatic", command)
 
     def test_django_never_mounts_docker_socket(self):
@@ -161,6 +164,28 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn('BASE_POSTGRES_ID=', gate)
         self.assertIn('BASE_REDIS_ID=', gate)
 
+    def test_upgrade_overlay_preserves_each_source_tree_bootstrap_command(self):
+        production = (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
+        overlay = (ROOT / "deploy/docker-compose.upgrade-gate.yml").read_text(encoding="utf-8")
+        bootstrap_overlay = overlay[
+            overlay.index("  bootstrap:\n") : overlay.index("  web:\n")
+        ]
+
+        self.assertIn('command: ["python", "manage.py", "bootstrap_animemo"]', production)
+        self.assertNotIn("command:", bootstrap_overlay)
+
+        fixture = (ROOT / "scripts/stateful_upgrade_fixture.py").read_text(encoding="utf-8")
+        self.assertIn('_migration_applied("site", "0003_installation_state")', fixture)
+        self.assertIn('"PRESERVED_INITIALIZED"', fixture)
+
+    def test_first_run_private_host_directory_rejects_links_and_is_not_recursively_chowned(self):
+        prepare_host = (ROOT / "deploy/prepare-host.sh").read_text(encoding="utf-8")
+
+        self.assertIn('[ -L "$private_directory" ]', prepare_host)
+        self.assertIn('[ ! -d "$private_directory" ]', prepare_host)
+        self.assertIn('chown "$APP_UID:$APP_GID" "$private_directory"', prepare_host)
+        self.assertNotIn('chown -R "$APP_UID:$APP_GID" "$private_directory"', prepare_host)
+
     def test_legacy_zip_deployer_is_explicit_bootstrap_or_break_glass_only(self):
         deploy = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
 
@@ -177,6 +202,8 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertLess(bootstrap, switch)
         self.assertNotIn("stage_compose down", deploy)
         self.assertNotIn("STACK_STOPPED", deploy)
+        self.assertIn("--create-admin was removed", deploy)
+        self.assertNotIn("deploy/create-admin.sh", deploy)
 
 
 if __name__ == "__main__":

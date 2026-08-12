@@ -27,7 +27,7 @@ from .auth_tokens import RefreshReplayError, issue_token_pair, revoke_access_tok
 from .auth_service import authenticate_with_second_factor
 from .admin_security_middleware import clear_staff_second_factor, mark_staff_second_factor_verified
 from accounts.models import LoginEvent
-from site_config.models import SiteSettings
+from site_config.models import InstallationState, SiteSettings
 from .registration import (
     build_verify_url,
     complete_registration,
@@ -260,6 +260,18 @@ class RegistrationThrottleAuditMixin:
             raise
 
 
+def installation_registration_guard():
+    if InstallationState.is_initialized():
+        return None
+    return no_store(Response(
+        {
+            "code": "installation_uninitialized",
+            "detail": "站点尚未完成首次初始化，暂不开放注册。",
+        },
+        status=status.HTTP_403_FORBIDDEN,
+    ))
+
+
 @method_decorator(csrf_protect, name="dispatch")
 class RegisterView(RegistrationThrottleAuditMixin, APIView):
     permission_classes = [permissions.AllowAny]
@@ -269,6 +281,9 @@ class RegisterView(RegistrationThrottleAuditMixin, APIView):
 
     @extend_schema(request=RegistrationRequestSerializer, responses=MessageResponseSerializer, auth=[])
     def post(self, request):
+        installation_response = installation_registration_guard()
+        if installation_response is not None:
+            return installation_response
         turnstile_response = require_anti_abuse_challenge(request)
         if turnstile_response is not None:
             return turnstile_response
@@ -329,6 +344,9 @@ class VerifyRegistrationView(RegistrationThrottleAuditMixin, APIView):
 
     @extend_schema(request=RegistrationVerifySerializer, responses=RegistrationVerificationResponseSerializer, auth=[])
     def post(self, request):
+        installation_response = installation_registration_guard()
+        if installation_response is not None:
+            return installation_response
         serializer = RegistrationVerifySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         pending, completion_token = verify_registration_token(raw_token=serializer.validated_data["token"])
@@ -351,6 +369,9 @@ class CompleteRegistrationView(RegistrationThrottleAuditMixin, APIView):
 
     @extend_schema(request=RegistrationCompleteSerializer, responses=MessageResponseSerializer, auth=[])
     def post(self, request):
+        installation_response = installation_registration_guard()
+        if installation_response is not None:
+            return installation_response
         turnstile_response = require_anti_abuse_challenge(request)
         if turnstile_response is not None:
             return turnstile_response

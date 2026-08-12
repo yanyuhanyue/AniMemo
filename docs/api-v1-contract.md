@@ -21,6 +21,7 @@ The generated `/api/schema/` document is the exhaustive method-level inventory a
 | Session | `/api/v1/auth/me/`, `logout/`, `password-change/`, `account/` | GET, POST, DELETE | Bearer; logout additionally accepts refresh cookie | auth request/response serializers, `ApiError` | Web, future Mobile adapter |
 | Password reset | `/api/v1/auth/password-reset/`, `password-reset-confirm/` | POST | Public + anti-abuse challenge | reset serializers, `ApiError` | Web, future Mobile adapter |
 | Web CSRF | `/api/v1/auth/csrf/` | GET | Public | `CsrfTokenResponse` | Web adapter only |
+| First-run installation | `/api/v1/setup/status/`, `/api/v1/setup/` | GET, POST | Public status; setup requires CSRF, strict throttle and active one-time code | installation status/setup serializers, `ApiError` | Web first-run adapter only |
 | Staff login | `/api/v1/auth/staff-login/` | POST | Public + CSRF + challenge + staff/2FA policy | login serializers, `ApiError` | Staff Web |
 | Entries | `/api/v1/entries/`, `/api/v1/entries/{id}/` | GET, POST, PUT, PATCH, DELETE | Bearer + owner isolation | `JournalEntrySerializer`, paginated response, `ApiError` | Web, future Mobile, Plugin via Host capability |
 | External identities | `/api/v1/entries/{id}/external-identities/...` | GET, POST, DELETE | Bearer + entry owner | external identity DTOs, `ApiError` | Web, future Mobile |

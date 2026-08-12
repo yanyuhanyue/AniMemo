@@ -20,7 +20,6 @@ SHA_FILE=${ANIME_JOURNAL_SHA256_FILE:-}
 ENV_SOURCE=${ANIME_JOURNAL_ENV_FILE:-}
 MODE=
 RESET_DATA=0
-CREATE_ADMIN=0
 CONFIRM_RESET=0
 SKIP_OPENRESTY=0
 
@@ -40,7 +39,7 @@ Options:
   --env-file PATH      Existing production env; otherwise keep app/.env.production.
   --reset-data         Bootstrap-only destructive reset of AniMemo data. Requires --yes
                        or an interactive exact confirmation.
-  --create-admin       Bootstrap-only initial superuser creation after smoke passes.
+  --create-admin       Removed. The browser /setup flow is the only supported first-admin path.
   --yes                Confirm --reset-data in non-interactive use.
   --skip-openresty     Do not install or reload the AniMemo site config.
   --app-root PATH      Override the exact AniMemo app path.
@@ -131,8 +130,7 @@ while [ "$#" -gt 0 ]; do
             shift
             ;;
         --create-admin)
-            CREATE_ADMIN=1
-            shift
+            die "--create-admin was removed; complete first-admin creation through the browser /setup flow"
             ;;
         --yes)
             CONFIRM_RESET=1
@@ -192,10 +190,6 @@ done
 if [ "$RESET_DATA" -eq 1 ] && [ "$MODE" != bootstrap ]; then
     die "--reset-data requires --bootstrap"
 fi
-if [ "$CREATE_ADMIN" -eq 1 ] && [ "$MODE" != bootstrap ]; then
-    die "--create-admin requires --bootstrap"
-fi
-
 for command in docker sha256sum awk sed tr find mktemp install; do
     require_cmd "$command"
 done
@@ -336,7 +330,7 @@ trap cleanup EXIT INT TERM
 archive_extract "$ARCHIVE" "$EXTRACT_ROOT" || die "cannot extract release archive"
 for required in \
     deploy/docker-compose.yml deploy/docker-compose.build.yml deploy/deploy.sh \
-    deploy/create-admin.sh deploy/prepare-host.sh deploy/smoke-test.sh \
+    deploy/prepare-host.sh deploy/smoke-test.sh \
     deploy/openresty-re-anime.conf .env.production.example package.json; do
     [ -f "$EXTRACT_ROOT/$required" ] || die "archive is missing $required"
 done
@@ -395,7 +389,7 @@ if [ "$RESET_DATA" -eq 1 ]; then
         live_compose stop api web postgres redis || die "could not stop the exact AniMemo project for reset"
     fi
     log "clearing only AniMemo data under $DATA_ROOT"
-    for directory in postgres redis plugins logs backups media; do
+    for directory in postgres redis plugins logs backups media private; do
         [ ! -e "$DATA_ROOT/$directory" ] || rm -rf "$DATA_ROOT/$directory"
     done
     sh "$EXTRACT_ROOT/deploy/prepare-host.sh"
@@ -434,10 +428,6 @@ if [ "$SKIP_OPENRESTY" -eq 0 ]; then
     fi
     docker exec "$OPENRESTY_CONTAINER" openresty -s reload >/dev/null 2>&1 || docker exec "$OPENRESTY_CONTAINER" nginx -s reload >/dev/null 2>&1 || die "OpenResty reload failed"
     log "AniMemo OpenResty config installed and reloaded"
-fi
-
-if [ "$CREATE_ADMIN" -eq 1 ]; then
-    (cd "$APP_ROOT" && sh deploy/create-admin.sh)
 fi
 
 archive_name=$(basename "$ARCHIVE")

@@ -59,8 +59,12 @@ try {
     if (Test-Path "package-lock.json") { & npm ci } else { & npm install }
     Assert-LastExitCode "安装前端依赖"
     Write-Host "执行数据库迁移..."
+    $privateState = Join-Path $root "runtime\private"
+    New-Item -ItemType Directory -Force -Path $privateState | Out-Null
     & $venvPython backend/manage.py migrate --noinput
     Assert-LastExitCode "执行数据库迁移"
+    & $venvPython backend/manage.py bootstrap_animemo
+    Assert-LastExitCode "初始化应用默认数据"
     Write-Host "验证本地 Django 配置与健康检查..."
     & $venvPython backend/manage.py check
     Assert-LastExitCode "Django 配置检查"

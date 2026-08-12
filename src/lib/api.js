@@ -36,6 +36,7 @@ export const getAuthUser = session.getUser;
 export const getStoredTokens = webAuth.getStoredTokens;
 export const initializeAuth = webAuth.initializeAuth;
 export const refreshAccessToken = webAuth.refreshAccessToken;
+export const setupApi = webAuth.setupApi;
 export const setAccessToken = session.setAccessToken;
 export const storeTokens = webAuth.storeTokens;
 export const subscribeAuth = session.subscribe;

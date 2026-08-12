@@ -3,7 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from
 import { ShowcasePage } from "./pages/ShowcasePage.jsx";
 import { PageColorTransition } from "./components/PageColorTransition.jsx";
 import { SiteSettingsProvider } from "./context/SiteSettingsContext.jsx";
-import { api, getAuthUser, initializeAuth, subscribeAuth } from "./lib/api.js";
+import { api, getAuthUser, initializeAuth, setupApi, subscribeAuth } from "./lib/api.js";
 import { PluginErrorBoundary } from "./plugins/sdk/PluginErrorBoundary.jsx";
 import { PluginRuntimeProvider, usePluginRuntime } from "./plugins/sdk/PluginRuntimeContext.jsx";
 import { validatePluginRoute } from "./plugins/sdk/host.js";
@@ -17,6 +17,7 @@ const PluginDraftPreviewPage = lazy(() => import("./pages/PluginDraftPreviewPage
 const FeaturedPage = lazy(() => import("./pages/FeaturedPage.jsx").then(({ FeaturedPage: Component }) => ({ default: Component })));
 const ColumnSubmitPage = lazy(() => import("./pages/CommunityPages.jsx").then(({ ColumnSubmitPage: Component }) => ({ default: Component })));
 const UniversePage = lazy(() => import("./pages/CommunityPages.jsx").then(({ UniversePage: Component }) => ({ default: Component })));
+const SetupPage = lazy(() => import("./pages/SetupPage.jsx").then(({ SetupPage: Component }) => ({ default: Component })));
 
 function RouteLoading() {
   return <main className="app-auth-bootstrap" aria-label="正在加载页面"><span>正在加载页面...</span></main>;
@@ -60,6 +61,7 @@ function AppRoutes({ authUser }) {
       <Route path="/shared/:publicSlug" element={<ShowcasePage sharedMode />} />
       <Route path="/admin-login" element={<AdminLoginPage />} />
       <Route path="/admin-control" element={<AdminDashboardPage />} />
+      <Route path="/setup" element={<Navigate to="/admin-login" replace state={{ message: "初始化已完成，请登录管理员账号。" }} />} />
       {pluginRoutes.map(({ path, Component, pluginSlug, access = "public", permission }) => {
         const hasPermission = !permission
           || Boolean(authUser?.pluginPermissions?.includes?.(permission));
@@ -93,6 +95,8 @@ function AppRoutes({ authUser }) {
 export function App() {
   const [authReady, setAuthReady] = useState(false);
   const [authUser, setAuthUser] = useState(() => getAuthUser());
+  const [installationReady, setInstallationReady] = useState(false);
+  const [installation, setInstallation] = useState(null);
 
   useEffect(() => subscribeAuth(({ user }) => setAuthUser(user)), []);
 
@@ -105,19 +109,45 @@ export function App() {
     return () => { active = false; };
   }, []);
 
-  if (!authReady) {
+  useEffect(() => {
+    let active = true;
+    setupApi.status()
+      .then(({ data }) => {
+        if (active) setInstallation(data || { state: "unavailable", accepting_setup: false });
+      })
+      .catch(() => {
+        if (active) setInstallation({ state: "unavailable", accepting_setup: false });
+      })
+      .finally(() => {
+        if (active) setInstallationReady(true);
+      });
+    return () => { active = false; };
+  }, []);
+
+  if (!authReady || !installationReady) {
     return <main className="app-auth-bootstrap" aria-label="正在恢复登录状态" />;
   }
+
+  const requiresFirstRun = installation?.state !== "initialized";
 
   return (
       <SiteSettingsProvider>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <PageColorTransition>
-          <PluginRuntimeProvider authUser={authUser}>
-            <AppRoutes authUser={authUser} />
-          </PluginRuntimeProvider>
+          {requiresFirstRun ? (
+            <Suspense fallback={<RouteLoading />}>
+              <Routes>
+                <Route path="/setup" element={<SetupPage installation={installation} onInitialized={() => setInstallation({ state: "initialized", accepting_setup: false })} />} />
+                <Route path="*" element={<Navigate to="/setup" replace />} />
+              </Routes>
+            </Suspense>
+          ) : (
+            <PluginRuntimeProvider authUser={authUser}>
+              <AppRoutes authUser={authUser} />
+            </PluginRuntimeProvider>
+          )}
         </PageColorTransition>
       </BrowserRouter>
-    </SiteSettingsProvider>
+      </SiteSettingsProvider>
   );
 }

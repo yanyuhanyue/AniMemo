@@ -10,6 +10,7 @@ const roles = new Set(["reviewer", "user_manager", "operator", "administrator"])
 const runtimes = new Set(["frontend", "backend"]);
 const extensions = new Set(["frontend.page", "frontend.navigation", "backend.api", "settings", "hooks", "storage", "catalog.importer", "catalog.metadata", "integration.actions", "integration.events"]);
 const coreCapabilities = new Set(["journal", "watch_history", "analytics"]);
+const managedRuntimeDirectories = new Set([".locks", "packages", "previews", "runtime", "staging"]);
 const hooks = new Set(["registration.before_request", "registration.before_complete", "registration.after_complete", "journal.after_create", "journal.after_update", "journal.after_delete", "column.after_publish", "column.after_delete", "user.after_created", "user.before_delete", "user.after_delete"]);
 const userScopedHooks = new Set(["journal.after_create", "journal.after_update", "journal.after_delete", "column.after_publish", "column.after_delete"]);
 
@@ -100,7 +101,9 @@ function validateManifest(directory, manifest, { enforceDirectoryName = true } =
   return errors;
 }
 
-const pluginDirectories = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory() && !entry.name.startsWith("_")).map((entry) => entry.name);
+const pluginDirectories = readdirSync(root, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory() && !entry.name.startsWith("_") && !managedRuntimeDirectories.has(entry.name))
+  .map((entry) => entry.name);
 const candidates = [...pluginDirectories.map((directory) => ({ directory, enforceDirectoryName: true })), ...(existsSync(resolve(root, "_template", "manifest.json")) ? [{ directory: "_template", enforceDirectoryName: false }] : [])];
 const failures = [];
 for (const { directory, enforceDirectoryName } of candidates) {

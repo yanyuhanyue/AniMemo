@@ -1,4 +1,4 @@
-import { AUTH_ENDPOINTS, withAntiAbuseChallenge } from "./apiCore.js";
+import { AUTH_ENDPOINTS, INSTALLATION_ENDPOINTS, withAntiAbuseChallenge } from "./apiCore.js";
 
 
 const LEGACY_ACCESS_KEY = "anime_journal_access";
@@ -133,6 +133,11 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
     },
   });
 
+  const setupApi = Object.freeze({
+    status: () => cookieClient.get(INSTALLATION_ENDPOINTS.status),
+    complete: (payload) => cookiePost(INSTALLATION_ENDPOINTS.complete, payload),
+  });
+
   return Object.freeze({
     authApi,
     csrfApi,
@@ -148,6 +153,7 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
     initializeAuth,
     refreshAccessToken,
     scrubLegacyTokens,
+    setupApi,
     storeTokens,
   });
 }
