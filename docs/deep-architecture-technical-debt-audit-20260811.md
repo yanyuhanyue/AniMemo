@@ -8,17 +8,23 @@
 
 现有 API v1、Auth Core/Web Adapter、稳定资源身份、Plugin capability enforcement、Integration Protocol v1 和前端共享 Core 均有有效 contract 与测试保护。没有发现需要推翻 v1.0 公共 contract、身份模型或数据模型的 TD0 Structural Blocker。
 
-审计确认 5 项 TD1。它们集中在四条 seam：Journal mutation、Plugin Host/RPC、Integration receipt lifecycle 与 Media write reservation。当前功能与安全门禁可以继续通过，但这些 seam 若留到 Runtime v3、Marketplace 或更高媒体写入量之后再处理，迁移成本会明显放大。因此本轮结论是审计成功、架构债需要单独 Closure，不在 Audit PR 中静默重构。
+审计确认 5 项 TD1。它们集中在四条 seam：Journal mutation、Plugin Host/RPC、Integration receipt lifecycle 与 Media write reservation。当前功能与安全门禁可以继续通过，但这些 seam 若留到 Runtime v3、Marketplace 或更高媒体写入量之后再处理，迁移成本会明显放大。因此原始审计结论是审计成功、架构债需要单独 Closure，不在 Audit PR 中静默重构。2026-08-12 的 Closure decision 已进一步收敛：DA-TD1-002、003、005 已 RESOLVED；DA-TD1-001、004 已记录为 ACCEPTED V1.0 DEBT EXCEPTION，不再处于 BLOCKED 或 UNDECIDED。
 
 ```text
 TD0 OPEN: 0
-TD1 OPEN: 5
+ORIGINAL AUDIT TD1 OPEN SNAPSHOT (2026-08-11): 5
+CURRENT TD1 OPEN: 0
+CURRENT TD1 RESOLVED: 3
+CURRENT TD1 ACCEPTED EXCEPTIONS: 2
+CURRENT TD1 UNDECIDED: 0
 TD2 DEFERRED: 14
 TD3 DEFERRED: 5
 
 DEEP ARCHITECTURE & TECHNICAL DEBT AUDIT: PASS
 ARCHITECTURE DEBT CLOSURE REQUIRED: PASS
-ANI MEMO V1.0 NEXT STEP: Architecture Debt Closure
+ORIGINAL ANI MEMO V1.0 NEXT STEP: Architecture Debt Closure
+ARCHITECTURE DEBT CLOSURE: PASS WITH ACCEPTED DEBT
+CURRENT ANI MEMO V1.0 NEXT STEP: Deployment / Updater Hardening
 ```
 
 ## Scope And Method
@@ -140,6 +146,14 @@ SYMBOL: PluginContext; PluginDispatch._dispatch; PluginStorage.collection;
 
 **FIX BEFORE V1:** YES
 
+### Closure disposition (2026-08-12)
+
+**Original Finding:** 上述非序列化对象与 trusted in-process implementation 会阻塞未来 Runtime v3 worker/container/RPC 的自然迁移。
+
+**Original Reason:** 直接把 request、Response、QuerySet、transaction、filesystem root 与 Python callback 改成 RPC 会形成 Plugin SDK/package breaking change。
+
+**Resolution or Exception:** **ACCEPTED V1.0 DEBT EXCEPTION**。SDK API 2、Manifest v2、actor-bound capability DTO、权限/安装边界和官方插件 0.4.2 在 v1.0 保持不变；当前 route/request/storage implementation 被明确标记为 trusted in-process Runtime v3 deferred debt。触发 worker/container/RPC、不受信任 publisher 或独立资源隔离前，必须进入 versioned SDK v3/Host adapter remediation。决策 dossier 见 `docs/v1.0-remaining-td1-decisions-20260812.md`。
+
 **ESTIMATED BLAST RADIUS:** High；Plugin Host、官方插件、Integration action adapter 与 SDK tests。
 
 **TEST REQUIREMENT:** SDK serialization contract、官方插件禁止 Django/DRF/requests/QuerySet 的 AST gate、in-process adapter parity、plugin package/immutability/runtime/integration regressions。
@@ -243,6 +257,14 @@ SYMBOL: _claim_receipt; _wait_for_receipt; _stored_receipt_result;
 **RECOMMENDATION:** 通过 additive fields 引入 lease/claimed_at/attempt；过期 lease 可原子接管；完成写入验证当前 lease owner；cleanup/diagnostics 处理孤儿 PENDING；明确 handler 是否允许重放。
 
 **FIX BEFORE V1:** YES
+
+### Closure disposition (2026-08-12)
+
+**Original Finding:** PENDING receipt 没有 lease、接管或终态恢复，crash-after-claim 可能留下永久 `request_in_progress`。
+
+**Original Reason:** 没有 action-specific replay contract 时，通用 takeover 可能让已经完成外部副作用的旧 handler 被再次执行。
+
+**Resolution or Exception:** **ACCEPTED V1.0 DEBT EXCEPTION**。Integration Protocol v1 保持 at-most-once safety-first 语义：同一 `(connection, request_id)` 唯一 claim；PENDING duplicate 只等待并在超时后返回 409；COMPLETED/FAILED 才 replay；常规 cleanup 不删除 PENDING。已确认的债务是 liveness/availability，而非当前 live-process duplicate execution、auth 或 data-integrity failure。进入多 worker crash recovery、长任务/异步 action 或 Runtime v3 前，必须先定义 action replay policy，再以 additive lease/token/conditional finalize 实现接管。决策 dossier 见 `docs/v1.0-remaining-td1-decisions-20260812.md`。
 
 **ESTIMATED BLAST RADIUS:** Medium-High；Integration model、dispatch、cleanup、Bridge retry expectations。
 
@@ -1127,7 +1149,10 @@ TEST ARCHITECTURE: PASS
 CI ARCHITECTURE: PASS
 
 TD0 OPEN: 0
-TD1 OPEN: 5
+TD1 OPEN: 0
+TD1 RESOLVED: 3
+TD1 ACCEPTED EXCEPTIONS: 2
+TD1 UNDECIDED: 0
 TD2 DEFERRED: 14
 TD3 DEFERRED: 5
 TOP ARCHITECTURAL HOTSPOTS: 17
@@ -1135,7 +1160,7 @@ TOP ARCHITECTURAL HOTSPOTS: 17
 
 ## Verification And Production Status
 
-本轮只修改文档，因此执行 required architecture verification、文档一致性检查、现有 CI/Release Gate 证据核对和 `git diff --check`；不重复无意义的完整功能回归。
+本轮只修改文档，因此执行 required architecture verification、文档一致性检查、现有 CI/Release Gate 证据核对和 `git diff --check`；不重复无意义的完整功能回归。上面的 2026-08-11 数字保留为原始审计快照；当前 closure 状态以本节 Closure disposition、`docs/architecture-debt-closure-report-20260812.md` 和 `docs/v1.0-remaining-td1-decisions-20260812.md` 为准。
 
 - Node architecture/plugin/release contract：12 passed。
 - Django architecture dependency、Plugin capability、Journal hook、Integration concurrency：14 tests，13 passed，1 skipped。
@@ -1173,8 +1198,12 @@ FINAL STATUS:
 
 DEEP ARCHITECTURE & TECHNICAL DEBT AUDIT: PASS
 TD0 OPEN: 0
-TD1 OPEN: 5
+TD1 OPEN: 0
+TD1 RESOLVED: 3
+TD1 ACCEPTED EXCEPTIONS: 2
+TD1 UNDECIDED: 0
 V1.0 STRUCTURAL BLOCKERS: 0
+ARCHITECTURE DEBT CLOSURE: PASS WITH ACCEPTED DEBT
 ARCHITECTURE DEBT CLOSURE REQUIRED: PASS
-ANI MEMO V1.0 NEXT STEP: Architecture Debt Closure
+ANI MEMO V1.0 NEXT STEP: Deployment / Updater Hardening
 ```
