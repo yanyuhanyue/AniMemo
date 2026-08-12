@@ -12,8 +12,12 @@
 
 ```text
 TD0 OPEN: 0
-TD1 OPEN: 5
+TD1 OPEN: 0
+TD1 RESOLVED: 3
+TD1 ACCEPTED EXCEPTIONS: 2
+TD1 UNDECIDED: 0
 ARCHITECTURE DEBT CLOSURE REQUIRED: PASS
+ARCHITECTURE DEBT CLOSURE: PASS WITH ACCEPTED DEBT
 PRODUCTION DEPLOY: NOT RUN
 PRODUCTION SMOKE: NOT RUN
 ```
@@ -114,6 +118,10 @@ High。改变 callback 观察时序，必须逐个 hook 标记 criticality。
 - `DA-TD1-001` Backend Plugin SDK 非 RPC 可序列化。
 - `DA-TD1-002` 的 runtime adapter 部分。
 
+### Disposition (2026-08-12)
+
+`DA-TD1-001`：**ACCEPTED V1.0 DEBT EXCEPTION**。v1.0 保持 SDK API 2、Manifest v2 和 trusted in-process runtime；JSON-compatible SDK v3、Host operations、official plugin migration 只在 Runtime v3 trigger 前进入 v1.1。详见 `docs/v1.0-remaining-td1-decisions-20260812.md`。
+
 ### Proposed PRs
 
 #### PR B1：冻结 JSON-compatible Host SDK DTO
@@ -183,6 +191,10 @@ Medium-High；复用 Batch A ordering/failure tests，补 runtime reconcile/unlo
 ### Covers
 
 - `DA-TD1-004` PENDING receipt crash recovery。
+
+### Disposition (2026-08-12)
+
+`DA-TD1-004`：**ACCEPTED V1.0 DEBT EXCEPTION**。v1.0 保持 PENDING 不接管、不删除和 terminal-only replay；在 action replay policy 明确前不改变副作用语义。详见 `docs/v1.0-remaining-td1-decisions-20260812.md`。
 
 ### Proposed PR
 
@@ -296,14 +308,16 @@ PRODUCTION SMOKE: NOT RUN
 ```text
 TD0 OPEN: 0
 TD1 OPEN: 0
-All TD1 acceptance tests: PASS
+TD1 RESOLVED IMPLEMENTATION TESTS: PASS
+TD1 ACCEPTED EXCEPTIONS WITH DECISION DOSSIERS: PASS
+TD1 UNDECIDED: 0
 No new migration drift: PASS
 CI + Release Gate + post-merge: PASS
 Production deploy: NOT RUN until separate acceptance phase
 ```
 
-完成以上条件后，下一步才是 `Deployment / Updater Hardening`，而不是在 Closure 中顺便实现 Mobile、Marketplace 或 UI/UX 2.0。
+完成以上条件后，下一步是 `Deployment / Updater Hardening`；Production Acceptance 仍是独立的发布前操作阶段，不在本轮执行。不得在 Closure 中顺便实现 Mobile、Marketplace 或 UI/UX 2.0。
 
 ## Execution Update (2026-08-12)
 
-本轮执行结果记录在 `docs/architecture-debt-closure-report-20260812.md`：DA-TD1-002、DA-TD1-003、DA-TD1-005 CLOSED；DA-TD1-001、DA-TD1-004 因 stop condition BLOCKED。PR #54/#55/#56 均已通过 CI/Release Gate 并 squash merge；生产部署与 smoke NOT RUN。
+本轮执行结果记录在 `docs/architecture-debt-closure-report-20260812.md` 与 `docs/v1.0-remaining-td1-decisions-20260812.md`：DA-TD1-002、DA-TD1-003、DA-TD1-005 RESOLVED；DA-TD1-001、DA-TD1-004 ACCEPTED V1.0 DEBT EXCEPTION；TD1 UNDECIDED: 0。PR #54/#55/#56 均已通过 CI/Release Gate 并 squash merge；本次 remaining decision 为 docs-only fast path，生产部署与 smoke NOT RUN。
