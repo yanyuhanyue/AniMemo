@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from updater.errors import OperationInProgress, StateError
 from updater.state import OperationStore, UpdateLock
@@ -134,6 +135,31 @@ class OperationStateTests(unittest.TestCase):
 
             with self.assertRaisesRegex(StateError, "file"):
                 store.get(operation_id)
+
+    def test_operation_store_reads_inode_unlinked_by_concurrent_atomic_replace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = OperationStore(root / "state")
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+            real_fstat = os.fstat
+            observed_unlinked_inode = False
+
+            def fstat_after_atomic_replace(descriptor):
+                nonlocal observed_unlinked_inode
+                metadata = real_fstat(descriptor)
+                if observed_unlinked_inode:
+                    return metadata
+                observed_unlinked_inode = True
+                values = list(metadata)
+                values[3] = 0  # st_nlink: the opened old inode was unlinked by os.replace
+                return os.stat_result(values)
+
+            with mock.patch("updater.state.os.fstat", side_effect=fstat_after_atomic_replace):
+                restored = store.get(operation["id"])
+
+            self.assertTrue(observed_unlinked_inode)
+            self.assertEqual(restored["id"], operation["id"])
+            self.assertEqual(restored["status"], "idle")
 
     def test_invalid_transition_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
