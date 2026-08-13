@@ -90,9 +90,8 @@ _TRUNCATED_QUOTED_KEY_VALUE = re.compile(
     r"(?P<value_quote>[\"'])(?P<value>(?:\\.|(?!(?P=value_quote))[^\\])*)[\\]?\Z",
     re.DOTALL,
 )
-_BARE_KEY_VALUE = re.compile(
+_BARE_KEY_PREFIX = re.compile(
     rf"(?P<prefix>(?<![A-Za-z0-9_.-])[\"']?(?P<key>{_KEY})[\"']?\s*[:=]\s*)"
-    rf"(?P<value>(?![\"'])(?:\[REDACTED\]|(?:(?!\s+{_KEY}\s*[:=])[^,;}}&\]\r\n])+))",
 )
 
 _CLI_QUOTED = re.compile(
@@ -309,6 +308,19 @@ def _scrub_sequence(
             scrubbed_item = _redact_cookie_value(header, str(item))
         return [header, scrubbed_item]
 
+    if len(value) == 2 and isinstance(value[0], str) and _is_sensitive_key(value[0]):
+        key = value[0]
+        item = value[1]
+        if _normalise_key(key) in {
+            "authorization",
+            "http_authorization",
+            "proxy_authorization",
+        }:
+            scrubbed_item = _redact_arbitrary_authorization_value(str(item))
+        else:
+            scrubbed_item = _REDACTED
+        return [key, scrubbed_item]
+
     if value and all(
         isinstance(item, Mapping)
         and bool({_normalise_key(key) for key in item} & _COOKIE_VALUE_FIELDS)
@@ -391,6 +403,75 @@ def _replace_truncated_secret_value(match: re.Match[str]) -> str:
         return match.group(0)
     quote = match.groupdict().get("value_quote") or ""
     return f"{match.group('prefix')}{quote}{_REDACTED}"
+
+
+def _bare_secret_value_end(text: str, start: int) -> int:
+    line_end, _ = _line_end(text, start)
+    boundary = _SAFE_DIAGNOSTIC_BOUNDARY.search(text, start, line_end)
+    value_end = boundary.start() if boundary else line_end
+    for delimiter in ("}", "]", "&"):
+        delimiter_start = start
+        if delimiter == "]" and text.startswith(_REDACTED, start):
+            delimiter_start += len(_REDACTED)
+        position = text.find(delimiter, delimiter_start, value_end)
+        if position >= 0:
+            value_end = position
+    return value_end
+
+
+def _redacted_marker_is_complete(text: str, start: int) -> bool:
+    end = start + len(_REDACTED)
+    line_end, _ = _line_end(text, end)
+    if end >= line_end:
+        return True
+    remainder = text[end:line_end]
+    if _SAFE_DIAGNOSTIC_BOUNDARY.match(remainder):
+        return True
+    if remainder[0] in "}]&":
+        return True
+    return bool(re.match(rf"[,;]\s+{_KEY}\s*[:=]", remainder))
+
+
+def _redact_bare_key_values(text: str) -> str:
+    output: list[str] = []
+    output_cursor = 0
+    search_cursor = 0
+    while match := _BARE_KEY_PREFIX.search(text, search_cursor):
+        value_start = match.end()
+        search_cursor = value_start
+        normalised_key = _normalise_key(match.group("key"))
+        if not _is_sensitive_key(match.group("key")):
+            continue
+        if normalised_key in {
+            "authorization",
+            "http_authorization",
+            "proxy_authorization",
+            "cookie",
+            "http_cookie",
+            "set_cookie",
+        }:
+            # Dedicated header rules run first and preserve safe scheme, cookie
+            # names, and attributes. A generic second pass would destroy that
+            # useful diagnostic structure or split the redaction marker.
+            continue
+        if value_start >= len(text) or text[value_start] in "\"'":
+            continue
+        if text.startswith(_REDACTED, value_start) and _redacted_marker_is_complete(
+            text, value_start
+        ):
+            search_cursor = value_start + len(_REDACTED)
+            continue
+
+        value_end = _bare_secret_value_end(text, value_start)
+        if value_end <= value_start:
+            continue
+        output.append(text[output_cursor : match.end()])
+        output.append(_REDACTED)
+        output_cursor = value_end
+        search_cursor = value_end
+
+    output.append(text[output_cursor:])
+    return "".join(output)
 
 
 def _redact_escaped_json_text(text: str) -> str:
@@ -672,7 +753,7 @@ def redact(value: object) -> str:
     text = _CLI_BARE.sub(_replace_secret_value, text)
     text = _QUOTED_KEY_VALUE.sub(_replace_secret_value, text)
     text = _redact_escaped_json_text(text)
-    text = _BARE_KEY_VALUE.sub(_replace_secret_value, text)
+    text = _redact_bare_key_values(text)
     text = _TRUNCATED_QUOTED_KEY_VALUE.sub(_replace_truncated_secret_value, text)
     text = _URL_CREDENTIALS.sub(r"\g<scheme>\g<user>:[REDACTED]@", text)
     return _URL_PARAMETER.sub(_replace_url_parameter, text)

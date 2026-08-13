@@ -446,6 +446,58 @@ class RedactionTests(unittest.TestCase):
         self.assertIn("--release-id rc-1", value)
         self.assertEqual(redact(value), value)
 
+    def test_bare_secret_punctuation_and_authorization_pairs_fail_closed(self):
+        value = redact(
+            "failure password=BARE_COMMA_HEAD,BARE_COMMA_TAIL status=500\n"
+            "failure api_token=BARE_SEMI_HEAD;BARE_SEMI_TAIL request_id=req-bare\n"
+            "DATABASE_URL=postgresql://user:DB_HEAD;DB_TAIL@db.example.test/app "
+            "operation_id=op-bare"
+        )
+        authorization_pair = redact(
+            [("Authorization", "Bearer HEADER_PAIR_SECRET")]
+        )
+        sensitive_pair = redact([("api_token", "STRUCTURED_PAIR_SECRET")])
+
+        self.assert_secrets_removed(
+            value,
+            "BARE_COMMA_HEAD",
+            "BARE_COMMA_TAIL",
+            "BARE_SEMI_HEAD",
+            "BARE_SEMI_TAIL",
+            "DB_HEAD",
+            "DB_TAIL",
+        )
+        self.assert_secrets_removed(authorization_pair, "HEADER_PAIR_SECRET")
+        self.assert_secrets_removed(sensitive_pair, "STRUCTURED_PAIR_SECRET")
+        self.assertIn("status=500", value)
+        self.assertIn("request_id=req-bare", value)
+        self.assertIn("operation_id=op-bare", value)
+        self.assertIn("Bearer [REDACTED]", authorization_pair)
+        self.assertIn("[REDACTED]", sensitive_pair)
+        self.assertEqual(redact(value), value)
+        self.assertEqual(redact(authorization_pair), authorization_pair)
+        self.assertEqual(redact(sensitive_pair), sensitive_pair)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationStore(Path(directory))
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+            store.transition(
+                operation["id"],
+                "preflight",
+                detail=(
+                    "stderr: password=PERSISTED_HEAD,PERSISTED_TAIL "
+                    "status=500"
+                ),
+            )
+            persisted = store.get(operation["id"])["events"][-1]["detail"]
+
+        self.assert_secrets_removed(
+            persisted,
+            "PERSISTED_HEAD",
+            "PERSISTED_TAIL",
+        )
+        self.assertIn("status=500", persisted)
+
     def test_key_value_logs_and_common_cloud_credentials_are_redacted(self):
         value = redact(
             "db_password: database-secret\n"
