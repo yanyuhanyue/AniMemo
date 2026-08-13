@@ -53,6 +53,12 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
             "rotate_authentication_epoch --confirm-restore",
             "old-access-token",
             "old-refresh-token",
+            "csrf_payload = csrf_response.json()",
+            "old_refresh_csrf_payload = old_refresh_csrf.json()",
+            "login_payload = login_response.json()",
+            "refresh_payload = refresh_response.json()",
+            'HTTP_ORIGIN="https://dr.example.test"',
+            'HTTP_REFERER="https://dr.example.test/"',
             "AccessToken.lifetime = timedelta(hours=2)",
             'int(access_token["exp"]) - int(access_token["iat"]) >= 2 * 60 * 60',
             'old_access_token = AccessToken(old_access)',
@@ -77,6 +83,7 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
             self.script.index("DR media graph and restored authentication/refresh verification: PASS"),
         )
         self.assertNotIn("issue_token_pair", self.script)
+        self.assertNotIn("response.data", self.script)
 
     def test_destructive_paths_are_canonical_direct_children_and_revalidated(self):
         for marker in (

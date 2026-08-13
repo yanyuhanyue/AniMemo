@@ -51,12 +51,17 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
     def test_ci_and_release_gate_keep_merge_group_and_accept_exact_candidate(self):
         ci = self.source("ci.yml")
         release = self.source("release-gate.yml")
+        candidate_ref = (
+            "ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && "
+            "github.event.pull_request.head.sha || github.sha) }}"
+        )
         for source in (ci, release):
             self.assertIn("merge_group:", source)
             self.assertIn("workflow_call:", source)
             self.assertIn("candidate_sha:", source)
             self.assertIn("force_full:", source)
-            self.assertIn("ref: ${{ inputs.candidate_sha || github.sha }}", source)
+            self.assertIn(candidate_ref, source)
+            self.assertNotIn("ref: ${{ inputs.candidate_sha || github.sha }}", source)
             self.assertIn("inputs.force_full ||", source)
             self.assertIn("inputs.candidate_sha || github.event.pull_request.number || github.ref", source)
         self.assertIn("comparison_base_sha:", ci)
@@ -94,8 +99,12 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         for name in ("updater-isolated", "docker", "stateful-upgrade", "dr-rehearsal"):
             self.assertIn("inputs.force_full ||", self.job(release, name), name)
 
-        self.assertEqual(ci.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 10)
-        self.assertEqual(release.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 7)
+        candidate_ref = (
+            "ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && "
+            "github.event.pull_request.head.sha || github.sha) }}"
+        )
+        self.assertEqual(ci.count(candidate_ref), 10)
+        self.assertEqual(release.count(candidate_ref), 7)
         self.assertIn(
             "repository: AstrBotDevs/AstrBot\n          ref: ${{ matrix.astrbot_ref }}",
             ci,

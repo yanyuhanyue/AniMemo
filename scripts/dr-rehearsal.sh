@@ -442,18 +442,22 @@ csrf_response = login_client.get(
     secure=True,
     HTTP_HOST="dr.example.test",
 )
-assert csrf_response.status_code == 200, csrf_response.data
+csrf_payload = csrf_response.json()
+assert csrf_response.status_code == 200, csrf_payload
 login_response = login_client.post(
     "/api/v1/token/",
     {"username": user.username, "password": "DrRestorePass123!"},
     format="json",
     secure=True,
     HTTP_HOST="dr.example.test",
-    HTTP_X_CSRFTOKEN=csrf_response.data["csrf_token"],
+    HTTP_ORIGIN="https://dr.example.test",
+    HTTP_REFERER="https://dr.example.test/",
+    HTTP_X_CSRFTOKEN=csrf_payload["csrf_token"],
 )
-assert login_response.status_code == 200, login_response.data
-assert "refresh" not in login_response.data
-access = login_response.data["access"]
+login_payload = login_response.json()
+assert login_response.status_code == 200, login_payload
+assert "refresh" not in login_payload
+access = login_payload["access"]
 refresh = login_response.cookies[django_settings.REFRESH_COOKIE_NAME].value
 access_token = AccessToken(access)
 assert int(access_token["exp"]) - int(access_token["iat"]) >= 2 * 60 * 60
@@ -651,7 +655,8 @@ old_access_response = old_access_client.get(
     secure=True,
     HTTP_HOST="dr.example.test",
 )
-assert old_access_response.status_code == 401, old_access_response.data
+old_access_payload = old_access_response.json()
+assert old_access_response.status_code == 401, old_access_payload
 
 old_refresh_client = APIClient(enforce_csrf_checks=True)
 old_refresh_csrf = old_refresh_client.get(
@@ -659,7 +664,8 @@ old_refresh_csrf = old_refresh_client.get(
     secure=True,
     HTTP_HOST="dr.example.test",
 )
-assert old_refresh_csrf.status_code == 200, old_refresh_csrf.data
+old_refresh_csrf_payload = old_refresh_csrf.json()
+assert old_refresh_csrf.status_code == 200, old_refresh_csrf_payload
 old_refresh_client.cookies[django_settings.REFRESH_COOKIE_NAME] = old_refresh
 old_refresh_response = old_refresh_client.post(
     "/api/v1/token/refresh/",
@@ -667,9 +673,12 @@ old_refresh_response = old_refresh_client.post(
     format="json",
     secure=True,
     HTTP_HOST="dr.example.test",
-    HTTP_X_CSRFTOKEN=old_refresh_csrf.data["csrf_token"],
+    HTTP_ORIGIN="https://dr.example.test",
+    HTTP_REFERER="https://dr.example.test/",
+    HTTP_X_CSRFTOKEN=old_refresh_csrf_payload["csrf_token"],
 )
-assert old_refresh_response.status_code == 401, old_refresh_response.data
+old_refresh_payload = old_refresh_response.json()
+assert old_refresh_response.status_code == 401, old_refresh_payload
 
 login_client = APIClient(enforce_csrf_checks=True)
 login_csrf = login_client.get(
@@ -677,17 +686,21 @@ login_csrf = login_client.get(
     secure=True,
     HTTP_HOST="dr.example.test",
 )
-assert login_csrf.status_code == 200, login_csrf.data
+login_csrf_payload = login_csrf.json()
+assert login_csrf.status_code == 200, login_csrf_payload
 login_response = login_client.post(
     "/api/v1/token/",
     {"username": "upgrade-gate-user-a", "password": "DrRestorePass123!"},
     format="json",
     secure=True,
     HTTP_HOST="dr.example.test",
-    HTTP_X_CSRFTOKEN=login_csrf.data["csrf_token"],
+    HTTP_ORIGIN="https://dr.example.test",
+    HTTP_REFERER="https://dr.example.test/",
+    HTTP_X_CSRFTOKEN=login_csrf_payload["csrf_token"],
 )
-assert login_response.status_code == 200, login_response.data
-assert "access" in login_response.data and "refresh" not in login_response.data
+login_payload = login_response.json()
+assert login_response.status_code == 200, login_payload
+assert "access" in login_payload and "refresh" not in login_payload
 assert login_client.cookies[django_settings.REFRESH_COOKIE_NAME].value
 
 refresh_csrf = login_client.get(
@@ -695,27 +708,32 @@ refresh_csrf = login_client.get(
     secure=True,
     HTTP_HOST="dr.example.test",
 )
-assert refresh_csrf.status_code == 200, refresh_csrf.data
+refresh_csrf_payload = refresh_csrf.json()
+assert refresh_csrf.status_code == 200, refresh_csrf_payload
 refresh_response = login_client.post(
     "/api/v1/token/refresh/",
     {},
     format="json",
     secure=True,
     HTTP_HOST="dr.example.test",
-    HTTP_X_CSRFTOKEN=refresh_csrf.data["csrf_token"],
+    HTTP_ORIGIN="https://dr.example.test",
+    HTTP_REFERER="https://dr.example.test/",
+    HTTP_X_CSRFTOKEN=refresh_csrf_payload["csrf_token"],
 )
-assert refresh_response.status_code == 200, refresh_response.data
-assert "access" in refresh_response.data and "refresh" not in refresh_response.data
+refresh_payload = refresh_response.json()
+assert refresh_response.status_code == 200, refresh_payload
+assert "access" in refresh_payload and "refresh" not in refresh_payload
 
 new_access_client = APIClient()
-new_access_client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh_response.data['access']}")
+new_access_client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh_payload['access']}")
 me_response = new_access_client.get(
     "/api/v1/auth/me/",
     secure=True,
     HTTP_HOST="dr.example.test",
 )
-assert me_response.status_code == 200, me_response.data
-assert me_response.data["username"] == "upgrade-gate-user-a"
+me_payload = me_response.json()
+assert me_response.status_code == 200, me_payload
+assert me_payload["username"] == "upgrade-gate-user-a"
 print("DR media graph and restored authentication/refresh verification: PASS")
 PY
 compose b exec -T api python - <<'PY'

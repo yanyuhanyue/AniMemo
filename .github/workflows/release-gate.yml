@@ -76,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 0
       - id: classify
         env:
@@ -95,7 +95,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - run: python scripts/ci_classify.py --self-test
       - run: git diff --check
       - run: python -m compileall -q scripts
@@ -109,7 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -131,7 +131,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - name: Create ephemeral production-like environment
         shell: bash
         run: |
@@ -267,7 +267,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -280,7 +280,7 @@ jobs:
         run: >-
           python scripts/ci_refs.py
           --base "${{ inputs.upgrade_base_sha || '' }}"
-          --head "${{ inputs.candidate_sha || github.sha }}"
+          --head "${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}"
           --github-output "$GITHUB_OUTPUT"
       - name: Run BASE to CURRENT stateful production upgrade gate
         shell: bash
@@ -318,13 +318,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
-      CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       COMPOSE_HTTP_TIMEOUT: "120"
       COMPOSE_PROJECT_NAME: animemo-dr-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 1
       - uses: actions/setup-python@v5
         with:
@@ -348,7 +348,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - name: Require selected jobs to succeed and unselected jobs to skip
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
