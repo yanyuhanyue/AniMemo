@@ -473,7 +473,7 @@ jobs:
             --compose-project "$COMPOSE_PROJECT_NAME" \
             --postgres-user animemo \
             --postgres-database animemo \
-            --iterations-per-user 2 \
+            --iterations-per-user 4 \
             --timeout-seconds 20 \
             --resource-interval-seconds 0.5 \
             --output artifacts/long-operation-capacity.json

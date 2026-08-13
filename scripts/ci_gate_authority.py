@@ -101,6 +101,12 @@ RELEASE_JOB_GATES: dict[str, str | None] = {
     "stateful-upgrade": "run_release_stateful",
     "dr-rehearsal": "run_release_stateful",
 }
+LEGACY_RELEASE_JOB_GATES: dict[str, str | None] = {
+    name: gate for name, gate in RELEASE_JOB_GATES.items() if name != "dr-rehearsal"
+}
+TRUSTED_PRE_MERGE_WORKFLOW_REF = (
+    "yanyuhanyue/AniMemo/.github/workflows/pre-merge-full.yml@refs/heads/main"
+)
 
 SUPPORTED_EVENTS = frozenset(
     {"push", "pull_request", "merge_group", "workflow_call", "workflow_dispatch"}
@@ -376,9 +382,14 @@ def _ci_selected_jobs(event_name: str, gates: Mapping[str, bool]) -> list[str]:
     return selected
 
 
-def _release_selected_jobs(event_name: str, gates: Mapping[str, bool]) -> list[str]:
+def _release_selected_jobs(
+    event_name: str,
+    gates: Mapping[str, bool],
+    *,
+    jobs: Mapping[str, str | None] = RELEASE_JOB_GATES,
+) -> list[str]:
     selected: list[str] = []
-    for job, gate in RELEASE_JOB_GATES.items():
+    for job, gate in jobs.items():
         should_run = (
             event_name == "push"
             if gate is None
@@ -417,7 +428,11 @@ def _validate_job_matrix(
 
 
 def validate_gate_authority(
-    needs: Mapping[str, Any], *, workflow: str, event_name: str
+    needs: Mapping[str, Any],
+    *,
+    workflow: str,
+    event_name: str,
+    workflow_ref: str = "",
 ) -> dict[str, object]:
     """Validate classifier identity and the exact selected/skipped workflow matrix."""
 
@@ -428,7 +443,16 @@ def validate_gate_authority(
     if event_name not in SUPPORTED_EVENTS:
         raise GateAuthorityError(f"unsupported event name: {event_name!r}")
 
+    job_set = "current"
     jobs = CI_JOB_GATES if workflow == "ci" else RELEASE_JOB_GATES
+    if workflow == "release" and event_name == "workflow_call":
+        legacy_keys = frozenset({"classify", *LEGACY_RELEASE_JOB_GATES})
+        if (
+            frozenset(needs) == legacy_keys
+            and workflow_ref == TRUSTED_PRE_MERGE_WORKFLOW_REF
+        ):
+            jobs = LEGACY_RELEASE_JOB_GATES
+            job_set = "legacy-main-without-dr-rehearsal"
     _exact_keys(needs, frozenset({"classify", *jobs}), label="NEEDS_JSON")
     _document, risk_level, risk_rank, force_full, gates = _validate_classification(
         needs
@@ -445,7 +469,7 @@ def validate_gate_authority(
     if workflow == "ci":
         selected_jobs = _ci_selected_jobs(event_name, gates)
     else:
-        selected_jobs = _release_selected_jobs(event_name, gates)
+        selected_jobs = _release_selected_jobs(event_name, gates, jobs=jobs)
     unselected_jobs = _validate_job_matrix(
         needs, jobs=jobs, selected_jobs=selected_jobs
     )
@@ -458,6 +482,7 @@ def validate_gate_authority(
         "risk_level": risk_level,
         "risk_rank": risk_rank,
         "execution_force_full": force_full,
+        "job_set": job_set,
         "selected_jobs": selected_jobs,
         "unselected_jobs": unselected_jobs,
     }
@@ -475,7 +500,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         raw_needs = os.getenv("NEEDS_JSON")
         needs = _object(_load_json(raw_needs, label="NEEDS_JSON"), label="NEEDS_JSON")
         result = validate_gate_authority(
-            needs, workflow=args.workflow, event_name=args.event_name
+            needs,
+            workflow=args.workflow,
+            event_name=args.event_name,
+            workflow_ref=os.getenv("GITHUB_WORKFLOW_REF", ""),
         )
     except GateAuthorityError as error:
         print(

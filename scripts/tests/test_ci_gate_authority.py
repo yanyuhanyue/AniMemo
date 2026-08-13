@@ -12,9 +12,11 @@ from scripts.ci_gate_authority import (
     CI_JOB_GATES,
     CLASSIFIER_OUTPUT_NAMES,
     GATE_NAMES,
+    LEGACY_RELEASE_JOB_GATES,
     PRODUCT_GATE_NAMES,
     RELEASE_JOB_GATES,
     SIGNAL_NAMES,
+    TRUSTED_PRE_MERGE_WORKFLOW_REF,
     GateAuthorityError,
     main,
     validate_gate_authority,
@@ -266,6 +268,56 @@ class CiGateAuthorityTests(unittest.TestCase):
         self.assertEqual(
             result["selected_jobs"],
             ["updater-isolated", "docker", "stateful-upgrade", "dr-rehearsal"],
+        )
+
+    def test_workflow_call_accepts_only_the_exact_legacy_main_release_job_set(self):
+        document = classification("STANDARD", force_full=True)
+        needs = release_needs(document, event_name="workflow_call")
+        needs.pop("dr-rehearsal")
+
+        result = validate_gate_authority(
+            needs,
+            workflow="release",
+            event_name="workflow_call",
+            workflow_ref=TRUSTED_PRE_MERGE_WORKFLOW_REF,
+        )
+
+        self.assertEqual(set(needs), {"classify", *LEGACY_RELEASE_JOB_GATES})
+        self.assertEqual(result["job_set"], "legacy-main-without-dr-rehearsal")
+        self.assertNotIn("dr-rehearsal", result["selected_jobs"])
+
+        self.assert_rejected(
+            "missing keys: dr-rehearsal",
+            lambda: validate_gate_authority(
+                needs,
+                workflow="release",
+                event_name="workflow_call",
+                workflow_ref=(
+                    "yanyuhanyue/AniMemo/.github/workflows/release.yml@"
+                    "refs/heads/work/integrated-final-rc-readiness-20260813"
+                ),
+            ),
+        )
+
+        for event_name in ("pull_request", "workflow_dispatch"):
+            with self.subTest(event_name=event_name):
+                self.assert_rejected(
+                    "missing keys: dr-rehearsal",
+                    lambda event_name=event_name: validate_gate_authority(
+                        needs, workflow="release", event_name=event_name
+                    ),
+                )
+
+        missing_stateful = dict(needs)
+        missing_stateful.pop("stateful-upgrade")
+        self.assert_rejected(
+            "missing keys",
+            lambda: validate_gate_authority(
+                missing_stateful,
+                workflow="release",
+                event_name="workflow_call",
+                workflow_ref=TRUSTED_PRE_MERGE_WORKFLOW_REF,
+            ),
         )
 
     def test_real_classifier_low_standard_high_critical_and_force_full_documents(self):

@@ -203,6 +203,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("THROTTLE_USER_RATE=300/min", source)
         self.assertIn("--count 60", source)
         self.assertIn("scripts/perf/long_operation_capacity.py", source)
+        capacity = source[
+            source.index("  isolated-long-operation-capacity:") : source.index(
+                "  regression-gate:"
+            )
+        ]
+        self.assertIn("--iterations-per-user 4", capacity)
         self.assertIn(
             "needs: [frontend, backend, isolated-resource-load, isolated-long-operation-capacity]",
             source,
@@ -346,6 +352,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertGreaterEqual(promotion.count("deployment-contract.json"), 7)
         self.assertIn('test "$UPGRADE_BASE_SHA" != "$candidate_sha"', release)
         self.assertIn('if [[ "$BASE_SHA" == "$HEAD_SHA" ]]', gate)
+        release_gate = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("timeout-minutes: 40", release_gate)
         self.assertIn('merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"', gate)
 
     def test_exact_image_rehearsal_is_runner_scoped_and_read_only(self):

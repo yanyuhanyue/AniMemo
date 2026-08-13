@@ -358,6 +358,7 @@ class LongOperationCapacityTests(unittest.TestCase):
             "ANIMEMO_ISOLATED_PROVIDER_LATENCY_MS=1200",
             "--count 60",
             "scripts/perf/long_operation_capacity.py",
+            "--iterations-per-user 4",
             "down -v --remove-orphans",
             "long-operation-capacity.json",
             "needs: [frontend, backend, isolated-resource-load, isolated-long-operation-capacity]",

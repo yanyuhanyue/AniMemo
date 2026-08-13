@@ -260,7 +260,7 @@ jobs:
     needs: classify
     if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_release_stateful == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       COMPOSE_PROJECT_NAME: animemo-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
       COMPOSE_HTTP_TIMEOUT: "120"

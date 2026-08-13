@@ -214,6 +214,12 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertLess(switch, retained)
         self.assertIn('BASE_POSTGRES_ID=', gate)
         self.assertIn('BASE_REDIS_ID=', gate)
+        self.assertIn(
+            'timeout --foreground 15s docker exec -i "$PROJECT_NAME-api" python -',
+            gate,
+        )
+        self.assertIn('local deadline=$((SECONDS + 240))', gate)
+        self.assertNotIn('compose "$source_root" exec -T api python -', gate)
 
     def test_upgrade_overlay_preserves_each_source_tree_bootstrap_command(self):
         production = (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")

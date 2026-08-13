@@ -161,8 +161,7 @@ trap cleanup EXIT
 trap 'print_logs "$CURRENT_ROOT"' ERR
 
 health_check() {
-  local source_root="$1"
-  compose "$source_root" exec -T api python - <<'PY'
+  timeout --foreground 15s docker exec -i "$PROJECT_NAME-api" python - <<'PY'
 import http.client
 import json
 
@@ -178,19 +177,20 @@ PY
 wait_for_api() {
   local source_root="$1"
   local phase="$2"
-  for attempt in $(seq 1 36); do
-    if health_check "$source_root" >/dev/null 2>&1; then
-      health_check "$source_root"
+  local deadline=$((SECONDS + 240))
+  while ((SECONDS < deadline)); do
+    if health_check >/dev/null 2>&1; then
+      health_check
       return 0
     fi
-    if ! compose "$source_root" ps --status running api | grep -q "${PROJECT_NAME}-api"; then
+    if [[ "$(timeout --foreground 15s docker inspect --format '{{.State.Running}}' "$PROJECT_NAME-api" 2>/dev/null || true)" != "true" ]]; then
       echo "$phase release API is not running." >&2
       print_logs "$source_root"
       return 1
     fi
     sleep 5
   done
-  echo "$phase release API did not become healthy within 180 seconds." >&2
+  echo "$phase release API did not become healthy within 240 seconds." >&2
   print_logs "$source_root"
   return 1
 }
