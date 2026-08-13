@@ -1,123 +1,105 @@
 # AniMemo v1.0 DeepSec Final RC Audit
 
-Status: **PASS WITH ONE NON-BLOCKING DEFERRED MEDIUM**
+Status: **FAIL / RELEASE BLOCKER**
 
-Audited application candidate: `306878de039cba6a706ce11c03ac9dab97448917`
-Completed: 2026-08-14, Asia/Shanghai
+Audited application candidate: `085657249c5d174e17dac7ff6dc0797f3179165a`
+
+Tool: DeepSec `2.3.5` ([upstream repository](https://github.com/Unclecheng-li/DeepSec))
+
+Completed: 2026-08-14 06:44, Asia/Shanghai
 
 ## Scope and source handling
 
-The scan input was created with `git archive 306878de039cba6a706ce11c03ac9dab97448917`. It contained 721 tracked entries and 721 extracted files. Untracked files, the working `.env`, databases, backups, SSH material, production credentials, and runtime state were not included.
+Only tracked source and the explicit candidate delta were analyzed. The local DeepSec environment file was not read. Untracked files, working `.env` files, databases, backups, SSH material, production credentials, private runtime state, and production endpoints were excluded.
 
-Raw JSON is intentionally retained outside the repository at:
+No Spear scan was run. No request targeted `animemo.cc`, the VPS, Cloudflare, R2, the real Bangumi application, localhost safety bypasses, or private network ranges.
 
-```text
-C:\Users\admin\AppData\Local\Temp\animemo-final-rc-deepsec-306878d-20260814-005500
-```
-
-The security result applies to the frozen application candidate, not to the later report-only readiness commit.
-
-## Tool and commands
-
-DeepSec package version: `0.2.0`.
-
-`deepsec --version` is not implemented by this CLI. The installed package version was recorded from the actual environment, and the supported interface was confirmed with:
+Sanitized raw exports are retained outside the repository:
 
 ```text
-deepsec shield --help
-deepsec shield scan --help
-deepsec shield supply-chain --help
+C:\Users\admin\AppData\Local\Temp\animemo-deepsec-final-0856572\broad-findings.json
+C:\Users\admin\AppData\Local\Temp\animemo-deepsec-final-0856572\exact-delta-findings.json
 ```
 
-Equivalent scan commands used the actual `0.2.0` interface:
+## Runs
 
-```text
-deepsec shield scan <tracked-source> --layer l1 --format json --output <temp> --include-tests
-deepsec shield scan <tracked-source> --layer l2 --format json --output <temp> --include-tests
-deepsec shield scan <four-changed-files> --layer l3 --remote-l3 --format json --output <temp> --include-tests
-deepsec shield supply-chain check <tracked-source> --format json --output <temp>
-```
+| Run | Scope | Tool summary |
+| --- | --- | --- |
+| `20260813195454-71f63d8979a92b46` | Broad tracked-source analysis | 124 analyses, 114 report findings; Critical 0, High 2, Medium 65, High Bug 1, Bug 46 |
+| `20260813222055-e85e738b3a20c3c5` | Exact delta `756bacd..0856572` | 6 changed files, 17 new analysis findings; report/export counters Critical 0, High 3, Medium 18, High Bug 1, Bug 4 |
 
-The full-repository local L3 attempt exceeded its execution window. Remote full-repository L3 had already timed out twice and was not retried under the two-attempt rule. A focused final-SHA L3 scan covered every file changed by the final code fix:
+The CLI overview, report counters, and JSON export use different counting units and include overlapping records. This report preserves the tool's numbers and triages by unique code-aware concern rather than adding duplicate rows together.
 
-- `backend/performance/seed.py`
-- `backend/journal/test_performance_baseline.py`
-- `backend/plugin_host/management/commands/sync_official_plugins.py`
-- `backend/plugin_host/tests/test_official_sync.py`
+The final pass did not rerun the separate supply-chain command. DeepSec Supply Chain is therefore **NOT RUN**, not PASS.
 
-## Finding summary
+## High-severity triage
 
-| Layer | Raw findings | Raw severity | Manual result |
-| --- | ---: | --- | --- |
-| L1 | 60 | 54 Critical, 6 High | 60 false positive / not applicable |
-| L2 | 7 | 3 High, 4 Medium | 6 false positive / not applicable, 1 deferred Medium |
-| Focused L3 | 10 | 5 Medium, 5 Low | 10 false positive / not applicable |
-| Supply chain | 0 | none | PASS |
+### DS-RC1-001: candidate-controlled release and integrity authority
+
+Disposition: **CONFIRMED HIGH, DUPLICATE GROUP, RC1**.
+
+The broad and exact-delta runs report overlapping High findings in:
+
+- `.github/workflows/release-gate.yml`
+- `scripts/ci_gate_authority.py`
+- `scripts/check_official_plugin_immutability.py`
+
+The common issue is self-certification: candidate-controlled classifier, gate-authority, or package-identity code participates in deciding whether the same candidate is acceptable. Internal consistency checks are valuable, but they are not an independent trust anchor when both evidence and validator come from the candidate tree.
+
+The repository has a trusted-main Pre-Merge workflow intended to compensate for this boundary. For exact candidate `0856572`, that authority failed because the reusable Release Gate from `main` lacked the required `dr-rehearsal` job and the compatibility path did not activate under the observed event. Because the compensation did not pass, these High findings cannot be dismissed as merely theoretical.
+
+Required closure: execute classification, authority, and immutable package identity from protected trusted code, or have a protected authority independently recompute and verify candidate claims. Then obtain a passing exact-candidate Trusted Pre-Merge run.
+
+### Artifact workflow permission report
+
+Disposition: **FALSE POSITIVE**.
+
+The exact-delta High Bug predicted that artifact upload/download would fail for lack of workflow permission. The final performance run uploaded, downloaded, and consumed the capacity and regression artifacts successfully. The observed execution contradicts the report.
+
+### Updater backup retention report
+
+Disposition: **CONFIRMED OPERATIONAL DEBT, DEFERRED RC2**.
+
+The broad High Bug notes that pre-migration database backups have verification and freshness rules but no automatic retention/pruning policy. This can cause long-term disk pressure. It is not a current credential compromise, unsafe restore, or candidate data-loss path, and automatic deletion is intentionally outside the updater's current safety contract. Define an operator-visible inventory/retention policy before backup accumulation becomes an operational risk; do not silently auto-delete verified backups during this RC closure.
+
+## Medium and Bug triage
+
+| Finding group | Disposition | Triage |
+| --- | --- | --- |
+| Hardcoded Django/Fernet/staff values in CI | NOT APPLICABLE | Synthetic isolated fixtures; no production secret or production credential was present |
+| Mutable GitHub Action/service image tags | CONFIRMED, DEFERRED RC2 | Real supply-chain hardening debt; pin to reviewed immutable SHAs/digests in a separate controlled change |
+| CI trust/event/dispatch findings | DUPLICATE | Same root issue as DS-RC1-001; do not inflate the High count |
+| Candidate SHA option/input handling | DEFERRED RC2 or DUPLICATE | Operator/CI script hardening; no demonstrated production request surface in this run |
+| Fixed Compose namespace / ambient environment concerns | DEFERRED RC2 | Isolated rehearsal robustness debt; final authoritative workflows used scoped disposable resources successfully |
+| Temporary fixture file permissions | DEFERRED RC2 | Synthetic workflow material, not production credentials; tighten private temp modes without widening RC scope |
+| Artifact permission finding | FALSE POSITIVE | Artifact transfer succeeded in run `31745479369` |
+
+No tracked production credential, private key, access token, Cloudflare/R2 secret, Bangumi App Secret, Resend key, or database dump credential was identified.
+
+## Layer decision
+
+| Requirement | Result | Reason |
+| --- | --- | --- |
+| DeepSec L1 / broad local analysis | PASS | Executed against tracked source; confirmed Critical 0 |
+| DeepSec L2 / code-aware boundary analysis | **FAIL** | One grouped confirmed High in release/integrity authority |
+| DeepSec L3 / exact candidate delta | **FAIL** | Reproduced the same self-certification High group on the final delta |
+| DeepSec Supply Chain | NOT RUN | Separate command was not rerun in the final pass |
+| Spear | NOT RUN | Forbidden production/private targets and tool safety boundary |
+
+## Sanitized totals
 
 Confirmed Critical: **0**.
 
-Confirmed High: **0**.
+Confirmed High: **1 grouped issue** represented by overlapping release/classifier/plugin authority findings.
 
-False positive or not applicable: **76**.
+False positives: **artifact permission High Bug plus synthetic-secret reports where the values are isolated fixtures**.
 
-Deferred: **1 Medium**.
+Deferred findings: **mutable action tags, backup retention, and bounded rehearsal/script hardening**.
 
-## L1 triage
-
-The 54 `hardcoded_secret` findings are synthetic CI/test values, masked samples, generated setup credentials, test CSRF values, or fixed non-production fixture credentials. No production secret was present in the tracked archive.
-
-The three `ai_pattern_error` findings are not exploitable code-generation or SQL-injection defects:
-
-- Updater thread names and redacted error text do not execute input.
-- The SQLite-only `json_each` table name is obtained from Django model metadata, not a request value.
-
-The three `insecure_config` findings are not runtime vulnerabilities:
-
-- `check_official_plugin_immutability.py` evaluates a tightly validated literal tuple extracted from repository-owned source; it does not evaluate caller-provided Python.
-- The two `yaml.load()` calls are test-only workflow parsers using `yaml.BaseLoader`, which constructs scalar/container data and does not instantiate arbitrary Python objects.
-
-Disposition: all 60 L1 findings are **FALSE POSITIVE** or **NOT APPLICABLE**.
-
-## L2 triage
-
-| Finding group | Count | Disposition | Rationale |
-| --- | ---: | --- | --- |
-| Updater command injection | 2 | FALSE POSITIVE | Fixed executable/argv vectors, `list(argv)`, `shell=False`, and production RPC does not accept arbitrary commands. |
-| Resource sampler command injection | 1 | NOT APPLICABLE | Isolated CI harness constructs fixed Docker/PostgreSQL/Redis argv arrays; the callable is an injected test seam, not a product request surface. |
-| Core Bangumi SSRF | 1 | FALSE POSITIVE | URL construction is constrained by `_fixed_url()` to fixed Bangumi API/OAuth bases. |
-| Official importer Bangumi SSRF | 2 | FALSE POSITIVE | Fixed `https://api.bgm.tv/v0/subjects/` paths with `int(subject_id)` interpolation. |
-| Plugin Host arbitrary URL | 1 | DEFERRED MEDIUM | `PluginContext.request_json()` accepts an arbitrary URL in trusted in-process backend plugin code. This is consistent with the explicit v1.0 trusted-publisher model, but it is not a network sandbox. |
-
-The deferred network boundary must be closed before enabling untrusted backend publishers, a public third-party backend marketplace, worker/container isolation, or Runtime v3. The expected remediation is a Host-owned outbound network broker with scheme/host policy and explicit capability declarations. It is not a confirmed v1.0 authorization bypass because backend plugin execution already requires trusted superuser review/publish and runs with in-process authority.
-
-## Focused L3 triage
-
-All ten final-delta findings were reviewed against execution boundaries and tests:
-
-- Test passwords and the performance integration secret exist only in disposable fixtures.
-- Performance identity tokens are deliberately emitted to a protected workflow artifact boundary; production execution is blocked by the load harness target denylist and isolated workflow contract.
-- Prefix cleanup and fixture approval records are confined to the explicitly disposable performance database contract.
-- `force_authenticate` is a query-count unit test; the real isolated performance workflow separately uses issued JWTs.
-- Official sync is an operator management command with package validation, immutable content checks, concurrency handling, and fail-closed conflict tests. The reported actor and diagnostics do not create a remote authorization surface.
-- Manifest console text, paths, and package hashes are operator diagnostics, not secrets.
-
-Disposition: all ten are **FALSE POSITIVE** or **NOT APPLICABLE**. No code change was justified by these findings.
-
-## Supply chain and Spear
-
-DeepSec supply-chain check returned zero findings for the tracked source dependency inputs.
-
-Spear: **NOT RUN BY POLICY**. No scan targeted `animemo.cc`, the VPS, localhost bypasses, private networks, Cloudflare, R2, or the real Bangumi application.
+These are triaged groups, not a relabeling of every duplicate JSON record as a unique vulnerability.
 
 ## Final security decision
 
-DeepSec L1: **PASS** after triage.
+DeepSec does not establish a Critical vulnerability in AniMemo v1.0. It does establish a release-blocking trust-boundary High: candidate-controlled logic certifies candidate release/integrity claims, while the intended trusted-main compensation failed for this exact candidate.
 
-DeepSec L2: **PASS**, with one non-blocking deferred Medium.
-
-DeepSec L3: **FAIL for the required full-repository final-SHA scope**; the final changed-file delta passed.
-
-DeepSec Supply Chain: **PASS**.
-Release-blocking confirmed Critical/High: **0**.
-
-This result does not override the overall Final RC readiness verdict. Recovery, concurrency/long-task isolation, Release Producer parity, and Pre-Merge authority have separate unresolved evidence requirements.
+Security verdict: **FAIL / NOT READY** until the authority boundary is anchored to trusted code and a passing exact-candidate trusted authority run exists.

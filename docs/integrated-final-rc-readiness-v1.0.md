@@ -2,10 +2,11 @@
 
 Final verdict: **NOT READY**
 
-Evidence window: 2026-08-13 19:40 through 2026-08-14 01:30, Asia/Shanghai
+Evidence window: 2026-08-13 19:40 through 2026-08-14 06:44, Asia/Shanghai (`2026-08-13T11:40Z` through `2026-08-13T22:44Z`).
 
-Elapsed evidence run: approximately 5 hours 50 minutes
-Production operations: **NOT RUN BY DESIGN**
+Elapsed evidence run: approximately 11 hours 4 minutes. This exceeded the requested 8-hour absolute stop. No additional scan, fix, or third authority attempt was started after the two-attempt limit was exhausted.
+
+Production operations: **NOT RUN BY DESIGN**.
 
 ## Authority and identity
 
@@ -16,159 +17,122 @@ Production operations: **NOT RUN BY DESIGN**
 | Barrier A | `f49cbce6fee839609ca4ed04e091f82b37f3fc45` |
 | Barrier B | `103c82055cffd3a5d21144a100b050b65fe44ac4` |
 | Merge base with `origin/main` | `8727aa97dc092d12e4a4abb15b85ce1f46d1020d` |
-| Integrated candidate | `103c82055cffd3a5d21144a100b050b65fe44ac4` |
-| Final application candidate | `306878de039cba6a706ce11c03ac9dab97448917` |
-| Final readiness SHA | Set by the report-only commit containing this document |
-| Draft PR | `#76`, `work/integrated-final-rc-readiness-20260813` to `main` |
-| PR state | OPEN, DRAFT |
+| Initial integrated baseline | `103c82055cffd3a5d21144a100b050b65fe44ac4` |
+| Final application candidate | `085657249c5d174e17dac7ff6dc0797f3179165a` |
+| Final readiness SHA | Report-only commit following `0856572`; record from the branch/PR head after this report is committed |
+| Draft PR | [#76](https://github.com/yanyuhanyue/AniMemo/pull/76), `work/integrated-final-rc-readiness-20260813` to `main` |
+| PR state at checkpoint | OPEN, DRAFT, BLOCKED |
 
-At final application-candidate freeze, local HEAD and the remote work branch both resolved to `306878de039cba6a706ce11c03ac9dab97448917`. Barrier B was zero commits behind `origin/main` and three commits ahead at the initial checkpoint; `origin/main` did not advance during the run.
-
-The report-only readiness commit does not change the application candidate. Expensive code evidence remains bound to `306878d`; remote branch identity after the report commit is recorded separately as `FINAL_READINESS_SHA`.
+Before the report-only commit, local HEAD, the remote work branch, and PR #76 HEAD all resolved to exact candidate `085657249c5d174e17dac7ff6dc0797f3179165a`. `origin/main` remained `8727aa9`; the branch was 0 behind and 11 commits ahead. The report-only commit does not change the application candidate or make old code evidence apply to a new code tree.
 
 ## Barrier B evidence rebuild
 
-Result: **PASS**. The exact Barrier B tree was rebuilt and exercised before candidate integration. Build, frontend tests, lint, plugin validation, Python compilation, Django checks, migration checks, provider/Bangumi configuration, origin/CORS/CSRF/host validation, namespace, browser migration, Bridge, Updater, Release, and CI-classifier coverage produced no RC0/RC1 mismatch.
+Result: **PASS**.
 
-No evidence mismatch was found between the previous Barrier B report and the rebuilt result. Two later candidate fixes addressed failures exposed only by exact remote RC environments:
+The exact Barrier B tree was rebuilt before integration. Build, frontend tests, lint, plugin validation, Python compilation, Django checks, migration checks, provider/Bangumi configuration, origin/CORS/CSRF/host validation, namespace, browser migration, Bridge, Updater, Release, and CI-classifier coverage produced no RC0/RC1 evidence mismatch.
 
-1. The isolated performance seed now initializes its own `InstallationState`, allowing real installation-bound token issuance.
-2. Official plugin sync migrates the known legacy ID `com.anime-journal.watch-history-importer` to `com.animemo.watch-history-importer` while preserving the project primary key, installations, data, and historical versions; unknown conflicts still fail closed.
+Later candidate commits closed exact-environment gaps in DR authentication evidence, path safety coverage, CI authority selection, plugin identity binding, performance capacity evidence, and workflow contracts. They do not change the Barrier B result; they define the final candidate that required a new authority pass.
 
 ## Exact-SHA remote evidence
 
-| Workflow | Run | Head SHA | Result |
+| Workflow | Run | Authority / head | Result |
 | --- | ---: | --- | --- |
-| PR CI | `31722610999` | `306878d` | PASS |
-| PR Release Gate | `31722611077` | `306878d` | PASS |
-| Manual full CI | `31722761518` | `306878d` | PASS |
-| Manual full Release Gate | `31722761578` | `306878d` | PASS |
-| Performance | `31722761167` | `306878d` | PASS |
-| Default-branch Pre-Merge Full Gate | `31722761423` | trusted workflow at `8727aa9` | **FAIL** |
+| PR CI | [31745442987](https://github.com/yanyuhanyue/AniMemo/actions/runs/31745442987) | candidate `0856572` | PASS |
+| PR Release Gate | [31745443020](https://github.com/yanyuhanyue/AniMemo/actions/runs/31745443020) | candidate `0856572` | PASS |
+| Performance Baseline | [31745479369](https://github.com/yanyuhanyue/AniMemo/actions/runs/31745479369) | candidate `0856572` | PASS |
+| Trusted Pre-Merge Full Gate | [31745482956](https://github.com/yanyuhanyue/AniMemo/actions/runs/31745482956) | trusted workflow at main `8727aa9`, candidate snapshot `0856572` | **FAIL** |
+| Release Producer dry-run track | [31745485923](https://github.com/yanyuhanyue/AniMemo/actions/runs/31745485923) | candidate `0856572` | **FAIL / CANCELLED** |
 
-The PR CI passed backend, frontend, PostgreSQL, plugins, bootstrap on Windows and Ubuntu, AstrBot Bridge, two AstrBot runtime versions, selection authority, and PR fast gate. The PR Release Gate passed updater-isolated, fresh Docker, stateful upgrade, and release authority at CRITICAL risk.
+The candidate-controlled PR CI passed backend, frontend, PostgreSQL, plugins, bootstrap on Windows and Ubuntu, AstrBot Bridge, two AstrBot runtime versions, CI selection authority, and PR fast gate. The PR Release Gate passed updater isolation, fresh Docker, main-to-candidate stateful upgrade, full A-to-B DR rehearsal, and release-gate selection authority. Performance and its aggregate regression gate passed.
 
-The Pre-Merge run correctly used the trusted workflow from `main`, but that workflow still injected legacy `ANIME_JOURNAL_*` values and omitted `ANIMEMO_PUBLIC_ORIGIN`. Candidate settings failed closed with:
+The trusted Pre-Merge run failed closed. The reusable Release Gate loaded from protected `main` does not contain the candidate's required `dr-rehearsal` job. The candidate compatibility logic observed the outer event as `workflow_dispatch`, not `workflow_call`, so it did not apply the intended narrow compatibility path. Authority therefore reported the required `dr-rehearsal` job missing. This is not a candidate PASS and leaves the trusted merge authority red.
 
-```text
-django.core.exceptions.ImproperlyConfigured:
-ALLOWED_HOSTS 必须包含 ANIMEMO_PUBLIC_ORIGIN 的主机。
-```
+The Release Producer dry-run did not reach artifact construction or parity verification. Its historical `6452b3d...` to candidate stateful-upgrade path twice stalled after the historical base API started and reached the serious-attempt time limits (30 minutes, then 40 minutes). The final exact-candidate run was cancelled with `stateful-upgrade` incomplete; `read-only-release-dry-run` and all publish jobs remained skipped. The two-attempt rule is exhausted.
 
-This is an authority contract mismatch, not a candidate pass. The PR status therefore contains a failing `pre-merge-authority` context and must remain Draft.
-
-## Verification results
+## Final pass matrix
 
 | Area | Result | Evidence |
 | --- | --- | --- |
-| Repository Evidence Rebuild | PASS | Exact refs, clean candidate, diff/compile checks |
-| Barrier B Evidence | PASS | Rebuilt targeted and integration evidence |
-| Remote exact-SHA CI | FAIL | Candidate CI/Release/Performance pass; required trusted Pre-Merge authority fails |
-| Backend Full | PASS | 622 tests, 589 pass and 33 platform/database skips on GitHub; local run 586 pass and 36 skips; 0 failures |
-| Frontend | PASS | Build, lint, 171/171 tests, critical browser regressions |
-| Plugin SDK v2 | PASS | Manifest/package/runtime validation and official plugin tests |
-| Integration Protocol v1 | PASS | Backend suite, PostgreSQL paths, stateful upgrade |
-| Bridge | PASS | Bridge plus AstrBot `v4.27.2` and pinned runtime smoke |
-| Updater | PASS | 142 isolated tests; Unix socket, fixed argv, recovery journal, compatibility, A-B-A behavior |
-| Release | PASS | Release tests, classifier, manifest/checksum/provenance contracts, gate authority |
-| Fresh Docker | PASS | Ephemeral build/boot/migration/bootstrap/health/first-run and D1A gate |
-| Stateful Upgrade | PASS | Historical base to candidate; representative data and installation identity preserved after restart |
-| Recovery | **FAIL** | Required execution NOT RUN: no complete isolated A backup to fresh B restore rehearsal |
-| Failure Injection | **FAIL** | Updater/release injection is broad, but provider corrupt-ciphertext/wrong-key focused injection is missing; no single full required matrix report |
-| First-run | PASS | State machine, TTL/attempt/race tests and real Docker setup lock |
-| Provider Config | PASS | DB/env precedence, encrypted secret, masking, callback, and availability pass; the missing corrupt-ciphertext/wrong-key case is counted under Failure Injection |
-| Namespace | PASS | Active owned legacy namespace 0; remaining matches classified as migration history, denylist, historical fact, or test fixture |
-| DeepSec L1 | PASS | 60 raw findings manually triaged; 0 confirmed |
-| DeepSec L2 | PASS | 7 raw findings; 6 FP/N/A, trusted-plugin network boundary deferred as non-blocking Medium |
-| DeepSec L3 | FAIL | Final four changed files scanned, but full final-SHA repository L3 timed out |
-| DeepSec Supply Chain | PASS | 0 findings |
+| Repository Evidence Rebuild | PASS | Exact refs, merge base, branch identity, and candidate freeze verified |
+| Barrier B Evidence | PASS | Rebuilt exact Barrier B targeted and integration evidence |
+| Remote exact-SHA CI | **FAIL** | Candidate CI/Release/Performance pass; mandatory trusted Pre-Merge authority fails |
+| Backend Full | PASS | Exact candidate PR CI backend and PostgreSQL jobs pass |
+| Frontend | PASS | Build, lint, tests, production probe, and bootstrap paths pass |
+| Plugin SDK v2 | PASS | Manifest/package/runtime validation and official plugin tests pass |
+| Integration Protocol v1 | PASS | Backend, Bridge, state persistence, and upgrade evidence pass |
+| Bridge | PASS | Bridge plus AstrBot `v4.27.2` and pinned runtime smoke pass |
+| Updater | PASS | Isolated updater, path/argv/state/compatibility and failure boundaries pass |
+| Release | **FAIL** | Candidate release contract passes, but trusted authority and producer authority fail |
+| Fresh Docker | PASS | Disposable build, boot, migration, setup, health, and persistence pass |
+| Stateful Upgrade | **FAIL** | Main-to-candidate path passes; mandatory historical producer path times out |
+| Recovery | PASS | Full isolated A backup, destroy-scoped A, fresh B restore, data/media/state verification, `/setup` locked |
+| Failure Injection | PASS | Updater/release/DR/provider failure paths fail closed, including corrupt credential handling |
+| First-run | PASS | Setup-code state machine, limits, races, plaintext removal, and post-restore lock pass |
+| Provider Config | PASS | Encrypted secret, masking, DB-over-env, fallback, callback, availability, and failure behavior pass |
+| Namespace | PASS | Active owned legacy namespace 0; remaining matches classified |
+| DeepSec L1 | PASS | Broad tracked-source analysis executed; confirmed Critical 0 |
+| DeepSec L2 | **FAIL** | Broad analysis identified a confirmed grouped release-authority trust-boundary High |
+| DeepSec L3 | **FAIL** | Exact delta analysis reproduced the candidate self-certification High group |
+| DeepSec Supply Chain | NOT RUN | Not rerun in the final pass; mutable action tags remain deferred debt |
 | Spear | NOT RUN | Production/private targets forbidden by policy |
-| Concurrency Probe | **FAIL** | Existing `1/5/10/20` plus sustained 5 passes; required long-task matrix absent |
-| Structural Debt Review | PASS WITH ACCEPTED DEBT | TD0 0; two accepted TD1; new TD1 0 |
-| Release Producer dry-run | **FAIL** | Required execution NOT RUN: workflow legally requires candidate to equal `origin/main` |
-| RC to Stable artifact parity | **FAIL** | Required execution NOT RUN: depends on Release Producer dry-run outputs |
+| Concurrency Probe | PASS | Required `20/40/60 x 0/2/4/8` matrix completed with active resource sampling |
+| Structural Debt Review | **FAIL / BLOCKED** | No TD0, but trusted release authority is a new unresolved TD1/RC1 |
+| Release Producer dry-run | **FAIL** | Historical stateful upgrade timed out; dry-run artifact job did not execute |
+| RC to Stable artifact parity | **FAIL / NOT EVIDENCED** | Producer never reached artifact/parity jobs |
 
-## Local and remote test detail
+## Recovery and failure injection
 
-- Candidate local full backend: 622 tests, 586 PASS, 36 SKIP, 0 FAIL.
-- Candidate GitHub backend: 622 tests, 589 PASS, 33 SKIP, 0 FAIL in 287.621 seconds.
-- Frontend: 171 PASS, 0 FAIL, 0 SKIP; production build completed; critical auth/dashboard browser tests passed.
-- Script suite: 186/186 PASS locally.
-- Updater isolated: 142 tests PASS in 9.049 seconds.
-- Local isolated SQLite performance command: 16 probes, all HTTP 200.
-- Modified-file Ruff, `compileall`, and `git diff --check`: PASS.
-- Whole-repository Ruff reported 472 pre-existing findings outside this RC fix scope; no result was hidden or relabeled as a candidate regression.
+The final PR Release Gate executed the complete isolated DR contract. Instance A contained representative users, staff state, SiteConfig, journal and watch history, provider/external-account metadata, external media identity, plugin state, Integration state, installation identity, and media references/files. The backup set was verified, only the disposable A project/root was destroyed, a fresh B instance restored the set, `/setup` remained locked, restored authentication identity was rotated, and representative state was checked after restore.
 
-## Fresh install and upgrade
+The DR workflow also includes direct backup and recovery-path tests. The final candidate checks that the pre-restore access token remains unexpired before proving authentication-epoch rejection, and the authoritative Release Gate includes the same recovery-path safety module as the standalone DR workflow.
 
-Fresh Docker used a disposable Compose project, PostgreSQL, Redis, and data root. It built the candidate images, applied migrations, ran bootstrap, reached health, completed the real one-time setup API, verified `/setup` lock, and exercised the fresh external-collection routes without production credentials.
-
-Stateful upgrade preserved or migrated users, journal data, watch history, provider/external-account metadata, external media identity, SiteConfig/metadata source, Plugin project/version/deployment/CAS/data/installation, Integration state, and initialized InstallationState. Verification passed both before and after a scoped current-API restart.
-
-This is not a disaster-recovery restore. The current backup producer creates and verifies a PostgreSQL `pg_dump` gzip, while the complete recovery set for media, plugin CAS/runtime state, updater state, authentication restoration, and fresh-instance restore verification is not implemented or rehearsed. Recovery is therefore fail-closed **NOT RUN/FAIL**.
-
-## Failure injection assessment
-
-Release and Updater tests cover invalid or mismatched manifest/provenance/digest data, fixed-source fetch/pull errors, backup failure, migration/bootstrap/health/switch failures, stable-window 5xx/critical logs, interrupted operations, concurrent update locks, corrupted durable state, CURRENT/PREVIOUS slot behavior, unsafe downgrade, incompatible previous applications, credential redaction, and crash recovery without replaying migration.
-
-However, the required provider-secret failure injection is incomplete. The effective provider path catches credential cipher/decryption errors and makes OAuth unavailable, but no focused test injects corrupt database ciphertext and a wrong encryption key through the complete staff/effective-configuration surface. Because the requested matrix names that case explicitly, Failure Injection cannot be marked PASS.
+Failure-injection coverage is accepted as PASS for the requested non-production scope: invalid or inconsistent release identity, pull/backup/migration/bootstrap/health/switch/stable-window failures, interruption and durable-state corruption, CURRENT/PREVIOUS mismatch, unsafe downgrade, incompatible previous, credential configuration failure, and provider secret decryption failure remain fail closed.
 
 ## DeepSec result
 
-DeepSec `0.2.0` scanned a 721-file tracked-only archive. Raw artifacts remain outside the repository. Summary:
+DeepSec `2.3.5` produced two tracked-source runs against the final evidence set:
 
-- L1: 60 raw, all false positive/not applicable.
-- L2: 7 raw, 6 false positive/not applicable and 1 deferred Medium.
-- Focused final-delta L3: 10 raw, all false positive/not applicable.
-- Supply chain: 0.
-- Confirmed Critical: 0.
-- Confirmed High: 0.
-- Total false positive/not applicable: 76.
-- Deferred: 1 Medium, Plugin Host arbitrary outbound URL under the trusted in-process v1 model.
+- Broad run `20260813195454-71f63d8979a92b46`: 124 analyses and 114 report findings; report severity counters were Critical 0, High 2, Medium 65, High Bug 1, Bug 46.
+- Exact delta run `20260813222055-e85e738b3a20c3c5` for `756bacd..0856572`: 6 changed files and 17 new analysis findings; report/export counters were Critical 0, High 3, Medium 18, High Bug 1, Bug 4.
 
-See `docs/security/deepsec-final-rc-audit-v1.0.md` for the sanitized triage.
+The raw High records overlap. They establish one grouped concern: release classification, authority, and official plugin identity checks execute candidate-controlled logic while certifying that candidate. The intended trusted-main compensation failed in this exact authority pass, so the group is not dismissed as a false positive. It is recorded as one confirmed release-blocking High / RC1.
+
+Confirmed Critical: **0**. Confirmed High: **1 grouped trust-boundary issue**. The artifact-permission High Bug is a false positive because upload/download artifact jobs succeeded. Hardcoded credential findings are synthetic isolated CI fixtures, not production secrets. Mutable GitHub Action tags and backup retention are real deferred hardening/operational debt. Supply-chain scanning was **NOT RUN** in the final pass, and Spear was **NOT RUN**.
 
 ## Concurrency result
 
-Performance run `31722761167` passed the current regression contract. The 25-minute concurrency-5 workload completed 19,845 requests with zero errors, 29.059 ms p50 and 57.723 ms p95. Burst concurrency 20 completed 240 requests with zero errors, 196.676 ms p50 and 543.808 ms p95. PostgreSQL peaked at 14 of 100 connections.
+Performance run `31745479369` completed the mandatory `20/40/60 normal users x 0/2/4/8 synchronous long operations` matrix against a fake 1.2-second provider with network disabled. All 7,722 requests returned HTTP 200: 0 timeouts, 0 HTTP 5xx, 0 HTTP 429, and 0 transport errors. Every matrix cell had active Docker/PostgreSQL/Redis resource sampling.
 
-The mandatory `20/40/60 x 0/2/4/8 long operations` matrix did not run. P99, 429, long-operation latency, and worker saturation for that matrix are absent. Comfortable capacity is proven only for the existing normal workload; degraded point is observed at burst 20; saturation is not established; Job Queue is **INCONCLUSIVE**.
+Four long operations did not cause severe starvation or errors. Eight long operations occupied the full configured `2 workers x 4 threads` synchronous capacity and produced clear p95/p99 degradation: at 20 users p95 increased from 325.316 ms to 1173.350 ms and p99 from 415.175 ms to 1375.156 ms; at 40 users p95 increased from 609.984 ms to 1197.285 ms and p99 from 766.456 ms to 1469.530 ms; at 60 users p95 increased from 848.891 ms to 1549.515 ms and p99 from 967.935 ms to 1811.623 ms.
 
-See `docs/concurrency-long-task-isolation-v1.0.md`.
+Comfortable capacity: **up to four concurrent synchronous long operations in the tested envelope, with degradation at the 60-user edge but no hard failure**.
 
-## Structural debt
+Degraded but usable: **eight long operations**.
 
-TD0: **0**.
+Saturation boundary: **eight synchronous long operations, equal to configured worker-thread capacity**.
 
-TD1: **2 accepted exceptions**, no new/unresolved TD1:
+Job Queue decision: **DEFER TO v1.1**. Do not add Celery, RabbitMQ, Kafka, or a new worker architecture during v1.0 closure; retain the measured eight-operation degraded boundary and revisit with the Background Job contract.
 
-- Plugin SDK/runtime lacks a serializable worker/RPC boundary.
-- Integration receipts may remain permanently PENDING after crash.
+## Structural debt and severity accounting
 
-TD2: **15 tracked concerns**, including the newly explicit complete DR backup/restore-set gap.
+RC0 count: **0**.
 
-TD3: **5**.
+RC1 count: **3 grouped release blockers**:
 
-See `docs/v1.0-structural-debt-last-chance.md`.
+1. Trusted Pre-Merge authority fails because trusted `main` and candidate reusable Release Gate contracts disagree about `dr-rehearsal`.
+2. Historical stateful upgrade stalls in Release Producer, so dry-run artifacts and RC-to-Stable parity are unavailable.
+3. DeepSec release/plugin self-certification findings form one confirmed candidate-controlled authority trust-boundary High; the intended trusted-main compensation did not pass.
 
-## Release decision and blockers
+RC2 count: **3 grouped deferred categories**: mutable action tags/supply-chain pinning, backup retention policy, and non-production workflow/script hardening findings that do not create a current production credential or data-loss path.
 
-RC0 count: **1 readiness blocker**: the mandatory recovery contract/rehearsal is absent. Confirmed code/security RC0 defects: **0**.
+TD0: **0**. Accepted v1.0 TD1 exceptions remain the serializable Plugin SDK/Runtime v3 boundary and PENDING Integration receipt liveness. One new unresolved TD1 is the trusted release-authority boundary. Background Job remains deferred to v1.1 based on the completed capacity matrix.
 
-RC1 count: **3 unresolved readiness blockers**: Pre-Merge authority contract mismatch, incomplete failure injection, and incomplete long-task isolation matrix.
+## Stop conditions before a real Final RC
 
-RC2 count: **1 deferred security boundary** plus documented TD2/TD3 backlog.
-
-Release Producer dry-run and RC-to-Stable parity are two additional mandatory evidence gates marked FAIL because execution was NOT RUN; they are not assigned a defect severity until the candidate is legally on `main` and the producer can execute.
-
-The four stop conditions before a real Final RC are:
-
-1. Implement and rehearse the complete isolated disaster-recovery restore contract, including post-restore setup lock and authentication handling.
-2. Add provider corrupt-ciphertext/wrong-key injection evidence and close the required failure-injection matrix.
-3. Run the minimum long-task isolation matrix and make an evidence-based Job Queue decision.
-4. Align the trusted default-branch Pre-Merge workflow with the candidate namespace/public-origin contract, then obtain a passing exact-candidate authority run.
-
-After those are closed and the candidate is legally on `main`, run the Release Producer with `dry_run=true`, `push=false` behavior, and prove RC-to-Stable commit/API/Web digest parity without rebuilding.
+1. Close the trusted-main reusable Release Gate compatibility gap and obtain a passing Trusted Pre-Merge authority run for the exact code candidate.
+2. Diagnose and fix the historical `6452b3d...` stateful-upgrade hang, then rerun Release Producer dry-run within the two-attempt policy of a new candidate cycle.
+3. Produce the dry-run manifest/checksums/provenance and prove RC commit/API/Web digests are identical to Stable without rebuilding.
+4. Bind release/plugin classification and integrity authority to trusted code, or provide an equivalent protected authority that independently recomputes candidate claims.
 
 ## Operations explicitly not run
 
@@ -191,4 +155,4 @@ After those are closed and the candidate is legally on `main`, run the Release P
 
 **NOT READY**.
 
-The frozen candidate has strong non-production evidence and no confirmed Critical or High security finding. It does not satisfy the declared READY criteria because Recovery and Failure Injection are incomplete, the required long-task isolation matrix is absent, trusted Pre-Merge authority fails, and Release Producer / RC-to-Stable parity is not legally runnable before the candidate reaches `main`.
+Recovery, failure injection, and the required capacity matrix now pass, and confirmed Critical remains zero. AniMemo v1.0 still does not satisfy the declared READY criteria because Trusted Pre-Merge authority fails, the historical Release Producer upgrade hangs, the dry-run/parity artifacts were never produced, and DeepSec's candidate self-certification trust-boundary High remains uncompensated by a passing trusted authority.

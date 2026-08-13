@@ -1,102 +1,80 @@
 # AniMemo v1.0 Concurrency and Long-Task Isolation
 
-Status: **INCOMPLETE / RELEASE BLOCKER**
+Status: **PASS WITH A MEASURED DEGRADED BOUNDARY**
 
-Application candidate: `306878de039cba6a706ce11c03ac9dab97448917`
+Application candidate: `085657249c5d174e17dac7ff6dc0797f3179165a`
 
-Performance workflow: GitHub Actions run `31722761167`
+Performance workflow: [GitHub Actions run 31745479369](https://github.com/yanyuhanyue/AniMemo/actions/runs/31745479369)
+
 Completed: 2026-08-14, Asia/Shanghai
 
-## Required decision
+## Test contract
 
-The Final RC request required at least this matrix against a fake or stubbed slow provider:
+The final candidate completed the required minimum matrix against a disposable Compose environment:
 
 ```text
 normal API users: 20 / 40 / 60
 concurrent long operations: 0 / 2 / 4 / 8
 ```
 
-It also required normal-API p50/p95/p99, throughput, timeouts, 5xx, 429, CPU, memory, PostgreSQL connections, Redis use, worker saturation, and long-operation latency.
+The long operation used a fake Bangumi provider endpoint with external networking disabled and deterministic 1,200 ms provider latency. Gunicorn ran two workers with four threads each, for eight configured synchronous worker-thread slots. Every cell used barrier-synchronized clients, four normal iterations per user, and an uncounted normal-only warm-up immediately before measurement.
 
-That matrix was **NOT RUN**. No long-running provider operation was injected, and the existing harness reports p50/p95 but not p99 or 429 for the required matrix. Therefore the Job Queue decision is **INCONCLUSIVE** and cannot be promoted to `DEFER v1.1` or `STRUCTURAL RC1` from the current measurements.
+The runner sampled API/Web/PostgreSQL/Redis resources during every active matrix cell. The test never accessed production or the real Bangumi service.
 
-## Evidence that did run
+## Final matrix
 
-Run `31722761167` completed successfully on exact SHA `306878de039cba6a706ce11c03ac9dab97448917`:
+| Users | Long ops | Requests | Normal p50 | Normal p95 | Normal p99 | Normal throughput | Long-op p95 | Errors |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20 | 0 | 320 | 120.198 ms | 325.316 ms | 415.175 ms | 124.541 rps | - | 0 |
+| 20 | 2 | 322 | 122.675 ms | 288.490 ms | 338.044 ms | 127.970 rps | 1492.752 ms | 0 |
+| 20 | 4 | 324 | 119.769 ms | 372.972 ms | 427.745 ms | 119.413 rps | 1498.636 ms | 0 |
+| 20 | 8 | 328 | 142.142 ms | 1173.350 ms | 1375.156 ms | 87.827 rps | 2560.869 ms | 0 |
+| 40 | 0 | 640 | 277.027 ms | 609.984 ms | 766.456 ms | 125.713 rps | - | 0 |
+| 40 | 2 | 642 | 299.369 ms | 537.851 ms | 619.644 ms | 125.159 rps | 1681.120 ms | 0 |
+| 40 | 4 | 644 | 240.489 ms | 778.612 ms | 861.171 ms | 119.412 rps | 1708.470 ms | 0 |
+| 40 | 8 | 648 | 259.611 ms | 1197.285 ms | 1469.530 ms | 102.916 rps | 1874.409 ms | 0 |
+| 60 | 0 | 960 | 424.197 ms | 848.891 ms | 967.935 ms | 124.986 rps | - | 0 |
+| 60 | 2 | 962 | 376.435 ms | 869.045 ms | 1081.648 ms | 126.296 rps | 1522.179 ms | 0 |
+| 60 | 4 | 964 | 375.643 ms | 1451.866 ms | 1697.984 ms | 116.951 rps | 2223.931 ms | 0 |
+| 60 | 8 | 968 | 303.803 ms | 1549.515 ms | 1811.623 ms | 111.750 rps | 2977.043 ms | 0 |
 
-| Job | Result |
-| --- | --- |
-| `backend-postgresql-probe` | PASS |
-| `frontend-production-probe` | PASS |
-| `isolated-resource-load` | PASS |
-| `performance-regression-gate` | PASS |
+Across all 12 cells, 7,722 requests returned HTTP 200. Totals were 0 timeouts, 0 HTTP 5xx, 0 HTTP 429, and 0 transport errors. The configured per-identity `300/min` budget was not exceeded.
 
-The aggregate regression gate accepted the established baseline contract: PostgreSQL SMALL/MEDIUM/LARGE probes, frontend deterministic journeys, burst concurrency `1/5/10/20`, and a 25-minute sustained concurrency-5 workload.
+## Degradation against each user baseline
 
-## Isolated workload results
+| Users | Long ops | p95 change | p99 change | Throughput change | Interpretation |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 20 | 4 | +14.7% | +3.0% | -4.1% | Comfortable |
+| 20 | 8 | +260.7% | +231.2% | -29.5% | Clear synchronous saturation |
+| 40 | 4 | +27.6% | +12.4% | -5.0% | Degraded but usable |
+| 40 | 8 | +96.3% | +91.7% | -18.1% | Clear synchronous saturation |
+| 60 | 4 | +71.0% | +75.4% | -6.4% | Edge degraded, no hard starvation |
+| 60 | 8 | +82.5% | +87.2% | -10.6% | Saturated/degraded boundary |
 
-Environment authority: isolated Ubuntu runner with production-like Docker Compose, PostgreSQL, and Redis. Target: `http://perf.example.test:8088`. Twenty distinct users and entry IDs were provisioned through the real first-run and JWT paths.
+Two long operations did not materially harm throughput or error rate. Four long operations caused no hard failures and retained at least 93.6% of baseline throughput, although tail latency at 60 users rose noticeably. Eight operations equaled the configured worker-thread capacity and caused consistent tail-latency degradation.
 
-| Mode | Concurrency | Requests | Errors / 5xx / transport | p50 | p95 | Throughput |
-| --- | ---: | ---: | --- | ---: | ---: | ---: |
-| Burst | 1 | 12 | 0 / 0 / 0 | 15.812 ms | 183.886 ms | 23.721 rps |
-| Burst | 5 | 60 | 0 / 0 / 0 | 45.140 ms | 221.199 ms | 63.359 rps |
-| Burst | 10 | 120 | 0 / 0 / 0 | 120.726 ms | 316.098 ms | 68.106 rps |
-| Burst | 20 | 240 | 0 / 0 / 0 | 196.676 ms | 543.808 ms | 52.713 rps |
-| Sustained | 5 | 19,845 | 0 / 0 / 0 | 29.059 ms | 57.723 ms | 13.227 rps |
+## Resource evidence
 
-The sustained run lasted `1500.321` seconds. No load or sampler hard failure occurred.
+| Resource | Maximum observed |
+| --- | ---: |
+| API sampled CPU | 224.02% |
+| API memory | 226.7 MiB |
+| PostgreSQL connections | 14 of 100 |
+| Redis dataset memory | 1.46 MiB |
+| Matrix cells with active sampling | 12 of 12 |
 
-Resource summary:
+No PostgreSQL connection exhaustion, Redis growth failure, container crash, or sampler hard failure occurred. The API CPU samples show real work during active windows. Direct Gunicorn queue-depth telemetry was unavailable, so the saturation interpretation uses configured `2 x 4` capacity, synchronized occupancy, measured latency/throughput deltas, errors, and active resource samples.
 
-| Resource | Observation |
-| --- | --- |
-| API | 242,745,344-byte peak memory; +32,400,999 bytes; 161.42% peak sampled CPU |
-| Web | 6,046,089-byte peak memory; 4.38% peak sampled CPU |
-| PostgreSQL | 75,151,441-byte peak memory; 81.73% peak sampled CPU |
-| PostgreSQL connections | 14 peak of 100 configured |
-| Redis container | 9,806,282-byte peak memory; 3.86% peak sampled CPU |
-| Redis dataset | 1,410,976-byte peak; 31 peak keys |
+The aggregate performance regression artifact also passed frontend production journeys, PostgreSQL SMALL/MEDIUM/LARGE probes, established `1/5/10/20` burst levels, and the 1,500-second sustained workload.
 
-## PostgreSQL dataset probes
+## Capacity decision
 
-The backend job used authoritative PostgreSQL with `EXPLAIN ANALYZE BUFFERS` support:
+Comfortable capacity: **0-4 synchronous long operations in the tested envelope**. At 60 normal users, four operations are already an edge-degraded state, but they did not produce severe starvation, errors, or large throughput collapse.
 
-| Dataset | Journal entries | Watch history | Plugins | Supporting users | Result |
-| --- | ---: | ---: | ---: | ---: | --- |
-| SMALL | 50 | 25 | 5 | 10 | PASS |
-| MEDIUM | 1,000 | 500 | 20 | 50 | PASS |
-| LARGE | 10,000 | 5,000 | 50 | 100 | PASS |
+Degraded but usable: **8 synchronous long operations**, with zero hard failures but pronounced p95/p99 inflation.
 
-All 16 LARGE-path probes returned HTTP 200. Query counts remained bounded, including journal list/detail/filter/sort, page 48, watch history, plugin surfaces, staff surfaces, and Integration surfaces.
+Saturation point: **8 synchronous long operations**, equal to all configured worker-thread slots. This is a degraded boundary, not an authorization to run more synchronous provider work.
 
-## Capacity interpretation
+Concurrency Probe: **PASS** for the requested non-production evidence matrix.
 
-For the measured normal-read workload only:
-
-- Comfortable observed point: sustained concurrency 5, with zero errors and 57.723 ms p95.
-- Degraded but usable observed point: burst concurrency 20, with zero errors and 543.808 ms p95.
-- Saturation point: **NOT ESTABLISHED**. Throughput peaked at concurrency 10 and declined at 20, but no 40/60/80/100-user steps or long operations were run.
-
-These observations must not be relabeled as the required capacity matrix. They say nothing reliable about synchronous external-provider latency, worker/thread starvation, or normal API behavior while 2/4/8 long operations are active.
-
-## Missing evidence
-
-- `20/40/60 x 0/2/4/8` normal-user/long-operation matrix.
-- Stubbed provider latency and long-operation latency distribution.
-- Normal API p99 and 429 counts under that matrix.
-- Gunicorn worker saturation or queue-depth evidence.
-- Isolation comparison showing whether four long operations materially degrade normal APIs.
-
-## Decision
-
-Concurrency Probe: **FAIL** against the Final RC requirement; the required matrix is incomplete.
-
-Comfortable capacity: **observed only for the existing normal workload at concurrency 5**.
-
-Degraded point: **observed at normal burst concurrency 20**.
-
-Saturation point: **NOT ESTABLISHED**.
-Job Queue: **INCONCLUSIVE**.
-
-Before Final RC, implement the bounded minimum matrix with a deterministic slow-provider stub. The result should inform architecture; this report does not authorize an immediate Celery, RabbitMQ, Kafka, or Runtime v3 expansion.
+Job Queue decision: **DEFER TO v1.1**. The v1.0 evidence does not justify a last-minute Celery, RabbitMQ, Kafka, or worker-architecture expansion. v1.1 should introduce the Background Job boundary before raising synchronous long-operation concurrency or adding long-running Integration actions.
