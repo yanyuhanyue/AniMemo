@@ -1,8 +1,9 @@
-from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 from accounts.models import StaffProfile
 from config.credentials import CredentialCipher
+from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.urls import reverse
@@ -16,7 +17,6 @@ from journal.external_accounts.provider_configuration import (
 )
 from journal.external_accounts.providers.bangumi import BangumiAccountProvider
 from journal.models import AdminAuditLog, ExternalProviderConfiguration
-
 
 User = get_user_model()
 TEST_KEY = "a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io="
@@ -140,6 +140,40 @@ class ExternalProviderConfigurationServiceTests(APITestCase):
         self.assertEqual(sent["client_secret"], "database-secret")
         self.assertEqual(sent["redirect_uri"], CALLBACK)
 
+    def test_corrupt_database_secret_fails_closed_without_environment_fallback(self):
+        ExternalProviderConfiguration.objects.create(
+            provider="bangumi",
+            enabled=True,
+            client_id="database-id",
+            encrypted_client_secret="v1:not-a-valid-fernet-token",
+            credential_key_version=CredentialCipher.version,
+        )
+
+        effective = get_effective_provider_configuration("bangumi")
+
+        self.assertEqual(effective.client_secret_source, "database")
+        self.assertTrue(effective.client_secret_configured)
+        self.assertEqual(effective.client_secret, "")
+        self.assertFalse(effective.oauth_available)
+
+    def test_wrong_database_secret_key_fails_closed_without_environment_fallback(self):
+        stored_secret = CredentialCipher.encrypt("database-secret")
+        ExternalProviderConfiguration.objects.create(
+            provider="bangumi",
+            enabled=True,
+            client_id="database-id",
+            encrypted_client_secret=stored_secret,
+            credential_key_version=CredentialCipher.version,
+        )
+
+        with override_settings(CREDENTIAL_ENCRYPTION_KEY=Fernet.generate_key().decode("ascii")):
+            effective = get_effective_provider_configuration("bangumi")
+
+        self.assertEqual(effective.client_secret_source, "database")
+        self.assertTrue(effective.client_secret_configured)
+        self.assertEqual(effective.client_secret, "")
+        self.assertFalse(effective.oauth_available)
+
 
 @override_settings(
     CREDENTIAL_ENCRYPTION_KEY=TEST_KEY,
@@ -183,6 +217,44 @@ class ExternalProviderConfigurationApiTests(APITestCase):
         self.assertNotIn("client_secret", response.data)
         self.assertNotIn("encrypted_client_secret", response.data)
         self.assertNotIn("never-return-this", str(response.data))
+
+    def test_corrupt_database_secret_staff_get_is_masked_and_unavailable(self):
+        ExternalProviderConfiguration.objects.create(
+            provider="bangumi",
+            enabled=True,
+            client_id="database-id",
+            encrypted_client_secret="v1:not-a-valid-fernet-token",
+            credential_key_version=CredentialCipher.version,
+        )
+
+        response = self.client.get(self.detail_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertTrue(response.data["client_secret_configured"])
+        self.assertEqual(response.data["client_secret_source"], "database")
+        self.assertFalse(response.data["oauth_available"])
+        self.assertNotIn("client_secret", response.data)
+        self.assertNotIn("environment-secret", str(response.data))
+
+    def test_wrong_database_secret_key_staff_get_is_masked_and_unavailable(self):
+        ExternalProviderConfiguration.objects.create(
+            provider="bangumi",
+            enabled=True,
+            client_id="database-id",
+            encrypted_client_secret=CredentialCipher.encrypt("database-secret"),
+            credential_key_version=CredentialCipher.version,
+        )
+
+        with override_settings(CREDENTIAL_ENCRYPTION_KEY=Fernet.generate_key().decode("ascii")):
+            response = self.client.get(self.detail_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertTrue(response.data["client_secret_configured"])
+        self.assertEqual(response.data["client_secret_source"], "database")
+        self.assertFalse(response.data["oauth_available"])
+        self.assertNotIn("client_secret", response.data)
+        self.assertNotIn("database-secret", str(response.data))
+        self.assertNotIn("environment-secret", str(response.data))
 
     def test_patch_replaces_secret_without_leaking_it_to_response_or_audit(self):
         response = self.client.patch(

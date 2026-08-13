@@ -339,10 +339,167 @@ jobs:
         if: ${{ always() }}
         run: docker compose --env-file .env.production down -v --remove-orphans
 
+  isolated-long-operation-capacity:
+    name: performance-long-operation-capacity
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COMPOSE_PROJECT_NAME: animemo-capacity-${{ github.run_id }}-${{ github.run_attempt }}
+      COMPOSE_HTTP_TIMEOUT: "120"
+      COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.build.yml:deploy/docker-compose.performance.yml
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Prove the exact capacity candidate identity
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: docker/setup-buildx-action@v3
+      - name: Prepare the unique disposable capacity environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_root="$RUNNER_TEMP/animemo-capacity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$data_root"/{plugins,logs,backups,media,postgres,redis}
+          chmod -R a+rwx "$data_root"
+          sudo install -d -m 0700 -o 10001 -g 10001 "$data_root/private"
+          cat > .env.production <<EOF
+          DEBUG=false
+          DJANGO_SECRET_KEY=ci-only-capacity-secret-key-012345678901234567890123456789012345678901234567890
+          CREDENTIAL_ENCRYPTION_KEY=a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
+          POSTGRES_DB=animemo
+          POSTGRES_USER=animemo
+          POSTGRES_PASSWORD=ci-password
+          DATABASE_URL=postgresql://animemo:ci-password@postgres:5432/animemo
+          DATABASE_SSL_REQUIRE=false
+          REDIS_URL=redis://redis:6379/0
+          ALLOWED_HOSTS=capacity.example.test
+          ANIMEMO_PUBLIC_ORIGIN=https://capacity.example.test
+          CORS_ALLOWED_ORIGINS=https://capacity.example.test
+          CSRF_TRUSTED_ORIGINS=https://capacity.example.test
+          TRUSTED_PROXY_IPS=172.28.0.0/16
+          TURNSTILE_ENABLED=false
+          VITE_TURNSTILE_SITE_KEY=ci-site-key
+          SECURE_SSL_REDIRECT=false
+          SESSION_COOKIE_SECURE=false
+          CSRF_COOKIE_SECURE=false
+          REFRESH_COOKIE_SECURE=false
+          ALLOW_INSECURE_PRODUCTION_COOKIES=true
+          THROTTLE_USER_RATE=300/min
+          ANIMEMO_ISOLATED_CAPACITY_PROBE=true
+          ANIMEMO_ISOLATED_PROVIDER_LATENCY_MS=1200
+          ANIMEMO_PORT=8089
+          ANIMEMO_DATA_ROOT=$data_root
+          ANIMEMO_API_IMAGE=animemo-capacity-api:candidate
+          ANIMEMO_WEB_IMAGE=animemo-capacity-web:candidate
+          EOF
+          echo "CAPACITY_DATA_ROOT=$data_root" >> "$GITHUB_ENV"
+      - name: Validate and build the exact capacity candidate
+        run: |
+          docker compose --env-file .env.production config
+          docker compose --env-file .env.production build api web
+      - name: Start disposable capacity PostgreSQL Redis API and Web
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env.production up -d --wait --wait-timeout 120 postgres redis
+          docker compose --env-file .env.production run --rm --no-deps migration
+          docker compose --env-file .env.production run --rm --no-deps bootstrap
+          docker compose --env-file .env.production up -d --no-deps api web
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error -H 'Host: capacity.example.test' \
+              http://127.0.0.1:8089/health/ \
+              | python3 -c "import json,sys; assert json.load(sys.stdin)['status'] == 'ok'"; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              docker compose --env-file .env.production ps --all
+              exit 1
+            fi
+            sleep 5
+          done
+          echo '127.0.0.1 capacity.example.test' | sudo tee -a /etc/hosts >/dev/null
+      - name: Complete the isolated capacity first-run setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          CAPACITY_SETUP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          export CAPACITY_SETUP_PASSWORD
+          sudo cat "$CAPACITY_DATA_ROOT/private/setup-code" |
+            python3 scripts/ci_first_run.py \
+              --confirm-isolated \
+              --code-stdin \
+              --base-url http://127.0.0.1:8089 \
+              --host capacity.example.test \
+              --username capacity-bootstrap-admin \
+              --email capacity-bootstrap-admin@example.test \
+              --password-env CAPACITY_SETUP_PASSWORD
+      - name: Provision sixty isolated capacity identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          identities_file="$RUNNER_TEMP/animemo-capacity-identities-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          docker compose --env-file .env.production exec -T api \
+            python manage.py provision_performance_load_identities \
+              --dataset large \
+              --count 60 \
+              --token-minutes 30 \
+              --confirm-isolated \
+            > "$identities_file"
+          chmod 600 "$identities_file"
+          python3 - "$identities_file" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert len(payload["identities"]) == 60
+          assert len({item["username"] for item in payload["identities"]}) == 60
+          assert len({item["access_token"] for item in payload["identities"]}) == 60
+          PY
+          echo "CAPACITY_IDENTITIES_FILE=$identities_file" >> "$GITHUB_ENV"
+      - name: Run real HTTP 20 40 60 by 0 2 4 8 capacity matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/perf/long_operation_capacity.py \
+            --confirm-isolated \
+            --base-url http://capacity.example.test:8089 \
+            --identities-file "$CAPACITY_IDENTITIES_FILE" \
+            --compose-project "$COMPOSE_PROJECT_NAME" \
+            --postgres-user animemo \
+            --postgres-database animemo \
+            --iterations-per-user 2 \
+            --timeout-seconds 20 \
+            --resource-interval-seconds 0.5 \
+            --output artifacts/long-operation-capacity.json
+      - name: Capture scoped capacity Compose state and logs
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          docker compose --env-file .env.production ps --all > artifacts/capacity-compose-ps.txt 2>&1 || true
+          docker compose --env-file .env.production logs --no-color > artifacts/capacity-compose.log 2>&1 || true
+      - name: Upload isolated long-operation capacity evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-long-operation-capacity
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Remove only this disposable capacity Compose project
+        if: ${{ always() }}
+        run: docker compose --env-file .env.production down -v --remove-orphans
+
   regression-gate:
     name: performance-regression-gate
     if: ${{ always() }}
-    needs: [frontend, backend, isolated-resource-load]
+    needs: [frontend, backend, isolated-resource-load, isolated-long-operation-capacity]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -380,6 +537,10 @@ jobs:
         with:
           name: performance-resource-load
           path: artifacts/resource
+      - uses: actions/download-artifact@v4
+        with:
+          name: performance-long-operation-capacity
+          path: artifacts/capacity
       - name: Evaluate the deterministic performance regression gate
         run: |
           python scripts/perf/regression_gate.py \

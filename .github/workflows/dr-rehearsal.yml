@@ -1,0 +1,49 @@
+name: Isolated DR Rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit to rehearse
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit to rehearse
+        required: true
+        type: string
+
+concurrency:
+  group: dr-rehearsal-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-a-to-b:
+    name: isolated-a-to-b
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      COMPOSE_HTTP_TIMEOUT: "120"
+      COMPOSE_PROJECT_NAME: animemo-dr-${{ github.run_id }}-${{ github.run_attempt }}
+      DR_REHEARSAL_TEMP_ROOT: ${{ runner.temp }}/animemo-dr-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify exact candidate checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - name: Validate portable DR backup contract
+        run: python -m unittest scripts.tests.test_dr_backup scripts.tests.test_dr_recovery_paths scripts.tests.test_dr_rehearsal_contract -v
+      - name: Run isolated A-to-B DR rehearsal
+        shell: bash
+        run: bash scripts/dr-rehearsal.sh --candidate-sha "$CANDIDATE_SHA" --current-root "$GITHUB_WORKSPACE"

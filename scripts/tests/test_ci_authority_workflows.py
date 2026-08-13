@@ -62,6 +62,20 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("comparison_base_sha:", ci)
         self.assertIn("upgrade_base_sha:", release)
 
+    def test_pre_merge_passes_candidate_public_origin_to_trusted_reusable_gates(self):
+        source = self.source("pre-merge-full.yml")
+        self.assertIn("public_origin: https://ci.example.test", source)
+        self.assertEqual(source.count("public_origin: https://ci.example.test"), 2)
+
+        ci = self.source("ci.yml")
+        release = self.source("release-gate.yml")
+        self.assertIn("public_origin:", ci)
+        self.assertIn("public_origin:", release)
+        self.assertIn("ANIMEMO_PUBLIC_ORIGIN: ${{ inputs.public_origin || 'http://localhost:5173' }}", ci)
+        self.assertIn("ANIMEMO_PUBLIC_ORIGIN=${{ inputs.public_origin || 'https://ci.example.test' }}", release)
+        self.assertNotIn("ANIME_JOURNAL_PORT", release)
+        self.assertNotIn("ANIME_JOURNAL_DATA_ROOT", release)
+
     def test_every_full_job_is_forced_and_every_animemo_checkout_is_candidate_pinned(self):
         ci = self.source("ci.yml")
         release = self.source("release-gate.yml")
@@ -77,11 +91,11 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             "astrbot-runtime",
         ):
             self.assertIn("inputs.force_full ||", self.job(ci, name), name)
-        for name in ("updater-isolated", "docker", "stateful-upgrade"):
+        for name in ("updater-isolated", "docker", "stateful-upgrade", "dr-rehearsal"):
             self.assertIn("inputs.force_full ||", self.job(release, name), name)
 
         self.assertEqual(ci.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 10)
-        self.assertEqual(release.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 6)
+        self.assertEqual(release.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 7)
         self.assertIn(
             "repository: AstrBotDevs/AstrBot\n          ref: ${{ matrix.astrbot_ref }}",
             ci,
@@ -132,6 +146,7 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             "updater-isolated",
             "docker",
             "stateful-upgrade",
+            "dr-rehearsal",
         ):
             self.assertIn(dependency, release_authority)
 
@@ -148,6 +163,10 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn(
             "needs.classify.outputs.run_release_stateful == 'true'",
             self.job(release, "stateful-upgrade"),
+        )
+        self.assertIn(
+            "needs.classify.outputs.run_release_stateful == 'true'",
+            self.job(release, "dr-rehearsal"),
         )
 
     def test_release_gate_bootstraps_both_legacy_and_explicit_job_compose_contracts(self):

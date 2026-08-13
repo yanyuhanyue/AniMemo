@@ -7,10 +7,8 @@ from urllib.parse import urlsplit
 
 import dj_database_url
 from cryptography.fernet import Fernet
-from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
-
-
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR.parent / ".env")
@@ -100,6 +98,14 @@ ANIMEMO_DATABASE_CONTRACT = os.getenv(
 ANIMEMO_CONFIGURATION_CONTRACT = os.getenv(
     "ANIMEMO_CONFIGURATION_CONTRACT", "animemo-config-v1"
 )
+ANIMEMO_ISOLATED_CAPACITY_PROBE = env_bool("ANIMEMO_ISOLATED_CAPACITY_PROBE", False)
+ANIMEMO_ISOLATED_PROVIDER_LATENCY_MS = int(
+    os.getenv("ANIMEMO_ISOLATED_PROVIDER_LATENCY_MS", "1200")
+)
+if ANIMEMO_ISOLATED_CAPACITY_PROBE and not 100 <= ANIMEMO_ISOLATED_PROVIDER_LATENCY_MS <= 10_000:
+    raise ImproperlyConfigured(
+        "ANIMEMO_ISOLATED_PROVIDER_LATENCY_MS 必须介于 100 与 10000 毫秒。"
+    )
 ANIMEMO_UPDATER_SOCKET = os.getenv("ANIMEMO_UPDATER_SOCKET", "/run/animemo-updater/updater.sock")
 ANIMEMO_UPDATER_TIMEOUT_SECONDS = float(os.getenv("ANIMEMO_UPDATER_TIMEOUT_SECONDS", "10"))
 _first_run_setup_code_default = str(

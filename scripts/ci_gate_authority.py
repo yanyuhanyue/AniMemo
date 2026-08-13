@@ -99,6 +99,7 @@ RELEASE_JOB_GATES: dict[str, str | None] = {
     "updater-isolated": "run_release_updater",
     "docker": "run_release_docker",
     "stateful-upgrade": "run_release_stateful",
+    "dr-rehearsal": "run_release_stateful",
 }
 
 SUPPORTED_EVENTS = frozenset(

@@ -20,6 +20,10 @@ on:
         required: true
         default: true
         type: boolean
+      candidate_sha:
+        description: Optional exact candidate commit for a read-only dry-run; forbidden for publish
+        required: false
+        type: string
       target_version_override:
         description: Bootstrap-only vMAJOR.MINOR.PATCH when no Stable tag exists
         required: false
@@ -53,10 +57,49 @@ jobs:
       target_version: ${{ steps.version.outputs.target_version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
       created_at: ${{ steps.identity.outputs.created_at }}
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          fetch-depth: 0
+      - name: Bind the dispatch ref to an authorized release candidate
+        id: candidate
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          REQUESTED_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          INTENDED_MAIN_SHA: ${{ inputs.intended_main_sha }}
+          UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin "+refs/heads/main:refs/remotes/origin/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+
+          main_sha="$(git rev-parse origin/main^{commit})"
+          test "$INTENDED_MAIN_SHA" = "$main_sha"
+          candidate_sha="$GITHUB_SHA"
+          if [[ "$DRY_RUN" = "true" && -n "$REQUESTED_CANDIDATE_SHA" ]]; then
+            [[ "$REQUESTED_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            test "$REQUESTED_CANDIDATE_SHA" = "$GITHUB_SHA"
+            test "$(git rev-parse HEAD)" = "$REQUESTED_CANDIDATE_SHA"
+            candidate_sha="$REQUESTED_CANDIDATE_SHA"
+          else
+            test -z "$REQUESTED_CANDIDATE_SHA"
+            test "$GITHUB_REF" = "refs/heads/main"
+            test "$GITHUB_SHA" = "$main_sha"
+            test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"
+          fi
+          [[ "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --force origin "+$candidate_sha:refs/remotes/origin/release-candidate"
+          test "$(git rev-parse refs/remotes/origin/release-candidate^{commit})" = "$candidate_sha"
+          test "$UPGRADE_BASE_SHA" != "$candidate_sha"
+          git rev-parse --verify "$UPGRADE_BASE_SHA^{commit}"
+          git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$candidate_sha"
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.candidate.outputs.candidate_sha }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -64,22 +107,14 @@ jobs:
           cache: pip
           cache-dependency-path: release/requirements.txt
       - run: python -m pip install -r release/requirements.txt
-      - name: Prove exact clean main identity and upgrade ancestry
+      - name: Prove exact clean candidate identity
         env:
-          INTENDED_MAIN_SHA: ${{ inputs.intended_main_sha }}
-          UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --force --tags origin main
-          test "$GITHUB_REF" = "refs/heads/main"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
-          test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"
-          test "$UPGRADE_BASE_SHA" != "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-          git rev-parse --verify "$UPGRADE_BASE_SHA^{commit}"
-          git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$GITHUB_SHA"
       - name: Resolve deterministic pre-release version
         id: version
         env:
@@ -127,7 +162,7 @@ jobs:
     needs: preflight
     uses: ./.github/workflows/ci.yml
     with:
-      candidate_sha: ${{ github.sha }}
+      candidate_sha: ${{ needs.preflight.outputs.candidate_sha }}
       comparison_base_sha: ${{ inputs.upgrade_base_sha }}
       force_full: true
 
@@ -136,7 +171,7 @@ jobs:
     needs: preflight
     uses: ./.github/workflows/release-gate.yml
     with:
-      candidate_sha: ${{ github.sha }}
+      candidate_sha: ${{ needs.preflight.outputs.candidate_sha }}
       upgrade_base_sha: ${{ inputs.upgrade_base_sha }}
       force_full: true
 
@@ -146,7 +181,7 @@ jobs:
     needs: preflight
     uses: ./.github/workflows/performance.yml
     with:
-      candidate_sha: ${{ github.sha }}
+      candidate_sha: ${{ needs.preflight.outputs.candidate_sha }}
 
   release-authority:
     name: release-authority
@@ -158,7 +193,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
       - name: Enforce channel-aware Release Producer authority
         env:
           CHANNEL: ${{ inputs.channel }}
@@ -174,6 +209,17 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Prove exact read-only candidate identity
+        env:
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -190,10 +236,10 @@ jobs:
           platforms: linux/amd64
           push: false
           load: true
-          tags: animemo-release-api:${{ github.sha }}
+          tags: animemo-release-api:${{ needs.preflight.outputs.candidate_sha }}
           build-args: |
             ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}
-            ANIMEMO_COMMIT=${{ github.sha }}
+            ANIMEMO_COMMIT=${{ needs.preflight.outputs.candidate_sha }}
             ANIMEMO_CHANNEL=${{ inputs.channel }}
       - name: Build Web OCI artifact without publishing
         id: web
@@ -204,22 +250,22 @@ jobs:
           platforms: linux/amd64
           push: false
           load: true
-          tags: animemo-release-web:${{ github.sha }}
+          tags: animemo-release-web:${{ needs.preflight.outputs.candidate_sha }}
           build-args: |
             VITE_API_BASE_URL=/api/v1
             VITE_TURNSTILE_SITE_KEY=1x00000000000000000000AA
             ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}
-            ANIMEMO_COMMIT=${{ github.sha }}
+            ANIMEMO_COMMIT=${{ needs.preflight.outputs.candidate_sha }}
             ANIMEMO_CHANNEL=${{ inputs.channel }}
       - name: Start and accept the exact locally built API and Web images
         shell: bash
         run: >-
           bash scripts/rehearse-release-images.sh
           --confirm-isolated
-          --api-image "animemo-release-api:$GITHUB_SHA"
-          --web-image "animemo-release-web:$GITHUB_SHA"
+          --api-image "animemo-release-api:${{ needs.preflight.outputs.candidate_sha }}"
+          --web-image "animemo-release-web:${{ needs.preflight.outputs.candidate_sha }}"
           --version "${{ needs.preflight.outputs.release_tag }}"
-          --commit "$GITHUB_SHA"
+          --commit "${{ needs.preflight.outputs.candidate_sha }}"
           --channel "${{ inputs.channel }}"
       - name: Generate and validate manifest, checksums, and unsigned provenance input plan
         env:
@@ -235,7 +281,7 @@ jobs:
             --root . --output release-output/deployment-contract.json
           python -m release.cli generate-manifest \
             --version "$RELEASE_TAG" --channel "${{ inputs.channel }}" \
-            --commit "$GITHUB_SHA" --created-at "$CREATED_AT" \
+            --commit "${{ needs.preflight.outputs.candidate_sha }}" --created-at "$CREATED_AT" \
             --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
             --compatibility-file release/compatibility.json \
             --deployment-contract-file release-output/deployment-contract.json \
@@ -248,7 +294,7 @@ jobs:
             release-output/release-manifest.json release-output/deployment-contract.json
           (cd release-output && sha256sum --check checksums.txt)
           python -m release.cli generate-provenance-plan \
-            --version "$RELEASE_TAG" --commit "$GITHUB_SHA" --created-at "$CREATED_AT" \
+            --version "$RELEASE_TAG" --commit "${{ needs.preflight.outputs.candidate_sha }}" --created-at "$CREATED_AT" \
             --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
             --output release-output/provenance-plan.unsigned.json
           if [[ "${{ inputs.channel }}" = "rc" ]]; then
@@ -256,16 +302,18 @@ jobs:
             python -m release.cli promote-manifest \
               --rc-manifest release-output/release-manifest.json \
               --tags-file "$RUNNER_TEMP/tags.txt" --created-at "$CREATED_AT" \
-              --provenance-source-commit "$GITHUB_SHA" \
+              --provenance-source-commit "${{ needs.preflight.outputs.candidate_sha }}" \
               --output release-output/stable-manifest.dry-run.json
             test "$(jq -r '.release.commit' release-output/release-manifest.json)" = \
-              "$(jq -r '.release.commit' release-output/stable-manifest.dry-run.json)"
+              "$(jq -r '.release.commit' release-output/stable-manifest.dry-run.json)" # RC_COMMIT == STABLE_COMMIT
             test "$(jq -r '.images.api.digest' release-output/release-manifest.json)" = \
-              "$(jq -r '.images.api.digest' release-output/stable-manifest.dry-run.json)"
+              "$(jq -r '.images.api.digest' release-output/stable-manifest.dry-run.json)" # RC_API_DIGEST == STABLE_API_DIGEST
             test "$(jq -r '.images.web.digest' release-output/release-manifest.json)" = \
-              "$(jq -r '.images.web.digest' release-output/stable-manifest.dry-run.json)"
+              "$(jq -r '.images.web.digest' release-output/stable-manifest.dry-run.json)" # RC_WEB_DIGEST == STABLE_WEB_DIGEST
             test "$(jq -cS '.deployment' release-output/release-manifest.json)" = \
-              "$(jq -cS '.deployment' release-output/stable-manifest.dry-run.json)"
+              "$(jq -cS '.deployment' release-output/stable-manifest.dry-run.json)" # RC_DEPLOYMENT == STABLE_DEPLOYMENT
+            test "$(jq -cS '.artifacts.deploymentContract' release-output/release-manifest.json)" = \
+              "$(jq -cS '.artifacts.deploymentContract' release-output/stable-manifest.dry-run.json)"
           fi
       - uses: actions/upload-artifact@v4
         with:

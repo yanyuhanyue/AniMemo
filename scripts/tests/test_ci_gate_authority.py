@@ -243,7 +243,7 @@ class CiGateAuthorityTests(unittest.TestCase):
             release_needs(document), workflow="release", event_name="pull_request"
         )
 
-        self.assertEqual(result["selected_jobs"], ["docker", "stateful-upgrade"])
+        self.assertEqual(result["selected_jobs"], ["docker", "stateful-upgrade", "dr-rehearsal"])
         self.assertIn("updater-isolated", result["unselected_jobs"])
         self.assertIn("post-merge-sanity", result["unselected_jobs"])
 
@@ -265,7 +265,7 @@ class CiGateAuthorityTests(unittest.TestCase):
 
         self.assertEqual(
             result["selected_jobs"],
-            ["updater-isolated", "docker", "stateful-upgrade"],
+            ["updater-isolated", "docker", "stateful-upgrade", "dr-rehearsal"],
         )
 
     def test_real_classifier_low_standard_high_critical_and_force_full_documents(self):

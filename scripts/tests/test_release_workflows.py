@@ -129,6 +129,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 "updater-isolated",
                 "docker",
                 "stateful-upgrade",
+                "dr-rehearsal",
             },
         )
 
@@ -138,14 +139,22 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         inputs = release["on"]["workflow_dispatch"]["inputs"]
         self.assertEqual(inputs["channel"]["options"], ["beta", "rc"])
         self.assertIn("dry_run", inputs)
+        self.assertIn("candidate_sha", inputs)
+        self.assertEqual(inputs["candidate_sha"]["required"], "false")
         self.assertIn("upgrade_base_sha", inputs)
         self.assertIn("target_version_override", inputs)
         self.assertEqual(release["jobs"]["full-ci"]["uses"], "./.github/workflows/ci.yml")
         self.assertEqual(release["jobs"]["full-release-gate"]["uses"], "./.github/workflows/release-gate.yml")
-        self.assertEqual(release["jobs"]["full-ci"]["with"]["candidate_sha"], "${{ github.sha }}")
+        self.assertEqual(
+            release["jobs"]["full-ci"]["with"]["candidate_sha"],
+            "${{ needs.preflight.outputs.candidate_sha }}",
+        )
         self.assertEqual(release["jobs"]["full-ci"]["with"]["comparison_base_sha"], "${{ inputs.upgrade_base_sha }}")
         self.assertTrue(release["jobs"]["full-ci"]["with"]["force_full"])
-        self.assertEqual(release["jobs"]["full-release-gate"]["with"]["candidate_sha"], "${{ github.sha }}")
+        self.assertEqual(
+            release["jobs"]["full-release-gate"]["with"]["candidate_sha"],
+            "${{ needs.preflight.outputs.candidate_sha }}",
+        )
         self.assertEqual(release["jobs"]["full-release-gate"]["with"]["upgrade_base_sha"], "${{ inputs.upgrade_base_sha }}")
         self.assertTrue(release["jobs"]["full-release-gate"]["with"]["force_full"])
 
@@ -187,6 +196,19 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("inputs.candidate_sha || github.sha", source)
         self.assertIn('CANDIDATE_SHA: ${{ inputs.candidate_sha }}', source)
         self.assertIn('test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"', source)
+        self.assertIn("isolated-long-operation-capacity:", source)
+        self.assertIn("name: performance-long-operation-capacity", source)
+        self.assertIn("ANIMEMO_ISOLATED_CAPACITY_PROBE=true", source)
+        self.assertIn("ANIMEMO_ISOLATED_PROVIDER_LATENCY_MS=1200", source)
+        self.assertIn("THROTTLE_USER_RATE=300/min", source)
+        self.assertIn("--count 60", source)
+        self.assertIn("scripts/perf/long_operation_capacity.py", source)
+        self.assertIn(
+            "needs: [frontend, backend, isolated-resource-load, isolated-long-operation-capacity]",
+            source,
+        )
+        self.assertIn("name: performance-long-operation-capacity", source)
+        self.assertIn("path: artifacts/capacity", source)
 
     def test_fresh_docker_gates_complete_the_real_one_time_setup_api(self):
         release_gate = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8")
@@ -210,7 +232,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(performance["uses"], "./.github/workflows/performance.yml")
         self.assertEqual(performance["needs"], "preflight")
         self.assertEqual(performance["if"], "${{ inputs.channel == 'rc' }}")
-        self.assertEqual(performance["with"]["candidate_sha"], "${{ github.sha }}")
+        self.assertEqual(
+            performance["with"]["candidate_sha"],
+            "${{ needs.preflight.outputs.candidate_sha }}",
+        )
 
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         authority = release["jobs"]["release-authority"]
@@ -218,7 +243,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(authority["if"], "${{ always() }}")
         authority_source = source[source.index("  release-authority:\n") : source.index("  dry-run:\n")]
         self.assertIn("toJSON(needs)", authority_source)
-        self.assertIn("ref: ${{ github.sha }}", authority_source)
+        self.assertIn("ref: ${{ needs.preflight.outputs.candidate_sha }}", authority_source)
         self.assertIn("python scripts/release_authority.py", authority_source)
         for job_name in ("dry-run", "publish"):
             job = release["jobs"][job_name]
@@ -239,10 +264,66 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(publish_permissions["attestations"], "write")
         self.assertNotIn("write-all", str(release))
 
+    def test_candidate_override_is_dry_run_only_and_fail_closed(self):
+        release = workflow("release.yml")
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        preflight = source[source.index("  preflight:\n") : source.index("  full-ci:\n")]
+        publish = source[source.index("  publish:\n") :]
+
+        for guard in (
+            'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"',
+            'test "$INTENDED_MAIN_SHA" = "$main_sha"',
+            'if [[ "$DRY_RUN" = "true" && -n "$REQUESTED_CANDIDATE_SHA" ]]',
+            'test "$REQUESTED_CANDIDATE_SHA" = "$GITHUB_SHA"',
+            'test "$(git rev-parse HEAD)" = "$REQUESTED_CANDIDATE_SHA"',
+            'test -z "$REQUESTED_CANDIDATE_SHA"',
+            'test "$GITHUB_REF" = "refs/heads/main"',
+            'test "$GITHUB_SHA" = "$main_sha"',
+            'test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"',
+            '[[ "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]',
+            'git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$candidate_sha"',
+        ):
+            self.assertIn(guard, preflight)
+        self.assertNotIn("ref", release["jobs"]["preflight"]["steps"][0]["with"])
+        self.assertIn('ref: ${{ steps.candidate.outputs.candidate_sha }}', preflight)
+        for job_name in ("full-ci", "full-release-gate", "performance"):
+            uses = release["jobs"][job_name]["uses"]
+            self.assertTrue(uses.startswith("./.github/workflows/"))
+            self.assertNotIn("@main", uses)
+        self.assertNotIn("inputs.candidate_sha", publish)
+        self.assertIn("ref: main", publish)
+        self.assertIn('test "$(git rev-parse origin/main)" = "$GITHUB_SHA"', publish)
+        self.assertIn('test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"', publish)
+
+    def test_candidate_dry_run_uses_exact_candidate_and_has_no_external_mutation(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        dry_run = source[source.index("  dry-run:\n") : source.index("  publish:\n")]
+
+        self.assertIn("ref: ${{ needs.preflight.outputs.candidate_sha }}", dry_run)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"', dry_run)
+        self.assertEqual(dry_run.count("ANIMEMO_COMMIT=${{ needs.preflight.outputs.candidate_sha }}"), 2)
+        self.assertNotIn("ANIMEMO_COMMIT=${{ github.sha }}", dry_run)
+        self.assertIn('--commit "${{ needs.preflight.outputs.candidate_sha }}"', dry_run)
+        self.assertIn('RC_COMMIT == STABLE_COMMIT', dry_run)
+        self.assertIn('RC_API_DIGEST == STABLE_API_DIGEST', dry_run)
+        self.assertIn('RC_WEB_DIGEST == STABLE_WEB_DIGEST', dry_run)
+        self.assertIn('RC_DEPLOYMENT == STABLE_DEPLOYMENT', dry_run)
+        self.assertIn(".artifacts.deploymentContract", dry_run)
+        for mutation in (
+            "docker push",
+            "git push",
+            "git tag --annotate",
+            "gh release create",
+            "actions/attest",
+            "docker/login-action",
+        ):
+            self.assertNotIn(mutation, dry_run)
+
     def test_release_images_receive_the_same_runtime_identity_as_the_manifest(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         self.assertGreaterEqual(source.count("ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}"), 4)
-        self.assertGreaterEqual(source.count("ANIMEMO_COMMIT=${{ github.sha }}"), 4)
+        self.assertEqual(source.count("ANIMEMO_COMMIT=${{ needs.preflight.outputs.candidate_sha }}"), 2)
+        self.assertEqual(source.count("ANIMEMO_COMMIT=${{ github.sha }}"), 2)
         self.assertIn("VITE_TURNSTILE_SITE_KEY=1x00000000000000000000AA", source)
         self.assertIn("promote-manifest", source)
         self.assertEqual(source.count("scripts/rehearse-release-images.sh"), 2)
@@ -263,7 +344,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(release.count("generate-deployment-contract"), 2)
         self.assertGreaterEqual(release.count("deployment-contract.json"), 8)
         self.assertGreaterEqual(promotion.count("deployment-contract.json"), 7)
-        self.assertIn('test "$UPGRADE_BASE_SHA" != "$GITHUB_SHA"', release)
+        self.assertIn('test "$UPGRADE_BASE_SHA" != "$candidate_sha"', release)
         self.assertIn('if [[ "$BASE_SHA" == "$HEAD_SHA" ]]', gate)
         self.assertIn('merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"', gate)
 

@@ -22,6 +22,36 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         for service in ("migration", "bootstrap", "api"):
             self.assertTrue(any("/private:/app/runtime/private" in volume for volume in services[service]["volumes"]))
 
+    def test_build_only_overlay_migrates_trusted_legacy_inputs_without_weakening_production(self):
+        production = (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
+        build = (ROOT / "deploy/docker-compose.build.yml").read_text(encoding="utf-8")
+
+        self.assertNotIn("ANIME_JOURNAL_", production)
+        self.assertNotIn("FRONTEND_URL", production)
+        self.assertIn(
+            "ANIMEMO_PUBLIC_ORIGIN: ${ANIMEMO_PUBLIC_ORIGIN:-${FRONTEND_URL:-https://animemo.cc}}",
+            build,
+        )
+        self.assertIn(
+            "${ANIMEMO_DATA_ROOT:-${ANIME_JOURNAL_DATA_ROOT:-/data/animemo}}",
+            build,
+        )
+        self.assertIn(
+            "${ANIMEMO_DATA_ROOT:-${ANIME_JOURNAL_DATA_ROOT:-/data/animemo}}/postgres:/var/lib/postgresql/data",
+            build,
+        )
+        self.assertIn(
+            "${ANIMEMO_DATA_ROOT:-${ANIME_JOURNAL_DATA_ROOT:-/data/animemo}}/redis:/data",
+            build,
+        )
+        self.assertIn(
+            "${ANIMEMO_PORT:-${ANIME_JOURNAL_PORT:-8088}}",
+            build,
+        )
+        self.assertLess(build.index("ANIMEMO_PUBLIC_ORIGIN:-"), build.index("FRONTEND_URL:-"))
+        self.assertLess(build.index("ANIMEMO_DATA_ROOT:-"), build.index("ANIME_JOURNAL_DATA_ROOT:-"))
+        self.assertLess(build.index("ANIMEMO_PORT:-"), build.index("ANIME_JOURNAL_PORT:-"))
+
     def test_updater_runtime_overlay_injects_only_verified_effective_identity(self):
         override = yaml.safe_load(
             (ROOT / "updater/docker-compose.runtime.yml").read_text(encoding="utf-8")

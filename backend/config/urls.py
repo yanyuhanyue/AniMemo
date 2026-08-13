@@ -4,9 +4,10 @@ from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerSplitView
+
 import config.openapi  # noqa: F401 - registers the authentication extension
-from plugin_host.views import PluginAssetView, PluginPreviewAssetView
 from plugin_host.runtime.dispatch import PluginDispatch
+from plugin_host.views import PluginAssetView, PluginPreviewAssetView
 
 from .api_urls import urlpatterns as core_api_urlpatterns
 
@@ -59,3 +60,11 @@ urlpatterns = [
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+if settings.ANIMEMO_ISOLATED_CAPACITY_PROBE:
+    urlpatterns += [
+        path(
+            "api/v1/_isolated/capacity/",
+            include("performance.urls"),
+        )
+    ]
