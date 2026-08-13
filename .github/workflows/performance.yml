@@ -72,6 +72,7 @@ jobs:
       DJANGO_SECRET_KEY: ci-only-performance-secret-key-012345678901234567890123456789012345678901234567890
       CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
       ANIMEMO_PUBLIC_ORIGIN: http://perf.example.test:8088
+      FRONTEND_URL: http://perf.example.test:8088
       ALLOWED_HOSTS: perf.example.test
       PERFORMANCE_SERVER_NAME: perf.example.test
       DATABASE_URL: postgresql://animemo:ci-password@127.0.0.1:5432/animemo

@@ -21,6 +21,7 @@ from check_license_docs import (
     ValidationError,
     _git_blob,
     _logical_lines,
+    _normalized_text_sha256,
     validate_all,
     validate_documents,
     validate_polyform,
@@ -61,6 +62,11 @@ class LicenseDocumentationTests(unittest.TestCase):
 
     def test_validation_error_is_a_runtime_error(self):
         self.assertTrue(issubclass(ValidationError, RuntimeError))
+
+    def test_evidence_hashes_are_independent_of_checkout_line_endings(self):
+        normalized = (ROOT / "package-lock.json").read_text(encoding="utf-8")
+        expected = __import__("hashlib").sha256(normalized.encode("utf-8")).hexdigest()
+        self.assertEqual(_normalized_text_sha256("package-lock.json"), expected)
 
 
 if __name__ == "__main__":

@@ -10,11 +10,11 @@ Run `python scripts/check_license_docs.py` to verify this snapshot without chang
 
 | Repository input | SHA-256 | Coverage |
 |---|---|---|
-| `package-lock.json` | `cd44b7ee05e231fd781fcd3c7ee0ccda75663d43a0383aec9982745c05aae9c3` | Exact Node dependency graph, versions, package license metadata, and registry tarballs |
-| `backend/requirements.txt` | `a42438c0595bcc1e8b4a021a6860ca68d756b14f39010535fa0f2e87a03d2d87` | 44 exact Python production pins |
-| `release/requirements.txt` | `4fc3e8457917e5a8cbe5d2be87000a542d59397bf729151b1b1c7b03bc3db546` | Release updater Python pins |
-| `bridges/astrbot_plugin_animemo_bridge/requirements.txt` | `7429a163e432935a194adf11a9109ac6c478dcd08a0ab2486ed2106d29dc5f4f` | AstrBot bridge constraint |
-| `scripts/requirements-tools.txt` | `66cd85fc5569f837ae17e44e028515625f1e7f2dd1384c34bd0f3beb361bb4f4` | Dependency-maintenance tooling |
+| `package-lock.json` | `576f0b6f10b67ef0a4360f1028722f64bbd4c9f08eb972ecdec332ec6d4d54e5` | Exact Node dependency graph, versions, package license metadata, and registry tarballs |
+| `backend/requirements.txt` | `db0c4cfeeea40f0b8a7d4d7f392b8d493caedf0f467ea8d1a6a8358c506b5a90` | 44 exact Python production pins |
+| `release/requirements.txt` | `c91590bac77fab44ba03211bf8c0330ce0b5ba36f0f27927af37138278acd563` | Release updater Python pins |
+| `bridges/astrbot_plugin_animemo_bridge/requirements.txt` | `9d25b578e8e7489ee686d0eabaf1b2b2444b3b0761ac3d55548f9e00c99fb2de` | AstrBot bridge constraint |
+| `scripts/requirements-tools.txt` | `b33d39fc69d850a919bda957bce5fc19f49d66ec3097346001c4b5e4633d002c` | Dependency-maintenance tooling |
 
 License identifiers below come from the exact npm/PyPI package metadata or the license files shipped in the corresponding source distribution. Repository paths and exact versions are the primary reproducibility evidence.
 

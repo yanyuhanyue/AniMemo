@@ -181,6 +181,10 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("docker compose --env-file .env.production build\n", release)
         self.assertIn("docker compose --env-file .env.production up -d\n", release)
 
+    def test_performance_backend_uses_an_explicit_isolated_frontend_origin(self):
+        performance = self.source("performance.yml")
+        self.assertIn("FRONTEND_URL: http://perf.example.test:8088", performance)
+
 
 if __name__ == "__main__":
     unittest.main()

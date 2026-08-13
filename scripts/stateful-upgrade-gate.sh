@@ -210,6 +210,7 @@ DATABASE_SSL_REQUIRE=false
 REDIS_URL=redis://redis:6379/0
 ALLOWED_HOSTS=ci.example.test
 ANIMEMO_PUBLIC_ORIGIN=https://ci.example.test
+FRONTEND_URL=https://ci.example.test
 CORS_ALLOWED_ORIGINS=https://ci.example.test
 CSRF_TRUSTED_ORIGINS=https://ci.example.test
 TRUSTED_PROXY_IPS=127.0.0.1/32

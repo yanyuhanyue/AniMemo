@@ -159,6 +159,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
     def test_stateful_gate_migrates_before_scoped_switch_and_retains_data_services(self):
         gate = (ROOT / "scripts/stateful-upgrade-gate.sh").read_text(encoding="utf-8")
 
+        self.assertIn("FRONTEND_URL=https://ci.example.test", gate)
         self.assertIn('BUILD_OVERRIDE_FILE="$CURRENT_ROOT/deploy/docker-compose.build.yml"', gate)
         self.assertIn(
             'local compose_files=(-f "$source_root/deploy/docker-compose.yml" -f "$BUILD_OVERRIDE_FILE")',

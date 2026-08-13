@@ -45,14 +45,14 @@ RELEASE_DOCUMENTS = (
 )
 
 EVIDENCE_SHA256 = {
-    "package-lock.json": "cd44b7ee05e231fd781fcd3c7ee0ccda75663d43a0383aec9982745c05aae9c3",
-    "backend/requirements.txt": "a42438c0595bcc1e8b4a021a6860ca68d756b14f39010535fa0f2e87a03d2d87",
-    "release/requirements.txt": "4fc3e8457917e5a8cbe5d2be87000a542d59397bf729151b1b1c7b03bc3db546",
+    "package-lock.json": "576f0b6f10b67ef0a4360f1028722f64bbd4c9f08eb972ecdec332ec6d4d54e5",
+    "backend/requirements.txt": "db0c4cfeeea40f0b8a7d4d7f392b8d493caedf0f467ea8d1a6a8358c506b5a90",
+    "release/requirements.txt": "c91590bac77fab44ba03211bf8c0330ce0b5ba36f0f27927af37138278acd563",
     "bridges/astrbot_plugin_animemo_bridge/requirements.txt": (
-        "7429a163e432935a194adf11a9109ac6c478dcd08a0ab2486ed2106d29dc5f4f"
+        "9d25b578e8e7489ee686d0eabaf1b2b2444b3b0761ac3d55548f9e00c99fb2de"
     ),
     "scripts/requirements-tools.txt": (
-        "66cd85fc5569f837ae17e44e028515625f1e7f2dd1384c34bd0f3beb361bb4f4"
+        "b33d39fc69d850a919bda957bce5fc19f49d66ec3097346001c4b5e4633d002c"
     ),
 }
 
@@ -120,6 +120,10 @@ def _read_text(relative: str) -> str:
 
 def _sha256(relative: str) -> str:
     return hashlib.sha256(_read_bytes(relative)).hexdigest()
+
+
+def _normalized_text_sha256(relative: str) -> str:
+    return hashlib.sha256(_read_text(relative).encode("utf-8")).hexdigest()
 
 
 def _logical_lines(payload: bytes) -> int:
@@ -259,7 +263,7 @@ def validate_documents() -> None:
 def validate_evidence_hashes() -> None:
     third_party = _read_text("THIRD_PARTY_NOTICES")
     for relative, expected in EVIDENCE_SHA256.items():
-        actual = _sha256(relative)
+        actual = _normalized_text_sha256(relative)
         _require(actual == expected, f"evidence input changed: {relative}: {actual}")
         _require(expected in third_party, f"THIRD_PARTY_NOTICES omits {relative} SHA-256")
 
