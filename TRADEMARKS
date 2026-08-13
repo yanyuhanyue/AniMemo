@@ -1,0 +1,15 @@
+# Trademark Notice
+
+Names, logos, service names, package names, and other identifiers mentioned by this repository may be trademarks or other protected identifiers of their respective owners.
+
+No trademark license is stated or implied by `LICENSE`. In particular:
+
+- `AniMemo`, `My Anime Memory`, and `我的动漫记忆库` are the product and project identifiers selected for this repository. This file does not infer or name a legal rights holder for them.
+- Stable technical identifiers containing `anime-journal` are retained for compatibility and do not state affiliation, sponsorship, endorsement, provenance, or permission.
+- Bangumi, Font Awesome, Noto, GSAP, GreenSock, React, Django, AstrBot, PostgreSQL, Redis, Cloudflare, and other third-party names are used only to identify external data sources, dependencies, technologies, or services. Their respective owners retain any rights in those names and materials.
+- Anime titles, character names, posters, descriptions, and other external media or metadata remain outside the AniMemo source-code license.
+- Nothing in `LICENSE` re-licenses Bangumi APIs or data, external media, fonts, icons, dependencies, or service/runtime software; each remains under its own applicable terms.
+
+Before public branding or distribution, confirm any required permissions for names, logos, trade dress, media, and other brand assets separately from source-code licensing.
+
+This notice is informational and is not legal advice or a legal guarantee.

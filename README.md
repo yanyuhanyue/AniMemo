@@ -1,8 +1,12 @@
-# Anime Journal / 私人番剧手账
+# AniMemo / My Anime Memory / 我的动漫记忆库
 
-这是一个按 `xh-anime.com` 的孟菲斯设计、新波普粗野主义视觉语言复刻并重新实现的全栈番剧手账。展示页保留原站的高对比配色、重描边、错位阴影、列表/海报墙切换与响应式卡片，同时加入可独立部署的私人数据系统。
+AniMemo 是一套可自托管的动漫记忆与私人观影手账，提供条目管理、观看历史、公开展示、专栏、导入导出、插件与外部集成能力。产品以清晰的数据所有权、可独立部署和可维护的前后端契约为核心，不以任何外部网站作为正式来源或产品身份。
 
-> 上线前请确认你拥有原站视觉、文案与图片素材的复制/使用授权。仓库内的本地海报仅用于开发演示；生产环境建议换成自有或获授权素材。
+> 仓库内的演示媒体与示例数据不因源码许可证而获得授权；在授权状态明确或完成替换前，不应将其作为公开发行素材。
+
+## License / 许可证
+
+本仓库中由许可方有权许可的 AniMemo 自有源码采用 [PolyForm Noncommercial License 1.0.0](LICENSE)。根 `LICENSE` 与保留的核验副本 [PolyForm-Noncommercial-1.0.0.md](PolyForm-Noncommercial-1.0.0.md) 字节完全一致。该许可不覆盖第三方依赖、字体、图标、外部媒体、Bangumi API/数据或其他另行授权的材料；边界与证据见 [NOTICE](NOTICE)、[TRADEMARKS](TRADEMARKS)、[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) 和 [许可证来源审计](docs/license-provenance-audit-20260813.md)。
 
 ## 已实现
 
@@ -20,7 +24,7 @@
 ## 目录
 
 ```text
-anime-journal/
+AniMemo/
 ├─ src/                 React 页面、组件与样式
 ├─ public/assets/       本地演示图片
 ├─ backend/             Django 项目与 journal API

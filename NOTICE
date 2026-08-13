@@ -1,0 +1,27 @@
+# AniMemo Notice
+
+Documentation snapshot: 2026-08-13 (Asia/Shanghai).
+
+This repository applies the PolyForm Noncommercial License 1.0.0 to AniMemo-owned source code that the licensor is authorized to license. The complete, unmodified terms are in `LICENSE`; `PolyForm-Noncommercial-1.0.0.md` is retained as a byte-identical named copy.
+
+No legal rights-holder name is inferred or inserted by this notice. The repository history is evidence of contribution continuity, not a legal guarantee of title; the scope decision also relies on the user's explicit final rights decision dated 2026-08-13. See `docs/license-provenance-audit-20260813.md`.
+
+## AniMemo-owned source declarations
+
+- AniMemo Core source covered by the repository-level license, subject to the exclusions below.
+- `plugins/_template/manifest.json` declares `PolyForm-Noncommercial-1.0.0` for the AniMemo blank-plugin template source.
+- `plugins/watch-history-importer/manifest.json` declares `PolyForm-Noncommercial-1.0.0` beginning with version `0.4.3`; published version `0.4.2` remains an immutable historical package identity and is not rewritten.
+- `bridges/astrbot_plugin_animemo_bridge/metadata.yaml` declares `PolyForm-Noncommercial-1.0.0` for the AniMemo Bridge source in this repository.
+
+## Scope boundaries
+
+- Third-party software, fonts, icons, data, and bundled documentation remain subject to their own terms. See `THIRD_PARTY_NOTICES`.
+- Bangumi APIs, names, metadata, images, and other returned material are external to AniMemo source licensing. Code that calls those interfaces may be AniMemo-owned, but the responses and upstream service are not relicensed.
+- AstrBot, React, Django, Django REST Framework, requests, httpx, and other dependencies remain under their respective terms; their use by an AniMemo component does not bring them under PolyForm.
+- External media and media metadata are not cleared by the source-code license.
+- The source-code license does not clear or grant rights in `public/assets/avatar.png` or `public/assets/posters/poster-01.webp` through `poster-16.webp`. Authorization or replacement remains required before release.
+- The source-code license does not clear or grant rights in the provenance-sensitive demo content in `src/data/anime.js`. That file and concrete coordinator-owned UI/demo-data work are intentionally untouched here.
+- Stable technical identifiers containing `anime-journal`, including package IDs and module paths, are compatibility identifiers only. They are not statements of product provenance, affiliation, or legal ownership.
+- Names and marks are addressed separately in `TRADEMARKS`; no trademark permission should be inferred from the source-code license.
+
+This notice records repository boundaries and is not legal advice or a legal guarantee.

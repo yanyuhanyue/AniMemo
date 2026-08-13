@@ -2,6 +2,12 @@
 
 这是一个 provider-neutral 的 AstrBot 插件，当前版本为 `0.1.3`，使用 AniMemo Integration Protocol v1 的 HMAC、一次性配对、动作调用和 HTTP long-poll 事件投递。
 
+## 许可证与外部边界
+
+本目录中由许可方有权许可的 AniMemo Bridge 源码采用仓库根目录 `LICENSE` 所载的 PolyForm Noncommercial License 1.0.0，`metadata.yaml` 标识为 `PolyForm-Noncommercial-1.0.0`。本插件尚未发布到 AstrBot Marketplace，因此本次元数据修正不改写已发布市场包。
+
+AstrBot 运行时、httpx 及其传递依赖仍适用各自条款，不因 Bridge 源码的许可证声明而被重新许可。`author: AniMemo` 是项目标识，不用于推断或填写法律权利人姓名。
+
 最低支持 AstrBot `4.27.2`。路由与事件状态保存在 AstrBot 官方 `data/plugin_data/astrbot_plugin_animemo_bridge/` 持久化目录，升级插件代码时不会写入或依赖 `data/plugins/` 安装目录。
 
 插件配置 schema 使用 AstrBot 自己的类型系统：布尔值为 `bool`，整数为 `int`，文本为 `string`；不能使用 JSON Schema 风格的 `boolean`、`number` 或 `password`。AstrBot `4.27.2` 没有独立的 password 类型，`secret` 使用 `string` 并设置 `invisible: true`。Dashboard 会隐藏该字段，但 AstrBot 配置文件不是加密凭证库，因此生产环境优先使用 `ANIMEMO_INTEGRATION_SECRET` 注入 secret。

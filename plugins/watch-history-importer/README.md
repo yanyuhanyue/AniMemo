@@ -1,6 +1,12 @@
 # 忆往昔观看记录导入器
 
-Anime Journal 全栈插件，用于上传年度 TXT 观看记录，在正式写入前完成解析预览、Bangumi 匹配和人工确认。
+AniMemo 全栈插件，用于上传年度 TXT 观看记录，在正式写入前完成解析预览、Bangumi 匹配和人工确认。
+
+## 许可证与外部边界
+
+从 `0.4.3` 起，本插件中由许可方有权许可的 AniMemo 自有源码采用仓库根目录 `LICENSE` 所载的 PolyForm Noncommercial License 1.0.0，Manifest 标识为 `PolyForm-Noncommercial-1.0.0`。已发布的 `0.4.2` 是不可变历史包身份，本次变更不改写该版本。
+
+Bangumi API、返回的条目数据与媒体不属于 AniMemo 源码许可证范围；React、Django、Django REST Framework、requests 及宿主 SDK 等第三方软件仍适用各自条款。此处只声明本插件自有源码的许可边界，不提供第三方内容授权或法律保证。
 
 ## 导入流程
 

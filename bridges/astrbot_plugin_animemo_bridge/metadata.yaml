@@ -6,4 +6,4 @@ author: AniMemo
 desc: 连接 AniMemo Integration Protocol v1，实现帐号绑定、动作调用和事件推送。
 description: 连接 AniMemo Integration Protocol v1，实现帐号绑定、动作调用和事件推送。
 repo: https://github.com/yanyuhanyue/AniMemo
-license: MIT
+license: PolyForm-Noncommercial-1.0.0
