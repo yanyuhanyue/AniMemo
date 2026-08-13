@@ -58,13 +58,18 @@ GATE_NAMES = (
     "run_postgres",
     "run_runtime",
     "run_release_full",
+    "run_release_updater",
+    "run_release_docker",
+    "run_release_stateful",
     "full_gate",
+    "critical_gate",
 )
 
 OUTPUT_NAMES = (
     "schema_version",
     "risk_level",
     "risk_rank",
+    "execution_force_full",
     "reasons",
     "matched_rules",
     "unknown_paths",
@@ -80,7 +85,11 @@ OUTPUT_NAMES = (
     "run_postgres",
     "run_runtime",
     "run_release_full",
+    "run_release_updater",
+    "run_release_docker",
+    "run_release_stateful",
     "full_gate",
+    "critical_gate",
 )
 
 
@@ -112,6 +121,7 @@ def _is_ci_authority(path: str) -> bool:
         or path
         in {
             "scripts/ci_classify.py",
+            "scripts/ci_gate_authority.py",
             "scripts/ci_premerge.py",
             "scripts/ci_refs.py",
             "scripts/release_authority.py",
@@ -612,15 +622,6 @@ def _classification_document(
             )
         ] = set()
 
-    if force_full:
-        reason_paths[
-            (
-                "authority-event-force-full",
-                "CRITICAL",
-                "The event is an authoritative or explicitly forced full validation.",
-            )
-        ] = set(normalized)
-
     reasons = [
         {
             "rule": rule_id,
@@ -648,6 +649,7 @@ def _classification_document(
         )
     )
     full_gate = force_full or RISK_RANK[risk_level] >= RISK_RANK["HIGH"]
+    critical_gate = force_full or risk_level == "CRITICAL"
 
     primary_signals = (
         "frontend",
@@ -720,7 +722,11 @@ def _classification_document(
         "run_postgres": run_postgres,
         "run_runtime": run_runtime,
         "run_release_full": full_gate,
+        "run_release_updater": critical_gate,
+        "run_release_docker": full_gate,
+        "run_release_stateful": full_gate,
         "full_gate": full_gate,
+        "critical_gate": critical_gate,
     }
     return {
         "schema_version": SCHEMA_VERSION,
@@ -728,6 +734,19 @@ def _classification_document(
             "level": risk_level,
             "rank": RISK_RANK[risk_level],
             "reasons": reasons,
+        },
+        "execution": {
+            "force_full": force_full,
+            "reasons": (
+                [
+                    {
+                        "rule": "authority-event-force-full",
+                        "reason": "The event is an authoritative or explicitly forced full validation.",
+                    }
+                ]
+                if force_full
+                else []
+            ),
         },
         "paths": path_matches,
         "unknown_paths": unknown_paths,
@@ -740,6 +759,8 @@ def classify_paths(paths: list[str], *, force_full: bool = False) -> dict[str, s
     document = _classification_document(paths, force_full=force_full)
     risk = document["risk"]
     assert isinstance(risk, dict)
+    execution = document["execution"]
+    assert isinstance(execution, dict)
     signals = document["signals"]
     gates = document["gates"]
     assert isinstance(signals, dict)
@@ -749,6 +770,7 @@ def classify_paths(paths: list[str], *, force_full: bool = False) -> dict[str, s
         "schema_version": SCHEMA_VERSION,
         "risk_level": str(risk["level"]),
         "risk_rank": str(risk["rank"]),
+        "execution_force_full": "true" if execution["force_full"] else "false",
         "reasons": _json(risk["reasons"]),
         "matched_rules": _json(document["paths"]),
         "unknown_paths": _json(document["unknown_paths"]),

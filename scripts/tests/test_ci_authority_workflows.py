@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -81,8 +80,8 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         for name in ("updater-isolated", "docker", "stateful-upgrade"):
             self.assertIn("inputs.force_full ||", self.job(release, name), name)
 
-        self.assertEqual(ci.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 9)
-        self.assertEqual(release.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 5)
+        self.assertEqual(ci.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 10)
+        self.assertEqual(release.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 6)
         self.assertIn(
             "repository: AstrBotDevs/AstrBot\n          ref: ${{ matrix.astrbot_ref }}",
             ci,
@@ -92,10 +91,64 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         ci = self.source("ci.yml")
         release = self.source("release-gate.yml")
         self.assertIn("name: pr-fast-gate", ci)
+        self.assertIn("name: ci-selection-authority", ci)
+        self.assertIn("needs: selection-authority", self.job(ci, "pr-fast-gate"))
+        self.assertIn("name: release-gate-authority", release)
         self.assertIn("github.event_name == 'pull_request'", ci)
         self.assertIn("github.event_name != 'push'", ci)
         self.assertIn("github.event_name != 'push'", release)
         self.assertIn("name: post-merge-sanity", release)
+
+    def test_selection_authorities_validate_actual_job_results(self):
+        ci = self.source("ci.yml")
+        release = self.source("release-gate.yml")
+
+        ci_authority = self.job(ci, "selection-authority")
+        self.assertIn("if: ${{ always() }}", ci_authority)
+        self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", ci_authority)
+        self.assertIn("--workflow ci", ci_authority)
+        self.assertIn('--event-name "${{ github.event_name }}"', ci_authority)
+        for dependency in (
+            "classify",
+            "fast-fail",
+            "docs-only",
+            "frontend",
+            "backend",
+            "bootstrap-smoke",
+            "postgres",
+            "plugins",
+            "astrbot-bridge",
+            "astrbot-runtime",
+        ):
+            self.assertIn(dependency, ci_authority)
+
+        release_authority = self.job(release, "selection-authority")
+        self.assertIn("if: ${{ always() }}", release_authority)
+        self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", release_authority)
+        self.assertIn("--workflow release", release_authority)
+        for dependency in (
+            "classify",
+            "post-merge-sanity",
+            "updater-isolated",
+            "docker",
+            "stateful-upgrade",
+        ):
+            self.assertIn(dependency, release_authority)
+
+    def test_release_jobs_use_distinct_high_and_critical_selectors(self):
+        release = self.source("release-gate.yml")
+        self.assertIn(
+            "needs.classify.outputs.run_release_updater == 'true'",
+            self.job(release, "updater-isolated"),
+        )
+        self.assertIn(
+            "needs.classify.outputs.run_release_docker == 'true'",
+            self.job(release, "docker"),
+        )
+        self.assertIn(
+            "needs.classify.outputs.run_release_stateful == 'true'",
+            self.job(release, "stateful-upgrade"),
+        )
 
     def test_release_gate_bootstraps_both_legacy_and_explicit_job_compose_contracts(self):
         release = self.source("release-gate.yml")

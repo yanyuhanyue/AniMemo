@@ -65,6 +65,73 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.force_full && 'workflow_call'", gate_source)
         self.assertIn("--base \"${{ inputs.upgrade_base_sha || '' }}\"", gate_source)
 
+    def test_ci_and_release_gate_publish_complete_classifier_contract(self):
+        expected_outputs = {
+            "schema_version",
+            "risk_level",
+            "risk_rank",
+            "execution_force_full",
+            "classification_json",
+            "docs_only",
+            "mixed",
+            "run_frontend",
+            "run_backend",
+            "run_bootstrap",
+            "run_plugins",
+            "run_bridge",
+            "run_postgres",
+            "run_runtime",
+            "run_release_full",
+            "run_release_updater",
+            "run_release_docker",
+            "run_release_stateful",
+            "full_gate",
+            "critical_gate",
+        }
+        for name in ("ci.yml", "release-gate.yml"):
+            with self.subTest(workflow=name):
+                outputs = set(workflow(name)["jobs"]["classify"]["outputs"])
+                self.assertEqual(outputs, expected_outputs)
+
+    def test_selection_authority_jobs_are_always_run_and_exhaustive(self):
+        ci = workflow("ci.yml")
+        gate = workflow("release-gate.yml")
+
+        ci_authority = ci["jobs"]["selection-authority"]
+        self.assertEqual(ci_authority["if"], "${{ always() }}")
+        self.assertEqual(
+            set(ci_authority["needs"]),
+            {
+                "classify",
+                "fast-fail",
+                "docs-only",
+                "frontend",
+                "backend",
+                "bootstrap-smoke",
+                "postgres",
+                "plugins",
+                "astrbot-bridge",
+                "astrbot-runtime",
+            },
+        )
+        self.assertEqual(
+            ci["jobs"]["pr-fast-gate"]["needs"],
+            "selection-authority",
+        )
+
+        release_authority = gate["jobs"]["selection-authority"]
+        self.assertEqual(release_authority["if"], "${{ always() }}")
+        self.assertEqual(
+            set(release_authority["needs"]),
+            {
+                "classify",
+                "post-merge-sanity",
+                "updater-isolated",
+                "docker",
+                "stateful-upgrade",
+            },
+        )
+
     def test_release_workflow_is_manual_and_never_builds_stable(self):
         release = workflow("release.yml")
         self.assertEqual(set(release["on"]), {"workflow_dispatch"})

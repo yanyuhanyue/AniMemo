@@ -37,6 +37,8 @@ class CiClassificationTests(unittest.TestCase):
         self.assertEqual(document["schema_version"], SCHEMA_VERSION)
         self.assertEqual(document["risk"]["level"], result["risk_level"])
         self.assertEqual(str(document["risk"]["rank"]), result["risk_rank"])
+        self.assertIs(document["execution"]["force_full"], False)
+        self.assertEqual(result["execution_force_full"], "false")
         self.assertEqual(document["risk"]["reasons"], json.loads(result["reasons"]))
         self.assertEqual(document["paths"], json.loads(result["matched_rules"]))
         self.assertEqual(document["unknown_paths"], json.loads(result["unknown_paths"]))
@@ -196,6 +198,7 @@ class CiClassificationTests(unittest.TestCase):
             "scripts/stateful-upgrade-gate.sh",
             ".github/workflows/ci.yml",
             "scripts/ci_classify.py",
+            "scripts/ci_gate_authority.py",
             "scripts/tests/test_ci_classify.py",
             "backend/site_config/first_run.py",
             "backend/site_config/management/commands/bootstrap_animemo.py",
@@ -295,7 +298,7 @@ class CiClassificationTests(unittest.TestCase):
         self.assertEqual(set(matched), set(tracked))
         self.assertTrue(all(matched[path] for path in tracked))
 
-    def test_authority_events_and_explicit_override_force_critical_full(self):
+    def test_authority_events_force_execution_without_rewriting_change_risk(self):
         self.assertTrue(force_full_for_event("merge_group"))
         self.assertTrue(force_full_for_event("workflow_dispatch"))
         self.assertTrue(force_full_for_event("workflow_call"))
@@ -305,13 +308,35 @@ class CiClassificationTests(unittest.TestCase):
 
         result = classify_paths(["README.md"], force_full=True)
         document = parsed(result)
-        self.assertEqual(result["risk_level"], "CRITICAL")
+        self.assertEqual(result["risk_level"], "LOW")
+        self.assertEqual(result["execution_force_full"], "true")
         self.assertEqual(result["docs_only"], "false")
         self.assertEqual(result["full_gate"], "true")
+        self.assertEqual(result["critical_gate"], "true")
         self.assertIn(
+            "authority-event-force-full",
+            [reason["rule"] for reason in document["execution"]["reasons"]],
+        )
+        self.assertNotIn(
             "authority-event-force-full",
             [reason["rule"] for reason in document["risk"]["reasons"]],
         )
+
+    def test_high_and_critical_release_subsets_are_distinct(self):
+        high = classify_paths(["backend/journal/migrations/0006_add_index.py"])
+        critical = classify_paths(["updater/agent.py"])
+
+        self.assertEqual(high["risk_level"], "HIGH")
+        self.assertEqual(high["run_release_docker"], "true")
+        self.assertEqual(high["run_release_stateful"], "true")
+        self.assertEqual(high["run_release_updater"], "false")
+        self.assertEqual(high["critical_gate"], "false")
+
+        self.assertEqual(critical["risk_level"], "CRITICAL")
+        self.assertEqual(critical["run_release_docker"], "true")
+        self.assertEqual(critical["run_release_stateful"], "true")
+        self.assertEqual(critical["run_release_updater"], "true")
+        self.assertEqual(critical["critical_gate"], "true")
 
 
 if __name__ == "__main__":

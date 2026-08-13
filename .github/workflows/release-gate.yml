@@ -48,7 +48,26 @@ jobs:
     name: release-changed-files
     runs-on: ubuntu-latest
     outputs:
+      schema_version: ${{ steps.classify.outputs.schema_version }}
+      risk_level: ${{ steps.classify.outputs.risk_level }}
+      risk_rank: ${{ steps.classify.outputs.risk_rank }}
+      execution_force_full: ${{ steps.classify.outputs.execution_force_full }}
+      classification_json: ${{ steps.classify.outputs.classification_json }}
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      mixed: ${{ steps.classify.outputs.mixed }}
+      run_frontend: ${{ steps.classify.outputs.run_frontend }}
+      run_backend: ${{ steps.classify.outputs.run_backend }}
+      run_bootstrap: ${{ steps.classify.outputs.run_bootstrap }}
+      run_plugins: ${{ steps.classify.outputs.run_plugins }}
+      run_bridge: ${{ steps.classify.outputs.run_bridge }}
+      run_postgres: ${{ steps.classify.outputs.run_postgres }}
+      run_runtime: ${{ steps.classify.outputs.run_runtime }}
       run_release_full: ${{ steps.classify.outputs.run_release_full }}
+      run_release_updater: ${{ steps.classify.outputs.run_release_updater }}
+      run_release_docker: ${{ steps.classify.outputs.run_release_docker }}
+      run_release_stateful: ${{ steps.classify.outputs.run_release_stateful }}
+      full_gate: ${{ steps.classify.outputs.full_gate }}
+      critical_gate: ${{ steps.classify.outputs.critical_gate }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -79,7 +98,7 @@ jobs:
   updater-isolated:
     name: updater-isolated
     needs: classify
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_release_full == 'true')
+    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_release_updater == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -98,7 +117,7 @@ jobs:
   docker:
     name: docker
     needs: classify
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_release_full == 'true')
+    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_release_docker == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -234,7 +253,7 @@ jobs:
   stateful-upgrade:
     name: stateful-upgrade
     needs: classify
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_release_full == 'true')
+    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_release_stateful == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -286,3 +305,20 @@ jobs:
           if ! rm -rf -- "$STATEFUL_UPGRADE_TEMP_ROOT" 2>/dev/null; then
             sudo -n rm -rf -- "$STATEFUL_UPGRADE_TEMP_ROOT"
           fi
+
+  selection-authority:
+    name: release-gate-authority
+    if: ${{ always() }}
+    needs: [classify, post-merge-sanity, updater-isolated, docker, stateful-upgrade]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+      - name: Require selected jobs to succeed and unselected jobs to skip
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: >-
+          python scripts/ci_gate_authority.py
+          --workflow release
+          --event-name "${{ github.event_name }}"
