@@ -163,6 +163,7 @@ class StaffLoginView(APIView):
             detail.setdefault("code", "two_factor_required" if needs_second_factor else "invalid_credentials")
             return Response(detail, status=status.HTTP_428_PRECONDITION_REQUIRED if needs_second_factor else status.HTTP_401_UNAUTHORIZED)
 
+        refresh, access = issue_token_pair(result.user)
         session_login(request, result.user)
         security_profile = get_security_profile(result.user)
         admin_access = bool(result.second_factor_verified and security_profile.two_factor_enabled)
@@ -170,7 +171,6 @@ class StaffLoginView(APIView):
             mark_staff_second_factor_verified(request, result.user, security_profile)
         else:
             clear_staff_second_factor(request)
-        refresh, access = issue_token_pair(result.user)
         record_login_event(request, event_type=LoginEvent.EventType.LOGIN, success=True, user=result.user, account=account)
         requested_admin_path = str(request.data.get("next", "")).strip()
         if not requested_admin_path.startswith("/admin/") and requested_admin_path != "/admin":

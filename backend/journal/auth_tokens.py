@@ -1,5 +1,5 @@
-import hashlib
 import hmac
+import re
 from datetime import datetime, timezone as dt_timezone
 
 from django.conf import settings
@@ -18,6 +18,7 @@ from .staff_services import get_security_profile
 
 
 INSTALLATION_INSTANCE_CLAIM = "ii"
+INSTALLATION_BINDING_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class RefreshReplayError(TokenError):
@@ -31,8 +32,7 @@ def current_installation_binding():
     try:
         installation = InstallationState.objects.only(
             "status",
-            "initialized_at",
-            "updated_at",
+            "authentication_epoch",
         ).get(pk=1)
     except InstallationState.DoesNotExist as error:
         raise AuthenticationFailed(
@@ -40,17 +40,17 @@ def current_installation_binding():
             code="session_revoked",
         ) from error
 
-    anchor = installation.initialized_at or installation.updated_at
-    if anchor is None:
+    binding = installation.authentication_epoch
+    if (
+        installation.status != InstallationState.Status.INITIALIZED
+        or not isinstance(binding, str)
+        or not INSTALLATION_BINDING_PATTERN.fullmatch(binding)
+    ):
         raise AuthenticationFailed(
             "登录会话已失效，请重新登录。",
             code="session_revoked",
         )
-    if timezone.is_naive(anchor):
-        anchor = anchor.replace(tzinfo=dt_timezone.utc)
-    canonical = anchor.astimezone(dt_timezone.utc).isoformat(timespec="microseconds")
-    material = f"animemo-installation:v1:{installation.status}:{canonical}"
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return binding
 
 
 def bind_token_to_current_installation(token):

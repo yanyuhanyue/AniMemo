@@ -631,7 +631,7 @@ class FirstRunSetupApiTests(APITestCase):
 
 class InstallationStateMigrationTests(TransactionTestCase):
     migrate_from = [("site", "0002_media_write_reservation")]
-    migrate_to = [("site", "0003_installation_state")]
+    migrate_to = [("site", "0004_installation_authentication_epoch")]
 
     def setUp(self):
         super().setUp()
@@ -650,6 +650,7 @@ class InstallationStateMigrationTests(TransactionTestCase):
 
         self.assertEqual(installation.status, "initialized")
         self.assertIsNotNone(installation.initialized_at)
+        self.assertRegex(installation.authentication_epoch, r"^[0-9a-f]{64}$")
         self.assertEqual(installation.setup_code_hash, "")
         response = self.client.get(reverse("setup-status"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -659,7 +660,7 @@ class InstallationStateMigrationTests(TransactionTestCase):
 
 class InstallationStateFreshMigrationTests(TransactionTestCase):
     migrate_from = [("site", "0002_media_write_reservation")]
-    migrate_to = [("site", "0003_installation_state")]
+    migrate_to = [("site", "0004_installation_authentication_epoch")]
 
     def setUp(self):
         super().setUp()
@@ -676,6 +677,7 @@ class InstallationStateFreshMigrationTests(TransactionTestCase):
         self.assertEqual(installation.status, "uninitialized")
         self.assertIsNone(installation.initialized_at)
         self.assertIsNone(installation.initialized_by_id)
+        self.assertEqual(installation.authentication_epoch, "")
         self.assertEqual(installation.setup_code_hash, "")
 
 
