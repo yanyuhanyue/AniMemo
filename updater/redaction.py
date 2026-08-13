@@ -464,48 +464,50 @@ def _redacted_marker_is_complete(text: str, start: int) -> bool:
     return False
 
 
-def _protected_bare_value_spans(text: str) -> list[tuple[int, int]]:
-    """Return regions already handled by syntax-specific redactors."""
+def _trusted_redacted_value_starts(text: str) -> set[int]:
+    """Locate exact values redacted by the cookie and URL parsers."""
 
-    spans = [
-        match.span("value")
-        for pattern in (_COOKIE_LINE, _COOKIE_INLINE)
-        for match in pattern.finditer(text)
-    ]
-    spans.extend(match.span() for match in _URL_PARAMETER.finditer(text))
-    if not spans:
-        return []
+    starts: set[int] = set()
+    for pattern in (_COOKIE_LINE, _COOKIE_INLINE):
+        for match in pattern.finditer(text):
+            value = match.group("value")
+            value_start = match.start("value")
+            if _normalise_key(match.group("header")) == "set_cookie":
+                for record_start, record_end in _split_combined_set_cookie_spans(
+                    value
+                ):
+                    record = value[record_start:record_end]
+                    first_part = record.split(";", 1)[0]
+                    pair = _COOKIE_PAIR.match(first_part)
+                    if not pair:
+                        continue
+                    marker_start = value_start + record_start + pair.start("value")
+                    if text.startswith(_REDACTED, marker_start):
+                        starts.add(marker_start)
+            else:
+                for pair in _BARE_KEY_PREFIX.finditer(value):
+                    marker_start = value_start + pair.end()
+                    if text.startswith(_REDACTED, marker_start):
+                        starts.add(marker_start)
 
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(spans):
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
-        else:
-            merged.append((start, end))
-    return merged
+    for match in _URL_PARAMETER.finditer(text):
+        key = unquote_plus(match.group("key"))
+        if not _is_sensitive_key(key) and _normalise_key(key) not in _SENSITIVE_URL_KEYS:
+            continue
+        marker_start = match.start("value")
+        if text.startswith(_REDACTED, marker_start):
+            starts.add(marker_start)
+    return starts
 
 
 def _redact_bare_key_values(text: str) -> str:
     output: list[str] = []
     output_cursor = 0
     search_cursor = 0
-    protected_spans = _protected_bare_value_spans(text)
-    protected_index = 0
+    trusted_redacted_starts = _trusted_redacted_value_starts(text)
     while match := _BARE_KEY_PREFIX.search(text, search_cursor):
         value_start = match.end()
         search_cursor = value_start
-        while (
-            protected_index < len(protected_spans)
-            and protected_spans[protected_index][1] <= match.start()
-        ):
-            protected_index += 1
-        if (
-            protected_index < len(protected_spans)
-            and protected_spans[protected_index][0]
-            <= match.start()
-            < protected_spans[protected_index][1]
-        ):
-            continue
         normalised_key = _normalise_key(match.group("key"))
         if not _is_sensitive_key(match.group("key")):
             continue
@@ -523,8 +525,9 @@ def _redact_bare_key_values(text: str) -> str:
             continue
         if value_start >= len(text) or text[value_start] in "\"'":
             continue
-        if text.startswith(_REDACTED, value_start) and _redacted_marker_is_complete(
-            text, value_start
+        if text.startswith(_REDACTED, value_start) and (
+            value_start in trusted_redacted_starts
+            or _redacted_marker_is_complete(text, value_start)
         ):
             search_cursor = value_start + len(_REDACTED)
             continue
@@ -718,8 +721,8 @@ def _redact_cookie_scalar(value: str) -> str:
     return f"{leading}{_REDACTED}{outer_quote}{trailing}"
 
 
-def _split_combined_set_cookie(value: str) -> list[str]:
-    records: list[str] = []
+def _split_combined_set_cookie_spans(value: str) -> list[tuple[int, int]]:
+    records: list[tuple[int, int]] = []
     start = 0
     quote = ""
     escaped = False
@@ -738,10 +741,16 @@ def _split_combined_set_cookie(value: str) -> list[str]:
             quote = character
             continue
         if character == "," and _COOKIE_PAIR_START.match(value, index + 1):
-            records.append(value[start:index])
+            records.append((start, index))
             start = index + 1
-    records.append(value[start:])
+    records.append((start, len(value)))
     return records
+
+
+def _split_combined_set_cookie(value: str) -> list[str]:
+    return [
+        value[start:end] for start, end in _split_combined_set_cookie_spans(value)
+    ]
 
 
 def _redact_set_cookie_record(record: str) -> str:

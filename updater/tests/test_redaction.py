@@ -569,6 +569,60 @@ class RedactionTests(unittest.TestCase):
                     self.assert_secrets_removed(disk, secret)
                     self.assertEqual(redact(output), output)
 
+    def test_syntax_specific_redaction_does_not_hide_nested_credentials(self):
+        cases = (
+            (
+                "https://example.test/?note=password=URL_NESTED_SECRET"
+                "&trace_id=trace-7",
+                "URL_NESTED_SECRET",
+            ),
+            (
+                "https://example.test/?token=[REDACTED]"
+                "&note=password=URL_MARKER_NESTED_SECRET&trace_id=trace-8",
+                "URL_MARKER_NESTED_SECRET",
+            ),
+            (
+                "failure password=HEAD&trace_id=TAIL_QUERY_BOUNDARY_SECRET",
+                "TAIL_QUERY_BOUNDARY_SECRET",
+            ),
+            (
+                "Set-Cookie: sid=COOKIE_SECRET; "
+                "Path=password=COOKIE_PATH_SECRET; HttpOnly status=401",
+                "COOKIE_PATH_SECRET",
+            ),
+            (
+                "Set-Cookie: sid=[REDACTED]; "
+                "Path=password=COOKIE_MARKER_PATH_SECRET; HttpOnly status=401",
+                "COOKIE_MARKER_PATH_SECRET",
+            ),
+            (
+                "Set-Cookie: sid=COOKIE_SECRET; "
+                "Comment=api_token=COOKIE_COMMENT_SECRET; Secure status=401",
+                "COOKIE_COMMENT_SECRET",
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationStore(Path(directory))
+            for diagnostic, secret in cases:
+                with self.subTest(secret=secret):
+                    output = redact(diagnostic)
+                    operation = store.create("apply_update", {"version": "v1.0.1"})
+                    stored = store.transition(
+                        operation["id"], "preflight", detail=diagnostic
+                    )
+                    persisted = stored["events"][-1]["detail"]
+                    disk = (
+                        Path(directory)
+                        / "operations"
+                        / f"{operation['id']}.json"
+                    ).read_text()
+
+                    self.assert_secrets_removed(output, secret)
+                    self.assert_secrets_removed(persisted, secret)
+                    self.assert_secrets_removed(disk, secret)
+                    self.assertEqual(redact(output), output)
+
     def test_authentication_credential_key_variants_are_redacted(self):
         keys = (
             "setup_code",
