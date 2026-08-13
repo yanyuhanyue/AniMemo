@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.3
+
+- 将当前 AniMemo 自有插件源码的 Manifest 许可证元数据更新为 `PolyForm-Noncommercial-1.0.0`。
+- 仅发布新的 `0.4.3` 身份承载本次元数据更新；已发布的 `0.4.2` 包及其不可变内容身份不得重写。
+- 明确 Bangumi API、返回数据与媒体，以及 React、Django、Django REST Framework 和 requests 等依赖继续适用各自条款。
+
 ## 0.4.2
 
 - 通过 Manifest 明确声明 `journal` 与 `watch_history` Core capability。

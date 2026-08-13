@@ -19,7 +19,7 @@ from .src.anime_journal_watch_history_importer.parser import build_preview, norm
 
 
 PLUGIN_SLUG = "watch-history-importer"
-PLUGIN_VERSION = "0.4.2"
+PLUGIN_VERSION = "0.4.3"
 MAX_FILES = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
 INTEGRATION_TEXT_MAX_BYTES = 120 * 1024

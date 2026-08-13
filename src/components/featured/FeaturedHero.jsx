@@ -1,6 +1,11 @@
 import { Link } from "react-router-dom";
 import { Icon } from "../Icon.jsx";
 import { useSiteSettings } from "../../context/SiteSettingsContext.jsx";
+import { DEFAULT_POSTER } from "../../lib/demoMedia.js";
+import { selectDailyHeroPosters } from "../../lib/heroArtSelector.js";
+import { animeRecords } from "../../data/anime.js";
+
+const [, dailyPoster] = selectDailyHeroPosters(animeRecords, { domain: "featured" });
 
 export function FeaturedHero() {
   const { settings } = useSiteSettings();
@@ -17,7 +22,7 @@ export function FeaturedHero() {
         <div className="featured-hero__art" aria-hidden="true">
           <span className="featured-hero__account">{settings.social_handle}</span>
           <div className="featured-hero__burst"><Icon name="star" /></div>
-          <div className="featured-portrait featured-portrait--back"><img src="/assets/posters/poster-11.webp" alt="" /></div>
+          <div className="featured-portrait featured-portrait--back"><img src={dailyPoster} alt="" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = DEFAULT_POSTER; }} /></div>
           <div className="featured-portrait featured-portrait--front"><img src="/assets/avatar.png" alt="" /></div>
         </div>
       </div>

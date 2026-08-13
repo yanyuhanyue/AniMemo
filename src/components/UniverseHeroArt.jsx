@@ -1,9 +1,13 @@
 import { useEffect, useRef } from "react";
 import gsap from "gsap";
+import { DEFAULT_POSTER } from "../lib/demoMedia.js";
+import { selectDailyHeroPosters } from "../lib/heroArtSelector.js";
+import { animeRecords } from "../data/anime.js";
 
+const [dailyPoster] = selectDailyHeroPosters(animeRecords, { domain: "universe" });
 const HERO_ART = [
   { className: "one", src: "/assets/avatar.png", drift: 10, duration: 2.8 },
-  { className: "two", src: "/assets/posters/poster-11.webp", drift: -8, duration: 3.25 },
+  { className: "two", src: dailyPoster, drift: -8, duration: 3.25 },
 ];
 
 function UniverseHeroPiece({ item }) {
@@ -33,7 +37,7 @@ function UniverseHeroPiece({ item }) {
       <div className="universe-art-float-layer" ref={floatRef}>
         <div className="universe-art-hover-layer">
           <figure className="universe-art-image-layer">
-            <img src={item.src} alt="" />
+            <img src={item.src} alt="" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = DEFAULT_POSTER; }} />
           </figure>
         </div>
       </div>
@@ -41,7 +45,7 @@ function UniverseHeroPiece({ item }) {
   );
 }
 
-export function UniverseHeroArt({ socialHandle = "X: @ANIME_JOURNAL" }) {
+export function UniverseHeroArt({ socialHandle = "X: @ANIMEMO" }) {
   return (
     <div className="universe-hero__art" aria-hidden="true">
       <div className="universe-art-spark">✦</div>

@@ -1,8 +1,14 @@
-# AniMemo / My Anime Memory
+# AniMemo / My Anime Memory / 我的动漫记忆库
 
 这是一个独立实现的全栈番剧手账，产品定位为 AniMemo（我的动漫记忆库）。它提供高对比配色、重描边、错位阴影、列表/海报墙切换与响应式卡片等产品交互，并加入可独立部署的私人数据系统。
 
 > 发布前请确认品牌视觉、文案与图片素材均为自有、原创或已获得明确授权。第三方内容继续遵循其自身来源与使用条件。
+
+## 许可证与内容边界
+
+AniMemo 自有源代码采用 PolyForm Noncommercial License 1.0.0；这是一份 source-available、非商业源码许可证，不代表 AniMemo 是 OSI Open Source 项目。请先阅读 [PolyForm Noncommercial License 1.0.0](LICENSE) 与字节一致的 [PolyForm-Noncommercial-1.0.0.md](PolyForm-Noncommercial-1.0.0.md)。
+
+品牌名称、品牌视觉和 AniMemo 原创默认资产受 [TRADEMARKS](TRADEMARKS) 及相关品牌条款单独约束。仓库中的 `public/assets/avatar.png` 与 `public/assets/posters/poster-01.webp` 是 AniMemo 创建并控制的品牌头像与缺失封面 fallback；Bangumi/provider 返回的番剧封面、条目元数据及其他第三方内容不属于 AniMemo 自有资产，也不会因 PolyForm 被重新许可。详细边界见 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) 和 [许可证来源审计](docs/license-provenance-audit-20260813.md)。
 
 ## 已实现
 

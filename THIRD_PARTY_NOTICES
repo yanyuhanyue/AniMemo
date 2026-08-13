@@ -1,0 +1,184 @@
+# AniMemo Third-Party Notices
+
+Inventory snapshot: 2026-08-13 (Asia/Shanghai).
+
+This file is a reproducible attribution and license-metadata index for dependencies declared or locked in this repository. It does not replace upstream license texts, alter third-party terms, or provide a legal guarantee. Upstream terms apply only to their respective components. No AniMemo legal rights-holder name is inferred here.
+
+Run `python scripts/check_license_docs.py` to verify this snapshot without changing files or using the network.
+
+## Evidence inputs
+
+| Repository input | SHA-256 | Coverage |
+|---|---|---|
+| `package-lock.json` | `f33b80a8349f8c53ec4a0b4fc9885080d0a445bb304c6b17c648c4f2fe2c1b36` | Exact Node dependency graph, versions, package license metadata, and registry tarballs |
+| `backend/requirements.txt` | `a42438c0595bcc1e8b4a021a6860ca68d756b14f39010535fa0f2e87a03d2d87` | 44 exact Python production pins |
+| `release/requirements.txt` | `4fc3e8457917e5a8cbe5d2be87000a542d59397bf729151b1b1c7b03bc3db546` | Release updater Python pins |
+| `bridges/astrbot_plugin_animemo_bridge/requirements.txt` | `7429a163e432935a194adf11a9109ac6c478dcd08a0ab2486ed2106d29dc5f4f` | AstrBot bridge constraint |
+| `scripts/requirements-tools.txt` | `66cd85fc5569f837ae17e44e028515625f1e7f2dd1384c34bd0f3beb361bb4f4` | Dependency-maintenance tooling |
+
+License identifiers below come from the exact npm/PyPI package metadata or the license files shipped in the corresponding source distribution. Repository paths and exact versions are the primary reproducibility evidence.
+
+## Required license boundaries and notable packages
+
+### Noto Sans SC
+
+- Package: `@fontsource/noto-sans-sc` `5.3.0`.
+- Boundary: the distributed Noto Sans SC font files are under `OFL-1.1`.
+- Evidence: `package-lock.json` entry `node_modules/@fontsource/noto-sans-sc`; [Fontsource package record](https://www.npmjs.com/package/@fontsource/noto-sans-sc/v/5.3.0); [Fontsource font-files repository](https://github.com/fontsource/font-files/tree/main/fonts/google/noto-sans-sc).
+
+### Font Awesome Free
+
+- `@fortawesome/fontawesome-svg-core` `6.7.2`: code under `MIT`.
+- `@fortawesome/react-fontawesome` `3.5.0`: React wrapper code under `MIT`.
+- `@fortawesome/free-solid-svg-icons` `6.7.2`: package metadata is `(CC-BY-4.0 AND MIT)`; Font Awesome Free identifies icon content under `CC-BY-4.0` and code under `MIT`.
+- This repository directly imports SVG icon definitions; it does not declare the Font Awesome webfont package as a direct dependency.
+- Evidence: the three exact `package-lock.json` entries; [Font Awesome Free license](https://fontawesome.com/license/free); [Font Awesome repository](https://github.com/FortAwesome/Font-Awesome).
+
+### caniuse-lite
+
+- Package: transitive `caniuse-lite` `1.0.30001806`.
+- Boundary: browser-support data under `CC-BY-4.0`.
+- Evidence: `package-lock.json` entry `node_modules/caniuse-lite`; [caniuse-lite repository](https://github.com/browserslist/caniuse-lite).
+
+### GSAP
+
+- Package: `gsap` `3.15.0`.
+- Boundary: npm metadata states `Standard 'no charge' license: https://gsap.com/standard-license.` This package is not recorded as MIT.
+- Evidence: `package-lock.json` entry `node_modules/gsap`; [GSAP Standard License](https://gsap.com/standard-license/); [GSAP repository](https://github.com/greensock/GSAP).
+
+### Psycopg
+
+- Packages: `psycopg` `3.3.4` and `psycopg-binary` `3.3.4`.
+- Boundary: exact PyPI metadata identifies both packages as `LGPL-3.0-only`.
+- Evidence: `backend/requirements.txt`; [psycopg 3.3.4](https://pypi.org/project/psycopg/3.3.4/); [psycopg-binary 3.3.4](https://pypi.org/project/psycopg-binary/3.3.4/); [Psycopg repository](https://github.com/psycopg/psycopg).
+
+### Other notable bundled or non-permissive metadata
+
+- `certifi` `2026.7.22` records `MPL-2.0`.
+- `drf-spectacular-sidecar` `2026.8.1` is `BSD-3-Clause` and its source distribution also carries bundled Redoc (`MIT`) and Swagger UI (`Apache-2.0`) license files for the static assets it redistributes.
+- `typing-extensions` `4.16.0` records `PSF-2.0`.
+- `cffi` `2.1.1` records `MIT-0`.
+
+## Node direct dependencies
+
+The declared range comes from `package.json`; the locked version and license metadata come from `package-lock.json` lockfile version 3.
+
+<!-- BEGIN GENERATED: NODE DIRECT DEPENDENCIES -->
+| Scope | Package | Declared | Locked | License metadata |
+|---|---|---:|---:|---|
+| dependencies | `@fontsource/noto-sans-sc` | `^5.2.8` | `5.3.0` | `OFL-1.1` |
+| dependencies | `@fortawesome/fontawesome-svg-core` | `^6.7.2` | `6.7.2` | `MIT` |
+| dependencies | `@fortawesome/free-solid-svg-icons` | `^6.7.2` | `6.7.2` | `(CC-BY-4.0 AND MIT)` |
+| dependencies | `@fortawesome/react-fontawesome` | `^3.1.1` | `3.5.0` | `MIT` |
+| dependencies | `@vitejs/plugin-react` | `5.0.4` | `5.0.4` | `MIT` |
+| dependencies | `autoprefixer` | `^10.4.21` | `10.5.4` | `MIT` |
+| dependencies | `axios` | `^1.11.0` | `1.19.0` | `MIT` |
+| dependencies | `gsap` | `^3.13.0` | `3.15.0` | `Standard 'no charge' license: https://gsap.com/standard-license.` |
+| dependencies | `postcss` | `8.5.26` | `8.5.26` | `MIT` |
+| dependencies | `qrcode.react` | `^4.2.0` | `4.2.0` | `ISC` |
+| dependencies | `react` | `19.2.0` | `19.2.0` | `MIT` |
+| dependencies | `react-dom` | `19.2.0` | `19.2.0` | `MIT` |
+| dependencies | `react-router-dom` | `7.18.2` | `7.18.2` | `MIT` |
+| dependencies | `tailwindcss` | `^3.4.17` | `3.4.19` | `MIT` |
+| dependencies | `vite` | `6.4.3` | `6.4.3` | `MIT` |
+| devDependencies | `@eslint/js` | `^10.0.1` | `10.0.1` | `MIT` |
+| devDependencies | `@playwright/test` | `^1.62.1` | `1.62.1` | `Apache-2.0` |
+| devDependencies | `eslint` | `^10.8.1` | `10.8.1` | `MIT` |
+| devDependencies | `eslint-plugin-react-hooks` | `^7.1.1` | `7.1.1` | `MIT` |
+| devDependencies | `globals` | `^17.9.0` | `17.9.0` | `MIT` |
+<!-- END GENERATED: NODE DIRECT DEPENDENCIES -->
+
+The complete lock contains 287 versioned package entries. Every entry has license metadata. The summary below covers all direct and transitive entries; `Non-dev` means the lock entry is not marked `dev`.
+
+<!-- BEGIN GENERATED: NODE LICENSE SUMMARY -->
+| License metadata | Total | Non-dev | Dev |
+|---|---:|---:|---:|
+| `(CC-BY-4.0 AND MIT)` | 1 | 1 | 0 |
+| `Apache-2.0` | 18 | 3 | 15 |
+| `BlueOak-1.0.0` | 1 | 0 | 1 |
+| `BSD-2-Clause` | 6 | 0 | 6 |
+| `BSD-3-Clause` | 2 | 1 | 1 |
+| `CC-BY-4.0` | 1 | 1 | 0 |
+| `ISC` | 14 | 11 | 3 |
+| `MIT` | 242 | 194 | 48 |
+| `OFL-1.1` | 1 | 1 | 0 |
+| `Standard 'no charge' license: https://gsap.com/standard-license.` | 1 | 1 | 0 |
+<!-- END GENERATED: NODE LICENSE SUMMARY -->
+
+## Python production lock
+
+All 44 entries below are exact pins from `backend/requirements.txt`. License metadata is tied to the exact package version through the linked PyPI record or the license files in that version's source distribution.
+
+<!-- BEGIN GENERATED: PYTHON PRODUCTION DEPENDENCIES -->
+| Package | Locked | License metadata | Evidence |
+|---|---:|---|---|
+| `asgiref` | `3.12.1` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/asgiref/3.12.1/) |
+| `attrs` | `26.1.0` | `MIT` | [PyPI](https://pypi.org/project/attrs/26.1.0/) |
+| `boto3` | `1.43.67` | `Apache-2.0` | [PyPI](https://pypi.org/project/boto3/1.43.67/) |
+| `botocore` | `1.43.67` | `Apache-2.0` | [PyPI](https://pypi.org/project/botocore/1.43.67/) |
+| `certifi` | `2026.7.22` | `MPL-2.0` | [PyPI](https://pypi.org/project/certifi/2026.7.22/) |
+| `cffi` | `2.1.1` | `MIT-0` | [PyPI](https://pypi.org/project/cffi/2.1.1/) |
+| `charset-normalizer` | `3.4.9` | `MIT` | [PyPI](https://pypi.org/project/charset-normalizer/3.4.9/) |
+| `cryptography` | `50.0.0` | `Apache-2.0 OR BSD-3-Clause` | [PyPI](https://pypi.org/project/cryptography/50.0.0/) |
+| `dj-database-url` | `2.3.0` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/dj-database-url/2.3.0/) |
+| `django` | `5.2.17` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/django/5.2.17/) |
+| `django-cors-headers` | `4.9.0` | `MIT` | [PyPI](https://pypi.org/project/django-cors-headers/4.9.0/) |
+| `django-redis` | `5.4.0` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/django-redis/5.4.0/) |
+| `django-storages` | `1.14.6` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/django-storages/1.14.6/) |
+| `djangorestframework` | `3.16.1` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/djangorestframework/3.16.1/) |
+| `djangorestframework-simplejwt` | `5.5.1` | `MIT` | [PyPI](https://pypi.org/project/djangorestframework-simplejwt/5.5.1/) |
+| `drf-spectacular` | `0.30.0` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/drf-spectacular/0.30.0/) |
+| `drf-spectacular-sidecar` | `2026.8.1` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/drf-spectacular-sidecar/2026.8.1/) |
+| `gunicorn` | `23.0.0` | `MIT` | [PyPI](https://pypi.org/project/gunicorn/23.0.0/) |
+| `idna` | `3.18` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/idna/3.18/) |
+| `inflection` | `0.5.1` | `MIT` | [PyPI](https://pypi.org/project/inflection/0.5.1/) |
+| `jmespath` | `1.1.0` | `MIT` | [PyPI](https://pypi.org/project/jmespath/1.1.0/) |
+| `jsonschema` | `4.26.0` | `MIT` | [PyPI](https://pypi.org/project/jsonschema/4.26.0/) |
+| `jsonschema-specifications` | `2025.9.1` | `MIT` | [PyPI](https://pypi.org/project/jsonschema-specifications/2025.9.1/) |
+| `packaging` | `25.0` | `Apache-2.0 OR BSD-2-Clause` | [PyPI](https://pypi.org/project/packaging/25.0/) |
+| `pillow` | `12.3.0` | `MIT-CMU` | [PyPI](https://pypi.org/project/pillow/12.3.0/) |
+| `psycopg` | `3.3.4` | `LGPL-3.0-only` | [PyPI](https://pypi.org/project/psycopg/3.3.4/) |
+| `psycopg-binary` | `3.3.4` | `LGPL-3.0-only` | [PyPI](https://pypi.org/project/psycopg-binary/3.3.4/) |
+| `pycparser` | `3.0` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/pycparser/3.0/) |
+| `pyjwt` | `2.13.0` | `MIT` | [PyPI](https://pypi.org/project/pyjwt/2.13.0/) |
+| `python-dateutil` | `2.9.0.post0` | `BSD-3-Clause; portions also Apache-2.0` | [PyPI](https://pypi.org/project/python-dateutil/2.9.0.post0/) |
+| `python-dotenv` | `1.2.2` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/python-dotenv/1.2.2/) |
+| `pyyaml` | `6.0.3` | `MIT` | [PyPI](https://pypi.org/project/pyyaml/6.0.3/) |
+| `redis` | `8.1.0` | `MIT` | [PyPI](https://pypi.org/project/redis/8.1.0/) |
+| `referencing` | `0.37.0` | `MIT` | [PyPI](https://pypi.org/project/referencing/0.37.0/) |
+| `requests` | `2.34.2` | `Apache-2.0` | [PyPI](https://pypi.org/project/requests/2.34.2/) |
+| `rpds-py` | `2026.6.3` | `MIT` | [PyPI](https://pypi.org/project/rpds-py/2026.6.3/) |
+| `s3transfer` | `0.19.2` | `Apache-2.0` | [PyPI](https://pypi.org/project/s3transfer/0.19.2/) |
+| `six` | `1.17.0` | `MIT` | [PyPI](https://pypi.org/project/six/1.17.0/) |
+| `sqlparse` | `0.5.5` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/sqlparse/0.5.5/) |
+| `typing-extensions` | `4.16.0` | `PSF-2.0` | [PyPI](https://pypi.org/project/typing-extensions/4.16.0/) |
+| `tzdata` | `2026.3` | `Apache-2.0` | [PyPI](https://pypi.org/project/tzdata/2026.3/) |
+| `uritemplate` | `4.2.0` | `Apache-2.0 OR BSD-3-Clause` | [PyPI](https://pypi.org/project/uritemplate/4.2.0/) |
+| `urllib3` | `2.7.0` | `MIT` | [PyPI](https://pypi.org/project/urllib3/2.7.0/) |
+| `whitenoise` | `6.12.0` | `MIT` | [PyPI](https://pypi.org/project/whitenoise/6.12.0/) |
+<!-- END GENERATED: PYTHON PRODUCTION DEPENDENCIES -->
+
+## Release, bridge, and dependency-maintenance inputs
+
+| Scope | Declaration | License metadata | Reproducibility note |
+|---|---|---|---|
+| Release updater | `jsonschema==4.26.0` | `MIT` | Exact pin; also present in the backend lock |
+| Release updater | `packaging==25.0` | `Apache-2.0 OR BSD-2-Clause` | Exact pin; also present in the backend lock |
+| Release updater | `pyyaml==6.0.3` | `MIT` | Exact pin; also present in the backend lock |
+| AstrBot bridge | `httpx>=0.27,<1` | `BSD-3-Clause` | Range only; the exact installed version and transitives are environment-dependent because this file is not locked |
+| Dependency tooling | `pip<26` | `MIT` | Range only |
+| Dependency tooling | `pip-tools==7.6.0` | `BSD-3-Clause` | Exact pin |
+| Dependency tooling | `ruff==0.16.2` | `MIT` | Exact pin |
+
+## AniMemo source and external-material boundaries
+
+The repository-level PolyForm declaration applies only to source code that the licensor is authorized to license. It does not replace or supersede any dependency, service, data, font, icon, media, or documentation license recorded above.
+
+The following repository components are AniMemo source scopes rather than third-party inventory entries. Their current metadata declares `PolyForm-Noncommercial-1.0.0`:
+
+- AniMemo Core under the root `LICENSE` and `NOTICE` boundaries.
+- `plugins/_template/manifest.json` for the blank Plugin SDK template.
+- `plugins/watch-history-importer/manifest.json` beginning with version `0.4.3`; historical version `0.4.2` remains an immutable package identity.
+- `bridges/astrbot_plugin_animemo_bridge/metadata.yaml` for the unpublished AniMemo Bridge source in this repository.
+
+Those components still cross third-party boundaries. The template imports React; the importer uses React, Django, Django REST Framework, requests, and Bangumi interfaces/data; the Bridge runs on AstrBot and uses httpx. Those projects, services, responses, and dependencies retain their own terms. Bangumi metadata and images, other external media, and concrete demo content are not relicensed by PolyForm. The repository's two controlled local visual assets—`public/assets/avatar.png` and the generic `public/assets/posters/poster-01.webp` fallback—are AniMemo-created assets and are separately documented in `NOTICE`; the removed `poster-02.webp` through `poster-16.webp` files are not part of the bundled asset set. See `NOTICE` and `docs/license-provenance-audit-20260813.md` for exact scope evidence and unresolved provenance limits.
