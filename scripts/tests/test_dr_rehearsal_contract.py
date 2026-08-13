@@ -134,7 +134,13 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
         self.assertIn("scripts.tests.test_dr_recovery_paths", self.workflow)
         self.assertIn("scripts.tests.test_dr_recovery_paths", self.release_gate)
         self.assertIn("bash scripts/dr-rehearsal.sh --candidate-sha", self.workflow)
-        self.assertIn("runner.temp", self.workflow)
+        for workflow in (self.workflow, self.release_gate):
+            self.assertIn(
+                "DR_REHEARSAL_TEMP_ROOT: ${{ runner.temp }}/animemo-dr-",
+                workflow,
+            )
+            job_env_prefix = workflow.split("steps:", 1)[0]
+            self.assertNotIn("runner.temp", job_env_prefix)
         self.assertNotIn("animemo.cc", self.workflow)
         self.assertNotIn("re-anime.cc", self.workflow)
         self.assertNotIn("BANGUMI_OAUTH_CLIENT_SECRET", self.workflow)

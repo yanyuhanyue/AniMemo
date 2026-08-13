@@ -321,7 +321,6 @@ jobs:
       CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
       COMPOSE_HTTP_TIMEOUT: "120"
       COMPOSE_PROJECT_NAME: animemo-dr-${{ github.run_id }}-${{ github.run_attempt }}
-      DR_REHEARSAL_TEMP_ROOT: ${{ runner.temp }}/animemo-dr-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -336,6 +335,8 @@ jobs:
       - name: Validate portable DR backup contract
         run: python -m unittest scripts.tests.test_dr_backup scripts.tests.test_dr_recovery_paths scripts.tests.test_dr_rehearsal_contract -v
       - name: Run isolated A-to-B DR rehearsal
+        env:
+          DR_REHEARSAL_TEMP_ROOT: ${{ runner.temp }}/animemo-dr-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
         run: bash scripts/dr-rehearsal.sh --candidate-sha "$CANDIDATE_SHA" --current-root "$GITHUB_WORKSPACE"
 
