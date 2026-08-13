@@ -1,3 +1,5 @@
+import hmac
+import re
 from datetime import datetime, timezone as dt_timezone
 
 from django.conf import settings
@@ -11,7 +13,12 @@ from rest_framework_simplejwt.tokens import AccessToken, RefreshToken, UntypedTo
 from rest_framework_simplejwt.exceptions import TokenError
 
 from accounts.models import RevokedAccessToken
+from site_config.models import InstallationState
 from .staff_services import get_security_profile
+
+
+INSTALLATION_INSTANCE_CLAIM = "ii"
+INSTALLATION_BINDING_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class RefreshReplayError(TokenError):
@@ -21,9 +28,54 @@ class RefreshReplayError(TokenError):
         self.jti = str(jti)
 
 
+def current_installation_binding():
+    try:
+        installation = InstallationState.objects.only(
+            "status",
+            "authentication_epoch",
+        ).get(pk=1)
+    except InstallationState.DoesNotExist as error:
+        raise AuthenticationFailed(
+            "登录会话已失效，请重新登录。",
+            code="session_revoked",
+        ) from error
+
+    binding = installation.authentication_epoch
+    if (
+        installation.status != InstallationState.Status.INITIALIZED
+        or not isinstance(binding, str)
+        or not INSTALLATION_BINDING_PATTERN.fullmatch(binding)
+    ):
+        raise AuthenticationFailed(
+            "登录会话已失效，请重新登录。",
+            code="session_revoked",
+        )
+    return binding
+
+
+def bind_token_to_current_installation(token):
+    token[INSTALLATION_INSTANCE_CLAIM] = current_installation_binding()
+    return token
+
+
+def validate_token_installation(token):
+    token_binding = token.get(INSTALLATION_INSTANCE_CLAIM)
+    current_binding = current_installation_binding()
+    if not isinstance(token_binding, str) or not hmac.compare_digest(
+        token_binding,
+        current_binding,
+    ):
+        raise AuthenticationFailed(
+            "登录会话已失效，请重新登录。",
+            code="session_revoked",
+        )
+
+
 def create_refresh_token(user):
+    installation_binding = current_installation_binding()
     refresh = RefreshToken.for_user(user)
     refresh["sv"] = get_security_profile(user).session_version
+    refresh[INSTALLATION_INSTANCE_CLAIM] = installation_binding
     return refresh
 
 
@@ -40,6 +92,7 @@ def revoke_access_token(raw_token):
         return False
     try:
         token = AccessToken(raw_token)
+        validate_token_installation(token)
         jti = token.get("jti")
         user_id = token.get(api_settings.USER_ID_CLAIM)
         exp = token.get("exp")
@@ -54,11 +107,19 @@ def revoke_access_token(raw_token):
             defaults={"user": user, "expires_at": expires_at},
         )
         return True
-    except (TokenError, ValueError, TypeError, OverflowError, get_user_model().DoesNotExist):
+    except (
+        AuthenticationFailed,
+        TokenError,
+        ValueError,
+        TypeError,
+        OverflowError,
+        get_user_model().DoesNotExist,
+    ):
         return False
 
 
 def user_from_refresh(refresh):
+    validate_token_installation(refresh)
     user_id = refresh.get(api_settings.USER_ID_CLAIM)
     if user_id is None:
         raise InvalidToken("刷新凭据无效。")

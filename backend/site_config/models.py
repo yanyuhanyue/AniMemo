@@ -1,4 +1,5 @@
 import uuid
+import secrets
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -27,6 +28,12 @@ class InstallationState(models.Model):
     setup_code_issued_at = models.DateTimeField(blank=True, null=True, editable=False)
     setup_code_expires_at = models.DateTimeField(blank=True, null=True, editable=False)
     failed_attempts = models.PositiveSmallIntegerField(default=0, editable=False)
+    authentication_epoch = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        editable=False,
+    )
     initialized_at = models.DateTimeField(blank=True, null=True, editable=False)
     initialized_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -63,6 +70,14 @@ class InstallationState(models.Model):
 
     def save(self, *args, **kwargs):
         self.pk = 1
+        if self.status == self.Status.INITIALIZED and not self.authentication_epoch:
+            self.authentication_epoch = secrets.token_hex(32)
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None:
+                kwargs["update_fields"] = {
+                    *update_fields,
+                    "authentication_epoch",
+                }
         super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):

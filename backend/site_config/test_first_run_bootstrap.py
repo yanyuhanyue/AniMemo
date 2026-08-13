@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from django.conf import settings
 from django.contrib.auth.hashers import check_password
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -218,7 +219,7 @@ class FirstRunSetupApiTests(APITestCase):
         self.assertFalse(code_path.exists())
         self.assertFalse(User.objects.filter(username="first-admin").exists())
 
-    def test_attempt_limit_invalidates_code_and_requires_reprovisioning(self):
+    def test_remote_wrong_attempts_cannot_invalidate_valid_setup_code(self):
         with TemporaryDirectory() as directory:
             private_root = Path(directory) / "private"
             private_root.mkdir(mode=0o700)
@@ -228,30 +229,102 @@ class FirstRunSetupApiTests(APITestCase):
                 FIRST_RUN_SETUP_MAX_ATTEMPTS=3,
             ):
                 call_command("provision_first_run_setup", verbosity=0)
+                valid_code = code_path.read_text(encoding="utf-8").strip()
+                self.installation.refresh_from_db()
+                original_hash = self.installation.setup_code_hash
+                original_expiry = self.installation.setup_code_expires_at
                 csrf = self.client.get(reverse("csrf-token")).data["csrf_token"]
-                payload = {
-                    "code": "wrong-code",
-                    "username": "first-admin",
-                    "email": "first-admin@example.com",
-                    "password": "StrongPass123!RC",
-                    "password_confirm": "StrongPass123!RC",
-                }
                 responses = [
                     self.client.post(
                         reverse("setup-complete"),
-                        payload,
+                        {
+                            "code": f"wrong-code-{index}",
+                            "username": f"remote-attacker-{index}",
+                            "email": f"remote-attacker-{index}@example.com",
+                            "password": "StrongPass123!RC",
+                            "password_confirm": "StrongPass123!RC",
+                        },
                         format="json",
                         HTTP_X_CSRFTOKEN=csrf,
+                        REMOTE_ADDR="198.51.100.23",
                     )
-                    for _ in range(3)
+                    for index in range(3)
                 ]
 
-        self.assertEqual([item.status_code for item in responses], [400, 400, 429])
-        self.assertEqual(responses[-1].data["code"], "setup_code_locked")
+                self.installation.refresh_from_db()
+                self.assertEqual([item.status_code for item in responses], [400, 400, 400])
+                self.assertTrue(all(item.data["code"] == "invalid_setup_code" for item in responses))
+                self.assertEqual(code_path.read_text(encoding="utf-8").strip(), valid_code)
+                self.assertEqual(self.installation.setup_code_hash, original_hash)
+                self.assertEqual(self.installation.setup_code_expires_at, original_expiry)
+                self.assertEqual(self.installation.failed_attempts, 3)
+                self.assertTrue(self.installation.accepting_setup)
+
+                with self.captureOnCommitCallbacks(execute=True):
+                    completed = self.client.post(
+                        reverse("setup-complete"),
+                        {
+                            "code": valid_code,
+                            "username": "first-admin",
+                            "email": "first-admin@example.com",
+                            "password": "StrongPass123!RC",
+                            "password_confirm": "StrongPass123!RC",
+                        },
+                        format="json",
+                        HTTP_X_CSRFTOKEN=csrf,
+                        REMOTE_ADDR="203.0.113.44",
+                    )
+
+        self.assertEqual(completed.status_code, status.HTTP_201_CREATED)
         self.installation.refresh_from_db()
-        self.assertEqual(self.installation.failed_attempts, 3)
+        self.assertEqual(self.installation.status, InstallationState.Status.INITIALIZED)
         self.assertEqual(self.installation.setup_code_hash, "")
         self.assertFalse(code_path.exists())
+
+    def test_wrong_setup_codes_are_bounded_by_ip_throttle_without_consuming_code(self):
+        with TemporaryDirectory() as directory:
+            private_root = Path(directory) / "private"
+            private_root.mkdir(mode=0o700)
+            code_path = private_root / "setup-code"
+            with override_settings(FIRST_RUN_SETUP_CODE_PATH=code_path):
+                call_command("provision_first_run_setup", verbosity=0)
+                valid_code = code_path.read_text(encoding="utf-8").strip()
+                self.installation.refresh_from_db()
+                original_hash = self.installation.setup_code_hash
+                csrf = self.client.get(reverse("csrf-token")).data["csrf_token"]
+
+                responses = [
+                    self.client.post(
+                        reverse("setup-complete"),
+                        {
+                            "code": f"wrong-code-{index}",
+                            "username": f"rotating-identity-{index}",
+                            "email": f"rotating-identity-{index}@example.com",
+                            "password": "StrongPass123!RC",
+                            "password_confirm": "StrongPass123!RC",
+                        },
+                        format="json",
+                        HTTP_X_CSRFTOKEN=csrf,
+                        REMOTE_ADDR="198.51.100.77",
+                    )
+                    for index in range(11)
+                ]
+
+                self.assertEqual([item.status_code for item in responses[:10]], [400] * 10)
+                self.assertTrue(
+                    all(item.data["code"] == "invalid_setup_code" for item in responses[:10])
+                )
+                self.assertEqual(responses[10].status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+                self.assertEqual(responses[10].data["code"], "rate_limited")
+                self.assertIn("Retry-After", responses[10])
+                self.installation.refresh_from_db()
+                self.assertEqual(self.installation.setup_code_hash, original_hash)
+                self.assertEqual(
+                    self.installation.failed_attempts,
+                    settings.FIRST_RUN_SETUP_MAX_ATTEMPTS,
+                )
+                self.assertEqual(code_path.read_text(encoding="utf-8").strip(), valid_code)
+                self.assertTrue(self.installation.accepting_setup)
 
     def test_repeated_provisioning_reuses_the_active_code_without_rotation(self):
         with TemporaryDirectory() as directory:
@@ -558,7 +631,7 @@ class FirstRunSetupApiTests(APITestCase):
 
 class InstallationStateMigrationTests(TransactionTestCase):
     migrate_from = [("site", "0002_media_write_reservation")]
-    migrate_to = [("site", "0003_installation_state")]
+    migrate_to = [("site", "0004_installation_authentication_epoch")]
 
     def setUp(self):
         super().setUp()
@@ -577,6 +650,7 @@ class InstallationStateMigrationTests(TransactionTestCase):
 
         self.assertEqual(installation.status, "initialized")
         self.assertIsNotNone(installation.initialized_at)
+        self.assertRegex(installation.authentication_epoch, r"^[0-9a-f]{64}$")
         self.assertEqual(installation.setup_code_hash, "")
         response = self.client.get(reverse("setup-status"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -586,7 +660,7 @@ class InstallationStateMigrationTests(TransactionTestCase):
 
 class InstallationStateFreshMigrationTests(TransactionTestCase):
     migrate_from = [("site", "0002_media_write_reservation")]
-    migrate_to = [("site", "0003_installation_state")]
+    migrate_to = [("site", "0004_installation_authentication_epoch")]
 
     def setUp(self):
         super().setUp()
@@ -603,6 +677,7 @@ class InstallationStateFreshMigrationTests(TransactionTestCase):
         self.assertEqual(installation.status, "uninitialized")
         self.assertIsNone(installation.initialized_at)
         self.assertIsNone(installation.initialized_by_id)
+        self.assertEqual(installation.authentication_epoch, "")
         self.assertEqual(installation.setup_code_hash, "")
 
 

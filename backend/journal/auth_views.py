@@ -23,7 +23,13 @@ from rest_framework_simplejwt.exceptions import TokenError
 
 from .emails import EmailDeliveryError, send_transactional_email
 from .account_security import AccountDeletionError, delete_current_account
-from .auth_tokens import RefreshReplayError, issue_token_pair, revoke_access_token, rotate_refresh
+from .auth_tokens import (
+    RefreshReplayError,
+    create_refresh_token,
+    issue_token_pair,
+    revoke_access_token,
+    rotate_refresh,
+)
 from .auth_service import authenticate_with_second_factor
 from .admin_security_middleware import clear_staff_second_factor, mark_staff_second_factor_verified
 from accounts.models import LoginEvent
@@ -71,9 +77,7 @@ class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     @classmethod
     def get_token(cls, user):
-        token = super().get_token(user)
-        token["sv"] = get_security_profile(user).session_version
-        return token
+        return create_refresh_token(user)
 
     def validate(self, attrs):
         otp = attrs.pop("otp", "")
@@ -159,6 +163,7 @@ class StaffLoginView(APIView):
             detail.setdefault("code", "two_factor_required" if needs_second_factor else "invalid_credentials")
             return Response(detail, status=status.HTTP_428_PRECONDITION_REQUIRED if needs_second_factor else status.HTTP_401_UNAUTHORIZED)
 
+        refresh, access = issue_token_pair(result.user)
         session_login(request, result.user)
         security_profile = get_security_profile(result.user)
         admin_access = bool(result.second_factor_verified and security_profile.two_factor_enabled)
@@ -166,7 +171,6 @@ class StaffLoginView(APIView):
             mark_staff_second_factor_verified(request, result.user, security_profile)
         else:
             clear_staff_second_factor(request)
-        refresh, access = issue_token_pair(result.user)
         record_login_event(request, event_type=LoginEvent.EventType.LOGIN, success=True, user=result.user, account=account)
         requested_admin_path = str(request.data.get("next", "")).strip()
         if not requested_admin_path.startswith("/admin/") and requested_admin_path != "/admin":

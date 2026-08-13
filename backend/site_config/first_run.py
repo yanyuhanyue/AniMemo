@@ -8,9 +8,12 @@ from pathlib import Path
 
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
+from django.contrib.sessions.models import Session
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import ExpressionWrapper, F, PositiveSmallIntegerField, Q
 from django.utils import timezone
+
+from accounts.models import UserSecurityProfile
 
 from .models import InstallationState
 
@@ -39,6 +42,35 @@ class ProvisionedSetupCode:
     path: Path
     reused: bool
     expires_at: object
+
+
+def new_authentication_epoch():
+    return secrets.token_hex(32)
+
+
+def rotate_authentication_epoch():
+    with transaction.atomic():
+        installation = InstallationState.objects.select_for_update().get(pk=1)
+        installation.authentication_epoch = new_authentication_epoch()
+        installation.save(update_fields=["authentication_epoch", "updated_at"])
+        UserSecurityProfile.objects.update(session_version=F("session_version") + 1)
+        Session.objects.all().delete()
+        return installation.authentication_epoch
+
+
+def _record_failed_setup_attempt(snapshot):
+    InstallationState.objects.filter(
+        pk=1,
+        status=InstallationState.Status.UNINITIALIZED,
+        setup_code_hash=snapshot.setup_code_hash,
+        setup_code_expires_at=snapshot.setup_code_expires_at,
+        failed_attempts__lt=settings.FIRST_RUN_SETUP_MAX_ATTEMPTS,
+    ).update(
+        failed_attempts=ExpressionWrapper(
+            F("failed_attempts") + 1,
+            output_field=PositiveSmallIntegerField(),
+        )
+    )
 
 
 def _is_reparse_point(metadata):
@@ -144,6 +176,11 @@ def provision_first_run_setup():
     with transaction.atomic():
         installation = InstallationState.objects.select_for_update().get(pk=1)
         if installation.status == InstallationState.Status.INITIALIZED:
+            if not installation.authentication_epoch:
+                installation.authentication_epoch = new_authentication_epoch()
+                installation.save(
+                    update_fields=["authentication_epoch", "updated_at"]
+                )
             delete_private_setup_code(code_path)
             return None
         if installation.status == InstallationState.Status.INITIALIZING:
@@ -178,6 +215,40 @@ def complete_first_run_setup(*, code, username, email, password, request):
     from journal.network import client_ip
 
     User = get_user_model()
+    snapshot = InstallationState.objects.only(
+        "status",
+        "setup_code_hash",
+        "setup_code_expires_at",
+    ).get(pk=1)
+    now = timezone.now()
+    if snapshot.status == InstallationState.Status.INITIALIZED:
+        raise SetupCompletionError("installation_initialized", "安装已经完成。", 404)
+    if snapshot.status == InstallationState.Status.INITIALIZING:
+        raise SetupCompletionError(
+            "installation_initializing",
+            "安装初始化正在进行。",
+            409,
+        )
+    if not snapshot.setup_code_hash or not snapshot.setup_code_expires_at:
+        raise SetupCompletionError(
+            "setup_code_unavailable",
+            "初始化码不可用，请在服务器上重新生成。",
+            409,
+        )
+
+    # The password hash check is intentionally outside the singleton row lock.
+    # Public wrong-code attempts therefore cannot serialize an expensive PBKDF2
+    # queue ahead of the legitimate initializer. The locked phase below binds
+    # success to this exact hash/expiry snapshot before creating any user.
+    code_matches = (
+        snapshot.setup_code_expires_at > now
+        and check_password(code, snapshot.setup_code_hash)
+    )
+
+    if not code_matches and snapshot.setup_code_expires_at > now:
+        _record_failed_setup_attempt(snapshot)
+        raise SetupCompletionError("invalid_setup_code", "初始化码无效。", 400)
+
     rejection = None
     created_user = None
     with transaction.atomic():
@@ -189,6 +260,15 @@ def complete_first_run_setup(*, code, username, email, password, request):
             rejection = SetupCompletionError("installation_initializing", "安装初始化正在进行。", 409)
         elif not installation.setup_code_hash or not installation.setup_code_expires_at:
             rejection = SetupCompletionError("setup_code_unavailable", "初始化码不可用，请在服务器上重新生成。", 409)
+        elif (
+            installation.setup_code_hash != snapshot.setup_code_hash
+            or installation.setup_code_expires_at != snapshot.setup_code_expires_at
+        ):
+            rejection = SetupCompletionError(
+                "setup_code_changed",
+                "初始化码已经变化，请读取服务器上的当前初始化码后重试。",
+                409,
+            )
         elif installation.setup_code_expires_at <= now:
             delete_private_setup_code(settings.FIRST_RUN_SETUP_CODE_PATH)
             installation.setup_code_hash = ""
@@ -201,23 +281,8 @@ def complete_first_run_setup(*, code, username, email, password, request):
                 "updated_at",
             ])
             rejection = SetupCompletionError("setup_code_expired", "初始化码已过期，请在服务器上重新生成。", 410)
-        elif not check_password(code, installation.setup_code_hash):
-            installation.failed_attempts += 1
-            if installation.failed_attempts >= settings.FIRST_RUN_SETUP_MAX_ATTEMPTS:
-                delete_private_setup_code(settings.FIRST_RUN_SETUP_CODE_PATH)
-                installation.setup_code_hash = ""
-                installation.setup_code_issued_at = None
-                installation.setup_code_expires_at = None
-                rejection = SetupCompletionError("setup_code_locked", "初始化码尝试次数已用尽，请在服务器上重新生成。", 429)
-            else:
-                rejection = SetupCompletionError("invalid_setup_code", "初始化码无效。", 400)
-            installation.save(update_fields=[
-                "setup_code_hash",
-                "setup_code_issued_at",
-                "setup_code_expires_at",
-                "failed_attempts",
-                "updated_at",
-            ])
+        elif not code_matches:
+            rejection = SetupCompletionError("invalid_setup_code", "初始化码无效。", 400)
         elif User.objects.filter(Q(username__iexact=username) | Q(email__iexact=email)).exists():
             rejection = SetupCompletionError(
                 "admin_identity_unavailable",
@@ -250,6 +315,7 @@ def complete_first_run_setup(*, code, username, email, password, request):
             installation.setup_code_issued_at = None
             installation.setup_code_expires_at = None
             installation.failed_attempts = 0
+            installation.authentication_epoch = new_authentication_epoch()
             installation.initialized_at = now
             installation.initialized_by = created_user
             installation.save(update_fields=[
@@ -258,6 +324,7 @@ def complete_first_run_setup(*, code, username, email, password, request):
                 "setup_code_issued_at",
                 "setup_code_expires_at",
                 "failed_attempts",
+                "authentication_epoch",
                 "initialized_at",
                 "initialized_by",
                 "updated_at",

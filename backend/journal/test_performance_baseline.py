@@ -19,6 +19,7 @@ from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken
 
 from journal.models import ExternalMediaIdentity, JournalEntry, WatchHistoryRecord
+from site_config.models import InstallationState
 
 
 class PerformanceMeasurementContractTests(TestCase):
@@ -86,6 +87,9 @@ class PerformanceMeasurementContractTests(TestCase):
 
     def test_load_identity_command_emits_unique_owned_tokens(self):
         output = io.StringIO()
+        installation = InstallationState.load()
+        installation.status = InstallationState.Status.INITIALIZED
+        installation.save(update_fields=["status", "updated_at"])
 
         call_command(
             "provision_performance_load_identities",

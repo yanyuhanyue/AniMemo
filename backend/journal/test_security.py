@@ -151,6 +151,9 @@ class AdminSecondFactorTests(APITestCase):
 
     def setUp(self):
         cache.clear()
+        installation = InstallationState.load()
+        installation.status = InstallationState.Status.INITIALIZED
+        installation.save(update_fields=["status", "updated_at"])
         self.admin = User.objects.create_superuser(
             username="admin-gateway",
             email="admin-gateway@example.com",
@@ -592,6 +595,9 @@ class CookieJwtSecurityTests(APITestCase):
 
     def setUp(self):
         cache.clear()
+        installation = InstallationState.load()
+        installation.status = InstallationState.Status.INITIALIZED
+        installation.save(update_fields=["status", "updated_at"])
         self.user = User.objects.create_user(
             username="secure-user",
             email="secure@example.com",
@@ -831,6 +837,9 @@ class TwoFactorSecurityTests(APITestCase):
 
     def setUp(self):
         cache.clear()
+        installation = InstallationState.load()
+        installation.status = InstallationState.Status.INITIALIZED
+        installation.save(update_fields=["status", "updated_at"])
         self.admin = User.objects.create_superuser(
             username="two-factor-admin",
             email="two.factor@example.com",
@@ -1454,6 +1463,9 @@ class UsernameUniquenessSecurityTests(APITestCase):
         self.assertIn("username", serializer.errors)
 
     def test_case_insensitive_login_still_resolves_the_canonical_username(self):
+        installation = InstallationState.load()
+        installation.status = InstallationState.Status.INITIALIZED
+        installation.save(update_fields=["status", "updated_at"])
         user = User.objects.create_user(username="DisplayCase", email="display@example.com", password=self.password)
         response = APIClient().post(reverse("token_obtain_pair"), {
             "username": "displaycase",

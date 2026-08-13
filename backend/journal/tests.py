@@ -555,6 +555,9 @@ class JournalApiTests(APITestCase):
 class StaffControlRoomTests(APITestCase):
     def setUp(self):
         cache.clear()
+        installation = InstallationState.load()
+        installation.status = InstallationState.Status.INITIALIZED
+        installation.save(update_fields=["status", "updated_at"])
         self.admin = User.objects.create_superuser(
             username="root-admin",
             email="root@example.com",
