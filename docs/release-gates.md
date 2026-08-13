@@ -44,13 +44,44 @@ risk classification.
 5. **RC:** the full RC Release Gate, build-once artifacts, and immutable
    promotion described by the release contract.
 
+## Risk classification and execution policy
+
+`scripts/ci_classify.py` emits the versioned `animemo.ci-risk/v1` document.
+The document keeps the inherent changed-file risk separate from execution
+policy: `risk.level` describes the change, while `execution.force_full`
+records an authoritative/manual request to run everything. Forcing a full run
+must not rewrite a LOW change into a CRITICAL change.
+
+| Risk | Typical change | PR Fast product gates | PR Fast Release Gate |
+| --- | --- | --- | --- |
+| LOW | Safe documentation or repository metadata | Documentation authority only | None |
+| STANDARD | Ordinary frontend, backend, plugin, or test change | Affected subsystems only | None |
+| HIGH | Database/auth/API/plugin/integration/media contracts, dependency inputs, sensitive release documentation, or broad automation | Complete product matrix | Fresh Docker plus stateful Base-to-Current upgrade |
+| CRITICAL | CI authority, release producer, Updater, deployment, recovery, or first-run security boundary | Complete product matrix | Updater failure/recovery tests, Fresh Docker, and stateful Base-to-Current upgrade |
+
+An explicit `force_full` execution (Pre-Merge, Release Producer, merge-group
+future support, or audited manual dispatch) selects the complete product and
+release matrices regardless of inherent risk. Empty change sets and unknown
+paths escalate fail-closed to CRITICAL. Changed-file discovery disables rename
+pairing and evaluates both delete/add paths, so a move out of a sensitive area
+cannot hide its original authority boundary.
+
+The classifier is only a selector. The independent `ci-selection-authority`
+and `release-gate-authority` jobs parse its complete schema and the actual
+`needs` results. Every selected job must be `success`, every unselected job
+must be `skipped`, and event-specific lightweight jobs must match policy. A
+missing output, an unexpected success, or a selected skip fails the authority
+job. `pr-fast-gate` trusts only `ci-selection-authority`, not a hand-maintained
+list of subsystem outcomes.
+
 ## PR Fast Gate
 
 Ordinary PR updates use `scripts/ci_classify.py` to select the affected gates.
 Docs-only, frontend-only, and backend-only changes do not automatically pay for
-the complete matrix. CI workflows, deployment files, Dockerfiles, dependency
-definitions, release scripts, classifier changes, shared contracts, and other
-high-risk combinations force the full CI and Release Gate immediately.
+the complete matrix. HIGH changes receive broad correctness plus Fresh Docker
+and stateful upgrade coverage. CRITICAL changes additionally receive the
+isolated Updater failure/recovery subset. The risk table above is authoritative
+for the selection split.
 
 The stable `pr-fast-gate` aggregate succeeds only when classification and every
 selected PR job succeed; unselected jobs may skip. A newer PR commit cancels the
@@ -114,6 +145,28 @@ gh workflow run pre-merge-full.yml --ref main \
 Squash merge only after both `pr-fast-gate` and `pre-merge-authority` are green
 on the current head. The same final head normally receives one authoritative
 Full Regression; `main` does not repeat it.
+
+## Exact-SHA reuse and build reuse
+
+Cross-run authority reuse is **DEFERRED**. A safe reusable result would have to
+bind at least the exact HEAD SHA, Base SHA, trusted workflow revision, Release
+Gate revision, classifier revision, relevant test configuration, and applicable
+dependency locks. A new HEAD, a moving `main`, or any change to those inputs
+invalidates the result. Current GitHub job identity does not prove this complete
+equivalence, so the repository continues to execute Pre-Merge Full rather than
+accepting a HEAD-only cache.
+
+Cross-job API/Web build reuse is also **DEFERRED**. Fresh Docker and stateful
+upgrade currently rebuild in independent trust boundaries; moving images
+between them would require immutable digest/provenance binding. Measured runs
+show that the full backend suite, not image build time, is the current ordinary
+full-gate critical path. The release producer remains the build-once/promote-many
+authority for actual release artifacts.
+
+The 1,500-second sustained performance baseline is not a default PR job. It is
+manual/RC/risk-triggered evidence. Normal LOW/STANDARD patches should complete
+their selected PR gates plus one final Pre-Merge Full in tens of minutes, while
+major milestones and HIGH/CRITICAL infrastructure work retain extended gates.
 
 ## Core CI
 

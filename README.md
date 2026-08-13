@@ -217,4 +217,4 @@ python backend/manage.py test journal
 
 ## GitHub Actions CI
 
-每次 `main` push、针对 `main` 的 Pull Request 或手动触发都会运行 `frontend`、`backend`、`postgres` 和 `plugins` 检查；其中 `postgres` 使用真实 PostgreSQL 执行插件并发测试。`docker` Release Gate 只在 `main` push 或手动触发时运行，使用临时 CI 凭据进行 Compose 配置、镜像构建和健康检查。
+针对 `main` 的 Pull Request 会先按变更风险选择受影响的前端、后端、PostgreSQL、插件、Bridge 与发布门禁；数据库、认证、发布、Updater、部署和 CI 权威逻辑等高风险变更会自动扩大验证范围。合并前必须对当前 PR HEAD 和最新 `main` 显式运行一次权威 Pre-Merge Full Gate，随后 squash merge；`main` push 只做轻量合并后校验。门禁分级、触发规则与本地命令见 [`docs/release-gates.md`](docs/release-gates.md)。

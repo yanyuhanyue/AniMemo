@@ -48,7 +48,13 @@ jobs:
     name: changed-files
     runs-on: ubuntu-latest
     outputs:
+      schema_version: ${{ steps.classify.outputs.schema_version }}
+      risk_level: ${{ steps.classify.outputs.risk_level }}
+      risk_rank: ${{ steps.classify.outputs.risk_rank }}
+      execution_force_full: ${{ steps.classify.outputs.execution_force_full }}
+      classification_json: ${{ steps.classify.outputs.classification_json }}
       docs_only: ${{ steps.classify.outputs.docs_only }}
+      mixed: ${{ steps.classify.outputs.mixed }}
       run_frontend: ${{ steps.classify.outputs.run_frontend }}
       run_backend: ${{ steps.classify.outputs.run_backend }}
       run_bootstrap: ${{ steps.classify.outputs.run_bootstrap }}
@@ -56,7 +62,12 @@ jobs:
       run_bridge: ${{ steps.classify.outputs.run_bridge }}
       run_postgres: ${{ steps.classify.outputs.run_postgres }}
       run_runtime: ${{ steps.classify.outputs.run_runtime }}
+      run_release_full: ${{ steps.classify.outputs.run_release_full }}
+      run_release_updater: ${{ steps.classify.outputs.run_release_updater }}
+      run_release_docker: ${{ steps.classify.outputs.run_release_docker }}
+      run_release_stateful: ${{ steps.classify.outputs.run_release_stateful }}
       full_gate: ${{ steps.classify.outputs.full_gate }}
+      critical_gate: ${{ steps.classify.outputs.critical_gate }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -335,22 +346,31 @@ jobs:
       - name: Prove schema loader gate red and green
         run: python scripts/prove-astrbot-bridge-schema-gate.py --runtime-root .astrbot-runtime --plugin-zip "${{ runner.temp }}/astrbot_plugin_animemo_bridge-0.1.3.zip"
 
-  pr-fast-gate:
-    name: pr-fast-gate
-    if: ${{ always() && github.event_name == 'pull_request' }}
+  selection-authority:
+    name: ci-selection-authority
+    if: ${{ always() }}
     needs: [classify, fast-fail, docs-only, frontend, backend, bootstrap-smoke, postgres, plugins, astrbot-bridge, astrbot-runtime]
     runs-on: ubuntu-latest
     steps:
-      - name: Require every selected PR Fast job to pass or skip
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+      - name: Require selected jobs to succeed and unselected jobs to skip
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
+        run: >-
+          python scripts/ci_gate_authority.py
+          --workflow ci
+          --event-name "${{ github.event_name }}"
+
+  pr-fast-gate:
+    name: pr-fast-gate
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: selection-authority
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the selection-aware PR Fast authority
+        env:
+          AUTHORITY_RESULT: ${{ needs.selection-authority.result }}
         shell: bash
-        run: |
-          python - <<'PY'
-          import json, os, sys
-          needs = json.loads(os.environ["NEEDS_JSON"])
-          failed = {name: job["result"] for name, job in needs.items() if job["result"] not in {"success", "skipped"}}
-          if failed:
-              print(json.dumps(failed, sort_keys=True), file=sys.stderr)
-              raise SystemExit(1)
-          PY
+        run: test "$AUTHORITY_RESULT" = success
