@@ -24,7 +24,7 @@ export class PluginErrorBoundary extends Component {
         <section className="plugin-runtime-error__panel">
           <span className="plugin-runtime-error__kicker">PLUGIN RUNTIME</span>
           <h1>插件加载失败</h1>
-          <p>这个插件页面遇到了一点问题，其他 Anime Journal 页面仍然可以正常使用。</p>
+          <p>这个插件页面遇到了一点问题，其他 AniMemo 页面仍然可以正常使用。</p>
           {development && <pre>{String(this.state.error?.message || this.state.error)}</pre>}
           <div className="plugin-runtime-error__actions">
             <button type="button" onClick={this.reset}>重新加载插件</button>

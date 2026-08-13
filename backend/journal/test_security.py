@@ -911,7 +911,7 @@ class TwoFactorSecurityTests(APITestCase):
         parsed = urlparse(begin.data["otpauth_uri"])
         self.assertEqual(parsed.scheme, "otpauth")
         self.assertEqual(parsed.netloc, "totp")
-        self.assertIn("Anime Journal", unquote(parsed.path))
+        self.assertIn("AniMemo", unquote(parsed.path))
         query = parse_qs(parsed.query)
         self.assertEqual(query["algorithm"], ["SHA1"])
         self.assertEqual(query["digits"], ["6"])

@@ -105,4 +105,4 @@ fi
 cleanup_local_media
 trap - 0 1 2 15
 echo "Local media write, permissions, Nginx read and cleanup: PASS"
-echo "Anime Journal production smoke test: PASS"
+echo "AniMemo production smoke test: PASS"

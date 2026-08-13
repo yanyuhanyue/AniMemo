@@ -627,7 +627,7 @@ FRONTEND_URL = _validate_origin(_raw_frontend_url, setting_name="FRONTEND_URL", 
 BANGUMI_USER_AGENT = os.getenv("BANGUMI_USER_AGENT", "AniMemo/1.0 (+https://re-anime.cc)")
 BANGUMI_IMAGE_PROXY_BASE_URL = os.getenv(
     "BANGUMI_IMAGE_PROXY_BASE_URL",
-    "https://bgm-img-proxy.xhcytus100.workers.dev/",
+    "",
 ).strip()
 BANGUMI_ACCOUNT_INTEGRATION_ENABLED = env_bool("BANGUMI_ACCOUNT_INTEGRATION_ENABLED", True)
 BANGUMI_OAUTH_CLIENT_ID = os.getenv("BANGUMI_OAUTH_CLIENT_ID", "").strip()
@@ -657,7 +657,7 @@ if BANGUMI_OAUTH_REDIRECT_URI:
     ):
         raise ImproperlyConfigured("BANGUMI_OAUTH_REDIRECT_URI 必须是固定且安全的回调 URL。")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "Anime Journal <noreply@example.com>")
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "AniMemo <noreply@example.com>")
 TURNSTILE_SECRET = os.getenv("TURNSTILE_SECRET", "").strip()
 # Local DEBUG defaults to no external verification; production defaults to
 # fail-closed enforcement.

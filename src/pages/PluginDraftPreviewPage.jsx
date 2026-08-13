@@ -43,7 +43,7 @@ export function PluginDraftPreviewPage({ authUser }) {
             notify: (payload) => window.alert(typeof payload === "string" ? payload : payload?.message || "插件提示"),
             confirm: (payload) => Promise.resolve(window.confirm(payload?.message || "确认继续？")),
           },
-          site: { getSettings: () => ({}), getName: () => "Anime Journal", getBaseUrl: () => window.location.origin, subscribeSettings: () => () => {} },
+          site: { getSettings: () => ({}), getName: () => "AniMemo", getBaseUrl: () => window.location.origin, subscribeSettings: () => () => {} },
           eventBus,
           manifest: data.manifest,
         });

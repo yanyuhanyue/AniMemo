@@ -20,7 +20,7 @@ test("Plugin SDK host exposes namespaced api and readonly auth surface", async (
     authStore: { getUser: () => user, subscribe: (listener) => { authListener = listener; return () => { authListener = null; }; } },
     navigation: { navigate() {}, replace() {}, back() {} },
     ui: { notify() {}, confirm: async () => true },
-    site: { getSettings: () => ({ site_name: "Anime Journal", resend_api_key: "hidden" }) },
+    site: { getSettings: () => ({ site_name: "AniMemo", resend_api_key: "hidden" }) },
     eventBus: createEventBus(),
     manifest: { extensions: ["frontend.page"], permissions: [] },
   });

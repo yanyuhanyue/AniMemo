@@ -1,6 +1,6 @@
 # Blank Plugin
 
-这是 Anime Journal Plugin SDK v2 的空白 Runtime Plugin 模板。先复制整个目录，再统一替换模板标识，禁止直接在 `_template` 中开发正式插件。
+这是 AniMemo Plugin SDK v2 的空白 Runtime Plugin 模板。先复制整个目录，再统一替换模板标识，禁止直接在 `_template` 中开发正式插件。
 
 ## 后端接入
 

@@ -116,7 +116,7 @@ function periodSortValue(period) {
 
 function Header({ profile, sharedMode, siteSettings }) {
   const { isTransitioning, navigateWithTransition } = usePageColorTransition();
-  const nickname = profile?.nickname || "XuanHuang";
+  const nickname = profile?.nickname || "AniMemo";
   const title = sharedMode ? `${nickname} 的番剧汇总` : siteSettings.homepage_title;
   const subtitle = sharedMode ? (profile?.subtitle || "把每一次与动画相遇认真收藏。") : siteSettings.homepage_description;
   const avatar = sharedMode ? (profile?.avatar || "/assets/avatar.png") : siteSettings.site_avatar_url;
@@ -300,7 +300,7 @@ export function ShowcasePage({ sharedMode = false }) {
         setRecords(localRecords);
         setRemoteStats(null);
         setProfile({
-          nickname: settings.nickname || settings.email || "XuanHuang",
+          nickname: settings.nickname || settings.email || "AniMemo",
           subtitle: settings.subtitle || "把每一次与动画相遇认真收藏。",
           avatar: settings.avatar || "/assets/avatar.png",
           public_slug: publicSlug || "local-preview",

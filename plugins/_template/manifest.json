@@ -6,7 +6,7 @@
   "slug": "blank-plugin",
   "name": "空白插件",
   "version": "0.2.0",
-  "description": "Anime Journal Plugin SDK v2 的全栈插件模板。",
+  "description": "AniMemo Plugin SDK v2 的全栈插件模板。",
   "author": { "name": "Plugin Author" },
   "license": "MIT",
   "installationMode": "user",

@@ -12,7 +12,7 @@ from site_config.models import InstallationState, SiteSettings
 User = get_user_model()
 
 
-@override_settings(RESEND_API_KEY="", RESEND_FROM_EMAIL="Anime Journal <env@example.com>")
+@override_settings(RESEND_API_KEY="", RESEND_FROM_EMAIL="AniMemo <env@example.com>")
 class StaffEmailSettingsTests(APITestCase):
     def setUp(self):
         installation = InstallationState.load()

@@ -10,7 +10,7 @@ from .storage_units import BINARY_GIB_BYTES, DECIMAL_GB_BYTES
 
 
 def default_trusted_poster_hosts():
-    return ["lain.bgm.tv", "bgm-img-proxy.xhcytus100.workers.dev", "img.re-anime.cc", "re-anime.cc"]
+    return ["lain.bgm.tv", "img.re-anime.cc", "re-anime.cc"]
 
 
 def site_avatar_upload_to(_instance, filename):
@@ -88,13 +88,16 @@ class InstallationState(models.Model):
 
 
 class SiteSettings(models.Model):
-    site_name = models.CharField(max_length=120, default="Anime Journal")
-    homepage_title = models.CharField(max_length=160, default="XuanHuang 的番剧汇总")
+    site_name = models.CharField(max_length=120, default="AniMemo")
+    homepage_title = models.CharField(max_length=160, default="AniMemo · 我的动漫记忆库")
     homepage_owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, blank=True, null=True, related_name="homepage_site_settings")
     site_avatar = models.ImageField(upload_to=site_avatar_upload_to, blank=True, null=True)
-    homepage_description = models.CharField(max_length=320, default="精心收录 2007 年至今的优质动漫作品，包含详细的题材分类、季度划分与主观评价等。")
+    homepage_description = models.CharField(
+        max_length=320,
+        default="把想看、在看与看完的作品收进同一条记忆轨迹，随时回望每一次与动画相遇的时刻。",
+    )
     universe_description = models.CharField(max_length=320, default="穿过各位同好们的观看轨道，发现真实同步、持续生长的私人番剧宇宙。")
-    social_handle = models.CharField(max_length=80, default="X: @ANIME_JOURNAL")
+    social_handle = models.CharField(max_length=80, default="X: @ANIMEMO")
     registration_enabled = models.BooleanField(default=True)
     email_delivery_enabled = models.BooleanField(default=True)
     email_sender_name = models.CharField(max_length=120, blank=True, default="")

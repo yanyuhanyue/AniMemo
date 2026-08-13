@@ -57,7 +57,7 @@ EOF
 }
 
 die() {
-    echo "Anime Journal legacy deploy: $*" >&2
+    echo "AniMemo legacy deploy: $*" >&2
     exit 1
 }
 
@@ -283,7 +283,7 @@ if [ "$RESET_DATA" -eq 1 ] && [ "$CONFIRM_RESET" -ne 1 ] && [ ! -t 0 ]; then
     die "--reset-data is non-interactive; add --yes to confirm"
 fi
 if [ "$RESET_DATA" -eq 1 ] && [ "$CONFIRM_RESET" -ne 1 ]; then
-    printf 'This clears only Anime Journal data under %s. Type RESET anime-journal: ' "$DATA_ROOT" >&2
+    printf 'This clears only AniMemo data under %s. Type RESET anime-journal: ' "$DATA_ROOT" >&2
     read confirmation
     [ "$confirmation" = "RESET anime-journal" ] || die "reset not confirmed"
 fi
