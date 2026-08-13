@@ -7,6 +7,7 @@ from urllib.parse import unquote_plus
 
 _REDACTED = "[REDACTED]"
 _MAX_JSON_DEPTH = 8
+_MAX_PERCENT_DECODE_DEPTH = 4
 
 _SENSITIVE_EXACT_KEYS = {
     "authorization",
@@ -220,6 +221,57 @@ def _is_sensitive_key(key: object) -> bool:
     if normalised.endswith(_SENSITIVE_DERIVED_SUFFIXES):
         return True
     return normalised.endswith(_SENSITIVE_SUFFIXES)
+
+
+def _contains_sensitive_syntax(value: str) -> bool:
+    """Return whether normal redactors would remove material from decoded text."""
+
+    if _PRIVATE_KEY_BLOCK.sub(_REDACTED, value) != value:
+        return True
+    if _TRUNCATED_PRIVATE_KEY_BEGIN.sub(_REDACTED, value) != value:
+        return True
+    if _redact_authorization_text(value) != value:
+        return True
+    for pattern in (_COOKIE_LINE, _COOKIE_INLINE):
+        for match in pattern.finditer(value):
+            if _redact_cookie_value(
+                match.group("header"),
+                match.group("value"),
+                inspect_percent_encoded=False,
+            ) != match.group("value"):
+                return True
+    if _CLI_QUOTED.sub(_replace_secret_value, value) != value:
+        return True
+    if _TRUNCATED_CLI_QUOTED.sub(_replace_truncated_secret_value, value) != value:
+        return True
+    if _CLI_BARE.sub(_replace_secret_value, value) != value:
+        return True
+    if _QUOTED_KEY_VALUE.sub(_replace_secret_value, value) != value:
+        return True
+    if _redact_escaped_json_text(value) != value:
+        return True
+    for match in _URL_CREDENTIALS.finditer(value):
+        if match.group("password") != _REDACTED:
+            return True
+    if _URL_PARAMETER.sub(_replace_unencoded_url_parameter, value) != value:
+        return True
+    return _redact_bare_key_values(value) != value
+
+
+def _percent_decoding_reveals_sensitive_material(value: str) -> bool:
+    """Inspect bounded URL-decoding layers and fail closed beyond the bound."""
+
+    if "%" not in value:
+        return False
+    decoded = value
+    for _ in range(_MAX_PERCENT_DECODE_DEPTH):
+        next_value = unquote_plus(decoded)
+        if next_value == decoded:
+            return False
+        if _contains_sensitive_syntax(next_value):
+            return True
+        decoded = next_value
+    return unquote_plus(decoded) != decoded
 
 
 def _structure_exceeds_depth(value: object, depth: int) -> bool:
@@ -753,13 +805,22 @@ def _split_combined_set_cookie(value: str) -> list[str]:
     ]
 
 
-def _redact_set_cookie_record(record: str) -> str:
+def _redact_set_cookie_record(
+    record: str, *, inspect_percent_encoded: bool = True
+) -> str:
     parts = record.split(";")
     if _COOKIE_PAIR.match(parts[0]):
         redacted = _redact_cookie_pair(parts[0])
     else:
         redacted = _redact_cookie_scalar(parts[0])
     parts[0] = redacted
+    if inspect_percent_encoded:
+        for index in range(1, len(parts)):
+            attribute = _COOKIE_PAIR.match(parts[index])
+            if attribute and _percent_decoding_reveals_sensitive_material(
+                attribute.group("value")
+            ):
+                parts[index] = _redact_cookie_pair(parts[index])
     return ";".join(parts)
 
 
@@ -783,10 +844,17 @@ def _replace_cookie_line(match: re.Match[str]) -> str:
     )
 
 
-def _redact_cookie_value(header: object, value: str) -> str:
+def _redact_cookie_value(
+    header: object,
+    value: str,
+    *,
+    inspect_percent_encoded: bool = True,
+) -> str:
     if _normalise_key(header) == "set_cookie":
         redacted = ",".join(
-            _redact_set_cookie_record(record)
+            _redact_set_cookie_record(
+                record, inspect_percent_encoded=inspect_percent_encoded
+            )
             for record in _split_combined_set_cookie(value)
         )
     else:
@@ -797,11 +865,36 @@ def _redact_cookie_value(header: object, value: str) -> str:
     return redacted
 
 
-def _replace_url_parameter(match: re.Match[str]) -> str:
+def _replace_unencoded_url_parameter(match: re.Match[str]) -> str:
     key = unquote_plus(match.group("key"))
     if not _is_sensitive_key(key) and _normalise_key(key) not in _SENSITIVE_URL_KEYS:
         return match.group(0)
     return f"{match.group('prefix')}{_REDACTED}"
+
+
+def _replace_url_parameter(match: re.Match[str]) -> str:
+    replacement = _replace_unencoded_url_parameter(match)
+    if replacement != match.group(0):
+        return replacement
+    if _percent_decoding_reveals_sensitive_material(match.group("value")):
+        return f"{match.group('prefix')}{_REDACTED}"
+    return match.group(0)
+
+
+def _redact_percent_encoded_text(text: str) -> str:
+    """Fail closed for encoded credentials outside syntax-specific containers."""
+
+    if "%" not in text:
+        return text
+    output: list[str] = []
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        ending = line[len(content) :]
+        if _percent_decoding_reveals_sensitive_material(content):
+            output.append(f"{_REDACTED}{ending}")
+        else:
+            output.append(line)
+    return "".join(output)
 
 
 def redact(value: object) -> str:
@@ -833,4 +926,4 @@ def redact(value: object) -> str:
     text = _URL_PARAMETER.sub(_replace_url_parameter, text)
     text = _redact_bare_key_values(text)
     text = _TRUNCATED_QUOTED_KEY_VALUE.sub(_replace_truncated_secret_value, text)
-    return text
+    return _redact_percent_encoded_text(text)

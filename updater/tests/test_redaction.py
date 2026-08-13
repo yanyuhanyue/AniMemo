@@ -600,6 +600,41 @@ class RedactionTests(unittest.TestCase):
                 "Comment=api_token=COOKIE_COMMENT_SECRET; Secure status=401",
                 "COOKIE_COMMENT_SECRET",
             ),
+            (
+                "https://example.test/?next=https%3A%2F%2Finternal.test%2Fcallback"
+                "%3Faccess_token%3DENCODED_REDIRECT_SECRET&trace_id=trace-9",
+                "ENCODED_REDIRECT_SECRET",
+            ),
+            (
+                "https://example.test/?message=password%3DENCODED_ASSIGNMENT_SECRET"
+                "&trace_id=trace-10",
+                "ENCODED_ASSIGNMENT_SECRET",
+            ),
+            (
+                "https://example.test/?message=password%253D"
+                "DOUBLE_ENCODED_ASSIGNMENT_SECRET&trace_id=trace-11",
+                "DOUBLE_ENCODED_ASSIGNMENT_SECRET",
+            ),
+            (
+                "diagnostic message=password%25253DTRIPLE_ENCODED_SECRET "
+                "status=500",
+                "TRIPLE_ENCODED_SECRET",
+            ),
+            (
+                "diagnostic message=password%25252525253D"
+                "OVER_DEPTH_ENCODED_SECRET status=500",
+                "OVER_DEPTH_ENCODED_SECRET",
+            ),
+            (
+                "https://example.test/?message=password%3D%5BREDACTED%5D%2Cfake%3D"
+                "ENCODED_MARKER_TAIL_SECRET&trace_id=trace-12",
+                "ENCODED_MARKER_TAIL_SECRET",
+            ),
+            (
+                "Set-Cookie: sid=COOKIE_VALUE; "
+                "Path=/password%3DENCODED_COOKIE_SECRET; HttpOnly status=401",
+                "ENCODED_COOKIE_SECRET",
+            ),
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -622,6 +657,11 @@ class RedactionTests(unittest.TestCase):
                     self.assert_secrets_removed(persisted, secret)
                     self.assert_secrets_removed(disk, secret)
                     self.assertEqual(redact(output), output)
+
+        harmless = (
+            "https://example.test/?message=hello%20world&trace_id=trace-harmless"
+        )
+        self.assertEqual(redact(harmless), harmless)
 
     def test_authentication_credential_key_variants_are_redacted(self):
         keys = (
@@ -815,7 +855,14 @@ class RedactionTests(unittest.TestCase):
         size = 1024 * 1024
         cases = {
             "benign": "a" * size,
+            "benign_percent_encoded": ("hello%20world&" * (size // 14 + 1))[
+                :size
+            ],
             "adversarial_truncated": 'password="' + "\\" * (size - 10),
+            "adversarial_percent_encoded": (
+                "message=password%25253DPERCENT_SCAN_SECRET&"
+                * (size // len("message=password%25253DPERCENT_SCAN_SECRET&") + 1)
+            )[:size],
             "adversarial_many_lines": (
                 "\n" * (size - len("Authorization: Custom MANY_LINES_SECRET"))
                 + "Authorization: Custom MANY_LINES_SECRET"
@@ -832,10 +879,12 @@ class RedactionTests(unittest.TestCase):
                 output = redact(value)
                 elapsed = time.monotonic() - started
 
-                if name == "benign":
+                if name in {"benign", "benign_percent_encoded"}:
                     self.assertEqual(output, value)
                 elif name == "adversarial_truncated":
                     self.assertNotIn("\\" * 1_000, output)
+                elif name == "adversarial_percent_encoded":
+                    self.assertNotIn("PERCENT_SCAN_SECRET", output)
                 elif name == "adversarial_many_lines":
                     self.assertNotIn("MANY_LINES_SECRET", output)
                 else:
