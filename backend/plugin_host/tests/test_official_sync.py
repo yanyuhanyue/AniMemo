@@ -15,7 +15,14 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 
-from plugin_host.models import PluginDeployment, PluginPackageBlob, PluginProject, PluginVersion
+from plugin_host.models import (
+    PluginData,
+    PluginDeployment,
+    PluginPackageBlob,
+    PluginProject,
+    PluginVersion,
+    UserPluginInstallation,
+)
 from plugin_host.official_packages import (
     ZIP_TIMESTAMP,
     build_official_package,
@@ -23,7 +30,7 @@ from plugin_host.official_packages import (
     canonical_content_digest_from_source,
 )
 from plugin_host.runtime import runtime_registry
-
+from plugin_host.services import store_package_blob
 
 HISTORICAL_OFFICIAL_RELEASE_SHA = "347f3e8466e7fe67296aecabe0d68fc958f729e4"
 
@@ -145,6 +152,70 @@ class OfficialPluginSyncTests(TestCase):
         self.assertEqual(PluginVersion.objects.count(), 1)
         self.assertEqual(PluginPackageBlob.objects.count(), 1)
 
+    def test_sync_migrates_the_legacy_official_id_without_replacing_the_project(self):
+        user = get_user_model().objects.create_user(username="legacy-official-plugin-user")
+        project = PluginProject.objects.create(
+            plugin_id="com.anime-journal.watch-history-importer",
+            slug="watch-history-importer",
+            name="Legacy importer",
+            description="Historical official plugin identity",
+        )
+        installation = UserPluginInstallation.objects.create(
+            user=user,
+            plugin=project,
+            enabled=True,
+            config={"preserve": True},
+        )
+        plugin_data = PluginData.objects.create(
+            user=user,
+            plugin=project,
+            namespace="fixture",
+            key="preserve",
+            value={"still": "owned"},
+        )
+        source = Path(__file__).resolve().parents[3] / "plugins" / "watch-history-importer"
+        package_payload = build_official_package(source)
+        blob, _, _, _ = store_package_blob(package_payload)
+        legacy_version = PluginVersion.objects.create(
+            plugin=project,
+            version="0.4.2",
+            package_blob=blob,
+            manifest_snapshot={
+                "id": "com.anime-journal.watch-history-importer",
+                "slug": "watch-history-importer",
+                "version": "0.4.2",
+            },
+            runtime_types=["frontend", "backend"],
+            review_status=PluginVersion.ReviewStatus.APPROVED,
+        )
+
+        call_command("sync_official_plugins")
+
+        project.refresh_from_db()
+        installation.refresh_from_db()
+        plugin_data.refresh_from_db()
+        legacy_version.refresh_from_db()
+        self.assertEqual(project.plugin_id, "com.animemo.watch-history-importer")
+        self.assertEqual(PluginProject.objects.count(), 1)
+        self.assertEqual(installation.plugin_id, project.pk)
+        self.assertEqual(plugin_data.plugin_id, project.pk)
+        self.assertEqual(legacy_version.plugin_id, project.pk)
+
+    def test_sync_rejects_an_unknown_project_using_the_official_slug(self):
+        project = PluginProject.objects.create(
+            plugin_id="com.example.unrelated-importer",
+            slug="watch-history-importer",
+            name="Unrelated importer",
+            description="Must not be claimed by official synchronization",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Official plugin id/slug conflict"):
+            call_command("sync_official_plugins")
+
+        project.refresh_from_db()
+        self.assertEqual(project.plugin_id, "com.example.unrelated-importer")
+        self.assertEqual(PluginProject.objects.count(), 1)
+
     def test_sync_retains_existing_blob_for_same_content_with_different_archive(self):
         call_command("sync_official_plugins")
         deployment = PluginDeployment.objects.select_related("current_version__package_blob").get(
@@ -191,9 +262,10 @@ class OfficialPluginSyncTests(TestCase):
         with patch(
             "plugin_host.management.commands.sync_official_plugins.build_official_package",
             return_value=changed_package,
-        ), patch("plugin_host.management.commands.sync_official_plugins.PluginPackageInstaller.publish") as publish:
-            with self.assertRaisesRegex(RuntimeError, "Official plugin immutable content mismatch"):
-                call_command("sync_official_plugins")
+        ), patch(
+            "plugin_host.management.commands.sync_official_plugins.PluginPackageInstaller.publish"
+        ) as publish, self.assertRaisesRegex(RuntimeError, "Official plugin immutable content mismatch"):
+            call_command("sync_official_plugins")
 
         deployment.refresh_from_db()
         self.assertEqual(deployment.current_version_id, original_version_id)

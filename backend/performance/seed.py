@@ -6,10 +6,11 @@ import hashlib
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from accounts.models import StaffProfile, UserSecurityProfile
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
+
+from accounts.models import StaffProfile, UserSecurityProfile
 from integrations.models import (
     ExternalIdentityBinding,
     IntegrationConnection,
@@ -30,6 +31,7 @@ from plugin_host.models import (
     PluginVersion,
     UserPluginInstallation,
 )
+from site_config.models import InstallationState
 
 from .contract import DATASETS
 
@@ -203,6 +205,20 @@ def seed_backend_performance_data(dataset, *, reset=True):
     )
     admin.set_unusable_password()
     admin.save()
+
+    installation = InstallationState.load()
+    if installation.status != InstallationState.Status.INITIALIZED:
+        installation.status = InstallationState.Status.INITIALIZED
+        installation.initialized_at = timezone.now()
+        installation.initialized_by = admin
+        installation.save(
+            update_fields=[
+                "status",
+                "initialized_at",
+                "initialized_by",
+                "updated_at",
+            ]
+        )
 
     supporting_users = []
     for index in range(shape.supporting_users):
