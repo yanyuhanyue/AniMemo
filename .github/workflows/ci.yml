@@ -289,7 +289,8 @@ jobs:
             python scripts/check_official_plugin_immutability.py \
               --base "$COMPARISON_BASE_SHA" --head "$CANDIDATE_SHA" --head-root .
           else
-            python scripts/check_official_plugin_immutability.py --head-root .
+            python scripts/check_official_plugin_immutability.py \
+              --head "$CANDIDATE_SHA" --head-root .
           fi
       - run: python scripts/pluginctl.py pack watch-history-importer
 

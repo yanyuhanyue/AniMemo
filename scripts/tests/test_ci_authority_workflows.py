@@ -122,6 +122,13 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("github.event_name != 'push'", release)
         self.assertIn("name: post-merge-sanity", release)
 
+    def test_plugin_immutability_gate_uses_the_checked_out_candidate_head(self):
+        plugins = self.job(self.source("ci.yml"), "plugins")
+
+        self.assertEqual(plugins.count('--head "$CANDIDATE_SHA"'), 2)
+        self.assertIn('--base "$COMPARISON_BASE_SHA" --head "$CANDIDATE_SHA"', plugins)
+        self.assertNotIn("check_official_plugin_immutability.py --head-root .", plugins)
+
     def test_selection_authorities_validate_actual_job_results(self):
         ci = self.source("ci.yml")
         release = self.source("release-gate.yml")
