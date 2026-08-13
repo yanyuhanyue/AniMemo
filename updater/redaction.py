@@ -34,6 +34,17 @@ _SENSITIVE_EXACT_KEYS = {
     "google_application_credentials",
     "service_account_key",
     "request_signature",
+    "setup_code",
+    "bootstrap_code",
+    "recovery_code",
+    "otp",
+    "totp",
+    "passphrase",
+    "private_key_passphrase",
+    "client_assertion",
+    "refresh_credential",
+    "access_credential",
+    "session_key",
     "x_amz_signature",
     "x_amz_credential",
     "x_goog_signature",
@@ -211,6 +222,35 @@ def _is_sensitive_key(key: object) -> bool:
     return normalised.endswith(_SENSITIVE_SUFFIXES)
 
 
+def _structure_exceeds_depth(value: object, depth: int) -> bool:
+    """Check parsed JSON depth without relying on the interpreter recursion limit."""
+
+    if depth >= _MAX_JSON_DEPTH:
+        return True
+    if isinstance(value, Mapping):
+        children = iter(value.values())
+    elif isinstance(value, (list, tuple)):
+        children = iter(value)
+    else:
+        return False
+
+    stack: list[tuple[object, int]] = [(children, depth + 1)]
+    while stack:
+        children, child_depth = stack[-1]
+        try:
+            child = next(children)
+        except StopIteration:
+            stack.pop()
+            continue
+        if child_depth >= _MAX_JSON_DEPTH:
+            return True
+        if isinstance(child, Mapping):
+            stack.append((iter(child.values()), child_depth + 1))
+        elif isinstance(child, (list, tuple)):
+            stack.append((iter(child), child_depth + 1))
+    return False
+
+
 def _redact_json_text(value: str, depth: int) -> tuple[bool, str]:
     if depth >= _MAX_JSON_DEPTH:
         return True, _REDACTED
@@ -222,6 +262,8 @@ def _redact_json_text(value: str, depth: int) -> tuple[bool, str]:
         return False, value
 
     if isinstance(parsed, (Mapping, list)):
+        if _structure_exceeds_depth(parsed, depth + 1):
+            return True, _REDACTED
         scrubbed = _scrub_structure(parsed, depth + 1)
         return True, json.dumps(scrubbed, ensure_ascii=False, separators=(",", ":"))
     if isinstance(parsed, str):
@@ -408,15 +450,7 @@ def _replace_truncated_secret_value(match: re.Match[str]) -> str:
 def _bare_secret_value_end(text: str, start: int) -> int:
     line_end, _ = _line_end(text, start)
     boundary = _SAFE_DIAGNOSTIC_BOUNDARY.search(text, start, line_end)
-    value_end = boundary.start() if boundary else line_end
-    for delimiter in ("}", "]", "&"):
-        delimiter_start = start
-        if delimiter == "]" and text.startswith(_REDACTED, start):
-            delimiter_start += len(_REDACTED)
-        position = text.find(delimiter, delimiter_start, value_end)
-        if position >= 0:
-            value_end = position
-    return value_end
+    return boundary.start() if boundary else line_end
 
 
 def _redacted_marker_is_complete(text: str, start: int) -> bool:
@@ -427,18 +461,51 @@ def _redacted_marker_is_complete(text: str, start: int) -> bool:
     remainder = text[end:line_end]
     if _SAFE_DIAGNOSTIC_BOUNDARY.match(remainder):
         return True
-    if remainder[0] in "}]&":
-        return True
-    return bool(re.match(rf"[,;]\s+{_KEY}\s*[:=]", remainder))
+    return False
+
+
+def _protected_bare_value_spans(text: str) -> list[tuple[int, int]]:
+    """Return regions already handled by syntax-specific redactors."""
+
+    spans = [
+        match.span("value")
+        for pattern in (_COOKIE_LINE, _COOKIE_INLINE)
+        for match in pattern.finditer(text)
+    ]
+    spans.extend(match.span() for match in _URL_PARAMETER.finditer(text))
+    if not spans:
+        return []
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _redact_bare_key_values(text: str) -> str:
     output: list[str] = []
     output_cursor = 0
     search_cursor = 0
+    protected_spans = _protected_bare_value_spans(text)
+    protected_index = 0
     while match := _BARE_KEY_PREFIX.search(text, search_cursor):
         value_start = match.end()
         search_cursor = value_start
+        while (
+            protected_index < len(protected_spans)
+            and protected_spans[protected_index][1] <= match.start()
+        ):
+            protected_index += 1
+        if (
+            protected_index < len(protected_spans)
+            and protected_spans[protected_index][0]
+            <= match.start()
+            < protected_spans[protected_index][1]
+        ):
+            continue
         normalised_key = _normalise_key(match.group("key"))
         if not _is_sensitive_key(match.group("key")):
             continue
@@ -753,7 +820,8 @@ def redact(value: object) -> str:
     text = _CLI_BARE.sub(_replace_secret_value, text)
     text = _QUOTED_KEY_VALUE.sub(_replace_secret_value, text)
     text = _redact_escaped_json_text(text)
+    text = _URL_CREDENTIALS.sub(r"\g<scheme>\g<user>:[REDACTED]@", text)
+    text = _URL_PARAMETER.sub(_replace_url_parameter, text)
     text = _redact_bare_key_values(text)
     text = _TRUNCATED_QUOTED_KEY_VALUE.sub(_replace_truncated_secret_value, text)
-    text = _URL_CREDENTIALS.sub(r"\g<scheme>\g<user>:[REDACTED]@", text)
-    return _URL_PARAMETER.sub(_replace_url_parameter, text)
+    return text

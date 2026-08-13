@@ -498,6 +498,117 @@ class RedactionTests(unittest.TestCase):
         )
         self.assertIn("status=500", persisted)
 
+    def test_bare_secret_structure_characters_do_not_truncate_redaction(self):
+        cases = (
+            (
+                "password=HEAD}TAIL_BRACE_SECRET status=500",
+                "TAIL_BRACE_SECRET",
+            ),
+            (
+                "api_token=HEAD]TAIL_BRACKET_SECRET request_id=req-bracket",
+                "TAIL_BRACKET_SECRET",
+            ),
+            (
+                "DATABASE_URL=postgres://u:HEAD&TAIL_AMP_SECRET@db/app "
+                "operation_id=op-amp",
+                "TAIL_AMP_SECRET",
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationStore(Path(directory))
+            for diagnostic, secret in cases:
+                with self.subTest(secret=secret):
+                    output = redact(diagnostic)
+                    operation = store.create("apply_update", {"version": "v1.0.1"})
+                    stored = store.transition(
+                        operation["id"], "preflight", detail=diagnostic
+                    )
+                    persisted = stored["events"][-1]["detail"]
+                    disk = (
+                        Path(directory)
+                        / "operations"
+                        / f"{operation['id']}.json"
+                    ).read_text()
+
+                    self.assert_secrets_removed(output, secret)
+                    self.assert_secrets_removed(persisted, secret)
+                    self.assert_secrets_removed(disk, secret)
+                    self.assertEqual(redact(output), output)
+
+    def test_untrusted_redacted_marker_suffix_is_not_treated_as_safe(self):
+        cases = (
+            (
+                "password=[REDACTED], fake=TAIL_FAKE_MARKER_SECRET",
+                "TAIL_FAKE_MARKER_SECRET",
+            ),
+            (
+                "api_token=[REDACTED]; fake=TAIL_FAKE_SEMI_SECRET",
+                "TAIL_FAKE_SEMI_SECRET",
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationStore(Path(directory))
+            for diagnostic, secret in cases:
+                with self.subTest(secret=secret):
+                    output = redact(diagnostic)
+                    operation = store.create("apply_update", {"version": "v1.0.1"})
+                    stored = store.transition(
+                        operation["id"], "preflight", detail=diagnostic
+                    )
+                    persisted = stored["events"][-1]["detail"]
+                    disk = (
+                        Path(directory)
+                        / "operations"
+                        / f"{operation['id']}.json"
+                    ).read_text()
+
+                    self.assert_secrets_removed(output, secret)
+                    self.assert_secrets_removed(persisted, secret)
+                    self.assert_secrets_removed(disk, secret)
+                    self.assertEqual(redact(output), output)
+
+    def test_authentication_credential_key_variants_are_redacted(self):
+        keys = (
+            "setup_code",
+            "bootstrap_code",
+            "recovery_code",
+            "otp",
+            "totp",
+            "passphrase",
+            "private_key_passphrase",
+            "client_assertion",
+            "refresh_credential",
+            "access_credential",
+            "session_key",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationStore(Path(directory))
+            for index, key in enumerate(keys):
+                secret = f"CREDENTIAL_CANARY_{index:02d}_SECRET_VALUE"
+                diagnostic = f"failure {key}={secret} status=500"
+                with self.subTest(key=key):
+                    text_output = redact(diagnostic)
+                    structured_output = redact({key: secret, "status": 500})
+                    operation = store.create("apply_update", {"version": "v1.0.1"})
+                    stored = store.transition(
+                        operation["id"], "preflight", detail=diagnostic
+                    )
+                    persisted = stored["events"][-1]["detail"]
+                    disk = (
+                        Path(directory)
+                        / "operations"
+                        / f"{operation['id']}.json"
+                    ).read_text()
+
+                    self.assert_secrets_removed(text_output, secret)
+                    self.assert_secrets_removed(structured_output, secret)
+                    self.assert_secrets_removed(persisted, secret)
+                    self.assert_secrets_removed(disk, secret)
+                    self.assertIn("status=500", text_output)
+
     def test_key_value_logs_and_common_cloud_credentials_are_redacted(self):
         value = redact(
             "db_password: database-secret\n"
@@ -592,6 +703,16 @@ class RedactionTests(unittest.TestCase):
         self.assert_secrets_removed(serialized, "deep-secret")
         self.assertIn("[REDACTED]", structured)
         self.assertIn("[REDACTED]", serialized)
+
+    def test_parsed_json_exceeding_depth_is_replaced_as_a_whole(self):
+        value = '{"password":"DEPTH_LIMIT_SECRET"}'
+        for _ in range(12):
+            value = f"[{value}]"
+
+        output = redact(value)
+
+        self.assertEqual(output, "[REDACTED]")
+        self.assert_secrets_removed(output, "DEPTH_LIMIT_SECRET")
 
     def test_json_parser_recursion_error_fails_closed(self):
         value = "[" * 5_000 + '{"password":"DEEP_JSON_SECRET"}' + "]" * 5_000
