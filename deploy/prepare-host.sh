@@ -6,19 +6,19 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-DATA_ROOT=${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}
+DATA_ROOT=${ANIMEMO_DATA_ROOT:-/data/animemo}
 APP_UID=10001
 APP_GID=10001
 
 case "$DATA_ROOT" in
     /*) ;;
     *)
-        echo "ANIME_JOURNAL_DATA_ROOT must be an absolute path." >&2
+        echo "ANIMEMO_DATA_ROOT must be an absolute path." >&2
         exit 1
         ;;
 esac
 if [ "$DATA_ROOT" = "/" ]; then
-    echo "ANIME_JOURNAL_DATA_ROOT must not be /." >&2
+    echo "ANIMEMO_DATA_ROOT must not be /." >&2
     exit 1
 fi
 

@@ -20,9 +20,9 @@ import { SharedShowcaseHeader } from "../components/SharedShowcaseHeader.jsx";
 import { useSiteSettings } from "../context/SiteSettingsContext.jsx";
 import { demoAnimeRecords, demoEnabled, getDemoUniverseOwner } from "@demo-data";
 
-const RECORDS_STORAGE_KEY = "anime_journal_records_v1";
-const SETTINGS_STORAGE_KEY = "anime_journal_settings_v1";
-const RECORDS_UPDATED_EVENT = "anime-journal:records-updated";
+const RECORDS_STORAGE_KEY = "animemo_records_v1";
+const SETTINGS_STORAGE_KEY = "animemo_settings_v1";
+const RECORDS_UPDATED_EVENT = "animemo:records-updated";
 const DEFAULT_FILTERS = { search: "", tag: "all", status: "all", year: "all", sort: "date-desc", quick: "all" };
 
 function apiToRecord(item, presetColors) {
@@ -93,7 +93,7 @@ function readStoredRecords() {
 
 function isExplicitDemoMode() {
   return demoEnabled
-    && localStorage.getItem("anime_journal_demo") === "true";
+    && localStorage.getItem("animemo_demo") === "true";
 }
 
 function readStoredPreviewSettings() {
@@ -241,7 +241,7 @@ export function ShowcasePage({ sharedMode = false }) {
   useEffect(() => {
     if (!ownerPreview) return undefined;
     const { access } = getStoredTokens();
-    if (demoEnabled && (!access || localStorage.getItem("anime_journal_demo") === "true")) {
+    if (demoEnabled && (!access || localStorage.getItem("animemo_demo") === "true")) {
       setOwnerPublicStatus(readStoredPreviewSettings().publicStatus || "private");
       return undefined;
     }
@@ -417,7 +417,7 @@ export function ShowcasePage({ sharedMode = false }) {
   const changeOwnerPublicStatus = useCallback(async (action) => {
     const { access } = getStoredTokens();
     const isDemo = demoEnabled
-      && (!access || localStorage.getItem("anime_journal_demo") === "true");
+      && (!access || localStorage.getItem("animemo_demo") === "true");
     if (isDemo) {
       const nextStatus = action === "cancel" ? "private" : "pending";
       const settings = readStoredPreviewSettings();
@@ -441,7 +441,7 @@ export function ShowcasePage({ sharedMode = false }) {
       await authApi.logout();
     } finally {
       clearTokens();
-      localStorage.removeItem("anime_journal_demo");
+      localStorage.removeItem("animemo_demo");
       navigate("/", { replace: true });
     }
   }, [navigate]);

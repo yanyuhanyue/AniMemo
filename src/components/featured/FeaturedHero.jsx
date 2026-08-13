@@ -3,9 +3,9 @@ import { Icon } from "../Icon.jsx";
 import { useSiteSettings } from "../../context/SiteSettingsContext.jsx";
 import { DEFAULT_POSTER } from "../../lib/demoMedia.js";
 import { selectDailyHeroPosters } from "../../lib/heroArtSelector.js";
-import { animeRecords } from "../../data/anime.js";
+import { demoAnimeRecords } from "@demo-data";
 
-const [, dailyPoster] = selectDailyHeroPosters(animeRecords, { domain: "featured" });
+const [, dailyPoster] = selectDailyHeroPosters(demoAnimeRecords, { domain: "featured" });
 
 export function FeaturedHero() {
   const { settings } = useSiteSettings();

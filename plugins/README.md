@@ -14,8 +14,8 @@ Copy-Item -Recurse plugins\_template plugins\my-plugin
 blank-plugin
 Blank Plugin
 空白插件
-anime_journal_blank_plugin
-com.example.anime-journal.blank
+animemo_blank_plugin
+com.example.animemo.blank
 ```
 
 插件目前不会被自动发现。完成开发后必须经过审查，并在 Django `INSTALLED_APPS`、Django URL、前端插件 registry 和部署依赖中显式注册。

@@ -7,14 +7,14 @@ AniMemo Update Agent 是独立的 Host Service，也是不可变 Core Release �
 生产资源固定为：
 
 ```text
-application: /opt/1panel/docker/compose/anime-journal/app
-data:        /data/anime-journal
+application: /opt/1panel/docker/compose/animemo/app
+data:        /data/animemo
 state:       /var/lib/animemo-updater
 socket:      /run/animemo-updater/updater.sock
 repository:  yanyuhanyue/AniMemo
 API image:   ghcr.io/yanyuhanyue/animemo-api
 Web image:   ghcr.io/yanyuhanyue/animemo-web
-project:     anime-journal
+project:     animemo
 services:    migration, bootstrap, api, web
 ```
 

@@ -10,6 +10,7 @@ from journal.bangumi import (
 )
 from journal.external_sync.canonical import MISSING, canonical_snapshot
 
+from ..provider_configuration import get_effective_provider_configuration
 from ..errors import (
     ExternalAccountError,
     account_token_invalid,
@@ -39,7 +40,8 @@ class BangumiAccountProvider:
         return self.client.headers(access_token)
 
     def enabled(self):
-        return bool(getattr(settings, "BANGUMI_ACCOUNT_INTEGRATION_ENABLED", True))
+        # PAT connections and collection reads do not depend on OAuth app setup.
+        return True
 
     def capabilities(self):
         enabled = self.enabled()
@@ -62,21 +64,20 @@ class BangumiAccountProvider:
         return int(settings.BANGUMI_IMPORT_MAX_ITEMS)
 
     def oauth_available(self):
-        return all(
-            str(getattr(settings, name, "") or "").strip()
-            for name in ("BANGUMI_OAUTH_CLIENT_ID", "BANGUMI_OAUTH_CLIENT_SECRET", "BANGUMI_OAUTH_REDIRECT_URI")
-        )
+        return get_effective_provider_configuration(self.slug).oauth_available
 
     def authorization_url(self, state):
+        configuration = get_effective_provider_configuration(self.slug)
         params = {
-            "client_id": settings.BANGUMI_OAUTH_CLIENT_ID,
+            "client_id": configuration.client_id,
             "response_type": "code",
-            "redirect_uri": settings.BANGUMI_OAUTH_REDIRECT_URI,
+            "redirect_uri": configuration.oauth_callback,
             "state": state,
         }
         return f"{self.oauth_base_url}/authorize?{urlencode(params)}"
 
     def exchange_code(self, code, state):
+        configuration = get_effective_provider_configuration(self.slug)
         payload = self._request_json(
             "post",
             "/access_token",
@@ -84,16 +85,17 @@ class BangumiAccountProvider:
             base="oauth",
             data={
                 "grant_type": "authorization_code",
-                "client_id": settings.BANGUMI_OAUTH_CLIENT_ID,
-                "client_secret": settings.BANGUMI_OAUTH_CLIENT_SECRET,
+                "client_id": configuration.client_id,
+                "client_secret": configuration.client_secret,
                 "code": str(code or "")[:512],
-                "redirect_uri": settings.BANGUMI_OAUTH_REDIRECT_URI,
+                "redirect_uri": configuration.oauth_callback,
                 "state": str(state or "")[:512],
             },
         )
         return self._normalize_token_payload(payload)
 
     def refresh_oauth_token(self, refresh_token):
+        configuration = get_effective_provider_configuration(self.slug)
         payload = self._request_json(
             "post",
             "/access_token",
@@ -101,10 +103,10 @@ class BangumiAccountProvider:
             base="oauth",
             data={
                 "grant_type": "refresh_token",
-                "client_id": settings.BANGUMI_OAUTH_CLIENT_ID,
-                "client_secret": settings.BANGUMI_OAUTH_CLIENT_SECRET,
+                "client_id": configuration.client_id,
+                "client_secret": configuration.client_secret,
                 "refresh_token": str(refresh_token or "")[:4096],
-                "redirect_uri": settings.BANGUMI_OAUTH_REDIRECT_URI,
+                "redirect_uri": configuration.oauth_callback,
             },
         )
         return self._normalize_token_payload(payload)

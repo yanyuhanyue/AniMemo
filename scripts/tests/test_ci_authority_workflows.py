@@ -153,8 +153,8 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
     def test_release_gate_bootstraps_both_legacy_and_explicit_job_compose_contracts(self):
         release = self.source("release-gate.yml")
 
-        self.assertIn("ANIMEMO_API_IMAGE=anime-journal-api:release-gate", release)
-        self.assertIn("ANIMEMO_WEB_IMAGE=anime-journal-web:release-gate", release)
+        self.assertIn("ANIMEMO_API_IMAGE=animemo-api:release-gate", release)
+        self.assertIn("ANIMEMO_WEB_IMAGE=animemo-web:release-gate", release)
         self.assertIn('if [[ -f deploy/docker-compose.build.yml ]]; then', release)
         self.assertIn(
             "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",

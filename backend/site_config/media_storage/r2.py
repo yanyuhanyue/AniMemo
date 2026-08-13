@@ -101,7 +101,7 @@ class DynamicR2Backend:
         client = self.client_for(self.backend)
         wrote = False
         try:
-            client.put_object(Bucket=self.backend.bucket_name, Key=key, Body=force_bytes("anime-journal-r2-healthcheck"), ContentType="text/plain")
+            client.put_object(Bucket=self.backend.bucket_name, Key=key, Body=force_bytes("animemo-r2-healthcheck"), ContentType="text/plain")
             wrote = True
             client.head_object(Bucket=self.backend.bucket_name, Key=key)
             return "R2 read/write connection OK"

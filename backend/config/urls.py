@@ -21,20 +21,20 @@ def health(_request):
     return JsonResponse(
         {
             "status": "ok",
-            "service": "anime-journal-api",
+            "service": "animemo-api",
             "release": {
-                "version": settings.ANIME_JOURNAL_VERSION,
-                "commit": settings.ANIME_JOURNAL_COMMIT,
-                "channel": settings.ANIME_JOURNAL_RELEASE_CHANNEL,
+                "version": settings.ANIMEMO_VERSION,
+                "commit": settings.ANIMEMO_COMMIT,
+                "channel": settings.ANIMEMO_RELEASE_CHANNEL,
             },
             "artifact": {
-                "version": settings.ANIME_JOURNAL_ARTIFACT_VERSION,
-                "commit": settings.ANIME_JOURNAL_ARTIFACT_COMMIT,
-                "channel": settings.ANIME_JOURNAL_ARTIFACT_CHANNEL,
+                "version": settings.ANIMEMO_ARTIFACT_VERSION,
+                "commit": settings.ANIMEMO_ARTIFACT_COMMIT,
+                "channel": settings.ANIMEMO_ARTIFACT_CHANNEL,
             },
             "contracts": {
-                "database": settings.ANIME_JOURNAL_DATABASE_CONTRACT,
-                "configuration": settings.ANIME_JOURNAL_CONFIGURATION_CONTRACT,
+                "database": settings.ANIMEMO_DATABASE_CONTRACT,
+                "configuration": settings.ANIMEMO_CONFIGURATION_CONTRACT,
             },
         }
     )

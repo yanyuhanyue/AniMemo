@@ -118,7 +118,7 @@ class RuntimeRegistry:
         if not entry.is_file() or entry.is_symlink():
             raise RuntimeLoadError("Backend runtime entry 不存在。")
 
-        namespace = "_anime_journal_runtime_{}_{}_{}".format(
+        namespace = "_animemo_runtime_{}_{}_{}".format(
             re.sub(r"[^a-z0-9_]", "_", slug),
             re.sub(r"[^a-z0-9_]", "_", version.lower()),
             uuid4().hex,

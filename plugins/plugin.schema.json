@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://anime-journal.local/schemas/plugin-manifest-v2.json",
+  "$id": "https://animemo.local/schemas/plugin-manifest-v2.json",
   "title": "AniMemo Plugin Manifest v2",
   "type": "object",
   "additionalProperties": false,

@@ -44,8 +44,8 @@ export function SiteSettingsProvider({ children }) {
   useEffect(() => {
     void refresh();
     const handleUpdate = () => void refresh();
-    window.addEventListener("anime-journal:site-settings-updated", handleUpdate);
-    return () => window.removeEventListener("anime-journal:site-settings-updated", handleUpdate);
+    window.addEventListener("animemo:site-settings-updated", handleUpdate);
+    return () => window.removeEventListener("animemo:site-settings-updated", handleUpdate);
   }, [refresh]);
 
   useEffect(() => {

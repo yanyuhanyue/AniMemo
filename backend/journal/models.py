@@ -114,6 +114,27 @@ class ExternalMediaIdentity(models.Model):
         return f"{self.provider}:{self.external_id} · {self.entry}"
 
 
+class ExternalProviderConfiguration(models.Model):
+    provider = models.CharField(max_length=50, unique=True)
+    enabled = models.BooleanField(blank=True, null=True)
+    client_id = models.CharField(max_length=255, blank=True, default="")
+    encrypted_client_secret = models.TextField(blank=True, default="")
+    credential_key_version = models.CharField(max_length=16, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["provider"]
+
+    def save(self, *args, **kwargs):
+        self.provider = str(self.provider or "").strip().lower()
+        self.client_id = str(self.client_id or "").strip()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.provider
+
+
 class UserExternalAccountConnection(models.Model):
     class AuthMethod(models.TextChoices):
         OAUTH = "oauth", "OAuth"

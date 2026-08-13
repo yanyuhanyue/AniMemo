@@ -121,17 +121,17 @@ class StaffBackupView(APIView):
             for row in rows:
                 writer.writerow({field: safe_csv_value(row.get(field)) for field in fields})
             response = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
-            response["Content-Disposition"] = f'attachment; filename="anime-journal-{kind}-{stamp}.csv"'
+            response["Content-Disposition"] = f'attachment; filename="animemo-{kind}-{stamp}.csv"'
             return no_store(response)
 
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("manifest.json", json.dumps({"version": settings.ANIME_JOURNAL_VERSION, "created_at": timezone.now(), "scope": "safe-admin-backup", "contains_passwords": False}, cls=DjangoJSONEncoder, ensure_ascii=False, indent=2))
+            archive.writestr("manifest.json", json.dumps({"version": settings.ANIMEMO_VERSION, "created_at": timezone.now(), "scope": "safe-admin-backup", "contains_passwords": False}, cls=DjangoJSONEncoder, ensure_ascii=False, indent=2))
             selected = datasets if kind == "all" else {kind: datasets.get(kind, [])}
             for name, rows in selected.items():
                 archive.writestr(f"{name}.json", json.dumps(rows, cls=DjangoJSONEncoder, ensure_ascii=False, indent=2))
         response = HttpResponse(buffer.getvalue(), content_type="application/zip")
-        response["Content-Disposition"] = f'attachment; filename="anime-journal-backup-{stamp}.zip"'
+        response["Content-Disposition"] = f'attachment; filename="animemo-backup-{stamp}.zip"'
         return no_store(response)
 
 

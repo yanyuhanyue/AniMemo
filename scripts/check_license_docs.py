@@ -45,7 +45,7 @@ RELEASE_DOCUMENTS = (
 )
 
 EVIDENCE_SHA256 = {
-    "package-lock.json": "f33b80a8349f8c53ec4a0b4fc9885080d0a445bb304c6b17c648c4f2fe2c1b36",
+    "package-lock.json": "cd44b7ee05e231fd781fcd3c7ee0ccda75663d43a0383aec9982745c05aae9c3",
     "backend/requirements.txt": "a42438c0595bcc1e8b4a021a6860ca68d756b14f39010535fa0f2e87a03d2d87",
     "release/requirements.txt": "4fc3e8457917e5a8cbe5d2be87000a542d59397bf729151b1b1c7b03bc3db546",
     "bridges/astrbot_plugin_animemo_bridge/requirements.txt": (
@@ -95,7 +95,7 @@ INTERNAL_POLYFORM_DECLARATIONS = {
     "plugins/watch-history-importer/manifest.json": ("json", "PolyForm-Noncommercial-1.0.0"),
     "bridges/astrbot_plugin_animemo_bridge/metadata.yaml": ("yaml", "PolyForm-Noncommercial-1.0.0"),
 }
-OFFICIAL_IMPORTER_VERSION = "0.4.3"
+OFFICIAL_IMPORTER_VERSION = "0.4.4"
 OFFICIAL_IMPORTER_ROOT = "plugins/watch-history-importer"
 
 

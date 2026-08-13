@@ -84,7 +84,7 @@ def sanitize_uploaded_image(
     except (Image.DecompressionBombError, Image.DecompressionBombWarning, UnidentifiedImageError, OSError, ValueError) as error:
         raise serializers.ValidationError("上传文件不是有效图片。") from error
     sanitized = ContentFile(output.getvalue(), name=f"{secrets.token_hex(16)}.webp")
-    sanitized._anime_journal_sanitized = True
+    sanitized._animemo_sanitized = True
     return sanitized
 
 

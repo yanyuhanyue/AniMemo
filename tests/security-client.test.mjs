@@ -19,7 +19,7 @@ const dashboardSource = [
   "../src/pages/useDashboardImport.js",
 ].map((path) => readFileSync(new URL(path, import.meta.url), "utf8")).join("\n");
 const nginxSource = readFileSync(new URL("../deploy/nginx.conf", import.meta.url), "utf8");
-const openrestySource = readFileSync(new URL("../deploy/openresty-re-anime.conf", import.meta.url), "utf8");
+const openrestySource = readFileSync(new URL("../deploy/openresty-animemo.conf", import.meta.url), "utf8");
 const removedRouteAuthField = ["route", "requires", "Auth"].join("\\.");
 const removedRouteStaffField = ["route", "requires", "Admin"].join("\\.");
 
@@ -27,7 +27,8 @@ test("keeps JWTs out of browser storage and restores access through the refresh 
   assert.doesNotMatch(apiSource, /localStorage\.setItem\([^\n]*(?:access|refresh)/i);
   assert.doesNotMatch(apiSource, /sessionStorage\.setItem\([^\n]*(?:access|refresh)/i);
   assert.match(authSessionSource, /let accessToken = null/);
-  assert.match(webAuthSource, /storage\?\.removeItem\(LEGACY_ACCESS_KEY\)/);
+  assert.match(webAuthSource, /storage\?\.removeItem\(INSECURE_LEGACY_ACCESS_KEY\)/);
+  assert.match(webAuthSource, /storage\?\.removeItem\(INSECURE_LEGACY_REFRESH_KEY\)/);
   assert.match(webAuthSource, /cookiePost\(AUTH_ENDPOINTS\.refresh\)/);
   assert.match(webAuthSource, /"X-CSRFToken"/);
   assert.match(webTransportSource, /withCredentials: true/);

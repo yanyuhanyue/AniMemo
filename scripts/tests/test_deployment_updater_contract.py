@@ -29,9 +29,9 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         services = override["services"]
 
         for key in [
-            "ANIME_JOURNAL_VERSION",
-            "ANIME_JOURNAL_COMMIT",
-            "ANIME_JOURNAL_RELEASE_CHANNEL",
+            "ANIMEMO_VERSION",
+            "ANIMEMO_COMMIT",
+            "ANIMEMO_RELEASE_CHANNEL",
         ]:
             self.assertIn("ANIMEMO_RELEASE_", services["api"]["environment"][key])
         for key in [
@@ -66,7 +66,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("PrivateTmp=true", service)
         self.assertIn("ProtectHome=true", service)
         self.assertIn("ProtectSystem=strict", service)
-        self.assertIn("ReadWritePaths=/var/lib/animemo-updater /data/anime-journal /run/animemo-updater", service)
+        self.assertIn("ReadWritePaths=/var/lib/animemo-updater /data/animemo /run/animemo-updater", service)
         self.assertIn("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6", service)
         self.assertIn("UMask=0077", service)
         self.assertIn("/run/animemo-updater 0750 animemo-updater animemo-api", tmpfiles)

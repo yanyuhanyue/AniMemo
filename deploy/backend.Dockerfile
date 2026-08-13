@@ -12,12 +12,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     TZ=Asia/Shanghai \
-    ANIME_JOURNAL_ARTIFACT_VERSION=${ANIMEMO_VERSION} \
-    ANIME_JOURNAL_ARTIFACT_COMMIT=${ANIMEMO_COMMIT} \
-    ANIME_JOURNAL_ARTIFACT_CHANNEL=${ANIMEMO_CHANNEL} \
-    ANIME_JOURNAL_VERSION=${ANIMEMO_VERSION} \
-    ANIME_JOURNAL_COMMIT=${ANIMEMO_COMMIT} \
-    ANIME_JOURNAL_RELEASE_CHANNEL=${ANIMEMO_CHANNEL}
+    ANIMEMO_ARTIFACT_VERSION=${ANIMEMO_VERSION} \
+    ANIMEMO_ARTIFACT_COMMIT=${ANIMEMO_COMMIT} \
+    ANIMEMO_ARTIFACT_CHANNEL=${ANIMEMO_CHANNEL} \
+    ANIMEMO_VERSION=${ANIMEMO_VERSION} \
+    ANIMEMO_COMMIT=${ANIMEMO_COMMIT} \
+    ANIMEMO_RELEASE_CHANNEL=${ANIMEMO_CHANNEL}
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
     && apt-get install -y --no-install-recommends tzdata \
@@ -32,14 +32,14 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY backend /app/backend
 COPY plugins /app/plugins
-RUN useradd --create-home --uid 10001 animejournal \
+RUN useradd --create-home --uid 10001 animemo \
     && mkdir -p /app/runtime/plugins /app/logs \
-    && chown -R animejournal:animejournal /app/runtime /app/logs /app/backend /app/plugins \
-    && ANIME_JOURNAL_BUILD_STATIC=1 python /app/backend/manage.py collectstatic --noinput \
-    && chown -R animejournal:animejournal /app/backend/staticfiles
+    && chown -R animemo:animemo /app/runtime /app/logs /app/backend /app/plugins \
+    && ANIMEMO_BUILD_STATIC=1 python /app/backend/manage.py collectstatic --noinput \
+    && chown -R animemo:animemo /app/backend/staticfiles
 WORKDIR /app/backend
 
-USER animejournal
+USER animemo
 
 EXPOSE 8000
 

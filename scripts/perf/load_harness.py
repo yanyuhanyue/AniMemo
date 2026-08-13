@@ -36,7 +36,14 @@ except ModuleNotFoundError:  # Support ``python scripts/perf/load_harness.py``.
     from contract import CONCURRENCY_LEVELS, SUSTAINED_MINUTES, nearest_rank
 
 
-PRODUCTION_HOSTS = frozenset({"re-anime.cc", "www.re-anime.cc", "45.207.221.83"})
+PRODUCTION_HOSTS = frozenset({
+    "animemo.cc",
+    "www.animemo.cc",
+    "media.animemo.cc",
+    "re-anime.cc",
+    "www.re-anime.cc",
+    "45.207.221.83",
+})
 CONNECTION_EXHAUSTION_MARKERS = (
     "too many connections",
     "connection pool exhausted",
@@ -140,7 +147,7 @@ def validate_target(base_url: str) -> str:
     if parsed.username or parsed.password:
         raise HarnessConfigurationError("credentials must not be embedded in the base URL")
     hostname = parsed.hostname.rstrip(".").lower()
-    if hostname in PRODUCTION_HOSTS or hostname.endswith(".re-anime.cc"):
+    if hostname in PRODUCTION_HOSTS or hostname.endswith((".animemo.cc", ".re-anime.cc")):
         raise HarnessConfigurationError("production AniMemo targets are forbidden")
     if parsed.query or parsed.fragment:
         raise HarnessConfigurationError("base URL must not contain query or fragment components")

@@ -138,7 +138,7 @@ jobs:
       DEBUG: "true"
       DJANGO_SECRET_KEY: ci-only-django-secret-key-for-local-github-actions-validation
       CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
-      FRONTEND_URL: http://localhost:5173
+      ANIMEMO_PUBLIC_ORIGIN: http://localhost:5173
     steps:
       - uses: actions/checkout@v4
         with:
@@ -205,23 +205,23 @@ jobs:
       DEBUG: "true"
       DJANGO_SECRET_KEY: ci-only-django-secret-key-for-local-github-actions-validation
       CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
-      FRONTEND_URL: http://localhost:5173
-      DATABASE_URL: postgresql://anime_journal:ci-password@127.0.0.1:5432/anime_journal
-      POSTGRES_DB: anime_journal
-      POSTGRES_USER: anime_journal
+      ANIMEMO_PUBLIC_ORIGIN: http://localhost:5173
+      DATABASE_URL: postgresql://animemo:ci-password@127.0.0.1:5432/animemo
+      POSTGRES_DB: animemo
+      POSTGRES_USER: animemo
       POSTGRES_PASSWORD: ci-password
       REDIS_URL: redis://127.0.0.1:6379/0
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: anime_journal
-          POSTGRES_USER: anime_journal
+          POSTGRES_DB: animemo
+          POSTGRES_USER: animemo
           POSTGRES_PASSWORD: ci-password
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U anime_journal -d anime_journal"
+          --health-cmd "pg_isready -U animemo -d animemo"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20

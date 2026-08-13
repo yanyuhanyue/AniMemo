@@ -10,7 +10,7 @@ Run `python scripts/check_license_docs.py` to verify this snapshot without chang
 
 | Repository input | SHA-256 | Coverage |
 |---|---|---|
-| `package-lock.json` | `f33b80a8349f8c53ec4a0b4fc9885080d0a445bb304c6b17c648c4f2fe2c1b36` | Exact Node dependency graph, versions, package license metadata, and registry tarballs |
+| `package-lock.json` | `cd44b7ee05e231fd781fcd3c7ee0ccda75663d43a0383aec9982745c05aae9c3` | Exact Node dependency graph, versions, package license metadata, and registry tarballs |
 | `backend/requirements.txt` | `a42438c0595bcc1e8b4a021a6860ca68d756b14f39010535fa0f2e87a03d2d87` | 44 exact Python production pins |
 | `release/requirements.txt` | `4fc3e8457917e5a8cbe5d2be87000a542d59397bf729151b1b1c7b03bc3db546` | Release updater Python pins |
 | `bridges/astrbot_plugin_animemo_bridge/requirements.txt` | `7429a163e432935a194adf11a9109ac6c478dcd08a0ab2486ed2106d29dc5f4f` | AstrBot bridge constraint |
@@ -178,7 +178,7 @@ The following repository components are AniMemo source scopes rather than third-
 
 - AniMemo Core under the root `LICENSE` and `NOTICE` boundaries.
 - `plugins/_template/manifest.json` for the blank Plugin SDK template.
-- `plugins/watch-history-importer/manifest.json` beginning with version `0.4.3`; historical version `0.4.2` remains an immutable package identity.
+- `plugins/watch-history-importer/manifest.json` at version `0.4.4`; historical version `0.4.2` remains an immutable package identity.
 - `bridges/astrbot_plugin_animemo_bridge/metadata.yaml` for the unpublished AniMemo Bridge source in this repository.
 
 Those components still cross third-party boundaries. The template imports React; the importer uses React, Django, Django REST Framework, requests, and Bangumi interfaces/data; the Bridge runs on AstrBot and uses httpx. Those projects, services, responses, and dependencies retain their own terms. Bangumi metadata and images, other external media, and concrete demo content are not relicensed by PolyForm. The repository's two controlled local visual assets—`public/assets/avatar.png` and the generic `public/assets/posters/poster-01.webp` fallback—are AniMemo-created assets and are separately documented in `NOTICE`; the removed `poster-02.webp` through `poster-16.webp` files are not part of the bundled asset set. See `NOTICE` and `docs/license-provenance-audit-20260813.md` for exact scope evidence and unresolved provenance limits.

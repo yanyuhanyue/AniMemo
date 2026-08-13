@@ -229,7 +229,7 @@ class WatchHistoryMigrationTests(TransactionTestCase):
         user = User.objects.create(username="migration-user")
         entry = JournalEntry.objects.create(user=user, title="Migrated History")
         plugin = PluginProject.objects.create(
-            plugin_id="com.anime-journal.watch-history-importer",
+            plugin_id="com.animemo.watch-history-importer",
             slug="watch-history-importer",
             name="Importer",
             description="fixture",

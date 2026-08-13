@@ -385,7 +385,7 @@ class JournalApiTests(APITestCase):
             "records": [{"title": "旧格式", "japaneseTitle": "旧字段", "status": "planned"}],
         }
         upload = SimpleUploadedFile(
-            "anime-journal.json",
+            "animemo.json",
             json.dumps(payload).encode("utf-8"),
             content_type="application/json",
         )
@@ -398,7 +398,7 @@ class JournalApiTests(APITestCase):
 
     def test_import_accepts_csv_templates(self):
         csv_file = SimpleUploadedFile(
-            "anime-journal.csv",
+            "animemo.csv",
             "title,japanese_title,airing_period,watch_status\n《CSV 番剧》,CSV Anime,2026-4,planned\n".encode("utf-8"),
             content_type="text/csv",
         )

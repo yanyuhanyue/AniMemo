@@ -11,6 +11,10 @@ const showcase = readFileSync(new URL("../src/pages/ShowcasePage.jsx", import.me
 const community = readFileSync(new URL("../src/pages/CommunityPages.jsx", import.meta.url), "utf8");
 const featured = readFileSync(new URL("../src/pages/FeaturedPage.jsx", import.meta.url), "utf8");
 const auth = readFileSync(new URL("../src/pages/UserAuthPage.jsx", import.meta.url), "utf8");
+const heroArt = [
+  "../src/components/UniverseHeroArt.jsx",
+  "../src/components/featured/FeaturedHero.jsx",
+].map((path) => readFileSync(new URL(path, import.meta.url), "utf8")).join("\n");
 const viteConfig = readFileSync(new URL("../vite.config.mjs", import.meta.url), "utf8");
 const productionDemoData = readFileSync(new URL("../src/data/demoData.production.js", import.meta.url), "utf8");
 
@@ -33,7 +37,7 @@ test("production routes never substitute local demonstration data", () => {
   assert.doesNotMatch(dashboard, /^import .*animeRecords.*data\/anime/m);
   assert.match(dashboard, /catalogRecords=\{demoCatalogRecords\}/);
   assert.match(dashboard, /if \(!demoEnabled && !access\) navigate\("\/login", \{ replace: true \}\)/);
-  assert.match(showcase, /return demoEnabled\s*&&\s*localStorage\.getItem\("anime_journal_demo"\) === "true"/);
+  assert.match(showcase, /return demoEnabled\s*&&\s*localStorage\.getItem\("animemo_demo"\) === "true"/);
   assert.doesNotMatch(showcase, /^import .*getDemoUniverseOwner.*data\/universe/m);
   assert.match(showcase, /if \(demoEnabled\) await applyLocalRecords\(\);\s*else \{\s*setRecords\(\[\]\)/);
   assert.doesNotMatch(community, /^import .*demoUniverseOwners.*data\/universe/m);
@@ -42,6 +46,8 @@ test("production routes never substitute local demonstration data", () => {
   assert.doesNotMatch(featured, /^import .*featuredColumns.*data\/featuredColumns/m);
   assert.match(featured, /const \[columns, setColumns\] = useState\(\[\]\)/);
   assert.match(featured, /setSyncError\("精选专栏加载失败，请检查服务器连接。"\)/);
+  assert.match(heroArt, /from "@demo-data"/);
+  assert.doesNotMatch(heroArt, /data\/anime\.js/);
   assert.match(viteConfig, /mode === "development"[\s\S]*demoData\.development\.js[\s\S]*demoData\.production\.js/);
   assert.match(viteConfig, /"@demo-data": demoDataModule/);
   assert.match(productionDemoData, /export const demoEnabled = false/);

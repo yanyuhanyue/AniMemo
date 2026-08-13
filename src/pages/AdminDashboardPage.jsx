@@ -5,6 +5,7 @@ import { Icon } from "../components/Icon.jsx";
 import { PluginManagementPanel } from "../components/admin/PluginManagementPanel.jsx";
 import { AdminResourcePanel, AdminSystemPanel } from "../components/admin/AdminControlPanels.jsx";
 import { AdminMediaStoragePanel } from "../components/admin/AdminMediaStoragePanel.jsx";
+import { AdminExternalServicesPanel } from "../components/admin/AdminExternalServicesPanel.jsx";
 import { AdminUpdatePanel } from "../components/admin/AdminUpdatePanel.jsx";
 import { TagManagementPanel } from "../components/admin/TagManagementPanel.jsx";
 import { api, authApi, clearTokens, getStoredTokens, readableApiError } from "../lib/api.js";
@@ -30,7 +31,7 @@ const EMPTY_SITE_SETTINGS = {
   site_avatar_url: "/assets/avatar.png",
   homepage_description: "",
   universe_description: "",
-  social_handle: "X: @ANIME_JOURNAL",
+  social_handle: "X: @ANIMEMO",
   registration_enabled: true,
   email_delivery_enabled: true,
   email_sender_name: "",
@@ -57,6 +58,7 @@ const tabs = [
   ["storage", "媒体存储", "upload", "superuser"],
   ["tags", "标签管理", "tags", "manage_system"],
   ["plugins", "插件中心", "puzzle", "manage_system"],
+  ["services", "外部服务", "link", "manage_system"],
   ["settings", "站点设置", "gear", "manage_system"],
 ];
 
@@ -73,6 +75,7 @@ const tabMeta = {
   storage: { kicker: "MEDIA STORAGE POOL", title: "媒体存储", description: "管理 R2 与本地媒体后端、写入优先级和容量保护。" },
   tags: { kicker: "TAG DIRECTORY", title: "标签管理", description: "统一维护公共标签、默认颜色与快捷预设。" },
   plugins: { kicker: "PLUGIN CONTROL", title: "插件中心", description: "检查插件兼容性、运行状态和受控部署配置。" },
+  services: { kicker: "EXTERNAL SERVICES", title: "外部服务", description: "管理 Bangumi 等第三方应用的授权配置与可用状态。" },
   settings: { kicker: "SITE SETTINGS", title: "站点设置", description: "管理公共品牌资料、邮件服务与媒体安全策略。" },
 };
 
@@ -281,7 +284,7 @@ export function AdminDashboardPage() {
     setSiteSettingsDraft(normalized);
     setSiteAvatarPreview(normalized.site_avatar_url || EMPTY_SITE_SETTINGS.site_avatar_url);
     setSiteAvatarFile(null);
-    window.dispatchEvent(new CustomEvent("anime-journal:site-settings-updated"));
+    window.dispatchEvent(new CustomEvent("animemo:site-settings-updated"));
     return normalized;
   };
 
@@ -445,6 +448,7 @@ export function AdminDashboardPage() {
               {tab === "storage" && <AdminMediaStoragePanel viewer={data.viewer} onNotice={flash} onError={setError} />}
               {tab === "tags" && <TagManagementPanel onNotice={flash} onError={setError} />}
               {tab === "plugins" && <PluginManagementPanel onNotice={flash} />}
+              {tab === "services" && <AdminExternalServicesPanel onNotice={flash} onError={setError} />}
               {tab === "settings" && <SiteSettingsPanel settings={siteSettings} draft={siteSettingsDraft} loading={siteSettingsLoading} saving={siteSettingsSaving} avatarPreview={siteAvatarPreview} emailTestRecipient={emailTestRecipient} emailTesting={emailTesting} onChange={updateSiteSettingsDraft} onAvatarChange={setSiteAvatarFile} onEmailTestRecipientChange={setEmailTestRecipient} onTestEmail={testActivationEmail} onReload={loadSiteSettings} onSubmit={saveSiteSettings} />}
             </>}
           </div>

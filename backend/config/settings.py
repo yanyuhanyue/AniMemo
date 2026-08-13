@@ -48,6 +48,8 @@ def _validate_origin(value, *, setting_name, production):
     parsed = urlsplit(origin)
     if not parsed.scheme or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ImproperlyConfigured(f"{setting_name} 包含非法来源：{value}")
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise ImproperlyConfigured(f"{setting_name} 仅支持 HTTP 或 HTTPS 来源：{value}")
     if parsed.path not in {"", "/"}:
         raise ImproperlyConfigured(f"{setting_name} 只能配置 origin，不能包含路径：{value}")
     try:
@@ -77,26 +79,26 @@ def _validate_cookie_domain(value, *, setting_name, production):
     return domain
 
 
-BUILD_STATIC = env_bool("ANIME_JOURNAL_BUILD_STATIC", False)
+BUILD_STATIC = env_bool("ANIMEMO_BUILD_STATIC", False)
 DEBUG = env_bool("DEBUG", BUILD_STATIC)
 
-ANIME_JOURNAL_VERSION = os.getenv("ANIME_JOURNAL_VERSION", "0.0.0")
-ANIME_JOURNAL_COMMIT = os.getenv("ANIME_JOURNAL_COMMIT", "unknown")
-ANIME_JOURNAL_RELEASE_CHANNEL = os.getenv("ANIME_JOURNAL_RELEASE_CHANNEL", "development")
-ANIME_JOURNAL_ARTIFACT_VERSION = os.getenv(
-    "ANIME_JOURNAL_ARTIFACT_VERSION", ANIME_JOURNAL_VERSION
+ANIMEMO_VERSION = os.getenv("ANIMEMO_VERSION", "0.0.0")
+ANIMEMO_COMMIT = os.getenv("ANIMEMO_COMMIT", "unknown")
+ANIMEMO_RELEASE_CHANNEL = os.getenv("ANIMEMO_RELEASE_CHANNEL", "development")
+ANIMEMO_ARTIFACT_VERSION = os.getenv(
+    "ANIMEMO_ARTIFACT_VERSION", ANIMEMO_VERSION
 )
-ANIME_JOURNAL_ARTIFACT_COMMIT = os.getenv(
-    "ANIME_JOURNAL_ARTIFACT_COMMIT", ANIME_JOURNAL_COMMIT
+ANIMEMO_ARTIFACT_COMMIT = os.getenv(
+    "ANIMEMO_ARTIFACT_COMMIT", ANIMEMO_COMMIT
 )
-ANIME_JOURNAL_ARTIFACT_CHANNEL = os.getenv(
-    "ANIME_JOURNAL_ARTIFACT_CHANNEL", ANIME_JOURNAL_RELEASE_CHANNEL
+ANIMEMO_ARTIFACT_CHANNEL = os.getenv(
+    "ANIMEMO_ARTIFACT_CHANNEL", ANIMEMO_RELEASE_CHANNEL
 )
-ANIME_JOURNAL_DATABASE_CONTRACT = os.getenv(
-    "ANIME_JOURNAL_DATABASE_CONTRACT", "animemo-db-v1"
+ANIMEMO_DATABASE_CONTRACT = os.getenv(
+    "ANIMEMO_DATABASE_CONTRACT", "animemo-db-v1"
 )
-ANIME_JOURNAL_CONFIGURATION_CONTRACT = os.getenv(
-    "ANIME_JOURNAL_CONFIGURATION_CONTRACT", "animemo-config-v1"
+ANIMEMO_CONFIGURATION_CONTRACT = os.getenv(
+    "ANIMEMO_CONFIGURATION_CONTRACT", "animemo-config-v1"
 )
 ANIMEMO_UPDATER_SOCKET = os.getenv("ANIMEMO_UPDATER_SOCKET", "/run/animemo-updater/updater.sock")
 ANIMEMO_UPDATER_TIMEOUT_SECONDS = float(os.getenv("ANIMEMO_UPDATER_TIMEOUT_SECONDS", "10"))
@@ -228,7 +230,7 @@ UNSAFE_SECRET_KEYS = {
     "change-me",
 }
 if DEBUG:
-    SECRET_KEY = raw_secret_key or "anime-journal-local-development-only-secret-key"
+    SECRET_KEY = raw_secret_key or "animemo-local-development-only-secret-key"
 elif raw_secret_key in UNSAFE_SECRET_KEYS or len(raw_secret_key) < 50:
     raise ImproperlyConfigured("生产环境必须配置至少 50 个字符的随机 DJANGO_SECRET_KEY。")
 else:
@@ -253,6 +255,25 @@ if not DEBUG:
     except (UnicodeEncodeError, ValueError) as error:
         raise ImproperlyConfigured("CREDENTIAL_ENCRYPTION_KEY 必须是合法的 Fernet key。") from error
 CREDENTIAL_ENCRYPTION_KEY = raw_credential_key or _development_credential_key
+ANIMEMO_PUBLIC_ORIGIN = _validate_origin(
+    os.getenv(
+        "ANIMEMO_PUBLIC_ORIGIN",
+        "http://localhost:5173" if DEBUG else "https://animemo.cc",
+    ),
+    setting_name="ANIMEMO_PUBLIC_ORIGIN",
+    production=not DEBUG,
+)
+ANIMEMO_MEDIA_PUBLIC_ORIGIN = _validate_origin(
+    os.getenv(
+        "ANIMEMO_MEDIA_PUBLIC_ORIGIN",
+        "http://localhost:8000" if DEBUG else "https://media.animemo.cc",
+    ),
+    setting_name="ANIMEMO_MEDIA_PUBLIC_ORIGIN",
+    production=not DEBUG,
+)
+_public_origin_host = (urlsplit(ANIMEMO_PUBLIC_ORIGIN).hostname or "").lower()
+_public_origin_netloc = urlsplit(ANIMEMO_PUBLIC_ORIGIN).netloc
+_public_websocket_scheme = "wss" if ANIMEMO_PUBLIC_ORIGIN.startswith("https://") else "ws"
 ALLOWED_HOSTS = env_list("ALLOWED_HOSTS", "localhost,127.0.0.1" if DEBUG else "")
 if not DEBUG and not ALLOWED_HOSTS:
     raise ImproperlyConfigured("生产环境必须显式配置 ALLOWED_HOSTS。")
@@ -267,6 +288,8 @@ if not DEBUG:
             or normalized_host.startswith("127.")
         ):
             raise ImproperlyConfigured(f"ALLOWED_HOSTS 包含不安全主机：{configured_host}")
+    if _public_origin_host not in {host.lstrip(".").lower() for host in ALLOWED_HOSTS}:
+        raise ImproperlyConfigured("ALLOWED_HOSTS 必须包含 ANIMEMO_PUBLIC_ORIGIN 的主机。")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -482,7 +505,7 @@ REST_FRAMEWORK = {
 SPECTACULAR_SETTINGS = {
     "TITLE": "AniMemo API",
     "DESCRIPTION": "AniMemo Core API v1 与独立冻结的 Integration Protocol v1。旧 /api/ Core 路径仅用于兼容，不进入正式 schema。",
-    "VERSION": ANIME_JOURNAL_VERSION,
+    "VERSION": ANIMEMO_VERSION,
     "SERVE_INCLUDE_SCHEMA": False,
     "SERVE_PERMISSIONS": ["rest_framework.permissions.AllowAny"],
     "SCHEMA_PATH_PREFIX": r"/api",
@@ -506,7 +529,7 @@ SPECTACULAR_SETTINGS = {
             "refreshCookie": {
                 "type": "apiKey",
                 "in": "cookie",
-                "name": os.getenv("REFRESH_COOKIE_NAME", "anime_journal_refresh"),
+                "name": os.getenv("REFRESH_COOKIE_NAME", "animemo_refresh"),
                 "description": "refresh token 仅通过 HttpOnly Cookie 传递。",
             },
         },
@@ -556,12 +579,17 @@ CSRF_TRUSTED_ORIGINS = [
     _validate_origin(value, setting_name="CSRF_TRUSTED_ORIGINS", production=not DEBUG)
     for value in _raw_csrf_origins
 ]
+if not DEBUG:
+    if ANIMEMO_PUBLIC_ORIGIN not in CORS_ALLOWED_ORIGINS:
+        raise ImproperlyConfigured("CORS_ALLOWED_ORIGINS 必须包含 ANIMEMO_PUBLIC_ORIGIN。")
+    if ANIMEMO_PUBLIC_ORIGIN not in CSRF_TRUSTED_ORIGINS:
+        raise ImproperlyConfigured("CSRF_TRUSTED_ORIGINS 必须包含 ANIMEMO_PUBLIC_ORIGIN。")
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_ORIGINS = False
 
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 AUTH_THROTTLE_CACHE_ALIAS = "default"
-AUTH_THROTTLE_KEY_PREFIX = os.getenv("AUTH_THROTTLE_KEY_PREFIX", "anime-journal:auth-throttle")
+AUTH_THROTTLE_KEY_PREFIX = os.getenv("AUTH_THROTTLE_KEY_PREFIX", "animemo:auth-throttle")
 AUTH_THROTTLE_FAIL_CLOSED = not DEBUG
 if REDIS_URL:
     CACHES = {
@@ -569,14 +597,14 @@ if REDIS_URL:
             "BACKEND": "django_redis.cache.RedisCache",
             "LOCATION": REDIS_URL,
             "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
-            "KEY_PREFIX": "anime-journal",
+            "KEY_PREFIX": "animemo",
         }
     }
 elif DEBUG or "test" in sys.argv:
     CACHES = {
         "default": {
             "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-            "LOCATION": "anime-journal-development",
+            "LOCATION": "animemo-development",
         }
     }
 else:
@@ -595,7 +623,7 @@ for configured_proxy in TRUSTED_PROXY_IPS:
     if not DEBUG and str(configured_network) in {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}:
         raise ImproperlyConfigured(f"TRUSTED_PROXY_IPS 网段过于宽泛：{configured_network}")
 
-REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "anime_journal_refresh")
+REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "animemo_refresh")
 REFRESH_COOKIE_PATH = os.getenv("REFRESH_COOKIE_PATH", "/api/")
 if not REFRESH_COOKIE_PATH.startswith("/"):
     raise ImproperlyConfigured("REFRESH_COOKIE_PATH 必须以 / 开头。")
@@ -620,11 +648,8 @@ CSRF_COOKIE_SAMESITE = env_cookie_samesite("CSRF_COOKIE_SAMESITE", "Lax")
 REFRESH_COOKIE_SECURE = env_bool("REFRESH_COOKIE_SECURE", not DEBUG)
 ADMIN_LOGIN_PATH = os.getenv("ADMIN_LOGIN_PATH", "/admin-login")
 
-_raw_frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173" if DEBUG else "").strip()
-if not _raw_frontend_url:
-    raise ImproperlyConfigured("生产环境必须显式配置 FRONTEND_URL。")
-FRONTEND_URL = _validate_origin(_raw_frontend_url, setting_name="FRONTEND_URL", production=not DEBUG)
-BANGUMI_USER_AGENT = os.getenv("BANGUMI_USER_AGENT", "AniMemo/1.0 (+https://re-anime.cc)")
+FRONTEND_URL = ANIMEMO_PUBLIC_ORIGIN
+BANGUMI_USER_AGENT = f"AniMemo/1.0 (+{ANIMEMO_PUBLIC_ORIGIN})"
 BANGUMI_IMAGE_PROXY_BASE_URL = os.getenv(
     "BANGUMI_IMAGE_PROXY_BASE_URL",
     "",
@@ -632,7 +657,9 @@ BANGUMI_IMAGE_PROXY_BASE_URL = os.getenv(
 BANGUMI_ACCOUNT_INTEGRATION_ENABLED = env_bool("BANGUMI_ACCOUNT_INTEGRATION_ENABLED", True)
 BANGUMI_OAUTH_CLIENT_ID = os.getenv("BANGUMI_OAUTH_CLIENT_ID", "").strip()
 BANGUMI_OAUTH_CLIENT_SECRET = os.getenv("BANGUMI_OAUTH_CLIENT_SECRET", "").strip()
-BANGUMI_OAUTH_REDIRECT_URI = os.getenv("BANGUMI_OAUTH_REDIRECT_URI", "").strip()
+BANGUMI_OAUTH_REDIRECT_URI = (
+    f"{ANIMEMO_PUBLIC_ORIGIN}/api/v1/external-accounts/bangumi/callback/"
+)
 BANGUMI_IMPORT_MAX_ITEMS = int(os.getenv("BANGUMI_IMPORT_MAX_ITEMS", "1000"))
 EXTERNAL_ACCOUNT_OAUTH_STATE_TTL_SECONDS = int(os.getenv("EXTERNAL_ACCOUNT_OAUTH_STATE_TTL_SECONDS", "600"))
 EXTERNAL_IMPORT_PREVIEW_TTL_SECONDS = int(os.getenv("EXTERNAL_IMPORT_PREVIEW_TTL_SECONDS", "1200"))
@@ -646,16 +673,6 @@ if min(
     raise ImproperlyConfigured("外部账号连接与导入限制必须为正整数。")
 if EXTERNAL_IMPORT_APPLY_MAX_ITEMS > BANGUMI_IMPORT_MAX_ITEMS:
     raise ImproperlyConfigured("EXTERNAL_IMPORT_APPLY_MAX_ITEMS 不能超过 provider 导入上限。")
-if BANGUMI_OAUTH_REDIRECT_URI:
-    _bangumi_redirect = urlsplit(BANGUMI_OAUTH_REDIRECT_URI)
-    if (
-        _bangumi_redirect.scheme not in ({"http", "https"} if DEBUG else {"https"})
-        or not _bangumi_redirect.hostname
-        or _bangumi_redirect.username
-        or _bangumi_redirect.password
-        or _bangumi_redirect.fragment
-    ):
-        raise ImproperlyConfigured("BANGUMI_OAUTH_REDIRECT_URI 必须是固定且安全的回调 URL。")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "AniMemo <noreply@example.com>")
 TURNSTILE_SECRET = os.getenv("TURNSTILE_SECRET", "").strip()
@@ -704,7 +721,7 @@ _csp = (
     "style-src-attr 'unsafe-inline'; "
     "img-src 'self' data: blob: https:; "
     "font-src 'self' data:; "
-    "connect-src 'self' https://api.bgm.tv wss://re-anime.cc; "
+    f"connect-src 'self' https://api.bgm.tv {_public_websocket_scheme}://{_public_origin_netloc}; "
     "frame-src https://challenges.cloudflare.com; "
     "worker-src 'self' blob:; "
     "object-src 'none'; "

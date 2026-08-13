@@ -1,8 +1,9 @@
 import { AUTH_ENDPOINTS, INSTALLATION_ENDPOINTS, withAntiAbuseChallenge } from "./apiCore.js";
 
 
-const LEGACY_ACCESS_KEY = "anime_journal_access";
-const LEGACY_REFRESH_KEY = "anime_journal_refresh";
+// Security denylist: remove obsolete browser-stored tokens without accepting them.
+const INSECURE_LEGACY_ACCESS_KEY = "anime_journal_access";
+const INSECURE_LEGACY_REFRESH_KEY = "anime_journal_refresh";
 
 export function createWebAuthAdapter({ api, cookieClient, session, browser = null } = {}) {
   let csrfToken = null;
@@ -10,8 +11,8 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
 
   function scrubLegacyTokens() {
     for (const storage of [browser?.localStorage, browser?.sessionStorage]) {
-      storage?.removeItem(LEGACY_ACCESS_KEY);
-      storage?.removeItem(LEGACY_REFRESH_KEY);
+      storage?.removeItem(INSECURE_LEGACY_ACCESS_KEY);
+      storage?.removeItem(INSECURE_LEGACY_REFRESH_KEY);
     }
   }
 

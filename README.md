@@ -26,7 +26,7 @@ AniMemo 自有源代码采用 PolyForm Noncommercial License 1.0.0；这是一�
 ## 目录
 
 ```text
-anime-journal/
+animemo/
 ├─ src/                 React 页面、组件与样式
 ├─ public/assets/       本地演示图片
 ├─ backend/             Django 项目与 journal API
@@ -112,7 +112,7 @@ npm run test:plugins
 
 正式拓扑为：Cloudflare → Nginx/OpenResty → React 静态站点与 Django API → PostgreSQL/Redis；媒体后端由 Superuser 在“媒体存储”页面配置，可按优先级使用多个 Cloudflare R2 与固定根目录下的 Local Server Storage，插件包写入持久化插件卷。复制 [`.env.production.example`](.env.production.example) 为 `.env.production`，替换所有 placeholder，并确保 `POSTGRES_PASSWORD` 与 `DATABASE_URL` 中的密码完全一致。
 
-生产环境强制要求 `DEBUG=false`、PostgreSQL、共享 Redis、独立 `CREDENTIAL_ENCRYPTION_KEY`、HTTPS `FRONTEND_URL`、精确的 CORS/CSRF 来源、至少 50 个字符的随机 `DJANGO_SECRET_KEY`，以及显式的可信代理网段。Compose 内部 PostgreSQL 使用私有 Docker 网络，因此模板设置 `DATABASE_SSL_REQUIRE=false`；连接要求 TLS 的外部 PostgreSQL 时必须改为 `true`。媒体存储由 Superuser 登录后在“媒体存储”页面创建；尚未配置时网站仍可启动，但媒体上传会返回 `MEDIA_STORAGE_SETUP_REQUIRED`。
+生产环境强制要求 `DEBUG=false`、PostgreSQL、共享 Redis、独立 `CREDENTIAL_ENCRYPTION_KEY`、HTTPS `ANIMEMO_PUBLIC_ORIGIN`、精确的 CORS/CSRF 来源、至少 50 个字符的随机 `DJANGO_SECRET_KEY`，以及显式的可信代理网段。Compose 内部 PostgreSQL 使用私有 Docker 网络，因此模板设置 `DATABASE_SSL_REQUIRE=false`；连接要求 TLS 的外部 PostgreSQL 时必须改为 `true`。媒体存储由 Superuser 登录后在“媒体存储”页面创建；尚未配置时网站仍可启动，但媒体上传会返回 `MEDIA_STORAGE_SETUP_REQUIRED`。
 
 生成凭证主密钥：
 
@@ -123,7 +123,7 @@ print(Fernet.generate_key().decode())
 PY
 ```
 
-默认生产拓扑是同源部署，例如站点与 API 都由 `https://app.example.com` 提供，前端通过 `/api` 访问 Django。此时使用 `ALLOWED_HOSTS=app.example.com`，并将 `FRONTEND_URL`、CORS 与 CSRF origin 都设为 `https://app.example.com`。`www` 主机默认不加入 Django，应由外层代理明确重定向到主域名。Cookie 使用：
+当前 canonical public origin 为 `https://animemo.cc`，media origin 为 `https://media.animemo.cc`；前端通过同源 `/api` 访问 Django。生产配置使用 `ALLOWED_HOSTS=animemo.cc`，并将 `ANIMEMO_PUBLIC_ORIGIN`、CORS 与 CSRF origin 都设为 `https://animemo.cc`。`www.animemo.cc` 不加入 Django，由 OpenResty 明确 301 到主域名。Cookie 使用：
 
 ```env
 SESSION_COOKIE_SAMESITE=Lax
@@ -147,8 +147,8 @@ cp .env.production.example .env.production
 ```bash
 sudo sh deploy/deploy.sh \
   --bootstrap \
-  --archive /tmp/anime-journal-core-<stamp>.zip \
-  --sha256 /tmp/anime-journal-core-<stamp>.sha256
+  --archive /tmp/animemo-core-<stamp>.zip \
+  --sha256 /tmp/animemo-core-<stamp>.sha256
 ```
 
 Update Agent 不可用且完成了人工审批时，才允许 break-glass：
@@ -156,13 +156,13 @@ Update Agent 不可用且完成了人工审批时，才允许 break-glass：
 ```bash
 sudo sh deploy/deploy.sh \
   --break-glass \
-  --archive /tmp/anime-journal-core-<stamp>.zip \
-  --sha256 /tmp/anime-journal-core-<stamp>.sha256
+  --archive /tmp/animemo-core-<stamp>.zip \
+  --sha256 /tmp/animemo-core-<stamp>.sha256
 ```
 
 只有明确要清空本网站数据时才允许在 bootstrap 模式增加 `--reset-data --yes`；脚本只操作经校验的 AniMemo 数据根目录，绝不执行全局 `docker system prune`、`docker volume prune` 或其他 Compose 项目的 `down`。真实环境的 OpenResty 配置也只写入显式的单站点配置，可用 `--skip-openresty` 做本地或非 1Panel 验证。
 
-迁移与 bootstrap 完成后，一次性初始化码只写入 `${ANIME_JOURNAL_DATA_ROOT}/private/setup-code`（目录 `0700`、文件 `0600`），不会出现在日志、API 或构建产物。操作者读取该文件后访问 `/setup` 创建首位管理员；成功后文件立即删除，入口由数据库状态永久锁定。完整生命周期与故障恢复见 [`首次运行引导`](docs/first-run-bootstrap.md)。
+迁移与 bootstrap 完成后，一次性初始化码只写入 `${ANIMEMO_DATA_ROOT}/private/setup-code`（目录 `0700`、文件 `0600`），不会出现在日志、API 或构建产物。操作者读取该文件后访问 `/setup` 创建首位管理员；成功后文件立即删除，入口由数据库状态永久锁定。完整生命周期与故障恢复见 [`首次运行引导`](docs/first-run-bootstrap.md)。
 
 构建前端执行 `npm run build`，输出目录为 `dist/client`。生产镜像构建会从 `.env.production` 将公开的 `VITE_TURNSTILE_SITE_KEY` 作为 build arg 传入 Vite；后端 `TURNSTILE_SECRET` 不会传入前端构建。Smoke Test 会严格检查健康接口为 HTTP 200 且 JSON `status` 为 `ok`，再检查四个容器健康状态、Host 转发、PostgreSQL/Redis 连接，以及 Local 文件 `0644`、目录 `0755`、Nginx `/local-media/` 读取和清理。
 

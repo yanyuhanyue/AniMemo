@@ -45,8 +45,8 @@ class FirstRunCiClientTests(unittest.TestCase):
 
         invalid_targets = (
             ("http://127.0.0.1:8088", "ci.example.test", False),
-            ("https://re-anime.cc", "ci.example.test", True),
-            ("http://127.0.0.1:8088", "re-anime.cc", True),
+            ("https://animemo.cc", "ci.example.test", True),
+            ("http://127.0.0.1:8088", "animemo.cc", True),
             ("http://127.0.0.1:8088/path", "ci.example.test", True),
         )
         for base_url, host, confirmed in invalid_targets:

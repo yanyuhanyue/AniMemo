@@ -14,11 +14,11 @@ services:
     env_file: !override
       - ${STATEFUL_UPGRADE_ENV_FILE:?STATEFUL_UPGRADE_ENV_FILE is required}
     volumes: !override
-      - ${ANIME_JOURNAL_DATA_ROOT:?ANIME_JOURNAL_DATA_ROOT is required}/plugins:/app/runtime/plugins
-      - ${ANIME_JOURNAL_DATA_ROOT}/logs:/app/logs
-      - ${ANIME_JOURNAL_DATA_ROOT}/backups:/app/backups
-      - ${ANIME_JOURNAL_DATA_ROOT}/media:/data/anime-journal/media
-      - ${ANIME_JOURNAL_DATA_ROOT}/private:/app/runtime/private
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/plugins:/app/runtime/plugins
+      - ${ANIMEMO_DATA_ROOT}/logs:/app/logs
+      - ${ANIMEMO_DATA_ROOT}/backups:/app/backups
+      - ${ANIMEMO_DATA_ROOT}/media:/data/animemo/media
+      - ${ANIMEMO_DATA_ROOT}/private:/app/runtime/private
       - ${STATEFUL_UPGRADE_HELPER_ROOT:?STATEFUL_UPGRADE_HELPER_ROOT is required}/scripts:/app/ci-scripts:ro
       - ${STATEFUL_UPGRADE_META_ROOT:?STATEFUL_UPGRADE_META_ROOT is required}:/app/ci-meta
     networks: !override
@@ -31,11 +31,11 @@ services:
     env_file: !override
       - ${STATEFUL_UPGRADE_ENV_FILE:?STATEFUL_UPGRADE_ENV_FILE is required}
     volumes: !override
-      - ${ANIME_JOURNAL_DATA_ROOT:?ANIME_JOURNAL_DATA_ROOT is required}/plugins:/app/runtime/plugins
-      - ${ANIME_JOURNAL_DATA_ROOT}/logs:/app/logs
-      - ${ANIME_JOURNAL_DATA_ROOT}/backups:/app/backups
-      - ${ANIME_JOURNAL_DATA_ROOT}/media:/data/anime-journal/media
-      - ${ANIME_JOURNAL_DATA_ROOT}/private:/app/runtime/private
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/plugins:/app/runtime/plugins
+      - ${ANIMEMO_DATA_ROOT}/logs:/app/logs
+      - ${ANIMEMO_DATA_ROOT}/backups:/app/backups
+      - ${ANIMEMO_DATA_ROOT}/media:/data/animemo/media
+      - ${ANIMEMO_DATA_ROOT}/private:/app/runtime/private
       - ${STATEFUL_UPGRADE_HELPER_ROOT:?STATEFUL_UPGRADE_HELPER_ROOT is required}/scripts:/app/ci-scripts:ro
       - ${STATEFUL_UPGRADE_META_ROOT:?STATEFUL_UPGRADE_META_ROOT is required}:/app/ci-meta
     networks: !override
@@ -47,11 +47,11 @@ services:
     env_file: !override
       - ${STATEFUL_UPGRADE_ENV_FILE:?STATEFUL_UPGRADE_ENV_FILE is required}
     volumes: !override
-      - ${ANIME_JOURNAL_DATA_ROOT:?ANIME_JOURNAL_DATA_ROOT is required}/plugins:/app/runtime/plugins
-      - ${ANIME_JOURNAL_DATA_ROOT}/logs:/app/logs
-      - ${ANIME_JOURNAL_DATA_ROOT}/backups:/app/backups
-      - ${ANIME_JOURNAL_DATA_ROOT}/media:/data/anime-journal/media
-      - ${ANIME_JOURNAL_DATA_ROOT}/private:/app/runtime/private
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/plugins:/app/runtime/plugins
+      - ${ANIMEMO_DATA_ROOT}/logs:/app/logs
+      - ${ANIMEMO_DATA_ROOT}/backups:/app/backups
+      - ${ANIMEMO_DATA_ROOT}/media:/data/animemo/media
+      - ${ANIMEMO_DATA_ROOT}/private:/app/runtime/private
     networks: !override
       - upgrade-gate
 
@@ -61,6 +61,6 @@ services:
       - upgrade-gate
 
 networks:
-  anime-journal: !reset null
+  animemo: !reset null
   upgrade-gate:
     name: ${COMPOSE_PROJECT_NAME}-network

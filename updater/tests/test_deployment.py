@@ -118,7 +118,7 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
         (app / "deploy").mkdir(parents=True)
         (app / "deploy" / "docker-compose.yml").write_bytes(TEST_COMPOSE_BYTES)
         (app / ".env.production").write_text(
-            "POSTGRES_USER=anime_journal\nPOSTGRES_DB=anime_journal\nFRONTEND_URL=https://ci.example.test\n",
+            "POSTGRES_USER=animemo\nPOSTGRES_DB=animemo\nANIMEMO_PUBLIC_ORIGIN=https://ci.example.test\n",
             encoding="utf-8",
         )
         for name in ["backups", "plugins", "logs", "media"]:

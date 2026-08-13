@@ -46,13 +46,13 @@ export function ColumnSubmitPage() {
     setLoading(true);
     try {
       const { access } = getStoredTokens();
-      const demoMode = demoEnabled && localStorage.getItem("anime_journal_demo") === "true";
+      const demoMode = demoEnabled && localStorage.getItem("animemo_demo") === "true";
       if (access && !demoMode) {
         const { data } = await api.post("columns/", form);
         await api.post(`columns/${data.id}/submit/`);
       } else if (demoEnabled) {
-        const drafts = JSON.parse(localStorage.getItem("anime_journal_column_drafts") || "[]");
-        localStorage.setItem("anime_journal_column_drafts", JSON.stringify([{ ...form, id: Date.now(), status: "pending" }, ...drafts]));
+        const drafts = JSON.parse(localStorage.getItem("animemo_column_drafts") || "[]");
+        localStorage.setItem("animemo_column_drafts", JSON.stringify([{ ...form, id: Date.now(), status: "pending" }, ...drafts]));
       } else {
         setMessage("请先登录后再提交专栏。");
         navigate("/login", { state: { from: "/featured/submit" } });

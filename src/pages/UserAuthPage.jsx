@@ -232,7 +232,7 @@ export function UserAuthPage() {
       if (demoEnabled && !requestError.response && mode !== "login") {
         setMessage(getDemoAuthMessage(mode));
       } else if (demoEnabled && !requestError.response && mode === "login" && form.account && form.password) {
-        localStorage.setItem("anime_journal_demo", "true");
+        localStorage.setItem("animemo_demo", "true");
         navigate("/dashboard", { replace: true });
       } else {
         setError(readableApiError(requestError, "请求失败，请稍后重试。"));

@@ -1,5 +1,7 @@
-import uuid
+import ipaddress
 import secrets
+import uuid
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -10,7 +12,15 @@ from .storage_units import BINARY_GIB_BYTES, DECIMAL_GB_BYTES
 
 
 def default_trusted_poster_hosts():
-    return ["lain.bgm.tv", "img.re-anime.cc", "re-anime.cc"]
+    hosts = ["lain.bgm.tv"]
+    hostname = (urlsplit(settings.ANIMEMO_MEDIA_PUBLIC_ORIGIN).hostname or "").lower()
+    try:
+        is_loopback = ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        is_loopback = hostname == "localhost"
+    if hostname and not is_loopback:
+        hosts.append(hostname)
+    return hosts
 
 
 def site_avatar_upload_to(_instance, filename):

@@ -2,9 +2,9 @@ import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { DEFAULT_POSTER } from "../lib/demoMedia.js";
 import { selectDailyHeroPosters } from "../lib/heroArtSelector.js";
-import { animeRecords } from "../data/anime.js";
+import { demoAnimeRecords } from "@demo-data";
 
-const [dailyPoster] = selectDailyHeroPosters(animeRecords, { domain: "universe" });
+const [dailyPoster] = selectDailyHeroPosters(demoAnimeRecords, { domain: "universe" });
 const HERO_ART = [
   { className: "one", src: "/assets/avatar.png", drift: 10, duration: 2.8 },
   { className: "two", src: dailyPoster, drift: -8, duration: 3.25 },

@@ -15,7 +15,7 @@ R2 thresholds use decimal GB (`1 GB = 1,000,000,000 bytes`). Local disk reserves
 For periodic external usage refresh, run the built-in command from a host scheduler every 30–60 minutes as appropriate for the deployment. On the production VPS, invoke it through the API container from the real Compose working directory:
 
 ```bash
-cd /opt/1panel/docker/compose/anime-journal/app
+cd /opt/1panel/docker/compose/animemo/app
 docker compose --env-file .env.production -f deploy/docker-compose.yml \
   exec -T api python manage.py refresh_media_storage_usage
 ```

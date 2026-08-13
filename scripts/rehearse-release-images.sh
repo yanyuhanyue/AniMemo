@@ -74,14 +74,14 @@ cat > "$ENV_FILE" <<EOF
 DEBUG=false
 DJANGO_SECRET_KEY=ci-only-release-rehearsal-key-012345678901234567890123456789012345678901
 CREDENTIAL_ENCRYPTION_KEY=a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
-POSTGRES_DB=anime_journal
-POSTGRES_USER=anime_journal
+POSTGRES_DB=animemo
+POSTGRES_USER=animemo
 POSTGRES_PASSWORD=ci-release-rehearsal-password
-DATABASE_URL=postgresql://anime_journal:ci-release-rehearsal-password@postgres:5432/anime_journal
+DATABASE_URL=postgresql://animemo:ci-release-rehearsal-password@postgres:5432/animemo
 DATABASE_SSL_REQUIRE=false
 REDIS_URL=redis://redis:6379/0
 ALLOWED_HOSTS=release-rehearsal.example.test
-FRONTEND_URL=https://release-rehearsal.example.test
+ANIMEMO_PUBLIC_ORIGIN=https://release-rehearsal.example.test
 CORS_ALLOWED_ORIGINS=https://release-rehearsal.example.test
 CSRF_TRUSTED_ORIGINS=https://release-rehearsal.example.test
 TRUSTED_PROXY_IPS=172.16.0.0/12
@@ -92,8 +92,8 @@ SESSION_COOKIE_SECURE=false
 CSRF_COOKIE_SECURE=false
 REFRESH_COOKIE_SECURE=false
 ALLOW_INSECURE_PRODUCTION_COOKIES=true
-ANIME_JOURNAL_PORT=18088
-ANIME_JOURNAL_DATA_ROOT=$DATA_ROOT
+ANIMEMO_PORT=18088
+ANIMEMO_DATA_ROOT=$DATA_ROOT
 ANIMEMO_API_IMAGE=$API_IMAGE
 ANIMEMO_WEB_IMAGE=$WEB_IMAGE
 ANIMEMO_RELEASE_VERSION=$VERSION
@@ -107,7 +107,7 @@ STATEFUL_UPGRADE_META_ROOT=$META_ROOT
 EOF
 chmod 600 "$ENV_FILE"
 
-export ANIME_JOURNAL_DATA_ROOT="$DATA_ROOT"
+export ANIMEMO_DATA_ROOT="$DATA_ROOT"
 export ANIMEMO_API_IMAGE="$API_IMAGE"
 export ANIMEMO_WEB_IMAGE="$WEB_IMAGE"
 export ANIMEMO_RELEASE_VERSION="$VERSION"

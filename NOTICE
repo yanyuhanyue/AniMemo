@@ -22,7 +22,7 @@ No legal rights-holder name is inferred or inserted by this notice. The reposito
 - `public/assets/avatar.png` is an AniMemo-created brand mascot/default avatar, and `public/assets/posters/poster-01.webp` is an AniMemo-created generic missing-cover fallback. These controlled assets are separate from the source-code license and are not anime artwork.
 - `public/assets/posters/poster-02.webp` through `poster-16.webp` were removed from the bundled repository assets. Real anime covers are resolved from Bangumi/provider identity and remain external media subject to their own source conditions; they are not relicensed by PolyForm.
 - The source-code license does not clear or grant rights in provenance-sensitive demo text, metadata, or external media in `src/data/anime.js` and related UI/demo data. Provider responses and other third-party content remain outside AniMemo licensing.
-- Stable technical identifiers containing `anime-journal`, including package IDs and module paths, are compatibility identifiers only. They are not statements of product provenance, affiliation, or legal ownership.
+- Before v1.0, current AniMemo-owned runtime, package, browser, deployment, release, and updater namespaces are normalized to `animemo`. Any remaining `anime-journal` identifiers are limited to immutable migration history, historical audit facts, security denylists, third-party identifiers, or an explicitly documented legacy-domain redirect; none states product provenance, affiliation, or legal ownership.
 - Names and marks are addressed separately in `TRADEMARKS`; no trademark permission should be inferred from the source-code license.
 
 This notice records repository boundaries and is not legal advice or a legal guarantee.

@@ -237,7 +237,7 @@ class ExternalAccountApiTests(APITestCase):
     @override_settings(
         BANGUMI_OAUTH_CLIENT_ID="client-id",
         BANGUMI_OAUTH_CLIENT_SECRET="client-secret",
-        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/external-accounts/bangumi/callback/",
+        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/v1/external-accounts/bangumi/callback/",
     )
     @patch("journal.external_accounts.providers.bangumi.BangumiAccountProvider.verify_account")
     @patch("journal.external_accounts.providers.bangumi.BangumiAccountProvider.refresh_oauth_token")
@@ -273,7 +273,7 @@ class ExternalAccountApiTests(APITestCase):
     @override_settings(
         BANGUMI_OAUTH_CLIENT_ID="client-id",
         BANGUMI_OAUTH_CLIENT_SECRET="client-secret",
-        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/external-accounts/bangumi/callback/",
+        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/v1/external-accounts/bangumi/callback/",
     )
     @patch("journal.external_accounts.providers.bangumi.BangumiAccountProvider.refresh_oauth_token")
     def test_expired_oauth_refresh_failure_persists_reauthorization(self, refresh):
@@ -301,7 +301,7 @@ class ExternalAccountApiTests(APITestCase):
     @override_settings(
         BANGUMI_OAUTH_CLIENT_ID="client-id",
         BANGUMI_OAUTH_CLIENT_SECRET="client-secret",
-        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/external-accounts/bangumi/callback/",
+        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/v1/external-accounts/bangumi/callback/",
     )
     def test_oauth_state_is_hashed_bound_single_use_and_callback_hides_code(self):
         authorize = self.client.post(reverse("external-account-authorize", kwargs={"provider": "bangumi"}), {}, format="json")
@@ -328,7 +328,7 @@ class ExternalAccountApiTests(APITestCase):
     @override_settings(
         BANGUMI_OAUTH_CLIENT_ID="client-id",
         BANGUMI_OAUTH_CLIENT_SECRET="client-secret",
-        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/external-accounts/bangumi/callback/",
+        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/v1/external-accounts/bangumi/callback/",
     )
     def test_oauth_states_are_random_and_expired_state_is_denied(self):
         first = self.client.post(reverse("external-account-authorize", kwargs={"provider": "bangumi"}), {}, format="json")

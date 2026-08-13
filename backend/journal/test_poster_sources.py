@@ -19,6 +19,7 @@ PNG_1X1 = base64.b64decode(
 )
 
 
+@override_settings(ANIMEMO_MEDIA_PUBLIC_ORIGIN="https://media.animemo.cc")
 class PosterSourceTests(APITestCase):
     def setUp(self):
         self.media = tempfile.TemporaryDirectory()
@@ -98,7 +99,7 @@ class PosterSourceTests(APITestCase):
         response = self.client.patch(
             reverse("entry-detail", kwargs={"pk": entry.pk}),
             {
-                "custom_poster_url": "https://img.re-anime.cc/posters/custom.jpg",
+                "custom_poster_url": "https://media.animemo.cc/posters/custom.jpg",
             },
             format="json",
         )
@@ -107,7 +108,7 @@ class PosterSourceTests(APITestCase):
         self.assertEqual(response.data["poster_source"], "trusted_url")
         self.assertEqual(
             response.data["poster"],
-            "https://img.re-anime.cc/posters/custom.jpg",
+            "https://media.animemo.cc/posters/custom.jpg",
         )
         entry.refresh_from_db()
         self.assertEqual(entry.poster_url, "https://lain.bgm.tv/pic/cover/l/default.jpg")
@@ -127,7 +128,7 @@ class PosterSourceTests(APITestCase):
 
         response = self.client.patch(
             reverse("entry-detail", kwargs={"pk": created.data["id"]}),
-            {"custom_poster_url": "https://img.re-anime.cc/posters/custom.webp"},
+            {"custom_poster_url": "https://media.animemo.cc/posters/custom.webp"},
             format="json",
         )
 

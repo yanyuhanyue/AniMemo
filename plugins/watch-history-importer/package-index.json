@@ -1,13 +1,13 @@
 {
   "packageVersion": 1,
-  "pluginId": "com.anime-journal.watch-history-importer",
+  "pluginId": "com.animemo.watch-history-importer",
   "slug": "watch-history-importer",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "files": [
     {
       "path": "backend/plugin.py",
-      "size": 26330,
-      "sha256": "8a5625c264448ada6996b68858a5dbc2738b29bf04d3ae6cc09c9f76d861b778"
+      "size": 26312,
+      "sha256": "3350acfb387c5bcfae3d1a7eb801ac72944d9e67a9575fda75d9a22879199420"
     },
     {
       "path": "backend/src/__init__.py",
@@ -15,17 +15,17 @@
       "sha256": "4c64d4c48900eb0bef4eb02ba3379bc48c698fc9c8f8e4fc9c9d24234c6f06a9"
     },
     {
-      "path": "backend/src/anime_journal_watch_history_importer/__init__.py",
+      "path": "backend/src/animemo_watch_history_importer/__init__.py",
       "size": 57,
       "sha256": "0cbbd09cc5deb53457480c27f237874d2a5cd72997b36bc57af06242dc1c6913"
     },
     {
-      "path": "backend/src/anime_journal_watch_history_importer/bangumi.py",
+      "path": "backend/src/animemo_watch_history_importer/bangumi.py",
       "size": 12408,
       "sha256": "99136efa137f63995f560a2ae75a94106a850a6ca21d426f6d1d83e6eff266a5"
     },
     {
-      "path": "backend/src/anime_journal_watch_history_importer/parser.py",
+      "path": "backend/src/animemo_watch_history_importer/parser.py",
       "size": 9051,
       "sha256": "69bce731e3bd9a1d77fe42b86d4797f7aef4bd0f859bca20ebaef69c078f5287"
     },
@@ -36,13 +36,13 @@
     },
     {
       "path": "frontend/plugin.js",
-      "size": 28816,
-      "sha256": "db69b72911fd5904d43120f2590728d74ea3f8d0a03fa077d6a53e546b770bbd"
+      "size": 28810,
+      "sha256": "2c2cebd9c2d7223ac990672650d6d36da1cab7a942260775579c2296e5102148"
     },
     {
       "path": "manifest.json",
-      "size": 2340,
-      "sha256": "0899ac8bcf51448b9d92fb4332900851fad0f7e0f27367e6b606257f688677d3"
+      "size": 2328,
+      "sha256": "aa5921e5aec58540f4b752c8f14d51eea78beb283bea0b4f9acec2076381ab62"
     }
   ]
 }

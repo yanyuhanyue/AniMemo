@@ -3,14 +3,14 @@ from django.test import SimpleTestCase, override_settings
 
 class ReleaseIdentityHealthTests(SimpleTestCase):
     @override_settings(
-        ANIME_JOURNAL_VERSION="v1.0.0-rc.3",
-        ANIME_JOURNAL_COMMIT="a" * 40,
-        ANIME_JOURNAL_RELEASE_CHANNEL="rc",
-        ANIME_JOURNAL_ARTIFACT_VERSION="v1.0.0-rc.2",
-        ANIME_JOURNAL_ARTIFACT_COMMIT="a" * 40,
-        ANIME_JOURNAL_ARTIFACT_CHANNEL="rc",
-        ANIME_JOURNAL_DATABASE_CONTRACT="animemo-db-v1",
-        ANIME_JOURNAL_CONFIGURATION_CONTRACT="animemo-config-v1",
+        ANIMEMO_VERSION="v1.0.0-rc.3",
+        ANIMEMO_COMMIT="a" * 40,
+        ANIMEMO_RELEASE_CHANNEL="rc",
+        ANIMEMO_ARTIFACT_VERSION="v1.0.0-rc.2",
+        ANIMEMO_ARTIFACT_COMMIT="a" * 40,
+        ANIMEMO_ARTIFACT_CHANNEL="rc",
+        ANIMEMO_DATABASE_CONTRACT="animemo-db-v1",
+        ANIMEMO_CONFIGURATION_CONTRACT="animemo-config-v1",
     )
     def test_health_reports_immutable_release_identity(self):
         response = self.client.get("/health/", secure=True)

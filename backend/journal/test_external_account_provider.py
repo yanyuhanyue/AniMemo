@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 import requests
-from django.test import SimpleTestCase, override_settings
+from django.test import TestCase, override_settings
 
 from journal.external_accounts.errors import ExternalAccountError
 from journal.external_accounts.providers.bangumi import BangumiAccountProvider
@@ -19,14 +19,14 @@ def response(payload, *, status_code=200, content=None, headers=None):
     return result
 
 
-class BangumiAccountProviderTests(SimpleTestCase):
+class BangumiAccountProviderTests(TestCase):
     def setUp(self):
         self.provider = BangumiAccountProvider()
 
     @override_settings(
         BANGUMI_OAUTH_CLIENT_ID="client-id",
         BANGUMI_OAUTH_CLIENT_SECRET="client-secret",
-        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/external-accounts/bangumi/callback/",
+        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/v1/external-accounts/bangumi/callback/",
     )
     def test_authorization_url_uses_verified_official_contract(self):
         parsed = urlparse(self.provider.authorization_url("random-state"))
@@ -34,7 +34,7 @@ class BangumiAccountProviderTests(SimpleTestCase):
         self.assertEqual(parse_qs(parsed.query), {
             "client_id": ["client-id"],
             "response_type": ["code"],
-            "redirect_uri": ["https://example.test/api/external-accounts/bangumi/callback/"],
+            "redirect_uri": ["https://example.test/api/v1/external-accounts/bangumi/callback/"],
             "state": ["random-state"],
         })
 
@@ -173,7 +173,7 @@ class BangumiAccountProviderTests(SimpleTestCase):
     @override_settings(
         BANGUMI_OAUTH_CLIENT_ID="client-id",
         BANGUMI_OAUTH_CLIENT_SECRET="client-secret",
-        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/callback",
+        BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/v1/external-accounts/bangumi/callback/",
     )
     @patch("journal.bangumi.client.requests.request")
     def test_oauth_exchange_uses_server_side_secret_and_bounded_token_payload(self, request):

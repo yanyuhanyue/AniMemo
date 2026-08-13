@@ -72,7 +72,7 @@ Snapshot 只保存界面与刷新所需的规范化摘要，不保存 Provider �
 - 海报地址经过受信任 HTTPS host 校验。
 - 错误使用稳定代码，覆盖非法 ID、不支持的 Provider、404、超时、不可用、无效响应与绑定冲突。
 - 外部请求日志仅记录 Provider、端点类型、状态或错误类别，不记录 Cookie 或 Authorization。
-- `BANGUMI_USER_AGENT` 默认是 `AniMemo/1.0 (+https://re-anime.cc)`；部署者应按实际站点维护可联系信息。
+- Bangumi User-Agent 从 `ANIMEMO_PUBLIC_ORIGIN` 派生，当前为 `AniMemo/1.0 (+https://animemo.cc)`。
 - `BANGUMI_IMAGE_PROXY_BASE_URL` 控制 Bangumi 图片代理前缀；留空时使用固定 HTTPS 图片源。
 
 ## 阶段边界

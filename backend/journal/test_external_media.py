@@ -42,7 +42,7 @@ class ExternalMediaIdentityApiTests(APITestCase):
         self.user = User.objects.create_user(username="identity-owner", password="StrongPass123!")
         self.other = User.objects.create_user(username="identity-other", password="StrongPass123!")
         self.plugin = PluginProject.objects.create(
-            plugin_id="com.anime-journal.watch-history-importer.identity",
+            plugin_id="com.animemo.watch-history-importer.identity",
             slug="watch-history-importer",
             name="观看记录",
             description="test",

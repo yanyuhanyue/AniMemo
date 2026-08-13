@@ -49,7 +49,7 @@ class MaintenanceRunnerTests(SimpleTestCase):
             pk=7,
             slug="primary-r2",
             cloudflare_account_ref_id=3,
-            bucket_name="anime-journal",
+            bucket_name="animemo",
             analytics_token_configured=True,
         )
         objects.select_related.return_value.filter.return_value.order_by.return_value = [backend]

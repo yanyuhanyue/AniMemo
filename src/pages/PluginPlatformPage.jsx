@@ -63,7 +63,7 @@ export function PluginPlatformPage({ authUser }) {
       setInstalled((current) => new Map(current).set(plugin.slug, response.data));
       flash(`${plugin.name} 已安装`);
       await load();
-      window.dispatchEvent(new Event("anime-journal:plugins-changed"));
+      window.dispatchEvent(new Event("animemo:plugins-changed"));
     } catch (requestError) {
       setError(readableApiError(requestError, "插件安装失败。"));
     } finally { setBusy(""); }
@@ -76,7 +76,7 @@ export function PluginPlatformPage({ authUser }) {
       setInstalled((current) => new Map(current).set(plugin.slug, response.data));
       flash(`${plugin.name} 已${enabled ? "启用" : "停用"}`);
       await load();
-      window.dispatchEvent(new Event("anime-journal:plugins-changed"));
+      window.dispatchEvent(new Event("animemo:plugins-changed"));
     } catch (requestError) {
       setError(readableApiError(requestError, "插件状态更新失败。"));
     } finally { setBusy(""); }
@@ -90,7 +90,7 @@ export function PluginPlatformPage({ authUser }) {
       setInstalled((current) => { const next = new Map(current); next.delete(plugin.slug); return next; });
       flash(deleteData ? `${plugin.name} 已卸载并删除个人数据` : `${plugin.name} 已卸载，个人数据已保留`);
       await load();
-      window.dispatchEvent(new Event("anime-journal:plugins-changed"));
+      window.dispatchEvent(new Event("animemo:plugins-changed"));
     } catch (requestError) {
       setError(readableApiError(requestError, "插件卸载失败。"));
     } finally { setBusy(""); }

@@ -9,7 +9,7 @@ from time import monotonic
 from types import SimpleNamespace
 
 
-logger = logging.getLogger("anime_journal.plugins")
+logger = logging.getLogger("animemo.plugins")
 from .hook_contract import (
     ACTION_HOOKS,
     CLOSED_HOOKS,

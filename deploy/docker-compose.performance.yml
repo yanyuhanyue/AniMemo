@@ -22,5 +22,5 @@ services:
     container_name: ${COMPOSE_PROJECT_NAME}-web
 
 networks:
-  anime-journal:
+  animemo:
     name: ${COMPOSE_PROJECT_NAME}

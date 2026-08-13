@@ -1,8 +1,8 @@
 import { resolveTagColors } from "../lib/tagPresets.js";
 
-export const STORAGE_KEY = "anime_journal_records_v1";
-export const SETTINGS_KEY = "anime_journal_settings_v1";
-export const FILTERS_KEY = "anime_journal_quick_filters_v1";
+export const STORAGE_KEY = "animemo_records_v1";
+export const SETTINGS_KEY = "animemo_settings_v1";
+export const FILTERS_KEY = "animemo_quick_filters_v1";
 export const DEFAULT_SETTINGS = { email: "", nickname: "AniMemo", subtitle: "把每一次与动画相遇认真收藏。", avatar: "/assets/avatar.png", accent: "#4ecdc4", publicProfile: false, publicSlug: "", publicStatus: "private", isStaff: false, isSuperuser: false, twoFactorEnabled: false };
 
 export const STATUS_OPTIONS = [

@@ -24,7 +24,7 @@ TXT 排版、编码探测、来源标签、标题规范化、候选解析、批�
 ## 验证
 
 ```powershell
-python backend\manage.py test anime_journal_watch_history_importer
+python backend\manage.py test animemo_watch_history_importer
 npm run test:plugins
 npm run build
 npm run qa:watch-history:selection
