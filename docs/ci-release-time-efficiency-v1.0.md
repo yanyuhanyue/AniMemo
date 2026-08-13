@@ -1,6 +1,6 @@
 # AniMemo v1.0 CI / Release Time-Efficiency Audit
 
-Audit date: 2026-08-12. Scope: GitHub Actions evidence only; production and real
+Audit date: 2026-08-13. Scope: GitHub Actions evidence only; production and real
 release operations were not run.
 
 ## Measured critical paths
