@@ -5,7 +5,25 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
+
+try:
+    from scripts.release_qualification import (
+    QualificationError,
+    build_qualification_evidence,
+    read_qualification_evidence,
+    resolve_qualification_evidence,
+    validate_qualification_evidence,
+    )
+except ModuleNotFoundError:  # pragma: no cover - direct script execution
+    from release_qualification import (
+        QualificationError,
+        build_qualification_evidence,
+        read_qualification_evidence,
+        resolve_qualification_evidence,
+        validate_qualification_evidence,
+    )
 
 
 class ReleaseAuthorityError(ValueError):
@@ -36,6 +54,115 @@ def validate_release_authority(channel: str, needs: Mapping[str, Any]) -> dict[s
     return {"channel": normalized_channel, "status": "PASS"}
 
 
+def validate_phase_a_authority(
+    channel: str,
+    needs: Mapping[str, Any],
+    *,
+    identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate all Phase A gates and create immutable qualification evidence."""
+
+    result = validate_release_authority(channel, needs)
+    if not identity.get("emit_evidence", False):
+        return {**result, "operation": "qualify"}
+    try:
+        evidence = build_qualification_evidence(
+            workflow_ref=str(identity["workflow_ref"]),
+            workflow_sha=str(identity["workflow_sha"]),
+            run_id=str(identity["run_id"]),
+            run_attempt=int(identity["run_attempt"]),
+            candidate_sha=str(identity["candidate_sha"]),
+            upgrade_base_sha=str(identity["upgrade_base_sha"]),
+            channel=channel,
+            target_version=str(identity["target_version"]),
+            release_tag=str(identity["release_tag"]),
+            needs=needs,
+            created_at=str(identity.get("created_at", "1970-01-01T00:00:00Z")),
+            qualification_results=identity.get("qualification_results"),
+            event=str(identity.get("event", "workflow_dispatch")),
+            status=str(identity.get("status", "completed")),
+            conclusion=str(identity.get("conclusion", "success")),
+        )
+    except (KeyError, TypeError, ValueError, QualificationError) as error:
+        raise ReleaseAuthorityError(str(error)) from error
+    return {**result, "operation": "qualify", "evidence": evidence}
+
+
+def validate_phase_b_authority(
+    channel: str,
+    needs: Mapping[str, Any],
+    *,
+    qualification: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    run_metadata: Mapping[str, Any] | None = None,
+    artifact_metadata: Mapping[str, Any] | None = None,
+    archive_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Validate a publish run against previously completed qualification evidence."""
+
+    normalized_channel = str(channel or "").strip().lower()
+    if normalized_channel not in {"beta", "rc"}:
+        raise ReleaseAuthorityError(f"unsupported release channel: {channel or '<unset>'}")
+    # A publish run must not silently re-use a skipped or partial gate result.
+    for name, item in needs.items():
+        result = item.get("result") if isinstance(item, Mapping) else item
+        if result not in {"success", "skipped"}:
+            raise ReleaseAuthorityError(json.dumps({name: str(result or "missing")}, sort_keys=True))
+    try:
+        expected_identity = {**dict(expected), "channel": normalized_channel}
+        if run_metadata is None or artifact_metadata is None or not archive_sha256:
+            raise QualificationError(
+                "qualification run metadata, artifact metadata, and archive digest are required for publish"
+            )
+        validated = resolve_qualification_evidence(
+            qualification_run_id=str(expected_identity.get("qualification_run_id", "")),
+            run_metadata=run_metadata,
+            artifact=artifact_metadata,
+            expected=expected_identity,
+            evidence=qualification,
+            archive_sha256=archive_sha256,
+        )
+    except QualificationError as error:
+        raise ReleaseAuthorityError(str(error)) from error
+    return {"channel": normalized_channel, "status": "PASS", "operation": "publish", "evidence": validated}
+
+
+def validate_operation(
+    operation: str,
+    channel: str,
+    needs: Mapping[str, Any],
+    *,
+    identity: Mapping[str, Any] | None = None,
+    qualification: Mapping[str, Any] | None = None,
+    expected: Mapping[str, Any] | None = None,
+    run_metadata: Mapping[str, Any] | None = None,
+    artifact_metadata: Mapping[str, Any] | None = None,
+    archive_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Dispatch the explicit qualify/publish authority operation."""
+
+    normalized_operation = str(operation or "").strip().lower()
+    if normalized_operation == "qualify":
+        if identity is None:
+            raise ReleaseAuthorityError("qualification identity is required")
+        return validate_phase_a_authority(channel, needs, identity=identity)
+    if normalized_operation == "publish":
+        if qualification is None:
+            raise ReleaseAuthorityError("qualification evidence is required for publish")
+        if expected is None:
+            raise ReleaseAuthorityError("qualification identity expectations are required for publish")
+        return validate_phase_b_authority(
+            channel,
+            needs,
+            qualification=qualification,
+            expected=expected,
+            run_metadata=run_metadata,
+            artifact_metadata=artifact_metadata,
+            archive_sha256=archive_sha256,
+        )
+    raise ReleaseAuthorityError(f"unsupported release operation: {operation or '<unset>'}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     del argv
     channel = os.getenv("CHANNEL", "")
@@ -46,7 +173,70 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ReleaseAuthorityError(f"invalid NEEDS_JSON: {error}") from error
     if not isinstance(needs, dict):
         raise ReleaseAuthorityError("NEEDS_JSON must be an object")
-    result = validate_release_authority(channel, needs)
+    operation = os.getenv("OPERATION", "qualify").strip().lower()
+    if operation == "qualify":
+        identity = {
+            "workflow_ref": os.getenv("WORKFLOW_REF", ""),
+            "workflow_sha": os.getenv("WORKFLOW_SHA", os.getenv("GITHUB_SHA", "")),
+            "run_id": os.getenv("RUN_ID", os.getenv("GITHUB_RUN_ID", "")),
+            "run_attempt": os.getenv("RUN_ATTEMPT", os.getenv("GITHUB_RUN_ATTEMPT", "1")),
+            "candidate_sha": os.getenv("CANDIDATE_SHA", ""),
+            "upgrade_base_sha": os.getenv("UPGRADE_BASE_SHA", ""),
+            "target_version": os.getenv("TARGET_VERSION", ""),
+            "release_tag": os.getenv("RELEASE_TAG", ""),
+            "created_at": os.getenv("CREATED_AT", "1970-01-01T00:00:00Z"),
+            "qualification_results": (
+                json.loads(os.getenv("QUALIFICATION_RESULTS_JSON", "{}"))
+                if os.getenv("QUALIFICATION_RESULTS_JSON", "")
+                else None
+            ),
+            "emit_evidence": bool(os.getenv("QUALIFICATION_ARTIFACT_PATH", "")),
+            "event": os.getenv("EVENT_NAME", os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")),
+        }
+        result = validate_phase_a_authority(channel, needs, identity=identity)
+        artifact_path = os.getenv("QUALIFICATION_ARTIFACT_PATH", "")
+        if artifact_path:
+            Path(artifact_path).write_text(
+                json.dumps(result["evidence"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+    elif operation == "publish":
+        artifact_path = os.getenv("QUALIFICATION_ARTIFACT_PATH", "")
+        if not artifact_path:
+            raise ReleaseAuthorityError("QUALIFICATION_ARTIFACT_PATH is required for publish")
+        qualification = read_qualification_evidence(Path(artifact_path))
+        expected = {
+            "qualification_run_id": os.getenv("QUALIFICATION_RUN_ID", ""),
+            "candidate_sha": os.getenv("CANDIDATE_SHA", ""),
+            "upgrade_base_sha": os.getenv("UPGRADE_BASE_SHA", ""),
+            "channel": channel,
+            "target_version": os.getenv("TARGET_VERSION", ""),
+            "release_tag": os.getenv("RELEASE_TAG", ""),
+            "workflow_ref": os.getenv("QUALIFICATION_WORKFLOW_REF", ""),
+            "workflow_sha": os.getenv("QUALIFICATION_WORKFLOW_SHA", ""),
+            "release_graph_contract": os.getenv("RELEASE_GRAPH_CONTRACT", "animemo.release-gate.jobs/v2"),
+        }
+        expected = {key: value for key, value in expected.items() if value != ""}
+        def _json_env(name: str) -> Mapping[str, Any] | None:
+            raw = os.getenv(name, "")
+            if not raw:
+                return None
+            parsed = json.loads(raw)
+            if not isinstance(parsed, Mapping):
+                raise ReleaseAuthorityError(f"{name} must be an object")
+            return parsed
+
+        result = validate_phase_b_authority(
+            channel,
+            needs,
+            qualification=qualification,
+            expected=expected,
+            run_metadata=_json_env("QUALIFICATION_RUN_METADATA"),
+            artifact_metadata=_json_env("QUALIFICATION_ARTIFACT_METADATA"),
+            archive_sha256=os.getenv("QUALIFICATION_ARCHIVE_SHA256", "") or None,
+        )
+    else:
+        raise ReleaseAuthorityError(f"unsupported release operation: {operation or '<unset>'}")
     print(json.dumps(result, sort_keys=True))
     return 0
 

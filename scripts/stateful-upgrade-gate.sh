@@ -421,8 +421,10 @@ FRONTEND_URL=https://ci.example.test
 CORS_ALLOWED_ORIGINS=https://ci.example.test
 CSRF_TRUSTED_ORIGINS=https://ci.example.test
 TRUSTED_PROXY_IPS=127.0.0.1/32
+# Historical BASE images defaulted Turnstile to enabled in production.  This
+# test-only compatibility fixture keeps BASE -> CURRENT upgrades isolated from
+# the removed production ENV contract.
 TURNSTILE_ENABLED=false
-VITE_TURNSTILE_SITE_KEY=ci-site-key
 SECURE_SSL_REDIRECT=false
 ALLOW_INSECURE_PRODUCTION_COOKIES=true
 PLUGIN_MIN_FREE_DISK_MB=0

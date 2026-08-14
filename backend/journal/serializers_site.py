@@ -3,6 +3,7 @@ import re
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import Count, Q
 from rest_framework import serializers
 
@@ -22,6 +23,7 @@ HOSTNAME_PATTERN = re.compile(
 
 class SiteSettingsSerializer(serializers.ModelSerializer):
     site_avatar_url = serializers.SerializerMethodField()
+    turnstile = serializers.SerializerMethodField()
 
     class Meta:
         model = SiteSettings
@@ -29,6 +31,7 @@ class SiteSettingsSerializer(serializers.ModelSerializer):
             "site_name", "homepage_title", "site_avatar", "site_avatar_url",
             "homepage_description", "universe_description", "social_handle",
             "registration_enabled", "trusted_poster_hosts", "updated_at",
+            "turnstile",
         ]
         read_only_fields = ["site_avatar_url", "updated_at"]
 
@@ -38,6 +41,12 @@ class SiteSettingsSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         url = obj.site_avatar.url
         return request.build_absolute_uri(url) if request and url.startswith("/") else url
+
+    def get_turnstile(self, obj):
+        return {
+            "enabled": bool(obj.turnstile_enabled),
+            "site_key": str(obj.turnstile_site_key or "").strip(),
+        }
 
     def validate_site_avatar(self, value):
         return sanitize_uploaded_image(
@@ -77,6 +86,18 @@ class StaffSiteSettingsSerializer(SiteSettingsSerializer):
     resend_api_key_source = serializers.CharField(read_only=True)
     effective_email_from = serializers.SerializerMethodField()
     email_delivery_ready = serializers.SerializerMethodField()
+    turnstile_enabled = serializers.BooleanField(required=False)
+    turnstile_site_key = serializers.CharField(required=False, allow_blank=True, max_length=128, trim_whitespace=True)
+    turnstile_secret = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=False,
+        max_length=512,
+    )
+    clear_turnstile_secret = serializers.BooleanField(write_only=True, required=False, default=False)
+    turnstile_secret_configured = serializers.SerializerMethodField()
+    turnstile_ready = serializers.SerializerMethodField()
 
     class Meta(SiteSettingsSerializer.Meta):
         fields = SiteSettingsSerializer.Meta.fields + [
@@ -91,6 +112,12 @@ class StaffSiteSettingsSerializer(SiteSettingsSerializer):
             "resend_api_key_source",
             "effective_email_from",
             "email_delivery_ready",
+            "turnstile_enabled",
+            "turnstile_site_key",
+            "turnstile_secret",
+            "clear_turnstile_secret",
+            "turnstile_secret_configured",
+            "turnstile_ready",
         ]
         read_only_fields = SiteSettingsSerializer.Meta.read_only_fields + [
             "homepage_owner_options",
@@ -98,6 +125,8 @@ class StaffSiteSettingsSerializer(SiteSettingsSerializer):
             "resend_api_key_source",
             "effective_email_from",
             "email_delivery_ready",
+            "turnstile_secret_configured",
+            "turnstile_ready",
         ]
 
     def get_homepage_owner_options(self, _obj):
@@ -131,6 +160,33 @@ class StaffSiteSettingsSerializer(SiteSettingsSerializer):
             raise serializers.ValidationError("Resend API Key 应以 re_ 开头。")
         return value
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        enabled = attrs.get("turnstile_enabled", self.instance.turnstile_enabled)
+        site_key = str(attrs.get("turnstile_site_key", self.instance.turnstile_site_key) or "").strip()
+        secret_input = attrs.get("turnstile_secret")
+        has_new_secret = secret_input is not None and bool(str(secret_input).strip())
+        clear_secret = bool(attrs.get("clear_turnstile_secret", False))
+        has_secret = self.instance.turnstile_secret_configured
+        if has_new_secret:
+            has_secret = True
+        if clear_secret:
+            has_secret = False
+        if enabled and not site_key:
+            raise serializers.ValidationError({"turnstile_site_key": "启用 Turnstile 时必须填写 Site Key。"})
+        if enabled and not has_secret:
+            raise serializers.ValidationError({"turnstile_secret": "启用 Turnstile 时必须配置 Secret Key。"})
+        if enabled and clear_secret and not has_new_secret:
+            raise serializers.ValidationError({"clear_turnstile_secret": "Turnstile 启用时不能清除 Secret Key。"})
+        if enabled and not has_new_secret and not clear_secret and self.instance.turnstile_secret_encrypted:
+            try:
+                if not self.instance.get_turnstile_secret():
+                    raise ValueError
+            except Exception as error:
+                raise serializers.ValidationError({"turnstile_secret": "现有 Secret Key 无法解密，请重新填写。"}) from error
+        attrs["turnstile_site_key"] = site_key
+        return attrs
+
     def validate_trusted_poster_hosts(self, value):
         if not isinstance(value, list):
             raise serializers.ValidationError("可信图片域名必须是数组。")
@@ -158,17 +214,36 @@ class StaffSiteSettingsSerializer(SiteSettingsSerializer):
     def update(self, instance, validated_data):
         api_key = validated_data.pop("resend_api_key", "")
         clear_api_key = validated_data.pop("clear_resend_api_key", False)
-        instance = super().update(instance, validated_data)
-        if clear_api_key:
-            instance.resend_api_key_encrypted = ""
-        elif api_key:
-            instance.set_resend_api_key(api_key)
-        if clear_api_key or api_key:
-            instance.save(update_fields=["resend_api_key_encrypted", "updated_at"])
+        turnstile_secret = validated_data.pop("turnstile_secret", "")
+        clear_turnstile_secret = validated_data.pop("clear_turnstile_secret", False)
+        with transaction.atomic():
+            instance = super().update(instance, validated_data)
+            update_fields = set()
+            if clear_api_key:
+                instance.resend_api_key_encrypted = ""
+                update_fields.add("resend_api_key_encrypted")
+            elif api_key:
+                instance.set_resend_api_key(api_key)
+                update_fields.add("resend_api_key_encrypted")
+            if clear_turnstile_secret:
+                instance.turnstile_secret_encrypted = ""
+                update_fields.add("turnstile_secret_encrypted")
+            elif str(turnstile_secret or "").strip():
+                instance.set_turnstile_secret(turnstile_secret)
+                update_fields.add("turnstile_secret_encrypted")
+            if update_fields:
+                update_fields.add("updated_at")
+                instance.save(update_fields=list(update_fields))
         return instance
 
     def get_resend_api_key_configured(self, obj):
         return obj.resend_api_key_source != "none"
+
+    def get_turnstile_secret_configured(self, obj):
+        return obj.turnstile_secret_configured
+
+    def get_turnstile_ready(self, obj):
+        return obj.turnstile_ready
 
     def get_effective_email_from(self, obj):
         return obj.get_email_from()

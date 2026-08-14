@@ -38,7 +38,7 @@ ANIMEMO_WEB_IMAGE=ghcr.io/yanyuhanyue/animemo-web@sha256:<digest>
 
 `deploy/docker-compose.yml` 没有 API/Web `build:`。`deploy/docker-compose.build.yml` 只供 CI、bootstrap 和 break-glass 使用。所有人工 Compose 命令都必须显式指定 `.env.production` 与 Compose 文件；禁止 mutable `latest` 作为部署身份。
 
-`.env.production` 只保存在服务器，不进入 Release 或 ZIP。生产环境必须保持 `DEBUG=false`、PostgreSQL、Redis、HTTPS、精确的 `ALLOWED_HOSTS`/CORS/CSRF 来源、Secure Cookie、可信代理网段和 `TURNSTILE_ENABLED=true`。同源部署默认使用 `SameSite=Lax`；跨站部署必须让 Session、CSRF、Refresh 三类 Cookie 一致使用 `SameSite=None; Secure`。
+`.env.production` 只保存在服务器，不进入 Release 或 ZIP。生产环境必须保持 `DEBUG=false`、PostgreSQL、Redis、HTTPS、精确的 `ALLOWED_HOSTS`/CORS/CSRF 来源、Secure Cookie 与可信代理网段。Turnstile 是安装后的可选 SiteSettings 配置，不写入生产 ENV，也不参与镜像构建；需要时在 Staff「安全验证」中填写当前实例的 Site Key 与 Secret Key。同源部署默认使用 `SameSite=Lax`；跨站部署必须让 Session、CSRF、Refresh 三类 Cookie 一致使用 `SameSite=None; Secure`。
 
 ## Normal update
 

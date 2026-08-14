@@ -5,6 +5,7 @@ import { AuthField } from "../components/auth/AuthField.jsx";
 import { TurnstileWidget } from "../components/auth/TurnstileWidget.jsx";
 import { Icon } from "../components/Icon.jsx";
 import { authApi, readableApiError, storeTokens } from "../lib/api.js";
+import { useSiteSettings } from "../context/SiteSettingsContext.jsx";
 
 export function AdminLoginPage() {
   const rootRef = useRef(null);
@@ -18,6 +19,8 @@ export function AdminLoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const completionMessage = typeof location.state?.message === "string" ? location.state.message : "";
+  const { settings: siteSettings } = useSiteSettings();
+  const turnstile = siteSettings.turnstile || { enabled: false, site_key: "" };
 
   useLayoutEffect(() => {
     const context = gsap.context(() => {
@@ -77,9 +80,9 @@ export function AdminLoginPage() {
   const submit = async (event) => {
     event.preventDefault();
     setError("");
-    const turnstileToken = turnstileRef.current?.getToken();
-    if (!turnstileToken) {
-      setError("请先完成安全验证。");
+    const turnstileToken = turnstile.enabled ? turnstileRef.current?.getToken() : "";
+    if (turnstile.enabled && !turnstileToken) {
+      setError(turnstile.site_key ? "请先完成安全验证。" : "安全验证配置异常，请联系站点管理员。");
       return;
     }
     setLoading(true);
@@ -142,7 +145,7 @@ export function AdminLoginPage() {
             {!error && completionMessage && <p className="form-message success">{completionMessage}</p>}
             {error && <p className="form-message error" role="alert">{error}</p>}
           </div>
-          <TurnstileWidget ref={turnstileRef} variant="staff" size="flexible" mountDelay={900} />
+          <TurnstileWidget enabled={turnstile.enabled} siteKey={turnstile.site_key} ref={turnstileRef} variant="staff" size="flexible" mountDelay={900} />
           <button className="staff-auth-submit" type="submit" disabled={loading}><Icon name="login" /> {loading ? "正在验证工作人员权限..." : "进入管理控制室"}</button>
         </form>
         <Link className="staff-return-user" to="/login"><Icon name="arrow-left" /> 返回普通用户登录</Link>

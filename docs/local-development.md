@@ -30,4 +30,4 @@ macOS/Linux：
 
 全新数据库会在 `runtime/private/setup-code` 生成一次性初始化码。读取该文件后打开 `http://localhost:5173/setup`，填写初始化码、管理员用户名、邮箱和新密码。完成后初始化码会被删除且 `/setup` 永久锁定；详细状态机和恢复说明见 [`首次运行引导`](first-run-bootstrap.md)。
 
-开发模板明确关闭 Turnstile 校验并使用 SQLite + LocMemCache；这组设置只适用于本地开发，生产环境必须使用 `.env.example`/`.env.production.example` 中的 fail-closed 配置。
+开发模板使用 SQLite + LocMemCache，Turnstile 默认在 SiteSettings 中关闭；生产部署也不通过 ENV 配置 Turnstile，而是在 Staff「安全验证」中按实例启用并保存密钥。

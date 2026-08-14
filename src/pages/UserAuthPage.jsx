@@ -56,7 +56,8 @@ export function UserAuthPage() {
   const [modeSequence, setModeSequence] = useState(0);
   const copy = modeCopy[mode];
   const registrationEnabled = siteSettings.registration_enabled;
-  const requiresTurnstile = ["login", "register", "registerComplete", "reset", "resetNew"].includes(mode);
+  const turnstile = siteSettings.turnstile || { enabled: false, site_key: "" };
+  const requiresTurnstile = Boolean(turnstile.enabled) && ["login", "register", "registerComplete", "reset", "resetNew"].includes(mode);
 
   useEffect(() => {
     if (registrationEnabled || !["register", "registerComplete"].includes(mode)) return;
@@ -190,7 +191,7 @@ export function UserAuthPage() {
 
     const turnstileToken = requiresTurnstile ? turnstileRef.current?.getToken() : "";
     if (requiresTurnstile && !turnstileToken) {
-      setError("请先完成安全验证。");
+      setError(turnstile.site_key ? "请先完成安全验证。" : "安全验证配置异常，请联系站点管理员。");
       return;
     }
 
@@ -312,7 +313,7 @@ export function UserAuthPage() {
                   {error && <p className="form-message error" role="alert">{error}</p>}
                   {message && <p className="form-message success">{message}</p>}
                 </div>
-                {requiresTurnstile && <TurnstileWidget key={`turnstile-${mode}`} ref={turnstileRef} variant="user" size="normal" mountDelay={900} />}
+                {requiresTurnstile && <TurnstileWidget key={`turnstile-${mode}`} enabled={turnstile.enabled} siteKey={turnstile.site_key} ref={turnstileRef} variant="user" size="normal" mountDelay={900} />}
                 <button className="auth-submit" type="submit" disabled={loading || mode === "registerVerify"} data-auth-step>
                   <Icon name={mode === "register" ? "user-plus" : mode === "registerComplete" ? "user-plus" : mode === "reset" ? "arrow-right" : "login"} />
                   {loading ? "正在处理..." : mode === "login" ? "进入我的手账房" : mode === "register" ? "发送验证邮件" : mode === "registerComplete" ? "完成注册" : mode === "resetNew" ? "保存新密码" : "发送重置邮件"}

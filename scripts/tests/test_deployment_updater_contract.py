@@ -190,6 +190,8 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         gate = (ROOT / "scripts/stateful-upgrade-gate.sh").read_text(encoding="utf-8")
 
         self.assertIn("FRONTEND_URL=https://ci.example.test", gate)
+        self.assertIn("TURNSTILE_ENABLED=false", gate)
+        self.assertIn("test-only compatibility fixture", gate)
         self.assertIn('BUILD_OVERRIDE_FILE="$CURRENT_ROOT/deploy/docker-compose.build.yml"', gate)
         self.assertIn(
             'local compose_files=(-f "$source_root/deploy/docker-compose.yml" -f "$BUILD_OVERRIDE_FILE")',

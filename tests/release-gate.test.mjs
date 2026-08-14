@@ -17,13 +17,13 @@ test("API healthcheck is secure-forwarded and validates status and body", () => 
   assert.match(compose, /payload\.get\('status'\) == 'ok'/);
 });
 
-test("production frontend receives only the public Turnstile build value", () => {
+test("production frontend is a generic artifact without instance Turnstile build configuration", () => {
   const productionCompose = read("../deploy/docker-compose.yml");
   const buildCompose = read("../deploy/docker-compose.build.yml");
   const dockerfile = read("../deploy/frontend.Dockerfile");
   assert.doesNotMatch(productionCompose, /VITE_TURNSTILE_SITE_KEY/);
-  assert.match(buildCompose, /VITE_TURNSTILE_SITE_KEY: \$\{VITE_TURNSTILE_SITE_KEY:\?VITE_TURNSTILE_SITE_KEY is required\}/);
-  assert.match(dockerfile, /ARG VITE_TURNSTILE_SITE_KEY/);
+  assert.doesNotMatch(buildCompose, /VITE_TURNSTILE_SITE_KEY|TURNSTILE_ENABLED|TURNSTILE_SECRET/);
+  assert.doesNotMatch(dockerfile, /VITE_TURNSTILE_SITE_KEY|TURNSTILE_ENABLED|TURNSTILE_SECRET/);
   assert.doesNotMatch(dockerfile, /TURNSTILE_SECRET/);
 });
 

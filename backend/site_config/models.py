@@ -114,6 +114,9 @@ class SiteSettings(models.Model):
     email_sender_address = models.EmailField(blank=True, default="")
     trusted_poster_hosts = models.JSONField(default=default_trusted_poster_hosts, blank=True)
     resend_api_key_encrypted = models.TextField(blank=True, default="", editable=False)
+    turnstile_enabled = models.BooleanField(default=False)
+    turnstile_site_key = models.CharField(max_length=128, blank=True, default="")
+    turnstile_secret_encrypted = models.TextField(blank=True, default="", editable=False)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -150,6 +153,42 @@ class SiteSettings(models.Model):
         if settings.RESEND_API_KEY:
             return "environment"
         return "none"
+
+    def set_turnstile_secret(self, value):
+        from config.credentials import CredentialCipher
+
+        self.turnstile_secret_encrypted = CredentialCipher.encrypt(str(value or "").strip())
+
+    def get_turnstile_secret(self):
+        if self.turnstile_secret_encrypted:
+            from config.credentials import CredentialCipher
+
+            return CredentialCipher.decrypt(self.turnstile_secret_encrypted)
+        return ""
+
+    @property
+    def turnstile_secret_configured(self):
+        return bool(self.turnstile_secret_encrypted)
+
+    @property
+    def turnstile_secret_ready(self):
+        if not self.turnstile_secret_configured:
+            return False
+        from config.credentials import CredentialCipherError
+
+        try:
+            return bool(self.get_turnstile_secret())
+        except CredentialCipherError:
+            # A stale or undecryptable ciphertext must never enable Turnstile.
+            return False
+
+    @property
+    def turnstile_ready(self):
+        return bool(
+            self.turnstile_enabled
+            and str(self.turnstile_site_key or "").strip()
+            and self.turnstile_secret_ready
+        )
 
     def get_email_from(self):
         if self.email_sender_address:

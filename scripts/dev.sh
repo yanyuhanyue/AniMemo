@@ -26,7 +26,7 @@ chmod 0700 runtime/private
 .venv/bin/python backend/manage.py migrate --noinput
 .venv/bin/python backend/manage.py bootstrap_animemo
 .venv/bin/python backend/manage.py check
-.venv/bin/python backend/manage.py shell -c "from django.conf import settings; from django.test import Client; assert settings.DEBUG and settings.TURNSTILE_ENABLED is False; assert Client(HTTP_HOST='localhost').get('/health/').status_code == 200"
+.venv/bin/python backend/manage.py shell -c "from site_config.models import SiteSettings; from django.conf import settings; from django.test import Client; assert settings.DEBUG and SiteSettings.load().turnstile_enabled is False; assert Client(HTTP_HOST='localhost').get('/health/').status_code == 200"
 if (( SETUP_ONLY )); then exit 0; fi
 
 cleanup() {

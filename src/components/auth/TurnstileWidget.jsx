@@ -1,9 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 
 const SCRIPT_ID = "cloudflare-turnstile-api";
-const DEVELOPMENT_SITE_KEY = "1x00000000000000000000AA";
-const SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim()
-  || (import.meta.env.DEV ? DEVELOPMENT_SITE_KEY : "");
 let turnstileScriptPromise = null;
 
 function loadTurnstileScript() {
@@ -48,6 +45,8 @@ function loadTurnstileScript() {
 }
 
 export const TurnstileWidget = forwardRef(function TurnstileWidget({
+  enabled = false,
+  siteKey = "",
   onTokenChange,
   variant = "user",
   size = variant === "staff" ? "flexible" : "normal",
@@ -58,6 +57,8 @@ export const TurnstileWidget = forwardRef(function TurnstileWidget({
   const tokenRef = useRef("");
   const onTokenChangeRef = useRef(onTokenChange);
   const theme = variant === "staff" ? "dark" : "light";
+  const normalizedSiteKey = String(siteKey || "").trim();
+  const invalidConfig = Boolean(enabled) && !normalizedSiteKey;
 
   useEffect(() => {
     onTokenChangeRef.current = onTokenChange;
@@ -77,7 +78,7 @@ export const TurnstileWidget = forwardRef(function TurnstileWidget({
   useEffect(() => {
     let cancelled = false;
     let mountTimer = null;
-    if (!SITE_KEY) {
+    if (!enabled || !normalizedSiteKey) {
       tokenRef.current = "";
       onTokenChangeRef.current?.("");
       return undefined;
@@ -88,7 +89,7 @@ export const TurnstileWidget = forwardRef(function TurnstileWidget({
         .then((turnstile) => {
           if (cancelled || !containerRef.current || !turnstile) return;
           widgetIdRef.current = turnstile.render(containerRef.current, {
-            sitekey: SITE_KEY,
+            sitekey: normalizedSiteKey,
             action: "turnstile-spin-v2",
             theme,
             size,
@@ -121,18 +122,17 @@ export const TurnstileWidget = forwardRef(function TurnstileWidget({
       widgetIdRef.current = null;
       tokenRef.current = "";
     };
-  }, [mountDelay, size, theme]);
+  }, [enabled, mountDelay, normalizedSiteKey, size, theme]);
 
-  if (!SITE_KEY) {
-    return <div className="turnstile-widget" role="alert">安全验证配置错误</div>;
-  }
+  if (!enabled) return null;
+  if (invalidConfig) return <div className="turnstile-widget turnstile-widget--error" role="alert">安全验证配置异常，请联系站点管理员。</div>;
 
   return (
     <div className={`turnstile-widget turnstile-widget--${variant}`} aria-label="安全验证" data-variant={variant}>
       <div
         ref={containerRef}
         className="cf-turnstile turnstile-widget__slot"
-        data-sitekey={SITE_KEY}
+        data-sitekey={normalizedSiteKey}
         data-action="turnstile-spin-v2"
         data-theme={theme}
         data-size={size}
