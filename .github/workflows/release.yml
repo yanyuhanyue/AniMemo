@@ -485,7 +485,7 @@ jobs:
 
   publish:
     name: publish-immutable-prerelease
-    if: ${{ inputs.operation == 'publish' }}
+    if: ${{ !cancelled() && inputs.operation == 'publish' && needs.preflight.result == 'success' && needs.release-authority.result == 'success' }}
     needs: [preflight, release-authority]
     runs-on: ubuntu-latest
     permissions:
