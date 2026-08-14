@@ -20,6 +20,10 @@ usage() {
 
 SOURCE=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
 install -o animemo-updater -g animemo-api -m 0600 "$SOURCE" "$FIXED_MANIFEST"
-runuser -u animemo-updater -g animemo-api -- /usr/local/bin/animemo-updater import-current
+runuser \
+    -u animemo-updater \
+    -g animemo-api \
+    -G docker \
+    -- /usr/local/bin/animemo-updater import-current
 systemctl restart animemo-updater.service
 echo "AniMemo CURRENT identity imported once; no application containers were changed."

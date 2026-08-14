@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import configparser
+import shlex
 import unittest
 from pathlib import Path
 
@@ -102,6 +104,37 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("/run/animemo-updater 0750 animemo-updater animemo-api", tmpfiles)
         self.assertIn("socket.AF_UNIX", server)
         self.assertNotIn("socket.AF_INET, socket.SOCK_STREAM", server)
+
+    def test_current_bootstrap_matches_host_agent_docker_identity(self):
+        service_source = (ROOT / "deploy/updater/animemo-updater.service").read_text(
+            encoding="utf-8"
+        )
+        service = configparser.ConfigParser(interpolation=None, strict=False)
+        service.optionxform = str
+        service.read_string(service_source)
+
+        bootstrap = (ROOT / "deploy/bootstrap-updater.sh").read_text(encoding="utf-8")
+        logical_lines = bootstrap.replace("\\\n", " ").splitlines()
+        runuser_line = next(
+            line for line in logical_lines if "runuser" in line and "import-current" in line
+        )
+        tokens = shlex.split(runuser_line)
+
+        self.assertEqual(tokens[0], "runuser")
+        self.assertIn("-u", tokens)
+        self.assertIn("-g", tokens)
+        self.assertIn("-G", tokens)
+        self.assertEqual(tokens[tokens.index("-u") + 1], service["Service"]["User"])
+        self.assertEqual(tokens[tokens.index("-g") + 1], service["Service"]["Group"])
+        self.assertIn(
+            tokens[tokens.index("-G") + 1],
+            shlex.split(service["Service"]["SupplementaryGroups"]),
+        )
+        separator = tokens.index("--")
+        self.assertEqual(
+            tokens[separator + 1 :],
+            ["/usr/local/bin/animemo-updater", "import-current"],
+        )
 
     def test_agent_preflight_and_stable_window_cover_the_public_contract(self):
         deployment = (ROOT / "updater/deployment.py").read_text(encoding="utf-8")
