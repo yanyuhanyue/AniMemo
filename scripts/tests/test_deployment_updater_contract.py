@@ -188,10 +188,34 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
 
     def test_stateful_gate_migrates_before_scoped_switch_and_retains_data_services(self):
         gate = (ROOT / "scripts/stateful-upgrade-gate.sh").read_text(encoding="utf-8")
+        fixture_start = gate.index('cat >"$ENV_FILE" <<EOF\n')
+        fixture_end = gate.index("\nEOF\n", fixture_start)
+        env_fixture = gate[fixture_start:fixture_end]
+        production_sources = (
+            (ROOT / ".env.production.example").read_text(encoding="utf-8"),
+            (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8"),
+            (ROOT / "deploy/docker-compose.build.yml").read_text(encoding="utf-8"),
+            (ROOT / "deploy/frontend.Dockerfile").read_text(encoding="utf-8"),
+            (ROOT / "backend/config/settings.py").read_text(encoding="utf-8"),
+        )
 
         self.assertIn("FRONTEND_URL=https://ci.example.test", gate)
-        self.assertIn("TURNSTILE_ENABLED=false", gate)
-        self.assertIn("test-only compatibility fixture", gate)
+        self.assertIn("\nTURNSTILE_ENABLED=false\n", env_fixture)
+        self.assertIn(
+            "\nVITE_TURNSTILE_SITE_KEY=1x00000000000000000000AA\n",
+            env_fixture,
+        )
+        self.assertIn("test-only compatibility fixtures", gate)
+        self.assertIn("SiteSettings database-only", gate)
+        self.assertIn("public test", gate)
+        for source in production_sources:
+            for legacy_input in (
+                "VITE_TURNSTILE_SITE_KEY",
+                "TURNSTILE_ENABLED",
+                "TURNSTILE_SECRET",
+                "ANIMEMO_TURNSTILE_SITE_KEY",
+            ):
+                self.assertNotIn(legacy_input, source)
         self.assertIn('BUILD_OVERRIDE_FILE="$CURRENT_ROOT/deploy/docker-compose.build.yml"', gate)
         self.assertIn(
             'local compose_files=(-f "$source_root/deploy/docker-compose.yml" -f "$BUILD_OVERRIDE_FILE")',
