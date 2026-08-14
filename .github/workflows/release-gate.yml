@@ -356,3 +356,4 @@ jobs:
           python scripts/ci_gate_authority.py
           --workflow release
           --event-name "${{ github.event_name }}"
+          --release-graph-contract animemo.release-gate.jobs/v2

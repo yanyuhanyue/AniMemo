@@ -156,6 +156,11 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("if: ${{ always() }}", release_authority)
         self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", release_authority)
         self.assertIn("--workflow release", release_authority)
+        self.assertIn(
+            "--release-graph-contract animemo.release-gate.jobs/v2",
+            release_authority,
+        )
+        self.assertNotIn("--release-graph-contract", ci_authority)
         for dependency in (
             "classify",
             "post-merge-sanity",

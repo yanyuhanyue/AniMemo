@@ -197,14 +197,30 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         )
         self.assertNotIn('if [[ "$source_root" == "$CURRENT_ROOT" ]]', gate)
         base_ready = gate.index(
-            'compose "$BASE_ROOT" up -d --wait --wait-timeout 120 postgres redis'
+            'run_compose base_services_start "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" '
+            'up -d --wait --wait-timeout 120 postgres redis'
         )
-        base_migration = gate.index('compose "$BASE_ROOT" run --rm --no-deps migration')
-        base_bootstrap = gate.index('compose "$BASE_ROOT" run --rm --no-deps bootstrap')
-        base_api = gate.index('compose "$BASE_ROOT" up -d --no-deps api')
-        migration = gate.index('compose "$CURRENT_ROOT" run --rm --no-deps migration')
-        bootstrap = gate.index('compose "$CURRENT_ROOT" run --rm --no-deps bootstrap')
-        switch = gate.index('compose "$CURRENT_ROOT" up -d --no-deps --force-recreate api')
+        base_migration = gate.index(
+            'run_compose base_migration "$BASE_ROOT" "$JOB_TIMEOUT_SECONDS" '
+            'run --rm --no-deps migration'
+        )
+        base_bootstrap = gate.index('run_compose base_bootstrap "$BASE_ROOT" "$JOB_TIMEOUT_SECONDS"')
+        base_api = gate.index(
+            'run_compose base_api_start "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" '
+            'up -d --no-deps api'
+        )
+        migration = gate.index(
+            'run_compose current_migration "$CURRENT_ROOT" "$JOB_TIMEOUT_SECONDS" '
+            'run --rm --no-deps migration'
+        )
+        bootstrap = gate.index(
+            'run_compose current_bootstrap "$CURRENT_ROOT" "$JOB_TIMEOUT_SECONDS" '
+            'run --rm --no-deps bootstrap'
+        )
+        switch = gate.index(
+            'run_compose current_api_replace "$CURRENT_ROOT" "$COMMAND_TIMEOUT_SECONDS" '
+            'up -d --no-deps --force-recreate api'
+        )
         retained = gate.index('PostgreSQL and Redis containers were retained')
         self.assertLess(base_ready, base_migration)
         self.assertLess(base_migration, base_bootstrap)
@@ -214,22 +230,29 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertLess(switch, retained)
         self.assertIn('BASE_POSTGRES_ID=', gate)
         self.assertIn('BASE_REDIS_ID=', gate)
-        self.assertIn(
-            'timeout --foreground 15s docker exec -i "$PROJECT_NAME-api" python -',
-            gate,
-        )
-        self.assertIn('local deadline=$((SECONDS + 240))', gate)
+        self.assertIn('timeout_command "$HEALTH_TIMEOUT_SECONDS" docker exec -i', gate)
+        self.assertIn('local deadline=$((SECONDS + API_WAIT_SECONDS))', gate)
+        self.assertIn("--kill-after=\"${TIMEOUT_KILL_AFTER_SECONDS}s\"", gate)
+        self.assertIn("diagnostic_api_inspect", gate)
         self.assertNotIn('compose "$source_root" exec -T api python -', gate)
 
-    def test_upgrade_overlay_preserves_each_source_tree_bootstrap_command(self):
+    def test_upgrade_gate_overrides_only_the_legacy_bootstrap_server_command(self):
         production = (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
         overlay = (ROOT / "deploy/docker-compose.upgrade-gate.yml").read_text(encoding="utf-8")
+        gate = (ROOT / "scripts/stateful-upgrade-gate.sh").read_text(encoding="utf-8")
         bootstrap_overlay = overlay[
             overlay.index("  bootstrap:\n") : overlay.index("  web:\n")
+        ]
+        base_bootstrap = gate[
+            gate.index("run_compose base_bootstrap") : gate.index("run_compose base_api_start")
         ]
 
         self.assertIn('command: ["python", "manage.py", "bootstrap_animemo"]', production)
         self.assertNotIn("command:", bootstrap_overlay)
+        self.assertIn("python manage.py sync_official_plugins", base_bootstrap)
+        self.assertIn("exec python manage.py collectstatic --noinput", base_bootstrap)
+        self.assertNotIn("gunicorn", base_bootstrap)
+        self.assertNotIn("manage.py migrate", base_bootstrap)
 
         fixture = (ROOT / "scripts/stateful_upgrade_fixture.py").read_text(encoding="utf-8")
         self.assertIn('_migration_applied("site", "0003_installation_state")', fixture)

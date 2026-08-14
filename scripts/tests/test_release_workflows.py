@@ -64,6 +64,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.force_full && 'workflow_call'", ci_source)
         self.assertIn("inputs.force_full && 'workflow_call'", gate_source)
         self.assertIn("--base \"${{ inputs.upgrade_base_sha || '' }}\"", gate_source)
+        self.assertEqual(
+            gate_source.count(
+                "--release-graph-contract animemo.release-gate.jobs/v2"
+            ),
+            1,
+        )
+        self.assertNotIn("--release-graph-contract", ci_source)
 
     def test_ci_and_release_gate_publish_complete_classifier_contract(self):
         expected_outputs = {
