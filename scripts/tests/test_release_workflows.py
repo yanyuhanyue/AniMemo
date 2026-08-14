@@ -269,6 +269,50 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("run_attempt=\"$(jq -r '.run_attempt // empty'", authority_source)
         self.assertIn('[[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]', authority_source)
 
+    def test_phase_b_publish_scheduling_is_skip_safe_and_fail_closed(self):
+        release = workflow("release.yml")
+        publish = release["jobs"]["publish"]
+        condition = publish["if"]
+        expected_condition = (
+            "${{ !cancelled() && inputs.operation == 'publish' "
+            "&& needs.preflight.result == 'success' "
+            "&& needs.release-authority.result == 'success' }}"
+        )
+
+        self.assertEqual(publish["needs"], ["preflight", "release-authority"])
+        self.assertEqual(condition, expected_condition)
+        for required_guard in (
+            "!cancelled()",
+            "inputs.operation == 'publish'",
+            "needs.preflight.result == 'success'",
+            "needs.release-authority.result == 'success'",
+        ):
+            self.assertIn(required_guard, condition)
+        self.assertNotIn("always()", condition)
+
+        cases = (
+            ("qualify", False, "success", "success", False),
+            ("publish", False, "success", "success", True),
+            ("publish", False, "failure", "success", False),
+            ("publish", False, "success", "failure", False),
+            ("publish", False, "success", "skipped", False),
+            ("publish", True, "success", "success", False),
+        )
+        for operation, cancelled, preflight, authority, expected in cases:
+            with self.subTest(
+                operation=operation,
+                cancelled=cancelled,
+                preflight=preflight,
+                authority=authority,
+            ):
+                eligible = (
+                    not cancelled
+                    and operation == "publish"
+                    and preflight == "success"
+                    and authority == "success"
+                )
+                self.assertEqual(eligible, expected)
+
     def test_dry_run_is_read_only_and_publish_permissions_are_minimal(self):
         release = workflow("release.yml")
         dry_permissions = release["jobs"]["dry-run"]["permissions"]
