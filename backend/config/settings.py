@@ -681,12 +681,6 @@ if EXTERNAL_IMPORT_APPLY_MAX_ITEMS > BANGUMI_IMPORT_MAX_ITEMS:
     raise ImproperlyConfigured("EXTERNAL_IMPORT_APPLY_MAX_ITEMS 不能超过 provider 导入上限。")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "AniMemo <noreply@example.com>")
-TURNSTILE_SECRET = os.getenv("TURNSTILE_SECRET", "").strip()
-# Local DEBUG defaults to no external verification; production defaults to
-# fail-closed enforcement.
-TURNSTILE_ENABLED = env_bool("TURNSTILE_ENABLED", not DEBUG)
-if not DEBUG and TURNSTILE_ENABLED and not TURNSTILE_SECRET:
-    raise ImproperlyConfigured("生产环境启用 Turnstile 时必须配置 TURNSTILE_SECRET。")
 PASSWORD_RESET_TIMEOUT = 600
 ADMIN_2FA_SESSION_MAX_AGE = int(os.getenv("ADMIN_2FA_SESSION_MAX_AGE", "28800"))
 if ADMIN_2FA_SESSION_MAX_AGE <= 0:

@@ -58,6 +58,7 @@ export const auditTargetLabels = {
 export const auditFieldLabels = {
   allow_sharing: "允许公开分享",
   clear_resend_api_key: "清除 Resend 密钥",
+  clear_turnstile_secret: "清除 Turnstile Secret",
   config: "插件配置",
   deleted_at: "删除时间",
   effective_email_from: "实际发件地址",
@@ -80,6 +81,10 @@ export const auditFieldLabels = {
   resend_api_key: "Resend API 密钥",
   resend_api_key_configured: "Resend 密钥状态",
   resend_api_key_source: "Resend 密钥来源",
+  turnstile_enabled: "启用 Turnstile",
+  turnstile_site_key: "Turnstile Site Key",
+  turnstile_secret_configured: "Turnstile Secret 状态",
+  turnstile_ready: "Turnstile 服务状态",
   review_reason: "审核反馈",
   role: "后台角色",
   session_version: "会话版本",

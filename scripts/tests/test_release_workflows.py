@@ -244,7 +244,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         performance = release["jobs"]["performance"]
         self.assertEqual(performance["uses"], "./.github/workflows/performance.yml")
         self.assertEqual(performance["needs"], "preflight")
-        self.assertEqual(performance["if"], "${{ inputs.channel == 'rc' }}")
+        self.assertEqual(performance["if"], "${{ inputs.operation == 'qualify' && inputs.channel == 'rc' }}")
         self.assertEqual(
             performance["with"]["candidate_sha"],
             "${{ needs.preflight.outputs.candidate_sha }}",
@@ -265,6 +265,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("performance.yml", (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
         self.assertNotIn("performance.yml", (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8"))
         self.assertIn("needs: [preflight, full-ci, full-release-gate, performance]", authority_source)
+        self.assertEqual(authority["permissions"], {"contents": "read", "actions": "read"})
+        self.assertIn("run_attempt=\"$(jq -r '.run_attempt // empty'", authority_source)
+        self.assertIn('[[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]', authority_source)
 
     def test_dry_run_is_read_only_and_publish_permissions_are_minimal(self):
         release = workflow("release.yml")
@@ -337,7 +340,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertGreaterEqual(source.count("ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}"), 4)
         self.assertEqual(source.count("ANIMEMO_COMMIT=${{ needs.preflight.outputs.candidate_sha }}"), 2)
         self.assertEqual(source.count("ANIMEMO_COMMIT=${{ github.sha }}"), 2)
-        self.assertIn("VITE_TURNSTILE_SITE_KEY=1x00000000000000000000AA", source)
+        self.assertNotIn("VITE_TURNSTILE_SITE_KEY", source)
         self.assertIn("promote-manifest", source)
         self.assertEqual(source.count("scripts/rehearse-release-images.sh"), 2)
         self.assertIn("Start and accept the exact images before any external publication", source)

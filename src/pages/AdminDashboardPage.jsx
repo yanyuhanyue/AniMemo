@@ -43,6 +43,12 @@ const EMPTY_SITE_SETTINGS = {
   resend_api_key_source: "none",
   effective_email_from: "",
   email_delivery_ready: false,
+  turnstile_enabled: false,
+  turnstile_site_key: "",
+  turnstile_secret: "",
+  clear_turnstile_secret: false,
+  turnstile_secret_configured: false,
+  turnstile_ready: false,
 };
 
 const tabs = [
@@ -277,9 +283,13 @@ export function AdminDashboardPage() {
     payload.append("trusted_poster_hosts", JSON.stringify(normalizeTrustedPosterHosts(siteSettingsDraft.trusted_poster_hosts)));
     if (siteSettingsDraft.resend_api_key?.trim()) payload.append("resend_api_key", siteSettingsDraft.resend_api_key.trim());
     if (siteSettingsDraft.clear_resend_api_key) payload.append("clear_resend_api_key", "true");
+    payload.append("turnstile_enabled", String(Boolean(siteSettingsDraft.turnstile_enabled)));
+    payload.append("turnstile_site_key", siteSettingsDraft.turnstile_site_key || "");
+    if (siteSettingsDraft.turnstile_secret?.trim()) payload.append("turnstile_secret", siteSettingsDraft.turnstile_secret.trim());
+    if (siteSettingsDraft.clear_turnstile_secret) payload.append("clear_turnstile_secret", "true");
     if (siteAvatarFile) payload.append("site_avatar", siteAvatarFile);
     const { data: savedSettings } = await api.patch("staff/site-settings/", payload);
-    const normalized = { ...EMPTY_SITE_SETTINGS, ...(savedSettings || {}), resend_api_key: "", clear_resend_api_key: false };
+    const normalized = { ...EMPTY_SITE_SETTINGS, ...(savedSettings || {}), resend_api_key: "", clear_resend_api_key: false, turnstile_secret: "", clear_turnstile_secret: false };
     setSiteSettings(normalized);
     setSiteSettingsDraft(normalized);
     setSiteAvatarPreview(normalized.site_avatar_url || EMPTY_SITE_SETTINGS.site_avatar_url);
@@ -513,6 +523,7 @@ function SiteSettingsPanel({ settings, draft, loading, saving, avatarPreview, em
       <nav className="admin-site-settings__tabs" aria-label="站点设置分区">
         <button type="button" aria-pressed={activeSection === "identity"} aria-controls="admin-settings-identity" className={activeSection === "identity" ? "is-active" : ""} onClick={() => setActiveSection("identity")}><Icon name="image" /><span><b>站点资料</b><small>名称、头像与首页文案</small></span></button>
         <button type="button" aria-pressed={activeSection === "delivery"} aria-controls="admin-settings-delivery" className={activeSection === "delivery" ? "is-active" : ""} onClick={() => setActiveSection("delivery")}><Icon name="envelope" /><span><b>邮件与注册</b><small>激活邮件、Resend 与开放注册</small></span><em className={settings.email_delivery_ready ? "is-ready" : ""}>{settings.email_delivery_ready ? "READY" : "SETUP"}</em></button>
+        <button type="button" aria-pressed={activeSection === "security"} aria-controls="admin-settings-security" className={activeSection === "security" ? "is-active" : ""} onClick={() => setActiveSection("security")}><Icon name="shield" /><span><b>安全验证</b><small>可选的 Cloudflare Turnstile</small></span><em className={settings.turnstile_ready ? "is-ready" : ""}>{settings.turnstile_ready ? "READY" : "OFF"}</em></button>
         <button type="button" aria-pressed={activeSection === "media"} aria-controls="admin-settings-media" className={activeSection === "media" ? "is-active" : ""} onClick={() => setActiveSection("media")}><Icon name="shield" /><span><b>媒体安全</b><small>用户自定义封面的可信来源</small></span><em className="is-ready">HTTPS</em></button>
       </nav>
       <form onSubmit={onSubmit}>
@@ -562,6 +573,20 @@ function SiteSettingsPanel({ settings, draft, loading, saving, avatarPreview, em
             <label><span>测试收件邮箱</span><input type="email" value={emailTestRecipient} onChange={(event) => onEmailTestRecipientChange(event.target.value)} placeholder="admin@example.com" /></label>
             <button type="button" disabled={saving || emailTesting || !emailTestRecipient.trim()} onClick={onTestEmail}><Icon name={emailTesting ? "spinner" : "envelope"} spin={emailTesting} /> {emailTesting ? "正在发送..." : "保存并发送测试邮件"}</button>
           </div>
+        </section> : activeSection === "security" ? <section id="admin-settings-security" className="admin-site-settings__media admin-site-settings__section" ref={sectionRef} aria-labelledby="admin-security-settings-title">
+          <div className="admin-site-settings__section-heading"><span>OPTIONAL SECURITY</span><h4 id="admin-security-settings-title">Cloudflare Turnstile</h4><p>Turnstile 为可选安全验证。关闭时 AniMemo 不依赖 Cloudflare Turnstile；开启后填写当前实例自己的 Site Key 与 Secret Key。</p></div>
+          <div className="admin-email-settings__switches">
+            <label className="admin-registration-switch admin-email-switch">
+              <input type="checkbox" checked={Boolean(draft.turnstile_enabled)} onChange={(event) => onChange("turnstile_enabled", event.target.checked)} />
+              <span aria-hidden="true"><i /></span>
+              <strong><b>启用 Turnstile</b><small>{draft.turnstile_enabled ? "登录、注册和密码安全流程需要通过验证" : "认证流程不加载 Cloudflare 验证脚本"}</small></strong>
+            </label>
+          </div>
+          <div className="admin-email-settings__grid">
+            <label><span>Site Key</span><input value={draft.turnstile_site_key || ""} onChange={(event) => onChange("turnstile_site_key", event.target.value)} maxLength="128" placeholder="当前站点的公开 Site Key" /></label>
+            <label className="admin-email-key-field"><span>Secret Key</span><input type="password" value={draft.turnstile_secret || ""} onChange={(event) => { onChange("turnstile_secret", event.target.value); onChange("clear_turnstile_secret", false); }} autoComplete="new-password" placeholder={settings.turnstile_secret_configured ? "已配置，留空表示保持不变" : "填写后加密保存"} /><small>Secret 只写入服务器，不会回传或预填到浏览器。</small></label>
+            <div className="admin-email-key-actions"><button type="button" className={draft.clear_turnstile_secret ? "is-clearing" : ""} disabled={!settings.turnstile_secret_configured && !draft.turnstile_secret} onClick={() => { onChange("turnstile_secret", ""); onChange("clear_turnstile_secret", !draft.clear_turnstile_secret); onChange("turnstile_enabled", false); }}><Icon name="trash" /> {draft.clear_turnstile_secret ? "保存后清除" : "清除已存密钥"}</button><small>当前状态：{settings.turnstile_secret_configured ? "已配置" : "未配置"}</small></div>
+          </div>
         </section> : <section id="admin-settings-media" className="admin-site-settings__media admin-site-settings__section" ref={sectionRef} aria-labelledby="admin-media-settings-title">
           <div className="admin-site-settings__section-heading"><span>MEDIA SECURITY</span><h4 id="admin-media-settings-title">可信封面来源</h4><p>普通用户可上传本地 JPG、PNG、WebP，也可填写下列域名提供的 HTTPS 图片地址。</p></div>
           <div className="admin-media-settings__notice"><Icon name="shield" /><div><strong>服务器只接受精确匹配的域名</strong><p>不支持通配符、子域名继承、HTTP、IP 地址、账号密码或任意外链，避免形成开放图片代理。</p></div></div>
@@ -569,7 +594,7 @@ function SiteSettingsPanel({ settings, draft, loading, saving, avatarPreview, em
           <div className="admin-media-settings__rules"><span><Icon name="upload" /><b>本地上传</b><small>最大 5MB，服务端重编码为 WebP 并移除元数据</small></span><span><Icon name="image" /><b>来源优先级</b><small>本地上传 ＞ 可信自定义 URL ＞ Bangumi 公共封面</small></span><span><Icon name="reset" /><b>恢复默认</b><small>清除用户上传与自定义 URL，回到公共封面</small></span></div>
         </section>}
         <div className="admin-site-settings__footer">
-          <div className="admin-site-settings__footer-context"><Icon name={activeSection === "identity" ? "image" : activeSection === "delivery" ? "envelope" : "shield"} /><span><b>{activeSection === "identity" ? "站点资料" : activeSection === "delivery" ? "邮件与注册" : "媒体安全"}</b><small>修改内容会在保存后同步到公共页面</small></span></div>
+          <div className="admin-site-settings__footer-context"><Icon name={activeSection === "identity" ? "image" : activeSection === "delivery" ? "envelope" : "shield"} /><span><b>{activeSection === "identity" ? "站点资料" : activeSection === "delivery" ? "邮件与注册" : activeSection === "security" ? "安全验证" : "媒体安全"}</b><small>修改内容会在保存后同步到公共页面</small></span></div>
           <div className="admin-site-settings__save">
             <small>上次保存：{dateLabel(settings.updated_at)}</small>
             <button type="submit" disabled={saving}><Icon name="check" /> {saving ? "正在保存..." : "保存站点设置"}</button>

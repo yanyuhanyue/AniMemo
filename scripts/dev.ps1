@@ -68,7 +68,7 @@ try {
     Write-Host "验证本地 Django 配置与健康检查..."
     & $venvPython backend/manage.py check
     Assert-LastExitCode "Django 配置检查"
-    & $venvPython backend/manage.py shell -c "from django.conf import settings; from django.test import Client; assert settings.DEBUG and settings.TURNSTILE_ENABLED is False; assert Client(HTTP_HOST='localhost').get('/health/').status_code == 200"
+    & $venvPython backend/manage.py shell -c "from site_config.models import SiteSettings; from django.conf import settings; from django.test import Client; assert settings.DEBUG and SiteSettings.load().turnstile_enabled is False; assert Client(HTTP_HOST='localhost').get('/health/').status_code == 200"
     Assert-LastExitCode "Django 健康检查"
     if ($SetupOnly) { return }
 

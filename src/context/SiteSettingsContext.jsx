@@ -11,6 +11,7 @@ export const DEFAULT_SITE_SETTINGS = {
   social_handle: "X: @ANIMEMO",
   registration_enabled: true,
   trusted_poster_hosts: DEFAULT_TRUSTED_POSTER_HOSTS,
+  turnstile: { enabled: false, site_key: "" },
 };
 
 const SiteSettingsContext = createContext({
@@ -23,6 +24,11 @@ function normalizeSettings(value) {
   const next = { ...DEFAULT_SITE_SETTINGS, ...(value || {}) };
   next.site_avatar_url = value?.site_avatar_url || DEFAULT_SITE_SETTINGS.site_avatar_url;
   next.trusted_poster_hosts = normalizeTrustedPosterHosts(value?.trusted_poster_hosts);
+  const turnstile = value?.turnstile && typeof value.turnstile === "object" ? value.turnstile : {};
+  next.turnstile = {
+    enabled: Boolean(turnstile.enabled),
+    site_key: typeof turnstile.site_key === "string" ? turnstile.site_key.trim() : "",
+  };
   return next;
 }
 

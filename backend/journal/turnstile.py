@@ -1,7 +1,8 @@
 import logging
 
 import requests
-from django.conf import settings
+
+from site_config.turnstile import resolve_turnstile_config
 
 
 logger = logging.getLogger(__name__)
@@ -9,11 +10,15 @@ TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverif
 
 
 def verify_turnstile(token, *, remote_ip=""):
-    """Redeem one Turnstile provider token and fail closed when enabled."""
-    if not getattr(settings, "TURNSTILE_ENABLED", True):
+    """Redeem one DB-configured Turnstile token and fail closed."""
+    config = resolve_turnstile_config()
+    if not config.enabled:
         return True
 
-    secret = str(getattr(settings, "TURNSTILE_SECRET", "") or "").strip()
+    if not config.ready:
+        return False
+
+    secret = config.secret
     response_token = str(token or "").strip()
     if not secret or not response_token:
         return False

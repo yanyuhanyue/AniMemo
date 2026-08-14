@@ -35,14 +35,19 @@ test("auth field leading icons stay above transformed focused inputs", () => {
 });
 
 test("user and staff Turnstile integrations use explicit official themes and stable slots", () => {
-  assert.match(userAuth, /TurnstileWidget[^\n]*variant="user"[^\n]*size="normal"[^\n]*mountDelay=\{900\}/);
-  assert.match(staffAuth, /TurnstileWidget[^\n]*variant="staff"[^\n]*size="flexible"[^\n]*mountDelay=\{900\}/);
+  assert.match(userAuth, /TurnstileWidget[^\n]*enabled=\{turnstile\.enabled\}[^\n]*siteKey=\{turnstile\.site_key\}/);
+  assert.match(staffAuth, /TurnstileWidget[^\n]*enabled=\{turnstile\.enabled\}[^\n]*siteKey=\{turnstile\.site_key\}/);
+  assert.match(userAuth, /variant="user"[^\n]*size="normal"[^\n]*mountDelay=\{900\}/);
+  assert.match(staffAuth, /variant="staff"[^\n]*size="flexible"[^\n]*mountDelay=\{900\}/);
   assert.match(turnstile, /theme = variant === "staff" \? "dark" : "light"/);
   assert.match(turnstile, /theme,/);
   assert.match(turnstile, /size,/);
   assert.match(turnstile, /setTimeout\(\(\) =>/);
   assert.match(turnstile, /turnstileScriptPromise/);
   assert.match(turnstile, /turnstile\.remove\?\./);
+  assert.doesNotMatch(turnstile, /import\.meta\.env\.VITE_TURNSTILE_SITE_KEY/);
+  assert.match(turnstile, /if \(!enabled\) return null/);
+  assert.match(turnstile, /安全验证配置异常，请联系站点管理员/);
   assert.match(styles, /\.turnstile-widget__slot \{/);
   assert.doesNotMatch(styles, /turnstile-widget[^\n]*transform:\s*scale/);
 });

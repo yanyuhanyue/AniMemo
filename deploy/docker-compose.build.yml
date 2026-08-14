@@ -44,7 +44,6 @@ services:
       dockerfile: deploy/frontend.Dockerfile
       args:
         VITE_API_BASE_URL: /api/v1
-        VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:?VITE_TURNSTILE_SITE_KEY is required}
     ports:
       - "127.0.0.1:${ANIMEMO_PORT:-${ANIME_JOURNAL_PORT:-8088}}:80"
     volumes:

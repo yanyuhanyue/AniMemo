@@ -164,7 +164,7 @@ sudo sh deploy/deploy.sh \
 
 迁移与 bootstrap 完成后，一次性初始化码只写入 `${ANIMEMO_DATA_ROOT}/private/setup-code`（目录 `0700`、文件 `0600`），不会出现在日志、API 或构建产物。操作者读取该文件后访问 `/setup` 创建首位管理员；成功后文件立即删除，入口由数据库状态永久锁定。完整生命周期与故障恢复见 [`首次运行引导`](docs/first-run-bootstrap.md)。
 
-构建前端执行 `npm run build`，输出目录为 `dist/client`。生产镜像构建会从 `.env.production` 将公开的 `VITE_TURNSTILE_SITE_KEY` 作为 build arg 传入 Vite；后端 `TURNSTILE_SECRET` 不会传入前端构建。Smoke Test 会严格检查健康接口为 HTTP 200 且 JSON `status` 为 `ok`，再检查四个容器健康状态、Host 转发、PostgreSQL/Redis 连接，以及 Local 文件 `0644`、目录 `0755`、Nginx `/local-media/` 读取和清理。
+构建前端执行 `npm run build`，输出目录为 `dist/client`。生产镜像是与实例配置无关的通用 Web 工件；Turnstile 在 AniMemo Staff「安全验证」设置中按实例配置，不参与前端构建。Smoke Test 会严格检查健康接口为 HTTP 200 且 JSON `status` 为 `ok`，再检查四个容器健康状态、Host 转发、PostgreSQL/Redis 连接，以及 Local 文件 `0644`、目录 `0755`、Nginx `/local-media/` 读取和清理。
 
 ## 认证与安全部署
 
@@ -174,7 +174,7 @@ sudo sh deploy/deploy.sh \
 - refresh/logout 必须允许 credentials，生产前端来源必须同时精确列入 `CORS_ALLOWED_ORIGINS` 与 `CSRF_TRUSTED_ORIGINS`。不要用通配符 origin 配合 credentials。
 - 同站部署使用 `SameSite=Lax`；确需跨站时使用 `SameSite=None` 且必须保持 `Secure=true` 和 HTTPS。
 - 工作人员 2FA 保持可选：未启用时密码正确即可进入自定义工作人员后台；启用后，普通 JWT 与工作人员登录都必须完成 TOTP 或一次性恢复码验证后才签发凭据。Django Admin 始终要求已启用并完成 2FA。
-- 登录、工作人员登录、注册申请、完成注册和密码重置入口均使用 Cloudflare Turnstile；前端使用 `VITE_TURNSTILE_SITE_KEY`，后端必须把密钥放入 `TURNSTILE_SECRET`，并保持 `TURNSTILE_ENABLED=true`（生产默认开启）。后端只在 Cloudflare `siteverify` 返回 `success: true` 时继续执行原有 handler。
+- 登录、工作人员登录、注册申请、完成注册和密码重置入口支持可选的 Cloudflare Turnstile；配置来自 Staff「安全验证」中的 SiteSettings 数据库。关闭时不加载 Turnstile，开启后必须配置 Site Key 与加密保存的 Secret Key；后端只在 Cloudflare `siteverify` 返回 `success: true` 时继续执行原有 handler。
 - 头像和站点头像默认限制 2MB，海报和专栏封面默认限制 5MB；核心图片会先完整解码、应用 EXIF 方向、去除元数据并重新编码为静态 WebP，动态图片会被拒绝。
 - 工作人员自助注销账号必须输入当前密码和 TOTP/一枚恢复码；最后一个有效超级管理员受到服务端事务锁保护，成功和拒绝都会写入不含敏感凭据的审计记录。
 - refresh rotation 会锁定对应 `OutstandingToken`，同一 refresh 并发请求只允许一个成功，重放会被拒绝并记录截断 JTI 哈希。
