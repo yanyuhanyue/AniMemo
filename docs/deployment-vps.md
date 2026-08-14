@@ -21,9 +21,9 @@ GitHub Release Producer
 固定生产路径：
 
 ```text
-/opt/1panel/docker/compose/anime-journal/app
-/opt/1panel/docker/compose/anime-journal/app/deploy/docker-compose.yml
-/data/anime-journal/{postgres,redis,plugins,logs,backups,media,private}
+/opt/1panel/docker/compose/animemo/app
+/opt/1panel/docker/compose/animemo/app/deploy/docker-compose.yml
+/data/animemo/{postgres,redis,plugins,logs,backups,media,private}
 /opt/animemo-updater
 /var/lib/animemo-updater
 /run/animemo-updater/updater.sock
@@ -93,17 +93,17 @@ Docker socket access is effectively privileged。systemd hardening 只缩小无�
 
 ```bash
 sudo sh deploy/deploy.sh --bootstrap \
-  --archive /tmp/anime-journal-core-<stamp>.zip \
-  --sha256 /tmp/anime-journal-core-<stamp>.sha256
+  --archive /tmp/animemo-core-<stamp>.zip \
+  --sha256 /tmp/animemo-core-<stamp>.sha256
 
 sudo sh deploy/deploy.sh --break-glass \
-  --archive /tmp/anime-journal-core-<stamp>.zip \
-  --sha256 /tmp/anime-journal-core-<stamp>.sha256
+  --archive /tmp/animemo-core-<stamp>.zip \
+  --sha256 /tmp/animemo-core-<stamp>.sha256
 ```
 
 脚本校验 core-only ZIP 和 SHA，使用 build override 构建 API/Web，显式运行 migration/bootstrap，再只替换 API/Web。它不会自动 reverse migration 或 restore 数据库。`--reset-data --yes` 仅属于明确的首次 bootstrap destructive reset；不得用于普通更新或 break-glass。
 
-全新数据库的 bootstrap 会把一次性初始化码写入 `/data/anime-journal/private/setup-code`。该目录由 API UID/GID 拥有并使用 `0700`，文件使用 `0600`；初始化码不写入命令输出、日志、API 响应或 Release artifact。操作者读取文件后访问同源 `/setup` 创建全新的首位管理员，成功提交会删除文件并把数据库安装状态永久锁为 `initialized`。普通注册在此之前保持关闭。升级中的已有数据库会迁移为已初始化，绝不会根据可预测用户名提升已有账号。完整流程见 [`First-run Bootstrap`](first-run-bootstrap.md)。
+全新数据库的 bootstrap 会把一次性初始化码写入 `/data/animemo/private/setup-code`。该目录由 API UID/GID 拥有并使用 `0700`，文件使用 `0600`；初始化码不写入命令输出、日志、API 响应或 Release artifact。操作者读取文件后访问同源 `/setup` 创建全新的首位管理员，成功提交会删除文件并把数据库安装状态永久锁为 `initialized`。普通注册在此之前保持关闭。升级中的已有数据库会迁移为已初始化，绝不会根据可预测用户名提升已有账号。完整流程见 [`First-run Bootstrap`](first-run-bootstrap.md)。
 
 ZIP/current.json 归档只保留为 legacy evidence，不是 signed OCI release identity，也不得被静默导入为 Agent CURRENT。
 

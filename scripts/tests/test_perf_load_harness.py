@@ -80,8 +80,9 @@ class PerformanceLoadHarnessTests(unittest.TestCase):
 
     def test_target_validation_rejects_production_and_unsafe_urls(self):
         for url in (
+            "https://animemo.cc",
+            "https://media.animemo.cc/api",
             "https://re-anime.cc",
-            "https://www.re-anime.cc/api",
             "http://45.207.221.83:8088",
             "https://user:password@example.test",
             "ftp://localhost",

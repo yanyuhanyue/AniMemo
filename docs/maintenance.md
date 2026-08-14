@@ -36,10 +36,10 @@ python backend/manage.py profile_journal_queries --username <用户名> --format
 
 ## Scheduling
 
-生产调度器可以使用宿主机的 cron 或 systemd timer，通过运行中的 AniMemo API 容器调用 `run_maintenance`，但不需要常驻 worker。实际生产 Compose 工作目录为 `/opt/1panel/docker/compose/anime-journal/app`，必须显式使用 `.env.production` 和 `deploy/docker-compose.yml`：
+生产调度器可以使用宿主机的 cron 或 systemd timer，通过运行中的 AniMemo API 容器调用 `run_maintenance`，但不需要常驻 worker。实际生产 Compose 工作目录为 `/opt/1panel/docker/compose/animemo/app`，必须显式使用 `.env.production` 和 `deploy/docker-compose.yml`：
 
 ```cron
-17 * * * * cd /opt/1panel/docker/compose/anime-journal/app && /usr/bin/docker compose --env-file .env.production -f deploy/docker-compose.yml exec -T api python manage.py run_maintenance >> /var/log/anime-journal-maintenance.log 2>&1
+17 * * * * cd /opt/1panel/docker/compose/animemo/app && /usr/bin/docker compose --env-file .env.production -f deploy/docker-compose.yml exec -T api python manage.py run_maintenance >> /var/log/animemo-maintenance.log 2>&1
 ```
 
 systemd service/timer 也应使用同一个命令，并让失败状态进入宿主机日志和告警系统；本项目不引入 Celery、Celery Beat、RabbitMQ、Kafka 或新的后台 worker。
@@ -55,7 +55,7 @@ Description=AniMemo maintenance tasks
 [Service]
 Type=oneshot
 User=root
-WorkingDirectory=/opt/1panel/docker/compose/anime-journal/app
+WorkingDirectory=/opt/1panel/docker/compose/animemo/app
 ExecStart=/usr/bin/docker compose --env-file .env.production -f deploy/docker-compose.yml exec -T api python manage.py run_maintenance
 ```
 

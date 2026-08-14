@@ -20,6 +20,11 @@ on:
         description: Force the authoritative full regression matrix
         required: true
         type: boolean
+      public_origin:
+        description: Candidate public origin used by isolated backend fixtures
+        required: false
+        default: http://localhost:5173
+        type: string
   workflow_dispatch:
     inputs:
       candidate_sha:
@@ -71,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 0
       - id: classify
         env:
@@ -90,7 +95,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - name: Validate changed-files classifier
         run: python scripts/ci_classify.py --self-test
       - name: Validate tracked text
@@ -113,7 +118,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -138,11 +143,11 @@ jobs:
       DEBUG: "true"
       DJANGO_SECRET_KEY: ci-only-django-secret-key-for-local-github-actions-validation
       CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
-      FRONTEND_URL: http://localhost:5173
+      ANIMEMO_PUBLIC_ORIGIN: ${{ inputs.public_origin || 'http://localhost:5173' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -178,7 +183,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -205,23 +210,23 @@ jobs:
       DEBUG: "true"
       DJANGO_SECRET_KEY: ci-only-django-secret-key-for-local-github-actions-validation
       CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
-      FRONTEND_URL: http://localhost:5173
-      DATABASE_URL: postgresql://anime_journal:ci-password@127.0.0.1:5432/anime_journal
-      POSTGRES_DB: anime_journal
-      POSTGRES_USER: anime_journal
+      ANIMEMO_PUBLIC_ORIGIN: ${{ inputs.public_origin || 'http://localhost:5173' }}
+      DATABASE_URL: postgresql://animemo:ci-password@127.0.0.1:5432/animemo
+      POSTGRES_DB: animemo
+      POSTGRES_USER: animemo
       POSTGRES_PASSWORD: ci-password
       REDIS_URL: redis://127.0.0.1:6379/0
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: anime_journal
-          POSTGRES_USER: anime_journal
+          POSTGRES_DB: animemo
+          POSTGRES_USER: animemo
           POSTGRES_PASSWORD: ci-password
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U anime_journal -d anime_journal"
+          --health-cmd "pg_isready -U animemo -d animemo"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -237,7 +242,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -259,7 +264,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
@@ -277,14 +282,15 @@ jobs:
       - name: Check official plugin immutable package identities
         env:
           COMPARISON_BASE_SHA: ${{ inputs.comparison_base_sha || '' }}
-          CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
         shell: bash
         run: |
           if [[ -n "$COMPARISON_BASE_SHA" ]]; then
             python scripts/check_official_plugin_immutability.py \
               --base "$COMPARISON_BASE_SHA" --head "$CANDIDATE_SHA" --head-root .
           else
-            python scripts/check_official_plugin_immutability.py --head-root .
+            python scripts/check_official_plugin_immutability.py \
+              --head "$CANDIDATE_SHA" --head-root .
           fi
       - run: python scripts/pluginctl.py pack watch-history-importer
 
@@ -297,7 +303,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -321,7 +327,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - uses: actions/checkout@v4
         with:
           repository: AstrBotDevs/AstrBot
@@ -354,7 +360,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha || github.sha }}
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - name: Require selected jobs to succeed and unselected jobs to skip
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}

@@ -1,4 +1,4 @@
-/** Public frontend contract for Anime Journal Plugin SDK v2. */
+/** Public frontend contract for AniMemo Plugin SDK v2. */
 export const PLUGIN_SDK_VERSION = "2.0.0";
 
 export const HOST_SDK_CAPABILITIES = Object.freeze([
@@ -145,7 +145,7 @@ export function createPluginHost({
     events,
     site: Object.freeze({
       getSettings: () => safeSiteSettings(site.getSettings?.()),
-      getName: () => String(site.getName?.() || "Anime Journal"),
+      getName: () => String(site.getName?.() || "AniMemo"),
       getBaseUrl: () => String(site.getBaseUrl?.() || (typeof window !== "undefined" ? window.location.origin : "")),
       subscribeSettings: site.subscribeSettings,
     }),

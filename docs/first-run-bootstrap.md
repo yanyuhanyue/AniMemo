@@ -16,7 +16,7 @@ AniMemo 不携带默认管理员用户名、邮箱或密码，也不会把已有
 
 1. 用 `deploy/prepare-host.sh` 创建持久目录。`private` 必须由 API 进程 UID/GID 拥有并使用 `0700`。
 2. 显式运行 migration，再运行 Compose `bootstrap` job。bootstrap 会同步幂等默认数据并生成或复用有效初始化码。
-3. 在宿主机读取 `${ANIME_JOURNAL_DATA_ROOT}/private/setup-code`。生产默认路径为 `/data/anime-journal/private/setup-code`，文件权限为 `0600`。
+3. 在宿主机读取 `${ANIMEMO_DATA_ROOT}/private/setup-code`。生产默认路径为 `/data/animemo/private/setup-code`，文件权限为 `0600`。
 4. 在同源站点打开 `/setup`，填写一次性初始化码、一个全新的用户名、必填邮箱和强密码。
 5. 成功后进入 `/admin-login`。服务器同时创建 `UserSettings` 与审计记录，删除明文码、清空哈希并把安装状态锁为 `initialized`。
 

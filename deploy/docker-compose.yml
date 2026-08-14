@@ -1,4 +1,4 @@
-name: anime-journal
+name: animemo
 
 x-api-common: &api-common
   image: ${ANIMEMO_API_IMAGE:?ANIMEMO_API_IMAGE must be an immutable ghcr.io/yanyuhanyue/animemo-api@sha256 digest}
@@ -7,13 +7,13 @@ x-api-common: &api-common
   environment:
     TZ: Asia/Shanghai
   volumes:
-    - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/plugins:/app/runtime/plugins
-    - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/logs:/app/logs
-    - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/backups:/app/backups
-    - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/media:/data/anime-journal/media
-    - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/private:/app/runtime/private
+    - ${ANIMEMO_DATA_ROOT:-/data/animemo}/plugins:/app/runtime/plugins
+    - ${ANIMEMO_DATA_ROOT:-/data/animemo}/logs:/app/logs
+    - ${ANIMEMO_DATA_ROOT:-/data/animemo}/backups:/app/backups
+    - ${ANIMEMO_DATA_ROOT:-/data/animemo}/media:/data/animemo/media
+    - ${ANIMEMO_DATA_ROOT:-/data/animemo}/private:/app/runtime/private
   networks:
-    - anime-journal
+    - animemo
   depends_on:
     postgres:
       condition: service_healthy
@@ -23,21 +23,21 @@ x-api-common: &api-common
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: anime-journal-postgres
+    container_name: animemo-postgres
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-anime_journal}
-      POSTGRES_USER: ${POSTGRES_USER:-anime_journal}
+      POSTGRES_DB: ${POSTGRES_DB:-animemo}
+      POSTGRES_USER: ${POSTGRES_USER:-animemo}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     restart: unless-stopped
     volumes:
-      - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/postgres:/var/lib/postgresql/data
+      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/postgres:/var/lib/postgresql/data
     networks:
-      - anime-journal
+      - animemo
     logging:
       driver: json-file
       options: {max-size: "50m", max-file: "7"}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-anime_journal} -d ${POSTGRES_DB:-anime_journal}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-animemo} -d ${POSTGRES_DB:-animemo}"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -45,13 +45,13 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: anime-journal-redis
+    container_name: animemo-redis
     command: ["redis-server", "--appendonly", "yes"]
     restart: unless-stopped
     volumes:
-      - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/redis:/data
+      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/redis:/data
     networks:
-      - anime-journal
+      - animemo
     logging:
       driver: json-file
       options: {max-size: "50m", max-file: "7"}
@@ -76,14 +76,14 @@ services:
 
   api:
     <<: *api-common
-    container_name: anime-journal-api
+    container_name: animemo-api
     restart: unless-stopped
     volumes:
-      - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/plugins:/app/runtime/plugins
-      - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/logs:/app/logs
-      - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/backups:/app/backups
-      - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/media:/data/anime-journal/media
-      - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/private:/app/runtime/private
+      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/plugins:/app/runtime/plugins
+      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/logs:/app/logs
+      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/backups:/app/backups
+      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/media:/data/animemo/media
+      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/private:/app/runtime/private
       - /run/animemo-updater:/run/animemo-updater:rw
     logging:
       driver: json-file
@@ -101,7 +101,7 @@ services:
 
   web:
     image: ${ANIMEMO_WEB_IMAGE:?ANIMEMO_WEB_IMAGE must be an immutable ghcr.io/yanyuhanyue/animemo-web@sha256 digest}
-    container_name: anime-journal-web
+    container_name: animemo-web
     depends_on:
       api:
         condition: service_healthy
@@ -109,11 +109,11 @@ services:
       TZ: Asia/Shanghai
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${ANIME_JOURNAL_PORT:-8088}:80"
+      - "127.0.0.1:${ANIMEMO_PORT:-8088}:80"
     volumes:
-      - ${ANIME_JOURNAL_DATA_ROOT:-/data/anime-journal}/media:/var/www/anime-data/media:ro
+      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/media:/var/www/animemo-data/media:ro
     networks:
-      - anime-journal
+      - animemo
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
       interval: 10s
@@ -122,8 +122,8 @@ services:
       start_period: 10s
 
 networks:
-  anime-journal:
-    name: anime-journal
+  animemo:
+    name: animemo
     ipam:
       config:
         - subnet: 172.28.0.0/16

@@ -1,9 +1,9 @@
 x-effective-release: &effective-release
-  ANIME_JOURNAL_VERSION: ${ANIMEMO_RELEASE_VERSION:?verified release version is required}
-  ANIME_JOURNAL_COMMIT: ${ANIMEMO_RELEASE_COMMIT:?verified release commit is required}
-  ANIME_JOURNAL_RELEASE_CHANNEL: ${ANIMEMO_RELEASE_CHANNEL:?verified release channel is required}
-  ANIME_JOURNAL_DATABASE_CONTRACT: ${ANIMEMO_DATABASE_CONTRACT:?verified database contract is required}
-  ANIME_JOURNAL_CONFIGURATION_CONTRACT: ${ANIMEMO_CONFIGURATION_CONTRACT:?verified configuration contract is required}
+  ANIMEMO_VERSION: ${ANIMEMO_RELEASE_VERSION:?verified release version is required}
+  ANIMEMO_COMMIT: ${ANIMEMO_RELEASE_COMMIT:?verified release commit is required}
+  ANIMEMO_RELEASE_CHANNEL: ${ANIMEMO_RELEASE_CHANNEL:?verified release channel is required}
+  ANIMEMO_DATABASE_CONTRACT: ${ANIMEMO_DATABASE_CONTRACT:?verified database contract is required}
+  ANIMEMO_CONFIGURATION_CONTRACT: ${ANIMEMO_CONFIGURATION_CONTRACT:?verified configuration contract is required}
 
 services:
   migration:

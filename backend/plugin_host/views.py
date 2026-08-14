@@ -100,8 +100,8 @@ def serialize_marketplace_project(project, *, user=None):
         "name": project.name,
         "description": project.description,
         "installation_mode": project.installation_mode,
-        "publisher": project.owner.get_username() if project.owner else "Anime Journal",
-        "owner": project.owner.get_username() if project.owner else "Anime Journal",
+        "publisher": project.owner.get_username() if project.owner else "AniMemo",
+        "owner": project.owner.get_username() if project.owner else "AniMemo",
         "published_version": current_version.version if current_version else None,
         "runtime_types": current_version.runtime_types if current_version else [],
         "permissions": [

@@ -51,16 +51,35 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
     def test_ci_and_release_gate_keep_merge_group_and_accept_exact_candidate(self):
         ci = self.source("ci.yml")
         release = self.source("release-gate.yml")
+        candidate_ref = (
+            "ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && "
+            "github.event.pull_request.head.sha || github.sha) }}"
+        )
         for source in (ci, release):
             self.assertIn("merge_group:", source)
             self.assertIn("workflow_call:", source)
             self.assertIn("candidate_sha:", source)
             self.assertIn("force_full:", source)
-            self.assertIn("ref: ${{ inputs.candidate_sha || github.sha }}", source)
+            self.assertIn(candidate_ref, source)
+            self.assertNotIn("ref: ${{ inputs.candidate_sha || github.sha }}", source)
             self.assertIn("inputs.force_full ||", source)
             self.assertIn("inputs.candidate_sha || github.event.pull_request.number || github.ref", source)
         self.assertIn("comparison_base_sha:", ci)
         self.assertIn("upgrade_base_sha:", release)
+
+    def test_pre_merge_passes_candidate_public_origin_to_trusted_reusable_gates(self):
+        source = self.source("pre-merge-full.yml")
+        self.assertIn("public_origin: https://ci.example.test", source)
+        self.assertEqual(source.count("public_origin: https://ci.example.test"), 2)
+
+        ci = self.source("ci.yml")
+        release = self.source("release-gate.yml")
+        self.assertIn("public_origin:", ci)
+        self.assertIn("public_origin:", release)
+        self.assertIn("ANIMEMO_PUBLIC_ORIGIN: ${{ inputs.public_origin || 'http://localhost:5173' }}", ci)
+        self.assertIn("ANIMEMO_PUBLIC_ORIGIN=${{ inputs.public_origin || 'https://ci.example.test' }}", release)
+        self.assertNotIn("ANIME_JOURNAL_PORT", release)
+        self.assertNotIn("ANIME_JOURNAL_DATA_ROOT", release)
 
     def test_every_full_job_is_forced_and_every_animemo_checkout_is_candidate_pinned(self):
         ci = self.source("ci.yml")
@@ -77,11 +96,15 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             "astrbot-runtime",
         ):
             self.assertIn("inputs.force_full ||", self.job(ci, name), name)
-        for name in ("updater-isolated", "docker", "stateful-upgrade"):
+        for name in ("updater-isolated", "docker", "stateful-upgrade", "dr-rehearsal"):
             self.assertIn("inputs.force_full ||", self.job(release, name), name)
 
-        self.assertEqual(ci.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 10)
-        self.assertEqual(release.count("ref: ${{ inputs.candidate_sha || github.sha }}"), 6)
+        candidate_ref = (
+            "ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && "
+            "github.event.pull_request.head.sha || github.sha) }}"
+        )
+        self.assertEqual(ci.count(candidate_ref), 10)
+        self.assertEqual(release.count(candidate_ref), 7)
         self.assertIn(
             "repository: AstrBotDevs/AstrBot\n          ref: ${{ matrix.astrbot_ref }}",
             ci,
@@ -98,6 +121,13 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("github.event_name != 'push'", ci)
         self.assertIn("github.event_name != 'push'", release)
         self.assertIn("name: post-merge-sanity", release)
+
+    def test_plugin_immutability_gate_uses_the_checked_out_candidate_head(self):
+        plugins = self.job(self.source("ci.yml"), "plugins")
+
+        self.assertEqual(plugins.count('--head "$CANDIDATE_SHA"'), 2)
+        self.assertIn('--base "$COMPARISON_BASE_SHA" --head "$CANDIDATE_SHA"', plugins)
+        self.assertNotIn("check_official_plugin_immutability.py --head-root .", plugins)
 
     def test_selection_authorities_validate_actual_job_results(self):
         ci = self.source("ci.yml")
@@ -126,12 +156,18 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("if: ${{ always() }}", release_authority)
         self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", release_authority)
         self.assertIn("--workflow release", release_authority)
+        self.assertIn(
+            "--release-graph-contract animemo.release-gate.jobs/v2",
+            release_authority,
+        )
+        self.assertNotIn("--release-graph-contract", ci_authority)
         for dependency in (
             "classify",
             "post-merge-sanity",
             "updater-isolated",
             "docker",
             "stateful-upgrade",
+            "dr-rehearsal",
         ):
             self.assertIn(dependency, release_authority)
 
@@ -149,12 +185,16 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             "needs.classify.outputs.run_release_stateful == 'true'",
             self.job(release, "stateful-upgrade"),
         )
+        self.assertIn(
+            "needs.classify.outputs.run_release_stateful == 'true'",
+            self.job(release, "dr-rehearsal"),
+        )
 
     def test_release_gate_bootstraps_both_legacy_and_explicit_job_compose_contracts(self):
         release = self.source("release-gate.yml")
 
-        self.assertIn("ANIMEMO_API_IMAGE=anime-journal-api:release-gate", release)
-        self.assertIn("ANIMEMO_WEB_IMAGE=anime-journal-web:release-gate", release)
+        self.assertIn("ANIMEMO_API_IMAGE=animemo-api:release-gate", release)
+        self.assertIn("ANIMEMO_WEB_IMAGE=animemo-web:release-gate", release)
         self.assertIn('if [[ -f deploy/docker-compose.build.yml ]]; then', release)
         self.assertIn(
             "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",
@@ -180,6 +220,10 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         )
         self.assertIn("docker compose --env-file .env.production build\n", release)
         self.assertIn("docker compose --env-file .env.production up -d\n", release)
+
+    def test_performance_backend_uses_an_explicit_isolated_frontend_origin(self):
+        performance = self.source("performance.yml")
+        self.assertIn("FRONTEND_URL: http://perf.example.test:8088", performance)
 
 
 if __name__ == "__main__":

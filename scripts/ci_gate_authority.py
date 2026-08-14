@@ -99,7 +99,18 @@ RELEASE_JOB_GATES: dict[str, str | None] = {
     "updater-isolated": "run_release_updater",
     "docker": "run_release_docker",
     "stateful-upgrade": "run_release_stateful",
+    "dr-rehearsal": "run_release_stateful",
 }
+LEGACY_RELEASE_JOB_GATES: dict[str, str | None] = {
+    name: gate for name, gate in RELEASE_JOB_GATES.items() if name != "dr-rehearsal"
+}
+CURRENT_RELEASE_GRAPH_CONTRACT = "animemo.release-gate.jobs/v2"
+LEGACY_RELEASE_GRAPH_CONTRACT = "animemo.release-gate.jobs/v1"
+TRUSTED_REPOSITORY = "yanyuhanyue/AniMemo"
+TRUSTED_PRE_MERGE_WORKFLOW_REF = (
+    "yanyuhanyue/AniMemo/.github/workflows/pre-merge-full.yml@refs/heads/main"
+)
+TRUSTED_LEGACY_WORKFLOW_SHA = "8727aa97dc092d12e4a4abb15b85ce1f46d1020d"
 
 SUPPORTED_EVENTS = frozenset(
     {"push", "pull_request", "merge_group", "workflow_call", "workflow_dispatch"}
@@ -375,9 +386,14 @@ def _ci_selected_jobs(event_name: str, gates: Mapping[str, bool]) -> list[str]:
     return selected
 
 
-def _release_selected_jobs(event_name: str, gates: Mapping[str, bool]) -> list[str]:
+def _release_selected_jobs(
+    event_name: str,
+    gates: Mapping[str, bool],
+    *,
+    jobs: Mapping[str, str | None] = RELEASE_JOB_GATES,
+) -> list[str]:
     selected: list[str] = []
-    for job, gate in RELEASE_JOB_GATES.items():
+    for job, gate in jobs.items():
         should_run = (
             event_name == "push"
             if gate is None
@@ -415,8 +431,57 @@ def _validate_job_matrix(
     return unselected_jobs
 
 
+def _release_graph_jobs(
+    release_graph_contract: str,
+    *,
+    workflow_ref: str,
+    workflow_sha: str,
+    repository: str,
+    caller_sha: str,
+) -> tuple[str, Mapping[str, str | None]]:
+    if release_graph_contract == CURRENT_RELEASE_GRAPH_CONTRACT:
+        return CURRENT_RELEASE_GRAPH_CONTRACT, RELEASE_JOB_GATES
+    if release_graph_contract:
+        raise GateAuthorityError(
+            f"unsupported release graph contract: {release_graph_contract!r}"
+        )
+
+    legacy_identity = {
+        "workflow_ref": workflow_ref,
+        "workflow_sha": workflow_sha,
+        "repository": repository,
+        "caller_sha": caller_sha,
+    }
+    expected_identity = {
+        "workflow_ref": TRUSTED_PRE_MERGE_WORKFLOW_REF,
+        "workflow_sha": TRUSTED_LEGACY_WORKFLOW_SHA,
+        "repository": TRUSTED_REPOSITORY,
+        "caller_sha": TRUSTED_LEGACY_WORKFLOW_SHA,
+    }
+    if legacy_identity == expected_identity:
+        return LEGACY_RELEASE_GRAPH_CONTRACT, LEGACY_RELEASE_JOB_GATES
+
+    mismatches = [
+        name
+        for name, expected in expected_identity.items()
+        if legacy_identity[name] != expected
+    ]
+    raise GateAuthorityError(
+        "release graph contract is required; authenticated legacy identity "
+        "did not match: " + ", ".join(mismatches)
+    )
+
+
 def validate_gate_authority(
-    needs: Mapping[str, Any], *, workflow: str, event_name: str
+    needs: Mapping[str, Any],
+    *,
+    workflow: str,
+    event_name: str,
+    release_graph_contract: str = "",
+    workflow_ref: str = "",
+    workflow_sha: str = "",
+    repository: str = "",
+    caller_sha: str = "",
 ) -> dict[str, object]:
     """Validate classifier identity and the exact selected/skipped workflow matrix."""
 
@@ -427,7 +492,21 @@ def validate_gate_authority(
     if event_name not in SUPPORTED_EVENTS:
         raise GateAuthorityError(f"unsupported event name: {event_name!r}")
 
-    jobs = CI_JOB_GATES if workflow == "ci" else RELEASE_JOB_GATES
+    resolved_release_graph_contract = ""
+    if workflow == "ci":
+        if release_graph_contract:
+            raise GateAuthorityError(
+                "release graph contract is not valid for the CI workflow"
+            )
+        jobs = CI_JOB_GATES
+    else:
+        resolved_release_graph_contract, jobs = _release_graph_jobs(
+            release_graph_contract,
+            workflow_ref=workflow_ref,
+            workflow_sha=workflow_sha,
+            repository=repository,
+            caller_sha=caller_sha,
+        )
     _exact_keys(needs, frozenset({"classify", *jobs}), label="NEEDS_JSON")
     _document, risk_level, risk_rank, force_full, gates = _validate_classification(
         needs
@@ -444,12 +523,12 @@ def validate_gate_authority(
     if workflow == "ci":
         selected_jobs = _ci_selected_jobs(event_name, gates)
     else:
-        selected_jobs = _release_selected_jobs(event_name, gates)
+        selected_jobs = _release_selected_jobs(event_name, gates, jobs=jobs)
     unselected_jobs = _validate_job_matrix(
         needs, jobs=jobs, selected_jobs=selected_jobs
     )
 
-    return {
+    result: dict[str, object] = {
         "status": "PASS",
         "workflow": workflow,
         "event_name": event_name,
@@ -460,6 +539,9 @@ def validate_gate_authority(
         "selected_jobs": selected_jobs,
         "unselected_jobs": unselected_jobs,
     }
+    if workflow == "release":
+        result["release_graph_contract"] = resolved_release_graph_contract
+    return result
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -468,13 +550,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--workflow", required=True)
     parser.add_argument("--event-name", required=True)
+    parser.add_argument("--release-graph-contract", default="")
     args = parser.parse_args(argv)
 
     try:
         raw_needs = os.getenv("NEEDS_JSON")
         needs = _object(_load_json(raw_needs, label="NEEDS_JSON"), label="NEEDS_JSON")
         result = validate_gate_authority(
-            needs, workflow=args.workflow, event_name=args.event_name
+            needs,
+            workflow=args.workflow,
+            event_name=args.event_name,
+            release_graph_contract=args.release_graph_contract,
+            workflow_ref=os.getenv("GITHUB_WORKFLOW_REF", ""),
+            workflow_sha=os.getenv("GITHUB_WORKFLOW_SHA", ""),
+            repository=os.getenv("GITHUB_REPOSITORY", ""),
+            caller_sha=os.getenv("GITHUB_SHA", ""),
         )
     except GateAuthorityError as error:
         print(

@@ -1,6 +1,10 @@
 # Blank Plugin
 
-这是 Anime Journal Plugin SDK v2 的空白 Runtime Plugin 模板。先复制整个目录，再统一替换模板标识，禁止直接在 `_template` 中开发正式插件。
+这是 AniMemo Plugin SDK v2 的空白 Runtime Plugin 模板。先复制整个目录，再统一替换模板标识，禁止直接在 `_template` 中开发正式插件。
+
+## 许可证边界
+
+本目录中由许可方有权许可的 AniMemo 模板源码采用仓库根目录 `LICENSE` 所载的 PolyForm Noncommercial License 1.0.0，Manifest 标识为 `PolyForm-Noncommercial-1.0.0`。`author.name` 的 `Plugin Author` 只是复制模板后必须替换的占位符，不表示或推断法律权利人。React、宿主运行时及复制后加入的依赖或素材仍适用各自条款，不因本模板的许可证声明而被重新许可。
 
 ## 后端接入
 

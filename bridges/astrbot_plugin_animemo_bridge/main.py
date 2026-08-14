@@ -32,7 +32,7 @@ from astrbot.api.web import request as web_request
 
 DEFAULT_CONFIG = {
     "enabled": True,
-    "animemo_base_url": "https://re-anime.cc",
+    "animemo_base_url": "https://animemo.cc",
     "key_id": "",
     "secret": "",
     "poll_events": True,

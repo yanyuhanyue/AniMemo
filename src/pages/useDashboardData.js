@@ -47,7 +47,7 @@ function filtersFromApi(data) {
 export function useDashboardData({ navigate, entryQuery = {} }) {
   const [{ access }, setAuthSnapshot] = useState(() => getStoredTokens());
   const isDemo = demoEnabled
-    && (!access || localStorage.getItem("anime_journal_demo") === "true");
+    && (!access || localStorage.getItem("animemo_demo") === "true");
   const [records, setRecords] = useState(() => {
     if (!isDemo) return [];
     try {
@@ -393,7 +393,7 @@ export function useDashboardData({ navigate, entryQuery = {} }) {
   useEffect(() => {
     if (!isDemo) return;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
-    window.dispatchEvent(new CustomEvent("anime-journal:records-updated", { detail: records }));
+    window.dispatchEvent(new CustomEvent("animemo:records-updated", { detail: records }));
   }, [isDemo, records]);
 
   useEffect(() => { if (isDemo) localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }, [isDemo, settings]);

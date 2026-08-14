@@ -11,10 +11,16 @@ from scripts.ci_classify import classify_paths
 from scripts.ci_gate_authority import (
     CI_JOB_GATES,
     CLASSIFIER_OUTPUT_NAMES,
+    CURRENT_RELEASE_GRAPH_CONTRACT,
     GATE_NAMES,
+    LEGACY_RELEASE_JOB_GATES,
+    LEGACY_RELEASE_GRAPH_CONTRACT,
     PRODUCT_GATE_NAMES,
     RELEASE_JOB_GATES,
     SIGNAL_NAMES,
+    TRUSTED_LEGACY_WORKFLOW_SHA,
+    TRUSTED_PRE_MERGE_WORKFLOW_REF,
+    TRUSTED_REPOSITORY,
     GateAuthorityError,
     main,
     validate_gate_authority,
@@ -133,6 +139,17 @@ def release_needs(
     return needs
 
 
+def validate_current_release(
+    needs: dict[str, object], *, event_name: str
+) -> dict[str, object]:
+    return validate_gate_authority(
+        needs,
+        workflow="release",
+        event_name=event_name,
+        release_graph_contract=CURRENT_RELEASE_GRAPH_CONTRACT,
+    )
+
+
 class CiGateAuthorityTests(unittest.TestCase):
     def assert_rejected(self, message: str, callback) -> None:
         with self.assertRaisesRegex(GateAuthorityError, message):
@@ -221,10 +238,8 @@ class CiGateAuthorityTests(unittest.TestCase):
 
     def test_release_push_selects_only_post_merge_sanity(self):
         document = classification("STANDARD")
-        result = validate_gate_authority(
-            release_needs(document, event_name="push"),
-            workflow="release",
-            event_name="push",
+        result = validate_current_release(
+            release_needs(document, event_name="push"), event_name="push"
         )
 
         self.assertEqual(result["selected_jobs"], ["post-merge-sanity"])
@@ -239,11 +254,11 @@ class CiGateAuthorityTests(unittest.TestCase):
                 "full_gate": True,
             },
         )
-        result = validate_gate_authority(
-            release_needs(document), workflow="release", event_name="pull_request"
+        result = validate_current_release(
+            release_needs(document), event_name="pull_request"
         )
 
-        self.assertEqual(result["selected_jobs"], ["docker", "stateful-upgrade"])
+        self.assertEqual(result["selected_jobs"], ["docker", "stateful-upgrade", "dr-rehearsal"])
         self.assertIn("updater-isolated", result["unselected_jobs"])
         self.assertIn("post-merge-sanity", result["unselected_jobs"])
 
@@ -259,13 +274,128 @@ class CiGateAuthorityTests(unittest.TestCase):
                 "critical_gate": True,
             },
         )
-        result = validate_gate_authority(
-            release_needs(document), workflow="release", event_name="pull_request"
+        result = validate_current_release(
+            release_needs(document), event_name="pull_request"
         )
 
         self.assertEqual(
             result["selected_jobs"],
-            ["updater-isolated", "docker", "stateful-upgrade"],
+            ["updater-isolated", "docker", "stateful-upgrade", "dr-rehearsal"],
+        )
+
+    def test_event_and_workflow_ref_alone_cannot_select_the_legacy_release_graph(self):
+        document = classification("STANDARD", force_full=True)
+        needs = release_needs(document, event_name="workflow_call")
+        needs.pop("dr-rehearsal")
+
+        self.assert_rejected(
+            "release graph contract",
+            lambda: validate_gate_authority(
+                needs,
+                workflow="release",
+                event_name="workflow_call",
+                workflow_ref=TRUSTED_PRE_MERGE_WORKFLOW_REF,
+            ),
+        )
+
+    def test_historical_dispatch_accepts_only_authenticated_v1_release_graph(self):
+        document = classification("STANDARD", force_full=True)
+        needs = release_needs(document, event_name="workflow_dispatch")
+        needs.pop("dr-rehearsal")
+
+        result = validate_gate_authority(
+            needs,
+            workflow="release",
+            event_name="workflow_dispatch",
+            workflow_ref=TRUSTED_PRE_MERGE_WORKFLOW_REF,
+            workflow_sha=TRUSTED_LEGACY_WORKFLOW_SHA,
+            repository=TRUSTED_REPOSITORY,
+            caller_sha=TRUSTED_LEGACY_WORKFLOW_SHA,
+        )
+
+        self.assertEqual(set(needs), {"classify", *LEGACY_RELEASE_JOB_GATES})
+        self.assertEqual(result["release_graph_contract"], LEGACY_RELEASE_GRAPH_CONTRACT)
+        self.assertNotIn("dr-rehearsal", result["selected_jobs"])
+
+        for field, value in (
+            ("workflow_ref", "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main"),
+            ("workflow_sha", "0" * 40),
+            ("repository", "fork/AniMemo"),
+            ("caller_sha", "0" * 40),
+        ):
+            with self.subTest(field=field):
+                identity = {
+                    "workflow_ref": TRUSTED_PRE_MERGE_WORKFLOW_REF,
+                    "workflow_sha": TRUSTED_LEGACY_WORKFLOW_SHA,
+                    "repository": TRUSTED_REPOSITORY,
+                    "caller_sha": TRUSTED_LEGACY_WORKFLOW_SHA,
+                }
+                identity[field] = value
+                self.assert_rejected(
+                    "release graph contract",
+                    lambda identity=identity: validate_gate_authority(
+                        needs,
+                        workflow="release",
+                        event_name="workflow_dispatch",
+                        **identity,
+                    ),
+                )
+
+        missing_stateful = dict(needs)
+        missing_stateful.pop("stateful-upgrade")
+        self.assert_rejected(
+            "missing keys: stateful-upgrade",
+            lambda: validate_gate_authority(
+                missing_stateful,
+                workflow="release",
+                event_name="workflow_dispatch",
+                workflow_ref=TRUSTED_PRE_MERGE_WORKFLOW_REF,
+                workflow_sha=TRUSTED_LEGACY_WORKFLOW_SHA,
+                repository=TRUSTED_REPOSITORY,
+                caller_sha=TRUSTED_LEGACY_WORKFLOW_SHA,
+            ),
+        )
+
+    def test_release_graph_contract_is_explicit_and_fail_closed(self):
+        document = classification("STANDARD", force_full=True)
+        current = release_needs(document, event_name="workflow_dispatch")
+        legacy = dict(current)
+        legacy.pop("dr-rehearsal")
+
+        result = validate_gate_authority(
+            current,
+            workflow="release",
+            event_name="workflow_dispatch",
+            release_graph_contract=CURRENT_RELEASE_GRAPH_CONTRACT,
+        )
+        self.assertEqual(result["release_graph_contract"], CURRENT_RELEASE_GRAPH_CONTRACT)
+
+        self.assert_rejected(
+            "unsupported release graph contract",
+            lambda: validate_gate_authority(
+                current,
+                workflow="release",
+                event_name="workflow_dispatch",
+                release_graph_contract="animemo.release-gate.jobs/v999",
+            ),
+        )
+        self.assert_rejected(
+            "unsupported release graph contract",
+            lambda: validate_gate_authority(
+                legacy,
+                workflow="release",
+                event_name="workflow_dispatch",
+                release_graph_contract=LEGACY_RELEASE_GRAPH_CONTRACT,
+            ),
+        )
+        self.assert_rejected(
+            "missing keys: dr-rehearsal",
+            lambda: validate_gate_authority(
+                legacy,
+                workflow="release",
+                event_name="workflow_dispatch",
+                release_graph_contract=CURRENT_RELEASE_GRAPH_CONTRACT,
+            ),
         )
 
     def test_real_classifier_low_standard_high_critical_and_force_full_documents(self):
@@ -294,6 +424,11 @@ class CiGateAuthorityTests(unittest.TestCase):
                             ),
                             workflow=workflow,
                             event_name=event_name,
+                            release_graph_contract=(
+                                CURRENT_RELEASE_GRAPH_CONTRACT
+                                if workflow == "release"
+                                else ""
+                            ),
                         )
                         self.assertEqual(result["status"], "PASS")
                         self.assertEqual(result["risk_level"], expected_risk)
@@ -722,6 +857,52 @@ class CiGateAuthorityTests(unittest.TestCase):
 
         self.assertEqual(status, 0)
         self.assertEqual(json.loads(stdout.getvalue())["status"], "PASS")
+
+    def test_cli_resolves_explicit_current_and_authenticated_legacy_release_graphs(self):
+        document = classification("STANDARD", force_full=True)
+        current = release_needs(document, event_name="workflow_dispatch")
+        legacy = dict(current)
+        legacy.pop("dr-rehearsal")
+        cases = (
+            (
+                current,
+                [
+                    "--workflow",
+                    "release",
+                    "--event-name",
+                    "workflow_dispatch",
+                    "--release-graph-contract",
+                    CURRENT_RELEASE_GRAPH_CONTRACT,
+                ],
+                {},
+                CURRENT_RELEASE_GRAPH_CONTRACT,
+            ),
+            (
+                legacy,
+                ["--workflow", "release", "--event-name", "workflow_dispatch"],
+                {
+                    "GITHUB_WORKFLOW_REF": TRUSTED_PRE_MERGE_WORKFLOW_REF,
+                    "GITHUB_WORKFLOW_SHA": TRUSTED_LEGACY_WORKFLOW_SHA,
+                    "GITHUB_REPOSITORY": TRUSTED_REPOSITORY,
+                    "GITHUB_SHA": TRUSTED_LEGACY_WORKFLOW_SHA,
+                },
+                LEGACY_RELEASE_GRAPH_CONTRACT,
+            ),
+        )
+        for needs, argv, identity, expected_contract in cases:
+            with self.subTest(contract=expected_contract):
+                stdout = io.StringIO()
+                environment = {"NEEDS_JSON": json.dumps(needs), **identity}
+                with (
+                    mock.patch.dict(os.environ, environment, clear=True),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    status = main(argv)
+                self.assertEqual(status, 0)
+                self.assertEqual(
+                    json.loads(stdout.getvalue())["release_graph_contract"],
+                    expected_contract,
+                )
 
     def test_cli_missing_invalid_or_duplicate_needs_json_returns_two(self):
         cases = ("", "{", '{"classify":{},"classify":{}}')

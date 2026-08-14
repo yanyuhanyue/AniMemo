@@ -1,3 +1,5 @@
+import { DEFAULT_POSTER } from "../lib/demoMedia.js";
+
 export const palette = {
   coral: "#ff6b6b",
   pink: "#ff8fab",
@@ -37,7 +39,7 @@ export const tagColors = {
   轩皇力推: "purple",
 };
 
-export const animeRecords = [
+const baseAnimeRecords = [
   {
     id: 1,
     title: "《一叠间漫画咖啡屋生活！》",
@@ -49,7 +51,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["轻百", "萌系", "日常", "喜剧"],
-    poster: "/assets/posters/poster-01.webp",
+    poster: "",
     description:
       "芽衣子是离乡到东京于一所大小姐学院就学的高中一年级生。到了指定的宿舍后，发现那儿竟然是学院经营的漫画咖啡屋 HEDGEHOG！上学的同时还要和同级生们一起经营漫咖屋，稍微变化的日常开始了！",
     baikeUrl: "https://mzh.moegirl.org.cn/一叠间漫画咖啡屋生活！",
@@ -66,7 +68,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["真百", "日常", "喜剧"],
-    poster: "/assets/posters/poster-02.webp",
+    poster: "",
     description:
       "新晋大学生上伊那牡丹与学姐砺波伊吹因一杯酒相识。两人一起购物、吃饭、旅行，相互间的距离逐渐拉近。",
     baikeUrl: "https://mzh.moegirl.org.cn/上伊那牡丹，酒醉身姿似百合花般",
@@ -83,7 +85,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["真百", "泡面番", "R18", "日常"],
-    poster: "/assets/posters/poster-03.webp",
+    poster: "",
     description: "单身 OL 与家务机器人共同生活的短篇喜剧。",
     baikeUrl: "https://mzh.moegirl.org.cn/和机器人啪啪啪能算在经验次数里吗？",
     review: "短小直接，喜剧节奏比预期更稳。",
@@ -99,7 +101,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["真百", "恋爱", "校园", "轩皇力推"],
-    poster: "/assets/posters/poster-04.webp",
+    poster: "",
     description: "甘织玲奈子与王冢真唯继续在友情与恋爱之间寻找答案。",
     baikeUrl: "https://mzh.moegirl.org.cn/我怎么可能成为你的恋人",
     review: "情绪兑现得很漂亮，是对正篇关系线的好补充。",
@@ -115,7 +117,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["奇幻", "战斗", "冒险"],
-    poster: "/assets/posters/poster-05.webp",
+    poster: "",
     description: "打倒魔王之后的旅程仍在继续。残存世间的人们编织出葬送与祈祷相伴的故事。",
     baikeUrl: "https://mzh.moegirl.org.cn/葬送的芙莉莲",
     review: "克制、安静，但每个停顿都有重量。",
@@ -131,7 +133,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["原创", "剧场版", "真百", "音乐", "奇幻", "轩皇力推"],
-    poster: "/assets/posters/poster-06.webp",
+    poster: "",
     description: "在虚拟空间月夜见里，彩叶与辉夜以音乐建立联系，也逐步接近离别的真相。",
     baikeUrl: "https://mzh.moegirl.org.cn/超时空辉夜姬！",
     review: "影像和音乐都像一场高密度的烟花。",
@@ -147,7 +149,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["真百", "悬疑", "奇幻"],
-    poster: "/assets/posters/poster-07.webp",
+    poster: "",
     description: "独自生活在海边小镇的比名子，遇见了自称要吃掉她的汐莉。",
     baikeUrl: "https://mzh.moegirl.org.cn/想吃掉我的非人少女",
     review: "潮湿、危险又柔软。",
@@ -163,7 +165,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["轻百", "搞笑", "校园", "日常", "轩皇力推"],
-    poster: "/assets/posters/poster-08.webp",
+    poster: "",
     description: "本性是好孩子的优谷优，为了引起学姐注意而努力扮演不良少女。",
     baikeUrl: "https://mzh.moegirl.org.cn/BadGirl",
     review: "表情包密度惊人，角色关系也越看越甜。",
@@ -179,7 +181,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["奇幻", "校园", "战斗"],
-    poster: "/assets/posters/poster-09.webp",
+    poster: "",
     description: "天才家里蹲魔女莫妮卡潜入学园，秘密护卫第二王子。",
     baikeUrl: "https://mzh.moegirl.org.cn/沉默的魔女",
     review: "社恐设定与强者叙事结合得很顺。",
@@ -195,7 +197,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["剧场版", "战斗", "奇幻"],
-    poster: "/assets/posters/poster-10.webp",
+    poster: "",
     description: "龙娘与独居 OL 的家庭日常，在大银幕上迎来新的风波。",
     baikeUrl: "https://mzh.moegirl.org.cn/小林家的龙女仆",
     review: "京阿尼的动作与日常演出依旧可靠。",
@@ -211,7 +213,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["真百", "恋爱", "校园", "轩皇力推"],
-    poster: "/assets/posters/poster-11.webp",
+    poster: "",
     description: "想摆脱孤独的玲奈子，在高中遇见了超级巨星王冢真唯。",
     baikeUrl: "https://mzh.moegirl.org.cn/我怎么可能成为你的恋人",
     review: "轻喜剧外壳下的自我接纳写得很好。",
@@ -227,7 +229,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["日常", "科普", "轩皇力推"],
-    poster: "/assets/posters/poster-12.webp",
+    poster: "",
     description: "喜欢宝石的女高中生琉璃，跟随矿物学研究者踏入野外采集世界。",
     baikeUrl: "https://mzh.moegirl.org.cn/琉璃的宝石",
     review: "知识、作画与少女日常的黄金配比。",
@@ -243,7 +245,7 @@ export const animeRecords = [
     status: "watching",
     statusLabel: "在看",
     tags: ["恋爱", "日常", "治愈"],
-    poster: "/assets/posters/poster-13.webp",
+    poster: "",
     description: "在离岛度过的夏天，与记忆、家人和无法忘记的人重逢。",
     baikeUrl: "https://mzh.moegirl.org.cn/Summer_Pockets",
     review: "夏日感很足，等待后半段收束。",
@@ -259,7 +261,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["日常", "喜剧"],
-    poster: "/assets/posters/poster-14.webp",
+    poster: "",
     description: "摄影社少女们用镜头记录旅行与普通日常。",
     baikeUrl: "https://mzh.moegirl.org.cn/mono",
     review: "构图意识很好，松弛感也很可爱。",
@@ -275,7 +277,7 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["日常", "异世界", "凤傲天"],
-    poster: "/assets/posters/poster-15.webp",
+    poster: "",
     description: "高原魔女与家人们继续悠闲又热闹的异世界生活。",
     baikeUrl: "https://mzh.moegirl.org.cn/打了300年的史莱姆",
     review: "稳定提供舒适感。",
@@ -291,12 +293,41 @@ export const animeRecords = [
     status: "completed",
     statusLabel: "看过",
     tags: ["原创", "轻百", "日常", "治愈"],
-    poster: "/assets/posters/poster-16.webp",
+    poster: "",
     description: "大学生们围绕料理与社团生活展开的温暖群像。",
     baikeUrl: "https://mzh.moegirl.org.cn/时光流逝，饭菜依旧美味",
     review: "生活流演出极其细腻。",
   },
 ];
+
+const demoBangumiMedia = {
+  1: ["569161", "https://lain.bgm.tv/pic/cover/l/24/d6/569161_MtUOQ.jpg"],
+  2: ["543360", "https://lain.bgm.tv/pic/cover/l/30/1b/543360_Ru78k.jpg"],
+  3: ["558296", "https://lain.bgm.tv/pic/cover/l/f0/78/558296_W25j2.jpg"],
+  4: ["587454", "https://lain.bgm.tv/pic/cover/l/a1/ea/587454_1KdKJ.jpg"],
+  5: ["515759", "https://lain.bgm.tv/pic/cover/l/0b/24/515759_qA1Zc.jpg"],
+  6: ["604826", "https://lain.bgm.tv/pic/cover/l/f6/0f/604826_2XWRN.jpg"],
+  7: ["520842", "https://lain.bgm.tv/pic/cover/l/2c/af/520842_J06fL.jpg"],
+  8: ["501614", "https://lain.bgm.tv/pic/cover/l/df/1b/501614_SzXy2.jpg"],
+  9: ["506677", "https://lain.bgm.tv/pic/cover/l/a0/60/506677_B74d5.jpg"],
+  10: ["514353", "https://lain.bgm.tv/pic/cover/l/f1/22/514353_21EQD.jpg"],
+  11: ["524707", "https://lain.bgm.tv/pic/cover/l/ae/03/524707_1quxk.jpg"],
+  12: ["512190", "https://lain.bgm.tv/pic/cover/l/27/d7/512190_3FtCT.jpg"],
+  13: ["363957", "https://lain.bgm.tv/pic/cover/l/23/ce/363957_pgptl.jpg"],
+  14: ["485936", "https://lain.bgm.tv/pic/cover/l/a6/39/485936_y0bX8.jpg"],
+  15: ["364844", "https://lain.bgm.tv/pic/cover/l/3b/a9/364844_GIb43.jpg"],
+  16: ["531159", "https://lain.bgm.tv/pic/cover/l/d3/5d/531159_BayD9.jpg"],
+};
+
+export const animeRecords = baseAnimeRecords.map((record) => {
+  const [externalId, posterUrl] = demoBangumiMedia[record.id] || [];
+  return {
+    ...record,
+    externalIdentity: externalId ? { provider: "bangumi", external_id: externalId } : null,
+    posterUrl: posterUrl || "",
+    poster: posterUrl || DEFAULT_POSTER,
+  };
+});
 
 const hasOvaMarker = (record) => /(^|\s|《)OVA($|\s|》)/i.test(`${record.title || ""} ${record.japaneseTitle || ""}`)
   || record.tags?.some((tag) => tag.toUpperCase() === "OVA");

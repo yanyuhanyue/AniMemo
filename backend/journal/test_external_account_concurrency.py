@@ -18,7 +18,7 @@ from journal.models import UserExternalAccountConnection
 @override_settings(
     BANGUMI_OAUTH_CLIENT_ID="client-id",
     BANGUMI_OAUTH_CLIENT_SECRET="client-secret",
-    BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/external-accounts/bangumi/callback/",
+    BANGUMI_OAUTH_REDIRECT_URI="https://example.test/api/v1/external-accounts/bangumi/callback/",
 )
 class ExternalAccountRefreshPostgreSQLConcurrencyTests(TransactionTestCase):
     reset_sequences = True

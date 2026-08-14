@@ -385,7 +385,7 @@ class JournalApiTests(APITestCase):
             "records": [{"title": "旧格式", "japaneseTitle": "旧字段", "status": "planned"}],
         }
         upload = SimpleUploadedFile(
-            "anime-journal.json",
+            "animemo.json",
             json.dumps(payload).encode("utf-8"),
             content_type="application/json",
         )
@@ -398,7 +398,7 @@ class JournalApiTests(APITestCase):
 
     def test_import_accepts_csv_templates(self):
         csv_file = SimpleUploadedFile(
-            "anime-journal.csv",
+            "animemo.csv",
             "title,japanese_title,airing_period,watch_status\n《CSV 番剧》,CSV Anime,2026-4,planned\n".encode("utf-8"),
             content_type="text/csv",
         )
@@ -479,8 +479,12 @@ class JournalApiTests(APITestCase):
         response = self.client.get(reverse("site-settings"))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["site_name"], "Anime Journal")
-        self.assertEqual(response.data["homepage_title"], "XuanHuang 的番剧汇总")
+        self.assertEqual(response.data["site_name"], "AniMemo")
+        self.assertEqual(response.data["homepage_title"], "AniMemo · 我的动漫记忆库")
+        self.assertEqual(
+            response.data["homepage_description"],
+            "把想看、在看与看完的作品收进同一条记忆轨迹，随时回望每一次与动画相遇的时刻。",
+        )
         self.assertTrue(response.data["registration_enabled"])
 
     def test_administrator_can_update_site_settings(self):
@@ -511,7 +515,7 @@ class JournalApiTests(APITestCase):
         }, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(SiteSettings.load().site_name, "Anime Journal")
+        self.assertEqual(SiteSettings.load().site_name, "AniMemo")
 
     def test_registration_disabled_prevents_account_creation(self):
         settings_obj = SiteSettings.load()

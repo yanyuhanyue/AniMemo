@@ -11,8 +11,16 @@ from plugin_host.official_packages import (
     build_official_package,
     canonical_content_digest_from_descriptor,
 )
-from plugin_host.package import LocalPluginPackageStorage, PluginPackageError, inspect_package
+from plugin_host.package import (
+    LocalPluginPackageStorage,
+    PluginPackageError,
+    inspect_package,
+)
 from plugin_host.services import store_package_blob
+
+LEGACY_OFFICIAL_PLUGIN_IDS = {
+    "watch-history-importer": {"com.anime-journal.watch-history-importer"},
+}
 
 
 def _existing_official_content_digest(version):
@@ -67,9 +75,23 @@ class Command(BaseCommand):
             inspected = inspect_package(package_payload)
             manifest = inspected["manifest"]
             current_content_digest = canonical_content_digest_from_descriptor(inspected["files"])
-            project = PluginProject.objects.filter(plugin_id=manifest["id"]).first()
-            if project is not None and project.slug != manifest["slug"]:
+            project_by_id = PluginProject.objects.filter(plugin_id=manifest["id"]).first()
+            project_by_slug = PluginProject.objects.filter(slug=manifest["slug"]).first()
+            if (
+                project_by_id is not None
+                and project_by_slug is not None
+                and project_by_id.pk != project_by_slug.pk
+            ):
                 raise RuntimeError(f"Official plugin id/slug conflict: {manifest['id']}")
+            if project_by_id is not None and project_by_id.slug != manifest["slug"]:
+                raise RuntimeError(f"Official plugin id/slug conflict: {manifest['id']}")
+            project = project_by_id or project_by_slug
+            if project is not None and project.plugin_id != manifest["id"]:
+                legacy_ids = LEGACY_OFFICIAL_PLUGIN_IDS.get(manifest["slug"], set())
+                if project.plugin_id not in legacy_ids:
+                    raise RuntimeError(f"Official plugin id/slug conflict: {manifest['id']}")
+                project.plugin_id = manifest["id"]
+                project.save(update_fields=["plugin_id", "updated_at"])
             version = None
             if project is not None:
                 version = (

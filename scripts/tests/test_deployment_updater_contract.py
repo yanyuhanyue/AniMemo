@@ -22,6 +22,36 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         for service in ("migration", "bootstrap", "api"):
             self.assertTrue(any("/private:/app/runtime/private" in volume for volume in services[service]["volumes"]))
 
+    def test_build_only_overlay_migrates_trusted_legacy_inputs_without_weakening_production(self):
+        production = (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
+        build = (ROOT / "deploy/docker-compose.build.yml").read_text(encoding="utf-8")
+
+        self.assertNotIn("ANIME_JOURNAL_", production)
+        self.assertNotIn("FRONTEND_URL", production)
+        self.assertIn(
+            "ANIMEMO_PUBLIC_ORIGIN: ${ANIMEMO_PUBLIC_ORIGIN:-${FRONTEND_URL:-https://animemo.cc}}",
+            build,
+        )
+        self.assertIn(
+            "${ANIMEMO_DATA_ROOT:-${ANIME_JOURNAL_DATA_ROOT:-/data/animemo}}",
+            build,
+        )
+        self.assertIn(
+            "${ANIMEMO_DATA_ROOT:-${ANIME_JOURNAL_DATA_ROOT:-/data/animemo}}/postgres:/var/lib/postgresql/data",
+            build,
+        )
+        self.assertIn(
+            "${ANIMEMO_DATA_ROOT:-${ANIME_JOURNAL_DATA_ROOT:-/data/animemo}}/redis:/data",
+            build,
+        )
+        self.assertIn(
+            "${ANIMEMO_PORT:-${ANIME_JOURNAL_PORT:-8088}}",
+            build,
+        )
+        self.assertLess(build.index("ANIMEMO_PUBLIC_ORIGIN:-"), build.index("FRONTEND_URL:-"))
+        self.assertLess(build.index("ANIMEMO_DATA_ROOT:-"), build.index("ANIME_JOURNAL_DATA_ROOT:-"))
+        self.assertLess(build.index("ANIMEMO_PORT:-"), build.index("ANIME_JOURNAL_PORT:-"))
+
     def test_updater_runtime_overlay_injects_only_verified_effective_identity(self):
         override = yaml.safe_load(
             (ROOT / "updater/docker-compose.runtime.yml").read_text(encoding="utf-8")
@@ -29,9 +59,9 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         services = override["services"]
 
         for key in [
-            "ANIME_JOURNAL_VERSION",
-            "ANIME_JOURNAL_COMMIT",
-            "ANIME_JOURNAL_RELEASE_CHANNEL",
+            "ANIMEMO_VERSION",
+            "ANIMEMO_COMMIT",
+            "ANIMEMO_RELEASE_CHANNEL",
         ]:
             self.assertIn("ANIMEMO_RELEASE_", services["api"]["environment"][key])
         for key in [
@@ -66,7 +96,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("PrivateTmp=true", service)
         self.assertIn("ProtectHome=true", service)
         self.assertIn("ProtectSystem=strict", service)
-        self.assertIn("ReadWritePaths=/var/lib/animemo-updater /data/anime-journal /run/animemo-updater", service)
+        self.assertIn("ReadWritePaths=/var/lib/animemo-updater /data/animemo /run/animemo-updater", service)
         self.assertIn("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6", service)
         self.assertIn("UMask=0077", service)
         self.assertIn("/run/animemo-updater 0750 animemo-updater animemo-api", tmpfiles)
@@ -159,6 +189,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
     def test_stateful_gate_migrates_before_scoped_switch_and_retains_data_services(self):
         gate = (ROOT / "scripts/stateful-upgrade-gate.sh").read_text(encoding="utf-8")
 
+        self.assertIn("FRONTEND_URL=https://ci.example.test", gate)
         self.assertIn('BUILD_OVERRIDE_FILE="$CURRENT_ROOT/deploy/docker-compose.build.yml"', gate)
         self.assertIn(
             'local compose_files=(-f "$source_root/deploy/docker-compose.yml" -f "$BUILD_OVERRIDE_FILE")',
@@ -166,14 +197,30 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         )
         self.assertNotIn('if [[ "$source_root" == "$CURRENT_ROOT" ]]', gate)
         base_ready = gate.index(
-            'compose "$BASE_ROOT" up -d --wait --wait-timeout 120 postgres redis'
+            'run_compose base_services_start "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" '
+            'up -d --wait --wait-timeout 120 postgres redis'
         )
-        base_migration = gate.index('compose "$BASE_ROOT" run --rm --no-deps migration')
-        base_bootstrap = gate.index('compose "$BASE_ROOT" run --rm --no-deps bootstrap')
-        base_api = gate.index('compose "$BASE_ROOT" up -d --no-deps api')
-        migration = gate.index('compose "$CURRENT_ROOT" run --rm --no-deps migration')
-        bootstrap = gate.index('compose "$CURRENT_ROOT" run --rm --no-deps bootstrap')
-        switch = gate.index('compose "$CURRENT_ROOT" up -d --no-deps --force-recreate api')
+        base_migration = gate.index(
+            'run_compose base_migration "$BASE_ROOT" "$JOB_TIMEOUT_SECONDS" '
+            'run --rm --no-deps migration'
+        )
+        base_bootstrap = gate.index('run_compose base_bootstrap "$BASE_ROOT" "$JOB_TIMEOUT_SECONDS"')
+        base_api = gate.index(
+            'run_compose base_api_start "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" '
+            'up -d --no-deps api'
+        )
+        migration = gate.index(
+            'run_compose current_migration "$CURRENT_ROOT" "$JOB_TIMEOUT_SECONDS" '
+            'run --rm --no-deps migration'
+        )
+        bootstrap = gate.index(
+            'run_compose current_bootstrap "$CURRENT_ROOT" "$JOB_TIMEOUT_SECONDS" '
+            'run --rm --no-deps bootstrap'
+        )
+        switch = gate.index(
+            'run_compose current_api_replace "$CURRENT_ROOT" "$COMMAND_TIMEOUT_SECONDS" '
+            'up -d --no-deps --force-recreate api'
+        )
         retained = gate.index('PostgreSQL and Redis containers were retained')
         self.assertLess(base_ready, base_migration)
         self.assertLess(base_migration, base_bootstrap)
@@ -183,16 +230,29 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertLess(switch, retained)
         self.assertIn('BASE_POSTGRES_ID=', gate)
         self.assertIn('BASE_REDIS_ID=', gate)
+        self.assertIn('timeout_command "$HEALTH_TIMEOUT_SECONDS" docker exec -i', gate)
+        self.assertIn('local deadline=$((SECONDS + API_WAIT_SECONDS))', gate)
+        self.assertIn("--kill-after=\"${TIMEOUT_KILL_AFTER_SECONDS}s\"", gate)
+        self.assertIn("diagnostic_api_inspect", gate)
+        self.assertNotIn('compose "$source_root" exec -T api python -', gate)
 
-    def test_upgrade_overlay_preserves_each_source_tree_bootstrap_command(self):
+    def test_upgrade_gate_overrides_only_the_legacy_bootstrap_server_command(self):
         production = (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
         overlay = (ROOT / "deploy/docker-compose.upgrade-gate.yml").read_text(encoding="utf-8")
+        gate = (ROOT / "scripts/stateful-upgrade-gate.sh").read_text(encoding="utf-8")
         bootstrap_overlay = overlay[
             overlay.index("  bootstrap:\n") : overlay.index("  web:\n")
+        ]
+        base_bootstrap = gate[
+            gate.index("run_compose base_bootstrap") : gate.index("run_compose base_api_start")
         ]
 
         self.assertIn('command: ["python", "manage.py", "bootstrap_animemo"]', production)
         self.assertNotIn("command:", bootstrap_overlay)
+        self.assertIn("python manage.py sync_official_plugins", base_bootstrap)
+        self.assertIn("exec python manage.py collectstatic --noinput", base_bootstrap)
+        self.assertNotIn("gunicorn", base_bootstrap)
+        self.assertNotIn("manage.py migrate", base_bootstrap)
 
         fixture = (ROOT / "scripts/stateful_upgrade_fixture.py").read_text(encoding="utf-8")
         self.assertIn('_migration_applied("site", "0003_installation_state")', fixture)

@@ -1,0 +1,4 @@
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+17 3 * * * root /usr/bin/docker run --rm --name animemo-certbot-renew -v /opt/1panel/apps/openresty/openresty/root:/var/www/acme -v /opt/1panel/www/sites/animemo.cc/letsencrypt:/etc/letsencrypt -v /opt/1panel/www/sites/animemo.cc/certbot-lib:/var/lib/letsencrypt certbot/certbot:latest renew --quiet --no-random-sleep-on-renew && /usr/bin/docker exec 1Panel-openresty-t1AN openresty -s reload >> /var/log/animemo-certbot.log 2>&1

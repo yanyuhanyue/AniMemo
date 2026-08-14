@@ -26,7 +26,7 @@ class BangumiClient:
             "User-Agent": getattr(
                 settings,
                 "BANGUMI_USER_AGENT",
-                "AniMemo/1.0 (+https://re-anime.cc)",
+                "AniMemo/1.0 (+https://animemo.cc)",
             ),
             "Accept": "application/json",
         }

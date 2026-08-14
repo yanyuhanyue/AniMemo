@@ -84,9 +84,9 @@ class PerformanceResourceSamplerTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             ResourceConfig(
-                compose_project="anime-journal",
-                postgres_user="anime_journal",
-                postgres_database="anime_journal",
+                compose_project="animemo",
+                postgres_user="animemo",
+                postgres_database="animemo",
                 confirm_isolated=True,
             )
 

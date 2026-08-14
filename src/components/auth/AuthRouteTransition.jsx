@@ -1,7 +1,7 @@
 import { forwardRef, useImperativeHandle, useLayoutEffect, useRef } from "react";
 import gsap from "gsap";
 
-const STORAGE_KEY = "anime-journal-auth-transition";
+const STORAGE_KEY = "animemo-auth-transition";
 
 export const AuthRouteTransition = forwardRef(function AuthRouteTransition(_, forwardedRef) {
   const curtainRef = useRef(null);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build, validate, package and inspect Anime Journal .ajplugin packages.
+"""Build, validate, package and inspect AniMemo .ajplugin packages.
 
 The command intentionally never installs dependencies. Runtime packages are
 assembled from files already present in the repository.

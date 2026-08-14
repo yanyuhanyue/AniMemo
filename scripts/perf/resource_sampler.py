@@ -54,11 +54,11 @@ class ResourceConfig:
         if not self.confirm_isolated:
             raise ResourceConfigurationError("explicit isolated-environment confirmation is required")
         forbidden = {
-            "anime-journal",
-            "anime-journal-api",
-            "anime-journal-web",
-            "anime-journal-postgres",
-            "anime-journal-redis",
+            "animemo",
+            "animemo-api",
+            "animemo-web",
+            "animemo-postgres",
+            "animemo-redis",
         }
         supplied = {
             self.compose_project,

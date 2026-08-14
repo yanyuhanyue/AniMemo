@@ -27,7 +27,7 @@ def remove_staff_profile_when_account_is_demoted(sender, instance, raw=False, **
 def _sanitize_model_image(instance, field_name, **limits):
     field = getattr(instance, field_name, None)
     raw_upload = getattr(field, "_file", None)
-    if raw_upload is None or getattr(raw_upload, "_anime_journal_sanitized", False):
+    if raw_upload is None or getattr(raw_upload, "_animemo_sanitized", False):
         return
     try:
         sanitized = sanitize_uploaded_image(raw_upload, **limits)

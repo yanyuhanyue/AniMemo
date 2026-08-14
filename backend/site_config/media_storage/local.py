@@ -153,8 +153,8 @@ class DynamicLocalBackend:
     def test_connection(self):
         key = f"site/healthchecks/{uuid.uuid4().hex}"
         try:
-            self.write(key, b"anime-journal-local-healthcheck", content_type="text/plain")
-            if self.open(key).read() != b"anime-journal-local-healthcheck":
+            self.write(key, b"animemo-local-healthcheck", content_type="text/plain")
+            if self.open(key).read() != b"animemo-local-healthcheck":
                 raise MediaStorageOffline("本地存储读写校验失败。")
             self.disk_usage()
             return "Local media read/write connection OK"

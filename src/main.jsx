@@ -12,7 +12,7 @@ const initialColorTransition = document.getElementById("initialColorTransition")
 
 // Runtime plugins resolve these browser modules through the import map. The host
 // publishes the exact instances used by the core bundle before any plugin load.
-globalThis.__ANIME_JOURNAL_REACT_RUNTIME__ = Object.freeze({
+globalThis.__ANIMEMO_REACT_RUNTIME__ = Object.freeze({
   React,
   ReactDOM,
   ReactDOMClient,

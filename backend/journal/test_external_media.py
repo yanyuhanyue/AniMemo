@@ -26,8 +26,8 @@ def subject(external_id="1424", **overrides):
         "studio": "京都アニメーション",
         "tags": ["校园", "日常"],
         "score": 8.2,
-        "poster_url": "https://bgm-img-proxy.xhcytus100.workers.dev/pic/cover/l/k-on.jpg",
-        "thumbnail_url": "https://bgm-img-proxy.xhcytus100.workers.dev/r/100/pic/cover/l/k-on.jpg",
+        "poster_url": "https://lain.bgm.tv/pic/cover/l/k-on.jpg",
+        "thumbnail_url": "https://lain.bgm.tv/r/100/pic/cover/l/k-on.jpg",
         "provider_name": "Bangumi",
         "provider_url": f"https://bgm.tv/subject/{external_id}",
         "external_id": str(external_id),
@@ -42,7 +42,7 @@ class ExternalMediaIdentityApiTests(APITestCase):
         self.user = User.objects.create_user(username="identity-owner", password="StrongPass123!")
         self.other = User.objects.create_user(username="identity-other", password="StrongPass123!")
         self.plugin = PluginProject.objects.create(
-            plugin_id="com.anime-journal.watch-history-importer.identity",
+            plugin_id="com.animemo.watch-history-importer.identity",
             slug="watch-history-importer",
             name="观看记录",
             description="test",

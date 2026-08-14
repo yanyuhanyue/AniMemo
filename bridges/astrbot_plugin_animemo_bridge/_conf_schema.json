@@ -1,6 +1,6 @@
 {
   "enabled": {"type": "bool", "default": true, "description": "是否启用 AniMemo Bridge。"},
-  "animemo_base_url": {"type": "string", "default": "https://re-anime.cc", "description": "AniMemo 服务地址。"},
+  "animemo_base_url": {"type": "string", "default": "https://animemo.cc", "description": "AniMemo 服务地址。"},
   "key_id": {"type": "string", "default": "", "description": "管理员创建 IntegrationConnection 后得到的 key id。"},
   "secret": {"type": "string", "default": "", "invisible": true, "description": "IntegrationConnection secret，仅用于 HMAC 签名；生产优先使用 ANIMEMO_INTEGRATION_SECRET。"},
   "poll_events": {"type": "bool", "default": true, "description": "是否启动事件长轮询。"},

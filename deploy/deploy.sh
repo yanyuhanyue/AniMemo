@@ -4,20 +4,20 @@ set -eu
 # Legacy bootstrap / break-glass deployer only. Normal updates use the AniMemo
 # Update Agent with immutable GHCR digests and never call this script.
 
-DEFAULT_APP_ROOT=/opt/1panel/docker/compose/anime-journal/app
-DEFAULT_RELEASE_ROOT=/opt/1panel/docker/compose/anime-journal/releases
-DEFAULT_DATA_ROOT=/data/anime-journal
-DEFAULT_OPENRESTY_CONF=/opt/1panel/www/conf.d/re-anime.cc.conf
+DEFAULT_APP_ROOT=/opt/1panel/docker/compose/animemo/app
+DEFAULT_RELEASE_ROOT=/opt/1panel/docker/compose/animemo/releases
+DEFAULT_DATA_ROOT=/data/animemo
+DEFAULT_OPENRESTY_CONF=/opt/1panel/www/conf.d/animemo.cc.conf
 DEFAULT_OPENRESTY_CONTAINER=1Panel-openresty-t1AN
 
-APP_ROOT=${ANIME_JOURNAL_APP_ROOT:-$DEFAULT_APP_ROOT}
-RELEASE_ROOT=${ANIME_JOURNAL_RELEASE_ROOT:-$DEFAULT_RELEASE_ROOT}
-DATA_ROOT=${ANIME_JOURNAL_DATA_ROOT:-}
-OPENRESTY_CONF=${ANIME_JOURNAL_OPENRESTY_CONF:-$DEFAULT_OPENRESTY_CONF}
-OPENRESTY_CONTAINER=${ANIME_JOURNAL_OPENRESTY_CONTAINER:-$DEFAULT_OPENRESTY_CONTAINER}
-ARCHIVE=${ANIME_JOURNAL_ARCHIVE:-}
-SHA_FILE=${ANIME_JOURNAL_SHA256_FILE:-}
-ENV_SOURCE=${ANIME_JOURNAL_ENV_FILE:-}
+APP_ROOT=${ANIMEMO_APP_ROOT:-$DEFAULT_APP_ROOT}
+RELEASE_ROOT=${ANIMEMO_RELEASE_ROOT:-$DEFAULT_RELEASE_ROOT}
+DATA_ROOT=${ANIMEMO_DATA_ROOT:-}
+OPENRESTY_CONF=${ANIMEMO_OPENRESTY_CONF:-$DEFAULT_OPENRESTY_CONF}
+OPENRESTY_CONTAINER=${ANIMEMO_OPENRESTY_CONTAINER:-$DEFAULT_OPENRESTY_CONTAINER}
+ARCHIVE=${ANIMEMO_ARCHIVE:-}
+SHA_FILE=${ANIMEMO_SHA256_FILE:-}
+ENV_SOURCE=${ANIMEMO_ENV_FILE:-}
 MODE=
 RESET_DATA=0
 CONFIRM_RESET=0
@@ -26,8 +26,8 @@ SKIP_OPENRESTY=0
 usage() {
     cat <<'EOF'
 Usage:
-  sudo sh deploy/deploy.sh --bootstrap --archive /tmp/anime-journal.zip [options]
-  sudo sh deploy/deploy.sh --break-glass --archive /tmp/anime-journal.zip [options]
+  sudo sh deploy/deploy.sh --bootstrap --archive /tmp/animemo.zip [options]
+  sudo sh deploy/deploy.sh --break-glass --archive /tmp/animemo.zip [options]
 
 Modes (exactly one is required):
   --bootstrap          First installation or one-time legacy-to-Updater cutover.
@@ -57,12 +57,12 @@ EOF
 }
 
 die() {
-    echo "Anime Journal legacy deploy: $*" >&2
+    echo "AniMemo legacy deploy: $*" >&2
     exit 1
 }
 
 log() {
-    echo "[anime-journal legacy] $*"
+    echo "[animemo legacy] $*"
 }
 
 require_cmd() {
@@ -256,7 +256,7 @@ assert_safe_target "release root" "$RELEASE_ROOT"
 assert_safe_target "data root" "${DATA_ROOT:-$DEFAULT_DATA_ROOT}"
 assert_safe_target "OpenResty config" "$OPENRESTY_CONF"
 if [ "$APP_ROOT" != "$DEFAULT_APP_ROOT" ] || [ "$RELEASE_ROOT" != "$DEFAULT_RELEASE_ROOT" ] || [ "$OPENRESTY_CONF" != "$DEFAULT_OPENRESTY_CONF" ]; then
-    [ "${ANIME_JOURNAL_ALLOW_CUSTOM_PATHS:-0}" = 1 ] || die "custom server paths require ANIME_JOURNAL_ALLOW_CUSTOM_PATHS=1"
+    [ "${ANIMEMO_ALLOW_CUSTOM_PATHS:-0}" = 1 ] || die "custom server paths require ANIMEMO_ALLOW_CUSTOM_PATHS=1"
 fi
 
 if [ -z "$ENV_SOURCE" ] && [ -f "$APP_ROOT/.env.production" ]; then
@@ -267,7 +267,7 @@ if [ -n "$ENV_SOURCE" ]; then
     [ -f "$ENV_SOURCE" ] || die "production env not found: $ENV_SOURCE"
 fi
 if [ -z "$DATA_ROOT" ] && [ -n "$ENV_SOURCE" ]; then
-    DATA_ROOT=$(sed -n 's/^ANIME_JOURNAL_DATA_ROOT=//p' "$ENV_SOURCE" | sed 's/\r$//' | tail -n 1 | tr -d "\"'")
+    DATA_ROOT=$(sed -n 's/^ANIMEMO_DATA_ROOT=//p' "$ENV_SOURCE" | sed 's/\r$//' | tail -n 1 | tr -d "\"'")
 fi
 DATA_ROOT=${DATA_ROOT:-$DEFAULT_DATA_ROOT}
 assert_safe_target "data root" "$DATA_ROOT"
@@ -283,9 +283,9 @@ if [ "$RESET_DATA" -eq 1 ] && [ "$CONFIRM_RESET" -ne 1 ] && [ ! -t 0 ]; then
     die "--reset-data is non-interactive; add --yes to confirm"
 fi
 if [ "$RESET_DATA" -eq 1 ] && [ "$CONFIRM_RESET" -ne 1 ]; then
-    printf 'This clears only Anime Journal data under %s. Type RESET anime-journal: ' "$DATA_ROOT" >&2
+    printf 'This clears only AniMemo data under %s. Type RESET animemo: ' "$DATA_ROOT" >&2
     read confirmation
-    [ "$confirmation" = "RESET anime-journal" ] || die "reset not confirmed"
+    [ "$confirmation" = "RESET animemo" ] || die "reset not confirmed"
 fi
 
 expected_sha=$(tr -d '\r' < "$SHA_FILE" | awk 'NF {print $1; exit}')
@@ -306,7 +306,7 @@ for entry in $zip_entries; do
     esac
 done
 
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/anime-journal-legacy.XXXXXX")
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/animemo-legacy.XXXXXX")
 EXTRACT_ROOT=$TMP_ROOT/release
 OPENRESTY_BACKUP=$TMP_ROOT/openresty.conf
 OPENRESTY_CHANGED=0
@@ -331,7 +331,7 @@ archive_extract "$ARCHIVE" "$EXTRACT_ROOT" || die "cannot extract release archiv
 for required in \
     deploy/docker-compose.yml deploy/docker-compose.build.yml deploy/deploy.sh \
     deploy/prepare-host.sh deploy/smoke-test.sh \
-    deploy/openresty-re-anime.conf .env.production.example package.json; do
+    deploy/openresty-animemo.conf .env.production.example package.json; do
     [ -f "$EXTRACT_ROOT/$required" ] || die "archive is missing $required"
 done
 [ ! -e "$EXTRACT_ROOT/.env.production" ] || die "release archive must not contain a real .env.production"
@@ -340,12 +340,12 @@ done
 cp "$ENV_SOURCE" "$EXTRACT_ROOT/.env.production"
 chmod 0600 "$EXTRACT_ROOT/.env.production"
 
-env_data_root=$(sed -n 's/^ANIME_JOURNAL_DATA_ROOT=//p' "$EXTRACT_ROOT/.env.production" | sed 's/\r$//' | tail -n 1 | tr -d "\"'")
+env_data_root=$(sed -n 's/^ANIMEMO_DATA_ROOT=//p' "$EXTRACT_ROOT/.env.production" | sed 's/\r$//' | tail -n 1 | tr -d "\"'")
 if [ -n "$env_data_root" ] && [ "$env_data_root" != "$DATA_ROOT" ]; then
-    die "ANIME_JOURNAL_DATA_ROOT in production env ($env_data_root) does not match --data-root ($DATA_ROOT)"
+    die "ANIMEMO_DATA_ROOT in production env ($env_data_root) does not match --data-root ($DATA_ROOT)"
 fi
 if [ -z "$env_data_root" ]; then
-    printf '\nANIME_JOURNAL_DATA_ROOT=%s\n' "$DATA_ROOT" >> "$EXTRACT_ROOT/.env.production"
+    printf '\nANIMEMO_DATA_ROOT=%s\n' "$DATA_ROOT" >> "$EXTRACT_ROOT/.env.production"
 fi
 env_media_root=$(sed -n 's/^MEDIA_LOCAL_STORAGE_ROOT=//p' "$EXTRACT_ROOT/.env.production" | sed 's/\r$//' | tail -n 1 | tr -d "\"'")
 if [ -n "$env_media_root" ] && [ "$env_media_root" != "$DATA_ROOT/media" ]; then
@@ -355,18 +355,18 @@ if [ -z "$env_media_root" ]; then
     printf 'MEDIA_LOCAL_STORAGE_ROOT=%s/media\n' "$DATA_ROOT" >> "$EXTRACT_ROOT/.env.production"
 fi
 
-ANIME_JOURNAL_DATA_ROOT=$DATA_ROOT
-export ANIME_JOURNAL_DATA_ROOT
+ANIMEMO_DATA_ROOT=$DATA_ROOT
+export ANIMEMO_DATA_ROOT
 sh "$EXTRACT_ROOT/deploy/prepare-host.sh"
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-ANIMEMO_API_IMAGE=anime-journal-api:legacy-$stamp
-ANIMEMO_WEB_IMAGE=anime-journal-web:legacy-$stamp
+ANIMEMO_API_IMAGE=animemo-api:legacy-$stamp
+ANIMEMO_WEB_IMAGE=animemo-web:legacy-$stamp
 export ANIMEMO_API_IMAGE ANIMEMO_WEB_IMAGE
 
 stage_compose() {
     (cd "$EXTRACT_ROOT" && docker compose \
-        --project-name anime-journal \
+        --project-name animemo \
         --env-file .env.production \
         -f deploy/docker-compose.yml \
         -f deploy/docker-compose.build.yml \
@@ -375,7 +375,7 @@ stage_compose() {
 
 live_compose() {
     (cd "$APP_ROOT" && docker compose \
-        --project-name anime-journal \
+        --project-name animemo \
         --env-file .env.production \
         -f deploy/docker-compose.yml \
         "$@")
@@ -393,11 +393,6 @@ if [ "$RESET_DATA" -eq 1 ]; then
         [ ! -e "$DATA_ROOT/$directory" ] || rm -rf "$DATA_ROOT/$directory"
     done
     sh "$EXTRACT_ROOT/deploy/prepare-host.sh"
-fi
-
-if [ "$MODE" = bootstrap ] && docker volume inspect anime-journal-data >/dev/null 2>&1; then
-    log "removing the legacy AniMemo named volume anime-journal-data"
-    docker volume rm anime-journal-data >/dev/null
 fi
 
 stage_compose up -d --wait --wait-timeout 120 postgres redis
@@ -421,7 +416,7 @@ if [ "$SKIP_OPENRESTY" -eq 0 ]; then
     if [ -f "$OPENRESTY_CONF" ]; then
         cp "$OPENRESTY_CONF" "$OPENRESTY_BACKUP"
     fi
-    install -m 0644 "$APP_ROOT/deploy/openresty-re-anime.conf" "$OPENRESTY_CONF"
+    install -m 0644 "$APP_ROOT/deploy/openresty-animemo.conf" "$OPENRESTY_CONF"
     OPENRESTY_CHANGED=1
     if ! docker exec "$OPENRESTY_CONTAINER" openresty -t >/dev/null 2>&1; then
         docker exec "$OPENRESTY_CONTAINER" nginx -t >/dev/null 2>&1 || die "OpenResty rejected $OPENRESTY_CONF"

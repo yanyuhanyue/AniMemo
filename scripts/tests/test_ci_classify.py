@@ -60,6 +60,19 @@ class CiClassificationTests(unittest.TestCase):
         ):
             self.assertEqual(result[name], "false", name)
 
+    def test_root_legal_documents_are_classified_as_safe_documentation(self):
+        paths = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES", "TRADEMARKS"]
+        result = classify_paths(paths)
+
+        self.assertEqual(result["risk_level"], "LOW")
+        self.assertEqual(result["docs_only"], "true")
+        self.assertEqual(json.loads(result["unknown_paths"]), [])
+        matched = json.loads(result["matched_rules"])
+        self.assertEqual({entry["path"] for entry in matched}, set(paths))
+        self.assertTrue(
+            all("safe-documentation" in entry["rules"] for entry in matched)
+        )
+
     def test_real_frozen_contract_docs_are_elevated(self):
         for path in (
             "docs/api-v1-contract.md",

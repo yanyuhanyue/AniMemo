@@ -44,7 +44,7 @@ class CloudflareAnalyticsInvalidResponse(CloudflareAnalyticsError):
 
 
 def managed_usage_bytes(backend_or_id):
-    """Return bytes currently indexed by Anime Journal for one backend."""
+    """Return bytes currently indexed by AniMemo for one backend."""
     backend_id = getattr(backend_or_id, "pk", backend_or_id)
     media_total = MediaObject.objects.filter(storage_backend_id=backend_id).aggregate(
         total=Sum("size_bytes")

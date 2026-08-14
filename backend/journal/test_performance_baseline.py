@@ -8,17 +8,18 @@ from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
-from performance.contract import DATASETS, has_query_scaling_regression
-from performance.probe import (
-    EXPECTED_STATUS_CODES,
-    duplicate_query_summary,
-    normalize_sql,
-)
-from performance.seed import provision_load_user_journeys, seed_backend_performance_data
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken
 
 from journal.models import ExternalMediaIdentity, JournalEntry, WatchHistoryRecord
+from performance.contract import DATASETS, has_query_scaling_regression
+from performance.probe import (
+    EXPECTED_STATUS_CODES,
+    build_probe_context,
+    duplicate_query_summary,
+    normalize_sql,
+)
+from performance.seed import provision_load_user_journeys, seed_backend_performance_data
 from site_config.models import InstallationState
 
 
@@ -66,6 +67,13 @@ class PerformanceMeasurementContractTests(TestCase):
             JournalEntry.objects.filter(user_id=second.owner_id, deleted_at__isnull=True).count(),
             50,
         )
+
+    def test_seed_supports_the_authenticated_probe_contract(self):
+        seed_result = seed_backend_performance_data("small")
+
+        probes, _total_pages = build_probe_context(seed_result)
+
+        self.assertEqual(probes["auth_session"]().status_code, 200)
 
     def test_load_user_journeys_are_distinct_owned_read_fixtures(self):
         seed_backend_performance_data("small")

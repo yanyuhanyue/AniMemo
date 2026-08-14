@@ -41,9 +41,9 @@ const keplerRecords = animeRecords.map((record, index) => ({
 
 export const demoUniverseOwners = [
   createDemoOwner(
-    "demo-xh",
-    "XuanHuang",
-    "精心收录 2007 年至今的优质动漫作品，包含详细的题材分类、季度划分与主观评价等。",
+    "animemo-demo",
+    "AniMemo",
+    "把每一次与动画相遇认真收藏，整理成自己的动漫记忆库。",
     animeRecords,
     "/assets/avatar.png",
   ),
@@ -52,14 +52,14 @@ export const demoUniverseOwners = [
     "兔子",
     "我是一直追番无害的小兔子~",
     animeRecords.filter((_, index) => index % 2 === 0),
-    "/assets/posters/poster-11.webp",
+    "/assets/avatar.png",
   ),
   createDemoOwner(
     "576932588@qq.com",
     "Kepler",
     "加番好麻烦，懒得添了(=ｘェｘ=)",
     keplerRecords,
-    "/assets/posters/poster-06.webp",
+    "/assets/avatar.png",
   ),
 ];
 

@@ -24,8 +24,8 @@ from .commands import CommandRunner
 from .errors import CommandFailed, StateError
 from .state import _atomic_json, _atomic_text, _read_private_text
 
-PRODUCTION_APP_ROOT = Path("/opt/1panel/docker/compose/anime-journal/app")
-PRODUCTION_DATA_ROOT = Path("/data/anime-journal")
+PRODUCTION_APP_ROOT = Path("/opt/1panel/docker/compose/animemo/app")
+PRODUCTION_DATA_ROOT = Path("/data/animemo")
 PRODUCTION_STATE_ROOT = Path("/var/lib/animemo-updater")
 MAX_BACKUP_AGE = timedelta(hours=24)
 MIN_AVAILABLE_MEMORY = 512 * 1024 * 1024
@@ -144,10 +144,10 @@ class ImmutableComposeDeployment:
             connection.close()
 
     def _public_endpoint(self) -> tuple[str, int, str]:
-        parsed = urlparse(self._env_value("FRONTEND_URL"))
+        parsed = urlparse(self._env_value("ANIMEMO_PUBLIC_ORIGIN"))
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise StateError("AniMemo FRONTEND_URL is unavailable for local health checks")
-        raw_port = self._env_value("ANIME_JOURNAL_PORT", "8088")
+            raise StateError("AniMemo ANIMEMO_PUBLIC_ORIGIN is unavailable for local health checks")
+        raw_port = self._env_value("ANIMEMO_PORT", "8088")
         try:
             port = int(raw_port)
         except ValueError as error:
@@ -266,7 +266,7 @@ class ImmutableComposeDeployment:
         return self.runner.run(
             [
                 "/usr/bin/docker", "compose",
-                "--project-name", "anime-journal",
+                "--project-name", "animemo",
                 *env_files,
                 "-f", str(self.compose_file),
                 "-f", str(self.updater_compose_file),
@@ -405,7 +405,7 @@ class ImmutableComposeDeployment:
         result = self.runner.write_gzip(
             [
                 "/usr/bin/docker", "compose",
-                "--project-name", "anime-journal",
+                "--project-name", "animemo",
                 "--env-file", str(self.env_file),
                 "-f", str(self.compose_file),
                 "exec", "-T", "postgres", "sh", "-c",

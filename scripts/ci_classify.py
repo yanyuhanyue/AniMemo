@@ -28,6 +28,15 @@ FROZEN_CONTRACT_DOCUMENTS = frozenset(
     }
 )
 
+ROOT_LEGAL_DOCUMENTS = frozenset(
+    {
+        "LICENSE",
+        "NOTICE",
+        "THIRD_PARTY_NOTICES",
+        "TRADEMARKS",
+    }
+)
+
 SIGNAL_NAMES = (
     "frontend",
     "backend",
@@ -104,7 +113,11 @@ class RiskRule:
 
 def _is_docs(path: str) -> bool:
     lower = path.lower()
-    return lower.startswith("docs/") or lower.endswith((".md", ".mdx", ".rst"))
+    return (
+        path in ROOT_LEGAL_DOCUMENTS
+        or lower.startswith("docs/")
+        or lower.endswith((".md", ".mdx", ".rst"))
+    )
 
 
 def _has(path: str, *parts: str) -> bool:

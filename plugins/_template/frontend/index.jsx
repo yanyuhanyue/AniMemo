@@ -8,7 +8,7 @@ export default function createPlugin(host) {
   }
 
   return Object.freeze({
-    id: "com.example.anime-journal.blank",
+    id: "com.example.animemo.blank",
     version: "0.2.0",
     routes: [
       {

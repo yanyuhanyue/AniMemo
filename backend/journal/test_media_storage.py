@@ -91,7 +91,7 @@ class MediaStorageCredentialApiTests(TestCase):
             "priority": 10,
             "warning_bytes": 8 * DECIMAL_GB_BYTES,
             "write_limit_bytes": 9 * DECIMAL_GB_BYTES,
-            "bucket_name": "anime-journal-media",
+            "bucket_name": "animemo-media",
             "endpoint_url": "https://account.r2.cloudflarestorage.com",
             "public_base_url": "https://media.example.com",
             "cloudflare_account_id": "primary-account",

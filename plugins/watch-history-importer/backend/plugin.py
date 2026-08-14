@@ -14,12 +14,12 @@ from rest_framework.response import Response
 
 from plugin_host.sdk import HostCapabilityError, PluginStorageLimitError
 
-from .src.anime_journal_watch_history_importer.bangumi import BangumiError, resolve_group, resolve_subject_id
-from .src.anime_journal_watch_history_importer.parser import build_preview, normalize_title
+from .src.animemo_watch_history_importer.bangumi import BangumiError, resolve_group, resolve_subject_id
+from .src.animemo_watch_history_importer.parser import build_preview, normalize_title
 
 
 PLUGIN_SLUG = "watch-history-importer"
-PLUGIN_VERSION = "0.4.2"
+PLUGIN_VERSION = "0.4.4"
 MAX_FILES = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
 INTEGRATION_TEXT_MAX_BYTES = 120 * 1024
@@ -506,7 +506,7 @@ class WatchHistoryPlugin:
             .values("value")[: _batch_max_per_user()]
         )
         values = [item["value"] for item in batches]
-        return Response({"status": "ok", "plugin": {"id": "com.anime-journal.watch-history-importer", "slug": PLUGIN_SLUG, "version": PLUGIN_VERSION}, "config": _config(self.host, request.user), "batches": [_serialize_batch(value, include_groups=False) for value in values]})
+        return Response({"status": "ok", "plugin": {"id": "com.animemo.watch-history-importer", "slug": PLUGIN_SLUG, "version": PLUGIN_VERSION}, "config": _config(self.host, request.user), "batches": [_serialize_batch(value, include_groups=False) for value in values]})
 
     def preview(self, request):
         files = request.FILES.getlist("files")

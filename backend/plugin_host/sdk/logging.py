@@ -11,4 +11,4 @@ class PluginLoggerAdapter(logging.LoggerAdapter):
 
 
 def get_plugin_logger(plugin_slug):
-    return PluginLoggerAdapter(logging.getLogger("anime_journal.plugins"), {"plugin": str(plugin_slug)})
+    return PluginLoggerAdapter(logging.getLogger("animemo.plugins"), {"plugin": str(plugin_slug)})

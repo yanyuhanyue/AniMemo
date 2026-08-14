@@ -6,7 +6,7 @@ from django.test import SimpleTestCase
 
 
 ROOT = Path(__file__).resolve().parents[3]
-SPEC = importlib.util.spec_from_file_location("anime_journal_pluginctl", ROOT / "scripts" / "pluginctl.py")
+SPEC = importlib.util.spec_from_file_location("animemo_pluginctl", ROOT / "scripts" / "pluginctl.py")
 pluginctl = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(pluginctl)
 

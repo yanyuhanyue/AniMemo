@@ -52,7 +52,7 @@ export function AdminSystemPanel({ viewer, onNotice, onError }) {
   const exportData = async (format, kind = "all") => {
     try {
       const response = await api.get("staff/system/backup/", { params: { export_format: format, kind }, responseType: "blob", timeout: 30000 });
-      downloadBlob(response.data, response.headers["content-disposition"], `anime-journal-${kind}.${format === "csv" ? "csv" : "zip"}`);
+      downloadBlob(response.data, response.headers["content-disposition"], `animemo-${kind}.${format === "csv" ? "csv" : "zip"}`);
       onNotice(format === "zip" ? "完整安全备份已导出" : "CSV 数据已导出");
     } catch (error) { onError(readableApiError(error, "备份生成失败。")); }
   };
@@ -163,4 +163,3 @@ export function AdminSystemPanel({ viewer, onNotice, onError }) {
     {exportConfirmation && <AdminConfirmDialog value={exportConfirmation} onChange={setExportConfirmation} onClose={() => setExportConfirmation(null)} />}
   </div>;
 }
-

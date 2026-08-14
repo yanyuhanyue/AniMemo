@@ -3,12 +3,12 @@ import { api } from "../lib/api.js";
 import { DEFAULT_TRUSTED_POSTER_HOSTS, normalizeTrustedPosterHosts } from "../lib/posterSources.js";
 
 export const DEFAULT_SITE_SETTINGS = {
-  site_name: "Anime Journal",
-  homepage_title: "XuanHuang 的番剧汇总",
+  site_name: "AniMemo",
+  homepage_title: "AniMemo · 我的动漫记忆库",
   site_avatar_url: "/assets/avatar.png",
-  homepage_description: "精心收录 2007 年至今的优质动漫作品，包含详细的题材分类、季度划分与主观评价等。",
+  homepage_description: "把想看、在看与看完的作品收进同一条记忆轨迹，随时回望每一次与动画相遇的时刻。",
   universe_description: "穿过各位同好们的观看轨道，发现真实同步、持续生长的私人番剧宇宙。",
-  social_handle: "X: @ANIME_JOURNAL",
+  social_handle: "X: @ANIMEMO",
   registration_enabled: true,
   trusted_poster_hosts: DEFAULT_TRUSTED_POSTER_HOSTS,
 };
@@ -44,8 +44,8 @@ export function SiteSettingsProvider({ children }) {
   useEffect(() => {
     void refresh();
     const handleUpdate = () => void refresh();
-    window.addEventListener("anime-journal:site-settings-updated", handleUpdate);
-    return () => window.removeEventListener("anime-journal:site-settings-updated", handleUpdate);
+    window.addEventListener("animemo:site-settings-updated", handleUpdate);
+    return () => window.removeEventListener("animemo:site-settings-updated", handleUpdate);
   }, [refresh]);
 
   useEffect(() => {

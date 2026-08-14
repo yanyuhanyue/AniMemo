@@ -1,8 +1,6 @@
 export const DEFAULT_TRUSTED_POSTER_HOSTS = [
   "lain.bgm.tv",
-  "bgm-img-proxy.xhcytus100.workers.dev",
-  "img.re-anime.cc",
-  "re-anime.cc",
+  "media.animemo.cc",
 ];
 
 export function normalizeTrustedPosterHosts(values) {

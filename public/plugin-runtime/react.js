@@ -1,5 +1,5 @@
-const runtime = globalThis.__ANIME_JOURNAL_REACT_RUNTIME__?.React;
-if (!runtime) throw new Error("Anime Journal React runtime is not ready");
+const runtime = globalThis.__ANIMEMO_REACT_RUNTIME__?.React;
+if (!runtime) throw new Error("AniMemo React runtime is not ready");
 export default runtime;
 export const {
   Children, Component, Fragment, Profiler, PureComponent, StrictMode, Suspense,

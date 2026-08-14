@@ -700,7 +700,7 @@ export function DashboardPage() {
       await authApi.logout();
     } finally {
       clearTokens();
-      localStorage.removeItem("anime_journal_demo");
+      localStorage.removeItem("animemo_demo");
       setAuthSnapshot({});
       navigate("/login");
     }
@@ -712,7 +712,7 @@ export function DashboardPage() {
       await authApi.logout();
     } finally {
       clearTokens();
-      localStorage.removeItem("anime_journal_demo");
+      localStorage.removeItem("animemo_demo");
       setAuthSnapshot({});
       navigate("/", { replace: true });
     }
@@ -746,7 +746,7 @@ export function DashboardPage() {
   };
   const deleteAccount = async (payload) => {
     if (isDemo) {
-      Object.keys(localStorage).filter((key) => key.startsWith("anime_journal_")).forEach((key) => localStorage.removeItem(key));
+      Object.keys(localStorage).filter((key) => key.startsWith("animemo_")).forEach((key) => localStorage.removeItem(key));
       logout();
       return;
     }

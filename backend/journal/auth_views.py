@@ -319,13 +319,13 @@ class RegisterView(RegistrationThrottleAuditMixin, APIView):
                         subject=f"继续创建你的 {site_settings.site_name} 账号",
                         html=(
                             f"<h1>继续创建 {site_settings.site_name} 账号</h1>"
-                            "<p>有人使用此邮箱请求创建 Anime Journal 账号。</p>"
+                            "<p>有人使用此邮箱请求创建 AniMemo 账号。</p>"
                             f"<p>如果是你本人，请点击<a href=\"{verify_url}\">此链接继续注册</a>。</p>"
                             "<p>完成邮箱验证后，你还需要自行设置用户名和密码。</p>"
                             "<p>如果你没有发起注册，请忽略此邮件。点击此链接不会自动为你创建带已有密码的账号。</p>"
                         ),
                         text=(
-                            "有人使用此邮箱请求创建 Anime Journal 账号。\n\n"
+                            "有人使用此邮箱请求创建 AniMemo 账号。\n\n"
                             f"如果是你本人，请点击下面的链接继续注册：{verify_url}\n"
                             "完成邮箱验证后，你还需要自行设置用户名和密码。\n\n"
                             "如果你没有发起注册，请忽略此邮件。点击此链接不会自动为你创建带已有密码的账号。"

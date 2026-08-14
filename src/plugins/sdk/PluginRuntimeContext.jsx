@@ -7,7 +7,7 @@ import { collectPluginNavigation, createEventBus, createPluginHost, PLUGIN_SDK_V
 async function loadPluginModule(metadata) {
   const entry = metadata?.frontendEntry;
   if (!entry) throw new Error("插件未提供 frontend/plugin.js 入口。");
-  if (!globalThis.__ANIME_JOURNAL_REACT_RUNTIME__?.React) {
+  if (!globalThis.__ANIMEMO_REACT_RUNTIME__?.React) {
     throw new Error("宿主 Shared React Runtime 尚未就绪。");
   }
   const url = new URL(entry, window.location.origin);
@@ -110,8 +110,8 @@ export function PluginRuntimeProvider({ children, authUser }) {
 
   useEffect(() => {
     const reload = () => setReloadNonce((value) => value + 1);
-    window.addEventListener("anime-journal:plugins-changed", reload);
-    return () => window.removeEventListener("anime-journal:plugins-changed", reload);
+    window.addEventListener("animemo:plugins-changed", reload);
+    return () => window.removeEventListener("animemo:plugins-changed", reload);
   }, []);
 
   const reloadPlugin = useCallback(async (slug) => {
@@ -145,7 +145,7 @@ export function PluginRuntimeProvider({ children, authUser }) {
               authStore,
               navigation: { navigate, replace: (path, options) => navigate(path, { ...options, replace: true }), back: () => navigate(-1) },
               ui: { notify, confirm },
-              site: { getSettings: () => settingsRef.current, getName: () => settingsRef.current?.site_name, getBaseUrl: () => window.location.origin, subscribeSettings: (listener) => { const handler = () => listener(settingsRef.current); window.addEventListener("anime-journal:site-settings-updated", handler); return () => window.removeEventListener("anime-journal:site-settings-updated", handler); } },
+              site: { getSettings: () => settingsRef.current, getName: () => settingsRef.current?.site_name, getBaseUrl: () => window.location.origin, subscribeSettings: (listener) => { const handler = () => listener(settingsRef.current); window.addEventListener("animemo:site-settings-updated", handler); return () => window.removeEventListener("animemo:site-settings-updated", handler); } },
               eventBus: eventBusRef.current,
               manifest: metadata,
             });

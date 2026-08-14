@@ -90,7 +90,7 @@ class PluginStorageLimitsTests(TestCase):
     @override_settings(WATCH_HISTORY_IMPORT_BATCH_RETENTION_SECONDS=100)
     def test_maintenance_only_removes_expired_import_batches(self):
         importer = PluginProject.objects.create(
-            plugin_id="com.anime-journal.watch-history-importer",
+            plugin_id="com.animemo.watch-history-importer",
             slug="watch-history-importer",
             name="Importer",
             description="test",

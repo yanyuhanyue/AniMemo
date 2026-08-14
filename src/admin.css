@@ -1,5 +1,5 @@
 /*
- * Anime Journal admin system
+ * AniMemo admin system
  * Primitive -> semantic -> component tokens are scoped to the staff workspace.
  */
 
@@ -574,6 +574,71 @@
   text-decoration: none;
   cursor: pointer;
   transition: transform var(--admin-duration-fast) var(--aj-admin-ease), box-shadow var(--admin-duration-fast) var(--aj-admin-ease), background-color var(--admin-duration-normal) ease;
+}
+
+/* External provider configuration. */
+.admin-external-services { overflow: hidden; }
+.admin-external-services > header p { max-width: 680px; margin: 4px 0 0; color: var(--admin-color-text-muted); font-size: var(--admin-font-meta); }
+.admin-external-services > form { display: grid; }
+.admin-external-services__provider-head { min-height: 82px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: var(--aj-admin-border-control) solid var(--admin-color-border); background: var(--aj-admin-ink-900); color: var(--aj-admin-white); padding: 14px 16px; }
+.admin-external-services__provider-head > div:first-child { min-width: 0; }
+.admin-external-services__provider-head span { color: var(--aj-admin-gray-300); font-size: var(--admin-font-kicker); font-weight: 900; }
+.admin-external-services__provider-head h4 { margin: 2px 0; font-size: 20px; }
+.admin-external-services__provider-head p { max-width: 680px; margin: 0; color: var(--aj-admin-gray-300); font-size: var(--admin-font-meta); line-height: 1.5; }
+.admin-external-services__availability { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; border: var(--aj-admin-border-control) solid var(--admin-color-border); background: var(--aj-admin-yellow-soft); color: var(--admin-color-text); padding: 7px 9px; font-size: var(--admin-font-meta); font-weight: 900; white-space: nowrap; }
+.admin-external-services__availability.is-ready { background: var(--aj-admin-teal-soft); }
+.admin-external-services__body { display: grid; gap: 16px; padding: 18px; }
+.admin-external-services__switch { min-height: 70px; display: flex; align-items: center; gap: 11px; border: var(--aj-admin-border-control) solid var(--admin-color-border); background: var(--admin-color-surface-subtle); padding: 12px; }
+.admin-external-services__fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.admin-external-services__fields label,
+.admin-external-services__callback { min-width: 0; display: grid; gap: 5px; font-size: var(--admin-font-body); font-weight: 800; }
+.admin-external-services__fields input,
+.admin-external-services__callback input { width: 100%; min-height: var(--admin-control-height); border: var(--aj-admin-border-control) solid var(--admin-input-border); border-radius: var(--aj-admin-radius); background: var(--admin-input-bg); color: var(--admin-color-text); padding: 8px 10px; font: inherit; font-size: var(--admin-font-control); outline: 0; }
+.admin-external-services__fields input:focus { background: var(--aj-admin-yellow-soft); box-shadow: 0 0 0 3px var(--admin-color-selection); }
+.admin-external-services__fields small,
+.admin-external-services__callback small { color: var(--admin-color-text-muted); font-size: var(--admin-font-meta); font-weight: 500; line-height: 1.5; }
+.admin-external-services__secret-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; border: var(--aj-admin-border-control) solid var(--admin-color-border); background: var(--aj-admin-yellow-soft); padding: 11px 12px; box-shadow: var(--admin-shadow-sm); }
+.admin-external-services__secret-actions > div { min-width: 0; display: flex; align-items: center; gap: 9px; }
+.admin-external-services__secret-actions > div > svg { flex: 0 0 auto; font-size: 18px; }
+.admin-external-services__secret-actions b,
+.admin-external-services__secret-actions small { display: block; }
+.admin-external-services__secret-actions b { font-size: var(--admin-font-body); }
+.admin-external-services__secret-actions small { color: var(--admin-color-text-muted); font-size: var(--admin-font-meta); }
+.admin-external-services__secret-actions button,
+.admin-external-services > form > footer button { min-height: var(--admin-control-height); display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: var(--aj-admin-border-control) solid var(--admin-color-border); border-radius: var(--aj-admin-radius); padding: 0 11px; box-shadow: var(--admin-button-shadow); color: var(--admin-color-text); font: inherit; font-size: var(--admin-font-control); font-weight: 900; cursor: pointer; transition: transform var(--admin-duration-fast) var(--aj-admin-ease), box-shadow var(--admin-duration-fast) var(--aj-admin-ease); }
+.admin-external-services__secret-actions button { flex: 0 0 auto; background: var(--admin-color-danger); }
+.admin-external-services > form > footer button { background: var(--admin-color-primary); }
+.admin-external-services__secret-actions button:not(:disabled):is(:hover, :focus-visible),
+.admin-external-services > form > footer button:not(:disabled):is(:hover, :focus-visible) { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--admin-color-border); }
+.admin-external-services__status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: var(--aj-admin-border-control) solid var(--admin-color-border); background: var(--admin-color-surface); }
+.admin-external-services__status-grid > div { min-width: 0; padding: 10px; border-inline-end: 1px solid var(--admin-color-divider); }
+.admin-external-services__status-grid > div:last-child { border-inline-end: 0; }
+.admin-external-services__status-grid span,
+.admin-external-services__status-grid strong { display: block; overflow-wrap: anywhere; }
+.admin-external-services__status-grid span { color: var(--admin-color-text-muted); font-size: var(--admin-font-meta); }
+.admin-external-services__status-grid strong { margin-top: 3px; font-size: var(--admin-font-body); }
+.admin-external-services__callback input { background: var(--admin-color-surface-muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 600; }
+.admin-external-services > form > footer { min-height: 66px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-top: var(--aj-admin-border-control) solid var(--admin-color-border); background: var(--admin-color-surface-muted); padding: 12px 16px; }
+.admin-external-services > form > footer > span { display: inline-flex; align-items: center; gap: 7px; color: var(--admin-color-text-muted); font-size: var(--admin-font-meta); line-height: 1.5; }
+
+@media (max-width: 800px) {
+  .admin-external-services__fields,
+  .admin-external-services__status-grid { grid-template-columns: 1fr 1fr; }
+  .admin-external-services__status-grid > div:nth-child(2) { border-inline-end: 0; }
+  .admin-external-services__status-grid > div:nth-child(-n + 2) { border-bottom: 1px solid var(--admin-color-divider); }
+}
+
+@media (max-width: 560px) {
+  .admin-external-services__provider-head,
+  .admin-external-services__secret-actions,
+  .admin-external-services > form > footer { align-items: stretch; flex-direction: column; }
+  .admin-external-services__availability { align-self: flex-start; }
+  .admin-external-services__fields,
+  .admin-external-services__status-grid { grid-template-columns: 1fr; }
+  .admin-external-services__status-grid > div { border-inline-end: 0; border-bottom: 1px solid var(--admin-color-divider); }
+  .admin-external-services__status-grid > div:last-child { border-bottom: 0; }
+  .admin-external-services__secret-actions button,
+  .admin-external-services > form > footer button { width: 100%; }
 }
 
 .admin-panel > header > button:is(:hover, :focus-visible),

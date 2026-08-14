@@ -102,6 +102,15 @@ class TrustedProxyIpTests(SimpleTestCase):
         request = self.factory.get("/", REMOTE_ADDR="127.0.0.1", HTTP_X_FORWARDED_FOR="203.0.113.9, 127.0.0.1")
         self.assertEqual(client_ip(request), "203.0.113.9")
 
+    @override_settings(TRUSTED_PROXY_IPS=["172.30.0.5/32"])
+    def test_exact_container_proxy_can_supply_client_address(self):
+        request = self.factory.get(
+            "/",
+            REMOTE_ADDR="172.30.0.5",
+            HTTP_X_FORWARDED_FOR="198.51.100.10",
+        )
+        self.assertEqual(client_ip(request), "198.51.100.10")
+
     @override_settings(TRUSTED_PROXY_IPS=["127.0.0.1/32", "2001:db8:1::/64"])
     def test_proxy_chain_supports_ipv6_and_falls_back_on_malformed_xff(self):
         request = self.factory.get(
@@ -129,7 +138,7 @@ class ProductionHealthSecurityTests(SimpleTestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.json()["status"], "ok")
-        self.assertEqual(response.json()["service"], "anime-journal-api")
+        self.assertEqual(response.json()["service"], "animemo-api")
         self.assertEqual(
             response.json()["release"],
             {"version": "0.0.0", "commit": "unknown", "channel": "development"},
@@ -381,14 +390,15 @@ class ProductionSecretKeyTests(SimpleTestCase):
         environment = os.environ.copy()
         environment.update({
             "DEBUG": "false",
-            "DATABASE_URL": "postgresql://test:ProdTestPassword2026@127.0.0.1:5432/anime_journal_test",
+            "DATABASE_URL": "postgresql://test:ProdTestPassword2026@127.0.0.1:5432/animemo_test",
             "POSTGRES_PASSWORD": "ProdTestPassword2026",
             "TURNSTILE_ENABLED": "false",
             "REDIS_URL": "redis://127.0.0.1:6379/15",
             "CREDENTIAL_ENCRYPTION_KEY": self.valid_credential_key,
-            "MEDIA_LOCAL_STORAGE_ROOT": "/tmp/anime-journal-media",
+            "MEDIA_LOCAL_STORAGE_ROOT": "/tmp/animemo-media",
             "ALLOWED_HOSTS": "example.com",
-            "FRONTEND_URL": "https://example.com",
+            "ANIMEMO_PUBLIC_ORIGIN": "https://example.com",
+            "ANIMEMO_MEDIA_PUBLIC_ORIGIN": "https://media.example.com",
             "CORS_ALLOWED_ORIGINS": "https://example.com",
             "CSRF_TRUSTED_ORIGINS": "https://example.com",
             "TRUSTED_PROXY_IPS": "127.0.0.1/32,172.28.0.0/16",
@@ -431,6 +441,37 @@ class ProductionSecretKeyTests(SimpleTestCase):
     def test_production_accepts_stable_random_secret(self):
         result = self.load_settings("a9" * 32)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_production_defaults_to_canonical_origins_and_derived_bangumi_identity(self):
+        command = (
+            "from django.conf import settings; "
+            "print(settings.ANIMEMO_PUBLIC_ORIGIN); "
+            "print(settings.ANIMEMO_MEDIA_PUBLIC_ORIGIN); "
+            "print(settings.FRONTEND_URL); "
+            "print(settings.BANGUMI_OAUTH_REDIRECT_URI); "
+            "print(settings.BANGUMI_USER_AGENT)"
+        )
+        result = self.load_settings(
+            "a9" * 32,
+            command=command,
+            ANIMEMO_PUBLIC_ORIGIN=None,
+            ANIMEMO_MEDIA_PUBLIC_ORIGIN=None,
+            BANGUMI_OAUTH_REDIRECT_URI="https://ignored.example/callback",
+            ALLOWED_HOSTS="animemo.cc",
+            CORS_ALLOWED_ORIGINS="https://animemo.cc",
+            CSRF_TRUSTED_ORIGINS="https://animemo.cc",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "https://animemo.cc",
+                "https://media.animemo.cc",
+                "https://animemo.cc",
+                "https://animemo.cc/api/v1/external-accounts/bangumi/callback/",
+                "AniMemo/1.0 (+https://animemo.cc)",
+            ],
+        )
 
     def test_production_database_ssl_can_be_disabled_for_private_compose_postgres(self):
         command = (
@@ -475,14 +516,19 @@ class ProductionSecretKeyTests(SimpleTestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("CREDENTIAL_ENCRYPTION_KEY", result.stderr)
 
-    def test_production_requires_safe_frontend_cors_csrf_and_cookie_settings(self):
+    def test_production_requires_safe_public_origin_cors_csrf_and_cookie_settings(self):
         cases = [
-            ({"FRONTEND_URL": ""}, "FRONTEND_URL"),
-            ({"FRONTEND_URL": "http://example.com"}, "FRONTEND_URL"),
-            ({"FRONTEND_URL": "https://localhost"}, "FRONTEND_URL"),
+            ({"ANIMEMO_PUBLIC_ORIGIN": ""}, "ANIMEMO_PUBLIC_ORIGIN"),
+            ({"ANIMEMO_PUBLIC_ORIGIN": "http://example.com"}, "ANIMEMO_PUBLIC_ORIGIN"),
+            ({"ANIMEMO_PUBLIC_ORIGIN": "https://localhost"}, "ANIMEMO_PUBLIC_ORIGIN"),
+            ({"ANIMEMO_PUBLIC_ORIGIN": "ftp://example.com"}, "ANIMEMO_PUBLIC_ORIGIN"),
+            ({"ANIMEMO_PUBLIC_ORIGIN": "https://other.example.com"}, "ALLOWED_HOSTS"),
+            ({"ANIMEMO_MEDIA_PUBLIC_ORIGIN": "http://media.example.com"}, "ANIMEMO_MEDIA_PUBLIC_ORIGIN"),
             ({"CORS_ALLOWED_ORIGINS": ""}, "CORS_ALLOWED_ORIGINS"),
             ({"CORS_ALLOWED_ORIGINS": "*"}, "CORS_ALLOWED_ORIGINS"),
+            ({"CORS_ALLOWED_ORIGINS": "https://other.example.com"}, "ANIMEMO_PUBLIC_ORIGIN"),
             ({"CSRF_TRUSTED_ORIGINS": ""}, "CSRF_TRUSTED_ORIGINS"),
+            ({"CSRF_TRUSTED_ORIGINS": "https://other.example.com"}, "ANIMEMO_PUBLIC_ORIGIN"),
             ({"SESSION_COOKIE_SECURE": "false"}, "SESSION_COOKIE_SECURE"),
             ({"REFRESH_COOKIE_SAMESITE": "None", "REFRESH_COOKIE_SECURE": "false"}, "REFRESH_COOKIE_SAMESITE"),
         ]
@@ -511,17 +557,18 @@ class ProductionSecretKeyTests(SimpleTestCase):
         environment.update({
             "DJANGO_SETTINGS_MODULE": "config.settings",
             "DJANGO_SECRET_KEY": "ab" * 32,
-            "DATABASE_URL": "postgresql://test:ProdTestPassword2026@127.0.0.1:5432/anime_journal_test",
+            "DATABASE_URL": "postgresql://test:ProdTestPassword2026@127.0.0.1:5432/animemo_test",
             "POSTGRES_PASSWORD": "ProdTestPassword2026",
             "TURNSTILE_ENABLED": "false",
             "ALLOWED_HOSTS": "example.com",
-            "FRONTEND_URL": "https://example.com",
+            "ANIMEMO_PUBLIC_ORIGIN": "https://example.com",
+            "ANIMEMO_MEDIA_PUBLIC_ORIGIN": "https://media.example.com",
             "CORS_ALLOWED_ORIGINS": "https://example.com",
             "CSRF_TRUSTED_ORIGINS": "https://example.com",
             "TRUSTED_PROXY_IPS": "127.0.0.1/32,172.28.0.0/16",
             "REDIS_URL": "redis://127.0.0.1:6379/15",
             "CREDENTIAL_ENCRYPTION_KEY": self.valid_credential_key,
-            "MEDIA_LOCAL_STORAGE_ROOT": "/tmp/anime-journal-media",
+            "MEDIA_LOCAL_STORAGE_ROOT": "/tmp/animemo-media",
             "SESSION_COOKIE_SECURE": "true",
             "CSRF_COOKIE_SECURE": "true",
             "REFRESH_COOKIE_SECURE": "true",
@@ -560,21 +607,29 @@ class ProductionSecretKeyTests(SimpleTestCase):
             "DEBUG": "false",
             "DJANGO_SETTINGS_MODULE": "config.settings",
             "DJANGO_SECRET_KEY": "cd" * 32,
-            "DATABASE_URL": "postgresql://test:ProdTestPassword2026@127.0.0.1:5432/anime_journal_test",
+            "DATABASE_URL": "postgresql://test:ProdTestPassword2026@127.0.0.1:5432/animemo_test",
             "POSTGRES_PASSWORD": "ProdTestPassword2026",
             "TURNSTILE_ENABLED": "false",
             "ALLOWED_HOSTS": "example.com",
-            "FRONTEND_URL": "https://example.com",
+            "ANIMEMO_PUBLIC_ORIGIN": "https://example.com",
+            "ANIMEMO_MEDIA_PUBLIC_ORIGIN": "https://media.example.com",
             "CORS_ALLOWED_ORIGINS": "https://example.com",
             "CSRF_TRUSTED_ORIGINS": "https://example.com",
             "REDIS_URL": "redis://127.0.0.1:6379/15",
             "CREDENTIAL_ENCRYPTION_KEY": self.valid_credential_key,
-            "MEDIA_LOCAL_STORAGE_ROOT": "/tmp/anime-journal-media",
+            "MEDIA_LOCAL_STORAGE_ROOT": "/tmp/animemo-media",
             "SESSION_COOKIE_SECURE": "true",
             "CSRF_COOKIE_SECURE": "true",
             "REFRESH_COOKIE_SECURE": "true",
         })
-        for proxy in ("not-a-network", "0.0.0.0/0", "::/0", "10.0.0.0/8"):
+        for proxy in (
+            "not-a-network",
+            "0.0.0.0/0",
+            "::/0",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+        ):
             with self.subTest(proxy=proxy):
                 environment["TRUSTED_PROXY_IPS"] = proxy
                 result = subprocess.run(
@@ -587,6 +642,17 @@ class ProductionSecretKeyTests(SimpleTestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("TRUSTED_PROXY_IPS", result.stderr)
+
+        environment["TRUSTED_PROXY_IPS"] = "172.30.0.5/32"
+        accepted = subprocess.run(
+            [sys.executable, "-c", "import django; django.setup()"],
+            cwd=settings.BASE_DIR,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
 
 
 @override_settings(REST_FRAMEWORK=RELAXED_THROTTLE_SETTINGS)
@@ -911,7 +977,7 @@ class TwoFactorSecurityTests(APITestCase):
         parsed = urlparse(begin.data["otpauth_uri"])
         self.assertEqual(parsed.scheme, "otpauth")
         self.assertEqual(parsed.netloc, "totp")
-        self.assertIn("Anime Journal", unquote(parsed.path))
+        self.assertIn("AniMemo", unquote(parsed.path))
         query = parse_qs(parsed.query)
         self.assertEqual(query["algorithm"], ["SHA1"])
         self.assertEqual(query["digits"], ["6"])
@@ -1044,7 +1110,7 @@ class PluginRuntimeSecurityTests(APITestCase):
         self.admin = User.objects.create_user(username="plugin-security-admin", password="StrongPass123!", is_staff=True)
         self.client.force_authenticate(self.admin)
         project = PluginProject.objects.create(
-            plugin_id="com.anime-journal.watch-history-importer", slug="watch-history-importer",
+            plugin_id="com.animemo.watch-history-importer", slug="watch-history-importer",
             name="Watch history", description="test", installation_mode=PluginProject.InstallationMode.SYSTEM,
         )
         blob = PluginPackageBlob.objects.create(sha256="0" * 64, size_bytes=0, storage_path="packages/sha256/00/" + "0" * 64 + ".ajplugin")

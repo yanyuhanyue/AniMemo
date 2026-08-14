@@ -4,9 +4,10 @@ from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerSplitView
+
 import config.openapi  # noqa: F401 - registers the authentication extension
-from plugin_host.views import PluginAssetView, PluginPreviewAssetView
 from plugin_host.runtime.dispatch import PluginDispatch
+from plugin_host.views import PluginAssetView, PluginPreviewAssetView
 
 from .api_urls import urlpatterns as core_api_urlpatterns
 
@@ -21,20 +22,20 @@ def health(_request):
     return JsonResponse(
         {
             "status": "ok",
-            "service": "anime-journal-api",
+            "service": "animemo-api",
             "release": {
-                "version": settings.ANIME_JOURNAL_VERSION,
-                "commit": settings.ANIME_JOURNAL_COMMIT,
-                "channel": settings.ANIME_JOURNAL_RELEASE_CHANNEL,
+                "version": settings.ANIMEMO_VERSION,
+                "commit": settings.ANIMEMO_COMMIT,
+                "channel": settings.ANIMEMO_RELEASE_CHANNEL,
             },
             "artifact": {
-                "version": settings.ANIME_JOURNAL_ARTIFACT_VERSION,
-                "commit": settings.ANIME_JOURNAL_ARTIFACT_COMMIT,
-                "channel": settings.ANIME_JOURNAL_ARTIFACT_CHANNEL,
+                "version": settings.ANIMEMO_ARTIFACT_VERSION,
+                "commit": settings.ANIMEMO_ARTIFACT_COMMIT,
+                "channel": settings.ANIMEMO_ARTIFACT_CHANNEL,
             },
             "contracts": {
-                "database": settings.ANIME_JOURNAL_DATABASE_CONTRACT,
-                "configuration": settings.ANIME_JOURNAL_CONFIGURATION_CONTRACT,
+                "database": settings.ANIMEMO_DATABASE_CONTRACT,
+                "configuration": settings.ANIMEMO_CONFIGURATION_CONTRACT,
             },
         }
     )
@@ -59,3 +60,11 @@ urlpatterns = [
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+if settings.ANIMEMO_ISOLATED_CAPACITY_PROBE:
+    urlpatterns += [
+        path(
+            "api/v1/_isolated/capacity/",
+            include("performance.urls"),
+        )
+    ]

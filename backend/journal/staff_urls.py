@@ -7,6 +7,10 @@ from .staff_dashboard_views import (
     StaffUserPermissionsView,
 )
 from .public_views import StaffSiteSettingsView, StaffTestEmailView
+from .external_accounts.staff_views import (
+    StaffExternalProviderClientSecretView,
+    StaffExternalProviderConfigurationView,
+)
 from .staff_storage_views import (
     StaffMediaStorageActionView,
     StaffMediaStorageDetailView,
@@ -39,6 +43,16 @@ urlpatterns = [
     path("dashboard/", StaffDashboardView.as_view(), name="staff-dashboard"),
     path("site-settings/", StaffSiteSettingsView.as_view(), name="staff-site-settings"),
     path("site-settings/test-email/", StaffTestEmailView.as_view(), name="staff-test-email"),
+    path(
+        "external-providers/<slug:provider>/",
+        StaffExternalProviderConfigurationView.as_view(),
+        name="staff-external-provider-configuration",
+    ),
+    path(
+        "external-providers/<slug:provider>/client-secret/",
+        StaffExternalProviderClientSecretView.as_view(),
+        name="staff-external-provider-client-secret",
+    ),
     path("columns/<int:pk>/review/", StaffColumnReviewView.as_view(), name="staff-column-review"),
     path("public-journals/<int:pk>/review/", StaffPublicJournalReviewView.as_view(), name="staff-public-journal-review"),
     path("users/<int:pk>/permissions/", StaffUserPermissionsView.as_view(), name="staff-user-permissions"),
