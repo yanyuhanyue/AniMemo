@@ -244,6 +244,24 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         ]:
             self.assertNotIn(forbidden, installer)
 
+    def test_installer_is_independent_of_the_calling_umask(self):
+        installer = (ROOT / "deploy/install-updater.sh").read_text(encoding="utf-8")
+
+        parent_modes = 'chmod 0755 "$INSTALL_ROOT" "$INSTALL_ROOT/releases"'
+        release_modes = 'chmod -R a+rX,go-w "$STAGING"'
+        service_probe = (
+            'runuser -u animemo-updater -g animemo-api -- "$LAUNCHER" version >/dev/null'
+        )
+        service_start = 'systemctl enable --now "$SERVICE"'
+
+        self.assertIn("python3 runuser systemctl", installer)
+        self.assertIn(parent_modes, installer)
+        self.assertIn(release_modes, installer)
+        self.assertIn(service_probe, installer)
+        self.assertLess(installer.index(parent_modes), installer.index('mkdir -p "$STAGING"'))
+        self.assertLess(installer.index(release_modes), installer.index('mv "$STAGING" "$RELEASE_ROOT"'))
+        self.assertLess(installer.index(service_probe), installer.index(service_start))
+
     def test_fresh_release_gate_uses_build_override_and_explicit_jobs(self):
         workflow = (ROOT / ".github/workflows/release-gate.yml").read_text(encoding="utf-8")
 

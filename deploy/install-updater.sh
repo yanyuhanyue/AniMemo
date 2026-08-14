@@ -18,7 +18,7 @@ die() {
 [ "$#" -eq 0 ] || die "this installer accepts no custom paths or commands"
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo is fine)"
 
-for command in /usr/bin/docker /usr/bin/gh python3 systemctl systemd-sysusers systemd-tmpfiles install; do
+for command in /usr/bin/docker /usr/bin/gh python3 runuser systemctl systemd-sysusers systemd-tmpfiles install; do
     command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"
 done
 
@@ -52,6 +52,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 mkdir -p "$INSTALL_ROOT/releases"
+chmod 0755 "$INSTALL_ROOT" "$INSTALL_ROOT/releases"
 rm -rf "$STAGING"
 mkdir -p "$STAGING"
 cp -R "$SCRIPT_ROOT/updater" "$STAGING/updater"
@@ -60,6 +61,7 @@ find "$STAGING" -type d -name __pycache__ -prune -exec rm -rf {} +
 python3 -m venv "$STAGING/.venv" || die "python3-venv is required"
 "$STAGING/.venv/bin/python" -m pip install --disable-pip-version-check -r "$STAGING/release/requirements.txt"
 (cd "$STAGING" && "$STAGING/.venv/bin/python" -m updater version >/dev/null)
+chmod -R a+rX,go-w "$STAGING"
 
 if [ -e "$RELEASE_ROOT" ]; then
     die "updater release already exists: $RELEASE_ROOT"
@@ -83,6 +85,8 @@ chmod 0755 "$INSTALL_ROOT/launcher"
 ln -sfn "$INSTALL_ROOT/launcher" "$LAUNCHER"
 ln -sfn "$RELEASE_ROOT" "$INSTALL_ROOT/.current-new"
 mv -Tf "$INSTALL_ROOT/.current-new" "$INSTALL_ROOT/current"
+runuser -u animemo-updater -g animemo-api -- "$LAUNCHER" version >/dev/null \
+    || die "installed updater is not executable by the service identity"
 
 systemctl daemon-reload
 systemctl enable --now "$SERVICE"
