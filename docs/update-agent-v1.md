@@ -47,13 +47,13 @@ Socket mode 是 `0660`，目录 mode 是 `0750`，属主/组为 `animemo-updater
 
 ## Release verification
 
-Release discovery 只访问 `yanyuhanyue/AniMemo`，并把 tag SemVer 通道与 GitHub Release 的 `draft/prerelease` metadata 绑定；错误标记的 Stable/RC/Beta 不进入可用列表。下载固定资产 `release-manifest.json` 与 `checksums.txt` 后，Agent 验证：
+Release discovery 只通过固定的 `https://api.github.com` REST authority 访问 `yanyuhanyue/AniMemo`，拒绝 redirect，并把 tag SemVer 通道与 GitHub Release 的 `draft/prerelease` metadata 绑定；错误标记的 Stable/RC/Beta 不进入可用列表。Agent 下载且只接受三项已上传资产 `release-manifest.json`、`deployment-contract.json`、`checksums.txt`，然后验证：
 
-1. tag、channel、SemVer、40 位 commit 与 Manifest schema；
+1. tag、channel、SemVer、40 位 commit 与 Manifest schema，并有界 peel lightweight/annotated tag，要求最终 Git commit 等于 `release.commit`；
 2. checksum 和固定 repository/platform/digest；
 3. minimum updater version 与 database/configuration/Plugin SDK contract；
-4. API/Web OCI attestation 的 repository、release workflow 与应用 commit；
-5. Manifest attestation 的 repository、签署 workflow 与 `provenance.sourceCommit`。
+4. 通过 repository attestation REST endpoint 按 digest 匿名发现 bundle；内联 bundle 可直接使用，GitHub 签发的 bundle URL 只允许固定 `tmaproduction.blob.core.windows.net` host、与 REST 条目相同的 repository ID 路径、HTTPS 和签名 query，下载时不携带 GitHub credential 且不跟随 redirect；`application/x-snappy` raw block 必须在读取其声明长度并通过 8 MiB 上限后解压为 JSON；随后在隔离的 GitHub/Docker credential 环境中使用本地 bundle，以 exact certificate identity（不与互斥的 workflow selector 混用）验证 API/Web OCI attestation 的 exact subject name/digest、repository、release workflow、OIDC issuer、main ref、应用 commit 与 SLSA predicate；
+5. 对 Manifest 与 deployment contract 执行同样的本地 bundle 验证，并绑定签署 workflow、exact subject name/digest 与 `provenance.sourceCommit`。
 
 Stable Manifest 保留 RC 的应用 commit 和 API/Web digest，但由 promotion workflow 的 commit 签署，因此 `release.commit` 与 `provenance.sourceCommit` 是两个明确身份。
 
@@ -121,7 +121,7 @@ sudo sh deploy/install-updater.sh
 
 安装器只写 `/opt/animemo-updater`、`/var/lib/animemo-updater`、`/run/animemo-updater`、自身 systemd/sysusers/tmpfiles 资产和 `/usr/local/bin/animemo-updater`。每个 Updater 版本安装到独立目录，再原子切换 `current` symlink；启动失败时恢复旧 symlink。它不部署 AniMemo、不导入 CURRENT、不重启 Docker 或其他服务。
 
-公开 GitHub Release assets 与 attestations 优先匿名读取。确实需要认证时，只在 Agent Host 配置 read-only contents/packages credential：GitHub CLI 使用固定 `GH_CONFIG_DIR=/var/lib/animemo-updater/gh`，GHCR Docker credential 保存在 Agent 用户的 Host home/config。token 不进入数据库、Staff UI、API/RPC、Manifest、Operation journal 或日志；不得使用 repo write、admin 或 workflow token。凭据安装、轮换和撤销是人工 Host 运维动作，不属于 Agent allowlist。
+公开 GitHub Release metadata、tag 与 attestations 始终先走匿名 REST，Release assets 也先匿名下载；只有匿名 REST 返回 `401/403/429` 或匿名 asset download 失败时，才可从固定 Host `GH_CONFIG_DIR=/var/lib/animemo-updater/gh` 读取 read-only contents credential 做同一固定 repository 的可用性回退。GitHub 签发的 attestation bundle URL 不使用该 credential。Attestation verifier 始终使用匿名取得的本地 bundle，并隔离 GitHub 与 Docker credential；credential 只提高 rate limit/可用性，不参与 Release Authority 判定。GHCR Docker credential 保存在 Agent 用户的 Host home/config。token 不进入数据库、Staff UI、API/RPC、Manifest、Operation journal 或日志；不得使用 repo write、admin 或 workflow token。凭据安装、轮换和撤销是人工 Host 运维动作，不属于 Agent allowlist。
 
 一次性 CURRENT bootstrap：
 

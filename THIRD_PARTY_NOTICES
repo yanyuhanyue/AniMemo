@@ -12,7 +12,7 @@ Run `python scripts/check_license_docs.py` to verify this snapshot without chang
 |---|---|---|
 | `package-lock.json` | `576f0b6f10b67ef0a4360f1028722f64bbd4c9f08eb972ecdec332ec6d4d54e5` | Exact Node dependency graph, versions, package license metadata, and registry tarballs |
 | `backend/requirements.txt` | `db0c4cfeeea40f0b8a7d4d7f392b8d493caedf0f467ea8d1a6a8358c506b5a90` | 44 exact Python production pins |
-| `release/requirements.txt` | `c91590bac77fab44ba03211bf8c0330ce0b5ba36f0f27927af37138278acd563` | Release updater Python pins |
+| `release/requirements.txt` | `dc33c76807b0f3672bd53d14a3916350ba5a876cced309d009caed2c630853fd` | Release updater Python pins |
 | `bridges/astrbot_plugin_animemo_bridge/requirements.txt` | `9d25b578e8e7489ee686d0eabaf1b2b2444b3b0761ac3d55548f9e00c99fb2de` | AstrBot bridge constraint |
 | `scripts/requirements-tools.txt` | `b33d39fc69d850a919bda957bce5fc19f49d66ec3097346001c4b5e4633d002c` | Dependency-maintenance tooling |
 
@@ -162,6 +162,7 @@ All 44 entries below are exact pins from `backend/requirements.txt`. License met
 
 | Scope | Declaration | License metadata | Reproducibility note |
 |---|---|---|---|
+| Release updater | `cramjam==2.11.0` | `MIT` | Exact pin; raw Snappy decoder for GitHub attestation bundles |
 | Release updater | `jsonschema==4.26.0` | `MIT` | Exact pin; also present in the backend lock |
 | Release updater | `packaging==25.0` | `Apache-2.0 OR BSD-2-Clause` | Exact pin; also present in the backend lock |
 | Release updater | `pyyaml==6.0.3` | `MIT` | Exact pin; also present in the backend lock |

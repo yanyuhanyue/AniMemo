@@ -147,6 +147,47 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn('logs = f"{result.stdout}\\n{result.stderr}"', deployment)
         self.assertIn("self.verify_recent_backup()", deployment)
 
+    def test_release_source_uses_public_rest_and_local_attestation_bundles(self):
+        source = (ROOT / "updater/source.py").read_text(encoding="utf-8")
+        requirements = (ROOT / "release/requirements.txt").read_text(encoding="utf-8")
+
+        self.assertIn('GITHUB_API_ROOT = "https://api.github.com"', source)
+        self.assertIn(
+            'ATTESTATION_BUNDLE_HOST = "tmaproduction.blob.core.windows.net"',
+            source,
+        )
+        self.assertIn("class _RejectRedirects", source)
+        self.assertIn('f"/repos/{REPOSITORY}/releases?per_page=100&page={page}"', source)
+        self.assertIn('f"/repos/{REPOSITORY}/releases/tags/{version}"', source)
+        self.assertIn('f"/repos/{REPOSITORY}/git/ref/tags/{version}"', source)
+        self.assertIn('f"/repos/{REPOSITORY}/attestations/{digest}"', source)
+        self.assertIn("def get_attestation_bundle", source)
+        self.assertIn('path_match.group("repository_id") != str(repository_id)', source)
+        self.assertIn("snappy.decompress_raw_len", source)
+        self.assertIn("snappy.decompress_raw", source)
+        self.assertIn("cramjam==2.11.0", requirements)
+        self.assertNotIn('["/usr/bin/gh", "api"', source)
+        self.assertNotIn('"--signer-workflow"', source)
+        self.assertIn('"auth", "token", "--hostname", "github.com"', source)
+        for required_option in (
+            '"--bundle"',
+            '"--repo"',
+            '"--cert-identity"',
+            '"--cert-oidc-issuer"',
+            '"--source-digest"',
+            '"--source-ref"',
+            '"--signer-digest"',
+            '"--predicate-type"',
+        ):
+            self.assertIn(required_option, source)
+        for credential in (
+            '"GH_TOKEN"',
+            '"GITHUB_TOKEN"',
+            '"GH_CONFIG_DIR"',
+            '"DOCKER_CONFIG"',
+        ):
+            self.assertIn(credential, source)
+
     def test_agent_switch_is_scoped_and_plugin_compatibility_uses_live_state(self):
         deployment = (ROOT / "updater/deployment.py").read_text(encoding="utf-8")
         executor = (ROOT / "updater/executor.py").read_text(encoding="utf-8")

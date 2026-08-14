@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import tempfile
 import time
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from cramjam import DecompressionError, snappy
 from packaging.version import Version
 
 from release.contract import (
@@ -18,39 +24,223 @@ from release.contract import (
 )
 
 from .commands import CommandRunner
-from .errors import RequestRejected, StateError
+from .errors import CommandFailed, RequestRejected, StateError
 from .protocol import CHANNELS, RELEASE_VERSION
 from .state import _absolute, _ensure_private_directory
 
 
+GITHUB_API_ROOT = "https://api.github.com"
+GITHUB_API_VERSION = "2026-03-10"
+ATTESTATION_BUNDLE_HOST = "tmaproduction.blob.core.windows.net"
+MAX_GITHUB_JSON_BYTES = 8 * 1024 * 1024
+EXPECTED_RELEASE_ASSETS = {
+    "checksums.txt",
+    "deployment-contract.json",
+    "release-manifest.json",
+}
+GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+ATTESTATION_BUNDLE_PATH = re.compile(
+    r"^/attestations/(?P<repository_id>[1-9][0-9]*)/"
+    r"[0-9]{4}/[0-9]{2}/[0-9]{2}/[1-9][0-9]*\.json\.sn$"
+)
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+
+class GitHubPublicRest:
+    _UNRESOLVED = object()
+
+    def __init__(self, *, runner=None, opener=None):
+        self.runner = runner or CommandRunner()
+        self.opener = opener or build_opener(_RejectRedirects())
+        self._token: str | None | object = self._UNRESOLVED
+
+    def configured_token(self) -> str | None:
+        if self._token is not self._UNRESOLVED:
+            return self._token
+        try:
+            result = self.runner.run(
+                ["/usr/bin/gh", "auth", "token", "--hostname", "github.com"],
+                timeout=10,
+            )
+        except CommandFailed:
+            self._token = None
+            return None
+        token = result.stdout.strip()
+        self._token = token if token and not any(character.isspace() for character in token) else None
+        return self._token
+
+    def _request_json(self, path: str, *, label: str, token: str | None):
+        if not path.startswith("/") or "://" in path:
+            raise RequestRejected(f"{label} path is invalid")
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "AniMemo-Updater",
+            "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = Request(
+            f"{GITHUB_API_ROOT}{path}",
+            headers=headers,
+            method="GET",
+        )
+        return self._open_json(request, label=label)
+
+    def _open_json(self, request: Request, *, label: str):
+        encoded, _ = self._open_bytes(request, label=label)
+        return self._decode_json(encoded, label=label)
+
+    def _open_bytes(self, request: Request, *, label: str) -> tuple[bytes, str]:
+        try:
+            with self.opener.open(request, timeout=30) as response:
+                encoded = response.read(MAX_GITHUB_JSON_BYTES + 1)
+                content_type = str(
+                    getattr(response, "headers", {}).get(
+                        "Content-Type",
+                        "application/json",
+                    )
+                ).partition(";")[0].strip().lower()
+        except HTTPError:
+            raise
+        except (OSError, URLError) as error:
+            raise RequestRejected(f"{label} is unavailable") from error
+        if len(encoded) > MAX_GITHUB_JSON_BYTES:
+            raise RequestRejected(f"{label} response is too large")
+        return encoded, content_type
+
+    @staticmethod
+    def _decode_json(encoded: bytes, *, label: str):
+        try:
+            return json.loads(encoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RequestRejected(f"{label} returned invalid JSON") from error
+
+    def get_attestation_bundle(self, url: str, *, repository_id: int):
+        if type(repository_id) is not int or repository_id <= 0 or not isinstance(url, str):
+            raise RequestRejected("GitHub artifact attestation bundle URL is invalid")
+        parsed = urlsplit(url)
+        path_match = ATTESTATION_BUNDLE_PATH.fullmatch(parsed.path)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != ATTESTATION_BUNDLE_HOST
+            or parsed.fragment
+            or not parsed.query
+            or path_match is None
+            or path_match.group("repository_id") != str(repository_id)
+        ):
+            raise RequestRejected("GitHub artifact attestation bundle URL is invalid")
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "AniMemo-Updater",
+            },
+            method="GET",
+        )
+        try:
+            encoded, content_type = self._open_bytes(
+                request,
+                label="GitHub artifact attestation bundle",
+            )
+        except HTTPError as error:
+            raise RequestRejected(
+                f"GitHub artifact attestation bundle returned HTTP {error.code}"
+            ) from error
+        if content_type == "application/x-snappy":
+            try:
+                if snappy.decompress_raw_len(encoded) > MAX_GITHUB_JSON_BYTES:
+                    raise RequestRejected(
+                        "GitHub artifact attestation bundle response is too large"
+                    )
+                encoded = bytes(snappy.decompress_raw(encoded))
+            except DecompressionError as error:
+                raise RequestRejected(
+                    "GitHub artifact attestation bundle is invalid Snappy data"
+                ) from error
+        elif content_type != "application/json":
+            raise RequestRejected(
+                "GitHub artifact attestation bundle content type is invalid"
+            )
+        return self._decode_json(
+            encoded,
+            label="GitHub artifact attestation bundle",
+        )
+
+    def get_json(self, path: str, *, label: str):
+        try:
+            return self._request_json(path, label=label, token=None)
+        except HTTPError as anonymous_error:
+            if anonymous_error.code not in {401, 403, 429}:
+                raise RequestRejected(f"{label} returned HTTP {anonymous_error.code}") from anonymous_error
+            token = self.configured_token()
+            if token is None:
+                raise RequestRejected(f"{label} returned HTTP {anonymous_error.code}") from anonymous_error
+            try:
+                return self._request_json(path, label=label, token=token)
+            except HTTPError as authenticated_error:
+                raise RequestRejected(f"{label} returned HTTP {authenticated_error.code}") from authenticated_error
+
+
 class GitHubReleaseSource:
-    def __init__(self, cache_root: Path, *, runner=None, cache_seconds: int = 300):
+    def __init__(self, cache_root: Path, *, runner=None, rest=None, cache_seconds: int = 300):
         self.cache_root = _absolute(cache_root)
         self.runner = runner or CommandRunner()
+        self.rest = rest or GitHubPublicRest(runner=self.runner)
         self.cache_seconds = cache_seconds
         self._release_cache: tuple[float, list[dict[str, object]]] | None = None
         self._verified_cache: dict[str, tuple[float, dict[str, object]]] = {}
+
+    @staticmethod
+    def _anonymous_gh_environment(root: Path) -> dict[str, str]:
+        environment = os.environ.copy()
+        for name in (
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+            "GH_HOST",
+            "DOCKER_AUTH_CONFIG",
+            "REGISTRY_AUTH_FILE",
+        ):
+            environment.pop(name, None)
+        gh_config = root / "gh"
+        docker_config = root / "docker"
+        gh_config.mkdir(mode=0o700)
+        docker_config.mkdir(mode=0o700)
+        environment["GH_CONFIG_DIR"] = str(gh_config)
+        environment["DOCKER_CONFIG"] = str(docker_config)
+        environment["GH_PROMPT_DISABLED"] = "1"
+        return environment
 
     def _list_all(self, *, refresh: bool) -> list[dict[str, object]]:
         now = time.monotonic()
         if not refresh and self._release_cache and now - self._release_cache[0] < self.cache_seconds:
             return self._release_cache[1]
-        result = self.runner.run(
-            [
-                "/usr/bin/gh",
-                "api",
-                f"repos/{REPOSITORY}/releases",
-                "--paginate",
-                "--jq",
-                ".[] | {tag_name,draft,prerelease,published_at}",
-            ],
-            timeout=30,
-        )
-        raw = result.stdout.strip()
-        try:
-            payload = json.loads(raw) if raw.startswith("[") else [json.loads(line) for line in raw.splitlines() if line]
-        except json.JSONDecodeError as error:
-            raise RequestRejected("GitHub release discovery returned invalid metadata") from error
+        payload = []
+        for page in range(1, 101):
+            batch = self.rest.get_json(
+                f"/repos/{REPOSITORY}/releases?per_page=100&page={page}",
+                label="GitHub release discovery",
+            )
+            if not isinstance(batch, list):
+                raise RequestRejected("GitHub release discovery returned invalid metadata")
+            if any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("tag_name"), str)
+                or not isinstance(item.get("draft"), bool)
+                or not isinstance(item.get("prerelease"), bool)
+                for item in batch
+            ):
+                raise RequestRejected("GitHub release discovery returned invalid metadata")
+            payload.extend(batch)
+            if len(batch) < 100:
+                break
+        else:
+            raise RequestRejected("GitHub release discovery exceeded the pagination limit")
         releases = [item for item in payload if not item.get("draft") and RELEASE_VERSION.fullmatch(str(item.get("tag_name", "")))]
         self._release_cache = (now, releases)
         return releases
@@ -76,7 +266,10 @@ class GitHubReleaseSource:
 
     @staticmethod
     def _verify_checksum(root: Path) -> None:
-        lines = (root / "checksums.txt").read_text(encoding="utf-8").splitlines()
+        try:
+            lines = (root / "checksums.txt").read_text(encoding="utf-8").splitlines()
+        except OSError as error:
+            raise RequestRejected("Release checksum asset is unavailable") from error
         expected = {}
         for line in lines:
             digest, separator, name = line.partition("  ")
@@ -85,13 +278,106 @@ class GitHubReleaseSource:
                 "deployment-contract.json",
             }:
                 raise RequestRejected("Release checksums contain an unexpected artifact")
+            if name in expected:
+                raise RequestRejected("Release checksums contain a duplicate artifact")
             expected[name] = digest
         if set(expected) != {"release-manifest.json", "deployment-contract.json"}:
             raise RequestRejected("Release checksums do not cover every release contract asset")
         for name, digest in expected.items():
-            actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
+            try:
+                actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
+            except OSError as error:
+                raise RequestRejected(f"Release contract asset is unavailable: {name}") from error
             if actual != digest:
                 raise RequestRejected(f"Release contract checksum mismatch: {name}")
+
+    def _verify_release_tag(self, version: str, expected_commit: str) -> None:
+        payload = self.rest.get_json(
+            f"/repos/{REPOSITORY}/git/ref/tags/{version}",
+            label="GitHub release tag",
+        )
+        seen = set()
+        for _ in range(8):
+            if not isinstance(payload, dict) or not isinstance(payload.get("object"), dict):
+                raise RequestRejected("GitHub release tag is invalid")
+            target = payload["object"]
+            object_type = target.get("type")
+            sha = target.get("sha")
+            if not isinstance(sha, str) or not GIT_SHA.fullmatch(sha) or sha in seen:
+                raise RequestRejected("GitHub release tag is invalid")
+            if object_type == "commit":
+                if sha != expected_commit:
+                    raise RequestRejected("GitHub release tag and manifest commit differ")
+                return
+            if object_type != "tag":
+                raise RequestRejected("GitHub release tag does not resolve to a commit")
+            seen.add(sha)
+            payload = self.rest.get_json(
+                f"/repos/{REPOSITORY}/git/tags/{sha}",
+                label="GitHub annotated tag",
+            )
+        raise RequestRejected("GitHub release tag exceeds the peel limit")
+
+    def _write_attestation_bundle(self, digest: str, path: Path) -> None:
+        payload = self.rest.get_json(
+            f"/repos/{REPOSITORY}/attestations/{digest}",
+            label="GitHub artifact attestations",
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("attestations"), list):
+            raise RequestRejected("GitHub artifact attestations returned invalid metadata")
+        bundles = []
+        for item in payload["attestations"]:
+            if not isinstance(item, dict):
+                raise RequestRejected("GitHub artifact attestations returned an invalid bundle")
+            bundle = item.get("bundle")
+            if bundle is None:
+                bundle = self.rest.get_attestation_bundle(
+                    item.get("bundle_url"),
+                    repository_id=item.get("repository_id"),
+                )
+            if not isinstance(bundle, dict):
+                raise RequestRejected("GitHub artifact attestations returned an invalid bundle")
+            bundles.append(bundle)
+        if not bundles:
+            raise RequestRejected("Required artifact attestation is unavailable")
+        try:
+            path.write_text(
+                "".join(
+                    json.dumps(bundle, separators=(",", ":"), sort_keys=True) + "\n"
+                    for bundle in bundles
+                ),
+                encoding="utf-8",
+            )
+            os.chmod(path, 0o600)
+        except OSError as error:
+            raise RequestRejected("Artifact attestation bundle cannot be staged") from error
+
+    @staticmethod
+    def _verify_attestation_result(output: str, expected_name: str, digest: str) -> None:
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError as error:
+            raise RequestRejected("Artifact attestation verification returned invalid JSON") from error
+        expected_digest = digest.removeprefix("sha256:")
+        if not isinstance(payload, list) or not payload:
+            raise RequestRejected("Artifact attestation verification returned no result")
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            verification = item.get("verificationResult")
+            statement = verification.get("statement") if isinstance(verification, dict) else None
+            subjects = statement.get("subject") if isinstance(statement, dict) else None
+            if not isinstance(subjects, list):
+                continue
+            for subject in subjects:
+                subject_digest = subject.get("digest") if isinstance(subject, dict) else None
+                if (
+                    isinstance(subject_digest, dict)
+                    and subject.get("name") == expected_name
+                    and subject_digest.get("sha256") == expected_digest
+                ):
+                    return
+        raise RequestRejected("Artifact attestation subject does not match the release authority")
 
     def fetch_verified(
         self,
@@ -110,17 +396,10 @@ class GitHubReleaseSource:
             _ensure_private_directory(self.cache_root, self.cache_root)
         except StateError as error:
             raise RequestRejected("Release cache directory is unavailable") from error
-        metadata_result = self.runner.run(
-            [
-                "/usr/bin/gh", "api", f"repos/{REPOSITORY}/releases/tags/{version}",
-                "--jq", "{tag_name,draft,prerelease,published_at}",
-            ],
-            timeout=30,
+        metadata = self.rest.get_json(
+            f"/repos/{REPOSITORY}/releases/tags/{version}",
+            label="Exact GitHub release metadata",
         )
-        try:
-            metadata = json.loads(metadata_result.stdout)
-        except json.JSONDecodeError as error:
-            raise RequestRejected("Exact GitHub release metadata is invalid") from error
         if (
             not isinstance(metadata, dict)
             or metadata.get("tag_name") != version
@@ -130,17 +409,27 @@ class GitHubReleaseSource:
             raise RequestRejected("Exact GitHub release metadata is invalid")
         with tempfile.TemporaryDirectory(prefix=f".{version}.", dir=self.cache_root) as temporary:
             destination = Path(temporary)
-            self.runner.run(
-                [
-                    "/usr/bin/gh", "release", "download", version,
-                    "--repo", REPOSITORY,
-                    "--pattern", "release-manifest.json",
-                    "--pattern", "deployment-contract.json",
-                    "--pattern", "checksums.txt",
-                    "--dir", str(destination),
-                ],
-                timeout=60,
-            )
+            environment = self._anonymous_gh_environment(destination)
+            download = [
+                "/usr/bin/gh", "release", "download", version,
+                "--repo", REPOSITORY,
+                "--pattern", "release-manifest.json",
+                "--pattern", "deployment-contract.json",
+                "--pattern", "checksums.txt",
+                "--dir", str(destination),
+            ]
+            try:
+                self.runner.run(download, env=environment, timeout=60)
+            except CommandFailed:
+                token_provider = getattr(self.rest, "configured_token", None)
+                token = token_provider() if callable(token_provider) else None
+                if not token:
+                    raise
+                for name in EXPECTED_RELEASE_ASSETS:
+                    (destination / name).unlink(missing_ok=True)
+                authenticated_environment = environment.copy()
+                authenticated_environment["GH_TOKEN"] = token
+                self.runner.run(download, env=authenticated_environment, timeout=60)
             self._verify_checksum(destination)
             assets = [
                 destination / name
@@ -175,23 +464,73 @@ class GitHubReleaseSource:
             expected_prerelease = manifest["release"]["channel"] != "stable"
             if metadata["prerelease"] != expected_prerelease:
                 raise RequestRejected("GitHub release metadata and manifest channel differ")
+            release_assets = metadata.get("assets")
+            if not isinstance(release_assets, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("name"), str)
+                or item.get("state") != "uploaded"
+                for item in release_assets
+            ):
+                raise RequestRejected("GitHub release assets differ from the release contract")
+            asset_names = [item["name"] for item in release_assets]
+            if (
+                len(asset_names) != len(EXPECTED_RELEASE_ASSETS)
+                or len(asset_names) != len(set(asset_names))
+                or set(asset_names) != EXPECTED_RELEASE_ASSETS
+            ):
+                raise RequestRejected("GitHub release assets differ from the release contract")
             commit = manifest["release"]["commit"]
             provenance_commit = manifest["provenance"]["sourceCommit"]
+            self._verify_release_tag(version, commit)
             subjects = [
-                (f"oci://{API_REPOSITORY}@{manifest['images']['api']['digest']}", ".github/workflows/release.yml", commit),
-                (f"oci://{WEB_REPOSITORY}@{manifest['images']['web']['digest']}", ".github/workflows/release.yml", commit),
-                (str(destination / "release-manifest.json"), manifest["provenance"]["workflow"], provenance_commit),
-                (str(destination / "deployment-contract.json"), manifest["provenance"]["workflow"], provenance_commit),
+                (
+                    f"oci://{API_REPOSITORY}@{manifest['images']['api']['digest']}",
+                    API_REPOSITORY,
+                    manifest["images"]["api"]["digest"],
+                    ".github/workflows/release.yml",
+                    commit,
+                ),
+                (
+                    f"oci://{WEB_REPOSITORY}@{manifest['images']['web']['digest']}",
+                    WEB_REPOSITORY,
+                    manifest["images"]["web"]["digest"],
+                    ".github/workflows/release.yml",
+                    commit,
+                ),
+                (
+                    str(destination / "release-manifest.json"),
+                    "release-manifest.json",
+                    "sha256:" + hashlib.sha256((destination / "release-manifest.json").read_bytes()).hexdigest(),
+                    manifest["provenance"]["workflow"],
+                    provenance_commit,
+                ),
+                (
+                    str(destination / "deployment-contract.json"),
+                    "deployment-contract.json",
+                    "sha256:" + hashlib.sha256((destination / "deployment-contract.json").read_bytes()).hexdigest(),
+                    manifest["provenance"]["workflow"],
+                    provenance_commit,
+                ),
             ]
-            for subject, workflow, source_commit in subjects:
-                self.runner.run(
+            for index, (subject, expected_name, digest, workflow, source_commit) in enumerate(subjects):
+                bundle = destination / f"attestation-{index}.jsonl"
+                self._write_attestation_bundle(digest, bundle)
+                result = self.runner.run(
                     [
                         "/usr/bin/gh", "attestation", "verify", subject,
+                        "--bundle", str(bundle),
                         "--repo", REPOSITORY,
-                        "--signer-workflow", f"{REPOSITORY}/{workflow}",
+                        "--cert-identity", f"https://github.com/{REPOSITORY}/{workflow}@refs/heads/main",
+                        "--cert-oidc-issuer", "https://token.actions.githubusercontent.com",
                         "--source-digest", source_commit,
+                        "--source-ref", "refs/heads/main",
+                        "--signer-digest", source_commit,
+                        "--predicate-type", "https://slsa.dev/provenance/v1",
+                        "--format", "json",
                     ],
+                    env=environment,
                     timeout=60,
                 )
+                self._verify_attestation_result(result.stdout, expected_name, digest)
         self._verified_cache[version] = (time.monotonic(), manifest)
         return manifest

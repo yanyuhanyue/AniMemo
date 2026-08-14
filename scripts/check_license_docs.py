@@ -47,7 +47,7 @@ RELEASE_DOCUMENTS = (
 EVIDENCE_SHA256 = {
     "package-lock.json": "576f0b6f10b67ef0a4360f1028722f64bbd4c9f08eb972ecdec332ec6d4d54e5",
     "backend/requirements.txt": "db0c4cfeeea40f0b8a7d4d7f392b8d493caedf0f467ea8d1a6a8358c506b5a90",
-    "release/requirements.txt": "c91590bac77fab44ba03211bf8c0330ce0b5ba36f0f27927af37138278acd563",
+    "release/requirements.txt": "dc33c76807b0f3672bd53d14a3916350ba5a876cced309d009caed2c630853fd",
     "bridges/astrbot_plugin_animemo_bridge/requirements.txt": (
         "9d25b578e8e7489ee686d0eabaf1b2b2444b3b0761ac3d55548f9e00c99fb2de"
     ),
@@ -378,7 +378,12 @@ def validate_python_inventory() -> None:
 
     _require(
         _read_text("release/requirements.txt").splitlines()
-        == ["jsonschema==4.26.0", "packaging==25.0", "pyyaml==6.0.3"],
+        == [
+            "cramjam==2.11.0",
+            "jsonschema==4.26.0",
+            "packaging==25.0",
+            "pyyaml==6.0.3",
+        ],
         "release requirements changed",
     )
     _require(
