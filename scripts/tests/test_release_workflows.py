@@ -378,6 +378,18 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn('docker system prune', source)
         self.assertNotIn('docker builder prune', source)
 
+    def test_exact_image_rehearsal_trusts_only_the_runtime_web_proxy(self):
+        source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(encoding="utf-8")
+
+        self.assertIn("TRUSTED_PROXY_IPS=127.0.0.1/32", source)
+        self.assertIn(".NetworkSettings.Networks", source)
+        self.assertIn('print(f"{address}/32")', source)
+        self.assertIn("TRUSTED_PROXY_CIDR", source)
+        self.assertIn("--force-recreate --wait --wait-timeout 120 api", source)
+        self.assertIn("AdminAuditLog.objects.get(action='installation.initialized').ip_address", source)
+        self.assertIn("recorded_ip == proxy_ip", source)
+        self.assertNotIn("TRUSTED_PROXY_IPS=172.16.0.0/12", source)
+
     def test_stable_notes_start_at_previous_stable_when_one_exists(self):
         source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
         self.assertIn("previous-stable", source)

@@ -102,6 +102,15 @@ class TrustedProxyIpTests(SimpleTestCase):
         request = self.factory.get("/", REMOTE_ADDR="127.0.0.1", HTTP_X_FORWARDED_FOR="203.0.113.9, 127.0.0.1")
         self.assertEqual(client_ip(request), "203.0.113.9")
 
+    @override_settings(TRUSTED_PROXY_IPS=["172.30.0.5/32"])
+    def test_exact_container_proxy_can_supply_client_address(self):
+        request = self.factory.get(
+            "/",
+            REMOTE_ADDR="172.30.0.5",
+            HTTP_X_FORWARDED_FOR="198.51.100.10",
+        )
+        self.assertEqual(client_ip(request), "198.51.100.10")
+
     @override_settings(TRUSTED_PROXY_IPS=["127.0.0.1/32", "2001:db8:1::/64"])
     def test_proxy_chain_supports_ipv6_and_falls_back_on_malformed_xff(self):
         request = self.factory.get(
@@ -613,7 +622,14 @@ class ProductionSecretKeyTests(SimpleTestCase):
             "CSRF_COOKIE_SECURE": "true",
             "REFRESH_COOKIE_SECURE": "true",
         })
-        for proxy in ("not-a-network", "0.0.0.0/0", "::/0", "10.0.0.0/8"):
+        for proxy in (
+            "not-a-network",
+            "0.0.0.0/0",
+            "::/0",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+        ):
             with self.subTest(proxy=proxy):
                 environment["TRUSTED_PROXY_IPS"] = proxy
                 result = subprocess.run(
@@ -626,6 +642,17 @@ class ProductionSecretKeyTests(SimpleTestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("TRUSTED_PROXY_IPS", result.stderr)
+
+        environment["TRUSTED_PROXY_IPS"] = "172.30.0.5/32"
+        accepted = subprocess.run(
+            [sys.executable, "-c", "import django; django.setup()"],
+            cwd=settings.BASE_DIR,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
 
 
 @override_settings(REST_FRAMEWORK=RELAXED_THROTTLE_SETTINGS)

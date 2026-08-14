@@ -541,3 +541,108 @@ FINAL:
 LOCAL PRE-COMMIT MATRIX PASS
 OLD SHA REMAINS BLOCKED
 ```
+
+## Release rehearsal trusted proxy remediation
+
+The next exact-SHA authority attempt used candidate
+`374c034ad6860db36286de9b33b80d02e82cae15`. That SHA remains permanently
+blocked. Its completed authority evidence is:
+
+- Normal PR CI run `31764881646`: `PASS`.
+- Normal PR Release Gate run `31764881640`: `PASS`.
+- Trusted Pre-Merge run `31765568471`: `PASS`, with trusted caller/workflow
+  revision `8727aa97dc092d12e4a4abb15b85ce1f46d1020d` and candidate input
+  `374c034ad6860db36286de9b33b80d02e82cae15`.
+- The first Producer run `31766043898` failed because the initial v1 release
+  line requires `target_version_override=v1.0.0`.
+- The corrected same-SHA Producer run `31766381984` passed release preflight,
+  full CI, full Release Gate, stateful upgrade, RC performance, and release
+  authority. Its stateful-upgrade gate passed in 110 seconds.
+- The first candidate failure was job `read-only-release-dry-run`, step
+  `Start and accept the exact locally built API and Web images`, with
+  `django.core.exceptions.ImproperlyConfigured: TRUSTED_PROXY_IPS` rejecting
+  the overly broad `172.16.0.0/12` network.
+
+This second Producer failure is a candidate release-rehearsal contract defect,
+not an authority invocation defect. A same-SHA retry is not valid and no result
+from `374c034...` transfers to the remediation candidate.
+
+### Proven proxy topology and source locus
+
+The exact-image rehearsal request path is:
+
+```text
+Host acceptance client -> Web/Nginx container -> API/Django container
+```
+
+The Web service is the direct reverse-proxy peer seen by Django. The isolated
+Compose network is created per rehearsal project and Docker assigns its subnet
+and service addresses at runtime, so another fixed private CIDR would not be a
+portable correction. The local exact-image run observed the Web peer as
+`172.18.0.5`, making the minimum trust representation for that run
+`172.18.0.5/32`.
+
+The deterministic defect was in `scripts/rehearse-release-images.sh`, which
+previously wrote `TRUSTED_PROXY_IPS=172.16.0.0/12`. The production-style
+validator in `backend/config/settings.py` correctly rejected that broad private
+network and remains unchanged.
+
+### Minimum root fix
+
+The rehearsal now:
+
+1. uses the valid bootstrap value `127.0.0.1/32` while migrations, bootstrap,
+   and the initial API/Web startup complete;
+2. inspects the running Web container on the project-scoped network;
+3. validates its assigned address as IPv4 and converts exactly that address to
+   a `/32`;
+4. writes that exact value to the isolated rehearsal environment;
+5. force-recreates only the API service so Django loads the exact Web proxy
+   source; and
+6. verifies the first-run `AdminAuditLog` client IP differs from the Web peer,
+   proving Django accepted the client address forwarded by the trusted proxy.
+
+No Compose architecture, backend trust-width rule, timeout, production
+configuration, or frozen v1 contract was changed.
+
+### Regression and real Docker evidence
+
+- Targeted release-rehearsal tests: `2 PASS`.
+- Targeted backend security tests: `5 PASS`.
+- Full scripts suite: `237 PASS`, `2 SKIPPED`.
+- Full backend suite: `631 PASS`, `36 SKIPPED`.
+- Frontend tests: `171 PASS`.
+- ESLint, Ruff fatal-rule scan, Python compileall, Django system check,
+  migration drift check, dependency lock check, workflow YAML parse, tracked
+  Bash syntax, and `git diff --check`: `PASS`.
+- Isolated exact API/Web image rehearsal: `PASS` in 41 seconds, with Web proxy
+  source `172.18.0.5/32` and first-run setup smoke `PASS`.
+- Isolated historical stateful upgrade
+  `6452b3dbfff39529c49c2bc69ede1f3d76236eee` to the remediation working tree:
+  `PASS` in 157 seconds.
+
+All dedicated Compose projects, containers, networks, and named volumes were
+removed project-specifically. No global Docker cleanup, production access,
+publication, or promotion occurred.
+
+### Candidate identity boundary
+
+The new candidate is the single normal descendant commit containing this
+remediation section and the three narrow source/test changes. A Git commit
+cannot embed its own final hash without changing that hash, so the authoritative
+40-character candidate SHA is recorded immediately after commit creation in the
+exact-SHA authority evidence and final result matrix.
+
+```text
+Previous candidate 374c034   BLOCKED
+Proxy topology               PROVEN
+Required trust               runtime Web peer /32
+Backend validator weakened   NO
+Minimum root fix             PASS
+Local exact-image rehearsal  PASS (41 seconds)
+Historical upgrade           PASS (157 seconds)
+New candidate SHA            ENCLOSING REMEDIATION COMMIT
+Production                   NOT RUN
+PR Ready                     NO
+Merge                        NO
+```
