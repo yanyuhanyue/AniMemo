@@ -46,6 +46,10 @@ _Avoid_: Listen address, proxy upstream, DNS record
 为同一 AniMemo Instance 的灾难恢复保存的可验证副本。
 _Avoid_: Export, Migration Bundle
 
+**Update Safety Backup**:
+Update Agent 为一次 release transition 保存的数据库恢复点，不承诺重建完整 AniMemo Instance。
+_Avoid_: Instance Backup, Migration Bundle
+
 **Restore**:
 从 Backup 重建一个 AniMemo Instance 的恢复行为。
 _Avoid_: Import, Migration
@@ -54,6 +58,22 @@ _Avoid_: Import, Migration
 把一个 AniMemo Instance 移动到另一运行环境，同时保持实例连续性的行为。
 _Avoid_: Restore, Export
 
+**Migration Bundle**:
+为环境迁移承载实例状态、迁移 metadata 与受保护 secret payload 的版本化 artifact。
+_Avoid_: Backup, Data Bundle, Export archive
+
+**Migration Secret Envelope**:
+由独立 migration secret 保护、用于迁移实例级 secret material 的 authenticated encrypted payload。
+_Avoid_: Plain environment archive, CREDENTIAL_ENCRYPTION_KEY-wrapped bundle
+
 **Export**:
 面向用户的数据可携带副本，不承诺重建完整 AniMemo Instance。
 _Avoid_: Backup, Migration Bundle
+
+**Compatibility Decision**:
+对具体 artifact、target 与受支持转换路径作出的 fail-closed 兼容性分类。
+_Avoid_: Probably works, best effort
+
+**Doctor Basic**:
+针对 AniMemo Instance 结构与运行前提的只读诊断报告。
+_Avoid_: Repair, maintenance mutation
