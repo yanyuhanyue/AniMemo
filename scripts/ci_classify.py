@@ -175,6 +175,10 @@ def _is_deployment(path: str) -> bool:
     )
 
 
+def _is_durability(path: str) -> bool:
+    return path.startswith("durability/")
+
+
 def _is_recovery(path: str) -> bool:
     return not _is_docs(path) and _has(
         path.lower(),
@@ -408,6 +412,13 @@ RULES = (
         "Production-like image, Compose, service, or deployment configuration changed.",
         ("deployment",),
         _is_deployment,
+    ),
+    RiskRule(
+        "durability-runtime",
+        "CRITICAL",
+        "Durable deployment, recovery, secret envelope, or diagnostic runtime changed.",
+        ("backend", "deployment", "recovery"),
+        _is_durability,
     ),
     RiskRule(
         "recovery-rollback",

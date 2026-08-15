@@ -1,0 +1,2 @@
+# Migration Secret Envelope v1 uses the same reviewed pin as the backend runtime.
+cryptography==50.0.0
