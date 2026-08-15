@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import configparser
+import os
 import shlex
+import shutil
+import stat
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,6 +16,36 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class DeploymentUpdaterContractTests(unittest.TestCase):
+    def _run_prepare_host(self, data_root: Path, harness_root: Path) -> subprocess.CompletedProcess[str]:
+        fake_bin = harness_root / "bin"
+        fake_bin.mkdir(exist_ok=True)
+        chown_log = harness_root / "chown.log"
+        fake_id = fake_bin / "id"
+        fake_id.write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+        fake_chown = fake_bin / "chown"
+        fake_chown.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CHOWN_LOG\"\n",
+            encoding="utf-8",
+        )
+        fake_id.chmod(0o755)
+        fake_chown.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "ANIMEMO_DATA_ROOT": str(data_root),
+                "CHOWN_LOG": str(chown_log),
+                "PATH": os.pathsep.join([str(fake_bin), environment["PATH"]]),
+            }
+        )
+        return subprocess.run(
+            ["sh", str(ROOT / "deploy/prepare-host.sh")],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def test_production_compose_uses_digest_inputs_and_explicit_jobs(self):
         compose = yaml.safe_load((ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8"))
         services = compose["services"]
@@ -383,6 +418,91 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn('[ ! -d "$private_directory" ]', prepare_host)
         self.assertIn('chown "$APP_UID:$APP_GID" "$private_directory"', prepare_host)
         self.assertNotIn('chown -R "$APP_UID:$APP_GID" "$private_directory"', prepare_host)
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("sh"), "requires a POSIX shell")
+    def test_prepare_host_applies_the_backup_directory_contract_without_broadening_other_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            harness_root = Path(directory)
+            data_root = harness_root / "data"
+
+            result = self._run_prepare_host(data_root, harness_root)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            expected_modes = {
+                "plugins": 0o755,
+                "logs": 0o755,
+                "media": 0o755,
+                "backups": 0o770,
+                "private": 0o700,
+            }
+            for name, expected_mode in expected_modes.items():
+                actual_mode = stat.S_IMODE((data_root / name).stat().st_mode)
+                self.assertEqual(actual_mode, expected_mode, name)
+
+            chown_calls = (harness_root / "chown.log").read_text(encoding="utf-8").splitlines()
+            self.assertIn(f"10001:10001 {data_root / 'backups'}", chown_calls)
+            self.assertNotIn(f"-R 10001:10001 {data_root / 'backups'}", chown_calls)
+            for name in ("plugins", "logs", "media"):
+                self.assertIn(f"-R 10001:10001 {data_root / name}", chown_calls)
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("sh"), "requires a POSIX shell")
+    def test_prepare_host_repairs_existing_backup_mode_idempotently_without_touching_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            harness_root = Path(directory)
+            data_root = harness_root / "data"
+            backup_root = data_root / "backups"
+            backup_root.mkdir(parents=True)
+            backup_root.chmod(0o755)
+            artifact = backup_root / "animemo-pre-existing.sql.gz"
+            artifact.write_bytes(b"existing backup")
+            artifact.chmod(0o600)
+
+            first = self._run_prepare_host(data_root, harness_root)
+            second = self._run_prepare_host(data_root, harness_root)
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(stat.S_IMODE(backup_root.stat().st_mode), 0o770)
+            self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o600)
+            self.assertEqual(artifact.read_bytes(), b"existing backup")
+            chown_calls = (harness_root / "chown.log").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(chown_calls.count(f"10001:10001 {backup_root}"), 2)
+            self.assertFalse(any(str(artifact) in call for call in chown_calls))
+            self.assertNotIn(f"-R 10001:10001 {backup_root}", chown_calls)
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("sh"), "requires a POSIX shell")
+    def test_prepare_host_rejects_a_backup_symlink_before_chown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            harness_root = Path(directory)
+            data_root = harness_root / "data"
+            outside = harness_root / "outside"
+            data_root.mkdir()
+            outside.mkdir()
+            backup_root = data_root / "backups"
+            backup_root.symlink_to(outside, target_is_directory=True)
+
+            result = self._run_prepare_host(data_root, harness_root)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Backup path must not be a symbolic link", result.stderr)
+            chown_calls = (harness_root / "chown.log").read_text(encoding="utf-8").splitlines()
+            self.assertFalse(any(str(backup_root) in call for call in chown_calls))
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("sh"), "requires a POSIX shell")
+    def test_prepare_host_rejects_a_non_directory_backup_path_before_chown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            harness_root = Path(directory)
+            data_root = harness_root / "data"
+            data_root.mkdir()
+            backup_root = data_root / "backups"
+            backup_root.write_text("not a directory", encoding="utf-8")
+
+            result = self._run_prepare_host(data_root, harness_root)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Backup path must be a directory", result.stderr)
+            chown_calls = (harness_root / "chown.log").read_text(encoding="utf-8").splitlines()
+            self.assertFalse(any(str(backup_root) in call for call in chown_calls))
 
     def test_legacy_zip_deployer_is_explicit_bootstrap_or_break_glass_only(self):
         deploy = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
