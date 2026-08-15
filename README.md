@@ -8,7 +8,7 @@
 
 AniMemo 自有源代码采用 PolyForm Noncommercial License 1.0.0；这是一份 source-available、非商业源码许可证，不代表 AniMemo 是 OSI Open Source 项目。请先阅读 [PolyForm Noncommercial License 1.0.0](LICENSE) 与字节一致的 [PolyForm-Noncommercial-1.0.0.md](PolyForm-Noncommercial-1.0.0.md)。
 
-品牌名称、品牌视觉和 AniMemo 原创默认资产受 [TRADEMARKS](TRADEMARKS) 及相关品牌条款单独约束。仓库中的 `public/assets/avatar.png` 与 `public/assets/posters/poster-01.webp` 是 AniMemo 创建并控制的品牌头像与缺失封面 fallback；Bangumi/provider 返回的番剧封面、条目元数据及其他第三方内容不属于 AniMemo 自有资产，也不会因 PolyForm 被重新许可。详细边界见 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) 和 [许可证来源审计](docs/license-provenance-audit-20260813.md)。
+品牌名称、品牌视觉和 AniMemo 原创默认资产受 [TRADEMARKS](TRADEMARKS) 及相关品牌条款单独约束。仓库中的 `public/assets/avatar.png`、`public/assets/featured-column.png`、`public/assets/site-icon.png`、`public/assets/posters/poster-01.webp` 与 `public/assets/posters/poster-02.webp` 是 AniMemo 控制的默认品牌视觉素材，其中 `poster-01.webp` 也作为缺失封面 fallback；Bangumi/provider 返回的番剧封面、条目元数据及其他第三方内容不属于 AniMemo 自有资产，也不会因 PolyForm 被重新许可。详细边界见 [NOTICE](NOTICE)、[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) 和 [许可证来源审计](docs/license-provenance-audit-20260813.md)。
 
 ## 已实现
 

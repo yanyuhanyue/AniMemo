@@ -1,5 +1,7 @@
 # AniMemo 许可证与历史标识审计
 
+> 2026-08-15 补充：用户批准的新默认品牌素材已替换原本地头像与 fallback 海报，并新增 `public/assets/posters/poster-02.webp`、透明底 `public/assets/featured-column.png` 和独立 `public/assets/site-icon.png` 作为受控视觉素材。下文原始审计结论继续保留，代表 2026-08-13 当时的仓库快照。
+
 审计日期：2026-08-13（Asia/Shanghai）
 审计工作树：`E:\番剧记录\anime-journal`
 审计基线：`8727aa97dc092d12e4a4abb15b85ce1f46d1020d`（与 `origin/main` 一致）

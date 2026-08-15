@@ -1,6 +1,11 @@
 import { validateTrustedPosterUrl } from "./posterSources.js";
 
-export const DEFAULT_POSTER = "/assets/posters/poster-01.webp";
+export const DEFAULT_POSTERS = Object.freeze([
+  "/assets/posters/poster-01.webp",
+  "/assets/posters/poster-02.webp",
+]);
+
+export const [DEFAULT_POSTER] = DEFAULT_POSTERS;
 
 export function isTrustedProviderPoster(value) {
   return Boolean(value) && validateTrustedPosterUrl(value) === "";

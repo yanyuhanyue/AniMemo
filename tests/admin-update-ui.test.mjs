@@ -38,6 +38,11 @@ test("unsafe downgrade and manual recovery have explicit user-facing states", ()
   assert.match(component, /服务器管理员完成现场对账/);
 });
 
+test("staff dashboard does not expose the raw Django admin shortcut", () => {
+  assert.doesNotMatch(page, /Django 高级后台/);
+  assert.doesNotMatch(page, /\badminUrl\b/);
+});
+
 test("frontend identifies its immutable artifact separately from effective updater state", () => {
   assert.match(html, /animemo-artifact-version/);
   assert.match(html, /%VITE_ANIMEMO_VERSION%/);

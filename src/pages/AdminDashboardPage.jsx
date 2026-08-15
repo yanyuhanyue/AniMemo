@@ -148,9 +148,6 @@ export function AdminDashboardPage() {
   const panelRef = useRef(null);
   const toastRef = useRef(null);
 
-  const apiBase = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || `${window.location.origin}/api/v1`;
-  const adminUrl = location.state?.adminUrl || `${apiBase.replace(/\/api(?:\/v1)?\/?$/, "")}/admin/`;
-
   const load = useCallback((options = {}) => {
     if (loadInFlightRef.current) return loadInFlightRef.current;
 
@@ -421,7 +418,7 @@ export function AdminDashboardPage() {
       <div className="admin-dashboard-shape admin-dashboard-shape--ring" aria-hidden="true" />
       <header className="admin-dashboard-header" ref={headerRef}>
         <div className="admin-dashboard-brand"><span className="admin-dashboard-brand__mark"><Icon name="shield" /></span><div><small>{siteSettings.site_name.toUpperCase()} / STAFF ONLY</small><h1>管理控制室</h1></div></div>
-        <div className="admin-dashboard-header__actions">{data.viewer.is_superuser && <a className="admin-dashboard-button is-yellow" href={adminUrl} target="_blank" rel="noreferrer"><Icon name="gear" /> Django 高级后台</a>}<button className="admin-dashboard-button" type="button" onClick={() => navigate("/")}><Icon name="arrow-left" /> 返回主界面</button><button className="admin-dashboard-button is-coral" type="button" onClick={logout} disabled={loggingOut}><Icon name="logout" /> {loggingOut ? "正在退出..." : "退出工作人员"}</button></div>
+        <div className="admin-dashboard-header__actions"><button className="admin-dashboard-button" type="button" onClick={() => navigate("/")}><Icon name="arrow-left" /> 返回主界面</button><button className="admin-dashboard-button is-coral" type="button" onClick={logout} disabled={loggingOut}><Icon name="logout" /> {loggingOut ? "正在退出..." : "退出工作人员"}</button></div>
       </header>
 
       <section className="admin-dashboard-shell" ref={shellRef}>
