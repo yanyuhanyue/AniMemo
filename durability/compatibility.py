@@ -213,10 +213,14 @@ class CompatibilityDecision:
             "reasonCode": self.reason_code.value,
             "summary": self.summary,
             "blockingDimension": (
-                self.blocking_dimension.value if self.blocking_dimension is not None else None
+                self.blocking_dimension.value
+                if self.blocking_dimension is not None
+                else None
             ),
             "artifact": artifact_identity,
-            "dimensions": [dimension.as_dict() for dimension in self.evaluated_dimensions],
+            "dimensions": [
+                dimension.as_dict() for dimension in self.evaluated_dimensions
+            ],
             "actions": [action.as_dict() for action in self.actions],
             "evaluatedArtifactIdentity": dict(artifact_identity),
         }
@@ -234,10 +238,19 @@ _REASON_CONTEXT: dict[ReasonCode, tuple[Dimension, CompatibilityOutcome]] = {
         Dimension.FORMAT,
         CompatibilityOutcome.REQUIRES_UPGRADE,
     ),
-    ReasonCode.FORMAT_IDENTITY_UNSUPPORTED: (Dimension.FORMAT, CompatibilityOutcome.UNSUPPORTED),
-    ReasonCode.FORMAT_VERSION_UNSUPPORTED: (Dimension.FORMAT, CompatibilityOutcome.UNSUPPORTED),
+    ReasonCode.FORMAT_IDENTITY_UNSUPPORTED: (
+        Dimension.FORMAT,
+        CompatibilityOutcome.UNSUPPORTED,
+    ),
+    ReasonCode.FORMAT_VERSION_UNSUPPORTED: (
+        Dimension.FORMAT,
+        CompatibilityOutcome.UNSUPPORTED,
+    ),
     ReasonCode.FORMAT_BOUNDS_EXCEEDED: (Dimension.FORMAT, CompatibilityOutcome.CORRUPT),
-    ReasonCode.FORMAT_STRUCTURE_CORRUPT: (Dimension.FORMAT, CompatibilityOutcome.CORRUPT),
+    ReasonCode.FORMAT_STRUCTURE_CORRUPT: (
+        Dimension.FORMAT,
+        CompatibilityOutcome.CORRUPT,
+    ),
     ReasonCode.INTEGRITY_AUTHENTICATED: (
         Dimension.INTEGRITY_AUTHENTICATION,
         CompatibilityOutcome.COMPATIBLE,
@@ -442,7 +455,9 @@ def _is_sensitive_string(value: str) -> bool:
     )
 
 
-def _normalize_json(value: object, *, depth: int = 0, counter: list[int] | None = None) -> object:
+def _normalize_json(
+    value: object, *, depth: int = 0, counter: list[int] | None = None
+) -> object:
     if counter is None:
         counter = [0]
     counter[0] += 1
@@ -469,12 +484,16 @@ def _normalize_json(value: object, *, depth: int = 0, counter: list[int] | None 
                 _fail("IDENTITY_EVIDENCE_INVALID")
             if _is_sensitive_key(key):
                 _fail("SENSITIVE_EVIDENCE_FORBIDDEN")
-            normalized[key] = _normalize_json(value[key], depth=depth + 1, counter=counter)
+            normalized[key] = _normalize_json(
+                value[key], depth=depth + 1, counter=counter
+            )
         return MappingProxyType(normalized)
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         if len(value) > _MAX_EVIDENCE_MEMBERS:
             _fail("IDENTITY_EVIDENCE_INVALID")
-        return tuple(_normalize_json(item, depth=depth + 1, counter=counter) for item in value)
+        return tuple(
+            _normalize_json(item, depth=depth + 1, counter=counter) for item in value
+        )
     _fail("IDENTITY_EVIDENCE_INVALID")
 
 
@@ -524,7 +543,9 @@ def _validate_artifact(artifact: object) -> ArtifactIdentity:
 def _normalize_dimensions(
     dimensions: Sequence[DimensionAssessment],
 ) -> tuple[DimensionAssessment, ...]:
-    if not isinstance(dimensions, Sequence) or isinstance(dimensions, (str, bytes, bytearray)):
+    if not isinstance(dimensions, Sequence) or isinstance(
+        dimensions, (str, bytes, bytearray)
+    ):
         _fail("DIMENSIONS_INVALID")
     if len(dimensions) != len(EVALUATION_ORDER):
         _fail("DIMENSIONS_INVALID")
@@ -534,13 +555,19 @@ def _normalize_dimensions(
     for expected_name, assessment in zip(EVALUATION_ORDER, supplied, strict=True):
         if not isinstance(assessment, DimensionAssessment):
             _fail("DIMENSIONS_INVALID")
-        if not isinstance(assessment.name, Dimension) or assessment.name is not expected_name:
+        if (
+            not isinstance(assessment.name, Dimension)
+            or assessment.name is not expected_name
+        ):
             _fail("DIMENSIONS_INVALID")
         if not isinstance(assessment.outcome, CompatibilityOutcome):
             _fail("OUTCOME_INVALID")
         if not isinstance(assessment.reason_code, ReasonCode):
             _fail("REASON_CODE_INVALID")
-        if _REASON_CONTEXT.get(assessment.reason_code) != (assessment.name, assessment.outcome):
+        if _REASON_CONTEXT.get(assessment.reason_code) != (
+            assessment.name,
+            assessment.outcome,
+        ):
             _fail("REASON_CODE_INVALID")
         normalized.append(
             DimensionAssessment(
@@ -555,7 +582,9 @@ def _normalize_dimensions(
 
 
 def _normalize_actions(actions: Sequence[UpgradeAction]) -> tuple[UpgradeAction, ...]:
-    if not isinstance(actions, Sequence) or isinstance(actions, (str, bytes, bytearray)):
+    if not isinstance(actions, Sequence) or isinstance(
+        actions, (str, bytes, bytearray)
+    ):
         _fail("ACTIONS_INVALID")
     if len(actions) > _MAX_EVIDENCE_MEMBERS:
         _fail("ACTIONS_INVALID")
@@ -567,7 +596,9 @@ def _normalize_actions(actions: Sequence[UpgradeAction]) -> tuple[UpgradeAction,
             _fail("ACTIONS_INVALID")
         if isinstance(action.order, bool) or not isinstance(action.order, int):
             _fail("ACTION_ORDER_INVALID")
-        if not isinstance(action.kind, str) or not _ACTION_KIND_RE.fullmatch(action.kind):
+        if not isinstance(action.kind, str) or not _ACTION_KIND_RE.fullmatch(
+            action.kind
+        ):
             _fail("ACTION_KIND_INVALID")
         normalized.append(
             UpgradeAction(
@@ -575,7 +606,9 @@ def _normalize_actions(actions: Sequence[UpgradeAction]) -> tuple[UpgradeAction,
                 kind=action.kind,
                 input_identity=_normalize_evidence(action.input_identity),
                 output_identity=_normalize_evidence(action.output_identity),
-                required_release_identity=_normalize_evidence(action.required_release_identity),
+                required_release_identity=_normalize_evidence(
+                    action.required_release_identity
+                ),
             )
         )
 
@@ -616,7 +649,9 @@ def evaluate_compatibility(
 
     highest = max(_PRECEDENCE[item.outcome] for item in normalized_dimensions)
     outcome = next(
-        candidate for candidate, precedence in _PRECEDENCE.items() if precedence == highest
+        candidate
+        for candidate, precedence in _PRECEDENCE.items()
+        if precedence == highest
     )
     blocker = next(
         (item for item in normalized_dimensions if item.outcome is outcome),
@@ -624,7 +659,10 @@ def evaluate_compatibility(
     )
 
     if outcome is CompatibilityOutcome.REQUIRES_UPGRADE:
-        if normalized_dimensions[-1].outcome is not CompatibilityOutcome.REQUIRES_UPGRADE:
+        if (
+            normalized_dimensions[-1].outcome
+            is not CompatibilityOutcome.REQUIRES_UPGRADE
+        ):
             _fail("SUPPORTED_PATH_REQUIRED")
         if not normalized_actions:
             _fail("UPGRADE_ACTIONS_REQUIRED")

@@ -15,7 +15,9 @@ from durability.canonical import canonical_json_bytes
 
 
 class FakePgDump:
-    def __init__(self, payload: bytes = b"-- PostgreSQL database dump\nSELECT 1;\n") -> None:
+    def __init__(
+        self, payload: bytes = b"-- PostgreSQL database dump\nSELECT 1;\n"
+    ) -> None:
         self.payload = payload
         self.calls: list[tuple[str, str, int]] = []
 
@@ -27,13 +29,21 @@ class FakePgDump:
         executable: str,
         timeout: int,
     ) -> str:
-        self.calls.append(("DATABASE_URL_PRESENT" if database_url else "DATABASE_URL_MISSING", executable, timeout))
+        self.calls.append(
+            (
+                "DATABASE_URL_PRESENT" if database_url else "DATABASE_URL_MISSING",
+                executable,
+                timeout,
+            )
+        )
         raw_output.write_bytes(self.payload)
         return "pg_dump (PostgreSQL) 16.4"
 
 
 class FailingPgDump:
-    def run(self, database_url: str, raw_output: Path, *, executable: str, timeout: int) -> str:
+    def run(
+        self, database_url: str, raw_output: Path, *, executable: str, timeout: int
+    ) -> str:
         raise backup.BackupError("PG_DUMP_FAILED", "logical database dump failed")
 
 
@@ -61,9 +71,7 @@ class BackupRuntimeTests(unittest.TestCase):
                     canonical_json_bytes({"profile": logical_root}) + b"\n"
                 )
             elif logical_root != "filesystem/private":
-                (source / "payload.bin").write_bytes(
-                    f"payload:{logical_root}".encode()
-                )
+                (source / "payload.bin").write_bytes(f"payload:{logical_root}".encode())
             self.sources[logical_root] = source
         (self.sources["filesystem/media"] / "poster.jpg").write_bytes(b"poster")
         self.secret_reference = self.root / "secret-reference.json"
@@ -88,7 +96,10 @@ class BackupRuntimeTests(unittest.TestCase):
                     "apiImageDigest": "sha256:" + "3" * 64,
                     "webImageDigest": "sha256:" + "4" * 64,
                 },
-                deployment_contract={"schemaVersion": 1, "digest": "sha256:" + "5" * 64},
+                deployment_contract={
+                    "schemaVersion": 1,
+                    "digest": "sha256:" + "5" * 64,
+                },
                 database_contract={"id": "animemo.database/v1", "serverMajor": 16},
                 configuration_contract={"id": "animemo.configuration/v1"},
                 plugin_sdk_apis=("animemo.plugin/v2",),
@@ -99,7 +110,8 @@ class BackupRuntimeTests(unittest.TestCase):
             ),
             secret=backup.SecretSource(mode="reference", source=self.secret_reference),
             local_media_references={
-                "poster.jpg": "sha256:" + hashlib.sha256(poster.read_bytes()).hexdigest(),
+                "poster.jpg": "sha256:"
+                + hashlib.sha256(poster.read_bytes()).hexdigest(),
             },
             r2_references=(
                 backup.R2Reference(
@@ -133,28 +145,46 @@ class BackupRuntimeTests(unittest.TestCase):
             "backup-20260102T030405Z-12345678-1234-5678-9234-567812345678",
         )
         self.assertEqual(runner.calls, [("DATABASE_URL_PRESENT", "pg_dump", 600)])
-        self.assertEqual(backup.list_finalized_backups(self.destination), (result.path,))
-        self.assertFalse(any(path.name.startswith(backup.STAGING_PREFIX) for path in self.destination.iterdir()))
+        self.assertEqual(
+            backup.list_finalized_backups(self.destination), (result.path,)
+        )
+        self.assertFalse(
+            any(
+                path.name.startswith(backup.STAGING_PREFIX)
+                for path in self.destination.iterdir()
+            )
+        )
 
         verification = backup.verify_backup(result.path)
         artifact_identity = verification.as_compatibility_artifact()
         self.assertEqual(artifact_identity.format_identity, backup.FORMAT)
         self.assertEqual(artifact_identity.format_version, backup.SCHEMA_VERSION)
         self.assertEqual(artifact_identity.artifact_id, str(self.backup_id))
-        self.assertEqual(artifact_identity.manifest_digest, verification.manifest_digest)
+        self.assertEqual(
+            artifact_identity.manifest_digest, verification.manifest_digest
+        )
         self.assertEqual(verification.backup_id, str(self.backup_id))
         self.assertEqual(verification.compatibility_artifact["format"], backup.FORMAT)
         self.assertEqual(verification.compatibility_artifact["schemaVersion"], 1)
-        self.assertEqual(verification.compatibility_artifact["artifactId"], str(self.backup_id))
-        self.assertEqual(verification.compatibility_artifact["manifestDigest"], result.manifest_digest)
+        self.assertEqual(
+            verification.compatibility_artifact["artifactId"], str(self.backup_id)
+        )
+        self.assertEqual(
+            verification.compatibility_artifact["manifestDigest"],
+            result.manifest_digest,
+        )
 
         manifest_bytes = (result.path / backup.MANIFEST_NAME).read_bytes()
         manifest = json.loads(manifest_bytes)
         self.assertEqual(manifest["format"], "animemo-instance-backup")
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertEqual(manifest["lifecycle"], "FINALIZED")
-        self.assertEqual(manifest["database"]["dumpProfile"]["argv"], list(backup.PG_DUMP_ARGUMENTS))
-        self.assertEqual(manifest["database"]["toolVersion"], "pg_dump (PostgreSQL) 16.4")
+        self.assertEqual(
+            manifest["database"]["dumpProfile"]["argv"], list(backup.PG_DUMP_ARGUMENTS)
+        )
+        self.assertEqual(
+            manifest["database"]["toolVersion"], "pg_dump (PostgreSQL) 16.4"
+        )
         self.assertEqual(manifest["secrets"]["mode"], "reference")
         self.assertNotIn("postgresql://", manifest_bytes.decode("utf-8"))
         self.assertEqual(
@@ -177,7 +207,9 @@ class BackupRuntimeTests(unittest.TestCase):
 
         second_root = self.root / "second"
         request = self.request()
-        request = backup.BackupRequest(**{**request.__dict__, "destination_root": second_root})
+        request = backup.BackupRequest(
+            **{**request.__dict__, "destination_root": second_root}
+        )
         moments = iter((self.started, self.completed))
         second = backup.create_backup(
             request,
@@ -185,7 +217,9 @@ class BackupRuntimeTests(unittest.TestCase):
             backup_id=self.backup_id,
             clock=lambda: next(moments),
         )
-        self.assertEqual(checksum_bytes, (second.path / backup.CHECKSUMS_NAME).read_bytes())
+        self.assertEqual(
+            checksum_bytes, (second.path / backup.CHECKSUMS_NAME).read_bytes()
+        )
         self.assertEqual(
             (first.path / backup.MANIFEST_NAME).read_bytes(),
             (second.path / backup.MANIFEST_NAME).read_bytes(),
@@ -197,13 +231,25 @@ class BackupRuntimeTests(unittest.TestCase):
         local = manifest["media"]["local"]
         self.assertEqual(local["mode"], "captured")
         self.assertEqual(local["referenced"][0]["path"], "poster.jpg")
-        self.assertTrue(any(item["path"] == "payload.bin" for item in local["preservedUnreferenced"]))
-        self.assertEqual(manifest["media"]["external"][0]["coverage"], "reference-dependent")
-        self.assertEqual(manifest["media"]["external"][0]["objectKeys"], ["posters/one.webp"])
+        self.assertTrue(
+            any(
+                item["path"] == "payload.bin" for item in local["preservedUnreferenced"]
+            )
+        )
+        self.assertEqual(
+            manifest["media"]["external"][0]["coverage"], "reference-dependent"
+        )
+        self.assertEqual(
+            manifest["media"]["external"][0]["objectKeys"], ["posters/one.webp"]
+        )
         self.assertFalse((result.path / "filesystem" / "media" / "posters").exists())
-        self.assertEqual(manifest["media"]["unknownOrphanPolicy"], "PRESERVE_NEVER_DELETE")
+        self.assertEqual(
+            manifest["media"]["unknownOrphanPolicy"], "PRESERVE_NEVER_DELETE"
+        )
 
-    def test_envelope_is_created_after_and_bound_to_canonical_artifact_record(self) -> None:
+    def test_envelope_is_created_after_and_bound_to_canonical_artifact_record(
+        self,
+    ) -> None:
         external_secret = secret_envelope.OneTimeKey.from_bytes(b"e" * 32)
         request = self.request()
 
@@ -215,7 +261,9 @@ class BackupRuntimeTests(unittest.TestCase):
                 artifact_binding_record=binding.artifact_binding_record,
                 source_instance_id=binding.source_instance_id,
                 secret_entries=(
-                    secret_envelope.SecretEntry.preserve("CREDENTIAL_ENCRYPTION_KEY", b"fake-cek"),
+                    secret_envelope.SecretEntry.preserve(
+                        "CREDENTIAL_ENCRYPTION_KEY", b"fake-cek"
+                    ),
                 ),
             ).to_bytes()
 
@@ -246,7 +294,9 @@ class BackupRuntimeTests(unittest.TestCase):
             expected_artifact_binding_record=manifest["artifactBindingRecord"],
             expected_source_instance_id=request.source.instance_id,
         )
-        self.assertEqual(opened.artifact_binding_digest, manifest["artifactBindingDigest"])
+        self.assertEqual(
+            opened.artifact_binding_digest, manifest["artifactBindingDigest"]
+        )
         backup.verify_backup(result.path)
 
     def test_verify_rejects_missing_database_and_checksum_mismatch(self) -> None:
@@ -257,7 +307,9 @@ class BackupRuntimeTests(unittest.TestCase):
 
         other_root = self.root / "other"
         request = self.request()
-        request = backup.BackupRequest(**{**request.__dict__, "destination_root": other_root})
+        request = backup.BackupRequest(
+            **{**request.__dict__, "destination_root": other_root}
+        )
         moments = iter((self.started, self.completed))
         other = backup.create_backup(
             request,
@@ -269,11 +321,18 @@ class BackupRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(backup.BackupError, "BACKUP_CHECKSUM_MISMATCH"):
             backup.verify_backup(other.path)
 
-    def test_verify_rejects_partial_staging_and_invalid_or_unsupported_manifest(self) -> None:
+    def test_verify_rejects_partial_staging_and_invalid_or_unsupported_manifest(
+        self,
+    ) -> None:
         self.destination.mkdir()
-        staging = self.destination / f"{backup.STAGING_PREFIX}aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        staging = (
+            self.destination
+            / f"{backup.STAGING_PREFIX}aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        )
         staging.mkdir()
-        (staging / backup.STAGING_STATE_NAME).write_text('{"lifecycle":"STAGING"}\n', encoding="utf-8")
+        (staging / backup.STAGING_STATE_NAME).write_text(
+            '{"lifecycle":"STAGING"}\n', encoding="utf-8"
+        )
         self.assertEqual(backup.list_finalized_backups(self.destination), ())
         with self.assertRaisesRegex(backup.BackupError, "BACKUP_NOT_FINALIZED"):
             backup.verify_backup(staging)
@@ -286,7 +345,9 @@ class BackupRuntimeTests(unittest.TestCase):
 
         unsupported_root = self.root / "unsupported"
         request = self.request()
-        request = backup.BackupRequest(**{**request.__dict__, "destination_root": unsupported_root})
+        request = backup.BackupRequest(
+            **{**request.__dict__, "destination_root": unsupported_root}
+        )
         moments = iter((self.started, self.completed))
         unsupported = backup.create_backup(
             request,
@@ -305,7 +366,28 @@ class BackupRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(backup.BackupError, "PG_DUMP_FAILED"):
             self.create(runner=FailingPgDump())
         self.assertEqual(backup.list_finalized_backups(self.destination), ())
-        self.assertTrue(any(path.name.startswith(backup.STAGING_PREFIX) for path in self.destination.iterdir()))
+        self.assertTrue(
+            any(
+                path.name.startswith(backup.STAGING_PREFIX)
+                for path in self.destination.iterdir()
+            )
+        )
+
+    def test_database_url_is_split_into_libpq_environment_not_argv(self) -> None:
+        database_url = (
+            "postgresql://animemo:not-a-real-secret@postgres.example:5433/animemo"
+            "?sslmode=require&connect_timeout=7"
+        )
+        environment = backup._pg_environment(database_url)
+
+        self.assertEqual(environment["PGHOST"], "postgres.example")
+        self.assertEqual(environment["PGPORT"], "5433")
+        self.assertEqual(environment["PGUSER"], "animemo")
+        self.assertEqual(environment["PGDATABASE"], "animemo")
+        self.assertEqual(environment["PGSSLMODE"], "require")
+        self.assertEqual(environment["PGCONNECT_TIMEOUT"], "7")
+        self.assertIn("PGPASSWORD", environment)
+        self.assertNotIn(database_url, environment.values())
 
     def test_empty_pg_dump_is_rejected(self) -> None:
         with self.assertRaisesRegex(backup.BackupError, "PG_DUMP_EMPTY"):
@@ -314,7 +396,10 @@ class BackupRuntimeTests(unittest.TestCase):
 
     def test_filesystem_read_failure_is_fail_closed(self) -> None:
         with (
-            mock.patch("durability.backup._copy_regular_file", side_effect=OSError("read denied")),
+            mock.patch(
+                "durability.backup._copy_regular_file",
+                side_effect=OSError("read denied"),
+            ),
             self.assertRaisesRegex(backup.BackupError, "BACKUP_IO_FAILED"),
         ):
             self.create()
@@ -322,7 +407,9 @@ class BackupRuntimeTests(unittest.TestCase):
 
     def test_manifest_write_failure_is_fail_closed(self) -> None:
         with (
-            mock.patch("durability.backup._write_manifest", side_effect=OSError("write denied")),
+            mock.patch(
+                "durability.backup._write_manifest", side_effect=OSError("write denied")
+            ),
             self.assertRaisesRegex(backup.BackupError, "BACKUP_IO_FAILED"),
         ):
             self.create()
@@ -330,17 +417,26 @@ class BackupRuntimeTests(unittest.TestCase):
 
     def test_finalize_interruption_leaves_only_undiscoverable_staging(self) -> None:
         with (
-            mock.patch("durability.backup._atomic_finalize", side_effect=OSError("rename interrupted")),
+            mock.patch(
+                "durability.backup._atomic_finalize",
+                side_effect=OSError("rename interrupted"),
+            ),
             self.assertRaisesRegex(backup.BackupError, "BACKUP_FINALIZE_FAILED"),
         ):
             self.create()
         self.assertEqual(backup.list_finalized_backups(self.destination), ())
-        staging = tuple(path for path in self.destination.iterdir() if path.name.startswith(backup.STAGING_PREFIX))
+        staging = tuple(
+            path
+            for path in self.destination.iterdir()
+            if path.name.startswith(backup.STAGING_PREFIX)
+        )
         self.assertEqual(len(staging), 1)
         with self.assertRaisesRegex(backup.BackupError, "BACKUP_NOT_FINALIZED"):
             backup.verify_backup(staging[0])
 
-    def test_allowlist_rejects_runtime_pgdata_redis_logs_temp_and_nested_backup(self) -> None:
+    def test_allowlist_rejects_runtime_pgdata_redis_logs_temp_and_nested_backup(
+        self,
+    ) -> None:
         for forbidden in (
             "filesystem/plugins/runtime",
             "filesystem/postgres",
@@ -358,10 +454,16 @@ class BackupRuntimeTests(unittest.TestCase):
                     **{
                         **request.__dict__,
                         "filesystem_sources": request.filesystem_sources
-                        + (backup.FilesystemSource(logical_root=forbidden, source=source),),
+                        + (
+                            backup.FilesystemSource(
+                                logical_root=forbidden, source=source
+                            ),
+                        ),
                     }
                 )
-                with self.assertRaisesRegex(backup.BackupError, "BACKUP_SOURCE_NOT_ALLOWED"):
+                with self.assertRaisesRegex(
+                    backup.BackupError, "BACKUP_SOURCE_NOT_ALLOWED"
+                ):
                     backup.create_backup(request, pg_dump_runner=FakePgDump())
 
         nested_backup = self.sources["filesystem/media"] / "backups"
@@ -422,7 +524,9 @@ class BackupRuntimeTests(unittest.TestCase):
             backup.create_backup(request, pg_dump_runner=FakePgDump())
 
         self.secret_reference.write_bytes(b'{"provider":"test","token":"plaintext"}\n')
-        with self.assertRaisesRegex(backup.BackupError, "BACKUP_SECRET_REFERENCE_INVALID"):
+        with self.assertRaisesRegex(
+            backup.BackupError, "BACKUP_SECRET_REFERENCE_INVALID"
+        ):
             self.create()
 
     def test_all_canonical_roots_are_explicitly_required(self) -> None:

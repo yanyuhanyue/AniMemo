@@ -111,7 +111,9 @@ class InstanceLocator:
 
 
 def _field_is_secret(name: object) -> bool:
-    normalized = "".join(character for character in str(name).lower() if character.isalnum())
+    normalized = "".join(
+        character for character in str(name).lower() if character.isalnum()
+    )
     return any(part in normalized for part in _SECRET_FIELD_PARTS)
 
 
@@ -211,15 +213,22 @@ def parse_instance_locator(payload: Mapping[str, Any]) -> InstanceLocator:
     if payload["deploymentProfile"] != STANDARD_DEPLOYMENT_PROFILE:
         raise LocatorError("LOCATOR_PROFILE_UNSUPPORTED")
 
-    app_root = _canonical_absolute_path(payload["appRoot"], code="LOCATOR_APP_ROOT_INVALID")
-    data_root = _canonical_absolute_path(payload["dataRoot"], code="LOCATOR_DATA_ROOT_INVALID")
+    app_root = _canonical_absolute_path(
+        payload["appRoot"], code="LOCATOR_APP_ROOT_INVALID"
+    )
+    data_root = _canonical_absolute_path(
+        payload["dataRoot"], code="LOCATOR_DATA_ROOT_INVALID"
+    )
     if app_root != APP_ROOT or data_root != DATA_ROOT:
         raise LocatorError("LOCATOR_CANONICAL_ROOT_MISMATCH")
 
     managed_config_path = _canonical_absolute_path(
         payload["managedConfigPath"], code="LOCATOR_CONFIG_PATH_INVALID"
     )
-    if managed_config_path == MANAGED_CONFIG_ROOT or MANAGED_CONFIG_ROOT not in managed_config_path.parents:
+    if (
+        managed_config_path == MANAGED_CONFIG_ROOT
+        or MANAGED_CONFIG_ROOT not in managed_config_path.parents
+    ):
         raise LocatorError("LOCATOR_CONFIG_PATH_INVALID")
 
     try:
@@ -233,7 +242,13 @@ def parse_instance_locator(payload: Mapping[str, Any]) -> InstanceLocator:
     _require_exact_fields(listen, _LISTEN_FIELDS)
     host = listen["host"]
     port = listen["port"]
-    if not isinstance(host, str) or not host or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+    if (
+        not isinstance(host, str)
+        or not host
+        or isinstance(port, bool)
+        or not isinstance(port, int)
+        or not 1 <= port <= 65535
+    ):
         raise LocatorError("LOCATOR_LISTEN_INVALID")
 
     release_identity = payload["releaseIdentity"]

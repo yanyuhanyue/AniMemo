@@ -119,30 +119,110 @@ class CheckDefinition:
 
 
 _DEFINITIONS: dict[str, CheckDefinition] = {
-    "instance.locator": CheckDefinition("locator", "Instance locator", "Use the explicit Installer repair path."),
-    "filesystem.roots": CheckDefinition("filesystem", "Canonical filesystem roots", "Correct the canonical instance layout explicitly."),
-    "filesystem.permissions": CheckDefinition("filesystem", "Filesystem permissions", "Use an explicit permission repair operation."),
-    "filesystem.capacity": CheckDefinition("filesystem", "Filesystem capacity", "Provide capacity before running a durable operation."),
-    "configuration.required": CheckDefinition("configuration", "Required configuration", "Restore the protected canonical configuration."),
-    "configuration.alignment": CheckDefinition("configuration", "Configuration alignment", "Reconcile locator and managed configuration explicitly."),
-    "systemd.allowlist": CheckDefinition("runtime", "systemd allowlist", "Inspect the Installer-owned allowlist."),
-    "compose.alignment": CheckDefinition("runtime", "Compose alignment", "Inspect the Installer-owned Compose deployment."),
-    "network.listen": CheckDefinition("configuration", "Listen identity", "Choose an explicit supported listen identity."),
-    "identity.public-origin": CheckDefinition("configuration", "Public Origin", "Set one canonical Public Origin."),
-    "database.postgresql.connectivity": CheckDefinition("dependency", "PostgreSQL connectivity", "Inspect the AniMemo-scoped PostgreSQL service."),
-    "database.schema-compatibility": CheckDefinition("data-integrity", "Database schema compatibility", "Use an approved compatibility path."),
-    "cache.redis.connectivity": CheckDefinition("dependency", "Redis connectivity", "Inspect the AniMemo-scoped Redis service."),
-    "cache.redis.persistence-contract": CheckDefinition("runtime", "Redis persistence contract", "Reconcile the rebuildable Redis profile."),
-    "service.api.health": CheckDefinition("runtime", "API health", "Inspect the configured loopback API endpoint."),
-    "service.web.health": CheckDefinition("runtime", "Web health", "Inspect the configured loopback Web endpoint."),
-    "updater.socket": CheckDefinition("runtime", "Updater socket", "Inspect the fixed local Updater socket."),
-    "updater.state": CheckDefinition("runtime", "Updater state snapshot", "Use a no-write Updater snapshot reader."),
-    "release.identity": CheckDefinition("release", "Release identity", "Revalidate the exact Release Authority identity."),
-    "release.updater-consistency": CheckDefinition("release", "Release and Updater consistency", "Reconcile through the approved Updater interface."),
-    "plugins.integrity": CheckDefinition("data-integrity", "Plugin integrity", "Repair package/CAS state without deleting plugin data."),
-    "media.integrity": CheckDefinition("data-integrity", "Media integrity", "Repair references explicitly without orphan deletion."),
-    "backup.readiness": CheckDefinition("data-integrity", "Backup readiness", "Prepare a private canonical backup destination."),
-    "compatibility.state": CheckDefinition("data-integrity", "Compatibility state", "Follow the canonical compatibility decision."),
+    "instance.locator": CheckDefinition(
+        "locator", "Instance locator", "Use the explicit Installer repair path."
+    ),
+    "filesystem.roots": CheckDefinition(
+        "filesystem",
+        "Canonical filesystem roots",
+        "Correct the canonical instance layout explicitly.",
+    ),
+    "filesystem.permissions": CheckDefinition(
+        "filesystem",
+        "Filesystem permissions",
+        "Use an explicit permission repair operation.",
+    ),
+    "filesystem.capacity": CheckDefinition(
+        "filesystem",
+        "Filesystem capacity",
+        "Provide capacity before running a durable operation.",
+    ),
+    "configuration.required": CheckDefinition(
+        "configuration",
+        "Required configuration",
+        "Restore the protected canonical configuration.",
+    ),
+    "configuration.alignment": CheckDefinition(
+        "configuration",
+        "Configuration alignment",
+        "Reconcile locator and managed configuration explicitly.",
+    ),
+    "systemd.allowlist": CheckDefinition(
+        "runtime", "systemd allowlist", "Inspect the Installer-owned allowlist."
+    ),
+    "compose.alignment": CheckDefinition(
+        "runtime",
+        "Compose alignment",
+        "Inspect the Installer-owned Compose deployment.",
+    ),
+    "network.listen": CheckDefinition(
+        "configuration",
+        "Listen identity",
+        "Choose an explicit supported listen identity.",
+    ),
+    "identity.public-origin": CheckDefinition(
+        "configuration", "Public Origin", "Set one canonical Public Origin."
+    ),
+    "database.postgresql.connectivity": CheckDefinition(
+        "dependency",
+        "PostgreSQL connectivity",
+        "Inspect the AniMemo-scoped PostgreSQL service.",
+    ),
+    "database.schema-compatibility": CheckDefinition(
+        "data-integrity",
+        "Database schema compatibility",
+        "Use an approved compatibility path.",
+    ),
+    "cache.redis.connectivity": CheckDefinition(
+        "dependency", "Redis connectivity", "Inspect the AniMemo-scoped Redis service."
+    ),
+    "cache.redis.persistence-contract": CheckDefinition(
+        "runtime",
+        "Redis persistence contract",
+        "Reconcile the rebuildable Redis profile.",
+    ),
+    "service.api.health": CheckDefinition(
+        "runtime", "API health", "Inspect the configured loopback API endpoint."
+    ),
+    "service.web.health": CheckDefinition(
+        "runtime", "Web health", "Inspect the configured loopback Web endpoint."
+    ),
+    "updater.socket": CheckDefinition(
+        "runtime", "Updater socket", "Inspect the fixed local Updater socket."
+    ),
+    "updater.state": CheckDefinition(
+        "runtime", "Updater state snapshot", "Use a no-write Updater snapshot reader."
+    ),
+    "release.identity": CheckDefinition(
+        "release",
+        "Release identity",
+        "Revalidate the exact Release Authority identity.",
+    ),
+    "release.updater-consistency": CheckDefinition(
+        "release",
+        "Release and Updater consistency",
+        "Reconcile through the approved Updater interface.",
+    ),
+    "plugins.integrity": CheckDefinition(
+        "data-integrity",
+        "Plugin integrity",
+        "Repair package/CAS state without deleting plugin data.",
+    ),
+    "media.integrity": CheckDefinition(
+        "data-integrity",
+        "Media integrity",
+        "Repair references explicitly without orphan deletion.",
+    ),
+    "backup.readiness": CheckDefinition(
+        "data-integrity",
+        "Backup readiness",
+        "Prepare a private canonical backup destination.",
+    ),
+    "compatibility.state": CheckDefinition(
+        "data-integrity",
+        "Compatibility state",
+        "Follow the canonical compatibility decision.",
+    ),
 }
 
 
@@ -212,7 +292,9 @@ class DoctorReport:
             "mode": DOCTOR_MODE,
             "overallStatus": self.overall_status.value,
             "checks": [check.as_dict() for check in self.checks],
-            "compatibility": self.compatibility.as_dict() if self.compatibility else None,
+            "compatibility": self.compatibility.as_dict()
+            if self.compatibility
+            else None,
         }
 
 
@@ -276,9 +358,7 @@ class DoctorRunner:
     def _locator_result(self) -> tuple[ProbeResult, InstanceLocator | None]:
         try:
             updater_uid = self._host.user_id("animemo-updater")
-            locator = load_instance_locator(
-                self._host, expected_owner_uid=updater_uid
-            )
+            locator = load_instance_locator(self._host, expected_owner_uid=updater_uid)
         except OSError:
             return ProbeResult.failed("LOCATOR_OWNER_UNAVAILABLE"), None
         except LocatorError as error:
@@ -286,7 +366,13 @@ class DoctorRunner:
         return ProbeResult.passed("LOCATOR_VALID"), locator
 
     def _root_metadata(self) -> dict[PurePosixPath, os.stat_result]:
-        roots = (APP_ROOT, DATA_ROOT, UPDATER_APP_ROOT, UPDATER_STATE_ROOT, UPDATER_RUNTIME_ROOT)
+        roots = (
+            APP_ROOT,
+            DATA_ROOT,
+            UPDATER_APP_ROOT,
+            UPDATER_STATE_ROOT,
+            UPDATER_RUNTIME_ROOT,
+        )
         return {root: self._host.lstat(root) for root in roots}
 
     def _filesystem_roots(self, _locator: InstanceLocator) -> ProbeResult:
@@ -294,7 +380,10 @@ class DoctorRunner:
             metadata = self._root_metadata()
         except (OSError, FileNotFoundError):
             return ProbeResult.failed("FILESYSTEM_ROOT_MISSING")
-        if any(not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode) for item in metadata.values()):
+        if any(
+            not stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode)
+            for item in metadata.values()
+        ):
             return ProbeResult.failed("FILESYSTEM_ROOT_INVALID")
         return ProbeResult.passed("FILESYSTEM_ROOTS_VALID")
 
@@ -318,7 +407,10 @@ class DoctorRunner:
             for path, item in metadata.items()
         ):
             return ProbeResult.failed("FILESYSTEM_PERMISSIONS_INVALID")
-        if locator_metadata.st_mode & 0o777 != 0o600 or locator_metadata.st_uid != updater_uid:
+        if (
+            locator_metadata.st_mode & 0o777 != 0o600
+            or locator_metadata.st_uid != updater_uid
+        ):
             return ProbeResult.failed("FILESYSTEM_PERMISSIONS_INVALID")
         return ProbeResult.passed("FILESYSTEM_PERMISSIONS_VALID")
 
@@ -356,14 +448,18 @@ class DoctorRunner:
             result = probe(locator)
         except Exception:  # noqa: BLE001 - independent probes must not abort the report
             return ProbeResult.skipped("PROBE_UNAVAILABLE")
-        if not isinstance(result, ProbeResult) or not isinstance(result.status, DoctorStatus):
+        if not isinstance(result, ProbeResult) or not isinstance(
+            result.status, DoctorStatus
+        ):
             return ProbeResult.failed("PROBE_RESULT_INVALID")
         return result
 
     def run(self) -> DoctorReport:
         checked_at = self._clock()
         locator_result, locator = self._locator_result()
-        results: list[DoctorCheck] = [_check("instance.locator", locator_result, checked_at)]
+        results: list[DoctorCheck] = [
+            _check("instance.locator", locator_result, checked_at)
+        ]
         compatibility_decision: CompatibilityDecision | None = None
 
         for check_id in DOCTOR_CHECK_IDS[1:]:
@@ -405,7 +501,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def _human(report: DoctorReport) -> str:
     lines = [f"AniMemo Doctor Basic: {report.overall_status.value}"]
-    lines.extend(f"{check.status.value:7} {check.check_id} [{check.code}]" for check in report.checks)
+    lines.extend(
+        f"{check.status.value:7} {check.check_id} [{check.code}]"
+        for check in report.checks
+    )
     return "\n".join(lines)
 
 
@@ -413,13 +512,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     from datetime import UTC, datetime
 
     args = _parser().parse_args(argv)
-    runner = DoctorRunner(clock=lambda: datetime.now(UTC).isoformat().replace("+00:00", "Z"))
+    runner = DoctorRunner(
+        clock=lambda: datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    )
     report = runner.run()
     if args.format == "json":
         print(json.dumps(report.as_dict(), ensure_ascii=False, sort_keys=True))
     else:
         print(_human(report))
-    return {DoctorStatus.PASS: 0, DoctorStatus.WARN: 1, DoctorStatus.FAIL: 2}[report.overall_status]
+    return {DoctorStatus.PASS: 0, DoctorStatus.WARN: 1, DoctorStatus.FAIL: 2}[
+        report.overall_status
+    ]
 
 
 if __name__ == "__main__":

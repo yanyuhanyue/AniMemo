@@ -49,9 +49,7 @@ MAX_SECRET_ENTRIES: Final = 32
 MAX_IDENTIFIER_BYTES: Final = 128
 
 ArtifactType: TypeAlias = Literal["backup", "migration-bundle"]
-Classification: TypeAlias = Literal[
-    "PRESERVE", "PRESERVE_OR_EXPLICIT_RECONFIGURE"
-]
+Classification: TypeAlias = Literal["PRESERVE", "PRESERVE_OR_EXPLICIT_RECONFIGURE"]
 Handling: TypeAlias = Literal["PRESERVE", "RECONFIGURE"]
 
 _ARTIFACT_TYPES = frozenset(("backup", "migration-bundle"))
@@ -357,8 +355,10 @@ def open_secret_envelope(
 ) -> OpenedSecretPayload:
     """Recompute binding, authenticate, and parse without target mutation."""
 
-    encoded = envelope.to_bytes() if isinstance(envelope, SecretEnvelope) else _copy_bytes(
-        envelope, "ENVELOPE_STRUCTURE_CORRUPT"
+    encoded = (
+        envelope.to_bytes()
+        if isinstance(envelope, SecretEnvelope)
+        else _copy_bytes(envelope, "ENVELOPE_STRUCTURE_CORRUPT")
     )
     root = _parse_envelope_object(encoded)
     _evaluate_version_and_suite(root)
@@ -438,7 +438,9 @@ def _validate_create_inputs(
         raise SecretEnvelopeInputError("EXTERNAL_SECRET_INVALID")
     if artifact_type not in _ARTIFACT_TYPES:
         raise SecretEnvelopeInputError("ARTIFACT_IDENTITY_INVALID")
-    if not _is_canonical_uuid(artifact_id) or not _is_canonical_uuid(source_instance_id):
+    if not _is_canonical_uuid(artifact_id) or not _is_canonical_uuid(
+        source_instance_id
+    ):
         raise SecretEnvelopeInputError("ARTIFACT_IDENTITY_INVALID")
     if not isinstance(credential_encryption_key_required, bool):
         raise SecretEnvelopeInputError("SECRET_PROFILE_INVALID")
@@ -472,9 +474,7 @@ def _artifact_binding_digest(
         "backup": "animemo-instance-backup",
         "migration-bundle": "animemo-migration-bundle",
     }[artifact_type]
-    id_field = {"backup": "backupId", "migration-bundle": "bundleId"}[
-        artifact_type
-    ]
+    id_field = {"backup": "backupId", "migration-bundle": "bundleId"}[artifact_type]
     version_field = {
         "backup": "schemaVersion",
         "migration-bundle": "formatVersion",
@@ -540,7 +540,10 @@ def _validate_entries(
             raise SecretEnvelopeInputError("SECRET_DISPOSITION_INVALID")
         if entry.name in seen:
             raise SecretEnvelopeInputError("SECRET_ENTRY_INVALID")
-        if entry.handling == "PRESERVE" and not 0 < len(entry._material) <= MAX_SECRET_BYTES:
+        if (
+            entry.handling == "PRESERVE"
+            and not 0 < len(entry._material) <= MAX_SECRET_BYTES
+        ):
             raise SecretEnvelopeInputError("SECRET_ENTRY_INVALID")
         if entry.handling == "PRESERVE":
             total_secret_bytes += len(entry._material)
@@ -648,9 +651,7 @@ def _build_payload(
     }
 
 
-def _derive_key(
-    external_secret: Passphrase | OneTimeKey, salt: bytes | None
-) -> bytes:
+def _derive_key(external_secret: Passphrase | OneTimeKey, salt: bytes | None) -> bytes:
     if isinstance(external_secret, OneTimeKey):
         return bytes(external_secret._material)
     if salt is None or len(salt) != SALT_BYTES:
@@ -857,9 +858,7 @@ def _validate_inner_payload(
         raise SecretEnvelopeCorruptError("ENVELOPE_STRUCTURE_CORRUPT")
     if version != 1:
         if version > 0:
-            raise SecretEnvelopeUnsupportedError(
-                "ENVELOPE_VERSION_UNSUPPORTED"
-            )
+            raise SecretEnvelopeUnsupportedError("ENVELOPE_VERSION_UNSUPPORTED")
         raise SecretEnvelopeCorruptError("ENVELOPE_STRUCTURE_CORRUPT")
     source_instance_id = payload["sourceInstanceId"]
     required_cek = payload["credentialEncryptionKeyRequired"]
@@ -916,9 +915,7 @@ def _validate_inner_payload(
             try:
                 material = _b64url_decode(value, maximum=MAX_SECRET_BYTES)
             except SecretEnvelopeCorruptError:
-                raise SecretEnvelopeCorruptError(
-                    "ENVELOPE_STRUCTURE_CORRUPT"
-                ) from None
+                raise SecretEnvelopeCorruptError("ENVELOPE_STRUCTURE_CORRUPT") from None
             if not material:
                 raise SecretEnvelopeCorruptError("ENVELOPE_STRUCTURE_CORRUPT")
             entries.append(SecretEntry.preserve(name, material))
@@ -931,9 +928,7 @@ def _validate_inner_payload(
     return OpenedSecretPayload(
         artifact_type=cast(ArtifactType, outer_binding["artifactType"]),
         artifact_id=cast(str, outer_binding["artifactId"]),
-        artifact_binding_digest=cast(
-            str, outer_binding["artifactBindingDigest"]
-        ),
+        artifact_binding_digest=cast(str, outer_binding["artifactBindingDigest"]),
         source_instance_id=cast(str, source_instance_id),
         credential_encryption_key_required=required_cek,
         entries=tuple(entries),

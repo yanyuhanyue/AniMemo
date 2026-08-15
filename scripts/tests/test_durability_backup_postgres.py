@@ -32,7 +32,9 @@ class IsolatedPostgreSQLBackupTests(unittest.TestCase):
                 source = root / "sources" / logical_root.replace("/", "-")
                 source.mkdir(parents=True)
                 sources[logical_root] = source
-            (sources["filesystem/config"] / "contract.json").write_text("{}\n", encoding="utf-8")
+            (sources["filesystem/config"] / "contract.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
             request = backup.BackupRequest(
                 destination_root=root / "backups",
                 database_url=database_url,
@@ -40,7 +42,10 @@ class IsolatedPostgreSQLBackupTests(unittest.TestCase):
                     instance_id="11111111-2222-4333-8444-555555555555",
                     source_locator_digest="sha256:" + "1" * 64,
                     release={"version": "1.1.0", "commit": "a" * 40},
-                    deployment_contract={"schemaVersion": 1, "digest": "sha256:" + "2" * 64},
+                    deployment_contract={
+                        "schemaVersion": 1,
+                        "digest": "sha256:" + "2" * 64,
+                    },
                     database_contract={"id": "animemo.database/v1", "serverMajor": 16},
                     configuration_contract={"id": "animemo.configuration/v1"},
                 ),

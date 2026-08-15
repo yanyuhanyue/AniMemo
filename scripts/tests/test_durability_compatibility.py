@@ -109,7 +109,9 @@ class CompatibilityEngineInvariantTests(unittest.TestCase):
             ),
         )
         forbidden = {"UNKNOWN", "MAYBE", "PARTIAL", "LEGACY"}
-        self.assertTrue(forbidden.isdisjoint(outcome.value for outcome in CompatibilityOutcome))
+        self.assertTrue(
+            forbidden.isdisjoint(outcome.value for outcome in CompatibilityOutcome)
+        )
 
     def test_all_compatible_dimensions_produce_canonical_machine_result(self):
         decision = evaluate_compatibility(
@@ -123,7 +125,9 @@ class CompatibilityEngineInvariantTests(unittest.TestCase):
         self.assertEqual(decision.reason_code, ReasonCode.ALL_DIMENSIONS_COMPATIBLE)
         self.assertIsNone(decision.blocking_dimension)
         self.assertEqual(decision.actions, ())
-        self.assertEqual(decision.evaluated_dimensions, tuple(decision.evaluated_dimensions))
+        self.assertEqual(
+            decision.evaluated_dimensions, tuple(decision.evaluated_dimensions)
+        )
 
         result = decision.as_dict()
         self.assertEqual(result["matrixVersion"], MATRIX_IDENTITY)
@@ -132,10 +136,15 @@ class CompatibilityEngineInvariantTests(unittest.TestCase):
         self.assertEqual(result["operation"], "restore")
         self.assertEqual(result["overallStatus"], "COMPATIBLE")
         self.assertEqual(result["reasonCode"], "ALL_DIMENSIONS_COMPATIBLE")
-        self.assertEqual(result["summary"], "All required compatibility dimensions are compatible.")
+        self.assertEqual(
+            result["summary"], "All required compatibility dimensions are compatible."
+        )
         self.assertIsNone(result["blockingDimension"])
         self.assertEqual(result["artifact"], result["evaluatedArtifactIdentity"])
-        self.assertEqual([item["name"] for item in result["dimensions"]], [item.value for item in EVALUATION_ORDER])
+        self.assertEqual(
+            [item["name"] for item in result["dimensions"]],
+            [item.value for item in EVALUATION_ORDER],
+        )
         self.assertEqual(result["actions"], [])
 
     def test_result_is_deterministic_and_detached_from_mutable_inputs(self):
@@ -173,7 +182,9 @@ class CompatibilityEngineInvariantTests(unittest.TestCase):
             ReasonCode.FORMAT_VERSION_UNSUPPORTED,
         )
 
-        result = evaluate_compatibility("restore", artifact(format_version=17), dimensions).as_dict()
+        result = evaluate_compatibility(
+            "restore", artifact(format_version=17), dimensions
+        ).as_dict()
 
         self.assertEqual(result["matrixVersion"], "animemo.compatibility/v1")
         self.assertEqual(result["artifact"]["format"], "animemo-instance-backup")
@@ -205,7 +216,9 @@ class CompatibilityEngineInvariantTests(unittest.TestCase):
 
         self.assertEqual(decision.outcome, CompatibilityOutcome.CORRUPT)
         self.assertEqual(decision.reason_code, ReasonCode.CHECKSUM_MISMATCH)
-        self.assertEqual(decision.blocking_dimension, Dimension.INTEGRITY_AUTHENTICATION)
+        self.assertEqual(
+            decision.blocking_dimension, Dimension.INTEGRITY_AUTHENTICATION
+        )
 
     def test_unsupported_precedence_suppresses_upgrade_plan(self):
         dimensions = compatible_dimensions()
@@ -247,7 +260,9 @@ class CompatibilityEngineInvariantTests(unittest.TestCase):
 
         self.assertEqual(decision.outcome, CompatibilityOutcome.UNSUPPORTED)
         self.assertEqual(decision.blocking_dimension, Dimension.DEPLOYMENT_CONTRACT)
-        self.assertEqual(decision.reason_code, ReasonCode.DEPLOYMENT_CONTRACT_UNSUPPORTED)
+        self.assertEqual(
+            decision.reason_code, ReasonCode.DEPLOYMENT_CONTRACT_UNSUPPORTED
+        )
 
     def test_upgrade_requires_exact_contiguous_actions_and_supported_path(self):
         dimensions = compatible_dimensions()
@@ -300,7 +315,9 @@ class CompatibilityEngineInvariantTests(unittest.TestCase):
             ReasonCode.ORDERED_PATH_REQUIRED,
         )
 
-        with self.assertRaisesRegex(CompatibilityEvaluationError, "UPGRADE_ACTIONS_REQUIRED") as raised:
+        with self.assertRaisesRegex(
+            CompatibilityEvaluationError, "UPGRADE_ACTIONS_REQUIRED"
+        ) as raised:
             evaluate_compatibility("restore", artifact(), dimensions)
 
         self.assertEqual(raised.exception.code, "UPGRADE_ACTIONS_REQUIRED")
@@ -323,7 +340,9 @@ class CompatibilityEngineInvariantTests(unittest.TestCase):
             ReasonCode.ORDERED_PATH_REQUIRED,
         )
 
-        with self.assertRaisesRegex(CompatibilityEvaluationError, "ACTION_ORDER_INVALID"):
+        with self.assertRaisesRegex(
+            CompatibilityEvaluationError, "ACTION_ORDER_INVALID"
+        ):
             evaluate_compatibility(
                 "restore",
                 artifact(),
@@ -339,7 +358,9 @@ class CompatibilityEngineInvariantTests(unittest.TestCase):
             ReasonCode.SCHEMA_MIGRATION_REQUIRED,
         )
 
-        with self.assertRaisesRegex(CompatibilityEvaluationError, "SUPPORTED_PATH_REQUIRED"):
+        with self.assertRaisesRegex(
+            CompatibilityEvaluationError, "SUPPORTED_PATH_REQUIRED"
+        ):
             evaluate_compatibility(
                 "restore",
                 artifact(),
@@ -358,9 +379,10 @@ class CompatibilityEngineValidationTests(unittest.TestCase):
         )
 
         for dimensions in invalid_sets:
-            with self.subTest(
-                names=[item.name.value for item in dimensions]
-            ), self.assertRaises(CompatibilityEvaluationError):
+            with (
+                self.subTest(names=[item.name.value for item in dimensions]),
+                self.assertRaises(CompatibilityEvaluationError),
+            ):
                 evaluate_compatibility("doctor", artifact(), dimensions)
 
     def test_unknown_operation_or_outcome_is_rejected_without_a_decision(self):
@@ -397,7 +419,9 @@ class CompatibilityEngineValidationTests(unittest.TestCase):
         )
 
         for dimensions in (wrong_dimension, wrong_outcome):
-            with self.assertRaisesRegex(CompatibilityEvaluationError, "REASON_CODE_INVALID"):
+            with self.assertRaisesRegex(
+                CompatibilityEvaluationError, "REASON_CODE_INVALID"
+            ):
                 evaluate_compatibility("doctor", artifact(), dimensions)
 
     def test_envelope_contract_reason_codes_map_to_canonical_dimensions(self):
@@ -411,8 +435,12 @@ class CompatibilityEngineValidationTests(unittest.TestCase):
         decision = evaluate_compatibility("migration", artifact(), dimensions)
 
         self.assertEqual(decision.outcome, CompatibilityOutcome.CORRUPT)
-        self.assertEqual(decision.reason_code, ReasonCode.ENVELOPE_AUTHENTICATION_FAILED)
-        self.assertEqual(decision.blocking_dimension, Dimension.INTEGRITY_AUTHENTICATION)
+        self.assertEqual(
+            decision.reason_code, ReasonCode.ENVELOPE_AUTHENTICATION_FAILED
+        )
+        self.assertEqual(
+            decision.blocking_dimension, Dimension.INTEGRITY_AUTHENTICATION
+        )
 
     def test_invalid_artifact_identity_fails_closed(self):
         bad_artifacts = (
@@ -423,8 +451,11 @@ class CompatibilityEngineValidationTests(unittest.TestCase):
         )
 
         for invalid in bad_artifacts:
-            with self.subTest(invalid=invalid), self.assertRaisesRegex(
-                CompatibilityEvaluationError, "ARTIFACT_IDENTITY_INVALID"
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(
+                    CompatibilityEvaluationError, "ARTIFACT_IDENTITY_INVALID"
+                ),
             ):
                 evaluate_compatibility("backup", invalid, compatible_dimensions())
 
@@ -444,8 +475,11 @@ class CompatibilityEngineValidationTests(unittest.TestCase):
                 target={},
             )
 
-            with self.subTest(source_type=type(next(iter(source)))), self.assertRaisesRegex(
-                CompatibilityEvaluationError, "IDENTITY_EVIDENCE_INVALID"
+            with (
+                self.subTest(source_type=type(next(iter(source)))),
+                self.assertRaisesRegex(
+                    CompatibilityEvaluationError, "IDENTITY_EVIDENCE_INVALID"
+                ),
             ):
                 evaluate_compatibility("backup", artifact(), dimensions)
 
@@ -469,7 +503,9 @@ class CompatibilityEngineValidationTests(unittest.TestCase):
                 target={},
             )
             with self.subTest(unsafe=list(unsafe)):
-                with self.assertRaisesRegex(CompatibilityEvaluationError, "SENSITIVE_EVIDENCE_FORBIDDEN") as raised:
+                with self.assertRaisesRegex(
+                    CompatibilityEvaluationError, "SENSITIVE_EVIDENCE_FORBIDDEN"
+                ) as raised:
                     evaluate_compatibility("doctor", artifact(), dimensions)
                 self.assertNotIn("must-not-appear", str(raised.exception))
 
@@ -510,8 +546,12 @@ class CompatibilityEngineValidationTests(unittest.TestCase):
             required_release_identity={"manifestDigest": DIGEST},
         )
 
-        with self.assertRaisesRegex(CompatibilityEvaluationError, "SENSITIVE_EVIDENCE_FORBIDDEN") as raised:
-            evaluate_compatibility("restore", artifact(), dimensions, actions=[unsafe_action])
+        with self.assertRaisesRegex(
+            CompatibilityEvaluationError, "SENSITIVE_EVIDENCE_FORBIDDEN"
+        ) as raised:
+            evaluate_compatibility(
+                "restore", artifact(), dimensions, actions=[unsafe_action]
+            )
 
         self.assertNotIn("must-not-appear", str(raised.exception))
 

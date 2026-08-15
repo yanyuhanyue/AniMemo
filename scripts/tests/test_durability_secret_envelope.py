@@ -192,9 +192,13 @@ class SecretEnvelopeTests(unittest.TestCase):
                         expected_artifact_binding_record=record,
                         expected_source_instance_id=instance_id,
                     )
-                self.assertEqual(caught.exception.code, "ENVELOPE_AUTHENTICATION_FAILED")
+                self.assertEqual(
+                    caught.exception.code, "ENVELOPE_AUTHENTICATION_FAILED"
+                )
                 self.assertEqual(caught.exception.compatibility_outcome, "CORRUPT")
-                self.assertEqual(str(caught.exception), "ENVELOPE_AUTHENTICATION_FAILED")
+                self.assertEqual(
+                    str(caught.exception), "ENVELOPE_AUTHENTICATION_FAILED"
+                )
 
     def test_binding_record_is_canonical_and_rejects_circular_fields(self):
         circular_record = binding_record("migration-bundle")
@@ -223,15 +227,15 @@ class SecretEnvelopeTests(unittest.TestCase):
             b'47c9345fd248c8d50b2fdf28870cc0f8","artifactId":'
             b'"11111111-1111-4111-8111-111111111111","artifactType":'
             b'"migration-bundle"},"ciphertext":"VWtDGaD0GlEADjqExNo-ZKx3LiKgSDAcQDTg'
-            b'RuT7sZpjdlzRZRiSjErW1o5AEkw0I3tTzsOE0F0LaU2tJ6R02Jq85u0cij8be0_1l8oD5m16'
-            b'o506GcJfsGrvwaAf2pWtRs3nNVdIVh3lIGTnIqZepl_O7srtR9ZqZvFTm3_SOKM0OG9q3uQf'
-            b'CDbxqoPNCnE420cOfHAzryn66rIJ2euXxIKk3EX_gqtprWl1Qbqm3EG719_sxA13jOVtMnxor'
-            b'LOkOxX1AEGLwKTe59Joh7mjQseNKDm0gFlkMWn6SPXMMPhICkvG6UrjuYR6hdBDXhAkaqfiI'
-            b'SbBvq0kpSU-P6SP2gk_NcKzXpfokztpSz_vIMYe0efJ1CesIWrRte9mzghdCYD5ft8fDmwQI'
-            b'YFYA5bNkONA7HtjEbZ8-zASDge8c_ipwIHWm3PWqEbN817cBY8gvMeqzRq9RWnv8RwTu0ODI'
-            b'MxvNR873CniAFZThcDowovqQ048Mt-tyyu11v4TZERo2BKcJab75Wk30wCvQkS2m3CGeEdDU'
-            b'0nbpIcfE44ptvfQNN97KjVBn9znI3xdKPcO8gkVk_f5wiW-9uJT7fetcFkbJ-DX6Gb_JvcoJ'
-            b'YUz5zZeBH-BAzVTGAdrP0Bca0rfVG-M--9TeqrS9iok-TyiAIedzS-zGjsTIiOYGjHlD7QcNV'
+            b"RuT7sZpjdlzRZRiSjErW1o5AEkw0I3tTzsOE0F0LaU2tJ6R02Jq85u0cij8be0_1l8oD5m16"
+            b"o506GcJfsGrvwaAf2pWtRs3nNVdIVh3lIGTnIqZepl_O7srtR9ZqZvFTm3_SOKM0OG9q3uQf"
+            b"CDbxqoPNCnE420cOfHAzryn66rIJ2euXxIKk3EX_gqtprWl1Qbqm3EG719_sxA13jOVtMnxor"
+            b"LOkOxX1AEGLwKTe59Joh7mjQseNKDm0gFlkMWn6SPXMMPhICkvG6UrjuYR6hdBDXhAkaqfiI"
+            b"SbBvq0kpSU-P6SP2gk_NcKzXpfokztpSz_vIMYe0efJ1CesIWrRte9mzghdCYD5ft8fDmwQI"
+            b"YFYA5bNkONA7HtjEbZ8-zASDge8c_ipwIHWm3PWqEbN817cBY8gvMeqzRq9RWnv8RwTu0ODI"
+            b"MxvNR873CniAFZThcDowovqQ048Mt-tyyu11v4TZERo2BKcJab75Wk30wCvQkS2m3CGeEdDU"
+            b"0nbpIcfE44ptvfQNN97KjVBn9znI3xdKPcO8gkVk_f5wiW-9uJT7fetcFkbJ-DX6Gb_JvcoJ"
+            b"YUz5zZeBH-BAzVTGAdrP0Bca0rfVG-M--9TeqrS9iok-TyiAIedzS-zGjsTIiOYGjHlD7QcNV"
             b'cDZw","ciphertextEncoding":'
             b'"base64url","format":'
             b'"animemo.migration-secret-envelope","kdf":{"algorithm":'

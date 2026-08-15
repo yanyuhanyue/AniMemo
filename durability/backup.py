@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from .canonical import canonical_json_bytes, sha256_identity
 
@@ -100,6 +101,17 @@ _FORBIDDEN_SOURCE_PARTS = frozenset(
         "tmp",
     }
 )
+_DATABASE_QUERY_ENV = {
+    "application_name": "PGAPPNAME",
+    "connect_timeout": "PGCONNECT_TIMEOUT",
+    "options": "PGOPTIONS",
+    "sslcert": "PGSSLCERT",
+    "sslcrl": "PGSSLCRL",
+    "sslkey": "PGSSLKEY",
+    "sslmode": "PGSSLMODE",
+    "sslrootcert": "PGSSLROOTCERT",
+    "target_session_attrs": "PGTARGETSESSIONATTRS",
+}
 
 
 class BackupError(RuntimeError):
@@ -115,7 +127,10 @@ class UnsupportedBackupFormat(BackupError):
     """The artifact has a bounded identity that this v1 reader cannot consume."""
 
     def __init__(self) -> None:
-        super().__init__("BACKUP_FORMAT_UNSUPPORTED", "backup format or schema version is unsupported")
+        super().__init__(
+            "BACKUP_FORMAT_UNSUPPORTED",
+            "backup format or schema version is unsupported",
+        )
 
 
 @dataclass(frozen=True)
@@ -252,8 +267,7 @@ class SubprocessPgDumpRunner:
         executable: str,
         timeout: int,
     ) -> str:
-        environment = os.environ.copy()
-        environment["PGDATABASE"] = database_url
+        environment = _pg_environment(database_url)
         try:
             version = subprocess.run(
                 [executable, "--version"],
@@ -264,16 +278,22 @@ class SubprocessPgDumpRunner:
                 shell=False,
             )
         except (OSError, subprocess.SubprocessError) as error:
-            raise BackupError("PG_DUMP_VERSION_FAILED", "pg_dump version probe failed") from error
+            raise BackupError(
+                "PG_DUMP_VERSION_FAILED", "pg_dump version probe failed"
+            ) from error
         if version.returncode != 0:
             raise BackupError("PG_DUMP_VERSION_FAILED", "pg_dump version probe failed")
         tool_version = version.stdout.decode("utf-8", "replace").strip()
         if not tool_version.startswith("pg_dump ") or len(tool_version) > 200:
-            raise BackupError("PG_DUMP_VERSION_INVALID", "pg_dump returned invalid version metadata")
+            raise BackupError(
+                "PG_DUMP_VERSION_INVALID", "pg_dump returned invalid version metadata"
+            )
 
         descriptor = -1
         try:
-            descriptor = os.open(raw_output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            descriptor = os.open(
+                raw_output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
             with os.fdopen(descriptor, "wb") as stream:
                 descriptor = -1
                 completed = subprocess.run(
@@ -288,15 +308,92 @@ class SubprocessPgDumpRunner:
                 stream.flush()
                 os.fsync(stream.fileno())
         except subprocess.TimeoutExpired as error:
-            raise BackupError("PG_DUMP_TIMEOUT", "logical database dump timed out") from error
+            raise BackupError(
+                "PG_DUMP_TIMEOUT", "logical database dump timed out"
+            ) from error
         except OSError as error:
-            raise BackupError("PG_DUMP_FAILED", "logical database dump could not start") from error
+            raise BackupError(
+                "PG_DUMP_FAILED", "logical database dump could not start"
+            ) from error
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
         if completed.returncode != 0:
             raise BackupError("PG_DUMP_FAILED", "logical database dump failed")
         return tool_version
+
+
+def _pg_environment(database_url: str) -> dict[str, str]:
+    try:
+        parsed = urlsplit(database_url)
+        port = parsed.port or 5432
+        query_items = parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except (TypeError, ValueError):
+        raise BackupError(
+            "DATABASE_URL_INVALID", "authoritative database location is invalid"
+        ) from None
+    database_name = unquote(parsed.path.removeprefix("/"))
+    username = unquote(parsed.username or "")
+    password = unquote(parsed.password) if parsed.password is not None else None
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not parsed.hostname
+        or not username
+        or not database_name
+        or "/" in database_name
+        or parsed.fragment
+        or any("\x00" in value for value in (parsed.hostname, username, database_name))
+        or (password is not None and "\x00" in password)
+    ):
+        raise BackupError(
+            "DATABASE_URL_INVALID", "authoritative database location is invalid"
+        )
+    query: dict[str, str] = {}
+    for name, value in query_items:
+        if name not in _DATABASE_QUERY_ENV or name in query or "\x00" in value:
+            raise BackupError(
+                "DATABASE_URL_INVALID", "authoritative database options are invalid"
+            )
+        query[name] = value
+
+    environment = os.environ.copy()
+    for name in (
+        "PGAPPNAME",
+        "PGCONNECT_TIMEOUT",
+        "PGDATABASE",
+        "PGHOST",
+        "PGOPTIONS",
+        "PGPASSFILE",
+        "PGPASSWORD",
+        "PGPORT",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+        "PGSSLCERT",
+        "PGSSLCRL",
+        "PGSSLKEY",
+        "PGSSLMODE",
+        "PGSSLROOTCERT",
+        "PGTARGETSESSIONATTRS",
+        "PGUSER",
+    ):
+        environment.pop(name, None)
+    environment.update(
+        {
+            "PGDATABASE": database_name,
+            "PGHOST": parsed.hostname,
+            "PGPORT": str(port),
+            "PGUSER": username,
+        }
+    )
+    if password is not None:
+        environment["PGPASSWORD"] = password
+    for name, value in query.items():
+        environment[_DATABASE_QUERY_ENV[name]] = value
+    return environment
 
 
 def create_backup(
@@ -321,11 +418,16 @@ def create_backup(
     staging = destination / f"{STAGING_PREFIX}{identifier}"
     final_path = destination / final_name
     if staging.exists() or final_path.exists():
-        raise BackupError("BACKUP_DESTINATION_EXISTS", "backup identity already exists at destination")
+        raise BackupError(
+            "BACKUP_DESTINATION_EXISTS", "backup identity already exists at destination"
+        )
     _make_private_directory(staging)
     _write_private_bytes(
         staging / STAGING_STATE_NAME,
-        canonical_json_bytes({"lifecycle": "STAGING", "format": FORMAT, "schemaVersion": SCHEMA_VERSION}) + b"\n",
+        canonical_json_bytes(
+            {"lifecycle": "STAGING", "format": FORMAT, "schemaVersion": SCHEMA_VERSION}
+        )
+        + b"\n",
     )
 
     try:
@@ -360,12 +462,16 @@ def create_backup(
                 )
             },
             "payloadMembers": [
-                item for item in member_records if not item["path"].startswith("secrets/")
+                item
+                for item in member_records
+                if not item["path"].startswith("secrets/")
             ],
             "media": media,
             "secretDisposition": {
                 "mode": request.secret.mode if request.secret is not None else "none",
-                "path": _secret_member_path(request.secret.mode) if request.secret is not None else None,
+                "path": _secret_member_path(request.secret.mode)
+                if request.secret is not None
+                else None,
                 "profileIdentity": _secret_profile_identity(request.secret),
             },
         }
@@ -418,11 +524,15 @@ def create_backup(
             "restoreRehearsed": False,
         }
         _write_manifest(staging, final_manifest)
-        verification = _verify_tree(staging, allow_staging=True, expected_lifecycle="FINALIZED")
+        verification = _verify_tree(
+            staging, allow_staging=True, expected_lifecycle="FINALIZED"
+        )
         try:
             _atomic_finalize(staging, final_path)
         except OSError as error:
-            raise BackupError("BACKUP_FINALIZE_FAILED", "atomic backup publication failed") from error
+            raise BackupError(
+                "BACKUP_FINALIZE_FAILED", "atomic backup publication failed"
+            ) from error
         return BackupResult(
             path=final_path,
             backup_id=str(identifier),
@@ -435,7 +545,9 @@ def create_backup(
         raise
     except OSError as error:
         _mark_incomplete(staging)
-        raise BackupError("BACKUP_IO_FAILED", "backup filesystem operation failed") from error
+        raise BackupError(
+            "BACKUP_IO_FAILED", "backup filesystem operation failed"
+        ) from error
 
 
 def verify_backup(path: Path) -> BackupVerification:
@@ -451,7 +563,9 @@ def list_finalized_backups(destination_root: Path) -> tuple[Path, ...]:
     if not root.exists():
         return ()
     if _is_link_or_reparse(root) or not root.is_dir():
-        raise BackupError("BACKUP_DESTINATION_INVALID", "backup destination is not a safe directory")
+        raise BackupError(
+            "BACKUP_DESTINATION_INVALID", "backup destination is not a safe directory"
+        )
     found: list[Path] = []
     for candidate in sorted(root.iterdir(), key=lambda item: item.name.encode("utf-8")):
         if not candidate.is_dir() or _FINAL_NAME.fullmatch(candidate.name) is None:
@@ -465,16 +579,30 @@ def list_finalized_backups(destination_root: Path) -> tuple[Path, ...]:
 
 
 def _validate_request(request: BackupRequest) -> None:
-    if not isinstance(request.database_url, str) or not request.database_url or "\x00" in request.database_url:
-        raise BackupError("DATABASE_URL_INVALID", "authoritative database location is missing or invalid")
+    if (
+        not isinstance(request.database_url, str)
+        or not request.database_url
+        or "\x00" in request.database_url
+    ):
+        raise BackupError(
+            "DATABASE_URL_INVALID",
+            "authoritative database location is missing or invalid",
+        )
     if not request.pg_dump_executable or "\x00" in request.pg_dump_executable:
         raise BackupError("PG_DUMP_EXECUTABLE_INVALID", "pg_dump executable is invalid")
-    if Path(request.pg_dump_executable).name.casefold() not in {"pg_dump", "pg_dump.exe"}:
-        raise BackupError("PG_DUMP_EXECUTABLE_INVALID", "only the pg_dump executable is allowed")
+    if Path(request.pg_dump_executable).name.casefold() not in {
+        "pg_dump",
+        "pg_dump.exe",
+    }:
+        raise BackupError(
+            "PG_DUMP_EXECUTABLE_INVALID", "only the pg_dump executable is allowed"
+        )
     if not isinstance(request.pg_dump_timeout, int) or request.pg_dump_timeout <= 0:
         raise BackupError("PG_DUMP_TIMEOUT_INVALID", "pg_dump timeout must be positive")
     _require_uuid(request.source.instance_id, field_name="instanceId")
-    _require_sha256(request.source.source_locator_digest, field_name="sourceLocatorDigest")
+    _require_sha256(
+        request.source.source_locator_digest, field_name="sourceLocatorDigest"
+    )
     for value, label in (
         (request.source.release, "release"),
         (request.source.deployment_contract, "deploymentContract"),
@@ -486,31 +614,68 @@ def _validate_request(request: BackupRequest) -> None:
     ):
         _validate_non_secret_json(value, label=label)
     if not request.source.release or not request.source.deployment_contract:
-        raise BackupError("BACKUP_SOURCE_IDENTITY_INVALID", "release and deployment identities are required")
-    if not request.source.database_contract or not request.source.configuration_contract:
-        raise BackupError("BACKUP_SOURCE_IDENTITY_INVALID", "database and configuration contracts are required")
+        raise BackupError(
+            "BACKUP_SOURCE_IDENTITY_INVALID",
+            "release and deployment identities are required",
+        )
+    if (
+        not request.source.database_contract
+        or not request.source.configuration_contract
+    ):
+        raise BackupError(
+            "BACKUP_SOURCE_IDENTITY_INVALID",
+            "database and configuration contracts are required",
+        )
     if not request.quiescence.get("method"):
-        raise BackupError("BACKUP_QUIESCENCE_MISSING", "an established quiescence method is required")
+        raise BackupError(
+            "BACKUP_QUIESCENCE_MISSING", "an established quiescence method is required"
+        )
     if len(set(request.source.plugin_sdk_apis)) != len(request.source.plugin_sdk_apis):
-        raise BackupError("BACKUP_PLUGIN_IDENTITY_INVALID", "enabled Plugin SDK identities are duplicated")
-    if not all(isinstance(item, str) and item for item in request.source.plugin_sdk_apis):
-        raise BackupError("BACKUP_PLUGIN_IDENTITY_INVALID", "enabled Plugin SDK identity is invalid")
+        raise BackupError(
+            "BACKUP_PLUGIN_IDENTITY_INVALID",
+            "enabled Plugin SDK identities are duplicated",
+        )
+    if not all(
+        isinstance(item, str) and item for item in request.source.plugin_sdk_apis
+    ):
+        raise BackupError(
+            "BACKUP_PLUGIN_IDENTITY_INVALID", "enabled Plugin SDK identity is invalid"
+        )
     roots = [item.logical_root for item in request.filesystem_sources]
     if len(roots) != len(set(roots)):
-        raise BackupError("BACKUP_SOURCE_DUPLICATE", "filesystem source roots are duplicated")
+        raise BackupError(
+            "BACKUP_SOURCE_DUPLICATE", "filesystem source roots are duplicated"
+        )
     for item in request.filesystem_sources:
         if item.logical_root not in _ALLOWED_FILESYSTEM_ROOTS:
-            raise BackupError("BACKUP_SOURCE_NOT_ALLOWED", "filesystem source is outside the canonical allowlist")
+            raise BackupError(
+                "BACKUP_SOURCE_NOT_ALLOWED",
+                "filesystem source is outside the canonical allowlist",
+            )
     if set(roots) != set(_ALLOWED_FILESYSTEM_ROOTS):
-        raise BackupError("BACKUP_SOURCE_INCOMPLETE", "all canonical filesystem roots must be explicit")
+        raise BackupError(
+            "BACKUP_SOURCE_INCOMPLETE",
+            "all canonical filesystem roots must be explicit",
+        )
     if request.secret is not None:
         if request.secret.mode not in {"envelope", "reference"}:
-            raise BackupError("BACKUP_SECRET_MODE_INVALID", "secret mode must be envelope or reference")
+            raise BackupError(
+                "BACKUP_SECRET_MODE_INVALID",
+                "secret mode must be envelope or reference",
+            )
         _validate_non_secret_json(request.secret.metadata, label="secretMetadata")
         if request.secret.mode == "reference":
-            if request.secret.source is None or request.secret.envelope_factory is not None:
-                raise BackupError("BACKUP_SECRET_MODE_INVALID", "reference mode requires exactly one reference file")
-        elif (request.secret.source is None) == (request.secret.envelope_factory is None):
+            if (
+                request.secret.source is None
+                or request.secret.envelope_factory is not None
+            ):
+                raise BackupError(
+                    "BACKUP_SECRET_MODE_INVALID",
+                    "reference mode requires exactly one reference file",
+                )
+        elif (request.secret.source is None) == (
+            request.secret.envelope_factory is None
+        ):
             raise BackupError(
                 "BACKUP_SECRET_MODE_INVALID",
                 "envelope mode requires exactly one envelope file or post-binding factory",
@@ -519,11 +684,22 @@ def _validate_request(request: BackupRequest) -> None:
         _canonical_relative_path(relative)
         _require_sha256(digest, field_name="localMediaReference")
     for reference in request.r2_references:
-        if reference.backend_type != "r2" or not reference.endpoint_identity or not reference.bucket:
-            raise BackupError("BACKUP_R2_REFERENCE_INVALID", "R2 physical identity is incomplete")
+        if (
+            reference.backend_type != "r2"
+            or not reference.endpoint_identity
+            or not reference.bucket
+        ):
+            raise BackupError(
+                "BACKUP_R2_REFERENCE_INVALID", "R2 physical identity is incomplete"
+            )
         if len(reference.object_keys) != len(set(reference.object_keys)):
-            raise BackupError("BACKUP_R2_REFERENCE_INVALID", "R2 object keys are duplicated")
-        if not all(isinstance(key, str) and key and "\x00" not in key for key in reference.object_keys):
+            raise BackupError(
+                "BACKUP_R2_REFERENCE_INVALID", "R2 object keys are duplicated"
+            )
+        if not all(
+            isinstance(key, str) and key and "\x00" not in key
+            for key in reference.object_keys
+        ):
             raise BackupError("BACKUP_R2_REFERENCE_INVALID", "R2 object key is invalid")
         _validate_non_secret_json(
             {
@@ -535,13 +711,18 @@ def _validate_request(request: BackupRequest) -> None:
             label="r2Reference",
         )
     physical_identities = [
-        (reference.endpoint_identity, reference.bucket) for reference in request.r2_references
+        (reference.endpoint_identity, reference.bucket)
+        for reference in request.r2_references
     ]
     if len(physical_identities) != len(set(physical_identities)):
-        raise BackupError("BACKUP_R2_REFERENCE_INVALID", "R2 physical identities are duplicated")
+        raise BackupError(
+            "BACKUP_R2_REFERENCE_INVALID", "R2 physical identities are duplicated"
+        )
 
 
-def _preflight_sources(request: BackupRequest) -> Mapping[str, tuple[tuple[str, Path, int], ...]]:
+def _preflight_sources(
+    request: BackupRequest,
+) -> Mapping[str, tuple[tuple[str, Path, int], ...]]:
     destination = _absolute_without_link(request.destination_root)
     source_files: dict[str, tuple[tuple[str, Path, int], ...]] = {}
     identities: set[tuple[int, int]] = set()
@@ -549,7 +730,9 @@ def _preflight_sources(request: BackupRequest) -> Mapping[str, tuple[tuple[str, 
         source = Path(filesystem_source.source)
         absolute = _safe_source_directory(source)
         if _paths_overlap(destination, absolute):
-            raise BackupError("BACKUP_SOURCE_OVERLAP", "backup destination overlaps a source root")
+            raise BackupError(
+                "BACKUP_SOURCE_OVERLAP", "backup destination overlaps a source root"
+            )
         entries = _enumerate_source_files(absolute)
         if filesystem_source.logical_root == "filesystem/private" and entries:
             raise BackupError(
@@ -563,29 +746,41 @@ def _preflight_sources(request: BackupRequest) -> Mapping[str, tuple[tuple[str, 
             file_stat = file_path.lstat()
             identity = (file_stat.st_dev, file_stat.st_ino)
             if identity in identities:
-                raise BackupError("BACKUP_UNSAFE_SOURCE", "hard-linked or repeated source member is not allowed")
+                raise BackupError(
+                    "BACKUP_UNSAFE_SOURCE",
+                    "hard-linked or repeated source member is not allowed",
+                )
             identities.add(identity)
         source_files[filesystem_source.logical_root] = entries
     if request.secret is not None and request.secret.source is not None:
         secret_path = _safe_source_file(Path(request.secret.source))
         if _paths_overlap(destination, secret_path):
-            raise BackupError("BACKUP_SOURCE_OVERLAP", "backup destination overlaps the secret source")
+            raise BackupError(
+                "BACKUP_SOURCE_OVERLAP", "backup destination overlaps the secret source"
+            )
         secret_stat = secret_path.lstat()
         identity = (secret_stat.st_dev, secret_stat.st_ino)
         if identity in identities or secret_stat.st_nlink != 1:
-            raise BackupError("BACKUP_UNSAFE_SOURCE", "secret member must not be hard linked")
+            raise BackupError(
+                "BACKUP_UNSAFE_SOURCE", "secret member must not be hard linked"
+            )
         if request.secret.mode == "reference":
             _validate_secret_reference(secret_path)
     media_entries = {
-        relative: path
-        for relative, path, _ in source_files.get("filesystem/media", ())
+        relative: path for relative, path, _ in source_files.get("filesystem/media", ())
     }
     for relative, expected_digest in request.local_media_references.items():
         source_path = media_entries.get(relative)
         if source_path is None:
-            raise BackupError("BACKUP_MEDIA_REFERENCE_MISSING", "database-referenced local media is missing")
+            raise BackupError(
+                "BACKUP_MEDIA_REFERENCE_MISSING",
+                "database-referenced local media is missing",
+            )
         if f"sha256:{_sha256_file(source_path)}" != expected_digest:
-            raise BackupError("BACKUP_MEDIA_REFERENCE_MISMATCH", "database-referenced local media failed identity verification")
+            raise BackupError(
+                "BACKUP_MEDIA_REFERENCE_MISMATCH",
+                "database-referenced local media failed identity verification",
+            )
     return source_files
 
 
@@ -604,10 +799,14 @@ def _create_database_member(
             timeout=request.pg_dump_timeout,
         )
         if not raw.is_file() or _is_link_or_reparse(raw):
-            raise BackupError("PG_DUMP_MISSING", "logical database dump was not produced")
+            raise BackupError(
+                "PG_DUMP_MISSING", "logical database dump was not produced"
+            )
         raw_stat = raw.lstat()
         if not stat.S_ISREG(raw_stat.st_mode) or raw_stat.st_nlink != 1:
-            raise BackupError("PG_DUMP_UNSAFE", "logical database dump staging member is unsafe")
+            raise BackupError(
+                "PG_DUMP_UNSAFE", "logical database dump staging member is unsafe"
+            )
         if raw_stat.st_size == 0:
             raise BackupError("PG_DUMP_EMPTY", "logical database dump is empty")
         uncompressed_digest = _sha256_file(raw)
@@ -615,7 +814,10 @@ def _create_database_member(
         try:
             with os.fdopen(descriptor, "wb") as target:
                 descriptor = -1
-                with raw.open("rb") as source, gzip.GzipFile(fileobj=target, mode="wb", mtime=0) as gzip_stream:
+                with (
+                    raw.open("rb") as source,
+                    gzip.GzipFile(fileobj=target, mode="wb", mtime=0) as gzip_stream,
+                ):
                     for chunk in iter(lambda: source.read(1024 * 1024), b""):
                         gzip_stream.write(chunk)
                 target.flush()
@@ -627,15 +829,24 @@ def _create_database_member(
         compressed_bytes = compressed.stat().st_size
         compressed_digest = _sha256_file(compressed)
         server_major = request.source.database_contract.get("serverMajor")
-        if isinstance(server_major, bool) or not isinstance(server_major, int) or server_major <= 0:
-            raise BackupError("BACKUP_DATABASE_METADATA_INVALID", "PostgreSQL server major is required")
+        if (
+            isinstance(server_major, bool)
+            or not isinstance(server_major, int)
+            or server_major <= 0
+        ):
+            raise BackupError(
+                "BACKUP_DATABASE_METADATA_INVALID",
+                "PostgreSQL server major is required",
+            )
         if (
             not isinstance(tool_version, str)
             or not tool_version.startswith("pg_dump ")
             or len(tool_version) > 200
             or any(character in tool_version for character in "\r\n\x00")
         ):
-            raise BackupError("PG_DUMP_VERSION_INVALID", "pg_dump returned invalid version metadata")
+            raise BackupError(
+                "PG_DUMP_VERSION_INVALID", "pg_dump returned invalid version metadata"
+            )
         member = {
             "path": DATABASE_MEMBER,
             "sha256": f"sha256:{compressed_digest}",
@@ -668,10 +879,14 @@ def _copy_payload_members(
     staging: Path,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for filesystem_source in sorted(request.filesystem_sources, key=lambda item: item.logical_root.encode("utf-8")):
+    for filesystem_source in sorted(
+        request.filesystem_sources, key=lambda item: item.logical_root.encode("utf-8")
+    ):
         root_target = staging / PurePosixPath(filesystem_source.logical_root)
         _make_private_directory(root_target)
-        for relative, source, source_mode in source_files[filesystem_source.logical_root]:
+        for relative, source, source_mode in source_files[
+            filesystem_source.logical_root
+        ]:
             logical_path = f"{filesystem_source.logical_root}/{relative}"
             target = staging / PurePosixPath(logical_path)
             _make_private_directory(target.parent)
@@ -708,7 +923,10 @@ def _copy_secret_member(
                 "BACKUP_SECRET_ENVELOPE_FAILED", "secret envelope creation failed"
             ) from None
         if not isinstance(envelope_bytes, bytes):
-            raise BackupError("BACKUP_SECRET_ENVELOPE_INVALID", "secret envelope factory returned invalid bytes")
+            raise BackupError(
+                "BACKUP_SECRET_ENVELOPE_INVALID",
+                "secret envelope factory returned invalid bytes",
+            )
         _validate_envelope_binding(envelope_bytes, binding)
         _write_private_bytes(target, envelope_bytes)
     else:
@@ -740,12 +958,18 @@ def _build_media_metadata(
         if str(record["path"]).startswith(prefix)
     }
     referenced = []
-    for path, digest in sorted(request.local_media_references.items(), key=lambda item: item[0].encode("utf-8")):
+    for path, digest in sorted(
+        request.local_media_references.items(), key=lambda item: item[0].encode("utf-8")
+    ):
         record = local_records[path]
-        referenced.append({"path": path, "sha256": digest, "sizeBytes": record["sizeBytes"]})
+        referenced.append(
+            {"path": path, "sha256": digest, "sizeBytes": record["sizeBytes"]}
+        )
     preserved = [
         {"path": path, "sha256": record["sha256"], "sizeBytes": record["sizeBytes"]}
-        for path, record in sorted(local_records.items(), key=lambda item: item[0].encode("utf-8"))
+        for path, record in sorted(
+            local_records.items(), key=lambda item: item[0].encode("utf-8")
+        )
         if path not in request.local_media_references
     ]
     external = [
@@ -753,13 +977,18 @@ def _build_media_metadata(
             "backendType": item.backend_type,
             "endpointIdentity": item.endpoint_identity,
             "bucket": item.bucket,
-            "objectKeys": sorted(item.object_keys, key=lambda value: value.encode("utf-8")),
+            "objectKeys": sorted(
+                item.object_keys, key=lambda value: value.encode("utf-8")
+            ),
             "coverage": "reference-dependent",
             "remoteBytesCopied": False,
         }
         for item in sorted(
             request.r2_references,
-            key=lambda value: (value.endpoint_identity.encode("utf-8"), value.bucket.encode("utf-8")),
+            key=lambda value: (
+                value.endpoint_identity.encode("utf-8"),
+                value.bucket.encode("utf-8"),
+            ),
         )
     ]
     return {
@@ -782,7 +1011,9 @@ def _verify_media_metadata(
         or set(media) != {"local", "external", "unknownOrphanPolicy"}
         or media.get("unknownOrphanPolicy") != "PRESERVE_NEVER_DELETE"
     ):
-        raise BackupError("BACKUP_MANIFEST_INVALID", "media coverage metadata is invalid")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "media coverage metadata is invalid"
+        )
     local = media.get("local")
     external = media.get("external")
     if (
@@ -791,7 +1022,9 @@ def _verify_media_metadata(
         or local.get("mode") != "captured"
         or not isinstance(external, list)
     ):
-        raise BackupError("BACKUP_MANIFEST_INVALID", "media coverage metadata is invalid")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "media coverage metadata is invalid"
+        )
     referenced = local.get("referenced")
     preserved = local.get("preservedUnreferenced")
     if not isinstance(referenced, list) or not isinstance(preserved, list):
@@ -804,17 +1037,31 @@ def _verify_media_metadata(
     }
     declared: set[str] = set()
     for raw_record in [*referenced, *preserved]:
-        if not isinstance(raw_record, dict) or set(raw_record) != {"path", "sha256", "sizeBytes"}:
-            raise BackupError("BACKUP_MANIFEST_INVALID", "local media record is invalid")
+        if not isinstance(raw_record, dict) or set(raw_record) != {
+            "path",
+            "sha256",
+            "sizeBytes",
+        }:
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "local media record is invalid"
+            )
         path = raw_record.get("path")
         if not isinstance(path, str) or path in declared or path not in local_members:
-            raise BackupError("BACKUP_MANIFEST_INVALID", "local media record is invalid")
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "local media record is invalid"
+            )
         declared.add(path)
         member = local_members[path]
-        if raw_record.get("sha256") != member.get("sha256") or raw_record.get("sizeBytes") != member.get("sizeBytes"):
-            raise BackupError("BACKUP_MANIFEST_INVALID", "local media identity is invalid")
+        if raw_record.get("sha256") != member.get("sha256") or raw_record.get(
+            "sizeBytes"
+        ) != member.get("sizeBytes"):
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "local media identity is invalid"
+            )
     if declared != set(local_members):
-        raise BackupError("BACKUP_MANIFEST_INVALID", "local media coverage is incomplete")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "local media coverage is incomplete"
+        )
     physical_identities: set[tuple[str, str]] = set()
     for reference in external:
         if not isinstance(reference, dict) or set(reference) != {
@@ -825,7 +1072,9 @@ def _verify_media_metadata(
             "coverage",
             "remoteBytesCopied",
         }:
-            raise BackupError("BACKUP_MANIFEST_INVALID", "external media reference is invalid")
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "external media reference is invalid"
+            )
         if (
             reference.get("backendType") != "r2"
             or not isinstance(reference.get("endpointIdentity"), str)
@@ -835,18 +1084,28 @@ def _verify_media_metadata(
             or reference.get("coverage") != "reference-dependent"
             or reference.get("remoteBytesCopied") is not False
         ):
-            raise BackupError("BACKUP_MANIFEST_INVALID", "external media reference is invalid")
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "external media reference is invalid"
+            )
         identity = (reference["endpointIdentity"], reference["bucket"])
         if identity in physical_identities:
-            raise BackupError("BACKUP_MANIFEST_INVALID", "external media identity is duplicated")
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "external media identity is duplicated"
+            )
         physical_identities.add(identity)
         keys = reference.get("objectKeys")
         if not isinstance(keys, list) or not all(
             isinstance(key, str) and key and "\x00" not in key for key in keys
         ):
-            raise BackupError("BACKUP_MANIFEST_INVALID", "external media object keys are invalid")
-        if keys != sorted(keys, key=lambda value: value.encode("utf-8")) or len(keys) != len(set(keys)):
-            raise BackupError("BACKUP_MANIFEST_INVALID", "external media object keys are invalid")
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "external media object keys are invalid"
+            )
+        if keys != sorted(keys, key=lambda value: value.encode("utf-8")) or len(
+            keys
+        ) != len(set(keys)):
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "external media object keys are invalid"
+            )
 
 
 def _build_manifest(
@@ -865,8 +1124,15 @@ def _build_manifest(
     artifact_binding_digest: str,
     lifecycle: str,
 ) -> dict[str, Any]:
-    roots = sorted((source.logical_root for source in request.filesystem_sources), key=lambda item: item.encode("utf-8"))
-    plugin_records = [record for record in member_records if str(record["path"]).startswith("filesystem/plugins/")]
+    roots = sorted(
+        (source.logical_root for source in request.filesystem_sources),
+        key=lambda item: item.encode("utf-8"),
+    )
+    plugin_records = [
+        record
+        for record in member_records
+        if str(record["path"]).startswith("filesystem/plugins/")
+    ]
     included = ["database"]
     included.extend(roots)
     if request.secret is not None:
@@ -907,7 +1173,9 @@ def _build_manifest(
             )
         },
         "filesystem": {
-            "allowlist": sorted(_ALLOWED_FILESYSTEM_ROOTS, key=lambda item: item.encode("utf-8")),
+            "allowlist": sorted(
+                _ALLOWED_FILESYSTEM_ROOTS, key=lambda item: item.encode("utf-8")
+            ),
             "includedRoots": roots,
             "members": list(member_records),
         },
@@ -919,8 +1187,12 @@ def _build_manifest(
         "media": media,
         "secrets": {
             "mode": request.secret.mode if request.secret is not None else "none",
-            "path": _secret_member_path(request.secret.mode) if request.secret is not None else None,
-            "metadata": dict(request.secret.metadata) if request.secret is not None else {},
+            "path": _secret_member_path(request.secret.mode)
+            if request.secret is not None
+            else None,
+            "metadata": dict(request.secret.metadata)
+            if request.secret is not None
+            else {},
             "plaintextIncluded": False,
         },
         "includedComponents": sorted(included, key=lambda item: item.encode("utf-8")),
@@ -970,13 +1242,19 @@ def _verify_tree(
         raise BackupError("BACKUP_ROOT_INVALID", "backup root is not a safe directory")
     _require_private_mode(root, directory=True)
     if root.name.startswith(STAGING_PREFIX) and not allow_staging:
-        raise BackupError("BACKUP_NOT_FINALIZED", "staging artifacts are not published backups")
+        raise BackupError(
+            "BACKUP_NOT_FINALIZED", "staging artifacts are not published backups"
+        )
     final_match = _FINAL_NAME.fullmatch(root.name)
     if not allow_staging and final_match is None:
-        raise BackupError("BACKUP_NAME_INVALID", "published backup directory name is invalid")
+        raise BackupError(
+            "BACKUP_NAME_INVALID", "published backup directory name is invalid"
+        )
     manifest_path = root / MANIFEST_NAME
     if _is_link_or_reparse(manifest_path) or not manifest_path.is_file():
-        raise BackupError("BACKUP_MANIFEST_INVALID", "backup manifest is missing or unsafe")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "backup manifest is missing or unsafe"
+        )
     manifest_bytes = _read_regular_file(manifest_path, maximum=_MAX_MANIFEST_BYTES)
     manifest = _strict_json_object(manifest_bytes, code="BACKUP_MANIFEST_INVALID")
     format_name = manifest.get("format")
@@ -985,15 +1263,21 @@ def _verify_tree(
         isinstance(format_name, str)
         and isinstance(schema_version, int)
         and not isinstance(schema_version, bool)
-        and (
-        format_name != FORMAT or schema_version != SCHEMA_VERSION
-        )
+        and (format_name != FORMAT or schema_version != SCHEMA_VERSION)
     ):
         raise UnsupportedBackupFormat()
-    if format_name != FORMAT or schema_version != SCHEMA_VERSION or isinstance(schema_version, bool):
-        raise BackupError("BACKUP_MANIFEST_INVALID", "backup format identity is malformed")
+    if (
+        format_name != FORMAT
+        or schema_version != SCHEMA_VERSION
+        or isinstance(schema_version, bool)
+    ):
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "backup format identity is malformed"
+        )
     if canonical_json_bytes(manifest) + b"\n" != manifest_bytes:
-        raise BackupError("BACKUP_MANIFEST_INVALID", "backup manifest is not canonical JSON")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "backup manifest is not canonical JSON"
+        )
     required = {
         "backupId",
         "startedAt",
@@ -1020,29 +1304,49 @@ def _verify_tree(
         "restorePrerequisites",
     }
     if set(manifest) != required | {"format", "schemaVersion"}:
-        raise BackupError("BACKUP_MANIFEST_INVALID", "backup manifest fields are invalid")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "backup manifest fields are invalid"
+        )
     if manifest["lifecycle"] != expected_lifecycle:
         raise BackupError("BACKUP_NOT_FINALIZED", "backup lifecycle is not finalized")
     backup_id = _require_uuid(manifest["backupId"], field_name="backupId")
     if final_match is not None:
         if final_match.group("id") != backup_id:
-            raise BackupError("BACKUP_IDENTITY_MISMATCH", "backup directory and manifest identities differ")
-        expected_stamp = _parse_utc(manifest["startedAt"], field_name="startedAt").strftime("%Y%m%dT%H%M%SZ")
+            raise BackupError(
+                "BACKUP_IDENTITY_MISMATCH",
+                "backup directory and manifest identities differ",
+            )
+        expected_stamp = _parse_utc(
+            manifest["startedAt"], field_name="startedAt"
+        ).strftime("%Y%m%dT%H%M%SZ")
         if final_match.group("stamp") != expected_stamp:
-            raise BackupError("BACKUP_IDENTITY_MISMATCH", "backup directory timestamp and manifest differ")
+            raise BackupError(
+                "BACKUP_IDENTITY_MISMATCH",
+                "backup directory timestamp and manifest differ",
+            )
     _parse_utc(manifest["completedAt"], field_name="completedAt")
     if manifest.get("createdAt") != manifest["completedAt"]:
-        raise BackupError("BACKUP_MANIFEST_INVALID", "createdAt and completedAt are inconsistent")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "createdAt and completedAt are inconsistent"
+        )
     if manifest["excludedComponents"] != list(_EXCLUDED_COMPONENTS):
-        raise BackupError("BACKUP_MANIFEST_INVALID", "backup exclusions do not match Format v1")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "backup exclusions do not match Format v1"
+        )
     if manifest["memoryIntegrity"] != ["MI-1", "MI-2", "MI-3", "MI-4", "MI-5"]:
-        raise BackupError("BACKUP_MANIFEST_INVALID", "memory integrity declarations are incomplete")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "memory integrity declarations are incomplete"
+        )
     binding_record = manifest["artifactBindingRecord"]
     if not isinstance(binding_record, dict):
-        raise BackupError("BACKUP_MANIFEST_INVALID", "artifact binding record is invalid")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "artifact binding record is invalid"
+        )
     expected_binding = sha256_identity(canonical_json_bytes(binding_record))
     if manifest["artifactBindingDigest"] != expected_binding:
-        raise BackupError("BACKUP_BINDING_MISMATCH", "artifact binding digest is invalid")
+        raise BackupError(
+            "BACKUP_BINDING_MISMATCH", "artifact binding digest is invalid"
+        )
     for value, label in (
         (manifest["source"], "source"),
         (manifest["producer"], "producer"),
@@ -1062,11 +1366,15 @@ def _verify_tree(
     }:
         raise BackupError("BACKUP_MANIFEST_INVALID", "source identity is invalid")
     _require_uuid(source_metadata.get("instanceId"), field_name="instanceId")
-    _require_sha256(source_metadata.get("sourceLocatorDigest"), field_name="sourceLocatorDigest")
+    _require_sha256(
+        source_metadata.get("sourceLocatorDigest"), field_name="sourceLocatorDigest"
+    )
 
     checksums_path = root / CHECKSUMS_NAME
     if _is_link_or_reparse(checksums_path) or not checksums_path.is_file():
-        raise BackupError("BACKUP_CHECKSUMS_INVALID", "checksum set is missing or unsafe")
+        raise BackupError(
+            "BACKUP_CHECKSUMS_INVALID", "checksum set is missing or unsafe"
+        )
     checksum_bytes = _read_regular_file(checksums_path, maximum=_MAX_CHECKSUM_BYTES)
     checksum_set_digest = sha256_identity(checksum_bytes)
     checksums_metadata = manifest["checksums"]
@@ -1080,24 +1388,44 @@ def _verify_tree(
         raise BackupError("BACKUP_CHECKSUMS_INVALID", "checksum set digest is invalid")
     expected_members = _parse_checksum_bytes(checksum_bytes)
     if checksums_metadata.get("memberCount") != len(expected_members):
-        raise BackupError("BACKUP_CHECKSUMS_INVALID", "checksum member count is invalid")
-    members = manifest.get("filesystem", {}).get("members") if isinstance(manifest.get("filesystem"), dict) else None
+        raise BackupError(
+            "BACKUP_CHECKSUMS_INVALID", "checksum member count is invalid"
+        )
+    members = (
+        manifest.get("filesystem", {}).get("members")
+        if isinstance(manifest.get("filesystem"), dict)
+        else None
+    )
     if not isinstance(members, list) or len(members) != len(expected_members):
-        raise BackupError("BACKUP_MANIFEST_INVALID", "manifest member inventory is invalid")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "manifest member inventory is invalid"
+        )
     manifest_members: dict[str, Mapping[str, Any]] = {}
     for record in members:
         if not isinstance(record, dict) or not isinstance(record.get("path"), str):
-            raise BackupError("BACKUP_MANIFEST_INVALID", "manifest member record is invalid")
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "manifest member record is invalid"
+            )
         member_path = _canonical_relative_path(record["path"])
         _validate_artifact_member_path(member_path)
         size_bytes = record.get("sizeBytes")
-        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 0:
-            raise BackupError("BACKUP_MANIFEST_INVALID", "manifest member size is invalid")
+        if (
+            isinstance(size_bytes, bool)
+            or not isinstance(size_bytes, int)
+            or size_bytes < 0
+        ):
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "manifest member size is invalid"
+            )
         if member_path in manifest_members:
-            raise BackupError("BACKUP_MANIFEST_INVALID", "manifest member path is duplicated")
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "manifest member path is duplicated"
+            )
         manifest_members[member_path] = record
     if set(manifest_members) != set(expected_members):
-        raise BackupError("BACKUP_MANIFEST_INVALID", "manifest and checksum inventories differ")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "manifest and checksum inventories differ"
+        )
     expected_binding_record = {
         "format": FORMAT,
         "schemaVersion": SCHEMA_VERSION,
@@ -1107,13 +1435,19 @@ def _verify_tree(
         "database": manifest["database"],
         "payloadMembers": [
             manifest_members[path]
-            for path in sorted(manifest_members, key=lambda value: value.encode("utf-8"))
+            for path in sorted(
+                manifest_members, key=lambda value: value.encode("utf-8")
+            )
             if not path.startswith("secrets/")
         ],
         "media": manifest["media"],
         "secretDisposition": {
-            "mode": manifest["secrets"].get("mode") if isinstance(manifest["secrets"], dict) else None,
-            "path": manifest["secrets"].get("path") if isinstance(manifest["secrets"], dict) else None,
+            "mode": manifest["secrets"].get("mode")
+            if isinstance(manifest["secrets"], dict)
+            else None,
+            "path": manifest["secrets"].get("path")
+            if isinstance(manifest["secrets"], dict)
+            else None,
             "profileIdentity": _secret_profile_identity_from_mode(
                 manifest["secrets"].get("mode")
                 if isinstance(manifest["secrets"], dict)
@@ -1122,9 +1456,13 @@ def _verify_tree(
         },
     }
     if binding_record != expected_binding_record:
-        raise BackupError("BACKUP_BINDING_MISMATCH", "artifact binding record and manifest differ")
+        raise BackupError(
+            "BACKUP_BINDING_MISMATCH", "artifact binding record and manifest differ"
+        )
     filesystem = manifest["filesystem"]
-    expected_roots = sorted(_ALLOWED_FILESYSTEM_ROOTS, key=lambda item: item.encode("utf-8"))
+    expected_roots = sorted(
+        _ALLOWED_FILESYSTEM_ROOTS, key=lambda item: item.encode("utf-8")
+    )
     if (
         not isinstance(filesystem, dict)
         or filesystem.get("allowlist") != expected_roots
@@ -1137,16 +1475,27 @@ def _verify_tree(
     if actual_members != expected_actual:
         missing = set(expected_members) - actual_members
         if missing:
-            raise BackupError("BACKUP_MEMBER_MISSING", "a required backup member is missing")
-        raise BackupError("BACKUP_MEMBER_UNEXPECTED", "backup contains an unexpected member")
+            raise BackupError(
+                "BACKUP_MEMBER_MISSING", "a required backup member is missing"
+            )
+        raise BackupError(
+            "BACKUP_MEMBER_UNEXPECTED", "backup contains an unexpected member"
+        )
     for relative, expected_digest in expected_members.items():
         member_path = root / PurePosixPath(relative)
         actual_digest = _sha256_file(member_path)
         if actual_digest != expected_digest:
-            raise BackupError("BACKUP_CHECKSUM_MISMATCH", "backup member checksum failed")
+            raise BackupError(
+                "BACKUP_CHECKSUM_MISMATCH", "backup member checksum failed"
+            )
         record = manifest_members[relative]
-        if record.get("sha256") != f"sha256:{expected_digest}" or record.get("sizeBytes") != member_path.stat().st_size:
-            raise BackupError("BACKUP_MANIFEST_INVALID", "backup member metadata is inconsistent")
+        if (
+            record.get("sha256") != f"sha256:{expected_digest}"
+            or record.get("sizeBytes") != member_path.stat().st_size
+        ):
+            raise BackupError(
+                "BACKUP_MANIFEST_INVALID", "backup member metadata is inconsistent"
+            )
 
     database = manifest["database"]
     if (
@@ -1164,7 +1513,9 @@ def _verify_tree(
         }
         or database.get("path") != DATABASE_MEMBER
     ):
-        raise BackupError("BACKUP_DATABASE_METADATA_INVALID", "database metadata is invalid")
+        raise BackupError(
+            "BACKUP_DATABASE_METADATA_INVALID", "database metadata is invalid"
+        )
     profile = database.get("dumpProfile")
     if (
         not isinstance(profile, dict)
@@ -1174,14 +1525,18 @@ def _verify_tree(
         or profile.get("compression") != "gzip"
         or profile.get("gzipMtime") != 0
     ):
-        raise BackupError("BACKUP_DATABASE_METADATA_INVALID", "database dump profile is not Format v1")
+        raise BackupError(
+            "BACKUP_DATABASE_METADATA_INVALID", "database dump profile is not Format v1"
+        )
     if (
         isinstance(database.get("serverMajor"), bool)
         or not isinstance(database.get("serverMajor"), int)
         or not isinstance(database.get("toolVersion"), str)
         or not database["toolVersion"].startswith("pg_dump ")
     ):
-        raise BackupError("BACKUP_DATABASE_METADATA_INVALID", "database version metadata is invalid")
+        raise BackupError(
+            "BACKUP_DATABASE_METADATA_INVALID", "database version metadata is invalid"
+        )
     database_path = root / DATABASE_MEMBER
     uncompressed_digest = hashlib.sha256()
     uncompressed_bytes = 0
@@ -1191,13 +1546,28 @@ def _verify_tree(
                 uncompressed_digest.update(chunk)
                 uncompressed_bytes += len(chunk)
     except (OSError, EOFError) as error:
-        raise BackupError("BACKUP_DATABASE_GZIP_INVALID", "database gzip stream is invalid") from error
+        raise BackupError(
+            "BACKUP_DATABASE_GZIP_INVALID", "database gzip stream is invalid"
+        ) from error
     if uncompressed_bytes == 0:
         raise BackupError("BACKUP_DATABASE_EMPTY", "database dump is empty")
-    if database.get("uncompressedBytes") != uncompressed_bytes or database.get("uncompressedSha256") != f"sha256:{uncompressed_digest.hexdigest()}":
-        raise BackupError("BACKUP_DATABASE_METADATA_INVALID", "database uncompressed identity is inconsistent")
-    if database.get("compressedBytes") != database_path.stat().st_size or database.get("compressedSha256") != f"sha256:{_sha256_file(database_path)}":
-        raise BackupError("BACKUP_DATABASE_METADATA_INVALID", "database compressed identity is inconsistent")
+    if (
+        database.get("uncompressedBytes") != uncompressed_bytes
+        or database.get("uncompressedSha256")
+        != f"sha256:{uncompressed_digest.hexdigest()}"
+    ):
+        raise BackupError(
+            "BACKUP_DATABASE_METADATA_INVALID",
+            "database uncompressed identity is inconsistent",
+        )
+    if (
+        database.get("compressedBytes") != database_path.stat().st_size
+        or database.get("compressedSha256") != f"sha256:{_sha256_file(database_path)}"
+    ):
+        raise BackupError(
+            "BACKUP_DATABASE_METADATA_INVALID",
+            "database compressed identity is inconsistent",
+        )
 
     secrets = manifest["secrets"]
     if (
@@ -1207,16 +1577,29 @@ def _verify_tree(
     ):
         raise BackupError("BACKUP_MANIFEST_INVALID", "secret disposition is invalid")
     secret_paths = {path for path in expected_members if path.startswith("secrets/")}
-    expected_secret_path = None if secrets["mode"] == "none" else _secret_member_path(secrets["mode"])
-    if secret_paths != ({expected_secret_path} if expected_secret_path is not None else set()):
-        raise BackupError("BACKUP_MANIFEST_INVALID", "secret member and disposition differ")
-    if secrets.get("path") != expected_secret_path or secrets.get("plaintextIncluded") is not False:
-        raise BackupError("BACKUP_MANIFEST_INVALID", "secret member metadata is invalid")
+    expected_secret_path = (
+        None if secrets["mode"] == "none" else _secret_member_path(secrets["mode"])
+    )
+    if secret_paths != (
+        {expected_secret_path} if expected_secret_path is not None else set()
+    ):
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "secret member and disposition differ"
+        )
+    if (
+        secrets.get("path") != expected_secret_path
+        or secrets.get("plaintextIncluded") is not False
+    ):
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "secret member metadata is invalid"
+        )
     if secrets["mode"] == "reference":
         _validate_secret_reference(root / str(expected_secret_path))
     elif secrets["mode"] == "envelope":
         _validate_envelope_binding(
-            _read_regular_file(root / str(expected_secret_path), maximum=_MAX_MANIFEST_BYTES),
+            _read_regular_file(
+                root / str(expected_secret_path), maximum=_MAX_MANIFEST_BYTES
+            ),
             SecretEnvelopeBinding(
                 artifact_id=backup_id,
                 artifact_binding_record=binding_record,
@@ -1227,8 +1610,12 @@ def _verify_tree(
     expected_included = ["database", *expected_roots]
     if secrets["mode"] != "none":
         expected_included.append(f"secrets/{secrets['mode']}")
-    if manifest["includedComponents"] != sorted(expected_included, key=lambda item: item.encode("utf-8")):
-        raise BackupError("BACKUP_MANIFEST_INVALID", "included component inventory is invalid")
+    if manifest["includedComponents"] != sorted(
+        expected_included, key=lambda item: item.encode("utf-8")
+    ):
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "included component inventory is invalid"
+        )
     plugins = manifest["plugins"]
     expected_plugin_records = [
         manifest_members[path]
@@ -1241,7 +1628,9 @@ def _verify_tree(
         or plugins.get("durableAndCasMembers") != expected_plugin_records
         or plugins.get("runtimeIncluded") is not False
     ):
-        raise BackupError("BACKUP_MANIFEST_INVALID", "plugin durable metadata is invalid")
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "plugin durable metadata is invalid"
+        )
     _verify_media_metadata(manifest["media"], manifest_members)
     verification_metadata = manifest["verification"]
     if expected_lifecycle == "FINALIZED" and (
@@ -1273,7 +1662,10 @@ def _verify_tree(
         },
     }
     if compatibility != expected_compatibility:
-        raise BackupError("BACKUP_COMPATIBILITY_INVALID", "canonical compatibility metadata is inconsistent")
+        raise BackupError(
+            "BACKUP_COMPATIBILITY_INVALID",
+            "canonical compatibility metadata is inconsistent",
+        )
     manifest_digest = sha256_identity(manifest_bytes)
     compatibility_artifact = {
         "format": FORMAT,
@@ -1297,29 +1689,42 @@ def _parse_checksum_bytes(data: bytes) -> dict[str, str]:
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
-        raise BackupError("BACKUP_CHECKSUMS_INVALID", "checksum set is not UTF-8") from error
+        raise BackupError(
+            "BACKUP_CHECKSUMS_INVALID", "checksum set is not UTF-8"
+        ) from error
     if not text.endswith("\n") or "\r" in text:
-        raise BackupError("BACKUP_CHECKSUMS_INVALID", "checksum set must use canonical LF records")
+        raise BackupError(
+            "BACKUP_CHECKSUMS_INVALID", "checksum set must use canonical LF records"
+        )
     records: dict[str, str] = {}
     normalized: set[str] = set()
     previous: bytes | None = None
     for line in text.splitlines():
         match = _CHECKSUM_LINE.fullmatch(line)
         if match is None:
-            raise BackupError("BACKUP_CHECKSUMS_INVALID", "checksum record is malformed")
+            raise BackupError(
+                "BACKUP_CHECKSUMS_INVALID", "checksum record is malformed"
+            )
         relative = _canonical_relative_path(match.group("path"))
         _validate_artifact_member_path(relative)
         ordering = relative.encode("utf-8")
         if previous is not None and ordering <= previous:
-            raise BackupError("BACKUP_CHECKSUMS_INVALID", "checksum records are not uniquely sorted")
+            raise BackupError(
+                "BACKUP_CHECKSUMS_INVALID", "checksum records are not uniquely sorted"
+            )
         collision = unicodedata.normalize("NFC", relative).casefold()
         if collision in normalized:
-            raise BackupError("BACKUP_CHECKSUMS_INVALID", "checksum paths have a normalization collision")
+            raise BackupError(
+                "BACKUP_CHECKSUMS_INVALID",
+                "checksum paths have a normalization collision",
+            )
         normalized.add(collision)
         records[relative] = match.group("digest")
         previous = ordering
         if len(records) > _MAX_MEMBER_COUNT:
-            raise BackupError("BACKUP_CHECKSUMS_INVALID", "checksum member count exceeds the v1 bound")
+            raise BackupError(
+                "BACKUP_CHECKSUMS_INVALID", "checksum member count exceeds the v1 bound"
+            )
     if not records:
         raise BackupError("BACKUP_CHECKSUMS_INVALID", "checksum set is empty")
     return records
@@ -1340,21 +1745,31 @@ def _enumerate_artifact_files(root: Path) -> set[str]:
     normalized: set[str] = set()
     for item in root.rglob("*"):
         if _is_link_or_reparse(item):
-            raise BackupError("BACKUP_UNSAFE_MEMBER", "backup contains a link or reparse point")
+            raise BackupError(
+                "BACKUP_UNSAFE_MEMBER", "backup contains a link or reparse point"
+            )
         relative = item.relative_to(root).as_posix()
         if item.is_dir():
             _require_private_mode(item, directory=True)
             if not _artifact_directory_allowed(relative):
-                raise BackupError("BACKUP_MEMBER_UNEXPECTED", "backup contains an unexpected directory")
+                raise BackupError(
+                    "BACKUP_MEMBER_UNEXPECTED",
+                    "backup contains an unexpected directory",
+                )
             continue
         item_stat = item.lstat()
         if not stat.S_ISREG(item_stat.st_mode) or item_stat.st_nlink != 1:
-            raise BackupError("BACKUP_UNSAFE_MEMBER", "backup contains a non-regular or hard-linked member")
+            raise BackupError(
+                "BACKUP_UNSAFE_MEMBER",
+                "backup contains a non-regular or hard-linked member",
+            )
         _require_private_mode(item, directory=False)
         canonical = _canonical_relative_path(relative)
         collision = unicodedata.normalize("NFC", canonical).casefold()
         if collision in normalized:
-            raise BackupError("BACKUP_UNSAFE_MEMBER", "backup paths have a normalization collision")
+            raise BackupError(
+                "BACKUP_UNSAFE_MEMBER", "backup paths have a normalization collision"
+            )
         normalized.add(collision)
         found.add(canonical)
     return found
@@ -1363,19 +1778,29 @@ def _enumerate_artifact_files(root: Path) -> set[str]:
 def _enumerate_source_files(root: Path) -> tuple[tuple[str, Path, int], ...]:
     result = []
     normalized: set[str] = set()
-    for item in sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix().encode("utf-8")):
+    for item in sorted(
+        root.rglob("*"),
+        key=lambda path: path.relative_to(root).as_posix().encode("utf-8"),
+    ):
         if _is_link_or_reparse(item):
-            raise BackupError("BACKUP_UNSAFE_SOURCE", "source contains a link or reparse point")
+            raise BackupError(
+                "BACKUP_UNSAFE_SOURCE", "source contains a link or reparse point"
+            )
         relative = item.relative_to(root).as_posix()
         if item.is_dir():
             continue
         item_stat = item.lstat()
         if not stat.S_ISREG(item_stat.st_mode) or item_stat.st_nlink != 1:
-            raise BackupError("BACKUP_UNSAFE_SOURCE", "source contains a non-regular or hard-linked member")
+            raise BackupError(
+                "BACKUP_UNSAFE_SOURCE",
+                "source contains a non-regular or hard-linked member",
+            )
         canonical = _canonical_relative_path(relative)
         collision = unicodedata.normalize("NFC", canonical).casefold()
         if collision in normalized:
-            raise BackupError("BACKUP_UNSAFE_SOURCE", "source paths have a normalization collision")
+            raise BackupError(
+                "BACKUP_UNSAFE_SOURCE", "source paths have a normalization collision"
+            )
         normalized.add(collision)
         result.append((canonical, item, stat.S_IMODE(item_stat.st_mode)))
     return tuple(result)
@@ -1383,16 +1808,22 @@ def _enumerate_source_files(root: Path) -> tuple[tuple[str, Path, int], ...]:
 
 def _safe_source_directory(path: Path) -> Path:
     if _is_link_or_reparse(path) or not path.is_dir():
-        raise BackupError("BACKUP_UNSAFE_SOURCE", "filesystem source is not a safe directory")
+        raise BackupError(
+            "BACKUP_UNSAFE_SOURCE", "filesystem source is not a safe directory"
+        )
     return path.resolve()
 
 
 def _safe_source_file(path: Path) -> Path:
     if _is_link_or_reparse(path) or not path.is_file():
-        raise BackupError("BACKUP_UNSAFE_SOURCE", "source member is not a safe regular file")
+        raise BackupError(
+            "BACKUP_UNSAFE_SOURCE", "source member is not a safe regular file"
+        )
     item_stat = path.lstat()
     if not stat.S_ISREG(item_stat.st_mode) or item_stat.st_nlink != 1:
-        raise BackupError("BACKUP_UNSAFE_SOURCE", "source member must be regular and singly linked")
+        raise BackupError(
+            "BACKUP_UNSAFE_SOURCE", "source member must be regular and singly linked"
+        )
     return path.resolve()
 
 
@@ -1404,11 +1835,21 @@ def _copy_regular_file(source: Path, target: Path) -> None:
     try:
         opened_stat = os.fstat(source_fd)
         if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
-            raise BackupError("BACKUP_UNSAFE_SOURCE", "source member changed during copy")
-        if (source_stat.st_dev, source_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
-            raise BackupError("BACKUP_UNSAFE_SOURCE", "source member changed during copy")
+            raise BackupError(
+                "BACKUP_UNSAFE_SOURCE", "source member changed during copy"
+            )
+        if (source_stat.st_dev, source_stat.st_ino) != (
+            opened_stat.st_dev,
+            opened_stat.st_ino,
+        ):
+            raise BackupError(
+                "BACKUP_UNSAFE_SOURCE", "source member changed during copy"
+            )
         target_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(source_fd, "rb") as input_stream, os.fdopen(target_fd, "wb") as output_stream:
+        with (
+            os.fdopen(source_fd, "rb") as input_stream,
+            os.fdopen(target_fd, "wb") as output_stream,
+        ):
             source_fd = -1
             target_fd = -1
             for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
@@ -1417,10 +1858,19 @@ def _copy_regular_file(source: Path, target: Path) -> None:
             os.fsync(output_stream.fileno())
         after_stat = source.lstat()
         if (
-            (source_stat.st_dev, source_stat.st_ino, source_stat.st_size, source_stat.st_mtime_ns)
-            != (after_stat.st_dev, after_stat.st_ino, after_stat.st_size, after_stat.st_mtime_ns)
+            source_stat.st_dev,
+            source_stat.st_ino,
+            source_stat.st_size,
+            source_stat.st_mtime_ns,
+        ) != (
+            after_stat.st_dev,
+            after_stat.st_ino,
+            after_stat.st_size,
+            after_stat.st_mtime_ns,
         ):
-            raise BackupError("BACKUP_SOURCE_CHANGED", "source member changed during backup")
+            raise BackupError(
+                "BACKUP_SOURCE_CHANGED", "source member changed during backup"
+            )
         os.chmod(target, 0o600)
     finally:
         if source_fd >= 0:
@@ -1431,10 +1881,16 @@ def _copy_regular_file(source: Path, target: Path) -> None:
 
 def _read_regular_file(path: Path, *, maximum: int) -> bytes:
     item_stat = path.lstat()
-    if not stat.S_ISREG(item_stat.st_mode) or item_stat.st_nlink != 1 or _is_link_or_reparse(path):
+    if (
+        not stat.S_ISREG(item_stat.st_mode)
+        or item_stat.st_nlink != 1
+        or _is_link_or_reparse(path)
+    ):
         raise BackupError("BACKUP_UNSAFE_MEMBER", "member is not a safe regular file")
     if item_stat.st_size > maximum:
-        raise BackupError("BACKUP_BOUNDS_EXCEEDED", "bounded metadata member is too large")
+        raise BackupError(
+            "BACKUP_BOUNDS_EXCEEDED", "bounded metadata member is too large"
+        )
     with path.open("rb") as stream:
         return stream.read()
 
@@ -1450,7 +1906,9 @@ def _sha256_file(path: Path) -> str:
 def _prepare_destination_root(path: Path) -> Path:
     raw = Path(path)
     if raw.exists() and (_is_link_or_reparse(raw) or not raw.is_dir()):
-        raise BackupError("BACKUP_DESTINATION_INVALID", "backup destination is not a safe directory")
+        raise BackupError(
+            "BACKUP_DESTINATION_INVALID", "backup destination is not a safe directory"
+        )
     raw.mkdir(parents=True, exist_ok=True)
     os.chmod(raw, 0o700)
     return raw.resolve()
@@ -1459,15 +1917,27 @@ def _prepare_destination_root(path: Path) -> Path:
 def _absolute_without_link(path: Path) -> Path:
     raw = Path(path).expanduser()
     if raw.exists() and _is_link_or_reparse(raw):
-        raise BackupError("BACKUP_DESTINATION_INVALID", "backup destination must not be a link")
+        raise BackupError(
+            "BACKUP_DESTINATION_INVALID", "backup destination must not be a link"
+        )
     return raw.absolute()
 
 
 def _make_private_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    if _is_link_or_reparse(path) or not path.is_dir():
+    pending: list[Path] = []
+    cursor = path
+    while not cursor.exists():
+        pending.append(cursor)
+        cursor = cursor.parent
+    if _is_link_or_reparse(cursor) or not cursor.is_dir():
         raise BackupError("BACKUP_UNSAFE_MEMBER", "backup directory is unsafe")
-    os.chmod(path, 0o700)
+    for directory in reversed(pending):
+        directory.mkdir()
+        if _is_link_or_reparse(directory) or not directory.is_dir():
+            raise BackupError("BACKUP_UNSAFE_MEMBER", "backup directory is unsafe")
+        os.chmod(directory, 0o700)
+    if not pending:
+        os.chmod(path, 0o700)
 
 
 def _write_private_bytes(path: Path, data: bytes) -> None:
@@ -1511,7 +1981,9 @@ def _require_private_mode(path: Path, *, directory: bool) -> None:
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode & 0o077:
         kind = "directory" if directory else "file"
-        raise BackupError("BACKUP_PERMISSIONS_INVALID", f"backup {kind} is group/world accessible")
+        raise BackupError(
+            "BACKUP_PERMISSIONS_INVALID", f"backup {kind} is group/world accessible"
+        )
 
 
 def _is_link_or_reparse(path: Path) -> bool:
@@ -1534,12 +2006,20 @@ def _canonical_relative_path(value: str) -> str:
         raise BackupError("BACKUP_PATH_INVALID", "backup member path is invalid")
     path = PurePosixPath(value)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise BackupError("BACKUP_PATH_INVALID", "backup member path escapes the artifact")
+        raise BackupError(
+            "BACKUP_PATH_INVALID", "backup member path escapes the artifact"
+        )
     canonical = path.as_posix()
     if canonical != value:
-        raise BackupError("BACKUP_PATH_INVALID", "backup member path is not canonical POSIX")
-    if len(canonical.encode("utf-8")) > 4096 or any(len(part.encode("utf-8")) > 255 for part in path.parts):
-        raise BackupError("BACKUP_PATH_INVALID", "backup member path exceeds the v1 bound")
+        raise BackupError(
+            "BACKUP_PATH_INVALID", "backup member path is not canonical POSIX"
+        )
+    if len(canonical.encode("utf-8")) > 4096 or any(
+        len(part.encode("utf-8")) > 255 for part in path.parts
+    ):
+        raise BackupError(
+            "BACKUP_PATH_INVALID", "backup member path exceeds the v1 bound"
+        )
     return canonical
 
 
@@ -1551,7 +2031,9 @@ def _validate_artifact_member_path(relative: str) -> None:
         return
     if any(relative.startswith(f"{root}/") for root in _ALLOWED_FILESYSTEM_ROOTS):
         return
-    raise BackupError("BACKUP_PATH_INVALID", "backup member is outside the Format v1 allowlist")
+    raise BackupError(
+        "BACKUP_PATH_INVALID", "backup member is outside the Format v1 allowlist"
+    )
 
 
 def _artifact_directory_allowed(relative: str) -> bool:
@@ -1559,7 +2041,9 @@ def _artifact_directory_allowed(relative: str) -> bool:
     for root in _ALLOWED_FILESYSTEM_ROOTS:
         parts = PurePosixPath(root).parts
         allowed.update("/".join(parts[:index]) for index in range(1, len(parts) + 1))
-    return relative in allowed or any(relative.startswith(f"{root}/") for root in _ALLOWED_FILESYSTEM_ROOTS)
+    return relative in allowed or any(
+        relative.startswith(f"{root}/") for root in _ALLOWED_FILESYSTEM_ROOTS
+    )
 
 
 def _validate_source_relative(logical_root: str, relative: str) -> None:
@@ -1570,9 +2054,13 @@ def _validate_source_relative(logical_root: str, relative: str) -> None:
         or part.endswith((".lock", ".sock", ".tmp"))
         for part in parts
     ):
-        raise BackupError("BACKUP_SOURCE_NOT_ALLOWED", "source contains a contract-excluded member")
+        raise BackupError(
+            "BACKUP_SOURCE_NOT_ALLOWED", "source contains a contract-excluded member"
+        )
     if logical_root == "filesystem/plugins/cas" and not parts:
-        raise BackupError("BACKUP_SOURCE_NOT_ALLOWED", "plugin CAS source path is invalid")
+        raise BackupError(
+            "BACKUP_SOURCE_NOT_ALLOWED", "plugin CAS source path is invalid"
+        )
 
 
 def _validate_secret_reference(path: Path) -> None:
@@ -1582,17 +2070,28 @@ def _validate_secret_reference(path: Path) -> None:
     except BackupError as error:
         if error.code == "BACKUP_SECRET_REFERENCE_INVALID":
             raise
-        raise BackupError("BACKUP_SECRET_REFERENCE_INVALID", "secret reference is invalid") from error
+        raise BackupError(
+            "BACKUP_SECRET_REFERENCE_INVALID", "secret reference is invalid"
+        ) from error
     if canonical_json_bytes(parsed) + b"\n" != encoded:
-        raise BackupError("BACKUP_SECRET_REFERENCE_INVALID", "secret reference is not canonical JSON")
+        raise BackupError(
+            "BACKUP_SECRET_REFERENCE_INVALID", "secret reference is not canonical JSON"
+        )
     if not isinstance(parsed.get("provider"), str) or not parsed["provider"]:
-        raise BackupError("BACKUP_SECRET_REFERENCE_INVALID", "secret reference provider is missing")
+        raise BackupError(
+            "BACKUP_SECRET_REFERENCE_INVALID", "secret reference provider is missing"
+        )
     if not isinstance(parsed.get("version"), str) or not parsed["version"]:
-        raise BackupError("BACKUP_SECRET_REFERENCE_INVALID", "secret reference version is missing")
+        raise BackupError(
+            "BACKUP_SECRET_REFERENCE_INVALID", "secret reference version is missing"
+        )
     try:
         _validate_non_secret_json(parsed, label="secretReference")
     except BackupError as error:
-        raise BackupError("BACKUP_SECRET_REFERENCE_INVALID", "secret reference contains forbidden data") from error
+        raise BackupError(
+            "BACKUP_SECRET_REFERENCE_INVALID",
+            "secret reference contains forbidden data",
+        ) from error
 
 
 def _validate_non_secret_metadata_file(path: Path) -> None:
@@ -1626,7 +2125,9 @@ def _validate_envelope_binding(encoded: bytes, binding: SecretEnvelopeBinding) -
 
     parsed = _strict_json_object(encoded, code="BACKUP_SECRET_ENVELOPE_INVALID")
     if canonical_json_bytes(parsed) != encoded:
-        raise BackupError("BACKUP_SECRET_ENVELOPE_INVALID", "secret envelope is not canonical JSON")
+        raise BackupError(
+            "BACKUP_SECRET_ENVELOPE_INVALID", "secret envelope is not canonical JSON"
+        )
     required = {
         "aead",
         "binding",
@@ -1639,20 +2140,27 @@ def _validate_envelope_binding(encoded: bytes, binding: SecretEnvelopeBinding) -
         "suiteId",
     }
     if set(parsed) != required:
-        raise BackupError("BACKUP_SECRET_ENVELOPE_INVALID", "secret envelope structure is invalid")
+        raise BackupError(
+            "BACKUP_SECRET_ENVELOPE_INVALID", "secret envelope structure is invalid"
+        )
     if (
         parsed.get("format") != ENVELOPE_FORMAT
         or parsed.get("schemaVersion") != ENVELOPE_SCHEMA_VERSION
         or parsed.get("suiteId") != SUITE_ID
     ):
-        raise BackupError("BACKUP_SECRET_ENVELOPE_INVALID", "secret envelope identity is invalid")
+        raise BackupError(
+            "BACKUP_SECRET_ENVELOPE_INVALID", "secret envelope identity is invalid"
+        )
     envelope_binding = parsed.get("binding")
     if envelope_binding != {
         "artifactBindingDigest": calculated_binding_digest,
         "artifactId": binding.artifact_id,
         "artifactType": "backup",
     }:
-        raise BackupError("BACKUP_SECRET_ENVELOPE_INVALID", "secret envelope artifact binding is invalid")
+        raise BackupError(
+            "BACKUP_SECRET_ENVELOPE_INVALID",
+            "secret envelope artifact binding is invalid",
+        )
 
 
 def _strict_json_object(encoded: bytes, *, code: str) -> dict[str, Any]:
@@ -1687,7 +2195,11 @@ def _mark_incomplete(staging: Path) -> None:
         _write_private_bytes(
             staging / STAGING_STATE_NAME,
             canonical_json_bytes(
-                {"format": FORMAT, "schemaVersion": SCHEMA_VERSION, "lifecycle": "INCOMPLETE"}
+                {
+                    "format": FORMAT,
+                    "schemaVersion": SCHEMA_VERSION,
+                    "lifecycle": "INCOMPLETE",
+                }
             )
             + b"\n",
         )
@@ -1709,18 +2221,27 @@ def _source_identity_json(source: BackupSourceIdentity) -> dict[str, Any]:
     }
 
 
-def _validate_non_secret_json(value: Any, *, label: str, path: tuple[str, ...] = ()) -> None:
+def _validate_non_secret_json(
+    value: Any, *, label: str, path: tuple[str, ...] = ()
+) -> None:
     try:
         canonical_json_bytes(value)
     except (TypeError, ValueError) as error:
-        raise BackupError("BACKUP_METADATA_INVALID", f"{label} is not canonical JSON") from error
+        raise BackupError(
+            "BACKUP_METADATA_INVALID", f"{label} is not canonical JSON"
+        ) from error
     if isinstance(value, Mapping):
         for key, child in value.items():
             if not isinstance(key, str):
-                raise BackupError("BACKUP_METADATA_INVALID", f"{label} contains a non-string key")
+                raise BackupError(
+                    "BACKUP_METADATA_INVALID", f"{label} contains a non-string key"
+                )
             folded = re.sub(r"[^a-z0-9]", "", key.casefold())
             if any(fragment in folded for fragment in _SECRET_KEY_FRAGMENTS):
-                raise BackupError("BACKUP_SECRET_METADATA", f"{label} contains a forbidden secret-bearing field")
+                raise BackupError(
+                    "BACKUP_SECRET_METADATA",
+                    f"{label} contains a forbidden secret-bearing field",
+                )
             _validate_non_secret_json(child, label=label, path=(*path, key))
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         for index, child in enumerate(value):
@@ -1733,29 +2254,44 @@ def _validate_non_secret_json(value: Any, *, label: str, path: tuple[str, ...] =
             or re.search(r"://[^/@\s:]+:[^/@\s]+@", value)
             or re.match(r"^[A-Z][A-Z0-9_]+\s*=", value)
         ):
-            raise BackupError("BACKUP_SECRET_METADATA", f"{label} contains secret-like data")
+            raise BackupError(
+                "BACKUP_SECRET_METADATA", f"{label} contains secret-like data"
+            )
 
 
 def _require_uuid(value: Any, *, field_name: str) -> str:
     try:
         parsed = uuid.UUID(str(value))
     except (ValueError, TypeError, AttributeError) as error:
-        raise BackupError("BACKUP_IDENTITY_INVALID", f"{field_name} is not a canonical UUID") from error
+        raise BackupError(
+            "BACKUP_IDENTITY_INVALID", f"{field_name} is not a canonical UUID"
+        ) from error
     canonical = str(parsed)
     if value != canonical:
-        raise BackupError("BACKUP_IDENTITY_INVALID", f"{field_name} is not a canonical UUID")
+        raise BackupError(
+            "BACKUP_IDENTITY_INVALID", f"{field_name} is not a canonical UUID"
+        )
     return canonical
 
 
 def _require_sha256(value: Any, *, field_name: str) -> str:
     if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
-        raise BackupError("BACKUP_IDENTITY_INVALID", f"{field_name} is not a canonical SHA-256 identity")
+        raise BackupError(
+            "BACKUP_IDENTITY_INVALID",
+            f"{field_name} is not a canonical SHA-256 identity",
+        )
     return value
 
 
 def _require_utc(value: datetime, *, field_name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
-        raise BackupError("BACKUP_TIME_INVALID", f"{field_name} must be an aware UTC timestamp")
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() != UTC.utcoffset(value)
+    ):
+        raise BackupError(
+            "BACKUP_TIME_INVALID", f"{field_name} must be an aware UTC timestamp"
+        )
     return value
 
 
@@ -1769,7 +2305,9 @@ def _parse_utc(value: Any, *, field_name: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as error:
-        raise BackupError("BACKUP_TIME_INVALID", f"{field_name} is not canonical UTC") from error
+        raise BackupError(
+            "BACKUP_TIME_INVALID", f"{field_name} is not canonical UTC"
+        ) from error
     if _utc_string(parsed) != value:
         raise BackupError("BACKUP_TIME_INVALID", f"{field_name} is not canonical UTC")
     return parsed
@@ -1784,7 +2322,9 @@ def _secret_member_path(mode: str) -> str:
 
 
 def _secret_profile_identity(secret: SecretSource | None) -> str:
-    return _secret_profile_identity_from_mode(secret.mode if secret is not None else "none")
+    return _secret_profile_identity_from_mode(
+        secret.mode if secret is not None else "none"
+    )
 
 
 def _secret_profile_identity_from_mode(mode: object) -> str:

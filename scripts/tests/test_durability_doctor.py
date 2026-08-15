@@ -95,8 +95,12 @@ class FakeReadOnlyHost:
             UPDATER_SOCKET_PATH: metadata(stat.S_IFSOCK, 0o660, uid=1000, gid=2000),
         }
         if include_locator:
-            self.metadata[INSTANCE_LOCATOR_PATH] = metadata(stat.S_IFREG, 0o600, uid=1000, gid=2000)
-            self.payloads[INSTANCE_LOCATOR_PATH] = json.dumps(locator_payload()).encode("utf-8")
+            self.metadata[INSTANCE_LOCATOR_PATH] = metadata(
+                stat.S_IFREG, 0o600, uid=1000, gid=2000
+            )
+            self.payloads[INSTANCE_LOCATOR_PATH] = json.dumps(locator_payload()).encode(
+                "utf-8"
+            )
 
     def lstat(self, path: PurePosixPath) -> os.stat_result:
         self.calls.append(("lstat", str(path)))
@@ -163,7 +167,9 @@ def passing_probes() -> dict[str, object]:
         "compatibility.state",
     }
     return {
-        check_id: (lambda _locator, check_id=check_id: ProbeResult.passed(f"{check_id}.ok"))
+        check_id: (
+            lambda _locator, check_id=check_id: ProbeResult.passed(f"{check_id}.ok")
+        )
         for check_id in DOCTOR_CHECK_IDS
         if check_id not in built_in
     }
@@ -180,7 +186,11 @@ class CanonicalLocatorTests(unittest.TestCase):
 
     def test_legacy_roots_profiles_unknown_and_secret_fields_fail_closed(self):
         cases: list[tuple[str, object, str]] = [
-            ("appRoot", "/opt/1panel/docker/compose/animemo/app", "LOCATOR_CANONICAL_ROOT_MISMATCH"),
+            (
+                "appRoot",
+                "/opt/1panel/docker/compose/animemo/app",
+                "LOCATOR_CANONICAL_ROOT_MISMATCH",
+            ),
             ("dataRoot", "/data/anime-journal", "LOCATOR_CANONICAL_ROOT_MISMATCH"),
             ("deploymentProfile", "v1.0-compatibility", "LOCATOR_PROFILE_UNSUPPORTED"),
             ("databasePassword", "must-not-appear", "LOCATOR_SECRET_FIELD_FORBIDDEN"),
@@ -219,7 +229,9 @@ class DoctorBasicRuntimeTests(unittest.TestCase):
         self.assertEqual(rendered["reportVersion"], 1)
         self.assertEqual(rendered["mode"], "READ-ONLY")
         self.assertEqual(rendered["overallStatus"], "PASS")
-        self.assertEqual([item["checkId"] for item in rendered["checks"]], list(DOCTOR_CHECK_IDS))
+        self.assertEqual(
+            [item["checkId"] for item in rendered["checks"]], list(DOCTOR_CHECK_IDS)
+        )
         self.assertEqual({item["status"] for item in rendered["checks"]}, {"PASS"})
         self.assertEqual(rendered["compatibility"]["overallStatus"], "COMPATIBLE")
         self.assertEqual(
@@ -241,7 +253,9 @@ class DoctorBasicRuntimeTests(unittest.TestCase):
         self.assertEqual(called, [])
         inspected = {path for operation, path in host.calls if operation == "lstat"}
         self.assertEqual(inspected, {str(INSTANCE_LOCATOR_PATH)})
-        self.assertFalse(any("1panel" in path or "anime-journal" in path for path in inspected))
+        self.assertFalse(
+            any("1panel" in path or "anime-journal" in path for path in inspected)
+        )
 
     def test_probe_exception_is_redacted_and_does_not_abort_independent_checks(self):
         marker = "must-not-appear"
@@ -262,7 +276,9 @@ class DoctorBasicRuntimeTests(unittest.TestCase):
         self.assertNotIn(marker, rendered)
         self.assertEqual(report.overall_status, DoctorStatus.FAIL)
         by_id = {check.check_id: check for check in report.checks}
-        self.assertEqual(by_id["database.postgresql.connectivity"].status, DoctorStatus.SKIPPED)
+        self.assertEqual(
+            by_id["database.postgresql.connectivity"].status, DoctorStatus.SKIPPED
+        )
         self.assertEqual(by_id["service.web.health"].status, DoctorStatus.PASS)
 
     def test_owner_mismatch_fails_without_repairing_metadata(self):
@@ -306,9 +322,7 @@ class DoctorBasicRuntimeTests(unittest.TestCase):
 
     def test_duplicate_locator_fields_fail_before_dependent_probes(self):
         host = FakeReadOnlyHost()
-        host.payloads[INSTANCE_LOCATOR_PATH] = (
-            b'{"schemaVersion":1,"schemaVersion":1}'
-        )
+        host.payloads[INSTANCE_LOCATOR_PATH] = b'{"schemaVersion":1,"schemaVersion":1}'
 
         report = DoctorRunner(host=host, clock=lambda: CHECKED_AT).run()
         by_id = {check.check_id: check for check in report.checks}
