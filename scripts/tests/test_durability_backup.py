@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import importlib.util
 import json
 import os
 import tempfile
@@ -10,6 +11,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+
+if importlib.util.find_spec("cryptography") is None:
+    raise unittest.SkipTest("requires durability/requirements.txt")
 
 from durability import backup, secret_envelope
 from durability.canonical import canonical_json_bytes

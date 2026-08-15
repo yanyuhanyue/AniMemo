@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import logging
 import traceback
 import unittest
 from unittest.mock import patch
+
+if importlib.util.find_spec("cryptography") is None:
+    raise unittest.SkipTest("requires durability/requirements.txt")
 
 from durability.canonical import canonical_json_bytes
 from durability.secret_envelope import (

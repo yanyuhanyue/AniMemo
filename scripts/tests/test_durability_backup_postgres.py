@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import tempfile
@@ -7,6 +8,9 @@ import unittest
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+if importlib.util.find_spec("cryptography") is None:
+    raise unittest.SkipTest("requires durability/requirements.txt")
 
 from durability import backup
 
