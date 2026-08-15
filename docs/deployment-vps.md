@@ -1,5 +1,7 @@
 # VPS Deployment
 
+> 本文件是当前 v1.0 生产实例与 legacy bootstrap/break-glass 的兼容 runbook。v1.1 新安装的 canonical、provider-neutral 规则由 [Deployment Boundary v1](deployment-boundary-v1.md)、[Filesystem Layout v1](filesystem-layout-v1.md)、[Installer Contract v1](installer-contract-v1.md) 和 [Public Origin / Listen Contract v1](public-origin-listen-contract-v1.md) 冻结；下文的 1Panel、OpenResty、certbot、当前域名与旧 app root 不属于 v1.1 Installer 依赖。
+
 AniMemo 的正常生产更新路径是可信、不可变 Release 加受限 Host Update Agent：
 
 ```text
@@ -16,7 +18,7 @@ GitHub Release Producer
 
 本轮只实现和验证部署基础设施；生产安装、更新、迁移和 smoke 均为 **NOT RUN**。
 
-## Production layout
+## Current v1.0 production layout (legacy compatibility profile)
 
 固定生产路径：
 

@@ -108,9 +108,22 @@ npm run dev -- --host 0.0.0.0
 npm run test:plugins
 ```
 
+## v1.1 Durable Deployment Contracts
+
+v1.1 先冻结 provider-neutral 的部署边界，再实现安装与维护工具。canonical Contract 为：
+
+- [`Deployment Boundary v1`](docs/deployment-boundary-v1.md)
+- [`Standard Filesystem Layout v1`](docs/filesystem-layout-v1.md)
+- [`Installer Contract v1`](docs/installer-contract-v1.md)
+- [`Public Origin / Listen Contract v1`](docs/public-origin-listen-contract-v1.md)
+
+版本路线为 `v1.0.0 Stable → v1.1 development → v1.1 RC → v1.1.0 Stable`。原计划的 v1.0.1 Stability/UI Patch 已取消，当前 main 上的品牌与小型修复累计进入 v1.1；生产继续保持 v1.0.0。本阶段不创建 tag、Release、OCI，不部署生产。
+
+新安装默认使用 `/opt/animemo` 与 `/data/animemo`，并只在 `127.0.0.1:8088` 监听。DNS、TLS、公网反向代理、firewall 与 hosting panel 由管理员负责，不是 AniMemo 安装成功条件。完整 Installer、Backup、Restore、Migration 与 Doctor 尚未实现。
+
 ## 生产部署
 
-正式拓扑为：Cloudflare → Nginx/OpenResty → React 静态站点与 Django API → PostgreSQL/Redis；媒体后端由 Superuser 在“媒体存储”页面配置，可按优先级使用多个 Cloudflare R2 与固定根目录下的 Local Server Storage，插件包写入持久化插件卷。复制 [`.env.production.example`](.env.production.example) 为 `.env.production`，替换所有 placeholder，并确保 `POSTGRES_PASSWORD` 与 `DATABASE_URL` 中的密码完全一致。
+当前 `animemo.cc` v1.0 生产实例的历史拓扑为：Cloudflare → Nginx/OpenResty → React 静态站点与 Django API → PostgreSQL/Redis；它是当前实例 runbook，不是 v1.1 新 Installer 的供应商依赖。媒体后端由 Superuser 在“媒体存储”页面配置，可按优先级使用多个 Cloudflare R2 与固定根目录下的 Local Server Storage，插件包写入持久化插件卷。复制 [`.env.production.example`](.env.production.example) 为 `.env.production`，替换所有 placeholder，并确保 `POSTGRES_PASSWORD` 与 `DATABASE_URL` 中的密码完全一致。
 
 生产环境强制要求 `DEBUG=false`、PostgreSQL、共享 Redis、独立 `CREDENTIAL_ENCRYPTION_KEY`、HTTPS `ANIMEMO_PUBLIC_ORIGIN`、精确的 CORS/CSRF 来源、至少 50 个字符的随机 `DJANGO_SECRET_KEY`，以及显式的可信代理网段。Compose 内部 PostgreSQL 使用私有 Docker 网络，因此模板设置 `DATABASE_SSL_REQUIRE=false`；连接要求 TLS 的外部 PostgreSQL 时必须改为 `true`。媒体存储由 Superuser 登录后在“媒体存储”页面创建；尚未配置时网站仍可启动，但媒体上传会返回 `MEDIA_STORAGE_SETUP_REQUIRED`。
 
