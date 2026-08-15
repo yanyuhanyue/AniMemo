@@ -1,4 +1,4 @@
-import { DEFAULT_POSTER, isTrustedProviderPoster, resolveDemoPoster } from "./demoMedia.js";
+import { DEFAULT_POSTERS, isTrustedProviderPoster, resolveDemoPoster } from "./demoMedia.js";
 
 const SHANGHAI_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: "Asia/Shanghai",
@@ -29,7 +29,7 @@ function eligiblePosterRecords(records) {
 
 export function selectDailyHeroPosters(records = [], { now = new Date(), domain = "universe" } = {}) {
   const candidates = [...new Set(eligiblePosterRecords(records).map(resolveDemoPoster))];
-  if (!candidates.length) return [DEFAULT_POSTER, DEFAULT_POSTER];
+  if (!candidates.length) return [...DEFAULT_POSTERS];
   if (candidates.length === 1) return [candidates[0], candidates[0]];
 
   const domainOffset = domain === "featured" ? 1 : 0;

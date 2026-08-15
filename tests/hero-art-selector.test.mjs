@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { animeRecords } from "../src/data/anime.js";
-import { DEFAULT_POSTER } from "../src/lib/demoMedia.js";
+import { DEFAULT_POSTERS } from "../src/lib/demoMedia.js";
 import { selectDailyHeroPosters, shanghaiDateKey } from "../src/lib/heroArtSelector.js";
 
 test("hero selection uses the Asia/Shanghai calendar date deterministically", () => {
@@ -16,5 +16,5 @@ test("hero selection uses the Asia/Shanghai calendar date deterministically", ()
 });
 
 test("hero selection falls back safely when no provider-backed posters exist", () => {
-  assert.deepEqual(selectDailyHeroPosters([], { now: new Date("2026-08-13T00:00:00Z") }), [DEFAULT_POSTER, DEFAULT_POSTER]);
+  assert.deepEqual(selectDailyHeroPosters([], { now: new Date("2026-08-13T00:00:00Z") }), [...DEFAULT_POSTERS]);
 });
