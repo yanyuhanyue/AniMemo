@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 import uuid
@@ -329,7 +330,8 @@ class BackupRuntimeTests(unittest.TestCase):
             self.destination
             / f"{backup.STAGING_PREFIX}aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         )
-        staging.mkdir()
+        staging.mkdir(mode=0o700)
+        os.chmod(staging, 0o700)
         (staging / backup.STAGING_STATE_NAME).write_text(
             '{"lifecycle":"STAGING"}\n', encoding="utf-8"
         )
