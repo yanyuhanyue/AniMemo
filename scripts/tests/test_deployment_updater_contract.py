@@ -54,6 +54,10 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertNotIn("build", services["web"])
         self.assertIn("ANIMEMO_API_IMAGE", services["api"]["image"])
         self.assertIn("ANIMEMO_WEB_IMAGE", services["web"]["image"])
+        self.assertEqual(
+            services["web"]["ports"],
+            ["127.0.0.1:${ANIMEMO_PORT:-8088}:80"],
+        )
         self.assertEqual(services["migration"]["command"], ["python", "manage.py", "migrate", "--noinput"])
         self.assertEqual(services["bootstrap"]["command"], ["python", "manage.py", "bootstrap_animemo"])
         for service in ("migration", "bootstrap", "api"):
