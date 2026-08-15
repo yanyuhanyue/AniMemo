@@ -152,6 +152,9 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: stable-promotion-${{ needs.plan.outputs.stable_tag }}
@@ -159,9 +162,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
       - run: python -m pip install -r release/requirements.txt
       - name: Revalidate read-only promotion output
         shell: bash

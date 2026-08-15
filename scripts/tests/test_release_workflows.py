@@ -455,6 +455,16 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("RC_API_DIGEST == STABLE_API_DIGEST", source)
         self.assertIn("RC_WEB_DIGEST == STABLE_WEB_DIGEST", source)
 
+    def test_stable_promotion_dry_run_checks_out_before_downloading_artifact(self):
+        promotion = workflow("promote-release.yml")
+        steps = promotion["jobs"]["dry-run"]["steps"]
+        checkout = next(index for index, step in enumerate(steps) if step.get("uses") == "actions/checkout@v4")
+        download = next(
+            index for index, step in enumerate(steps) if step.get("uses") == "actions/download-artifact@v4"
+        )
+
+        self.assertLess(checkout, download)
+
     def test_stable_promotion_revalidates_authority_before_external_mutation(self):
         promotion = workflow("promote-release.yml")
         publish = promotion["jobs"]["publish"]
