@@ -102,6 +102,22 @@ class PrepareHostPermissionTests(unittest.TestCase):
         self.assertEqual(metadata.st_gid, gid, path)
         self.assertEqual(stat.S_IMODE(metadata.st_mode), mode, path)
 
+    def _root_file_metadata(self, path: Path) -> tuple[int, int, int]:
+        result = subprocess.run(
+            ["sudo", "-n", "stat", "-c", "%u %g %a", str(path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        uid, gid, mode = result.stdout.split()
+        return int(uid), int(gid), int(mode, 8)
+
+    def _root_path_exists(self, path: Path) -> bool:
+        return subprocess.run(
+            ["sudo", "-n", "test", "-e", str(path)],
+            check=False,
+        ).returncode == 0
+
     def _assert_all_directory_contracts(self, data_root: Path) -> None:
         for name in ("plugins", "logs", "media"):
             self._assert_directory(
@@ -131,14 +147,23 @@ class PrepareHostPermissionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self._assert_all_directory_contracts(data_root)
         group_probe = data_root / "backups" / "group-writer"
+        renamed_probe = data_root / "backups" / "group-writer-renamed"
         group_write = self._run_as(
             UPDATER_UID,
             APP_GID,
-            "from pathlib import Path; Path(sys.argv[3]).write_bytes(b'payload')",
+            (
+                "from pathlib import Path; import os; "
+                "source=Path(sys.argv[3]); target=Path(sys.argv[4]); "
+                "descriptor=os.open(source,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); "
+                "os.write(descriptor,b'payload'); os.fsync(descriptor); os.close(descriptor); "
+                "source.rename(target); assert target.read_bytes()==b'payload'; target.unlink()"
+            ),
             group_probe,
+            renamed_probe,
         )
         self.assertEqual(group_write.returncode, 0, group_write.stderr)
-        self.assertEqual(group_probe.read_bytes(), b"payload")
+        self.assertFalse(self._root_path_exists(group_probe))
+        self.assertFalse(self._root_path_exists(renamed_probe))
 
         unrelated_probe = data_root / "backups" / "unrelated-writer"
         unrelated_write = self._run_as(
@@ -148,7 +173,7 @@ class PrepareHostPermissionTests(unittest.TestCase):
             unrelated_probe,
         )
         self.assertNotEqual(unrelated_write.returncode, 0)
-        self.assertFalse(unrelated_probe.exists())
+        self.assertFalse(self._root_path_exists(unrelated_probe))
 
     def test_existing_backup_artifact_survives_repair_and_idempotent_rerun(self):
         data_root = self.root / "existing"
@@ -165,7 +190,6 @@ class PrepareHostPermissionTests(unittest.TestCase):
             ["sudo", "-n", sys.executable, "-c", setup, str(backup_root), str(artifact)],
             check=True,
         )
-        original = artifact.stat()
 
         first = self._run_prepare_host(data_root)
         second = self._run_prepare_host(data_root)
@@ -173,11 +197,17 @@ class PrepareHostPermissionTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(second.returncode, 0, second.stderr)
         self._assert_all_directory_contracts(data_root)
-        current = artifact.stat()
-        self.assertEqual(current.st_uid, original.st_uid)
-        self.assertEqual(current.st_gid, original.st_gid)
-        self.assertEqual(stat.S_IMODE(current.st_mode), 0o600)
-        self.assertEqual(artifact.read_bytes(), b"existing backup")
+        self.assertEqual(
+            self._root_file_metadata(artifact),
+            (UPDATER_UID, APP_GID, 0o600),
+        )
+        updater_read = self._run_as(
+            UPDATER_UID,
+            APP_GID,
+            "from pathlib import Path; assert Path(sys.argv[3]).read_bytes()==b'existing backup'",
+            artifact,
+        )
+        self.assertEqual(updater_read.returncode, 0, updater_read.stderr)
 
     def test_backup_link_and_non_directory_fail_closed_before_metadata_changes(self):
         outside = self.root / "outside"
