@@ -125,7 +125,7 @@ v1.1 先冻结 provider-neutral 的部署边界，再实现安装与维护工具
 
 版本路线为 `v1.0.0 Stable → v1.1 development → v1.1 RC → v1.1.0 Stable`。原计划的 v1.0.1 Stability/UI Patch 已取消，当前 main 上的品牌与小型修复累计进入 v1.1；生产继续保持 v1.0.0。本阶段不创建 tag、Release、OCI，不部署生产。
 
-新安装默认使用 `/opt/animemo` 与 `/data/animemo`，并只在 `127.0.0.1:8088` 监听。DNS、TLS、公网反向代理、firewall 与 hosting panel 由管理员负责，不是 AniMemo 安装成功条件。Backup、Restore、Migration、Secret Envelope、Doctor 与统一 Compatibility 的产品运行时仍未实现；上述文档只冻结后续实现必须遵守的 Contract。
+新安装默认使用 `/opt/animemo` 与 `/data/animemo`，并只在 `127.0.0.1:8088` 监听。DNS、TLS、公网反向代理、firewall 与 hosting panel 由管理员负责，不是 AniMemo 安装成功条件。Phase 3A 已在 `durability/` 建立统一 Compatibility、Migration Secret Envelope、Backup 与 Doctor Basic 运行时基础；Restore、Migration Bundle、Installer、完整管理 CLI 与发布仍延后。
 
 ## 生产部署
 

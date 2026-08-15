@@ -208,6 +208,7 @@ class CiClassificationTests(unittest.TestCase):
             "updater/agent.py",
             "updater/tests/test_executor.py",
             "deploy/docker-compose.yml",
+            "durability/backup.py",
             "scripts/stateful-upgrade-gate.sh",
             ".github/workflows/ci.yml",
             "scripts/ci_classify.py",
