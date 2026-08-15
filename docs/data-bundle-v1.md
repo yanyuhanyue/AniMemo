@@ -1,6 +1,6 @@
 # AniMemo Data Bundle v1
 
-Data Bundle v1 是用户手账的权威 JSON 备份与恢复格式：
+Data Bundle v1 是用户手账的权威 JSON Portable Export / Import 格式；它不承诺重建完整 AniMemo Instance，也不是 Backup、Restore 或 Migration Bundle：
 
 ```json
 {
