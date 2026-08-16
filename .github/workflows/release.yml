@@ -71,7 +71,7 @@ jobs:
       created_at: ${{ steps.identity.outputs.created_at }}
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Bind the dispatch ref to an authorized release candidate
@@ -120,7 +120,7 @@ jobs:
           git rev-parse --verify "$UPGRADE_BASE_SHA^{commit}"
           git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$candidate_sha"
           echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ steps.candidate.outputs.candidate_sha }}
           fetch-depth: 0
@@ -214,7 +214,7 @@ jobs:
       ANIMEMO_TEST_DATABASE_URL: postgresql://qualification:qualification-only@127.0.0.1:55432/qualification_source
       ANIMEMO_RESTORE_TEST_DATABASE_URL: postgresql://qualification:qualification-only@127.0.0.1:55432/qualification_target
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.preflight.outputs.candidate_sha }}
           fetch-depth: 0
@@ -377,11 +377,11 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: ${{ inputs.operation == 'qualify' }}
         with:
           ref: ${{ needs.preflight.outputs.candidate_sha }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: ${{ inputs.operation == 'publish' }}
         with:
           ref: main
@@ -528,7 +528,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.preflight.outputs.candidate_sha }}
           fetch-depth: 0
@@ -679,7 +679,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.preflight.outputs.candidate_sha }}
           fetch-depth: 0
@@ -741,7 +741,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0

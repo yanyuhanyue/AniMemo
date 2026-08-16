@@ -74,7 +74,7 @@ jobs:
       full_gate: ${{ steps.classify.outputs.full_gate }}
       critical_gate: ${{ steps.classify.outputs.critical_gate }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 0
@@ -93,7 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - run: python scripts/ci_classify.py --self-test
@@ -107,7 +107,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - uses: actions/setup-python@v5
@@ -132,7 +132,7 @@ jobs:
       COMPOSE_PROJECT_NAME: animemo-ci
       COMPOSE_HTTP_TIMEOUT: "120"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - name: Create ephemeral production-like environment
@@ -258,7 +258,7 @@ jobs:
       COMPOSE_PROJECT_NAME: animemo-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
       COMPOSE_HTTP_TIMEOUT: "120"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 0
@@ -315,7 +315,7 @@ jobs:
       COMPOSE_HTTP_TIMEOUT: "120"
       COMPOSE_PROJECT_NAME: animemo-dr-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 1
@@ -339,7 +339,7 @@ jobs:
     needs: [classify, post-merge-sanity, updater-isolated, docker, stateful-upgrade, dr-rehearsal]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - name: Require selected jobs to succeed and unselected jobs to skip

@@ -31,7 +31,7 @@ jobs:
       COMPOSE_HTTP_TIMEOUT: "120"
       COMPOSE_PROJECT_NAME: animemo-dr-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 1

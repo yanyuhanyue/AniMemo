@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0
@@ -103,7 +103,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0
@@ -161,7 +161,7 @@ jobs:
       COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.build.yml:deploy/docker-compose.performance.yml
       PERF_ADMIN_PASSWORD: PerfOnly-Admin-2026!
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0
@@ -350,7 +350,7 @@ jobs:
       COMPOSE_HTTP_TIMEOUT: "120"
       COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.build.yml:deploy/docker-compose.performance.yml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0
@@ -511,7 +511,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0
