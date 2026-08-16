@@ -7,20 +7,40 @@ updates:
     open-pull-requests-limit: 5
     groups:
       frontend-production:
+        applies-to: version-updates
         dependency-type: production
+        update-types:
+          - minor
+          - patch
       frontend-development:
+        applies-to: version-updates
         dependency-type: development
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: pip
     directory: /backend
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      backend:
+      backend-minor-patch:
+        applies-to: version-updates
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    groups:
+      github-actions-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

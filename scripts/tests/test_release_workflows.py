@@ -8,6 +8,16 @@ from yaml.constructor import ConstructorError
 
 ROOT = Path(__file__).resolve().parents[2]
 
+HARDENED_WORKFLOWS = (
+    "ci.yml",
+    "dr-rehearsal.yml",
+    "performance.yml",
+    "pre-merge-full.yml",
+    "promote-release.yml",
+    "release-gate.yml",
+    "release.yml",
+)
+
 
 class UniqueKeyLoader(yaml.BaseLoader):
     pass
@@ -43,6 +53,74 @@ def workflow(name):
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
+    def test_core_github_actions_are_v7_and_checkout_credentials_are_explicit(self):
+        credentialed_checkouts = set()
+        checkout_count = 0
+
+        for name in HARDENED_WORKFLOWS:
+            document = workflow(name)
+            for job_name, job in document["jobs"].items():
+                for step in job.get("steps", []):
+                    action = step.get("uses", "")
+                    if action.startswith("actions/checkout@"):
+                        checkout_count += 1
+                        self.assertEqual(action, "actions/checkout@v7")
+                        settings = step.get("with", {})
+                        self.assertIn("persist-credentials", settings)
+                        if settings["persist-credentials"] == "true":
+                            credentialed_checkouts.add((name, job_name))
+                        else:
+                            self.assertEqual(settings["persist-credentials"], "false")
+                    elif action.startswith("actions/setup-node@"):
+                        self.assertEqual(action, "actions/setup-node@v7")
+                    elif action.startswith("actions/setup-python@"):
+                        self.assertEqual(action, "actions/setup-python@v7")
+
+        self.assertGreater(checkout_count, 0)
+        self.assertEqual(
+            credentialed_checkouts,
+            {
+                ("promote-release.yml", "publish"),
+                ("release.yml", "publish"),
+            },
+        )
+
+    def test_dependabot_groups_only_minor_patch_version_updates(self):
+        dependabot = yaml.load(
+            (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"),
+            Loader=UniqueKeyLoader,
+        )
+        updates = {
+            update["package-ecosystem"]: update for update in dependabot["updates"]
+        }
+
+        self.assertEqual(
+            set(updates["npm"]["groups"]),
+            {"frontend-production", "frontend-development"},
+        )
+        self.assertEqual(set(updates["pip"]["groups"]), {"backend-minor-patch"})
+        self.assertEqual(
+            set(updates["github-actions"]["groups"]),
+            {"github-actions-minor-patch"},
+        )
+
+        for update in updates.values():
+            for group in update.get("groups", {}).values():
+                self.assertEqual(group["applies-to"], "version-updates")
+                self.assertEqual(set(group["update-types"]), {"minor", "patch"})
+                self.assertNotIn("major", group["update-types"])
+
+    def test_security_policy_uses_private_reporting_for_preproduction(self):
+        source = (ROOT / ".github" / "SECURITY.md").read_text(encoding="utf-8")
+
+        self.assertIn("pre-production", source)
+        self.assertIn("GitHub Private Vulnerability Reporting", source)
+        self.assertIn("不要在公开 Issue", source)
+        self.assertIn("tokens", source)
+        self.assertIn("private user data", source)
+        self.assertIn("exploit details", source)
+        self.assertNotIn("v1.0 currently supported", source)
+
     def test_candidate_workflows_never_save_dependency_caches(self):
         for name in ("ci.yml", "performance.yml", "release.yml"):
             with self.subTest(workflow=name):
@@ -645,7 +723,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_stable_promotion_dry_run_checks_out_before_downloading_artifact(self):
         promotion = workflow("promote-release.yml")
         steps = promotion["jobs"]["dry-run"]["steps"]
-        checkout = next(index for index, step in enumerate(steps) if step.get("uses") == "actions/checkout@v4")
+        checkout = next(index for index, step in enumerate(steps) if step.get("uses") == "actions/checkout@v7")
         download = next(
             index for index, step in enumerate(steps) if step.get("uses") == "actions/download-artifact@v4"
         )
