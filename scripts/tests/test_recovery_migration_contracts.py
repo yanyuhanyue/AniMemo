@@ -13,6 +13,7 @@ DOCS = {
     "doctor": ROOT / "docs" / "doctor-basic-contract-v1.md",
     "compatibility": ROOT / "docs" / "compatibility-matrix-v1.md",
 }
+DEBT_LEDGER = ROOT / "docs" / "v1.1-pre-production-debt-ledger.md"
 
 
 class RecoveryMigrationContractTests(unittest.TestCase):
@@ -122,12 +123,51 @@ class RecoveryMigrationContractTests(unittest.TestCase):
             "TRANSFER_REQUIRED",
             "artifactBindingDigest",
             "secrets/secret-envelope.json",
-            "/data/anime-journal",
+            "v1.1-standard",
             "split-brain",
         ):
             self.assertIn(marker, contract)
         self.assertNotIn("envelope.bin", contract)
         self.assertNotIn("checksums.txt", contract)
+
+    def test_pre_production_contracts_freeze_one_canonical_runtime_path(self):
+        filesystem = (ROOT / "docs" / "filesystem-layout-v1.md").read_text(
+            encoding="utf-8"
+        )
+        installer = (ROOT / "docs" / "installer-contract-v1.md").read_text(
+            encoding="utf-8"
+        )
+        for name, contract in {
+            **self.contracts,
+            "filesystem": filesystem,
+            "installer": installer,
+        }.items():
+            with self.subTest(contract=name):
+                self.assertNotIn("legacy-v1.0 compatibility profile", contract)
+                self.assertNotIn("v1.0 compatibility profile", contract)
+        self.assertNotIn("/opt/1panel", self.contracts["migration"])
+        self.assertNotIn("| --app-root PATH |", installer)
+        self.assertNotIn("| --data-root PATH |", installer)
+        self.assertIn("v1.1-standard", filesystem)
+        self.assertIn("v1.1-standard", installer)
+
+        ledger = DEBT_LEDGER.read_text(encoding="utf-8")
+        for marker in (
+            "CURRENT CONTRACT",
+            "TECHNICAL DEBT",
+            "WHY COMPATIBILITY IS NOT REQUIRED",
+            "LONG-TERM COST",
+            "PROPOSED CLEAN CONTRACT",
+            "AFFECTED DOCS",
+            "AFFECTED TESTS",
+            "DATA / MEMORY INTEGRITY IMPACT",
+            "Legacy filesystem fallback | 0",
+            "Legacy config fallback | 0",
+            "Temporary compatibility shim | 0",
+            "Dual runtime path | 0",
+            "Pre-v1.1 format reader | 0",
+        ):
+            self.assertIn(marker, ledger)
 
     def test_secret_envelope_has_no_circular_secret_or_digest_trust(self):
         contract = self.contracts["envelope"]

@@ -530,6 +530,12 @@ class CiClassificationTests(unittest.TestCase):
             },
         )
 
+    def test_audited_contract_documents_retain_high_risk(self):
+        for path in sorted(AUDITED_CONTRACT_PRIMARY_DOCUMENTS):
+            with self.subTest(path=path):
+                result = parsed(classify_paths([path]))
+                self.assertEqual(result["risk"]["level"], "HIGH")
+
     def test_authority_force_is_explicit_or_merge_group_only(self):
         self.assertTrue(force_full_for_event("merge_group"))
         self.assertTrue(

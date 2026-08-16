@@ -249,7 +249,7 @@ Evaluation error 使用独立 error envelope，不得生成以上 decision shape
 | Backup | format animemo-instance-backup、schemaVersion、backupId、checksum-set digest | Backup Format v1 parser/verifier | Data Bundle/Update Safety Backup 不是 instance backup |
 | Migration Bundle | bundle format/schema、bundleId、Manifest digest | Migration Bundle v1 parser/verifier | 与 Backup/Export 分离 |
 | Secret Envelope | animemo.migration-secret-envelope/v1、suite、authenticated binding | 支持的 envelope version/suite 与 external secret availability | wrong key/tamper 为 CORRUPT |
-| Installer / locator | Installer Contract version、instance.json schema、deployment profile、roots | matching Installer/Doctor/Updater reader 与 systemd allowlist | custom/legacy profile 必须显式 |
+| Installer / locator | Installer Contract version、instance.json schema、`v1.1-standard` profile、canonical roots | matching Installer/Doctor/Updater reader 与 systemd allowlist | custom/pre-v1.1 profile 为 UNSUPPORTED，不存在 fallback reader |
 | Updater | Updater SemVer、release slots/runtime/operation schemas、pending state | 满足 Manifest minimumUpdaterVersion，理解 state schema | 不丢弃 PENDING/history |
 | Plugin | Manifest schema 2、enabled SDK APIs、trusted-in-process runtime | target supportedApis/runtime | 已启用集合必须是子集 |
 | Platform | linux/amd64、standard server profile | Linux/amd64 与 required host capabilities | 其他 server target UNSUPPORTED |

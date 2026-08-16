@@ -111,7 +111,7 @@ Manifest 和 checksum set 不允许 absolute path、`..`、重复 path、Unicode
 
 Backup 必须从经过验证的 `instance.json` 和 deployment profile 发现 roots，不能从当前目录、面板路径、环境猜测或 symlink 推断。
 
-v1.0 compatibility profile 可以读取其既有 app-root protected configuration，但必须把逻辑成员映射为本 Format 的 protected config/secret 成员；旧文件位置不能成为新 Backup 的 layout。
+Backup v1 只接受 `v1.1-standard` locator 与 canonical protected configuration。pre-v1.1 path、旧 config alias、custom profile 与 fallback reader 均为 `UNSUPPORTED`，不得扫描或映射为 Backup member。
 
 开始前必须：
 
@@ -313,7 +313,7 @@ Backup 任一步失败：
 | PostgreSQL | Updater 已有 atomic logical dump safety point | Backup Format v1 正式 database member | ALREADY SATISFIED |
 | Redis/logs/cache | 当前 rehearsal 排除 | 固定排除并记录重建语义 | ALREADY SATISFIED |
 | Canonical format | 只有旧 DR manifest | `backup-manifest.json` + checksum + strict layout | DOCUMENTATION GAP |
-| Protected config/secret | 当前 helper 排除，v1.0 config 仍在 legacy location | profile-aware protected capture + envelope/reference | IMPLEMENTATION DEFERRED |
+| Protected config/secret | 当前 helper 排除 | canonical protected capture + envelope/reference | IMPLEMENTATION DEFERRED |
 | Plugin/private/updater state | 当前 helper 整树复制 | 逐项 allowlist 与 selective state | IMPLEMENTATION DEFERRED |
 | R2 | 当前 rehearsal 未覆盖 | captured/reference-dependent | IMPLEMENTATION DEFERRED |
 | Export naming | Staff/Data Bundle 历史使用 backup/restore 字样 | canonical docs 明确为 Export/Import；未来产品文案继续收敛 | DOCUMENTATION GAP |

@@ -93,7 +93,7 @@ Finalized bundle 是 member allowlist，不得携带未知顶层内容：
 
 - `format`、`formatVersion`、`bundleId`、`createdAt`；
 - stable `instanceId`；
-- source deployment/compatibility profile；
+- source `v1.1-standard` deployment profile；
 - source canonical app/data roots，且只作为 source metadata，不强迫 target 复用；
 - source locator schema、managed config location 与 filesystem contract version；
 - source database/configuration contract、Plugin SDK APIs 和 migration bundle compatibility metadata；
@@ -253,22 +253,21 @@ Bundle 内 Manifest、checksums、OCI digest 或 release metadata 只说明 sour
 
 Bundle 不携带 `/opt/animemo` binaries，不使用 `latest`，不允许版本替换。Exact source release 不可取得时，根据 Compatibility Matrix 返回 `REQUIRES_UPGRADE` 或 `UNSUPPORTED`，不得把 bundle 变成第二 Release Source。若未来 standalone migration program 不能由现有 exact Release identity 绑定，必须进行 Release Contract review。
 
-## 14. Legacy source to canonical target
+## 14. Canonical source to canonical target
 
-v1.0 source profile 可以显式识别：
+Migration Bundle v1 只接受由有效 `instance.json` 证明的
+`v1.1-standard` source，以及 Filesystem Layout v1 的 exact canonical roots。
+Source locator、Compose、Updater CURRENT、data root 与 running exact release
+identity 必须一致；缺失 locator、unknown profile 或 noncanonical root 为
+`UNSUPPORTED` 或 target/source ambiguity failure，不得扫描路径或从 env 猜测。
 
-```text
-source app root:  /opt/1panel/docker/compose/animemo/app
-source data root: /data/animemo
-target app root:  /opt/animemo
-target data root: /data/animemo (default)
-```
+Target 同样只使用 canonical roots，并从 Release Authority 重建 application
+material、生成 target-specific locator/allowlist。不得复制 source app tree、
+盲拷 absolute path、使用 symlink 伪装 root，或提供 custom/legacy fallback。
 
-Legacy detection 是 explicit compatibility classification，不是目录存在即自动 adopt。Source 无 locator 时必须由 operator 明确选择 legacy profile，并用 Updater CURRENT、Compose identity、data root 与 running release evidence 证明；Migration 不得自动创建 source locator 来掩盖不一致。
-
-Target 始终重建 canonical app material，转移 protected config，生成 target-specific allowlist，并在全部验证完成后建立 locator。不得复制旧 app tree、使用 symlink 伪装 root 或在 target 继续要求 1Panel。
-
-历史 `/data/anime-journal` → `/data/animemo` migration 已完成。Migration Bundle、legacy profile、Doctor 或 target activation 永远不得重新探测、重放或反向执行该迁移。
+pre-v1.1 filesystem/config reader、panel source profile、old bundle reader 与
+历史 data-path migration 均不属于 v1 Runtime。Unknown existing data 保持不动
+并 fail closed；clean break 不授权删除或覆盖 user-owned bytes。
 
 ## 15. Target validation and activation ownership
 
@@ -336,7 +335,7 @@ Format version 与其他 compatibility dimensions 必须分别报告。一个 di
 
 | AREA | CURRENT | TARGET | CLASSIFICATION |
 |---|---|---|---|
-| Phase 1 roots/legacy guard | roots、lifecycle、locator interface 与 legacy replay 禁令已冻结 | 直接复用 | ALREADY SATISFIED |
+| Phase 1 roots/profile guard | canonical roots、lifecycle 与 locator interface 已重新冻结为 clean break | 直接复用 `v1.1-standard` only | ALREADY SATISFIED |
 | Logical database primitive | 已有 `pg_dump` gzip、checksum、metadata 与验证 | 作为 Migration member primitive 复用 | ALREADY SATISFIED |
 | DR helper | 复制 plugins/media/private/整个 updater state，排除 protected config，但已明确为noncanonical | 采用 strict member allowlist、Secret Envelope 与 selective state | DOCUMENTATION GAP |
 | Bundle schema/atomic finalize | 无 canonical Migration format、bundleId、activation handoff | 本 Contract 冻结语义；runtime later | DOCUMENTATION GAP |
@@ -349,6 +348,6 @@ Format version 与其他 compatibility dimensions 必须分别报告。一个 di
 
 ## 20. Acceptance and STOP
 
-Migration Bundle v1 只有在以下全部成立时才可宣称符合：格式独立且 versioned、instanceId 连续、source snapshot 一致、database/plugin/media/config/secret/updater members 完整、same-R2 被证明、different-R2 未实现时 fail closed、Release Authority 不变、legacy data migration 不重放、target locator 最后生成、source/target 不双写、MI-1..MI-5 全部满足。
+Migration Bundle v1 只有在以下全部成立时才可宣称符合：格式独立且 versioned、instanceId 连续、source snapshot 一致、database/plugin/media/config/secret/updater members 完整、same-R2 被证明、different-R2 未实现时 fail closed、Release Authority 不变、canonical-only 且无 compatibility reader、target locator 最后生成、source/target 不双写、MI-1..MI-5 全部满足。
 
 发现任何 unknown critical extension、integrity failure、missing authoritative memory、split-brain、locator mismatch、unverified Release、secret 明文、unknown orphan deletion proposal 或需要重跑历史数据迁移时，必须 STOP。#89 Backup Contract 与 #87 Migration Secret Envelope 未满足时，不得实现或宣称 Migration runtime 完成。

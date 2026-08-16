@@ -174,6 +174,7 @@ class BackupRuntimeTests(unittest.TestCase):
         self.assertEqual(
             verification.compatibility_artifact["artifactId"], str(self.backup_id)
         )
+
         self.assertEqual(
             verification.compatibility_artifact["manifestDigest"],
             result.manifest_digest,
@@ -198,6 +199,27 @@ class BackupRuntimeTests(unittest.TestCase):
         )
         with gzip.open(result.path / backup.DATABASE_MEMBER, "rb") as stream:
             self.assertEqual(stream.read(), runner.payload)
+
+    def test_shared_logical_postgres_capture_is_artifact_neutral(self) -> None:
+        staging = self.root / "shared-postgres-staging"
+        staging.mkdir(mode=0o700)
+        runner = FakePgDump()
+
+        captured = backup.capture_logical_postgres(
+            "postgresql://isolated-test.invalid/animemo",
+            staging,
+            server_major=16,
+            runner=runner,
+        )
+
+        self.assertEqual(runner.calls, [("DATABASE_URL_PRESENT", "pg_dump", 600)])
+        self.assertEqual(captured["path"], backup.DATABASE_MEMBER)
+        self.assertEqual(captured["serverMajor"], 16)
+        self.assertEqual(
+            gzip.decompress((staging / backup.DATABASE_MEMBER).read_bytes()),
+            runner.payload,
+        )
+        self.assertFalse((staging / ".database.sql.raw").exists())
 
     def test_checksums_are_sorted_complete_and_reproducible(self) -> None:
         first = self.create()
@@ -384,7 +406,14 @@ class BackupRuntimeTests(unittest.TestCase):
             "postgresql://animemo:not-a-real-secret@postgres.example:5433/animemo"
             "?sslmode=require&connect_timeout=7"
         )
-        environment = backup._pg_environment(database_url)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ANIMEMO_UNRELATED_SECRET": "must-not-reach-database-process",
+                "PGSERVICE": "must-not-be-inherited",
+            },
+        ):
+            environment = backup.postgres_connection_environment(database_url)
 
         self.assertEqual(environment["PGHOST"], "postgres.example")
         self.assertEqual(environment["PGPORT"], "5433")
@@ -394,6 +423,8 @@ class BackupRuntimeTests(unittest.TestCase):
         self.assertEqual(environment["PGCONNECT_TIMEOUT"], "7")
         self.assertIn("PGPASSWORD", environment)
         self.assertNotIn(database_url, environment.values())
+        self.assertNotIn("ANIMEMO_UNRELATED_SECRET", environment)
+        self.assertNotIn("PGSERVICE", environment)
 
     def test_empty_pg_dump_is_rejected(self) -> None:
         with self.assertRaisesRegex(backup.BackupError, "PG_DUMP_EMPTY"):
