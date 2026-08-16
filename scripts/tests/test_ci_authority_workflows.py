@@ -228,36 +228,36 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertNotIn("run_contract_validation:", classify)
         self.assertNotIn("run_release_dr:", classify)
 
-    def test_release_gate_bootstraps_both_legacy_and_explicit_job_compose_contracts(self):
+    def test_release_gate_uses_only_the_canonical_explicit_job_compose_contract(self):
         release = self.source("release-gate.yml")
 
         self.assertIn("ANIMEMO_API_IMAGE=animemo-api:release-gate", release)
         self.assertIn("ANIMEMO_WEB_IMAGE=animemo-web:release-gate", release)
-        self.assertIn('if [[ -f deploy/docker-compose.build.yml ]]; then', release)
+        self.assertIn("test -f deploy/docker-compose.build.yml", release)
+        self.assertNotIn('if [[ -f deploy/docker-compose.build.yml ]]; then', release)
         self.assertIn(
             "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",
             release,
         )
-        self.assertIn("COMPOSE_FILE=deploy/docker-compose.yml", release)
-        self.assertIn("docker compose --env-file .env.production build api web", release)
+        self.assertIn("docker compose --env-file .ci-runtime.env build api web", release)
         self.assertIn(
-            "docker compose --env-file .env.production up -d --wait --wait-timeout 120 postgres redis",
+            "docker compose --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis",
             release,
         )
         self.assertIn(
-            "docker compose --env-file .env.production run --rm --no-deps migration",
+            "docker compose --env-file .ci-runtime.env run --rm --no-deps migration",
             release,
         )
         self.assertIn(
-            "docker compose --env-file .env.production run --rm --no-deps bootstrap",
+            "docker compose --env-file .ci-runtime.env run --rm --no-deps bootstrap",
             release,
         )
         self.assertIn(
-            "docker compose --env-file .env.production up -d --no-deps api web",
+            "docker compose --env-file .ci-runtime.env up -d --no-deps api web",
             release,
         )
-        self.assertIn("docker compose --env-file .env.production build\n", release)
-        self.assertIn("docker compose --env-file .env.production up -d\n", release)
+        self.assertNotIn("EXPLICIT_RELEASE_JOBS", release)
+        self.assertNotIn(".env.production", release)
 
     def test_performance_backend_uses_an_explicit_isolated_frontend_origin(self):
         performance = self.source("performance.yml")

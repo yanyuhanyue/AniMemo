@@ -25,6 +25,9 @@ done
 SCRIPT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 [ -f "$SCRIPT_ROOT/updater/__init__.py" ] || die "updater package is missing"
 [ -f "$SCRIPT_ROOT/release/requirements.txt" ] || die "release requirements are missing"
+[ -f "$SCRIPT_ROOT/durability/requirements.txt" ] || die "durability requirements are missing"
+[ -d "$SCRIPT_ROOT/wheelhouse" ] || die "offline wheelhouse is missing"
+[ -f "$SCRIPT_ROOT/deploy/updater/animemo-updater" ] || die "verified launcher is missing"
 [ -f "$SCRIPT_ROOT/deploy/updater/animemo-updater.service" ] || die "systemd service asset is missing"
 
 VERSION=$(sed -n 's/^__version__ = "\([0-9][0-9.]*\)"$/\1/p' "$SCRIPT_ROOT/updater/__init__.py")
@@ -57,9 +60,17 @@ rm -rf "$STAGING"
 mkdir -p "$STAGING"
 cp -R "$SCRIPT_ROOT/updater" "$STAGING/updater"
 cp -R "$SCRIPT_ROOT/release" "$STAGING/release"
+cp -R "$SCRIPT_ROOT/durability" "$STAGING/durability"
+cp -R "$SCRIPT_ROOT/installer" "$STAGING/installer"
+cp -R "$SCRIPT_ROOT/wheelhouse" "$STAGING/wheelhouse"
 find "$STAGING" -type d -name __pycache__ -prune -exec rm -rf {} +
 python3 -m venv "$STAGING/.venv" || die "python3-venv is required"
-"$STAGING/.venv/bin/python" -m pip install --disable-pip-version-check -r "$STAGING/release/requirements.txt"
+"$STAGING/.venv/bin/python" -m pip install \
+    --disable-pip-version-check \
+    --no-index \
+    --find-links "$STAGING/wheelhouse" \
+    -r "$STAGING/release/requirements.txt" \
+    -r "$STAGING/durability/requirements.txt"
 (cd "$STAGING" && "$STAGING/.venv/bin/python" -m updater version >/dev/null)
 chmod -R a+rX,go-w "$STAGING"
 
@@ -75,13 +86,7 @@ install -m 0644 "$SCRIPT_ROOT/deploy/updater/animemo-updater.service" /etc/syste
 systemd-sysusers /usr/lib/sysusers.d/animemo-updater.conf
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/animemo-updater.conf
 
-cat > "$INSTALL_ROOT/launcher" <<'EOF'
-#!/usr/bin/env sh
-set -eu
-cd /opt/animemo-updater/current
-exec /opt/animemo-updater/current/.venv/bin/python -m updater "$@"
-EOF
-chmod 0755 "$INSTALL_ROOT/launcher"
+install -m 0755 "$SCRIPT_ROOT/deploy/updater/animemo-updater" "$INSTALL_ROOT/launcher"
 ln -sfn "$INSTALL_ROOT/launcher" "$LAUNCHER"
 ln -sfn "$RELEASE_ROOT" "$INSTALL_ROOT/.current-new"
 mv -Tf "$INSTALL_ROOT/.current-new" "$INSTALL_ROOT/current"
@@ -89,9 +94,7 @@ runuser -u animemo-updater -g animemo-api -- "$LAUNCHER" version >/dev/null \
     || die "installed updater is not executable by the service identity"
 
 systemctl daemon-reload
-systemctl enable --now "$SERVICE"
-systemctl is-active --quiet "$SERVICE" || die "animemo-updater did not become active"
 
 trap - EXIT INT TERM
 rm -rf "$STAGING"
-echo "AniMemo Updater $VERSION installed. CURRENT was not imported and production was not changed."
+echo "AniMemo Updater $VERSION installed but not started. Canonical adoption and locator publication are still required."

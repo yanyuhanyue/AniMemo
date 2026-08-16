@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from release.contract import build_manifest
 from updater.errors import StateError
@@ -120,20 +121,46 @@ class FakeDeployment:
         return self.enabled_plugin_apis
 
 
+class StatefulRuntimeBinding:
+    def __init__(self, *, failed_replacements: int = 0):
+        self.failed_replacements = failed_replacements
+        self.refreshes = 0
+        self.release_version = None
+
+    def refresh(self):
+        self.refreshes += 1
+
+    def replace_release(self, manifest):
+        if self.failed_replacements:
+            self.failed_replacements -= 1
+            raise StateError("LOCATOR_CONCURRENT_MODIFICATION")
+        self.release_version = manifest["release"]["version"]
+
+
 class UpdateExecutorTests(unittest.TestCase):
-    def setup_executor(self, directory, current, target, deployment):
+    def setup_executor(
+        self,
+        directory,
+        current,
+        target,
+        deployment,
+        *,
+        runtime_binding=None,
+    ):
         root = Path(directory)
         slots = ReleaseSlots(root / "releases")
         slots.import_current(current)
         store = OperationStore(root / "state")
         runtime_state = RuntimeState(root / "state")
         runtime_state.initialize_from_manifest(current, enabled_plugin_apis={2})
+        runtime_binding = runtime_binding or mock.Mock()
         executor = UpdateExecutor(
             store=store,
             slots=slots,
             release_source=FakeReleaseSource(target),
             deployment=deployment,
             runtime_state=runtime_state,
+            runtime_binding=runtime_binding,
             lock_path=root / "state" / "update.lock",
             updater_version="1.0.0",
         )
@@ -558,6 +585,110 @@ class UpdateExecutorTests(unittest.TestCase):
                     "enabledPluginApis": [2],
                 },
             )
+
+    def test_apply_commits_the_target_release_to_the_canonical_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = manifest("v1.0.0", "1")
+            target = manifest("v1.0.1", "2")
+            binding = StatefulRuntimeBinding()
+            executor, store, slots = self.setup_executor(
+                directory,
+                current,
+                target,
+                FakeDeployment(),
+                runtime_binding=binding,
+            )
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+
+            result = executor.apply(operation["id"], target)
+
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(slots.read()["current"], target)
+            self.assertEqual(binding.release_version, "v1.0.1")
+            self.assertEqual(binding.refreshes, 1)
+
+    def test_rollback_commits_previous_to_the_canonical_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = manifest("v1.1.0", "2")
+            previous = manifest("v1.0.0", "1")
+            binding = StatefulRuntimeBinding()
+            executor, store, slots = self.setup_executor(
+                directory,
+                current,
+                previous,
+                FakeDeployment(),
+                runtime_binding=binding,
+            )
+            slots.promote(previous, operation_id="seed")
+            slots.restore_previous(operation_id="seed-restore")
+            operation = store.create(
+                "rollback_previous", {"version": "v1.0.0"}
+            )
+
+            result = executor.rollback(operation["id"], previous)
+
+            self.assertEqual(result["status"], "rolled_back")
+            self.assertEqual(slots.read()["current"], previous)
+            self.assertEqual(binding.release_version, "v1.0.0")
+            self.assertEqual(binding.refreshes, 1)
+
+    def test_apply_locator_cas_failure_blocks_until_reconcile_repairs_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = manifest("v1.0.0", "1")
+            target = manifest("v1.0.1", "2")
+            binding = StatefulRuntimeBinding(failed_replacements=1)
+            executor, store, slots = self.setup_executor(
+                directory,
+                current,
+                target,
+                FakeDeployment(),
+                runtime_binding=binding,
+            )
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+
+            failed = executor.apply(operation["id"], target)
+
+            self.assertEqual(failed["status"], "manual_recovery_required")
+            self.assertEqual(slots.read()["current"], target)
+            self.assertIsNone(binding.release_version)
+            self.assertEqual(store.recovery_block()["id"], operation["id"])
+
+            repaired = executor.reconcile(operation["id"])
+
+            self.assertEqual(repaired["status"], "reconciled")
+            self.assertEqual(binding.release_version, "v1.0.1")
+            self.assertIsNone(store.recovery_block())
+
+    def test_rollback_locator_cas_failure_blocks_until_reconcile_repairs_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = manifest("v1.1.0", "2")
+            previous = manifest("v1.0.0", "1")
+            binding = StatefulRuntimeBinding(failed_replacements=1)
+            executor, store, slots = self.setup_executor(
+                directory,
+                current,
+                previous,
+                FakeDeployment(),
+                runtime_binding=binding,
+            )
+            slots.promote(previous, operation_id="seed")
+            slots.restore_previous(operation_id="seed-restore")
+            operation = store.create(
+                "rollback_previous", {"version": "v1.0.0"}
+            )
+
+            failed = executor.rollback(operation["id"], previous)
+
+            self.assertEqual(failed["status"], "manual_recovery_required")
+            self.assertEqual(slots.read()["current"], previous)
+            self.assertIsNone(binding.release_version)
+            self.assertEqual(store.recovery_block()["id"], operation["id"])
+
+            repaired = executor.reconcile(operation["id"])
+
+            self.assertEqual(repaired["status"], "reconciled")
+            self.assertEqual(binding.release_version, "v1.0.0")
+            self.assertIsNone(store.recovery_block())
 
 
 if __name__ == "__main__":

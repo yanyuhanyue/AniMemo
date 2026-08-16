@@ -252,19 +252,37 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         authority = release["jobs"]["release-authority"]
-        self.assertEqual(authority["needs"], ["preflight", "full-ci", "full-release-gate", "performance"])
+        self.assertEqual(
+            authority["needs"],
+            [
+                "preflight",
+                "full-ci",
+                "full-release-gate",
+                "performance",
+                "platform-qualification",
+            ],
+        )
         self.assertEqual(authority["if"], "${{ always() }}")
         authority_source = source[source.index("  release-authority:\n") : source.index("  dry-run:\n")]
         self.assertIn("toJSON(needs)", authority_source)
         self.assertIn("ref: ${{ needs.preflight.outputs.candidate_sha }}", authority_source)
         self.assertIn("python scripts/release_authority.py", authority_source)
+        self.assertEqual(
+            release["jobs"]["dry-run"]["needs"],
+            ["preflight", "release-authority", "platform-qualification"],
+        )
+        self.assertEqual(
+            release["jobs"]["publish"]["needs"],
+            ["preflight", "release-authority"],
+        )
         for job_name in ("dry-run", "publish"):
-            job = release["jobs"][job_name]
-            self.assertEqual(job["needs"], ["preflight", "release-authority"])
-            self.assertNotIn("performance", job["needs"])
+            self.assertNotIn("performance", release["jobs"][job_name]["needs"])
         self.assertNotIn("performance.yml", (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
         self.assertNotIn("performance.yml", (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8"))
-        self.assertIn("needs: [preflight, full-ci, full-release-gate, performance]", authority_source)
+        self.assertIn(
+            "needs: [preflight, full-ci, full-release-gate, performance, platform-qualification]",
+            authority_source,
+        )
         self.assertEqual(authority["permissions"], {"contents": "read", "actions": "read"})
         self.assertIn("run_attempt=\"$(jq -r '.run_attempt // empty'", authority_source)
         self.assertIn('[[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]', authority_source)
@@ -402,8 +420,19 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         gate = (ROOT / "scripts" / "stateful-upgrade-gate.sh").read_text(encoding="utf-8")
 
         self.assertEqual(release.count("generate-deployment-contract"), 2)
+        self.assertEqual(release.count("build-installer-materials"), 2)
+        self.assertGreaterEqual(release.count("-r durability/requirements.txt"), 2)
+        self.assertGreaterEqual(release.count("installer-materials.tar"), 10)
         self.assertGreaterEqual(release.count("deployment-contract.json"), 8)
         self.assertGreaterEqual(promotion.count("deployment-contract.json"), 7)
+        self.assertGreaterEqual(promotion.count("installer-materials.tar"), 7)
+        self.assertIn(
+            "cp --no-clobber rc-assets/installer-materials.tar promotion-output/installer-materials.tar",
+            promotion,
+        )
+        self.assertNotIn("build-installer-materials", promotion)
+        self.assertIn("POSTGRES_IMAGE: docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571", release)
+        self.assertIn("REDIS_IMAGE: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf", release)
         self.assertIn('test "$UPGRADE_BASE_SHA" != "$candidate_sha"', release)
         self.assertIn('if [[ "$BASE_SHA" == "$HEAD_SHA" ]]', gate)
         release_gate = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(
@@ -411,6 +440,88 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("timeout-minutes: 40", release_gate)
         self.assertIn('merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"', gate)
+
+    def test_platform_qualification_is_hosted_scoped_and_injected_exactly(self):
+        release = workflow("release.yml")
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        promotion = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(
+            encoding="utf-8"
+        )
+        job = release["jobs"]["platform-qualification"]
+
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(job["if"], "${{ inputs.operation == 'qualify' }}")
+        self.assertEqual(
+            job["needs"], ["preflight", "full-ci", "full-release-gate"]
+        )
+        qualification = source[
+            source.index("  platform-qualification:\n") : source.index(
+                "  release-authority:\n"
+            )
+        ]
+        for exact_identity_guard in (
+            'test "$GITHUB_ACTIONS" = "true"',
+            'test "$RUNNER_OS" = "Linux"',
+            'test "$RUNNER_ARCH" = "X64"',
+            'test "$GITHUB_SHA" = "$CANDIDATE_SHA"',
+            'test "$GITHUB_WORKFLOW_SHA" = "$CANDIDATE_SHA"',
+            'test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"',
+        ):
+            self.assertIn(exact_identity_guard, qualification)
+        for real_rehearsal in (
+            "installer.tests.test_runtime",
+            "from installer.production import build_runtime",
+            "deploy/docker-compose.yml config --quiet",
+            "scripts.tests.test_restore_postgres",
+            "scripts.tests.test_migration_postgres",
+            "updater.tests.test_adoption",
+            "updater.tests.test_linux_e2e",
+            "scripts.tests.test_durability_doctor",
+        ):
+            self.assertIn(real_rehearsal, qualification)
+        for marker in (
+            "fresh_install",
+            "logical_restore",
+            "logical_migration",
+            "updater_handoff",
+            "doctor_complete",
+        ):
+            self.assertIn(f'$REHEARSAL_DIR/{marker}', qualification)
+        for observed_capability in (
+            "postgresql-client-16",
+            "platform_qualification.py collect",
+            '--postgres-image "$POSTGRES_IMAGE"',
+            '--redis-image "$REDIS_IMAGE"',
+            '--source-database-url "$ANIMEMO_TEST_DATABASE_URL"',
+            '--target-database-url "$ANIMEMO_RESTORE_TEST_DATABASE_URL"',
+            '--rehearsal-directory "$REHEARSAL_DIR"',
+            "platform-qualification-${{ github.run_id }}",
+        ):
+            self.assertIn(observed_capability, qualification)
+
+        self.assertEqual(
+            source.count("release/platform-qualification.json | cmp - release/platform-qualification.json"),
+            2,
+        )
+        self.assertGreaterEqual(
+            source.count("platform_qualification.py verify"), 4
+        )
+        self.assertIn("path: release-qualification/", source)
+        self.assertIn(
+            "cp platform-qualification-input/platform-qualification.json", source
+        )
+        self.assertIn("release-qualification/platform-qualification.json", source)
+        self.assertIn(
+            "validated-platform-qualification-${{ github.run_id }}", source
+        )
+        self.assertIn(
+            "cp --no-clobber rc-assets/installer-materials.tar promotion-output/installer-materials.tar",
+            promotion,
+        )
+        self.assertNotIn("platform_qualification.py collect", promotion)
+        self.assertNotIn("build-installer-materials", promotion)
 
     def test_exact_image_rehearsal_is_runner_scoped_and_read_only(self):
         source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(encoding="utf-8")

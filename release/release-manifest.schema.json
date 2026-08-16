@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/yanyuhanyue/AniMemo/blob/main/release/release-manifest.schema.json",
-  "title": "AniMemo Release Manifest v1",
+  "title": "AniMemo Release Manifest v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "release", "images", "deployment", "minimumUpdaterVersion", "compatibility", "releaseNotes", "provenance", "artifacts"],
   "properties": {
-    "schemaVersion": {"const": 1},
+    "schemaVersion": {"const": 2},
     "release": {
       "type": "object",
       "additionalProperties": false,
@@ -27,23 +27,36 @@
     "images": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["api", "web"],
+      "required": ["api", "web", "postgres", "redis"],
       "properties": {
         "api": {"$ref": "#/$defs/apiImage"},
-        "web": {"$ref": "#/$defs/webImage"}
+        "web": {"$ref": "#/$defs/webImage"},
+        "postgres": {"$ref": "#/$defs/postgresImage"},
+        "redis": {"$ref": "#/$defs/redisImage"}
       }
     },
     "deployment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["contractSha256", "files"],
+      "required": ["profile", "contractSha256", "files", "installerMaterials"],
       "properties": {
+        "profile": {"const": "v1.1-standard"},
         "contractSha256": {"$ref": "#/$defs/digest"},
         "files": {
           "type": "array",
           "minItems": 2,
           "maxItems": 2,
           "items": {"$ref": "#/$defs/deploymentFile"}
+        },
+        "installerMaterials": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "sha256", "format"],
+          "properties": {
+            "name": {"const": "installer-materials.tar"},
+            "sha256": {"$ref": "#/$defs/digest"},
+            "format": {"const": "tar"}
+          }
         }
       }
     },
@@ -122,10 +135,11 @@
     "artifacts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["manifest", "deploymentContract", "checksums"],
+      "required": ["manifest", "deploymentContract", "installerMaterials", "checksums"],
       "properties": {
         "manifest": {"const": "release-manifest.json"},
         "deploymentContract": {"const": "deployment-contract.json"},
+        "installerMaterials": {"const": "installer-materials.tar"},
         "checksums": {"const": "checksums.txt"}
       }
     }
@@ -165,6 +179,26 @@
       "properties": {
         "repository": {"const": "ghcr.io/yanyuhanyue/animemo-web"},
         "digest": {"$ref": "#/$defs/digest"},
+        "platform": {"const": "linux/amd64"}
+      }
+    },
+    "postgresImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "platform"],
+      "properties": {
+        "repository": {"const": "docker.io/library/postgres"},
+        "digest": {"const": "sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571"},
+        "platform": {"const": "linux/amd64"}
+      }
+    },
+    "redisImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "platform"],
+      "properties": {
+        "repository": {"const": "docker.io/library/redis"},
+        "digest": {"const": "sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf"},
         "platform": {"const": "linux/amd64"}
       }
     }

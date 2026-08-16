@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -13,7 +15,7 @@ from urllib.error import HTTPError
 
 from cramjam import snappy
 
-from release.contract import build_manifest
+from release.contract import build_manifest, deployment_contract_digest
 from updater.errors import CommandFailed, RequestRejected
 from updater.source import (
     MAX_GITHUB_JSON_BYTES,
@@ -34,6 +36,51 @@ def link_directory(link: Path, target: Path) -> None:
             capture_output=True,
             text=True,
         )
+
+
+def _fake_material_archive() -> bytes:
+    output = io.BytesIO()
+    value = b"qualified wheel bytes"
+    with tarfile.open(fileobj=output, mode="w:", format=tarfile.USTAR_FORMAT) as archive:
+        member = tarfile.TarInfo(
+            "wheelhouse/qualified_dependency-1.0-py3-none-any.whl"
+        )
+        member.size = len(value)
+        member.mode = 0o644
+        member.mtime = 0
+        member.uid = 0
+        member.gid = 0
+        member.uname = ""
+        member.gname = ""
+        archive.addfile(member, io.BytesIO(value))
+    return output.getvalue()
+
+
+FAKE_MATERIAL_ARCHIVE = _fake_material_archive()
+FAKE_DEPLOYMENT_FILES = [
+    {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
+    {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
+]
+FAKE_DEPLOYMENT_CONTRACT = {
+    "schemaVersion": 2,
+    "profile": "v1.1-standard",
+    "platform": "linux/amd64",
+    "archive": {
+        "name": "installer-materials.tar",
+        "sha256": "sha256:" + hashlib.sha256(FAKE_MATERIAL_ARCHIVE).hexdigest(),
+        "size": len(FAKE_MATERIAL_ARCHIVE),
+        "format": "tar",
+    },
+    "files": FAKE_DEPLOYMENT_FILES,
+    "materials": [
+        {
+            "path": "wheelhouse/qualified_dependency-1.0-py3-none-any.whl",
+            "sha256": "sha256:" + hashlib.sha256(b"qualified wheel bytes").hexdigest(),
+            "size": len(b"qualified wheel bytes"),
+            "mode": "0644",
+        }
+    ],
+}
 
 
 class FakeRunner:
@@ -57,10 +104,7 @@ class FakeRunner:
         attestation_source_commit=None,
     ):
         self.manifest = manifest
-        self.deployment_contract = deployment_contract or {
-            "schemaVersion": 1,
-            "files": manifest["deployment"]["files"],
-        }
+        self.deployment_contract = deployment_contract or FAKE_DEPLOYMENT_CONTRACT
         self.calls = []
         self.call_options = []
         self.attestation_subject_name = attestation_subject_name
@@ -110,9 +154,11 @@ class FakeRunner:
             ).encode()
             (output / "release-manifest.json").write_bytes(encoded)
             (output / "deployment-contract.json").write_bytes(deployment_encoded)
+            (output / "installer-materials.tar").write_bytes(FAKE_MATERIAL_ARCHIVE)
             checksums = (
                 f"{hashlib.sha256(encoded).hexdigest()}  release-manifest.json\n"
                 f"{hashlib.sha256(deployment_encoded).hexdigest()}  deployment-contract.json\n"
+                f"{hashlib.sha256(FAKE_MATERIAL_ARCHIVE).hexdigest()}  installer-materials.tar\n"
             )
             if self.duplicate_checksum:
                 checksums += f"{hashlib.sha256(encoded).hexdigest()}  release-manifest.json\n"
@@ -210,6 +256,7 @@ class FakePublicRest:
             "assets": [
                 {"name": "checksums.txt", "state": "uploaded"},
                 {"name": "deployment-contract.json", "state": "uploaded"},
+                {"name": "installer-materials.tar", "state": "uploaded"},
                 {"name": "release-manifest.json", "state": "uploaded"},
             ],
         }
@@ -288,11 +335,9 @@ def stable_manifest():
         created_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
         api_digest="sha256:" + "a" * 64,
         web_digest="sha256:" + "b" * 64,
-        deployment_contract_sha256="sha256:0be5fdf5f87275755e06a2e2b6523c24e16d6aa1db48d8d58e8cfea969b674df",
-        deployment_files=[
-            {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
-            {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
-        ],
+        deployment_contract_sha256=deployment_contract_digest(FAKE_DEPLOYMENT_CONTRACT),
+        deployment_files=FAKE_DEPLOYMENT_FILES,
+        installer_materials_sha256=FAKE_DEPLOYMENT_CONTRACT["archive"]["sha256"],
         minimum_updater_version="1.0.0",
         database_contract="animemo-db-v1",
         database_accepts=["animemo-db-v1"],
@@ -309,6 +354,27 @@ def stable_manifest():
 
 
 class GitHubReleaseSourceTests(unittest.TestCase):
+    def test_verified_materials_remain_available_after_the_download_scope_closes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = stable_manifest()
+            source = GitHubReleaseSource(
+                Path(directory) / "cache",
+                runner=FakeRunner(manifest),
+                rest=FakePublicRest(manifest),
+            )
+
+            verified = source.fetch_verified_materials("v1.0.0")
+
+            self.assertEqual(verified.manifest, manifest)
+            self.assertEqual(verified.profile, "v1.1-standard")
+            self.assertEqual(
+                verified.material(
+                    "wheelhouse/qualified_dependency-1.0-py3-none-any.whl"
+                ).read_bytes(),
+                b"qualified wheel bytes",
+            )
+            self.assertTrue(verified.root.is_dir())
+
     def test_public_rest_does_not_read_a_configured_token_when_anonymous_access_succeeds(self):
         manifest = stable_manifest()
         runner = FakeRunner(manifest, github_token="read-only-token")
@@ -486,7 +552,7 @@ class GitHubReleaseSourceTests(unittest.TestCase):
             self.assertEqual(fetched, manifest)
             calls = [" ".join(call) for call in runner.calls]
             self.assertFalse(any(" gh api " in f" {call} " for call in calls))
-            self.assertEqual(sum("attestation verify" in call for call in calls), 4)
+            self.assertEqual(sum("attestation verify" in call for call in calls), 5)
             self.assertTrue(all("--bundle" in call for call in calls if "attestation verify" in call))
             for call, options in zip(runner.calls, runner.call_options, strict=True):
                 if call[1:3] not in {("release", "download"), ("attestation", "verify")}:
@@ -552,7 +618,7 @@ class GitHubReleaseSourceTests(unittest.TestCase):
             self.assertEqual(fetched, stable_manifest())
             calls = [" ".join(call) for call in runner.calls]
             self.assertTrue(any("release download v1.0.0 --repo yanyuhanyue/AniMemo" in call for call in calls))
-            self.assertEqual(sum("attestation verify" in call for call in calls), 4)
+            self.assertEqual(sum("attestation verify" in call for call in calls), 5)
             image_calls = [call for call in calls if "attestation verify oci://" in call]
             manifest_call = next(call for call in calls if "attestation verify" in call and "release-manifest.json" in call)
             deployment_call = next(
@@ -637,7 +703,7 @@ class GitHubReleaseSourceTests(unittest.TestCase):
             self.assertEqual(source.fetch_verified("v1.0.0"), manifest)
             self.assertEqual(
                 rest.bundle_calls,
-                [(bundle_url, 1327429673)] * 4,
+                [(bundle_url, 1327429673)] * 5,
             )
 
     def test_attestation_repository_workflow_and_commit_are_bound_exactly(self):
@@ -771,11 +837,15 @@ class GitHubReleaseSourceTests(unittest.TestCase):
     def test_tampered_deployment_contract_is_rejected_even_with_matching_checksum(self):
         with tempfile.TemporaryDirectory() as directory:
             changed = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
+                "profile": "v1.1-standard",
+                "platform": "linux/amd64",
+                "archive": FAKE_DEPLOYMENT_CONTRACT["archive"],
                 "files": [
                     {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "f" * 64},
                     {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
                 ],
+                "materials": FAKE_DEPLOYMENT_CONTRACT["materials"],
             }
             source = GitHubReleaseSource(
                 Path(directory),
@@ -783,7 +853,7 @@ class GitHubReleaseSourceTests(unittest.TestCase):
                 rest=FakePublicRest(stable_manifest()),
             )
 
-            with self.assertRaisesRegex(RequestRejected, "differs from the release manifest"):
+            with self.assertRaisesRegex(RequestRejected, "unreadable or invalid|differs from the release manifest"):
                 source.fetch_verified("v1.0.0")
 
     def test_release_source_never_accepts_url_or_repository(self):

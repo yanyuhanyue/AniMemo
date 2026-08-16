@@ -5,9 +5,11 @@ import test from "node:test";
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 
 test("production deployment has one environment template", () => {
-  assert.equal(existsSync(new URL("../.env.production.example", import.meta.url)), true);
+  assert.equal(existsSync(new URL("../.env.production.example", import.meta.url)), false);
   assert.equal(existsSync(new URL("../deploy/.env.production.example", import.meta.url)), false);
-  assert.match(read("../.env.production.example"), /^DATABASE_SSL_REQUIRE=false$/m);
+  const compose = read("../deploy/docker-compose.yml");
+  assert.match(compose, /\/run\/animemo-updater\/managed\.env/);
+  assert.doesNotMatch(compose, /\.env\.production/);
 });
 
 test("API healthcheck is secure-forwarded and validates status and body", () => {
@@ -27,48 +29,24 @@ test("production frontend is a generic artifact without instance Turnstile build
   assert.doesNotMatch(dockerfile, /TURNSTILE_SECRET/);
 });
 
-test("smoke test requires HTTP 200 and valid health JSON", () => {
-  const smoke = read("../deploy/smoke-test.sh");
-  assert.match(smoke, /\[ "\$HTTP_STATUS" != "200" \]/);
-  assert.match(smoke, /payload\.get\('status'\) == 'ok'/);
-  assert.match(smoke, /X-Forwarded-Proto: https/);
-});
-
-test("legacy ZIP deployer is explicit bootstrap or break-glass recovery", () => {
-  const deploy = read("../deploy/deploy.sh");
+test("legacy deploy, smoke, proxy, and certificate entrypoints are removed", () => {
   assert.equal(existsSync(new URL("../deploy/create-admin.sh", import.meta.url)), false);
-  assert.match(deploy, /DEFAULT_APP_ROOT=\/opt\/1panel\/docker\/compose\/animemo\/app/);
-  assert.match(deploy, /DEFAULT_DATA_ROOT=\/data\/animemo/);
-  assert.match(deploy, /--bootstrap/);
-  assert.match(deploy, /--break-glass/);
-  assert.match(deploy, /normal updates use the AniMemo Update Agent/);
-  assert.match(deploy, /--reset-data/);
-  assert.match(deploy, /--reset-data requires --bootstrap/);
-  assert.match(deploy, /--create-admin[\s\S]*removed[\s\S]*\/setup/);
-  assert.match(deploy, /tr -d '\\r' < "\$SHA_FILE"/);
-  assert.match(deploy, /ARCHIVE%\.zip/);
-  assert.match(deploy, /ARCHIVE_BACKEND=python3/);
-  assert.match(deploy, /from zipfile import ZipFile/);
-  assert.match(deploy, /deploy\/docker-compose\.build\.yml/);
-  assert.match(deploy, /run --rm --no-deps migration/);
-  assert.match(deploy, /run --rm --no-deps bootstrap/);
-  assert.match(deploy, /up -d --no-deps --force-recreate api web/);
-  assert.doesNotMatch(deploy, /docker volume rm/);
-  assert.doesNotMatch(deploy, /stage_compose down/);
-  assert.doesNotMatch(deploy, /STACK_STOPPED/);
-  assert.doesNotMatch(deploy, /docker\s+(?:system|volume)\s+prune/);
-  assert.doesNotMatch(deploy, /docker compose .*down .*--volumes/);
-  assert.match(deploy, /animemo\.cc\.conf/);
-  assert.doesNotMatch(deploy, /createsuperuser|get_or_create\(username|ANIMEMO_ADMIN_PASSWORD/);
+  for (const path of [
+    "../deploy/deploy.sh",
+    "../deploy/smoke-test.sh",
+    "../deploy/openresty-animemo.conf",
+    "../deploy/animemo-certbot.cron",
+  ]) {
+    assert.equal(existsSync(new URL(path, import.meta.url)), false, path);
+  }
 });
 
-test("operator docs use the browser first-run flow and current deploy modes", () => {
+test("operator docs use the browser first-run flow", () => {
   const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
   const localDevelopment = readFileSync(new URL("../docs/local-development.md", import.meta.url), "utf8");
 
   assert.match(readme, /docs\/first-run-bootstrap\.md/);
-  assert.match(readme, /--bootstrap/);
-  assert.doesNotMatch(readme, /--fresh|animemo-initial-admin/);
+  assert.doesNotMatch(readme, /deploy\/deploy\.sh|--fresh|animemo-initial-admin/);
   assert.match(localDevelopment, /\/setup/);
   assert.doesNotMatch(localDevelopment, /createsuperuser/);
 });

@@ -12,9 +12,7 @@ from .state import (
     _atomic_json,
     _ensure_private_directory,
     _read_private_text,
-    _validate_private_directory,
 )
-
 
 SLOTS_SCHEMA_VERSION = 1
 
@@ -25,7 +23,7 @@ class ReleaseSlots:
     def __init__(self, root: Path):
         self.root = _absolute(root)
         self.envelope_path = self.root / "release-slots.json"
-        # Read-only legacy locations are retained solely for one-time migration.
+        # Pre-v1.1 layouts are detected only so they can fail closed.
         self.current_path = self.root / "CURRENT.json"
         self.previous_path = self.root / "PREVIOUS.json"
         self.history_root = self.root / "history"
@@ -42,20 +40,6 @@ class ReleaseSlots:
 
     def _validate_storage(self) -> None:
         _ensure_private_directory(self.root, self.root)
-        if self.history_root.exists() or self.history_root.is_symlink():
-            _validate_private_directory(self.root, self.history_root)
-
-    def _load_manifest(self, path: Path) -> dict[str, object] | None:
-        try:
-            raw = _read_private_text(self.root, path)
-        except FileNotFoundError:
-            return None
-        try:
-            payload = json.loads(raw)
-            validate_manifest(payload)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
-            raise StateError(f"Invalid release slot: {path.name}") from error
-        return payload
 
     @staticmethod
     def _version(manifest: dict[str, object]) -> str:
@@ -63,12 +47,20 @@ class ReleaseSlots:
 
     def _validate_envelope(self, payload: object) -> dict[str, object]:
         if not isinstance(payload, dict) or set(payload) != {
-            "schemaVersion", "generation", "current", "previous", "history"
+            "schemaVersion",
+            "generation",
+            "current",
+            "previous",
+            "history",
         }:
             raise StateError("Release slots envelope has an invalid shape")
         if payload["schemaVersion"] != SLOTS_SCHEMA_VERSION:
             raise StateError("Release slots envelope has an unsupported schema")
-        if not isinstance(payload["generation"], int) or isinstance(payload["generation"], bool) or payload["generation"] < 0:
+        if (
+            not isinstance(payload["generation"], int)
+            or isinstance(payload["generation"], bool)
+            or payload["generation"] < 0
+        ):
             raise StateError("Release slots generation is invalid")
 
         current = payload["current"]
@@ -85,7 +77,10 @@ class ReleaseSlots:
             raise StateError("Release slots history is invalid")
         by_version: dict[str, dict[str, object]] = {}
         for record in history:
-            if not isinstance(record, dict) or set(record) != {"manifest", "deployment"}:
+            if not isinstance(record, dict) or set(record) != {
+                "manifest",
+                "deployment",
+            }:
                 raise StateError("Release slots history record is invalid")
             manifest = record["manifest"]
             deployment = record["deployment"]
@@ -105,7 +100,9 @@ class ReleaseSlots:
 
         if current is None:
             if previous is not None or history:
-                raise StateError("Uninitialized release slots contain durable release state")
+                raise StateError(
+                    "Uninitialized release slots contain durable release state"
+                )
         else:
             current_version = self._version(current)
             if by_version.get(current_version) != current:
@@ -113,9 +110,13 @@ class ReleaseSlots:
             if previous is not None:
                 previous_version = self._version(previous)
                 if previous == current:
-                    raise StateError("CURRENT and PREVIOUS must identify different releases")
+                    raise StateError(
+                        "CURRENT and PREVIOUS must identify different releases"
+                    )
                 if by_version.get(previous_version) != previous:
-                    raise StateError("PREVIOUS is missing from immutable release history")
+                    raise StateError(
+                        "PREVIOUS is missing from immutable release history"
+                    )
         return payload
 
     def _load_envelope(self) -> dict[str, object] | None:
@@ -129,44 +130,17 @@ class ReleaseSlots:
             raise StateError("Release slots envelope is invalid") from error
         return self._validate_envelope(payload)
 
-    def _legacy_envelope(self) -> dict[str, object] | None:
-        current = self._load_manifest(self.current_path)
-        previous = self._load_manifest(self.previous_path)
-        history: list[dict[str, object]] = []
-        if self.history_root.exists():
-            for path in sorted(self.history_root.glob("*.json")):
-                try:
-                    record = json.loads(_read_private_text(self.root, path))
-                    manifest = record["manifest"]
-                    deployment = record.get("deployment", {})
-                    validate_manifest(manifest)
-                except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-                    raise StateError(f"Invalid immutable release history: {path.name}") from error
-                history.append({
-                    "manifest": manifest,
-                    "deployment": {"operationId": deployment.get("operationId")},
-                })
-        if current is None and previous is None and not history:
-            return None
-        payload = {
-            "schemaVersion": SLOTS_SCHEMA_VERSION,
-            "generation": 1,
-            "current": current,
-            "previous": previous,
-            "history": history,
-        }
-        return self._validate_envelope(payload)
-
     def _state(self) -> dict[str, object]:
         self._validate_storage()
+        if any(
+            path.exists() or path.is_symlink()
+            for path in (self.current_path, self.previous_path, self.history_root)
+        ):
+            raise StateError("Legacy release slot state is unsupported")
         envelope = self._load_envelope()
         if envelope is not None:
             return envelope
-        legacy = self._legacy_envelope()
-        if legacy is None:
-            return self._empty()
-        _atomic_json(self.envelope_path, legacy, root=self.root)
-        return legacy
+        return self._empty()
 
     def _commit(self, payload: dict[str, object]) -> None:
         self._validate_envelope(payload)
@@ -185,17 +159,26 @@ class ReleaseSlots:
             if record["manifest"] != manifest:
                 raise StateError(f"Immutable release history conflicts for {version}")
             return
-        history.append({
-            "manifest": copy.deepcopy(manifest),
-            "deployment": {"operationId": operation_id},
-        })
-        history.sort(key=lambda item: (item["manifest"]["release"]["createdAt"], self._version(item["manifest"])))
+        history.append(
+            {
+                "manifest": copy.deepcopy(manifest),
+                "deployment": {"operationId": operation_id},
+            }
+        )
+        history.sort(
+            key=lambda item: (
+                item["manifest"]["release"]["createdAt"],
+                self._version(item["manifest"]),
+            )
+        )
 
     def import_current(self, manifest: dict[str, object]) -> None:
         validate_manifest(manifest)
         state = copy.deepcopy(self._state())
         if state["current"] is not None:
-            raise StateError("CURRENT is already initialized; bootstrap import is one-time")
+            raise StateError(
+                "CURRENT is already initialized; bootstrap import is one-time"
+            )
         state["current"] = copy.deepcopy(manifest)
         self._record_history(state["history"], manifest, None)
         state["generation"] += 1

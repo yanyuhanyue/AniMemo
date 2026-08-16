@@ -125,65 +125,26 @@ v1.1 先冻结 provider-neutral 的部署边界，再实现安装与维护工具
 
 版本路线为 `v1.0.0 Stable → v1.1 development → v1.1 RC → v1.1.0 Stable`。原计划的 v1.0.1 Stability/UI Patch 已取消，当前 main 上的品牌与小型修复累计进入 v1.1；生产继续保持 v1.0.0。本阶段不创建 tag、Release、OCI，不部署生产。
 
-新安装默认使用 `/opt/animemo` 与 `/data/animemo`，并只在 `127.0.0.1:8088` 监听。DNS、TLS、公网反向代理、firewall 与 hosting panel 由管理员负责，不是 AniMemo 安装成功条件。Phase 3A 已在 `durability/` 建立统一 Compatibility、Migration Secret Envelope、Backup 与 Doctor Basic 运行时基础；Restore、Migration Bundle、Installer、完整管理 CLI 与发布仍延后。
+v1.1 新安装只使用 `/opt/animemo`、`/data/animemo`、`/opt/animemo-updater`、`/var/lib/animemo-updater` 与 `/run/animemo-updater`，默认监听 `127.0.0.1:8088`。Phase 3C 已实现 Fresh Install、Restore-to-New、canonical Updater adoption、托管配置与平台资格验证；Migration Runtime 仍独立拥有迁移包消费和激活授权。DNS、TLS、公网反向代理、firewall 与 hosting panel 由管理员负责，不是 AniMemo 安装成功条件。
 
 ## 生产部署
 
-当前 `animemo.cc` v1.0 生产实例的历史拓扑为：Cloudflare → Nginx/OpenResty → React 静态站点与 Django API → PostgreSQL/Redis；它是当前实例 runbook，不是 v1.1 新 Installer 的供应商依赖。媒体后端由 Superuser 在“媒体存储”页面配置，可按优先级使用多个 Cloudflare R2 与固定根目录下的 Local Server Storage，插件包写入持久化插件卷。复制 [`.env.production.example`](.env.production.example) 为 `.env.production`，替换所有 placeholder，并确保 `POSTGRES_PASSWORD` 与 `DATABASE_URL` 中的密码完全一致。
+v1.1 的部署 authority 是经过验证的 GitHub Release、Manifest/checksums/attestation 与不可变 OCI digest。Installer 只消费 Release 中逐字节绑定的材料；不同版本的现有实例必须交给 Updater，foreign、partial 或无有效 locator 的目标默认拒绝。
 
-生产环境强制要求 `DEBUG=false`、PostgreSQL、共享 Redis、独立 `CREDENTIAL_ENCRYPTION_KEY`、HTTPS `ANIMEMO_PUBLIC_ORIGIN`、精确的 CORS/CSRF 来源、至少 50 个字符的随机 `DJANGO_SECRET_KEY`，以及显式的可信代理网段。Compose 内部 PostgreSQL 使用私有 Docker 网络，因此模板设置 `DATABASE_SSL_REQUIRE=false`；连接要求 TLS 的外部 PostgreSQL 时必须改为 `true`。媒体存储由 Superuser 登录后在“媒体存储”页面创建；尚未配置时网站仍可启动，但媒体上传会返回 `MEDIA_STORAGE_SETUP_REQUIRED`。
-
-生成凭证主密钥：
+实例配置的唯一 authority 是 `/data/animemo/config/animemo.json`。Updater 从它生成可重建的 `/run/animemo-updater/managed.env` 供 exact Compose 消费；该 env 文件不是配置 authority，也不得人工维护。查看或修改非秘密配置使用：
 
 ```bash
-python - <<'PY'
-from cryptography.fernet import Fernet
-print(Fernet.generate_key().decode())
-PY
+animemo-updater config show
+animemo-updater config validate --public-origin https://anime.example
+animemo-updater config dry-run --listen 127.0.0.2:8088
+animemo-updater config apply --listen 127.0.0.2:8088 --accept
 ```
 
-当前 canonical public origin 为 `https://animemo.cc`，media origin 为 `https://media.animemo.cc`；前端通过同源 `/api` 访问 Django。生产配置使用 `ALLOWED_HOSTS=animemo.cc`，并将 `ANIMEMO_PUBLIC_ORIGIN`、CORS 与 CSRF origin 都设为 `https://animemo.cc`。`www.animemo.cc` 不加入 Django，由 OpenResty 明确 301 到主域名。Cookie 使用：
+Public Origin 与 Listen 是独立字段。非 loopback 监听和 HTTP Public Origin 都需要独立显式确认；配置 apply 会执行原子更新、只协调 AniMemo API/Web、验证 health、exact Release、locator 与 Doctor，失败时回滚或留下 `RECOVERY_REQUIRED` 证据。
 
-```env
-SESSION_COOKIE_SAMESITE=Lax
-CSRF_COOKIE_SAMESITE=Lax
-REFRESH_COOKIE_SAMESITE=Lax
-SESSION_COOKIE_SECURE=true
-CSRF_COOKIE_SECURE=true
-REFRESH_COOKIE_SECURE=true
-```
+Fresh Installer 生成并保护必需 secret，但不创建管理员。成功后操作者访问同源 `/setup`，使用私有一次性初始化生命周期创建首位管理员。Restore-to-New 必须显式选择无保护、受保护 key 文件、passphrase 文件或 FD/stdin 获取方式，并保留源 `instanceId`、CEK、用户/资源/Memory identity；secret 不进入 argv、日志、plan 或结果。
 
-如果前后端确实跨站，三类 Cookie 都改为 `SameSite=None` 并保持 `Secure=true`，同时将前端 origin 精确加入 CORS/CSRF 配置，禁止使用通配符。
-
-正常生产更新只使用不可变 Release 与受限 Host Update Agent。`deploy/deploy.sh` 只保留给首次安装/旧架构切换的 `--bootstrap`，或 Update Agent 无法运行时人工批准的 `--break-glass`；日常更新不得用 ZIP、`git pull` 或服务器端构建替代不可变 Release。先在服务器准备并填写唯一的 production env 文件：
-
-```bash
-cp .env.production.example .env.production
-```
-
-首次安装或旧架构切换使用显式 bootstrap 模式：
-
-```bash
-sudo sh deploy/deploy.sh \
-  --bootstrap \
-  --archive /tmp/animemo-core-<stamp>.zip \
-  --sha256 /tmp/animemo-core-<stamp>.sha256
-```
-
-Update Agent 不可用且完成了人工审批时，才允许 break-glass：
-
-```bash
-sudo sh deploy/deploy.sh \
-  --break-glass \
-  --archive /tmp/animemo-core-<stamp>.zip \
-  --sha256 /tmp/animemo-core-<stamp>.sha256
-```
-
-只有明确要清空本网站数据时才允许在 bootstrap 模式增加 `--reset-data --yes`；脚本只操作经校验的 AniMemo 数据根目录，绝不执行全局 `docker system prune`、`docker volume prune` 或其他 Compose 项目的 `down`。真实环境的 OpenResty 配置也只写入显式的单站点配置，可用 `--skip-openresty` 做本地或非 1Panel 验证。
-
-迁移与 bootstrap 完成后，一次性初始化码只写入 `${ANIMEMO_DATA_ROOT}/private/setup-code`（目录 `0700`、文件 `0600`），不会出现在日志、API 或构建产物。操作者读取该文件后访问 `/setup` 创建首位管理员；成功后文件立即删除，入口由数据库状态永久锁定。完整生命周期与故障恢复见 [`首次运行引导`](docs/first-run-bootstrap.md)。
-
-构建前端执行 `npm run build`，输出目录为 `dist/client`。生产镜像是与实例配置无关的通用 Web 工件；Turnstile 在 AniMemo Staff「安全验证」设置中按实例配置，不参与前端构建。Smoke Test 会严格检查健康接口为 HTTP 200 且 JSON `status` 为 `ok`，再检查四个容器健康状态、Host 转发、PostgreSQL/Redis 连接，以及 Local 文件 `0644`、目录 `0755`、Nginx `/local-media/` 读取和清理。
+媒体后端由 Superuser 在“媒体存储”页面配置，可按优先级使用多个 Cloudflare R2 与固定根目录下的 Local Server Storage。未配置时网站仍可启动，但媒体上传返回 `MEDIA_STORAGE_SETUP_REQUIRED`。完整主机运维边界与命令见 [`生产部署`](docs/deployment-vps.md)。
 
 ## 认证与安全部署
 

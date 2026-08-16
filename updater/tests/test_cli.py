@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import patch
 
 from release.contract import build_manifest
-from updater.__main__ import main
+from updater.__main__ import _listen, main
 from updater.errors import StateError
 from updater.runtime import HostAgentRuntime
 
@@ -52,23 +55,113 @@ class FakeRuntime:
         self.calls.append("status")
         return {"updaterVersion": "1.0.0", "current": {"version": "v1.0.0"}}
 
-    def import_current(self):
-        self.calls.append("import-current")
-        return {"version": "v1.0.0"}
-
     def reconcile(self, operation_id, confirmation):
         self.calls.append(("reconcile", operation_id, confirmation))
         return {"id": operation_id, "status": "reconciled"}
 
 
 class HostAgentCliTests(unittest.TestCase):
+    def test_configuration_cli_has_fixed_show_validate_plan_and_apply_surface(self):
+        with patch("updater.__main__._run_configuration", return_value=0) as run:
+            self.assertEqual(main(["config", "show"]), 0)
+            self.assertEqual(
+                main(
+                    [
+                        "config",
+                        "apply",
+                        "--public-origin",
+                        "https://new.example",
+                        "--listen",
+                        "127.0.0.2:18088",
+                        "--accept",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(run.call_count, 2)
+        applied = run.call_args_list[1].args[0]
+        self.assertEqual(applied.listen.host, "127.0.0.2")
+        self.assertEqual(applied.listen.port, 18088)
+        self.assertTrue(applied.accept)
+
+    def test_configuration_listen_parser_rejects_noncanonical_or_invalid_input(self):
+        self.assertEqual(_listen("127.0.0.2:8088").port, 8088)
+        for value in ("localhost:8088", "127.0.0.1:0", "127.000.0.1:8088"):
+            with self.subTest(value=value), self.assertRaises(
+                argparse.ArgumentTypeError
+            ):
+                _listen(value)
+
+    def test_configuration_apply_requires_acceptance_with_stable_error(self):
+        plan = SimpleNamespace(plan_digest="sha256:" + "a" * 64)
+        manager = mock.Mock()
+        manager.validate.return_value = plan
+        errors = io.StringIO()
+        with (
+            patch(
+                "updater.configuration.build_configuration_manager",
+                return_value=manager,
+            ),
+            redirect_stderr(errors),
+        ):
+            self.assertEqual(
+                main(
+                    [
+                        "config",
+                        "apply",
+                        "--public-origin",
+                        "https://new.example",
+                    ]
+                ),
+                1,
+            )
+        payload = json.loads(errors.getvalue())
+        self.assertEqual(payload["error"]["code"], "CONFIG_PLAN_ACCEPTANCE_REQUIRED")
+        manager.apply.assert_not_called()
+
+    def test_configuration_apply_exit_codes_distinguish_recovery_and_failure(self):
+        plan = SimpleNamespace(plan_digest="sha256:" + "a" * 64)
+        manager = mock.Mock()
+        manager.validate.return_value = plan
+        output = io.StringIO()
+
+        for manual_recovery_required, outcome, expected in (
+            (True, "RECOVERY_REQUIRED", 5),
+            (False, "CONFIG_APPLY_FAILED", 6),
+        ):
+            result = SimpleNamespace(
+                manual_recovery_required=manual_recovery_required,
+                outcome=SimpleNamespace(value=outcome),
+                as_dict=lambda value=outcome: {"outcome": value},
+            )
+            manager.apply.return_value = result
+            with (
+                self.subTest(outcome=outcome),
+                patch(
+                    "updater.configuration.build_configuration_manager",
+                    return_value=manager,
+                ),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            "config",
+                            "apply",
+                            "--public-origin",
+                            "https://new.example",
+                            "--accept",
+                        ]
+                    ),
+                    expected,
+                )
+
     def test_cli_exposes_only_fixed_lifecycle_commands(self):
         runtime = FakeRuntime()
         output = io.StringIO()
 
         with patch("updater.__main__.production_runtime", return_value=runtime), redirect_stdout(output):
             self.assertEqual(main(["status"]), 0)
-            self.assertEqual(main(["import-current"]), 0)
             self.assertEqual(main([
                 "reconcile",
                 "--operation-id", "a" * 32,
@@ -78,19 +171,18 @@ class HostAgentCliTests(unittest.TestCase):
 
         self.assertEqual(runtime.calls, [
             "status",
-            "import-current",
             ("reconcile", "a" * 32, "RECONCILE " + "a" * 32),
             "serve",
         ])
         documents = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(documents[0]["current"]["version"], "v1.0.0")
-        self.assertEqual(documents[1], {"version": "v1.0.0"})
-        self.assertEqual(documents[2]["status"], "reconciled")
+        self.assertEqual(documents[1]["status"], "reconciled")
 
     def test_cli_refuses_custom_production_paths_and_generic_commands(self):
         for argv in [
             ["serve", "--socket", "/tmp/attacker.sock"],
-            ["import-current", "--manifest", "/tmp/release.json"],
+            ["import-current"],
+            ["adopt-current", "--manifest", "/tmp/release.json"],
             ["status", "--state-root", "/tmp/state"],
             ["reconcile", "--operation-id", "../escape", "--confirmation", "RECONCILE ../escape"],
             ["run-command", "docker", "ps"],
@@ -98,61 +190,22 @@ class HostAgentCliTests(unittest.TestCase):
             with self.subTest(argv=argv), self.assertRaises(SystemExit):
                 main(argv)
 
-    def test_import_current_validates_fixed_manifest_and_is_one_time(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            app = root / "app"
-            data = root / "data"
-            state = root / "state"
-            socket_path = root / "run" / "updater.sock"
-            bootstrap_manifest = state / "bootstrap" / "release-manifest.json"
-            app.mkdir()
-            data.mkdir()
-            bootstrap_manifest.parent.mkdir(parents=True)
-            bootstrap_manifest.write_text(json.dumps(manifest()), encoding="utf-8")
-            runtime = HostAgentRuntime.testing(
-                app_root=app,
-                data_root=data,
-                state_root=state,
-                socket_path=socket_path,
-                bootstrap_manifest=bootstrap_manifest,
-            )
-
-            with patch.object(runtime.deployment, "inspect_enabled_plugin_apis", return_value={2}):
-                identity = runtime.import_current()
-
-            self.assertEqual(identity["version"], "v1.0.0")
-            self.assertEqual(runtime.slots.read()["current"], manifest())
-            self.assertEqual(runtime.runtime_state.read()["databaseContract"], "animemo-db-v1")
-            self.assertEqual(runtime.runtime_state.read()["enabledPluginApis"], [2])
-            with self.assertRaisesRegex(StateError, "already initialized"):
-                runtime.import_current()
-
-    def test_import_current_rejects_invalid_manifest_without_partial_state(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            app = root / "app"
-            data = root / "data"
-            state = root / "state"
-            socket_path = root / "run" / "updater.sock"
-            bootstrap_manifest = state / "bootstrap" / "release-manifest.json"
-            app.mkdir()
-            data.mkdir()
-            bootstrap_manifest.parent.mkdir(parents=True)
-            bootstrap_manifest.write_text('{"schemaVersion": 1}', encoding="utf-8")
-            runtime = HostAgentRuntime.testing(
-                app_root=app,
-                data_root=data,
-                state_root=state,
-                socket_path=socket_path,
-                bootstrap_manifest=bootstrap_manifest,
-            )
-
-            with self.assertRaisesRegex(StateError, "failed validation"):
-                runtime.import_current()
-
-            self.assertIsNone(runtime.slots.read()["current"])
-            self.assertFalse(runtime.runtime_state.path.exists())
+    def test_adopt_current_uses_only_the_fixed_request_boundary(self):
+        request = object()
+        receipt = mock.Mock()
+        receipt.as_dict.return_value = {
+            "operationId": "a" * 32,
+            "locatorDigest": "sha256:" + "b" * 64,
+        }
+        output = io.StringIO()
+        with (
+            patch("updater.__main__.load_initial_adoption_request", return_value=request),
+            patch("updater.__main__.adopt_initial_release", return_value=receipt) as adopt,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(main(["adopt-current"]), 0)
+        adopt.assert_called_once_with(request)
+        self.assertEqual(json.loads(output.getvalue())["operationId"], "a" * 32)
 
     def test_reconcile_requires_exact_host_confirmation(self):
         with tempfile.TemporaryDirectory() as directory:

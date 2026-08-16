@@ -6,6 +6,7 @@ import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from release.contract import build_manifest
 from updater.agent import UpdateAgent
@@ -127,12 +128,14 @@ class LinuxUpdaterE2ETests(unittest.TestCase):
             operations = OperationStore(root / "state")
             deployment = IsolatedDeployment()
             deployment.live_version = first["release"]["version"]
+            runtime_binding = mock.Mock()
             executor = UpdateExecutor(
                 store=operations,
                 slots=slots,
                 release_source=source,
                 deployment=deployment,
                 runtime_state=runtime_state,
+                runtime_binding=runtime_binding,
                 lock_path=root / "state" / "update.lock",
                 updater_version="1.0.0",
             )

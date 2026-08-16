@@ -1,12 +1,6 @@
 from __future__ import annotations
 
-import configparser
-import os
-import shlex
-import shutil
-import stat
-import subprocess
-import tempfile
+import json
 import unittest
 from pathlib import Path
 
@@ -16,82 +10,51 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class DeploymentUpdaterContractTests(unittest.TestCase):
-    def _run_prepare_host(self, data_root: Path, harness_root: Path) -> subprocess.CompletedProcess[str]:
-        fake_bin = harness_root / "bin"
-        fake_bin.mkdir(exist_ok=True)
-        chown_log = harness_root / "chown.log"
-        fake_id = fake_bin / "id"
-        fake_id.write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
-        fake_chown = fake_bin / "chown"
-        fake_chown.write_text(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CHOWN_LOG\"\n",
-            encoding="utf-8",
-        )
-        fake_id.chmod(0o755)
-        fake_chown.chmod(0o755)
-        environment = os.environ.copy()
-        environment.update(
-            {
-                "ANIMEMO_DATA_ROOT": str(data_root),
-                "CHOWN_LOG": str(chown_log),
-                "PATH": os.pathsep.join([str(fake_bin), environment["PATH"]]),
-            }
-        )
-        return subprocess.run(
-            ["sh", str(ROOT / "deploy/prepare-host.sh")],
-            cwd=ROOT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
     def test_production_compose_uses_digest_inputs_and_explicit_jobs(self):
-        compose = yaml.safe_load((ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8"))
+        compose = yaml.safe_load(
+            (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
+        )
         services = compose["services"]
 
         self.assertNotIn("build", services["api"])
         self.assertNotIn("build", services["web"])
         self.assertIn("ANIMEMO_API_IMAGE", services["api"]["image"])
         self.assertIn("ANIMEMO_WEB_IMAGE", services["web"]["image"])
+        self.assertIn("ANIMEMO_POSTGRES_IMAGE", services["postgres"]["image"])
+        self.assertIn("ANIMEMO_REDIS_IMAGE", services["redis"]["image"])
+        self.assertEqual(services["web"]["ports"][0]["target"], 80)
+        self.assertIn("ANIMEMO_LISTEN_HOST", services["web"]["ports"][0]["host_ip"])
+        self.assertIn("ANIMEMO_LISTEN_PORT", services["web"]["ports"][0]["published"])
+        self.assertNotIn(".env.production", json.dumps(compose))
+        self.assertNotIn("ANIMEMO_DATA_ROOT", json.dumps(compose))
         self.assertEqual(
-            services["web"]["ports"],
-            ["127.0.0.1:${ANIMEMO_PORT:-8088}:80"],
+            services["migration"]["command"],
+            ["python", "manage.py", "migrate", "--noinput"],
         )
-        self.assertEqual(services["migration"]["command"], ["python", "manage.py", "migrate", "--noinput"])
-        self.assertEqual(services["bootstrap"]["command"], ["python", "manage.py", "bootstrap_animemo"])
+        self.assertEqual(
+            services["bootstrap"]["command"],
+            ["python", "manage.py", "bootstrap_animemo"],
+        )
         for service in ("migration", "bootstrap", "api"):
-            self.assertTrue(any("/private:/app/runtime/private" in volume for volume in services[service]["volumes"]))
+            self.assertTrue(
+                any(
+                    "/private:/app/runtime/private" in volume
+                    for volume in services[service]["volumes"]
+                )
+            )
 
-    def test_build_only_overlay_migrates_trusted_legacy_inputs_without_weakening_production(self):
+    def test_build_only_overlay_uses_an_explicit_testing_adapter(self):
         production = (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
         build = (ROOT / "deploy/docker-compose.build.yml").read_text(encoding="utf-8")
 
         self.assertNotIn("ANIME_JOURNAL_", production)
         self.assertNotIn("FRONTEND_URL", production)
-        self.assertIn(
-            "ANIMEMO_PUBLIC_ORIGIN: ${ANIMEMO_PUBLIC_ORIGIN:-${FRONTEND_URL:-https://animemo.cc}}",
-            build,
-        )
-        self.assertIn(
-            "${ANIMEMO_DATA_ROOT:-${ANIME_JOURNAL_DATA_ROOT:-/data/animemo}}",
-            build,
-        )
-        self.assertIn(
-            "${ANIMEMO_DATA_ROOT:-${ANIME_JOURNAL_DATA_ROOT:-/data/animemo}}/postgres:/var/lib/postgresql/data",
-            build,
-        )
-        self.assertIn(
-            "${ANIMEMO_DATA_ROOT:-${ANIME_JOURNAL_DATA_ROOT:-/data/animemo}}/redis:/data",
-            build,
-        )
-        self.assertIn(
-            "${ANIMEMO_PORT:-${ANIME_JOURNAL_PORT:-8088}}",
-            build,
-        )
-        self.assertLess(build.index("ANIMEMO_PUBLIC_ORIGIN:-"), build.index("FRONTEND_URL:-"))
-        self.assertLess(build.index("ANIMEMO_DATA_ROOT:-"), build.index("ANIME_JOURNAL_DATA_ROOT:-"))
-        self.assertLess(build.index("ANIMEMO_PORT:-"), build.index("ANIME_JOURNAL_PORT:-"))
+        self.assertNotIn("ANIME_JOURNAL_", build)
+        self.assertNotIn("FRONTEND_URL", build)
+        self.assertNotIn("ANIMEMO_DATA_ROOT", build)
+        self.assertNotIn("ANIMEMO_PORT", build)
+        self.assertIn("ANIMEMO_TEST_DATA_ROOT", build)
+        self.assertIn("ANIMEMO_PUBLIC_ORIGIN:?", build)
 
     def test_updater_runtime_overlay_injects_only_verified_effective_identity(self):
         override = yaml.safe_load(
@@ -114,7 +77,9 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
 
     def test_api_startup_has_no_release_orchestration(self):
         dockerfile = (ROOT / "deploy/backend.Dockerfile").read_text(encoding="utf-8")
-        command = next(line for line in dockerfile.splitlines() if line.startswith("CMD "))
+        command = next(
+            line for line in dockerfile.splitlines() if line.startswith("CMD ")
+        )
 
         self.assertIn("gunicorn", command)
         self.assertNotIn("migrate", command)
@@ -128,8 +93,12 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("/run/animemo-updater", compose)
 
     def test_host_agent_service_has_fixed_unix_socket_and_honest_hardening(self):
-        service = (ROOT / "deploy/updater/animemo-updater.service").read_text(encoding="utf-8")
-        tmpfiles = (ROOT / "deploy/updater/animemo-updater.tmpfiles.conf").read_text(encoding="utf-8")
+        service = (ROOT / "deploy/updater/animemo-updater.service").read_text(
+            encoding="utf-8"
+        )
+        tmpfiles = (ROOT / "deploy/updater/animemo-updater.tmpfiles.conf").read_text(
+            encoding="utf-8"
+        )
         server = (ROOT / "updater/server.py").read_text(encoding="utf-8")
 
         self.assertIn("ExecStart=/usr/local/bin/animemo-updater serve", service)
@@ -137,52 +106,41 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("PrivateTmp=true", service)
         self.assertIn("ProtectHome=true", service)
         self.assertIn("ProtectSystem=strict", service)
-        self.assertIn("ReadWritePaths=/var/lib/animemo-updater /data/animemo /run/animemo-updater", service)
+        self.assertIn(
+            "ReadWritePaths=/var/lib/animemo-updater /data/animemo /run/animemo-updater",
+            service,
+        )
         self.assertIn("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6", service)
         self.assertIn("UMask=0077", service)
         self.assertIn("/run/animemo-updater 0750 animemo-updater animemo-api", tmpfiles)
         self.assertIn("socket.AF_UNIX", server)
         self.assertNotIn("socket.AF_INET, socket.SOCK_STREAM", server)
 
-    def test_current_bootstrap_matches_host_agent_docker_identity(self):
-        service_source = (ROOT / "deploy/updater/animemo-updater.service").read_text(
-            encoding="utf-8"
-        )
-        service = configparser.ConfigParser(interpolation=None, strict=False)
-        service.optionxform = str
-        service.read_string(service_source)
+    def test_initial_adoption_uses_only_the_fixed_private_request(self):
+        runtime = (ROOT / "updater/runtime.py").read_text(encoding="utf-8")
+        command = (ROOT / "updater/__main__.py").read_text(encoding="utf-8")
 
-        bootstrap = (ROOT / "deploy/bootstrap-updater.sh").read_text(encoding="utf-8")
-        logical_lines = bootstrap.replace("\\\n", " ").splitlines()
-        runuser_line = next(
-            line for line in logical_lines if "runuser" in line and "import-current" in line
-        )
-        tokens = shlex.split(runuser_line)
-
-        self.assertEqual(tokens[0], "runuser")
-        self.assertIn("-u", tokens)
-        self.assertIn("-g", tokens)
-        self.assertIn("-G", tokens)
-        self.assertEqual(tokens[tokens.index("-u") + 1], service["Service"]["User"])
-        self.assertEqual(tokens[tokens.index("-g") + 1], service["Service"]["Group"])
+        self.assertFalse((ROOT / "deploy/bootstrap-updater.sh").exists())
         self.assertIn(
-            tokens[tokens.index("-G") + 1],
-            shlex.split(service["Service"]["SupplementaryGroups"]),
+            "/var/lib/animemo-updater/bootstrap/initial-adoption.json", runtime
         )
-        separator = tokens.index("--")
-        self.assertEqual(
-            tokens[separator + 1 :],
-            ["/usr/local/bin/animemo-updater", "import-current"],
-        )
+        self.assertIn('commands.add_parser("adopt-current"', command)
+        self.assertNotIn("RELEASE_MANIFEST_JSON", command)
+        self.assertNotIn("import-current", command)
 
     def test_agent_preflight_and_stable_window_cover_the_public_contract(self):
         deployment = (ROOT / "updater/deployment.py").read_text(encoding="utf-8")
 
         self.assertIn("MIN_AVAILABLE_MEMORY = 512 * 1024 * 1024", deployment)
-        self.assertIn('HEALTH_PATHS = ("/health/", "/", "/login", "/api/schema/", "/api/docs/")', deployment)
+        self.assertIn(
+            'HEALTH_PATHS = ("/health/", "/", "/login", "/api/schema/", "/api/docs/")',
+            deployment,
+        )
         self.assertIn('["postgres", "redis", "api", "web"]', deployment)
         self.assertIn('self._verify_http_paths(("/health/", "/"))', deployment)
-        self.assertIn('["/usr/bin/docker", "logs", "--since", since, container]', deployment)
+        self.assertIn(
+            '["/usr/bin/docker", "logs", "--since", since, container]', deployment
+        )
         self.assertIn('logs = f"{result.stdout}\\n{result.stderr}"', deployment)
         self.assertIn("self.verify_recent_backup()", deployment)
 
@@ -196,7 +154,9 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             source,
         )
         self.assertIn("class _RejectRedirects", source)
-        self.assertIn('f"/repos/{REPOSITORY}/releases?per_page=100&page={page}"', source)
+        self.assertIn(
+            'f"/repos/{REPOSITORY}/releases?per_page=100&page={page}"', source
+        )
         self.assertIn('f"/repos/{REPOSITORY}/releases/tags/{version}"', source)
         self.assertIn('f"/repos/{REPOSITORY}/git/ref/tags/{version}"', source)
         self.assertIn('f"/repos/{REPOSITORY}/attestations/{digest}"', source)
@@ -234,9 +194,11 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             ROOT / "backend/plugin_host/management/commands/list_enabled_plugin_apis.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('"up", "-d", "--no-deps", "--force-recreate"', deployment)
-        self.assertIn('"--wait", "--wait-timeout", "120", "api", "web"', deployment)
-        self.assertIn('"python", "manage.py", "list_enabled_plugin_apis"', deployment)
+        for token in ('"up"', '"-d"', '"--no-deps"', '"--force-recreate"', '"--wait"'):
+            self.assertIn(token, deployment)
+        self.assertIn('"--wait-timeout"', deployment)
+        for token in ('"python"', '"manage.py"', '"list_enabled_plugin_apis"'):
+            self.assertIn(token, deployment)
         self.assertIn("inspect_enabled_plugin_apis(current)", executor)
         self.assertIn("inspect_enabled_plugin_apis(target_manifest)", executor)
         self.assertIn("refresh=True", executor)
@@ -288,23 +250,29 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
 
         parent_modes = 'chmod 0755 "$INSTALL_ROOT" "$INSTALL_ROOT/releases"'
         release_modes = 'chmod -R a+rX,go-w "$STAGING"'
-        service_probe = (
-            'runuser -u animemo-updater -g animemo-api -- "$LAUNCHER" version >/dev/null'
-        )
-        service_start = 'systemctl enable --now "$SERVICE"'
-
+        service_probe = 'runuser -u animemo-updater -g animemo-api -- "$LAUNCHER" version >/dev/null'
         self.assertIn("python3 runuser systemctl", installer)
         self.assertIn(parent_modes, installer)
         self.assertIn(release_modes, installer)
         self.assertIn(service_probe, installer)
-        self.assertLess(installer.index(parent_modes), installer.index('mkdir -p "$STAGING"'))
-        self.assertLess(installer.index(release_modes), installer.index('mv "$STAGING" "$RELEASE_ROOT"'))
-        self.assertLess(installer.index(service_probe), installer.index(service_start))
+        self.assertIn("--no-index", installer)
+        self.assertIn('--find-links "$STAGING/wheelhouse"', installer)
+        self.assertNotIn('systemctl enable --now "$SERVICE"', installer)
+        self.assertLess(
+            installer.index(parent_modes), installer.index('mkdir -p "$STAGING"')
+        )
+        self.assertLess(
+            installer.index(release_modes),
+            installer.index('mv "$STAGING" "$RELEASE_ROOT"'),
+        )
 
     def test_fresh_release_gate_uses_build_override_and_explicit_jobs(self):
-        workflow = (ROOT / ".github/workflows/release-gate.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/release-gate.yml").read_text(
+            encoding="utf-8"
+        )
 
-        self.assertIn('if [[ -f deploy/docker-compose.build.yml ]]; then', workflow)
+        self.assertIn("test -f deploy/docker-compose.build.yml", workflow)
+        self.assertNotIn("if [[ -f deploy/docker-compose.build.yml ]]; then", workflow)
         self.assertIn(
             "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",
             workflow,
@@ -317,18 +285,21 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertLess(migration, bootstrap)
         self.assertLess(bootstrap, switch)
 
-    def test_stateful_gate_migrates_before_scoped_switch_and_retains_data_services(self):
+    def test_stateful_gate_migrates_before_scoped_switch_and_retains_data_services(
+        self,
+    ):
         gate = (ROOT / "scripts/stateful-upgrade-gate.sh").read_text(encoding="utf-8")
         fixture_start = gate.index('cat >"$ENV_FILE" <<EOF\n')
         fixture_end = gate.index("\nEOF\n", fixture_start)
         env_fixture = gate[fixture_start:fixture_end]
         production_sources = (
-            (ROOT / ".env.production.example").read_text(encoding="utf-8"),
             (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8"),
             (ROOT / "deploy/docker-compose.build.yml").read_text(encoding="utf-8"),
             (ROOT / "deploy/frontend.Dockerfile").read_text(encoding="utf-8"),
             (ROOT / "backend/config/settings.py").read_text(encoding="utf-8"),
         )
+
+        self.assertFalse((ROOT / ".env.production.example").exists())
 
         self.assertIn("FRONTEND_URL=https://ci.example.test", gate)
         self.assertIn("\nTURNSTILE_ENABLED=false\n", env_fixture)
@@ -347,7 +318,9 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
                 "ANIMEMO_TURNSTILE_SITE_KEY",
             ):
                 self.assertNotIn(legacy_input, source)
-        self.assertIn('BUILD_OVERRIDE_FILE="$CURRENT_ROOT/deploy/docker-compose.build.yml"', gate)
+        self.assertIn(
+            'BUILD_OVERRIDE_FILE="$CURRENT_ROOT/deploy/docker-compose.build.yml"', gate
+        )
         self.assertIn(
             'local compose_files=(-f "$source_root/deploy/docker-compose.yml" -f "$BUILD_OVERRIDE_FILE")',
             gate,
@@ -355,177 +328,87 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertNotIn('if [[ "$source_root" == "$CURRENT_ROOT" ]]', gate)
         base_ready = gate.index(
             'run_compose base_services_start "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" '
-            'up -d --wait --wait-timeout 120 postgres redis'
+            "up -d --wait --wait-timeout 120 postgres redis"
         )
         base_migration = gate.index(
             'run_compose base_migration "$BASE_ROOT" "$JOB_TIMEOUT_SECONDS" '
-            'run --rm --no-deps migration'
+            "run --rm --no-deps migration"
         )
-        base_bootstrap = gate.index('run_compose base_bootstrap "$BASE_ROOT" "$JOB_TIMEOUT_SECONDS"')
+        base_bootstrap = gate.index(
+            'run_compose base_bootstrap "$BASE_ROOT" "$JOB_TIMEOUT_SECONDS"'
+        )
         base_api = gate.index(
             'run_compose base_api_start "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" '
-            'up -d --no-deps api'
+            "up -d --no-deps api"
         )
         migration = gate.index(
             'run_compose current_migration "$CURRENT_ROOT" "$JOB_TIMEOUT_SECONDS" '
-            'run --rm --no-deps migration'
+            "run --rm --no-deps migration"
         )
         bootstrap = gate.index(
             'run_compose current_bootstrap "$CURRENT_ROOT" "$JOB_TIMEOUT_SECONDS" '
-            'run --rm --no-deps bootstrap'
+            "run --rm --no-deps bootstrap"
         )
         switch = gate.index(
             'run_compose current_api_replace "$CURRENT_ROOT" "$COMMAND_TIMEOUT_SECONDS" '
-            'up -d --no-deps --force-recreate api'
+            "up -d --no-deps --force-recreate api"
         )
-        retained = gate.index('PostgreSQL and Redis containers were retained')
+        retained = gate.index("PostgreSQL and Redis containers were retained")
         self.assertLess(base_ready, base_migration)
         self.assertLess(base_migration, base_bootstrap)
         self.assertLess(base_bootstrap, base_api)
         self.assertLess(migration, bootstrap)
         self.assertLess(bootstrap, switch)
         self.assertLess(switch, retained)
-        self.assertIn('BASE_POSTGRES_ID=', gate)
-        self.assertIn('BASE_REDIS_ID=', gate)
+        self.assertIn("BASE_POSTGRES_ID=", gate)
+        self.assertIn("BASE_REDIS_ID=", gate)
         self.assertIn('timeout_command "$HEALTH_TIMEOUT_SECONDS" docker exec -i', gate)
-        self.assertIn('local deadline=$((SECONDS + API_WAIT_SECONDS))', gate)
-        self.assertIn("--kill-after=\"${TIMEOUT_KILL_AFTER_SECONDS}s\"", gate)
+        self.assertIn("local deadline=$((SECONDS + API_WAIT_SECONDS))", gate)
+        self.assertIn('--kill-after="${TIMEOUT_KILL_AFTER_SECONDS}s"', gate)
         self.assertIn("diagnostic_api_inspect", gate)
         self.assertNotIn('compose "$source_root" exec -T api python -', gate)
 
     def test_upgrade_gate_overrides_only_the_legacy_bootstrap_server_command(self):
         production = (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
-        overlay = (ROOT / "deploy/docker-compose.upgrade-gate.yml").read_text(encoding="utf-8")
+        overlay = (ROOT / "deploy/docker-compose.upgrade-gate.yml").read_text(
+            encoding="utf-8"
+        )
         gate = (ROOT / "scripts/stateful-upgrade-gate.sh").read_text(encoding="utf-8")
         bootstrap_overlay = overlay[
             overlay.index("  bootstrap:\n") : overlay.index("  web:\n")
         ]
         base_bootstrap = gate[
-            gate.index("run_compose base_bootstrap") : gate.index("run_compose base_api_start")
+            gate.index("run_compose base_bootstrap") : gate.index(
+                "run_compose base_api_start"
+            )
         ]
 
-        self.assertIn('command: ["python", "manage.py", "bootstrap_animemo"]', production)
+        self.assertIn(
+            'command: ["python", "manage.py", "bootstrap_animemo"]', production
+        )
         self.assertNotIn("command:", bootstrap_overlay)
         self.assertIn("python manage.py sync_official_plugins", base_bootstrap)
         self.assertIn("exec python manage.py collectstatic --noinput", base_bootstrap)
         self.assertNotIn("gunicorn", base_bootstrap)
         self.assertNotIn("manage.py migrate", base_bootstrap)
 
-        fixture = (ROOT / "scripts/stateful_upgrade_fixture.py").read_text(encoding="utf-8")
+        fixture = (ROOT / "scripts/stateful_upgrade_fixture.py").read_text(
+            encoding="utf-8"
+        )
         self.assertIn('_migration_applied("site", "0003_installation_state")', fixture)
         self.assertIn('"PRESERVED_INITIALIZED"', fixture)
 
-    def test_first_run_private_host_directory_rejects_links_and_is_not_recursively_chowned(self):
-        prepare_host = (ROOT / "deploy/prepare-host.sh").read_text(encoding="utf-8")
-
-        self.assertIn('[ -L "$private_directory" ]', prepare_host)
-        self.assertIn('[ ! -d "$private_directory" ]', prepare_host)
-        self.assertIn('chown "$APP_UID:$APP_GID" "$private_directory"', prepare_host)
-        self.assertNotIn('chown -R "$APP_UID:$APP_GID" "$private_directory"', prepare_host)
-
-    @unittest.skipUnless(os.name == "posix" and shutil.which("sh"), "requires a POSIX shell")
-    def test_prepare_host_applies_the_backup_directory_contract_without_broadening_other_paths(self):
-        with tempfile.TemporaryDirectory() as directory:
-            harness_root = Path(directory)
-            data_root = harness_root / "data"
-
-            result = self._run_prepare_host(data_root, harness_root)
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            expected_modes = {
-                "plugins": 0o755,
-                "logs": 0o755,
-                "media": 0o755,
-                "backups": 0o770,
-                "private": 0o700,
-            }
-            for name, expected_mode in expected_modes.items():
-                actual_mode = stat.S_IMODE((data_root / name).stat().st_mode)
-                self.assertEqual(actual_mode, expected_mode, name)
-
-            chown_calls = (harness_root / "chown.log").read_text(encoding="utf-8").splitlines()
-            self.assertIn(f"10001:10001 {data_root / 'backups'}", chown_calls)
-            self.assertNotIn(f"-R 10001:10001 {data_root / 'backups'}", chown_calls)
-            for name in ("plugins", "logs", "media"):
-                self.assertIn(f"-R 10001:10001 {data_root / name}", chown_calls)
-
-    @unittest.skipUnless(os.name == "posix" and shutil.which("sh"), "requires a POSIX shell")
-    def test_prepare_host_repairs_existing_backup_mode_idempotently_without_touching_artifacts(self):
-        with tempfile.TemporaryDirectory() as directory:
-            harness_root = Path(directory)
-            data_root = harness_root / "data"
-            backup_root = data_root / "backups"
-            backup_root.mkdir(parents=True)
-            backup_root.chmod(0o755)
-            artifact = backup_root / "animemo-pre-existing.sql.gz"
-            artifact.write_bytes(b"existing backup")
-            artifact.chmod(0o600)
-
-            first = self._run_prepare_host(data_root, harness_root)
-            second = self._run_prepare_host(data_root, harness_root)
-
-            self.assertEqual(first.returncode, 0, first.stderr)
-            self.assertEqual(second.returncode, 0, second.stderr)
-            self.assertEqual(stat.S_IMODE(backup_root.stat().st_mode), 0o770)
-            self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o600)
-            self.assertEqual(artifact.read_bytes(), b"existing backup")
-            chown_calls = (harness_root / "chown.log").read_text(encoding="utf-8").splitlines()
-            self.assertEqual(chown_calls.count(f"10001:10001 {backup_root}"), 2)
-            self.assertFalse(any(str(artifact) in call for call in chown_calls))
-            self.assertNotIn(f"-R 10001:10001 {backup_root}", chown_calls)
-
-    @unittest.skipUnless(os.name == "posix" and shutil.which("sh"), "requires a POSIX shell")
-    def test_prepare_host_rejects_a_backup_symlink_before_chown(self):
-        with tempfile.TemporaryDirectory() as directory:
-            harness_root = Path(directory)
-            data_root = harness_root / "data"
-            outside = harness_root / "outside"
-            data_root.mkdir()
-            outside.mkdir()
-            backup_root = data_root / "backups"
-            backup_root.symlink_to(outside, target_is_directory=True)
-
-            result = self._run_prepare_host(data_root, harness_root)
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Backup path must not be a symbolic link", result.stderr)
-            chown_calls = (harness_root / "chown.log").read_text(encoding="utf-8").splitlines()
-            self.assertFalse(any(str(backup_root) in call for call in chown_calls))
-
-    @unittest.skipUnless(os.name == "posix" and shutil.which("sh"), "requires a POSIX shell")
-    def test_prepare_host_rejects_a_non_directory_backup_path_before_chown(self):
-        with tempfile.TemporaryDirectory() as directory:
-            harness_root = Path(directory)
-            data_root = harness_root / "data"
-            data_root.mkdir()
-            backup_root = data_root / "backups"
-            backup_root.write_text("not a directory", encoding="utf-8")
-
-            result = self._run_prepare_host(data_root, harness_root)
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Backup path must be a directory", result.stderr)
-            chown_calls = (harness_root / "chown.log").read_text(encoding="utf-8").splitlines()
-            self.assertFalse(any(str(backup_root) in call for call in chown_calls))
-
-    def test_legacy_zip_deployer_is_explicit_bootstrap_or_break_glass_only(self):
-        deploy = (ROOT / "deploy/deploy.sh").read_text(encoding="utf-8")
-
-        self.assertIn("--bootstrap", deploy)
-        self.assertIn("--break-glass", deploy)
-        self.assertIn("normal updates use the AniMemo Update Agent", deploy)
-        self.assertIn("deploy/docker-compose.build.yml", deploy)
-        ready = deploy.index('stage_compose up -d --wait --wait-timeout 120 postgres redis')
-        migration = deploy.index('stage_compose run --rm --no-deps migration')
-        bootstrap = deploy.index('stage_compose run --rm --no-deps bootstrap')
-        switch = deploy.index('live_compose up -d --no-deps --force-recreate api web')
-        self.assertLess(ready, migration)
-        self.assertLess(migration, bootstrap)
-        self.assertLess(bootstrap, switch)
-        self.assertNotIn("stage_compose down", deploy)
-        self.assertNotIn("STACK_STOPPED", deploy)
-        self.assertIn("--create-admin was removed", deploy)
-        self.assertNotIn("deploy/create-admin.sh", deploy)
+    def test_legacy_host_deployment_entrypoints_are_removed(self):
+        for relative in (
+            "deploy/prepare-host.sh",
+            "deploy/deploy.sh",
+            "deploy/smoke-test.sh",
+            "deploy/openresty-animemo.conf",
+            "deploy/animemo-certbot.cron",
+            ".env.production.example",
+        ):
+            with self.subTest(relative=relative):
+                self.assertFalse((ROOT / relative).exists())
 
 
 if __name__ == "__main__":

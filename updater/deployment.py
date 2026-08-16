@@ -3,20 +3,33 @@ from __future__ import annotations
 import gzip
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
 import re
 import shutil
 import stat
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+from durability.instance import (
+    APP_ROOT,
+    DATA_ROOT,
+    MANAGED_CONFIG_PATH,
+    UPDATER_RUNTIME_ROOT,
+    UPDATER_STATE_ROOT,
+    InstanceLocator,
+    InstanceSnapshot,
+)
 from release.contract import (
     API_REPOSITORY,
     DEPLOYMENT_CONTRACT_PATHS,
+    POSTGRES_REPOSITORY,
+    REDIS_REPOSITORY,
     WEB_REPOSITORY,
 )
 
@@ -24,14 +37,25 @@ from .commands import CommandRunner
 from .errors import CommandFailed, StateError
 from .state import _atomic_json, _atomic_text, _read_private_text
 
-PRODUCTION_APP_ROOT = Path("/opt/1panel/docker/compose/animemo/app")
-PRODUCTION_DATA_ROOT = Path("/data/animemo")
-PRODUCTION_STATE_ROOT = Path("/var/lib/animemo-updater")
 MAX_BACKUP_AGE = timedelta(hours=24)
 MIN_AVAILABLE_MEMORY = 512 * 1024 * 1024
 HEALTH_PATHS = ("/health/", "/", "/login", "/api/schema/", "/api/docs/")
+PROCESS_ENV_ALLOWLIST = frozenset(
+    {
+        "DOCKER_CONFIG",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "PATH",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TMPDIR",
+    }
+)
 HTTP_5XX_LOG = re.compile(r'"\s5\d\d(?:\s|$)')
-CRITICAL_LOG = re.compile(r"(?im)(?:^|\b)(?:traceback \(most recent call last\)|critical|fatal|panic)(?:\b|:)")
+CRITICAL_LOG = re.compile(
+    r"(?im)(?:^|\b)(?:traceback \(most recent call last\)|critical|fatal|panic)(?:\b|:)"
+)
 MIGRATION_PLAN_LINE = re.compile(
     r"^\s*\[(?P<state>[ X])\]\s+(?P<name>[A-Za-z0-9_]+\.[^\s]+)\s*$"
 )
@@ -50,27 +74,77 @@ class HostPaths:
     app_root: Path
     data_root: Path
     state_root: Path
+    managed_config_path: Path
+    managed_env_path: Path
+    listen_host: str
+    listen_port: int
+    public_origin: str
+    locator_digest: str | None
 
     @classmethod
-    def production(
-        cls,
-        *,
-        app_root: Path = PRODUCTION_APP_ROOT,
-        data_root: Path = PRODUCTION_DATA_ROOT,
-        state_root: Path = PRODUCTION_STATE_ROOT,
-    ):
-        resolved = cls(app_root.resolve(), data_root.resolve(), state_root.resolve())
-        if resolved != cls(PRODUCTION_APP_ROOT, PRODUCTION_DATA_ROOT, PRODUCTION_STATE_ROOT):
-            raise ValueError("Production Update Agent paths are fixed")
-        return resolved
+    def production(cls, snapshot: InstanceSnapshot):
+        if not isinstance(snapshot, InstanceSnapshot):
+            raise TypeError(
+                "Production Update Agent requires a canonical instance snapshot"
+            )
+        locator = snapshot.locator
+        if (
+            locator.app_root != APP_ROOT
+            or locator.data_root != DATA_ROOT
+            or locator.managed_config_path != MANAGED_CONFIG_PATH
+        ):
+            raise ValueError("Production Update Agent locator is not canonical")
+        return cls(
+            app_root=Path(str(APP_ROOT)),
+            data_root=Path(str(DATA_ROOT)),
+            state_root=Path(str(UPDATER_STATE_ROOT)),
+            managed_config_path=Path(str(MANAGED_CONFIG_PATH)),
+            managed_env_path=Path(str(UPDATER_RUNTIME_ROOT / "managed.env")),
+            listen_host=locator.listen.host,
+            listen_port=locator.listen.port,
+            public_origin=locator.public_origin,
+            locator_digest=snapshot.digest,
+        )
+
+    @classmethod
+    def initial_adoption(cls, locator: InstanceLocator) -> HostPaths:
+        if not isinstance(locator, InstanceLocator):
+            raise TypeError("Initial adoption requires a canonical locator")
+        if (
+            locator.app_root != APP_ROOT
+            or locator.data_root != DATA_ROOT
+            or locator.managed_config_path != MANAGED_CONFIG_PATH
+        ):
+            raise ValueError("Initial adoption locator is not canonical")
+        return cls(
+            app_root=Path(str(APP_ROOT)),
+            data_root=Path(str(DATA_ROOT)),
+            state_root=Path(str(UPDATER_STATE_ROOT)),
+            managed_config_path=Path(str(MANAGED_CONFIG_PATH)),
+            managed_env_path=Path(str(UPDATER_RUNTIME_ROOT / "managed.env")),
+            listen_host=locator.listen.host,
+            listen_port=locator.listen.port,
+            public_origin=locator.public_origin,
+            locator_digest=None,
+        )
 
     @classmethod
     def testing(cls, *, app: Path, data: Path, state: Path):
-        resolved = cls(app.resolve(), data.resolve(), state.resolve())
-        for value in resolved.__dict__.values():
+        resolved_roots = (app.resolve(), data.resolve(), state.resolve())
+        for value in resolved_roots:
             if not value.is_absolute():
                 raise ValueError("Test paths must be absolute")
-        return resolved
+        return cls(
+            app_root=resolved_roots[0],
+            data_root=resolved_roots[1],
+            state_root=resolved_roots[2],
+            managed_config_path=resolved_roots[1] / "config" / "animemo.json",
+            managed_env_path=resolved_roots[2] / "managed.env",
+            listen_host="127.0.0.1",
+            listen_port=8088,
+            public_origin="https://ci.example.test",
+            locator_digest=None,
+        )
 
 
 class ImmutableComposeDeployment:
@@ -84,6 +158,7 @@ class ImmutableComposeDeployment:
         memory_info_path: Path = Path("/proc/meminfo"),
         http_probe=None,
         release_probe=None,
+        managed_environment: Mapping[str, str] | None = None,
     ):
         self.paths = paths
         self.runner = runner or CommandRunner()
@@ -92,35 +167,66 @@ class ImmutableComposeDeployment:
         self.memory_info_path = memory_info_path
         self.http_probe = http_probe or self._http_probe
         self.release_probe = release_probe or self._release_probe
+        self.managed_environment = dict(managed_environment or {})
+        if any(
+            not isinstance(key, str) or not key or not isinstance(value, str)
+            for key, value in self.managed_environment.items()
+        ):
+            raise ValueError("Managed child environment is invalid")
         self.compose_file = self.paths.app_root / "deploy" / "docker-compose.yml"
-        self.updater_compose_file = Path(__file__).with_name("docker-compose.runtime.yml")
-        self.env_file = self.paths.app_root / ".env.production"
+        self.updater_compose_file = Path(__file__).with_name(
+            "docker-compose.runtime.yml"
+        )
         self.runtime_env = self.paths.state_root / "runtime-images.env"
 
-    def _env_value(self, name: str, default: str = "") -> str:
-        for raw_line in self.env_file.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            if key.strip() == name:
-                return value.strip().strip("\"'")
-        return default
+    def refresh_binding(
+        self,
+        paths: HostPaths,
+        *,
+        managed_environment: Mapping[str, str],
+    ) -> None:
+        """Refresh one lock-held canonical config/locator snapshot."""
 
-    @staticmethod
-    def _http_probe(path: str, *, host: str, port: int, forwarded_proto: str) -> int:
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        if not isinstance(paths, HostPaths) or any(
+            not isinstance(key, str) or not key or not isinstance(value, str)
+            for key, value in managed_environment.items()
+        ):
+            raise StateError("Canonical runtime binding is invalid")
+        self.paths = paths
+        self.managed_environment = dict(managed_environment)
+        self.compose_file = self.paths.app_root / "deploy" / "docker-compose.yml"
+        self.runtime_env = self.paths.state_root / "runtime-images.env"
+
+    def _local_probe_host(self) -> str:
+        address = ipaddress.ip_address(self.paths.listen_host)
+        if address.is_unspecified:
+            return "::1" if address.version == 6 else "127.0.0.1"
+        return address.compressed
+
+    def _http_probe(
+        self, path: str, *, host: str, port: int, forwarded_proto: str
+    ) -> int:
+        connection = http.client.HTTPConnection(
+            self._local_probe_host(), port, timeout=5
+        )
         try:
-            connection.request("GET", path, headers={"Host": host, "X-Forwarded-Proto": forwarded_proto})
+            connection.request(
+                "GET",
+                path,
+                headers={"Host": host, "X-Forwarded-Proto": forwarded_proto},
+            )
             response = connection.getresponse()
             response.read()
             return response.status
         finally:
             connection.close()
 
-    @staticmethod
-    def _release_probe(*, host: str, port: int, forwarded_proto: str) -> dict[str, object]:
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    def _release_probe(
+        self, *, host: str, port: int, forwarded_proto: str
+    ) -> dict[str, object]:
+        connection = http.client.HTTPConnection(
+            self._local_probe_host(), port, timeout=5
+        )
         try:
             connection.request(
                 "GET",
@@ -136,7 +242,9 @@ class ImmutableComposeDeployment:
             try:
                 payload = json.loads(body)
             except json.JSONDecodeError as error:
-                raise StateError("AniMemo effective release identity is invalid") from error
+                raise StateError(
+                    "AniMemo effective release identity is invalid"
+                ) from error
             if not isinstance(payload, dict):
                 raise StateError("AniMemo effective release identity is invalid")
             return payload
@@ -144,23 +252,22 @@ class ImmutableComposeDeployment:
             connection.close()
 
     def _public_endpoint(self) -> tuple[str, int, str]:
-        parsed = urlparse(self._env_value("ANIMEMO_PUBLIC_ORIGIN"))
+        parsed = urlparse(self.paths.public_origin)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise StateError("AniMemo ANIMEMO_PUBLIC_ORIGIN is unavailable for local health checks")
-        raw_port = self._env_value("ANIMEMO_PORT", "8088")
-        try:
-            port = int(raw_port)
-        except ValueError as error:
-            raise StateError("AniMemo loopback HTTP port is invalid") from error
-        if not 1 <= port <= 65535:
-            raise StateError("AniMemo loopback HTTP port is invalid")
-        return parsed.hostname, port, parsed.scheme
+            raise StateError(
+                "AniMemo Public Origin is unavailable for local health checks"
+            )
+        return parsed.hostname, self.paths.listen_port, parsed.scheme
 
-    def _container_state(self, manifest: dict[str, object], service: str) -> tuple[str, int]:
+    def _container_state(
+        self, manifest: dict[str, object], service: str
+    ) -> tuple[str, int]:
         container = self._container_id(manifest, service)
         result = self.runner.run(
             [
-                "/usr/bin/docker", "inspect", "--format",
+                "/usr/bin/docker",
+                "inspect",
+                "--format",
                 "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}} {{.RestartCount}}",
                 container,
             ],
@@ -171,11 +278,15 @@ class ImmutableComposeDeployment:
         try:
             restarts = int(result[1])
         except ValueError as error:
-            raise StateError(f"AniMemo {service} container restart count is invalid") from error
+            raise StateError(
+                f"AniMemo {service} container restart count is invalid"
+            ) from error
         return result[0], restarts
 
     def _container_id(self, manifest: dict[str, object], service: str) -> str:
-        container = self._compose(manifest, "ps", "-q", service, timeout=30).stdout.strip()
+        container = self._compose(
+            manifest, "ps", "-q", service, timeout=30
+        ).stdout.strip()
         if not container:
             raise StateError(f"AniMemo {service} container is unavailable")
         return container
@@ -190,15 +301,21 @@ class ImmutableComposeDeployment:
         host, port, forwarded_proto = self._public_endpoint()
         for path in paths:
             try:
-                status = self.http_probe(path, host=host, port=port, forwarded_proto=forwarded_proto)
+                status = self.http_probe(
+                    path, host=host, port=port, forwarded_proto=forwarded_proto
+                )
             except OSError as error:
                 raise StateError(f"AniMemo HTTP contract failed for {path}") from error
             if status != 200:
-                raise StateError(f"AniMemo HTTP contract failed for {path}: HTTP {status}")
+                raise StateError(
+                    f"AniMemo HTTP contract failed for {path}: HTTP {status}"
+                )
 
     def _verify_recent_logs(self, manifest: dict[str, object], *, since: str) -> None:
         for service in ["api", "web"]:
-            container = self._compose(manifest, "ps", "-q", service, timeout=30).stdout.strip()
+            container = self._compose(
+                manifest, "ps", "-q", service, timeout=30
+            ).stdout.strip()
             if not container:
                 raise StateError(f"AniMemo {service} container is unavailable")
             result = self.runner.run(
@@ -207,7 +324,9 @@ class ImmutableComposeDeployment:
             )
             logs = f"{result.stdout}\n{result.stderr}"
             if HTTP_5XX_LOG.search(logs) or CRITICAL_LOG.search(logs):
-                raise StateError(f"AniMemo {service} logs failed the stable observation gate")
+                raise StateError(
+                    f"AniMemo {service} logs failed the stable observation gate"
+                )
 
     @staticmethod
     def image_environment(
@@ -234,6 +353,12 @@ class ImmutableComposeDeployment:
         return {
             "ANIMEMO_API_IMAGE": f"{API_REPOSITORY}@{manifest['images']['api']['digest']}",
             "ANIMEMO_WEB_IMAGE": f"{WEB_REPOSITORY}@{manifest['images']['web']['digest']}",
+            "ANIMEMO_POSTGRES_IMAGE": (
+                f"{POSTGRES_REPOSITORY}@{manifest['images']['postgres']['digest']}"
+            ),
+            "ANIMEMO_REDIS_IMAGE": (
+                f"{REDIS_REPOSITORY}@{manifest['images']['redis']['digest']}"
+            ),
             "ANIMEMO_RELEASE_VERSION": release["version"],
             "ANIMEMO_RELEASE_COMMIT": release["commit"],
             "ANIMEMO_RELEASE_CHANNEL": release["channel"],
@@ -248,7 +373,12 @@ class ImmutableComposeDeployment:
         live_contracts: dict[str, str] | None = None,
     ) -> dict[str, str]:
         return {
-            **os.environ,
+            **{
+                key: os.environ[key]
+                for key in PROCESS_ENV_ALLOWLIST
+                if key in os.environ
+            },
+            **self.managed_environment,
             **self.image_environment(manifest, live_contracts=live_contracts),
         }
 
@@ -259,17 +389,21 @@ class ImmutableComposeDeployment:
         timeout: int = 300,
         live_contracts: dict[str, str] | None = None,
     ):
-        env_files = ["--env-file", str(self.env_file)]
+        env_files = ["--env-file", str(self.paths.managed_env_path)]
         if self.runtime_env.exists() or self.runtime_env.is_symlink():
             _read_private_text(self.paths.state_root, self.runtime_env)
             env_files.extend(["--env-file", str(self.runtime_env)])
         return self.runner.run(
             [
-                "/usr/bin/docker", "compose",
-                "--project-name", "animemo",
+                "/usr/bin/docker",
+                "compose",
+                "--project-name",
+                "animemo",
                 *env_files,
-                "-f", str(self.compose_file),
-                "-f", str(self.updater_compose_file),
+                "-f",
+                str(self.compose_file),
+                "-f",
+                str(self.updater_compose_file),
                 *args,
             ],
             cwd=self.paths.app_root,
@@ -279,11 +413,9 @@ class ImmutableComposeDeployment:
 
     def verify_deployment_contract(self, manifest: dict[str, object]) -> None:
         declared = manifest.get("deployment", {}).get("files", [])
-        if (
-            not isinstance(declared, list)
-            or [item.get("path") for item in declared if isinstance(item, dict)]
-            != list(DEPLOYMENT_CONTRACT_PATHS)
-        ):
+        if not isinstance(declared, list) or [
+            item.get("path") for item in declared if isinstance(item, dict)
+        ] != list(DEPLOYMENT_CONTRACT_PATHS):
             raise StateError("AniMemo deployment contract is incomplete or unordered")
         local_files = {
             "deploy/docker-compose.yml": self.compose_file,
@@ -312,9 +444,16 @@ class ImmutableComposeDeployment:
                 )
 
     def preflight(self, manifest: dict[str, object]) -> None:
-        for path in [self.compose_file, self.updater_compose_file, self.env_file]:
+        for path in [
+            self.compose_file,
+            self.updater_compose_file,
+            self.paths.managed_config_path,
+            self.paths.managed_env_path,
+        ]:
             if not path.is_file() or path.is_symlink():
-                raise StateError(f"Required fixed AniMemo file is unavailable: {path.name}")
+                raise StateError(
+                    f"Required fixed AniMemo file is unavailable: {path.name}"
+                )
         self.verify_deployment_contract(manifest)
         usage = shutil.disk_usage(self.paths.data_root)
         if usage.free < 2 * 1024 * 1024 * 1024:
@@ -324,18 +463,29 @@ class ImmutableComposeDeployment:
                 key: value
                 for key, value in (
                     line.split(":", 1)
-                    for line in self.memory_info_path.read_text(encoding="utf-8").splitlines()
+                    for line in self.memory_info_path.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
                     if ":" in line
                 )
             }
             available_kib = int(memory_fields["MemAvailable"].strip().split()[0])
         except (OSError, KeyError, ValueError, IndexError) as error:
-            raise StateError("AniMemo host available memory cannot be determined") from error
+            raise StateError(
+                "AniMemo host available memory cannot be determined"
+            ) from error
         if available_kib * 1024 < MIN_AVAILABLE_MEMORY:
             raise StateError("AniMemo host has less than 512 MiB available memory")
-        self.runner.run(["/usr/bin/docker", "version", "--format", "{{.Server.Version}}"], timeout=15)
+        self.runner.run(
+            ["/usr/bin/docker", "version", "--format", "{{.Server.Version}}"],
+            timeout=15,
+        )
         self._compose(manifest, "config", "--quiet", timeout=30)
-        services = set(self._compose(manifest, "ps", "--services", "--filter", "status=running", timeout=30).stdout.split())
+        services = set(
+            self._compose(
+                manifest, "ps", "--services", "--filter", "status=running", timeout=30
+            ).stdout.split()
+        )
         if not {"postgres", "redis", "api", "web"}.issubset(services):
             raise StateError("AniMemo Compose project is not fully running")
         for service in ["postgres", "redis", "api", "web"]:
@@ -345,8 +495,14 @@ class ImmutableComposeDeployment:
         self._verify_http_paths(("/health/", "/"))
         if manifest["compatibility"]["database"]["migration"]["required"]:
             backup_root = self.paths.data_root / "backups"
-            if not backup_root.is_dir() or backup_root.is_symlink() or not os.access(backup_root, os.W_OK):
-                raise StateError("AniMemo backup root is unavailable for a fresh migration backup")
+            if (
+                not backup_root.is_dir()
+                or backup_root.is_symlink()
+                or not os.access(backup_root, os.W_OK)
+            ):
+                raise StateError(
+                    "AniMemo backup root is unavailable for a fresh migration backup"
+                )
         else:
             self.verify_recent_backup()
 
@@ -354,12 +510,22 @@ class ImmutableComposeDeployment:
         backup_root = self.paths.data_root / "backups"
         if not backup_root.is_dir() or backup_root.is_symlink():
             raise StateError("AniMemo backup root is unavailable")
-        metadata_files = sorted(backup_root.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        metadata_files = sorted(
+            backup_root.glob("*.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
         if not metadata_files:
-            raise StateError("No verified AniMemo database backup metadata is available")
+            raise StateError(
+                "No verified AniMemo database backup metadata is available"
+            )
         metadata = metadata_files[0]
         metadata_stat = metadata.lstat()
-        if metadata.is_symlink() or not stat.S_ISREG(metadata_stat.st_mode) or metadata_stat.st_nlink != 1:
+        if (
+            metadata.is_symlink()
+            or not stat.S_ISREG(metadata_stat.st_mode)
+            or metadata_stat.st_nlink != 1
+        ):
             raise StateError("Latest backup metadata must not be a link")
         try:
             payload = json.loads(metadata.read_text(encoding="utf-8"))
@@ -374,21 +540,33 @@ class ImmutableComposeDeployment:
             raise StateError("Latest backup metadata is invalid")
         backup = Path(payload["path"])
         if backup.parent.resolve() != backup_root.resolve() or not backup.is_file():
-            raise StateError("Latest backup metadata points outside the AniMemo backup root")
+            raise StateError(
+                "Latest backup metadata points outside the AniMemo backup root"
+            )
         backup_stat = backup.lstat()
-        if backup.is_symlink() or not stat.S_ISREG(backup_stat.st_mode) or backup_stat.st_nlink != 1:
+        if (
+            backup.is_symlink()
+            or not stat.S_ISREG(backup_stat.st_mode)
+            or backup_stat.st_nlink != 1
+        ):
             raise StateError("Latest AniMemo database backup must not be a link")
         digest = _sha256_file(backup)
         if digest != payload.get("compressedSha256"):
             raise StateError("Latest AniMemo database backup checksum is invalid")
         try:
-            created_at = datetime.fromisoformat(str(payload["createdAt"]).replace("Z", "+00:00"))
+            created_at = datetime.fromisoformat(
+                str(payload["createdAt"]).replace("Z", "+00:00")
+            )
         except (KeyError, TypeError, ValueError) as error:
-            raise StateError("Latest AniMemo database backup timestamp is invalid") from error
+            raise StateError(
+                "Latest AniMemo database backup timestamp is invalid"
+            ) from error
         if created_at.tzinfo is None:
             raise StateError("Latest AniMemo database backup timestamp is invalid")
         current_time = now or datetime.now(timezone.utc)
-        age = current_time.astimezone(timezone.utc) - created_at.astimezone(timezone.utc)
+        age = current_time.astimezone(timezone.utc) - created_at.astimezone(
+            timezone.utc
+        )
         if age < timedelta(0) or age > MAX_BACKUP_AGE:
             raise StateError("Latest AniMemo database backup is older than 24 hours")
         try:
@@ -396,7 +574,9 @@ class ImmutableComposeDeployment:
                 while handle.read(1024 * 1024):
                     pass
         except (OSError, EOFError) as error:
-            raise StateError("Latest AniMemo database backup gzip stream is invalid") from error
+            raise StateError(
+                "Latest AniMemo database backup gzip stream is invalid"
+            ) from error
 
     def backup_database(self, operation_id: str) -> str:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -404,11 +584,19 @@ class ImmutableComposeDeployment:
         target = backup_root / f"animemo-pre-{operation_id[:8]}-{stamp}.sql.gz"
         result = self.runner.write_gzip(
             [
-                "/usr/bin/docker", "compose",
-                "--project-name", "animemo",
-                "--env-file", str(self.env_file),
-                "-f", str(self.compose_file),
-                "exec", "-T", "postgres", "sh", "-c",
+                "/usr/bin/docker",
+                "compose",
+                "--project-name",
+                "animemo",
+                "--env-file",
+                str(self.paths.managed_env_path),
+                "-f",
+                str(self.compose_file),
+                "exec",
+                "-T",
+                "postgres",
+                "sh",
+                "-c",
                 'exec pg_dump --format=plain --no-owner --no-privileges -U "$POSTGRES_USER" "$POSTGRES_DB"',
             ],
             target,
@@ -433,8 +621,110 @@ class ImmutableComposeDeployment:
 
     def pull(self, manifest: dict[str, object]) -> None:
         env = self._environment(manifest)
-        for image in [env["ANIMEMO_API_IMAGE"], env["ANIMEMO_WEB_IMAGE"]]:
+        for image in [
+            env["ANIMEMO_API_IMAGE"],
+            env["ANIMEMO_WEB_IMAGE"],
+            env["ANIMEMO_POSTGRES_IMAGE"],
+            env["ANIMEMO_REDIS_IMAGE"],
+        ]:
             self.runner.run(["/usr/bin/docker", "pull", image], env=env, timeout=600)
+
+    def start_datastores(self, manifest: dict[str, object]) -> None:
+        self._compose(
+            manifest,
+            "up",
+            "-d",
+            "--wait",
+            "--wait-timeout",
+            "120",
+            "postgres",
+            "redis",
+            timeout=600,
+        )
+
+    def start_application(self, manifest: dict[str, object]) -> None:
+        self._compose(
+            manifest,
+            "up",
+            "-d",
+            "--no-deps",
+            "--wait",
+            "--wait-timeout",
+            "120",
+            "api",
+            "web",
+            timeout=600,
+        )
+
+    def reconcile_application(self, manifest: dict[str, object]) -> None:
+        self._compose(
+            manifest,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "--wait",
+            "--wait-timeout",
+            "120",
+            "api",
+            "web",
+            timeout=600,
+        )
+
+    def validate_compose(self, manifest: dict[str, object]) -> None:
+        self._compose(manifest, "config", "--quiet", timeout=60)
+
+    def probe_postgres(self, manifest: dict[str, object]) -> None:
+        self._compose(
+            manifest,
+            "exec",
+            "-T",
+            "postgres",
+            "pg_isready",
+            "-U",
+            self.managed_environment["POSTGRES_USER"],
+            "-d",
+            self.managed_environment["POSTGRES_DB"],
+            timeout=30,
+        )
+
+    def probe_redis(self, manifest: dict[str, object]) -> None:
+        result = self._compose(
+            manifest,
+            "exec",
+            "-T",
+            "redis",
+            "redis-cli",
+            "ping",
+            timeout=30,
+        )
+        if result.stdout.strip() != "PONG":
+            raise StateError("AniMemo Redis connectivity probe failed")
+
+    def probe_api(self, manifest: dict[str, object]) -> None:
+        del manifest
+        host, _port, forwarded_proto = self._public_endpoint()
+        payload = self.release_probe(
+            host=host,
+            port=self.paths.listen_port,
+            forwarded_proto=forwarded_proto,
+        )
+        if payload.get("status") != "ok":
+            raise StateError("AniMemo API health probe failed")
+
+    def probe_web(self, manifest: dict[str, object]) -> None:
+        del manifest
+        host, _port, forwarded_proto = self._public_endpoint()
+        if (
+            self.http_probe(
+                "/",
+                host=host,
+                port=self.paths.listen_port,
+                forwarded_proto=forwarded_proto,
+            )
+            != 200
+        ):
+            raise StateError("AniMemo Web health probe failed")
 
     def migrate(self, manifest: dict[str, object]) -> None:
         self._compose(manifest, "run", "--rm", "--no-deps", "migration", timeout=600)
@@ -442,30 +732,133 @@ class ImmutableComposeDeployment:
     def bootstrap(self, manifest: dict[str, object]) -> None:
         self._compose(manifest, "run", "--rm", "--no-deps", "bootstrap", timeout=600)
 
+    def rotate_restored_authentication_epoch(
+        self, manifest: dict[str, object]
+    ) -> None:
+        self._compose(
+            manifest,
+            "exec",
+            "-T",
+            "api",
+            "python",
+            "manage.py",
+            "rotate_authentication_epoch",
+            "--confirm-restore",
+            timeout=120,
+        )
+
+    def apply_restore_secret_disposition(
+        self,
+        manifest: dict[str, object],
+        names: tuple[str, ...],
+    ) -> None:
+        allowed = {
+            "BANGUMI_OAUTH_CLIENT_SECRET",
+            "RESEND_API_KEY",
+            "TURNSTILE_SECRET",
+        }
+        if tuple(sorted(set(names))) != names or any(
+            name not in allowed for name in names
+        ):
+            raise StateError("Restore secret disposition is invalid")
+        argv = [
+            "run",
+            "--rm",
+            "--no-deps",
+            "api",
+            "python",
+            "manage.py",
+            "apply_restore_secret_disposition",
+        ]
+        for name in names:
+            argv.extend(("--clear", name))
+        self._compose(manifest, *argv, timeout=120)
+
+    def inspect_restore_integrity(
+        self, manifest: dict[str, object]
+    ) -> dict[str, bool]:
+        result = self._compose(
+            manifest,
+            "exec",
+            "-T",
+            "api",
+            "python",
+            "manage.py",
+            "validate_restore_integrity",
+            timeout=300,
+        )
+        try:
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError) as error:
+            raise StateError(
+                "Restore integrity inspection returned invalid data"
+            ) from error
+        checks = payload.get("checks") if isinstance(payload, dict) else None
+        expected = {
+            "instance.identity",
+            "protection.decryptability",
+            "authentication.epoch",
+            "durable.write",
+            "memory.mi1.external_metadata",
+            "memory.mi2.provider_identity",
+            "memory.mi3.merge_history",
+            "memory.mi4.unsupported_payload",
+            "memory.mi5.destructive_ambiguity",
+        }
+        if (
+            not isinstance(checks, dict)
+            or set(checks) != expected
+            or any(value is not True for value in checks.values())
+        ):
+            raise StateError("Restore integrity inspection failed")
+        return dict(checks)
+
     def inspect_enabled_plugin_apis(self, manifest: dict[str, object]) -> set[int]:
         result = self._compose(
             manifest,
-            "run", "--rm", "--no-deps", "api",
-            "python", "manage.py", "list_enabled_plugin_apis",
+            "run",
+            "--rm",
+            "--no-deps",
+            "api",
+            "python",
+            "manage.py",
+            "list_enabled_plugin_apis",
             timeout=120,
         )
         try:
             values = json.loads(result.stdout.strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError) as error:
-            raise StateError("Enabled Plugin SDK inspection returned invalid data") from error
-        if not isinstance(values, list) or not all(isinstance(value, int) and value > 0 for value in values):
+            raise StateError(
+                "Enabled Plugin SDK inspection returned invalid data"
+            ) from error
+        if not isinstance(values, list) or not all(
+            isinstance(value, int) and value > 0 for value in values
+        ):
             raise StateError("Enabled Plugin SDK inspection returned invalid data")
         return set(values)
 
     def inspect_runtime_contracts(self, manifest: dict[str, object]) -> dict[str, str]:
         self._compose(
             manifest,
-            "exec", "-T", "api", "python", "manage.py", "migrate", "--check", "--noinput",
+            "exec",
+            "-T",
+            "api",
+            "python",
+            "manage.py",
+            "migrate",
+            "--check",
+            "--noinput",
             timeout=120,
         )
         self._compose(
             manifest,
-            "exec", "-T", "api", "python", "manage.py", "check", "--deploy",
+            "exec",
+            "-T",
+            "api",
+            "python",
+            "manage.py",
+            "check",
+            "--deploy",
             timeout=120,
         )
         host, port, forwarded_proto = self._public_endpoint()
@@ -475,7 +868,10 @@ class ImmutableComposeDeployment:
             forwarded_proto=forwarded_proto,
         )
         contracts = payload.get("contracts") if isinstance(payload, dict) else None
-        if not isinstance(contracts, dict) or set(contracts) != {"database", "configuration"}:
+        if not isinstance(contracts, dict) or set(contracts) != {
+            "database",
+            "configuration",
+        }:
             raise StateError("Live runtime contract inspection returned invalid data")
         if not all(isinstance(value, str) and value for value in contracts.values()):
             raise StateError("Live runtime contract inspection returned invalid data")
@@ -487,8 +883,14 @@ class ImmutableComposeDeployment:
     def _migration_snapshot(self, manifest: dict[str, object]) -> dict[str, bool]:
         result = self._compose(
             manifest,
-            "run", "--rm", "--no-deps", "api",
-            "python", "manage.py", "showmigrations", "--plan",
+            "run",
+            "--rm",
+            "--no-deps",
+            "api",
+            "python",
+            "manage.py",
+            "showmigrations",
+            "--plan",
             timeout=120,
         )
         snapshot: dict[str, bool] = {}
@@ -499,7 +901,9 @@ class ImmutableComposeDeployment:
             name = match.group("name")
             applied = match.group("state") == "X"
             if name in snapshot and snapshot[name] != applied:
-                raise StateError("Database migration inspection returned conflicting state")
+                raise StateError(
+                    "Database migration inspection returned conflicting state"
+                )
             snapshot[name] = applied
         if not snapshot:
             raise StateError("Database migration inspection returned no migrations")
@@ -541,8 +945,15 @@ class ImmutableComposeDeployment:
         )
         self._compose(
             manifest,
-            "up", "-d", "--no-deps", "--force-recreate",
-            "--wait", "--wait-timeout", "120", "api", "web",
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "--wait",
+            "--wait-timeout",
+            "120",
+            "api",
+            "web",
             live_contracts=live_contracts,
             timeout=600,
         )
@@ -554,7 +965,9 @@ class ImmutableComposeDeployment:
         live_contracts: dict[str, str] | None = None,
     ) -> None:
         self.verify_deployment_contract(manifest)
-        observation_started = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        observation_started = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
         for observation in range(self.stable_observations):
             for service in ["api", "web"]:
                 status, restarts = self._container_state(manifest, service)
@@ -581,11 +994,16 @@ class ImmutableComposeDeployment:
             "org.opencontainers.image.revision": release["commit"],
             "cc.animemo.release.channel": artifact_channel,
         }
-        for service, image_key in (("api", "ANIMEMO_API_IMAGE"), ("web", "ANIMEMO_WEB_IMAGE")):
+        for service, image_key in (
+            ("api", "ANIMEMO_API_IMAGE"),
+            ("web", "ANIMEMO_WEB_IMAGE"),
+        ):
             container = self._container_id(manifest, service)
             actual_image = self._inspect_container(container, "{{.Config.Image}}")
             if actual_image != environment[image_key]:
-                raise StateError(f"AniMemo {service} image identity differs from the Manifest")
+                raise StateError(
+                    f"AniMemo {service} image identity differs from the Manifest"
+                )
             for label, expected in artifact.items():
                 actual = self._inspect_container(
                     container,
@@ -599,9 +1017,15 @@ class ImmutableComposeDeployment:
         web_container = self._container_id(manifest, "web")
         web_identity = self.runner.run(
             [
-                "/usr/bin/docker", "exec", web_container, "/bin/sh", "-c",
-                'printf "%s\\n%s\\n%s\\n" "$ANIMEMO_RELEASE_VERSION" '
-                '"$ANIMEMO_RELEASE_COMMIT" "$ANIMEMO_RELEASE_CHANNEL"',
+                "/usr/bin/docker",
+                "exec",
+                web_container,
+                "/bin/sh",
+                "-c",
+                (
+                    'printf "%s\\n%s\\n%s\\n" "$ANIMEMO_RELEASE_VERSION" '
+                    '"$ANIMEMO_RELEASE_COMMIT" "$ANIMEMO_RELEASE_CHANNEL"'
+                ),
             ],
             timeout=30,
         ).stdout.splitlines()
@@ -615,10 +1039,14 @@ class ImmutableComposeDeployment:
             expected_release["commit"],
             expected_release["channel"],
         ]:
-            raise StateError("AniMemo web effective release identity differs from the Manifest")
+            raise StateError(
+                "AniMemo web effective release identity differs from the Manifest"
+            )
 
         host, port, forwarded_proto = self._public_endpoint()
-        payload = self.release_probe(host=host, port=port, forwarded_proto=forwarded_proto)
+        payload = self.release_probe(
+            host=host, port=port, forwarded_proto=forwarded_proto
+        )
         expected_contracts = {
             "database": environment["ANIMEMO_DATABASE_CONTRACT"],
             "configuration": environment["ANIMEMO_CONFIGURATION_CONTRACT"],
@@ -629,4 +1057,6 @@ class ImmutableComposeDeployment:
             or payload.get("release") != expected_release
             or payload.get("contracts") != expected_contracts
         ):
-            raise StateError("AniMemo API effective release identity differs from the Manifest")
+            raise StateError(
+                "AniMemo API effective release identity differs from the Manifest"
+            )

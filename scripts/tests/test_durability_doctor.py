@@ -32,6 +32,7 @@ from durability.instance import (
     UPDATER_SOCKET_PATH,
     UPDATER_STATE_ROOT,
     LocatorError,
+    SecureFileSnapshot,
     parse_instance_locator,
 )
 
@@ -49,8 +50,9 @@ def locator_payload() -> dict[str, object]:
         "listen": {"host": "127.0.0.1", "port": 8088},
         "publicOrigin": "https://animemo.example",
         "managedConfigPath": "/data/animemo/config/animemo.json",
+        "configRevision": "11111111-1111-4111-8111-111111111111",
         "releaseIdentity": {
-            "version": "v1.1.0",
+            "version": "v1.1.0-rc.1",
             "channel": "rc",
             "commit": "a" * 40,
             "manifestDigest": DIGEST,
@@ -112,6 +114,31 @@ class FakeReadOnlyHost:
     def read_bytes(self, path: PurePosixPath, *, limit: int) -> bytes:
         self.calls.append(("read_bytes", str(path)))
         return self.payloads[path][: limit + 1]
+
+    def read_secure_bytes(
+        self,
+        path: PurePosixPath,
+        *,
+        limit: int,
+        expected_owner_uid: int | None = None,
+        expected_owner_gid: int | None = None,
+        required_mode: int = 0o600,
+    ) -> SecureFileSnapshot:
+        self.calls.append(("read_secure_bytes", str(path)))
+        metadata_value = self.lstat(path)
+        if (
+            expected_owner_uid is not None
+            and metadata_value.st_uid != expected_owner_uid
+        ):
+            raise LocatorError("LOCATOR_OWNER_INVALID")
+        if (
+            expected_owner_gid is not None
+            and metadata_value.st_gid != expected_owner_gid
+        ):
+            raise LocatorError("LOCATOR_GROUP_INVALID")
+        if stat.S_IMODE(metadata_value.st_mode) != required_mode:
+            raise LocatorError("LOCATOR_PERMISSIONS_INVALID")
+        return SecureFileSnapshot(self.payloads[path][: limit + 1], metadata_value)
 
     def disk_usage(self, path: PurePosixPath) -> Usage:
         self.calls.append(("disk_usage", str(path)))
@@ -236,7 +263,7 @@ class DoctorBasicRuntimeTests(unittest.TestCase):
         self.assertEqual(rendered["compatibility"]["overallStatus"], "COMPATIBLE")
         self.assertEqual(
             {call[0] for call in host.calls},
-            {"lstat", "read_bytes", "user_id", "group_id"},
+            {"lstat", "read_secure_bytes", "user_id", "group_id"},
         )
 
     def test_missing_locator_does_not_scan_legacy_paths_or_call_dependent_probes(self):
@@ -251,7 +278,11 @@ class DoctorBasicRuntimeTests(unittest.TestCase):
 
         self.assertEqual(report.overall_status, DoctorStatus.FAIL)
         self.assertEqual(called, [])
-        inspected = {path for operation, path in host.calls if operation == "lstat"}
+        inspected = {
+            path
+            for operation, path in host.calls
+            if operation in {"lstat", "read_secure_bytes"}
+        }
         self.assertEqual(inspected, {str(INSTANCE_LOCATOR_PATH)})
         self.assertFalse(
             any("1panel" in path or "anime-journal" in path for path in inspected)

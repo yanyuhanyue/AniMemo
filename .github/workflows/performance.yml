@@ -186,7 +186,7 @@ jobs:
           mkdir -p "$data_root"/plugins "$data_root"/logs "$data_root"/backups "$data_root"/media "$data_root"/postgres "$data_root"/redis
           chmod -R a+rwx "$data_root"
           sudo install -d -m 0700 -o 10001 -g 10001 "$data_root/private"
-          cat > .env.production <<EOF
+          cat > .ci-runtime.env <<EOF
           DEBUG=false
           DJANGO_SECRET_KEY=ci-only-performance-secret-key-012345678901234567890123456789012345678901234567890
           CREDENTIAL_ENCRYPTION_KEY=a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
@@ -208,24 +208,30 @@ jobs:
           CSRF_COOKIE_SECURE=false
           REFRESH_COOKIE_SECURE=false
           ALLOW_INSECURE_PRODUCTION_COOKIES=true
-          ANIMEMO_PORT=8088
-          ANIMEMO_DATA_ROOT=$data_root
+          ANIMEMO_LISTEN_HOST=127.0.0.1
+          ANIMEMO_LISTEN_PORT=8088
+          ANIMEMO_CONFIG_REVISION=11111111-1111-4111-8111-111111111111
+          ANIMEMO_TEST_DATA_ROOT=$data_root
           ANIMEMO_API_IMAGE=animemo-perf-api:candidate
           ANIMEMO_WEB_IMAGE=animemo-perf-web:candidate
+          ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
+          ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
           EOF
+          sudo install -d -m 0750 /run/animemo-updater
+          sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/managed.env
           echo "PERF_DATA_ROOT=$data_root" >> "$GITHUB_ENV"
       - name: Validate the isolated Compose contract
-        run: docker compose --env-file .env.production config
+        run: docker compose --env-file .ci-runtime.env config
       - name: Build the candidate API and Web images
-        run: docker compose --env-file .env.production build api web
+        run: docker compose --env-file .ci-runtime.env build api web
       - name: Start PostgreSQL and Redis, then run release jobs
         shell: bash
         run: |
           set -euo pipefail
-          docker compose --env-file .env.production up -d --wait --wait-timeout 120 postgres redis
-          docker compose --env-file .env.production run --rm --no-deps migration
-          docker compose --env-file .env.production run --rm --no-deps bootstrap
-          docker compose --env-file .env.production up -d --no-deps api web
+          docker compose --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis
+          docker compose --env-file .ci-runtime.env run --rm --no-deps migration
+          docker compose --env-file .ci-runtime.env run --rm --no-deps bootstrap
+          docker compose --env-file .ci-runtime.env up -d --no-deps api web
       - name: Wait for the candidate Web/API health endpoint
         shell: bash
         run: |
@@ -238,7 +244,7 @@ jobs:
               break
             fi
             if [[ "$attempt" == 30 ]]; then
-              docker compose --env-file .env.production ps
+              docker compose --env-file .ci-runtime.env ps
               exit 1
             fi
             sleep 5
@@ -268,7 +274,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           identities_file="$RUNNER_TEMP/animemo-performance-identities-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
-          docker compose --env-file .env.production exec -T \
+          docker compose --env-file .ci-runtime.env exec -T \
             -e PERF_ADMIN_PASSWORD="$PERF_ADMIN_PASSWORD" \
             api python manage.py provision_performance_load_identities \
               --dataset large \
@@ -322,8 +328,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifacts
-          docker compose --env-file .env.production ps --all > artifacts/compose-ps.txt 2>&1 || true
-          docker compose --env-file .env.production logs --no-color > artifacts/compose.log 2>&1 || true
+          docker compose --env-file .ci-runtime.env ps --all > artifacts/compose-ps.txt 2>&1 || true
+          docker compose --env-file .ci-runtime.env logs --no-color > artifacts/compose.log 2>&1 || true
       - name: Upload isolated resource/load evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -334,10 +340,10 @@ jobs:
           retention-days: 14
       - name: Print isolated logs on failure
         if: ${{ failure() }}
-        run: docker compose --env-file .env.production logs --no-color
+        run: docker compose --env-file .ci-runtime.env logs --no-color
       - name: Remove only this disposable performance Compose project
         if: ${{ always() }}
-        run: docker compose --env-file .env.production down -v --remove-orphans
+        run: docker compose --env-file .ci-runtime.env down -v --remove-orphans
 
   isolated-long-operation-capacity:
     name: performance-long-operation-capacity
@@ -369,7 +375,7 @@ jobs:
           mkdir -p "$data_root"/{plugins,logs,backups,media,postgres,redis}
           chmod -R a+rwx "$data_root"
           sudo install -d -m 0700 -o 10001 -g 10001 "$data_root/private"
-          cat > .env.production <<EOF
+          cat > .ci-runtime.env <<EOF
           DEBUG=false
           DJANGO_SECRET_KEY=ci-only-capacity-secret-key-012345678901234567890123456789012345678901234567890
           CREDENTIAL_ENCRYPTION_KEY=a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
@@ -394,24 +400,30 @@ jobs:
           THROTTLE_USER_RATE=300/min
           ANIMEMO_ISOLATED_CAPACITY_PROBE=true
           ANIMEMO_ISOLATED_PROVIDER_LATENCY_MS=1200
-          ANIMEMO_PORT=8089
-          ANIMEMO_DATA_ROOT=$data_root
+          ANIMEMO_LISTEN_HOST=127.0.0.1
+          ANIMEMO_LISTEN_PORT=8089
+          ANIMEMO_CONFIG_REVISION=22222222-2222-4222-8222-222222222222
+          ANIMEMO_TEST_DATA_ROOT=$data_root
           ANIMEMO_API_IMAGE=animemo-capacity-api:candidate
           ANIMEMO_WEB_IMAGE=animemo-capacity-web:candidate
+          ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
+          ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
           EOF
+          sudo install -d -m 0750 /run/animemo-updater
+          sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/managed.env
           echo "CAPACITY_DATA_ROOT=$data_root" >> "$GITHUB_ENV"
       - name: Validate and build the exact capacity candidate
         run: |
-          docker compose --env-file .env.production config
-          docker compose --env-file .env.production build api web
+          docker compose --env-file .ci-runtime.env config
+          docker compose --env-file .ci-runtime.env build api web
       - name: Start disposable capacity PostgreSQL Redis API and Web
         shell: bash
         run: |
           set -euo pipefail
-          docker compose --env-file .env.production up -d --wait --wait-timeout 120 postgres redis
-          docker compose --env-file .env.production run --rm --no-deps migration
-          docker compose --env-file .env.production run --rm --no-deps bootstrap
-          docker compose --env-file .env.production up -d --no-deps api web
+          docker compose --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis
+          docker compose --env-file .ci-runtime.env run --rm --no-deps migration
+          docker compose --env-file .ci-runtime.env run --rm --no-deps bootstrap
+          docker compose --env-file .ci-runtime.env up -d --no-deps api web
           for attempt in {1..30}; do
             if curl --fail --silent --show-error -H 'Host: capacity.example.test' \
               http://127.0.0.1:8089/health/ \
@@ -419,7 +431,7 @@ jobs:
               break
             fi
             if [[ "$attempt" == 30 ]]; then
-              docker compose --env-file .env.production ps --all
+              docker compose --env-file .ci-runtime.env ps --all
               exit 1
             fi
             sleep 5
@@ -446,7 +458,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           identities_file="$RUNNER_TEMP/animemo-capacity-identities-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
-          docker compose --env-file .env.production exec -T api \
+          docker compose --env-file .ci-runtime.env exec -T api \
             python manage.py provision_performance_load_identities \
               --dataset large \
               --count 60 \
@@ -482,8 +494,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifacts
-          docker compose --env-file .env.production ps --all > artifacts/capacity-compose-ps.txt 2>&1 || true
-          docker compose --env-file .env.production logs --no-color > artifacts/capacity-compose.log 2>&1 || true
+          docker compose --env-file .ci-runtime.env ps --all > artifacts/capacity-compose-ps.txt 2>&1 || true
+          docker compose --env-file .ci-runtime.env logs --no-color > artifacts/capacity-compose.log 2>&1 || true
       - name: Upload isolated long-operation capacity evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -494,7 +506,7 @@ jobs:
           retention-days: 14
       - name: Remove only this disposable capacity Compose project
         if: ${{ always() }}
-        run: docker compose --env-file .env.production down -v --remove-orphans
+        run: docker compose --env-file .ci-runtime.env down -v --remove-orphans
 
   regression-gate:
     name: performance-regression-gate

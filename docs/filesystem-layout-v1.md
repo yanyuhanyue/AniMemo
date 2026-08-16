@@ -69,7 +69,7 @@ AniMemo 的标准 filesystem roots 是：
 | `backups/` | application UID `10001`, group `animemo-api`, `0770`; backup artifacts `0600` | Durable recovery artifacts | 不递归包含自身；是否随服务器迁移携带由 Migration Contract 明确 | 可重新生成新的 backup，但既有 recovery point 不可重建 | 最高机密性与完整性 | 仅按未来显式 retention policy 删除；未知、未校验或唯一可用 backup 不得删除 |
 | `logs/` | application UID/GID，当前兼容映射为 `10001:10001`; `0755`，log files 不得 world-write | Operational / retention-bound | 默认 NO / NO / NO | YES | 可能含敏感 operational metadata | 只按明确 retention/rotation policy 清理，不跟随 release tree 删除 |
 
-受保护配置不得再放入 `/opt/animemo` 的 release/deployment tree。v1.1 的 exact config filename/schema 可由配置 Contract 在不改变本节 lifecycle 的前提下细化；任何 secret-bearing config 都必须位于 `config/` 或更严格的受保护子目录，并由原子更新流程维护。
+受保护配置不得再放入 `/opt/animemo` 的 release/deployment tree。v1.1 的唯一 authority 是 `/data/animemo/config/animemo.json`，schema identity 为 `animemo.managed-config/v1`。Compose 使用 `/run/animemo-updater/managed.env` 这个由 authority 与 exact Release 派生、可重建、`0600` 的 ephemeral Adapter；它不是第二 authority，也不得由其他组件作为配置输入读取。任何 secret-bearing config 都必须由同目录原子更新流程维护。
 
 `config/`、`private/`、`backups/` 以及它们的父路径必须拒绝 symlink/junction；敏感文件必须拒绝 hard link，原子替换必须在同一受保护目录内完成并同步文件与目录 metadata。
 
@@ -108,6 +108,8 @@ AniMemo 的标准 filesystem roots 是：
 - `appRoot`；
 - `dataRoot`；
 - `deploymentProfile`，精确为 `v1.1-standard`；
+- `managedConfigPath`，精确为 `/data/animemo/config/animemo.json`；
+- non-secret `configRevision` mirror；
 - canonical `listen` identity；
 - canonical `publicOrigin`；
 - immutable `releaseIdentity`，足以绑定 version/channel/commit、Manifest 与 exact OCI digests。
@@ -192,5 +194,10 @@ source 与 target 使用同一 R2 bucket 时，Migration 不需要复制 poster/
 Phase 3B 在 Runtime 实现前移除了原先的 custom/legacy profile 与 future
 cutover requirement。理由、影响和零债务结论记录在
 [v1.1 Pre-Production Debt Ledger](v1.1-pre-production-debt-ledger.md#pcdc-001--canonical-filesystem-clean-break)。
+
+Phase 3C 在 Installer 实现前进一步冻结 exact managed-config path、strict
+locator writer、canonical Updater adoption、完整 Release material 与 durable
+operation evidence。完整理由与影响记录在
+[Phase 3C Pre-Production Contract Corrections](phase3c-pre-production-contract-corrections.md)。
 
 本 Contract 的成功条件是边界冻结。它不授权本阶段创建 Installer、执行 cutover、移动生产数据、连接生产或开始 Backup/Restore/Migration/Doctor implementation。

@@ -8,11 +8,11 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from release.contract import build_manifest, deployment_contract_digest
 from updater.deployment import HostPaths, ImmutableComposeDeployment
 from updater.errors import StateError
-
 
 TEST_COMPOSE_BYTES = b"services: {}\n"
 UPDATER_OVERLAY = Path(__file__).parents[1] / "docker-compose.runtime.yml"
@@ -26,17 +26,41 @@ DEPLOYMENT_FILES = [
         "sha256": "sha256:" + hashlib.sha256(UPDATER_OVERLAY.read_bytes()).hexdigest(),
     },
 ]
+MATERIALS_DIGEST = "sha256:" + "c" * 64
 DEPLOYMENT_DIGEST = deployment_contract_digest(
-    {"schemaVersion": 1, "files": DEPLOYMENT_FILES}
+    {
+        "schemaVersion": 2,
+        "profile": "v1.1-standard",
+        "platform": "linux/amd64",
+        "archive": {
+            "name": "installer-materials.tar",
+            "sha256": MATERIALS_DIGEST,
+            "size": 1,
+            "format": "tar",
+        },
+        "files": DEPLOYMENT_FILES,
+        "materials": [
+            {
+                "path": "updater/__init__.py",
+                "sha256": "sha256:" + "d" * 64,
+                "size": 1,
+                "mode": "0644",
+            }
+        ],
+    }
 )
 
 
 class FakeRunner:
     def __init__(self):
         self.calls = []
-        self.service_health = {name: "healthy 0" for name in ["postgres", "redis", "api", "web"]}
+        self.service_health = {
+            name: "healthy 0" for name in ["postgres", "redis", "api", "web"]
+        }
         self.container_logs = {name: "" for name in ["postgres", "redis", "api", "web"]}
-        self.container_errors = {name: "" for name in ["postgres", "redis", "api", "web"]}
+        self.container_errors = {
+            name: "" for name in ["postgres", "redis", "api", "web"]
+        }
         self.container_images = {}
         self.container_labels = {}
         self.web_release_identity = {}
@@ -62,15 +86,18 @@ class FakeRunner:
                         stdout = value + "\n"
                         break
         elif argv[:2] == ["/usr/bin/docker", "exec"]:
-            stdout = "\n".join(
-                self.web_release_identity[key]
-                for key in ("version", "commit", "channel")
-            ) + "\n"
+            stdout = (
+                "\n".join(
+                    self.web_release_identity[key]
+                    for key in ("version", "commit", "channel")
+                )
+                + "\n"
+            )
         elif argv[:2] == ["/usr/bin/docker", "logs"]:
             service = str(argv[-1]).removesuffix("-container")
             stdout = self.container_logs[service]
         elif "list_enabled_plugin_apis" in " ".join(argv):
-            stdout = '[2]\n'
+            stdout = "[2]\n"
         elif "showmigrations --plan" in " ".join(argv):
             stdout = self.migration_plans.pop(0)
         stderr = ""
@@ -104,6 +131,7 @@ def manifest():
         configuration_contract="animemo-config-v1",
         configuration_accepts=["animemo-config-v1"],
         plugin_sdk_apis=[2],
+        installer_materials_sha256=MATERIALS_DIGEST,
         promoted_from="v1.0.0-rc.1",
     )
 
@@ -117,8 +145,11 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
         memory_info = root / "meminfo"
         (app / "deploy").mkdir(parents=True)
         (app / "deploy" / "docker-compose.yml").write_bytes(TEST_COMPOSE_BYTES)
-        (app / ".env.production").write_text(
-            "POSTGRES_USER=animemo\nPOSTGRES_DB=animemo\nANIMEMO_PUBLIC_ORIGIN=https://ci.example.test\n",
+        (data / "config").mkdir(parents=True)
+        (data / "config" / "animemo.json").write_text("{}\n", encoding="utf-8")
+        state.mkdir()
+        (state / "managed.env").write_text(
+            "POSTGRES_USER=animemo\nPOSTGRES_DB=animemo\nPOSTGRES_PASSWORD=test-placeholder\n",
             encoding="utf-8",
         )
         for name in ["backups", "plugins", "logs", "media"]:
@@ -127,8 +158,10 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
         runner = FakeRunner()
         target = manifest()
         runner.container_images = {
-            "api": "ghcr.io/yanyuhanyue/animemo-api@" + target["images"]["api"]["digest"],
-            "web": "ghcr.io/yanyuhanyue/animemo-web@" + target["images"]["web"]["digest"],
+            "api": "ghcr.io/yanyuhanyue/animemo-api@"
+            + target["images"]["api"]["digest"],
+            "web": "ghcr.io/yanyuhanyue/animemo-web@"
+            + target["images"]["web"]["digest"],
         }
         artifact_version = target["release"]["promotedFrom"]
         artifact_identity = {
@@ -160,12 +193,20 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
                 "release": dict(effective_identity),
                 "contracts": {
                     "database": target["compatibility"]["database"]["contract"],
-                    "configuration": target["compatibility"]["configuration"]["contract"],
+                    "configuration": target["compatibility"]["configuration"][
+                        "contract"
+                    ],
                 },
             }
 
         deployment = ImmutableComposeDeployment(
             HostPaths.testing(app=app, data=data, state=state),
+            managed_environment={
+                "POSTGRES_USER": "animemo",
+                "POSTGRES_DB": "animemo",
+                "POSTGRES_PASSWORD": "test-placeholder",
+                "ANIMEMO_DATA_ROOT": str(data),
+            },
             runner=runner,
             stable_observations=1,
             memory_info_path=memory_info,
@@ -174,7 +215,32 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
         )
         return deployment, runner, probes
 
-    def write_backup(self, deployment, *, created_at=None, content=b"SELECT 1;\n", compressed=None):
+    def test_compose_uses_only_managed_configuration_and_a_minimal_child_environment(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "POSTGRES_PASSWORD": "ambient-must-not-win",
+                    "COMPOSE_FILE": "attacker.yml",
+                    "UNRELATED_SECRET": "must-not-propagate",
+                },
+                clear=False,
+            ):
+                deployment._compose(manifest(), "config", "--quiet")
+
+            argv, kwargs = runner.calls[-1]
+            self.assertNotIn(".env.production", " ".join(argv))
+            self.assertIn(str(deployment.paths.managed_env_path), argv)
+            self.assertEqual(kwargs["env"]["POSTGRES_PASSWORD"], "test-placeholder")
+            self.assertNotIn("COMPOSE_FILE", kwargs["env"])
+            self.assertNotIn("UNRELATED_SECRET", kwargs["env"])
+
+    def write_backup(
+        self, deployment, *, created_at=None, content=b"SELECT 1;\n", compressed=None
+    ):
         backup_root = deployment.paths.data_root / "backups"
         backup = backup_root / "verified.sql.gz"
         if compressed is None:
@@ -184,10 +250,14 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             backup.write_bytes(compressed)
         metadata = {
             "path": str(backup),
-            "createdAt": (created_at or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
+            "createdAt": (created_at or datetime.now(timezone.utc))
+            .isoformat()
+            .replace("+00:00", "Z"),
             "compressedSha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
         }
-        (backup_root / "verified.sql.gz.json").write_text(json.dumps(metadata), encoding="utf-8")
+        (backup_root / "verified.sql.gz.json").write_text(
+            json.dumps(metadata), encoding="utf-8"
+        )
 
     def test_pull_and_switch_use_only_exact_digest_api_and_web(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -198,17 +268,45 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             deployment.switch(target)
 
             commands = [call[0] for call in runner.calls]
-            self.assertIn(("/usr/bin/docker", "pull", "ghcr.io/yanyuhanyue/animemo-api@" + target["images"]["api"]["digest"]), commands)
-            self.assertIn(("/usr/bin/docker", "pull", "ghcr.io/yanyuhanyue/animemo-web@" + target["images"]["web"]["digest"]), commands)
+            self.assertIn(
+                (
+                    "/usr/bin/docker",
+                    "pull",
+                    "ghcr.io/yanyuhanyue/animemo-api@"
+                    + target["images"]["api"]["digest"],
+                ),
+                commands,
+            )
+            self.assertIn(
+                (
+                    "/usr/bin/docker",
+                    "pull",
+                    "ghcr.io/yanyuhanyue/animemo-web@"
+                    + target["images"]["web"]["digest"],
+                ),
+                commands,
+            )
             switch = commands[-1]
             self.assertEqual(
                 switch[-9:],
-                ("up", "-d", "--no-deps", "--force-recreate", "--wait", "--wait-timeout", "120", "api", "web"),
+                (
+                    "up",
+                    "-d",
+                    "--no-deps",
+                    "--force-recreate",
+                    "--wait",
+                    "--wait-timeout",
+                    "120",
+                    "api",
+                    "web",
+                ),
             )
             self.assertNotIn("postgres", switch)
             self.assertNotIn("redis", switch)
 
-    def test_switch_atomically_replaces_a_linked_runtime_env_without_mutating_the_source(self):
+    def test_switch_atomically_replaces_a_linked_runtime_env_without_mutating_the_source(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             deployment, _, _ = self.make(directory)
             target = manifest()
@@ -230,8 +328,13 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
                 + target["images"]["api"]["digest"]
                 + "\nANIMEMO_WEB_IMAGE=ghcr.io/yanyuhanyue/animemo-web@"
                 + target["images"]["web"]["digest"]
+                + "\nANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@"
+                + target["images"]["postgres"]["digest"]
+                + "\nANIMEMO_REDIS_IMAGE=docker.io/library/redis@"
+                + target["images"]["redis"]["digest"]
                 + "\nANIMEMO_RELEASE_VERSION=v1.0.0"
-                + "\nANIMEMO_RELEASE_COMMIT=" + "1" * 40
+                + "\nANIMEMO_RELEASE_COMMIT="
+                + "1" * 40
                 + "\nANIMEMO_RELEASE_CHANNEL=stable"
                 + "\nANIMEMO_DATABASE_CONTRACT=animemo-db-v1"
                 + "\nANIMEMO_CONFIGURATION_CONTRACT=animemo-config-v1\n",
@@ -254,7 +357,9 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             self.assertIn("ANIMEMO_DATABASE_CONTRACT=animemo-db-v2\n", runtime)
             self.assertIn("ANIMEMO_CONFIGURATION_CONTRACT=animemo-config-v2\n", runtime)
             switch_environment = runner.calls[-1][1]["env"]
-            self.assertEqual(switch_environment["ANIMEMO_DATABASE_CONTRACT"], "animemo-db-v2")
+            self.assertEqual(
+                switch_environment["ANIMEMO_DATABASE_CONTRACT"], "animemo-db-v2"
+            )
             self.assertEqual(
                 switch_environment["ANIMEMO_CONFIGURATION_CONTRACT"],
                 "animemo-config-v2",
@@ -284,10 +389,18 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             deployment.bootstrap(target)
 
             commands = [call[0] for call in runner.calls]
-            self.assertEqual(commands[0][-4:], ("run", "--rm", "--no-deps", "migration"))
-            self.assertEqual(commands[1][-4:], ("run", "--rm", "--no-deps", "bootstrap"))
+            self.assertEqual(
+                commands[0][-4:], ("run", "--rm", "--no-deps", "migration")
+            )
+            self.assertEqual(
+                commands[1][-4:], ("run", "--rm", "--no-deps", "bootstrap")
+            )
             for _, kwargs in runner.calls:
-                self.assertEqual(kwargs["env"]["ANIMEMO_API_IMAGE"], "ghcr.io/yanyuhanyue/animemo-api@" + target["images"]["api"]["digest"])
+                self.assertEqual(
+                    kwargs["env"]["ANIMEMO_API_IMAGE"],
+                    "ghcr.io/yanyuhanyue/animemo-api@"
+                    + target["images"]["api"]["digest"],
+                )
 
     def test_runtime_contract_inspection_uses_the_running_api_without_mutation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -299,7 +412,16 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             commands = [call[0] for call in runner.calls]
             self.assertEqual(
                 commands[0][-8:],
-                ("exec", "-T", "api", "python", "manage.py", "migrate", "--check", "--noinput"),
+                (
+                    "exec",
+                    "-T",
+                    "api",
+                    "python",
+                    "manage.py",
+                    "migrate",
+                    "--check",
+                    "--noinput",
+                ),
             )
             self.assertEqual(
                 commands[1][-7:],
@@ -313,7 +435,9 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
                 },
             )
 
-    def test_database_transition_inspection_distinguishes_current_target_and_partial(self):
+    def test_database_transition_inspection_distinguishes_current_target_and_partial(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             deployment, runner, _ = self.make(directory)
             current = manifest()
@@ -345,10 +469,8 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
                     )
 
     def test_custom_or_symlink_escape_paths_are_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with self.assertRaises(ValueError):
-                HostPaths.production(app_root=root / "attacker")
+        with self.assertRaises(TypeError):
+            HostPaths.production(None)
 
     def test_recent_backup_requires_fresh_metadata_and_valid_gzip_stream(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -356,7 +478,9 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             self.write_backup(deployment)
             deployment.verify_recent_backup()
 
-            self.write_backup(deployment, created_at=datetime.now(timezone.utc) - timedelta(hours=25))
+            self.write_backup(
+                deployment, created_at=datetime.now(timezone.utc) - timedelta(hours=25)
+            )
             with self.assertRaisesRegex(Exception, "older than"):
                 deployment.verify_recent_backup()
 
@@ -375,8 +499,12 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             linked_backup.hardlink_to(outside_backup)
             metadata_payload = {
                 "path": str(linked_backup),
-                "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "compressedSha256": hashlib.sha256(outside_backup.read_bytes()).hexdigest(),
+                "createdAt": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "compressedSha256": hashlib.sha256(
+                    outside_backup.read_bytes()
+                ).hexdigest(),
             }
             metadata = backup_root / "linked.sql.gz.json"
             metadata.write_text(json.dumps(metadata_payload), encoding="utf-8")
@@ -409,7 +537,9 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             metadata.write_text(
                 json.dumps(
                     {
-                        "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "createdAt": datetime.now(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
                         "compressedSha256": "0" * 64,
                     }
                 ),
@@ -422,7 +552,9 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
     def test_preflight_blocks_when_available_memory_is_below_the_host_floor(self):
         with tempfile.TemporaryDirectory() as directory:
             deployment, _, _ = self.make(directory)
-            deployment.memory_info_path.write_text("MemAvailable:    262144 kB\n", encoding="utf-8")
+            deployment.memory_info_path.write_text(
+                "MemAvailable:    262144 kB\n", encoding="utf-8"
+            )
 
             with self.assertRaisesRegex(Exception, "memory"):
                 deployment.preflight(manifest())
@@ -430,7 +562,9 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
     def test_preflight_and_reconciliation_reject_deployment_file_drift(self):
         with tempfile.TemporaryDirectory() as directory:
             deployment, _, _ = self.make(directory)
-            deployment.compose_file.write_text("services:\n  attacker: {}\n", encoding="utf-8")
+            deployment.compose_file.write_text(
+                "services:\n  attacker: {}\n", encoding="utf-8"
+            )
 
             with self.assertRaisesRegex(StateError, "differs from the Manifest"):
                 deployment.preflight(manifest())
@@ -447,7 +581,9 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
 
     def test_preflight_requires_current_api_and_web_http_contracts(self):
         with tempfile.TemporaryDirectory() as directory:
-            deployment, _, probes = self.make(directory, http_statuses={"/health/": 503})
+            deployment, _, probes = self.make(
+                directory, http_statuses={"/health/": 503}
+            )
 
             with self.assertRaisesRegex(Exception, "/health/"):
                 deployment.preflight(manifest())
@@ -471,24 +607,47 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
 
             self.assertEqual(
                 [probe[0] for probe in probes],
-                ["/health/", "/", "/login", "/api/schema/", "/api/docs/", "release-identity"],
+                [
+                    "/health/",
+                    "/",
+                    "/login",
+                    "/api/schema/",
+                    "/api/docs/",
+                    "release-identity",
+                ],
             )
 
-    def test_stable_health_binds_exact_images_rc_artifact_and_effective_stable_identity(self):
+    def test_stable_health_binds_exact_images_rc_artifact_and_effective_stable_identity(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             deployment, runner, _ = self.make(directory)
 
             deployment.verify_health(manifest())
 
             commands = [call[0] for call in runner.calls]
-            self.assertTrue(any(any(".Config.Image" in part for part in command) for command in commands))
-            self.assertTrue(any(any("org.opencontainers.image.version" in part for part in command) for command in commands))
-            self.assertTrue(any(command[:2] == ("/usr/bin/docker", "exec") for command in commands))
+            self.assertTrue(
+                any(
+                    any(".Config.Image" in part for part in command)
+                    for command in commands
+                )
+            )
+            self.assertTrue(
+                any(
+                    any("org.opencontainers.image.version" in part for part in command)
+                    for command in commands
+                )
+            )
+            self.assertTrue(
+                any(command[:2] == ("/usr/bin/docker", "exec") for command in commands)
+            )
 
     def test_stable_health_rejects_a_wrong_running_image_reference(self):
         with tempfile.TemporaryDirectory() as directory:
             deployment, runner, _ = self.make(directory)
-            runner.container_images["web"] = "ghcr.io/yanyuhanyue/animemo-web@sha256:" + "0" * 64
+            runner.container_images["web"] = (
+                "ghcr.io/yanyuhanyue/animemo-web@sha256:" + "0" * 64
+            )
 
             with self.assertRaisesRegex(StateError, "web image identity"):
                 deployment.verify_health(manifest())
@@ -512,7 +671,10 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             '127.0.0.1 - - "GET / HTTP/1.1" 502 173',
             "Traceback (most recent call last):",
         ]:
-            with self.subTest(log_line=log_line), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(log_line=log_line),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 deployment, runner, _ = self.make(directory)
                 runner.container_logs["web"] = log_line
 

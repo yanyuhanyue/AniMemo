@@ -3,15 +3,17 @@ name: animemo
 x-api-common: &api-common
   image: ${ANIMEMO_API_IMAGE:?ANIMEMO_API_IMAGE must be an immutable ghcr.io/yanyuhanyue/animemo-api@sha256 digest}
   env_file:
-    - ../.env.production
+    - /run/animemo-updater/managed.env
   environment:
     TZ: Asia/Shanghai
   volumes:
-    - ${ANIMEMO_DATA_ROOT:-/data/animemo}/plugins:/app/runtime/plugins
-    - ${ANIMEMO_DATA_ROOT:-/data/animemo}/logs:/app/logs
-    - ${ANIMEMO_DATA_ROOT:-/data/animemo}/backups:/app/backups
-    - ${ANIMEMO_DATA_ROOT:-/data/animemo}/media:/data/animemo/media
-    - ${ANIMEMO_DATA_ROOT:-/data/animemo}/private:/app/runtime/private
+    - /data/animemo/plugins:/app/runtime/plugins
+    - /data/animemo/logs:/app/logs
+    - /data/animemo/backups:/app/backups
+    - /data/animemo/media:/data/animemo/media
+    - /data/animemo/private:/app/runtime/private
+  labels:
+    cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
   networks:
     - animemo
   depends_on:
@@ -22,34 +24,38 @@ x-api-common: &api-common
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: ${ANIMEMO_POSTGRES_IMAGE:?ANIMEMO_POSTGRES_IMAGE must be an immutable docker.io/library/postgres@sha256 digest}
     container_name: animemo-postgres
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-animemo}
-      POSTGRES_USER: ${POSTGRES_USER:-animemo}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     restart: unless-stopped
     volumes:
-      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/postgres:/var/lib/postgresql/data
+      - /data/animemo/postgres:/var/lib/postgresql/data
+    labels:
+      cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
     networks:
       - animemo
     logging:
       driver: json-file
       options: {max-size: "50m", max-file: "7"}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-animemo} -d ${POSTGRES_DB:-animemo}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?POSTGRES_USER is required} -d ${POSTGRES_DB:?POSTGRES_DB is required}"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 10s
 
   redis:
-    image: redis:7-alpine
+    image: ${ANIMEMO_REDIS_IMAGE:?ANIMEMO_REDIS_IMAGE must be an immutable docker.io/library/redis@sha256 digest}
     container_name: animemo-redis
     command: ["redis-server", "--appendonly", "yes"]
     restart: unless-stopped
     volumes:
-      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/redis:/data
+      - /data/animemo/redis:/data
+    labels:
+      cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
     networks:
       - animemo
     logging:
@@ -79,11 +85,11 @@ services:
     container_name: animemo-api
     restart: unless-stopped
     volumes:
-      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/plugins:/app/runtime/plugins
-      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/logs:/app/logs
-      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/backups:/app/backups
-      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/media:/data/animemo/media
-      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/private:/app/runtime/private
+      - /data/animemo/plugins:/app/runtime/plugins
+      - /data/animemo/logs:/app/logs
+      - /data/animemo/backups:/app/backups
+      - /data/animemo/media:/data/animemo/media
+      - /data/animemo/private:/app/runtime/private
       - /run/animemo-updater:/run/animemo-updater:rw
     logging:
       driver: json-file
@@ -109,9 +115,14 @@ services:
       TZ: Asia/Shanghai
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${ANIMEMO_PORT:-8088}:80"
+      - target: 80
+        published: ${ANIMEMO_LISTEN_PORT:?ANIMEMO_LISTEN_PORT is required}
+        host_ip: ${ANIMEMO_LISTEN_HOST:?ANIMEMO_LISTEN_HOST is required}
+        protocol: tcp
     volumes:
-      - ${ANIMEMO_DATA_ROOT:-/data/animemo}/media:/var/www/animemo-data/media:ro
+      - /data/animemo/media:/var/www/animemo-data/media:ro
+    labels:
+      cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
     networks:
       - animemo
     healthcheck:

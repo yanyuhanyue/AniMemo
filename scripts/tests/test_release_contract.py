@@ -1,26 +1,32 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import io
 import json
+import tarfile
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
 from release.contract import (
+    POSTGRES_DIGEST,
+    POSTGRES_REPOSITORY,
+    REDIS_DIGEST,
+    REDIS_REPOSITORY,
     ReleaseContractError,
     assert_tag_absent,
     build_deployment_contract,
-    build_provenance_plan,
     build_manifest,
+    build_provenance_plan,
     deployment_contract_digest,
-    promote_manifest,
     previous_stable_tag,
+    promote_manifest,
     resolve_prerelease,
     validate_deployment_contract,
     validate_manifest,
 )
-
 
 COMMIT = "a" * 40
 API_DIGEST = "sha256:" + "1" * 64
@@ -29,9 +35,46 @@ DEPLOYMENT_FILES = [
     {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
     {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
 ]
+MATERIAL_BYTES = b"qualified wheel bytes"
+MATERIAL_PATH = "wheelhouse/qualified_dependency-1.0-py3-none-any.whl"
+MATERIAL_DIGEST = "sha256:" + "f" * 64
+MATERIAL_FILES = [
+    {
+        "path": MATERIAL_PATH,
+        "sha256": "sha256:" + hashlib.sha256(MATERIAL_BYTES).hexdigest(),
+        "size": len(MATERIAL_BYTES),
+        "mode": "0644",
+    }
+]
+DEPLOYMENT_CONTRACT = {
+    "schemaVersion": 2,
+    "profile": "v1.1-standard",
+    "platform": "linux/amd64",
+    "archive": {
+        "name": "installer-materials.tar",
+        "sha256": MATERIAL_DIGEST,
+        "size": 10240,
+        "format": "tar",
+    },
+    "files": DEPLOYMENT_FILES,
+    "materials": MATERIAL_FILES,
+}
 DEPLOYMENT_DIGEST = deployment_contract_digest(
-    {"schemaVersion": 1, "files": DEPLOYMENT_FILES}
+    DEPLOYMENT_CONTRACT
 )
+
+
+def write_material_archive(path: Path) -> None:
+    with tarfile.open(path, mode="w:", format=tarfile.USTAR_FORMAT) as archive:
+        member = tarfile.TarInfo(MATERIAL_PATH)
+        member.size = len(MATERIAL_BYTES)
+        member.mode = 0o644
+        member.mtime = 0
+        member.uid = 0
+        member.gid = 0
+        member.uname = ""
+        member.gname = ""
+        archive.addfile(member, io.BytesIO(MATERIAL_BYTES))
 
 
 def manifest(**overrides):
@@ -44,6 +87,7 @@ def manifest(**overrides):
         "web_digest": WEB_DIGEST,
         "deployment_contract_sha256": DEPLOYMENT_DIGEST,
         "deployment_files": DEPLOYMENT_FILES,
+        "installer_materials_sha256": MATERIAL_DIGEST,
         "minimum_updater_version": "1.0.0",
         "database_contract": "animemo-db-v1",
         "database_accepts": ["animemo-db-v1"],
@@ -119,9 +163,15 @@ class ManifestContractTests(unittest.TestCase):
             (root / "updater" / "docker-compose.runtime.yml").write_text(
                 "services: {}\n", encoding="utf-8"
             )
+            materials = root / "installer-materials.tar"
+            write_material_archive(materials)
 
-            contract = build_deployment_contract(root)
-            validate_deployment_contract(contract, root=root)
+            contract = build_deployment_contract(
+                root, installer_materials=materials
+            )
+            validate_deployment_contract(
+                contract, root=root, installer_materials=materials
+            )
 
         self.assertEqual(
             [item["path"] for item in contract["files"]],
@@ -130,11 +180,13 @@ class ManifestContractTests(unittest.TestCase):
         self.assertRegex(deployment_contract_digest(contract), r"^sha256:[0-9a-f]{64}$")
 
     def test_deployment_contract_rejects_missing_unordered_or_tampered_files(self):
-        missing = {"schemaVersion": 1, "files": DEPLOYMENT_FILES[:1]}
+        missing = copy.deepcopy(DEPLOYMENT_CONTRACT)
+        missing["files"] = DEPLOYMENT_FILES[:1]
         with self.assertRaisesRegex(ReleaseContractError, "incomplete or unordered"):
             validate_deployment_contract(missing)
 
-        unordered = {"schemaVersion": 1, "files": list(reversed(DEPLOYMENT_FILES))}
+        unordered = copy.deepcopy(DEPLOYMENT_CONTRACT)
+        unordered["files"] = list(reversed(DEPLOYMENT_FILES))
         with self.assertRaisesRegex(ReleaseContractError, "incomplete or unordered"):
             validate_deployment_contract(unordered)
 
@@ -144,7 +196,11 @@ class ManifestContractTests(unittest.TestCase):
             (root / "updater").mkdir()
             (root / "deploy" / "docker-compose.yml").write_text("original\n", encoding="utf-8")
             (root / "updater" / "docker-compose.runtime.yml").write_text("overlay\n", encoding="utf-8")
-            contract = build_deployment_contract(root)
+            materials = root / "installer-materials.tar"
+            write_material_archive(materials)
+            contract = build_deployment_contract(
+                root, installer_materials=materials
+            )
             (root / "deploy" / "docker-compose.yml").write_text("tampered\n", encoding="utf-8")
             with self.assertRaisesRegex(ReleaseContractError, "checksum differs"):
                 validate_deployment_contract(contract, root=root)
@@ -162,8 +218,34 @@ class ManifestContractTests(unittest.TestCase):
     def test_valid_manifest_round_trips_through_versioned_schema(self):
         payload = manifest()
         validate_manifest(payload, updater_version="1.0.0")
-        self.assertEqual(payload["schemaVersion"], 1)
+        self.assertEqual(payload["schemaVersion"], 2)
         self.assertEqual(payload["images"]["api"]["digest"], API_DIGEST)
+        self.assertEqual(
+            payload["images"]["postgres"],
+            {
+                "repository": POSTGRES_REPOSITORY,
+                "digest": POSTGRES_DIGEST,
+                "platform": "linux/amd64",
+            },
+        )
+        self.assertEqual(
+            payload["images"]["redis"],
+            {
+                "repository": REDIS_REPOSITORY,
+                "digest": REDIS_DIGEST,
+                "platform": "linux/amd64",
+            },
+        )
+        self.assertEqual(payload["deployment"]["profile"], "v1.1-standard")
+        self.assertEqual(
+            payload["artifacts"],
+            {
+                "manifest": "release-manifest.json",
+                "deploymentContract": "deployment-contract.json",
+                "installerMaterials": "installer-materials.tar",
+                "checksums": "checksums.txt",
+            },
+        )
         self.assertEqual(payload["compatibility"]["pluginSdk"]["supportedApis"], [2])
         self.assertEqual(payload["provenance"]["sourceCommit"], COMMIT)
         self.assertNotIn("tag", payload["images"]["api"])
@@ -181,8 +263,8 @@ class ManifestContractTests(unittest.TestCase):
 
     def test_manifest_rejects_unbound_deployment_digest(self):
         payload = manifest()
-        payload["deployment"]["contractSha256"] = "sha256:" + "f" * 64
-        with self.assertRaisesRegex(ReleaseContractError, "does not bind"):
+        payload["deployment"]["contractSha256"] = "mutable"
+        with self.assertRaisesRegex(ReleaseContractError, "contractSha256"):
             validate_manifest(payload)
 
     def test_manifest_rejects_release_notes_and_provenance_mismatch(self):
@@ -208,7 +290,7 @@ class ManifestContractTests(unittest.TestCase):
             validate_manifest(invalid_commit)
 
         unsupported = manifest()
-        unsupported["schemaVersion"] = 2
+        unsupported["schemaVersion"] = 1
         with self.assertRaisesRegex(ReleaseContractError, "schemaVersion"):
             validate_manifest(unsupported)
 

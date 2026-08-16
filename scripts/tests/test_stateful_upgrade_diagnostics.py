@@ -9,7 +9,6 @@ import time
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "stateful-upgrade-gate.sh"
 BASE_SHA = "a" * 40
@@ -95,7 +94,9 @@ class StatefulUpgradeDiagnosticsTests(unittest.TestCase):
               shift
             fi
             if [[ "${1:-}" == "install" ]]; then
-              mkdir -p "${@: -1}"
+              # The diagnostics harness never runs Compose. Treat privileged
+              # canonical host preparation as a successful fixed-boundary
+              # operation without writing Git Bash's system-managed /run.
               exit 0
             fi
             "$@"
@@ -233,6 +234,7 @@ class StatefulUpgradeDiagnosticsTests(unittest.TestCase):
             encoding="utf-8",
             errors="replace",
             timeout=20,
+            check=False,
         )
 
     def output(self, completed: subprocess.CompletedProcess[str]) -> str:
