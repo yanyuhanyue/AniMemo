@@ -79,6 +79,8 @@ class CanonicalRuntimeBindingTests(unittest.TestCase):
         runtime_root = root / "runtime"
         config_root.mkdir()
         runtime_root.mkdir()
+        config_root.chmod(0o700)
+        runtime_root.chmod(0o750)
         config_store = LocalManagedConfigStore(
             config_root=config_root,
             runtime_root=runtime_root,

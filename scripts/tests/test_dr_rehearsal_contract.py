@@ -18,6 +18,7 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
     def test_rehearsal_has_real_dump_then_a_only_destruction_then_fresh_b_restore(self):
         for required in (
             "ANIMEMO_CONFIG_REVISION=",
+            "ANIMEMO_TEST_DATA_ROOT=",
             "ANIMEMO_LISTEN_HOST=127.0.0.1",
             "ANIMEMO_LISTEN_PORT=8088",
             "ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:",
