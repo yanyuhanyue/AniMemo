@@ -454,7 +454,7 @@ if [[ -e /run/animemo-updater/managed.env ]]; then
   echo "Stateful upgrade gate refuses to replace an existing managed runtime env." >&2
   exit 1
 fi
-sudo -n install -d -m 0750 /run/animemo-updater
+sudo -n install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater
 sudo -n install -m 0600 -o "$(id -u)" -g "$(id -g)" "$ENV_FILE" /run/animemo-updater/managed.env
 MANAGED_ENV_CREATED=true
 

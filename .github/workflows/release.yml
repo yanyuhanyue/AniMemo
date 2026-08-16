@@ -299,8 +299,8 @@ jobs:
           POSTGRES_USER=animemo
           POSTGRES_PASSWORD=qualification-only
           EOF
-          sudo install -d -m 0750 /run/animemo-updater
-          sudo install -m 0600 "$RUNNER_TEMP/platform-compose.env" /run/animemo-updater/managed.env
+          sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater
+          sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" "$RUNNER_TEMP/platform-compose.env" /run/animemo-updater/managed.env
           docker compose --env-file "$RUNNER_TEMP/platform-compose.env" \
             --file deploy/docker-compose.yml config --quiet
           printf '%s\n' "$CANDIDATE_SHA" > "$REHEARSAL_DIR/fresh_install"

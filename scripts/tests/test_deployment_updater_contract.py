@@ -272,6 +272,11 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         )
 
         self.assertIn("test -f deploy/docker-compose.build.yml", workflow)
+        self.assertIn("python -m pip install -r durability/requirements.txt", workflow)
+        self.assertIn(
+            'install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater',
+            workflow,
+        )
         self.assertNotIn("if [[ -f deploy/docker-compose.build.yml ]]; then", workflow)
         self.assertIn(
             "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",
@@ -406,6 +411,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             "deploy/openresty-animemo.conf",
             "deploy/animemo-certbot.cron",
             ".env.production.example",
+            "updater/tests/test_prepare_host_permissions.py",
         ):
             with self.subTest(relative=relative):
                 self.assertFalse((ROOT / relative).exists())

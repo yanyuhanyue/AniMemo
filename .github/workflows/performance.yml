@@ -217,7 +217,7 @@ jobs:
           ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
           ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
           EOF
-          sudo install -d -m 0750 /run/animemo-updater
+          sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater
           sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/managed.env
           echo "PERF_DATA_ROOT=$data_root" >> "$GITHUB_ENV"
       - name: Validate the isolated Compose contract
@@ -409,7 +409,7 @@ jobs:
           ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
           ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
           EOF
-          sudo install -d -m 0750 /run/animemo-updater
+          sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater
           sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/managed.env
           echo "CAPACITY_DATA_ROOT=$data_root" >> "$GITHUB_ENV"
       - name: Validate and build the exact capacity candidate
