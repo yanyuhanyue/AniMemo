@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from runpy import run_path
+from unittest.mock import patch
 
 from scripts import pluginctl
 
@@ -55,29 +56,18 @@ class SecurityToolPathTests(unittest.TestCase):
         self.assertIn("must equal the exact GitHub runner output path", completed.stderr)
 
     def test_bridge_packager_accepts_only_the_active_runner_target(self):
+        namespace = run_path(str(ROOT / "scripts" / "package-astrbot-bridge.py"))
+        package = namespace["package"]
         with tempfile.TemporaryDirectory() as directory:
             expected = Path(directory) / "astrbot_plugin_animemo_bridge-0.1.3.zip"
-            environ = {
-                **os.environ,
-                "GITHUB_ACTIONS": "true",
-                "RUNNER_TEMP": directory,
-            }
+            package.__globals__["GITHUB_RUNNER_TEMP"] = Path(directory)
+            with patch.dict(
+                os.environ,
+                {"GITHUB_ACTIONS": "true", "RUNNER_TEMP": directory},
+            ):
+                target = package(runner_output=True)
 
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(ROOT / "scripts" / "package-astrbot-bridge.py"),
-                    "--output",
-                    str(expected),
-                ],
-                cwd=ROOT,
-                env=environ,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(target, expected)
             self.assertTrue(expected.is_file())
 
     def test_bridge_packager_canonical_target_tracks_metadata_version(self):

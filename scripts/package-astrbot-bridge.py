@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "bridges" / "astrbot_plugin_animemo_bridge"
 OUT = ROOT / "dist"
 BRIDGE_ARCHIVE_NAME = "astrbot_plugin_animemo_bridge-0.1.3.zip"
+GITHUB_RUNNER_TEMP = ROOT.parents[1] / "_temp"
 
 
 def version():
@@ -57,10 +58,9 @@ def runner_output_target(environ=os.environ):
     if environ.get("GITHUB_ACTIONS") != "true":
         raise RuntimeError("runner output is available only inside GitHub Actions")
     runner_temp_value = str(environ.get("RUNNER_TEMP") or "")
-    runner_temp = Path(runner_temp_value)
-    if not runner_temp_value or not runner_temp.is_absolute():
-        raise RuntimeError("GitHub runner temp must be an absolute directory")
-    return checked_output_target(runner_temp, BRIDGE_ARCHIVE_NAME, create=False)
+    if runner_temp_value != os.fspath(GITHUB_RUNNER_TEMP):
+        raise RuntimeError("GitHub runner temp does not match the hosted checkout root")
+    return checked_output_target(GITHUB_RUNNER_TEMP, BRIDGE_ARCHIVE_NAME, create=False)
 
 
 def package(*, runner_output=False):
@@ -102,8 +102,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     runner_output = args.output is not None
     if runner_output:
-        expected = os.path.join(os.environ.get("RUNNER_TEMP", ""), BRIDGE_ARCHIVE_NAME)
-        if os.environ.get("GITHUB_ACTIONS") != "true" or args.output != expected:
+        runner_temp = os.fspath(GITHUB_RUNNER_TEMP)
+        expected = os.fspath(GITHUB_RUNNER_TEMP / BRIDGE_ARCHIVE_NAME)
+        if (
+            os.environ.get("GITHUB_ACTIONS") != "true"
+            or os.environ.get("RUNNER_TEMP") != runner_temp
+            or args.output != expected
+        ):
             parser.error("--output must equal the exact GitHub runner output path")
     try:
         package(runner_output=runner_output)
