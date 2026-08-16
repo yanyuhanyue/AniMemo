@@ -7,6 +7,25 @@ from scripts import update_dependencies
 
 
 class DependencyLockTests(unittest.TestCase):
+    def test_cli_rejects_hidden_arbitrary_dependency_paths(self):
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "update_dependencies.py",
+                    "--check",
+                    "--input",
+                    "../outside.in",
+                    "--lock",
+                    "../outside.txt",
+                ],
+            ),
+            patch.object(update_dependencies, "check") as check,
+            self.assertRaises(SystemExit),
+        ):
+            update_dependencies.main()
+        check.assert_not_called()
+
     def test_missing_lock_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

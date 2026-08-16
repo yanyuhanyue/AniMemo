@@ -134,10 +134,8 @@ def update() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="重新解析 requirements.in 并检查 requirements.txt 是否漂移")
-    parser.add_argument("--input", type=Path, default=INPUT, help=argparse.SUPPRESS)
-    parser.add_argument("--lock", type=Path, default=LOCK, help=argparse.SUPPRESS)
     args = parser.parse_args()
-    return check(args.input, args.lock) if args.check else update()
+    return check() if args.check else update()
 
 
 if __name__ == "__main__":

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import runpy
 import shutil
+import stat
 import tempfile
 import zipfile
 from pathlib import Path
@@ -20,10 +22,32 @@ def version():
     return match.group(1).strip().strip('"\'') if match else "0.1.3"
 
 
-def package(output=None):
+def canonical_output_target():
+    try:
+        metadata = OUT.lstat()
+    except FileNotFoundError:
+        OUT.mkdir(parents=True)
+        metadata = OUT.lstat()
+    if OUT.is_symlink():
+        raise RuntimeError("output directory must not be a symbolic link")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError("output directory must be a real directory")
+
+    target = OUT / f"astrbot_plugin_animemo_bridge-{version()}.zip"
+    try:
+        target_metadata = target.lstat()
+    except FileNotFoundError:
+        return target
+    if target.is_symlink():
+        raise RuntimeError("output file must not be a symbolic link")
+    if not stat.S_ISREG(target_metadata.st_mode):
+        raise RuntimeError("output file must be a regular file")
+    return target
+
+
+def package():
     runpy.run_path(str(ROOT / "scripts" / "validate-astrbot-bridge.py"), run_name="__bridge_validator__")["validate"]()
-    target = Path(output) if output else OUT / f"astrbot_plugin_animemo_bridge-{version()}.zip"
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target = canonical_output_target()
     with tempfile.TemporaryDirectory(prefix="astrbot-bridge-export-") as temp:
         export_root = Path(temp) / "astrbot_plugin_animemo_bridge"
         shutil.copytree(
@@ -39,16 +63,22 @@ def package(output=None):
                 "*.pyc",
             ),
         )
-        with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for path in sorted(export_root.rglob("*")):
-                if path.is_file():
-                    archive.write(path, path.relative_to(Path(temp)).as_posix())
+        target.unlink(missing_ok=True)
+        descriptor = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as output:
+            with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for path in sorted(export_root.rglob("*")):
+                    if path.is_file():
+                        archive.write(path, path.relative_to(Path(temp)).as_posix())
     print(target)
     return target
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output")
-    args = parser.parse_args()
-    package(args.output)
+    parser.parse_args()
+    package()

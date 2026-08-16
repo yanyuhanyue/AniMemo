@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OFFICIAL_MODULE_PATH = "backend/plugin_host/official_packages.py"
 LEGACY_SYNC_PATH = "backend/plugin_host/management/commands/sync_official_plugins.py"
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$")
+OFFICIAL_SLUG_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 CONTENT_IDENTITY_VERSION = 1
 
@@ -100,6 +101,8 @@ def _official_slugs_from_source(source, source_path):
                     raise GateInputError(f"OFFICIAL_PLUGIN_SLUGS in {source_path} must be a literal sequence.") from error
                 if not isinstance(value, (tuple, list)) or not all(isinstance(item, str) and item for item in value):
                     raise GateInputError(f"OFFICIAL_PLUGIN_SLUGS in {source_path} is invalid.")
+                if any(OFFICIAL_SLUG_RE.fullmatch(item) is None for item in value):
+                    raise GateInputError(f"Invalid official plugin slug in {source_path}.")
                 return tuple(value)
     raise GateInputError(f"OFFICIAL_PLUGIN_SLUGS is missing from {source_path}.")
 
@@ -427,14 +430,12 @@ def _print_report(report, resolution_source):
 
 def main():
     parser = argparse.ArgumentParser(description="Reject official plugin package mutations without a version bump.")
-    parser.add_argument("--repo", default=str(ROOT))
     parser.add_argument("--base", default="")
     parser.add_argument("--head", default="")
-    parser.add_argument("--head-root", type=Path)
     args = parser.parse_args()
     try:
-        refs = resolve_refs(repo=args.repo, explicit_base=args.base, explicit_head=args.head)
-        report = check_repository(args.repo, refs.base, refs.head, head_root=args.head_root)
+        refs = resolve_refs(repo=ROOT, explicit_base=args.base, explicit_head=args.head)
+        report = check_repository(ROOT, refs.base, refs.head, head_root=ROOT)
     except (RefResolutionError, GateInputError) as error:
         parser.exit(1, f"Official plugin immutability check failed: {error}\n")
     _print_report(report, refs.source)

@@ -6,8 +6,10 @@ import json
 import os
 import shutil
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 
@@ -58,14 +60,28 @@ def build_context(Context):
     return context, platform
 
 
+@contextmanager
+def isolated_astrbot_root(environ=os.environ):
+    previous = environ.get("ASTRBOT_ROOT")
+    with TemporaryDirectory(prefix="animemo-astrbot-smoke-") as directory:
+        root = Path(directory).resolve()
+        environ["ASTRBOT_ROOT"] = str(root)
+        try:
+            yield root
+        finally:
+            if previous is None:
+                environ.pop("ASTRBOT_ROOT", None)
+            else:
+                environ["ASTRBOT_ROOT"] = previous
+
+
 async def smoke():
-    astrbot_root_value = os.environ.get("ASTRBOT_ROOT", "").strip()
-    require(astrbot_root_value, "ASTRBOT_ROOT must point to an isolated smoke directory")
-    astrbot_root = Path(astrbot_root_value).resolve()
-    astrbot_root.mkdir(parents=True, exist_ok=True)
+    with isolated_astrbot_root() as astrbot_root:
+        await smoke_in_isolated_root(astrbot_root)
+
+
+async def smoke_in_isolated_root(astrbot_root):
     install_dir = astrbot_root / "data" / "plugins" / PLUGIN_NAME
-    if install_dir.exists():
-        shutil.rmtree(install_dir)
     shutil.copytree(
         BRIDGE_SOURCE,
         install_dir,

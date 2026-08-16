@@ -73,6 +73,52 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("actions/upload-artifact@", source)
         self.assertNotIn("secrets.", source)
 
+    def test_astrbot_packaging_uses_only_the_canonical_dist_output(self):
+        source = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("package-astrbot-bridge.py --output", source)
+        self.assertNotIn(
+            "${{ runner.temp }}/astrbot_plugin_animemo_bridge-0.1.3.zip",
+            source,
+        )
+        self.assertGreaterEqual(
+            source.count("dist/astrbot_plugin_animemo_bridge-0.1.3.zip"),
+            2,
+        )
+        self.assertNotIn("ASTRBOT_ROOT:", source)
+
+    def test_qualification_evidence_paths_are_runner_scoped_and_validated(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = source[
+            source.index("      - name: Download and verify Phase A qualification evidence") :
+            source.index("      - name: Stage the validated platform qualification")
+        ]
+
+        run_id_guard = '[[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]'
+        evidence_path = (
+            'evidence_file="$RUNNER_TEMP/qualification/'
+            'release-qualification-$QUALIFICATION_RUN_ID.json"'
+        )
+        authority_path = (
+            "QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/qualification/"
+            "release-qualification-${{ inputs.qualification_run_id }}.json"
+        )
+        self.assertIn(run_id_guard, publish)
+        self.assertIn(evidence_path, publish)
+        self.assertIn(authority_path, publish)
+        self.assertLess(publish.index(run_id_guard), publish.index(evidence_path))
+        self.assertLess(publish.index(evidence_path), publish.index(authority_path))
+        self.assertIn(
+            "QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/"
+            "release-qualification-${{ github.run_id }}.json",
+            source,
+        )
+        self.assertEqual(source.count("QUALIFICATION_ARTIFACT_PATH:"), 2)
+
     def test_all_workflows_reject_duplicate_mapping_keys(self):
         for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
             with self.subTest(workflow=path.name):

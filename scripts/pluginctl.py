@@ -55,6 +55,7 @@ USER_SCOPED_HOOKS = {
     "column.after_publish", "column.after_delete",
 }
 INTEGRATION_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+PLUGIN_SLUG_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 INTEGRATION_EXTENSIONS = {
     "actions": "integration.actions",
     "events": "integration.events",
@@ -159,7 +160,14 @@ def _runtime_files(root: Path) -> list[Path]:
     return sorted(files)
 
 
+def validate_plugin_slug(value: str) -> str:
+    if not isinstance(value, str) or PLUGIN_SLUG_RE.fullmatch(value) is None:
+        raise SystemExit("invalid plugin slug: expected lowercase kebab-case")
+    return value
+
+
 def read_manifest(slug: str) -> dict:
+    slug = validate_plugin_slug(slug)
     path = PLUGINS / slug / "manifest.json"
     if not path.is_file():
         raise SystemExit(f"manifest.json not found for {slug}")
@@ -227,6 +235,7 @@ def validate(slug: str | None = None) -> None:
 
 
 def build(slug: str) -> None:
+    slug = validate_plugin_slug(slug)
     manifest = read_manifest(slug)
     root = PLUGINS / slug
     frontend = root / "frontend"
@@ -241,7 +250,7 @@ def build(slug: str) -> None:
     esbuild = ROOT / "node_modules" / ".bin" / ("esbuild.cmd" if sys.platform.startswith("win") else "esbuild")
     if not esbuild.is_file():
         raise SystemExit("PluginBuildError: frontend build requires the bundled esbuild binary; install dependencies with npm ci")
-    with tempfile.TemporaryDirectory(prefix=f"pluginctl-{slug}-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="pluginctl-") as temporary:
         output = Path(temporary) / "plugin.js"
         metafile = Path(temporary) / "meta.json"
         command = [
@@ -260,6 +269,7 @@ def build(slug: str) -> None:
 
 
 def package(slug: str) -> Path:
+    slug = validate_plugin_slug(slug)
     validate(slug)
     manifest = read_manifest(slug)
     root = PLUGINS / slug
