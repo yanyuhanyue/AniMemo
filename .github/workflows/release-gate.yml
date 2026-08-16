@@ -103,7 +103,7 @@ jobs:
   updater-isolated:
     name: updater-isolated
     needs: classify
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_release_updater == 'true')
+    if: github.event_name != 'push' && needs.classify.outputs.run_release_updater == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -122,7 +122,7 @@ jobs:
   docker:
     name: docker
     needs: classify
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_release_docker == 'true')
+    if: github.event_name != 'push' && needs.classify.outputs.run_release_docker == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -258,7 +258,7 @@ jobs:
   stateful-upgrade:
     name: stateful-upgrade
     needs: classify
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_release_stateful == 'true')
+    if: github.event_name != 'push' && needs.classify.outputs.run_release_stateful == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -314,7 +314,7 @@ jobs:
   dr-rehearsal:
     name: dr-rehearsal
     needs: classify
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_release_stateful == 'true')
+    if: github.event_name != 'push' && fromJSON(needs.classify.outputs.classification_json).gates.run_release_dr == true
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:

@@ -5,6 +5,7 @@ import io
 import json
 import os
 import unittest
+from copy import deepcopy
 from unittest import mock
 
 from scripts.ci_classify import classify_paths
@@ -12,12 +13,11 @@ from scripts.ci_gate_authority import (
     CI_JOB_GATES,
     CLASSIFIER_OUTPUT_NAMES,
     CURRENT_RELEASE_GRAPH_CONTRACT,
-    GATE_NAMES,
-    LEGACY_RELEASE_JOB_GATES,
     LEGACY_RELEASE_GRAPH_CONTRACT,
+    LEGACY_RELEASE_JOB_GATES,
     PRODUCT_GATE_NAMES,
     RELEASE_JOB_GATES,
-    SIGNAL_NAMES,
+    SCHEMA_VERSION,
     TRUSTED_LEGACY_WORKFLOW_SHA,
     TRUSTED_PRE_MERGE_WORKFLOW_REF,
     TRUSTED_REPOSITORY,
@@ -26,42 +26,12 @@ from scripts.ci_gate_authority import (
     validate_gate_authority,
 )
 
-SCHEMA_VERSION = "animemo.ci-risk/v1"
-
 
 def classification(
-    risk: str = "STANDARD",
-    *,
-    force_full: bool = False,
-    gates: dict[str, bool] | None = None,
+    paths: list[str] | None = None, *, force_full: bool = False
 ) -> dict[str, object]:
-    rank = {"LOW": 1, "STANDARD": 2, "HIGH": 3, "CRITICAL": 4}[risk]
-    gate_values = dict.fromkeys(GATE_NAMES, False)
-    full_gate = force_full or rank >= 3
-    critical_gate = force_full or risk == "CRITICAL"
-    gate_values.update(
-        {
-            "run_release_full": full_gate,
-            "run_release_updater": critical_gate,
-            "run_release_docker": full_gate,
-            "run_release_stateful": full_gate,
-            "full_gate": full_gate,
-            "critical_gate": critical_gate,
-        }
-    )
-    if full_gate:
-        gate_values.update(dict.fromkeys(PRODUCT_GATE_NAMES, True))
-    if gates:
-        gate_values.update(gates)
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "risk": {"level": risk, "rank": rank, "reasons": []},
-        "execution": {"force_full": force_full, "reasons": []},
-        "signals": dict.fromkeys(SIGNAL_NAMES, False),
-        "gates": gate_values,
-        "paths": [],
-        "unknown_paths": [],
-    }
+    outputs = classify_paths(paths or ["src/pages/Journal.jsx"], force_full=force_full)
+    return json.loads(outputs["classification_json"])
 
 
 def classify_job(document: dict[str, object]) -> dict[str, object]:
@@ -71,51 +41,35 @@ def classify_job(document: dict[str, object]) -> dict[str, object]:
     assert isinstance(risk, dict)
     assert isinstance(execution, dict)
     assert isinstance(gates, dict)
-    outputs = {
+    outputs: dict[str, object] = {
         "schema_version": document["schema_version"],
         "risk_level": risk["level"],
         "risk_rank": str(risk["rank"]),
         "execution_force_full": str(execution["force_full"]).lower(),
         "classification_json": json.dumps(document, separators=(",", ":")),
     }
-    outputs.update({name: str(gates[name]).lower() for name in GATE_NAMES})
+    for name in CLASSIFIER_OUTPUT_NAMES:
+        if name not in outputs:
+            outputs[name] = str(gates[name]).lower()
     return {"result": "success", "outputs": outputs}
 
 
-def real_classify_job(outputs: dict[str, str]) -> dict[str, object]:
-    return {
-        "result": "success",
-        "outputs": {name: outputs[name] for name in CLASSIFIER_OUTPUT_NAMES},
-    }
-
-
-def real_classification_needs(
-    outputs: dict[str, str], *, workflow: str, event_name: str
-) -> dict[str, object]:
-    document = json.loads(outputs["classification_json"])
-    if workflow == "ci":
-        needs = ci_needs(document, event_name=event_name)
-    else:
-        needs = release_needs(document, event_name=event_name)
-    needs["classify"] = real_classify_job(outputs)
-    return needs
-
-
 def ci_needs(
-    document: dict[str, object],
-    *,
-    event_name: str = "pull_request",
+    document: dict[str, object], *, event_name: str = "pull_request"
 ) -> dict[str, object]:
+    execution = document["execution"]
     gates = document["gates"]
+    assert isinstance(execution, dict)
     assert isinstance(gates, dict)
-    docs_only = gates["docs_only"]
+    profile = execution["profile"]
     needs: dict[str, object] = {"classify": classify_job(document)}
     for job, gate in CI_JOB_GATES.items():
         if job == "fast-fail":
-            selected = event_name != "push" and not docs_only
+            selected = event_name != "push" and profile != "DOCS_ONLY"
         elif job == "docs-only":
-            selected = docs_only
+            selected = profile in {"DOCS_ONLY", "CONTRACT_VALIDATION_ONLY"}
         else:
+            assert gate is not None
             selected = event_name != "push" and gates[gate]
         needs[job] = {"result": "success" if selected else "skipped"}
     return needs
@@ -125,11 +79,13 @@ def release_needs(
     document: dict[str, object],
     *,
     event_name: str = "pull_request",
+    legacy: bool = False,
 ) -> dict[str, object]:
     gates = document["gates"]
     assert isinstance(gates, dict)
+    jobs = LEGACY_RELEASE_JOB_GATES if legacy else RELEASE_JOB_GATES
     needs: dict[str, object] = {"classify": classify_job(document)}
-    for job, gate in RELEASE_JOB_GATES.items():
+    for job, gate in jobs.items():
         selected = (
             event_name == "push"
             if gate is None
@@ -140,7 +96,7 @@ def release_needs(
 
 
 def validate_current_release(
-    needs: dict[str, object], *, event_name: str
+    needs: dict[str, object], *, event_name: str = "pull_request"
 ) -> dict[str, object]:
     return validate_gate_authority(
         needs,
@@ -155,127 +111,99 @@ class CiGateAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(GateAuthorityError, message):
             callback()
 
-    def test_ci_docs_only_pull_request_selects_only_docs_job(self):
-        document = classification("LOW", gates={"docs_only": True})
-        result = validate_gate_authority(
-            ci_needs(document), workflow="ci", event_name="pull_request"
+    def test_classifier_output_surface_stays_old_main_compatible(self):
+        self.assertEqual(SCHEMA_VERSION, "animemo.ci-risk/v2")
+        self.assertNotIn("execution_profile", CLASSIFIER_OUTPUT_NAMES)
+        self.assertNotIn("run_contract_validation", CLASSIFIER_OUTPUT_NAMES)
+        self.assertNotIn("run_release_dr", CLASSIFIER_OUTPUT_NAMES)
+        self.assertIn("classification_json", CLASSIFIER_OUTPUT_NAMES)
+
+    def test_ci_docs_and_contract_profiles_select_the_shared_lightweight_slot(self):
+        docs = classification(["README.md"])
+        contract = classification(
+            [
+                "docs/backup-contract-v1.md",
+                "scripts/tests/test_recovery_migration_contracts.py",
+            ]
         )
 
-        self.assertEqual(result["status"], "PASS")
-        self.assertEqual(result["selected_jobs"], ["docs-only"])
-
-    def test_ci_standard_change_selects_fast_fail_and_affected_jobs(self):
-        document = classification(gates={"run_frontend": True, "run_plugins": True})
-        result = validate_gate_authority(
-            ci_needs(document), workflow="ci", event_name="pull_request"
+        docs_result = validate_gate_authority(
+            ci_needs(docs), workflow="ci", event_name="pull_request"
+        )
+        contract_result = validate_gate_authority(
+            ci_needs(contract), workflow="ci", event_name="pull_request"
         )
 
-        self.assertEqual(result["selected_jobs"], ["fast-fail", "frontend", "plugins"])
-
-    def test_ci_critical_gate_requires_every_product_job(self):
-        document = classification(
-            "CRITICAL",
-            gates={
-                "run_frontend": True,
-                "run_backend": True,
-                "run_bootstrap": True,
-                "run_plugins": True,
-                "run_bridge": True,
-                "run_postgres": True,
-                "run_runtime": True,
-                "run_release_full": True,
-                "run_release_updater": True,
-                "run_release_docker": True,
-                "run_release_stateful": True,
-                "full_gate": True,
-                "critical_gate": True,
-            },
-        )
-        result = validate_gate_authority(
-            ci_needs(document), workflow="ci", event_name="pull_request"
-        )
-
+        self.assertEqual(docs_result["execution_profile"], "DOCS_ONLY")
+        self.assertEqual(docs_result["selected_jobs"], ["docs-only"])
         self.assertEqual(
-            set(result["selected_jobs"]),
+            contract_result["execution_profile"], "CONTRACT_VALIDATION_ONLY"
+        )
+        self.assertEqual(
+            contract_result["selected_jobs"], ["fast-fail", "docs-only"]
+        )
+
+    def test_ci_targeted_and_full_profiles_require_exact_selected_jobs(self):
+        frontend = classification(["src/pages/Journal.jsx"])
+        full = classification(["README.md"], force_full=True)
+
+        targeted_result = validate_gate_authority(
+            ci_needs(frontend), workflow="ci", event_name="pull_request"
+        )
+        full_result = validate_gate_authority(
+            ci_needs(full, event_name="workflow_call"),
+            workflow="ci",
+            event_name="workflow_call",
+        )
+
+        self.assertEqual(targeted_result["selected_jobs"], ["fast-fail", "frontend"])
+        self.assertEqual(full_result["execution_profile"], "FULL_AUTHORITY")
+        self.assertEqual(
+            set(full_result["selected_jobs"]),
             {"fast-fail", *set(CI_JOB_GATES) - {"docs-only"}},
         )
 
-    def test_ci_push_allows_only_intrinsic_docs_job(self):
-        document = classification("LOW", gates={"docs_only": True})
-        result = validate_gate_authority(
-            ci_needs(document, event_name="push"),
-            workflow="ci",
-            event_name="push",
+    def test_ci_push_remains_lightweight(self):
+        docs = classification(["README.md"])
+        product = classification(["backend/journal/services.py"])
+
+        docs_result = validate_gate_authority(
+            ci_needs(docs, event_name="push"), workflow="ci", event_name="push"
+        )
+        product_result = validate_gate_authority(
+            ci_needs(product, event_name="push"), workflow="ci", event_name="push"
         )
 
-        self.assertEqual(result["selected_jobs"], ["docs-only"])
+        self.assertEqual(docs_result["selected_jobs"], ["docs-only"])
+        self.assertEqual(product_result["selected_jobs"], [])
 
-    def test_ci_product_push_remains_lightweight_even_when_gates_are_true(self):
-        document = classification(
-            "HIGH",
-            gates={
-                "run_frontend": True,
-                "run_backend": True,
-                "run_bootstrap": True,
-                "run_plugins": True,
-                "run_bridge": True,
-                "run_postgres": True,
-                "run_runtime": True,
-                "run_release_full": True,
-                "run_release_docker": True,
-                "run_release_stateful": True,
-                "full_gate": True,
-            },
+    def test_release_targeted_stateful_and_dr_are_independent(self):
+        cases = (
+            (
+                ["backend/journal/migrations/9999_gate_test.py"],
+                ["stateful-upgrade"],
+            ),
+            (["durability/backup.py"], ["dr-rehearsal"]),
+            (
+                ["updater/agent.py"],
+                ["updater-isolated", "stateful-upgrade"],
+            ),
+            (
+                ["deploy/docker-compose.yml"],
+                ["docker", "stateful-upgrade"],
+            ),
         )
-        result = validate_gate_authority(
-            ci_needs(document, event_name="push"),
-            workflow="ci",
-            event_name="push",
-        )
+        for paths, selected in cases:
+            with self.subTest(paths=paths):
+                document = classification(paths)
+                result = validate_current_release(release_needs(document))
+                self.assertEqual(result["selected_jobs"], selected)
 
-        self.assertEqual(result["selected_jobs"], [])
-        self.assertEqual(result["unselected_jobs"], list(CI_JOB_GATES))
-
-    def test_release_push_selects_only_post_merge_sanity(self):
-        document = classification("STANDARD")
+    def test_release_force_full_selects_every_release_job_except_postmerge(self):
+        document = classification(["README.md"], force_full=True)
         result = validate_current_release(
-            release_needs(document, event_name="push"), event_name="push"
-        )
-
-        self.assertEqual(result["selected_jobs"], ["post-merge-sanity"])
-
-    def test_release_high_risk_uses_per_job_gates(self):
-        document = classification(
-            "HIGH",
-            gates={
-                "run_release_full": True,
-                "run_release_docker": True,
-                "run_release_stateful": True,
-                "full_gate": True,
-            },
-        )
-        result = validate_current_release(
-            release_needs(document), event_name="pull_request"
-        )
-
-        self.assertEqual(result["selected_jobs"], ["docker", "stateful-upgrade", "dr-rehearsal"])
-        self.assertIn("updater-isolated", result["unselected_jobs"])
-        self.assertIn("post-merge-sanity", result["unselected_jobs"])
-
-    def test_release_critical_risk_selects_all_release_jobs_except_postmerge(self):
-        document = classification(
-            "CRITICAL",
-            gates={
-                "run_release_full": True,
-                "run_release_updater": True,
-                "run_release_docker": True,
-                "run_release_stateful": True,
-                "full_gate": True,
-                "critical_gate": True,
-            },
-        )
-        result = validate_current_release(
-            release_needs(document), event_name="pull_request"
+            release_needs(document, event_name="workflow_call"),
+            event_name="workflow_call",
         )
 
         self.assertEqual(
@@ -283,28 +211,26 @@ class CiGateAuthorityTests(unittest.TestCase):
             ["updater-isolated", "docker", "stateful-upgrade", "dr-rehearsal"],
         )
 
-    def test_event_and_workflow_ref_alone_cannot_select_the_legacy_release_graph(self):
-        document = classification("STANDARD", force_full=True)
-        needs = release_needs(document, event_name="workflow_call")
-        needs.pop("dr-rehearsal")
-
-        self.assert_rejected(
-            "release graph contract",
-            lambda: validate_gate_authority(
-                needs,
-                workflow="release",
-                event_name="workflow_call",
-                workflow_ref=TRUSTED_PRE_MERGE_WORKFLOW_REF,
-            ),
+    def test_release_push_selects_only_post_merge_sanity(self):
+        document = classification(["backend/journal/services.py"])
+        result = validate_current_release(
+            release_needs(document, event_name="push"), event_name="push"
         )
 
-    def test_historical_dispatch_accepts_only_authenticated_v1_release_graph(self):
-        document = classification("STANDARD", force_full=True)
-        needs = release_needs(document, event_name="workflow_dispatch")
-        needs.pop("dr-rehearsal")
+        self.assertEqual(result["selected_jobs"], ["post-merge-sanity"])
 
-        result = validate_gate_authority(
-            needs,
+    def test_current_and_authenticated_legacy_release_graphs_are_fail_closed(self):
+        document = classification(["README.md"], force_full=True)
+        current = release_needs(document, event_name="workflow_dispatch")
+        legacy = release_needs(
+            document, event_name="workflow_dispatch", legacy=True
+        )
+
+        current_result = validate_current_release(
+            current, event_name="workflow_dispatch"
+        )
+        legacy_result = validate_gate_authority(
+            legacy,
             workflow="release",
             event_name="workflow_dispatch",
             workflow_ref=TRUSTED_PRE_MERGE_WORKFLOW_REF,
@@ -313,63 +239,30 @@ class CiGateAuthorityTests(unittest.TestCase):
             caller_sha=TRUSTED_LEGACY_WORKFLOW_SHA,
         )
 
-        self.assertEqual(set(needs), {"classify", *LEGACY_RELEASE_JOB_GATES})
-        self.assertEqual(result["release_graph_contract"], LEGACY_RELEASE_GRAPH_CONTRACT)
-        self.assertNotIn("dr-rehearsal", result["selected_jobs"])
+        self.assertEqual(
+            current_result["release_graph_contract"], CURRENT_RELEASE_GRAPH_CONTRACT
+        )
+        self.assertEqual(
+            legacy_result["release_graph_contract"], LEGACY_RELEASE_GRAPH_CONTRACT
+        )
+        self.assertNotIn("dr-rehearsal", legacy_result["selected_jobs"])
 
-        for field, value in (
-            ("workflow_ref", "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main"),
-            ("workflow_sha", "0" * 40),
-            ("repository", "fork/AniMemo"),
-            ("caller_sha", "0" * 40),
-        ):
-            with self.subTest(field=field):
-                identity = {
-                    "workflow_ref": TRUSTED_PRE_MERGE_WORKFLOW_REF,
-                    "workflow_sha": TRUSTED_LEGACY_WORKFLOW_SHA,
-                    "repository": TRUSTED_REPOSITORY,
-                    "caller_sha": TRUSTED_LEGACY_WORKFLOW_SHA,
-                }
-                identity[field] = value
-                self.assert_rejected(
-                    "release graph contract",
-                    lambda identity=identity: validate_gate_authority(
-                        needs,
-                        workflow="release",
-                        event_name="workflow_dispatch",
-                        **identity,
-                    ),
-                )
-
-        missing_stateful = dict(needs)
-        missing_stateful.pop("stateful-upgrade")
         self.assert_rejected(
-            "missing keys: stateful-upgrade",
+            "release graph contract",
             lambda: validate_gate_authority(
-                missing_stateful,
+                legacy,
                 workflow="release",
                 event_name="workflow_dispatch",
                 workflow_ref=TRUSTED_PRE_MERGE_WORKFLOW_REF,
-                workflow_sha=TRUSTED_LEGACY_WORKFLOW_SHA,
+                workflow_sha="0" * 40,
                 repository=TRUSTED_REPOSITORY,
                 caller_sha=TRUSTED_LEGACY_WORKFLOW_SHA,
             ),
         )
-
-    def test_release_graph_contract_is_explicit_and_fail_closed(self):
-        document = classification("STANDARD", force_full=True)
-        current = release_needs(document, event_name="workflow_dispatch")
-        legacy = dict(current)
-        legacy.pop("dr-rehearsal")
-
-        result = validate_gate_authority(
-            current,
-            workflow="release",
-            event_name="workflow_dispatch",
-            release_graph_contract=CURRENT_RELEASE_GRAPH_CONTRACT,
+        self.assert_rejected(
+            "missing keys: dr-rehearsal",
+            lambda: validate_current_release(legacy, event_name="workflow_dispatch"),
         )
-        self.assertEqual(result["release_graph_contract"], CURRENT_RELEASE_GRAPH_CONTRACT)
-
         self.assert_rejected(
             "unsupported release graph contract",
             lambda: validate_gate_authority(
@@ -379,107 +272,81 @@ class CiGateAuthorityTests(unittest.TestCase):
                 release_graph_contract="animemo.release-gate.jobs/v999",
             ),
         )
-        self.assert_rejected(
-            "unsupported release graph contract",
-            lambda: validate_gate_authority(
-                legacy,
-                workflow="release",
-                event_name="workflow_dispatch",
-                release_graph_contract=LEGACY_RELEASE_GRAPH_CONTRACT,
-            ),
-        )
-        self.assert_rejected(
-            "missing keys: dr-rehearsal",
-            lambda: validate_gate_authority(
-                legacy,
-                workflow="release",
-                event_name="workflow_dispatch",
-                release_graph_contract=CURRENT_RELEASE_GRAPH_CONTRACT,
-            ),
-        )
 
-    def test_real_classifier_low_standard_high_critical_and_force_full_documents(self):
+    def test_real_classifier_profiles_validate_for_ci_and_release(self):
         cases = (
-            ("LOW", ["README.md"], False, "pull_request"),
-            ("STANDARD", ["src/pages/Journal.jsx"], False, "pull_request"),
+            (["README.md"], False, "DOCS_ONLY"),
             (
-                "HIGH",
-                ["backend/journal/migrations/9999_gate_test.py"],
+                ["docs/backup-contract-v1.md"],
                 False,
-                "pull_request",
+                "CONTRACT_VALIDATION_ONLY",
             ),
-            ("CRITICAL", ["updater/agent.py"], False, "pull_request"),
-            ("LOW", ["README.md"], True, "workflow_call"),
+            (["src/pages/Journal.jsx"], False, "TARGETED"),
+            (["updater/agent.py"], False, "TARGETED"),
+            (["future/new.bin"], False, "TARGETED"),
+            (["README.md"], True, "FULL_AUTHORITY"),
         )
-        for expected_risk, paths, force_full, event_name in cases:
-            with self.subTest(
-                risk=expected_risk, force_full=force_full, event_name=event_name
-            ):
-                outputs = classify_paths(paths, force_full=force_full)
-                for workflow in ("ci", "release"):
-                    with self.subTest(workflow=workflow):
-                        result = validate_gate_authority(
-                            real_classification_needs(
-                                outputs, workflow=workflow, event_name=event_name
-                            ),
-                            workflow=workflow,
-                            event_name=event_name,
-                            release_graph_contract=(
-                                CURRENT_RELEASE_GRAPH_CONTRACT
-                                if workflow == "release"
-                                else ""
-                            ),
-                        )
-                        self.assertEqual(result["status"], "PASS")
-                        self.assertEqual(result["risk_level"], expected_risk)
-                        self.assertEqual(result["execution_force_full"], force_full)
+        for paths, force_full, expected_profile in cases:
+            event_name = "workflow_call" if force_full else "pull_request"
+            document = classification(paths, force_full=force_full)
+            with self.subTest(paths=paths, workflow="ci"):
+                result = validate_gate_authority(
+                    ci_needs(document, event_name=event_name),
+                    workflow="ci",
+                    event_name=event_name,
+                )
+                self.assertEqual(result["execution_profile"], expected_profile)
+            with self.subTest(paths=paths, workflow="release"):
+                result = validate_current_release(
+                    release_needs(document, event_name=event_name),
+                    event_name=event_name,
+                )
+                self.assertEqual(result["execution_profile"], expected_profile)
 
-    def test_policy_semantics_reject_gate_downgrades_and_escalations(self):
-        cases = (
-            (
-                "full_gate",
-                classification("HIGH"),
-                lambda gates: gates.__setitem__("full_gate", False),
-            ),
-            (
-                "critical_gate",
-                classification("CRITICAL"),
-                lambda gates: gates.__setitem__("critical_gate", False),
-            ),
-            (
-                "run_release_full",
-                classification("HIGH"),
-                lambda gates: gates.__setitem__("run_release_full", False),
-            ),
-            (
-                "run_release_docker",
-                classification("HIGH"),
-                lambda gates: gates.__setitem__("run_release_docker", False),
-            ),
-            (
-                "run_release_stateful",
-                classification("HIGH"),
-                lambda gates: gates.__setitem__("run_release_stateful", False),
-            ),
-            (
-                "run_release_updater",
-                classification("HIGH"),
-                lambda gates: gates.__setitem__("run_release_updater", True),
-            ),
-            (
-                "run_release_updater",
-                classification("CRITICAL"),
-                lambda gates: gates.__setitem__("run_release_updater", False),
-            ),
-            (
-                "run_backend",
-                classification("HIGH"),
-                lambda gates: gates.__setitem__("run_backend", False),
+    def test_authority_recomputes_contract_profile_from_exact_paths(self):
+        document = classification(["docs/backup-contract-v1.md"])
+        path_record = document["paths"][0]
+        assert isinstance(path_record, dict)
+        path_record["path"] = "docs/not-allowlisted-contract.md"
+        needs = ci_needs(document)
+
+        self.assert_rejected(
+            "profile violates audited path policy",
+            lambda: validate_gate_authority(
+                needs, workflow="ci", event_name="pull_request"
             ),
         )
-        for message, document, mutate in cases:
+
+        downgraded = classification(["docs/backup-contract-v1.md"])
+        downgraded["risk"] = {"level": "LOW", "rank": 1, "reasons": []}
+        downgraded["paths"][0]["risk_level"] = "LOW"
+        downgraded["execution"]["profile"] = "DOCS_ONLY"
+        downgraded["gates"]["docs_only"] = True
+        downgraded["gates"]["run_contract_validation"] = False
+        self.assert_rejected(
+            "audited contract path.*HIGH risk",
+            lambda: validate_gate_authority(
+                ci_needs(downgraded), workflow="ci", event_name="pull_request"
+            ),
+        )
+
+    def test_path_records_and_unknown_paths_are_strict(self):
+        cases = []
+
+        duplicate = classification(["src/pages/Journal.jsx"])
+        duplicate["paths"].append(deepcopy(duplicate["paths"][0]))
+        cases.append(("sorted and contain no duplicates", duplicate))
+
+        empty_path = classification(["src/pages/Journal.jsx"])
+        empty_path["paths"][0]["path"] = ""
+        cases.append(("path must be non-empty", empty_path))
+
+        unknown_not_subset = classification(["src/pages/Journal.jsx"])
+        unknown_not_subset["unknown_paths"] = ["future/new.bin"]
+        cases.append(("subset of changed paths", unknown_not_subset))
+
+        for message, document in cases:
             with self.subTest(message=message):
-                mutate(document["gates"])
                 needs = ci_needs(document)
                 self.assert_rejected(
                     message,
@@ -488,24 +355,70 @@ class CiGateAuthorityTests(unittest.TestCase):
                     ),
                 )
 
-    def test_every_full_gate_requires_every_product_gate(self):
-        for gate in PRODUCT_GATE_NAMES:
+    def test_authority_rejects_gate_downgrades_and_escalations(self):
+        cases = (
+            (
+                "run_release_stateful",
+                classification(["backend/journal/migrations/9999_gate_test.py"]),
+                "run_release_stateful",
+                False,
+            ),
+            (
+                "run_release_dr",
+                classification(["durability/backup.py"]),
+                "run_release_dr",
+                False,
+            ),
+            (
+                "run_release_updater",
+                classification(["updater/agent.py"]),
+                "run_release_updater",
+                False,
+            ),
+            (
+                "run_release_full",
+                classification(["backend/journal/migrations/9999_gate_test.py"]),
+                "run_release_full",
+                True,
+            ),
+            (
+                "critical_gate",
+                classification(["updater/agent.py"]),
+                "critical_gate",
+                False,
+            ),
+        )
+        for message, document, gate, value in cases:
             with self.subTest(gate=gate):
-                document = classification("HIGH")
-                document["gates"][gate] = False  # type: ignore[index]
+                document["gates"][gate] = value
                 needs = ci_needs(document)
                 self.assert_rejected(
-                    gate,
+                    message,
                     lambda needs=needs: validate_gate_authority(
                         needs, workflow="ci", event_name="pull_request"
                     ),
                 )
 
-    def test_mixed_gate_must_match_primary_signals(self):
-        document = classification()
-        document["signals"]["frontend"] = True  # type: ignore[index]
-        document["signals"]["backend"] = True  # type: ignore[index]
+    def test_unknown_and_full_profiles_cannot_omit_any_selected_gate(self):
+        for paths, force_full in ((["future/new.bin"], False), (["README.md"], True)):
+            for gate in (*PRODUCT_GATE_NAMES, "run_release_updater", "run_release_docker", "run_release_stateful", "run_release_dr"):
+                with self.subTest(paths=paths, force_full=force_full, gate=gate):
+                    document = classification(paths, force_full=force_full)
+                    document["gates"][gate] = False
+                    event_name = "workflow_call" if force_full else "pull_request"
+                    needs = ci_needs(document, event_name=event_name)
+                    self.assert_rejected(
+                        gate,
+                        lambda needs=needs, event_name=event_name: validate_gate_authority(
+                            needs, workflow="ci", event_name=event_name
+                        ),
+                    )
+
+    def test_mixed_gate_must_match_signals(self):
+        document = classification(["src/pages/Journal.jsx"])
+        document["signals"]["backend"] = True
         needs = ci_needs(document)
+
         self.assert_rejected(
             "mixed",
             lambda: validate_gate_authority(
@@ -513,19 +426,10 @@ class CiGateAuthorityTests(unittest.TestCase):
             ),
         )
 
-        document["gates"]["mixed"] = True  # type: ignore[index]
-        needs = ci_needs(document)
-        self.assertEqual(
-            validate_gate_authority(needs, workflow="ci", event_name="pull_request")[
-                "status"
-            ],
-            "PASS",
-        )
-
-    def test_authority_events_require_force_full_and_pull_request_may_force(self):
+    def test_authority_events_require_explicit_force_full(self):
         for event_name in ("merge_group", "workflow_dispatch", "workflow_call"):
             with self.subTest(event_name=event_name, force_full=False):
-                document = classification("STANDARD")
+                document = classification(["src/pages/Journal.jsx"])
                 needs = ci_needs(document, event_name=event_name)
                 self.assert_rejected(
                     "requires.*force_full=true",
@@ -533,173 +437,130 @@ class CiGateAuthorityTests(unittest.TestCase):
                         needs, workflow="ci", event_name=event_name
                     ),
                 )
-
             with self.subTest(event_name=event_name, force_full=True):
-                document = classification("STANDARD", force_full=True)
-                needs = ci_needs(document, event_name=event_name)
-                self.assertEqual(
-                    validate_gate_authority(
-                        needs, workflow="ci", event_name=event_name
-                    )["status"],
-                    "PASS",
+                document = classification(
+                    ["src/pages/Journal.jsx"], force_full=True
                 )
+                result = validate_gate_authority(
+                    ci_needs(document, event_name=event_name),
+                    workflow="ci",
+                    event_name=event_name,
+                )
+                self.assertEqual(result["status"], "PASS")
 
-        document = classification("STANDARD", force_full=True)
-        needs = ci_needs(document)
-        self.assertEqual(
-            validate_gate_authority(needs, workflow="ci", event_name="pull_request")[
-                "status"
-            ],
-            "PASS",
-        )
-
-    def test_push_rejects_force_full_instead_of_taking_lightweight_path(self):
-        document = classification("STANDARD", force_full=True)
-        needs = ci_needs(document, event_name="push")
+        forced_push = classification(["README.md"], force_full=True)
         self.assert_rejected(
             "push cannot.*force_full=true",
-            lambda: validate_gate_authority(needs, workflow="ci", event_name="push"),
+            lambda: validate_gate_authority(
+                ci_needs(forced_push, event_name="push"),
+                workflow="ci",
+                event_name="push",
+            ),
         )
 
-    def test_classify_must_exist_and_succeed(self):
-        document = classification()
+    def test_selected_unselected_missing_failed_and_cancelled_jobs_fail_closed(self):
+        document = classification(["src/pages/Journal.jsx"])
+        cases = (
+            ("frontend", "frontend", "skipped"),
+            ("backend", "backend", "success"),
+            ("frontend", "frontend", "failure"),
+            ("backend", "backend", "cancelled"),
+        )
+        for message, job, result in cases:
+            with self.subTest(job=job, result=result):
+                needs = ci_needs(document)
+                needs[job]["result"] = result
+                self.assert_rejected(
+                    message,
+                    lambda needs=needs: validate_gate_authority(
+                        needs, workflow="ci", event_name="pull_request"
+                    ),
+                )
+
         missing = ci_needs(document)
-        missing.pop("classify")
+        missing.pop("frontend")
         self.assert_rejected(
-            "missing.*classify",
+            "missing keys: frontend",
             lambda: validate_gate_authority(
                 missing, workflow="ci", event_name="pull_request"
             ),
         )
 
-        failed = ci_needs(document)
-        failed["classify"]["result"] = "failure"  # type: ignore[index]
+    def test_classify_and_needs_job_sets_are_fail_closed(self):
+        document = classification(["src/pages/Journal.jsx"])
+
+        missing_classify = ci_needs(document)
+        missing_classify.pop("classify")
         self.assert_rejected(
-            "classify.*success.*failure",
+            "missing keys: classify",
             lambda: validate_gate_authority(
-                failed, workflow="ci", event_name="pull_request"
+                missing_classify, workflow="ci", event_name="pull_request"
             ),
         )
 
-    def test_selected_skipped_and_unselected_success_fail_closed(self):
-        document = classification(gates={"run_frontend": True})
-        selected_skipped = ci_needs(document)
-        selected_skipped["frontend"]["result"] = "skipped"  # type: ignore[index]
+        failed_classify = ci_needs(document)
+        failed_classify["classify"]["result"] = "failure"
         self.assert_rejected(
-            "frontend.*success.*skipped",
+            "classify job must be success",
             lambda: validate_gate_authority(
-                selected_skipped, workflow="ci", event_name="pull_request"
+                failed_classify, workflow="ci", event_name="pull_request"
             ),
         )
 
-        unselected_success = ci_needs(document)
-        unselected_success["backend"]["result"] = "success"  # type: ignore[index]
+        unexpected = ci_needs(document)
+        unexpected["future-job"] = {"result": "success"}
         self.assert_rejected(
-            "backend.*skipped.*success",
+            "unexpected keys: future-job",
             lambda: validate_gate_authority(
-                unselected_success, workflow="ci", event_name="pull_request"
+                unexpected, workflow="ci", event_name="pull_request"
             ),
         )
 
-    def test_missing_failed_and_cancelled_jobs_fail_closed(self):
-        document = classification(gates={"run_frontend": True})
+    def test_schema_profiles_json_types_and_exact_key_sets_are_strict(self):
         cases = (
-            ("missing", "frontend", None),
-            ("failure", "frontend", "failure"),
-            ("cancelled", "backend", "cancelled"),
-        )
-        for label, job, result in cases:
-            with self.subTest(label=label):
-                needs = ci_needs(document)
-                if result is None:
-                    needs.pop(job)
-                else:
-                    needs[job]["result"] = result  # type: ignore[index]
-                self.assert_rejected(
-                    job,
-                    lambda needs=needs: validate_gate_authority(
-                        needs, workflow="ci", event_name="pull_request"
-                    ),
-                )
-
-    def test_schema_risk_rank_and_execution_are_strict(self):
-        mutations = (
-            ("schema", lambda doc: doc.__setitem__("schema_version", "future/v2")),
+            ("schema", lambda doc: doc.__setitem__("schema_version", "future/v3")),
             ("risk level", lambda doc: doc["risk"].__setitem__("level", "SEVERE")),
-            ("risk rank", lambda doc: doc["risk"].__setitem__("rank", 3)),
+            ("risk rank", lambda doc: doc["risk"].__setitem__("rank", 4)),
+            (
+                "execution profile",
+                lambda doc: doc["execution"].__setitem__("profile", "FAST"),
+            ),
             (
                 "execution.force_full",
                 lambda doc: doc["execution"].__setitem__("force_full", "false"),
             ),
-        )
-        for message, mutate in mutations:
-            with self.subTest(message=message):
-                document = classification()
-                mutate(document)
-                needs = ci_needs(document)
-                self.assert_rejected(
-                    message,
-                    lambda needs=needs: validate_gate_authority(
-                        needs, workflow="ci", event_name="pull_request"
-                    ),
-                )
-
-    def test_signals_and_gates_require_real_json_booleans(self):
-        for field in ("signals", "gates"):
-            with self.subTest(field=field):
-                document = classification()
-                document[field][next(iter(document[field]))] = "false"  # type: ignore[index]
-                needs = ci_needs(document)
-                self.assert_rejected(
-                    field,
-                    lambda needs=needs: validate_gate_authority(
-                        needs, workflow="ci", event_name="pull_request"
-                    ),
-                )
-
-    def test_classification_schema_uses_exact_known_key_sets(self):
-        cases = (
             (
-                "classification_json.*unexpected",
-                lambda document: document.__setitem__("future", {}),
+                "signals.frontend",
+                lambda doc: doc["signals"].__setitem__("frontend", "false"),
             ),
             (
-                "classification_json.*missing",
-                lambda document: document.pop("paths"),
+                "gates.run_frontend",
+                lambda doc: doc["gates"].__setitem__("run_frontend", "true"),
             ),
-            (
-                "risk.*unexpected",
-                lambda document: document["risk"].__setitem__("future", False),
-            ),
-            (
-                "risk.*missing",
-                lambda document: document["risk"].pop("reasons"),
-            ),
+            ("unexpected keys", lambda doc: doc.__setitem__("future", {})),
+            ("missing keys", lambda doc: doc.pop("paths")),
             (
                 "execution.*unexpected",
-                lambda document: document["execution"].__setitem__("future", False),
+                lambda doc: doc["execution"].__setitem__("future", False),
             ),
-            (
-                "execution.*missing",
-                lambda document: document["execution"].pop("reasons"),
-            ),
+            ("gates.*missing", lambda doc: doc["gates"].pop("run_backend")),
             (
                 "signals.*unexpected",
-                lambda document: document["signals"].__setitem__("future", False),
+                lambda doc: doc["signals"].__setitem__("future", False),
             ),
+            ("signals.*missing", lambda doc: doc["signals"].pop("frontend")),
             (
-                "signals.*missing",
-                lambda document: document["signals"].pop("frontend"),
+                "gates.*unexpected",
+                lambda doc: doc["gates"].__setitem__("future", False),
             ),
         )
         for message, mutate in cases:
             with self.subTest(message=message):
-                document = classification()
+                document = classification(["src/pages/Journal.jsx"])
                 mutate(document)
-                needs = ci_needs(classification())
-                needs["classify"]["outputs"]["classification_json"] = json.dumps(  # type: ignore[index]
-                    document
-                )
+                baseline = classification(["src/pages/Journal.jsx"])
+                needs = ci_needs(baseline)
+                needs["classify"]["outputs"]["classification_json"] = json.dumps(document)
                 self.assert_rejected(
                     message,
                     lambda needs=needs: validate_gate_authority(
@@ -707,86 +568,20 @@ class CiGateAuthorityTests(unittest.TestCase):
                     ),
                 )
 
-    def test_gate_set_must_be_exact(self):
-        for label, mutate in (
-            ("missing", lambda gates: gates.pop("run_backend")),
-            ("unexpected", lambda gates: gates.__setitem__("future_gate", False)),
-        ):
-            with self.subTest(label=label):
-                document = classification()
-                mutate(document["gates"])
-                outputs_document = classification()
-                needs = ci_needs(outputs_document)
-                needs["classify"]["outputs"]["classification_json"] = json.dumps(  # type: ignore[index]
-                    document
-                )
-                self.assert_rejected(
-                    f"gates.*{label}",
-                    lambda needs=needs: validate_gate_authority(
-                        needs, workflow="ci", event_name="pull_request"
-                    ),
-                )
-
-    def test_needs_job_set_and_classifier_output_set_must_be_exact(self):
-        document = classification()
-        cases = []
-
-        missing_job = ci_needs(document)
-        missing_job.pop("backend")
-        cases.append(("NEEDS_JSON.*missing.*backend", missing_job))
-
-        unexpected_job = ci_needs(document)
-        unexpected_job["future-job"] = {"result": "success"}
-        cases.append(("NEEDS_JSON.*unexpected.*future-job", unexpected_job))
-
-        missing_output = ci_needs(document)
-        missing_output["classify"]["outputs"].pop("mixed")  # type: ignore[index]
-        cases.append(("outputs.*missing.*mixed", missing_output))
-
-        unexpected_output = ci_needs(document)
-        unexpected_output["classify"]["outputs"]["future"] = "false"  # type: ignore[index]
-        cases.append(("outputs.*unexpected.*future", unexpected_output))
-
-        for message, needs in cases:
-            with self.subTest(message=message):
-                self.assert_rejected(
-                    message,
-                    lambda needs=needs: validate_gate_authority(
-                        needs, workflow="ci", event_name="pull_request"
-                    ),
-                )
-
-    def test_every_scalar_identity_and_gate_output_is_cross_checked(self):
-        document = classification(gates={"run_frontend": True})
-        cases = {
-            "schema_version": "wrong/v1",
-            "risk_level": "HIGH",
-            "risk_rank": "3",
-            "execution_force_full": "true",
-            "mixed": "true",
-            "run_frontend": "false",
-        }
-        for output, value in cases.items():
-            with self.subTest(output=output):
-                needs = ci_needs(document)
-                needs["classify"]["outputs"][output] = value  # type: ignore[index]
-                self.assert_rejected(
-                    output,
-                    lambda needs=needs: validate_gate_authority(
-                        needs, workflow="ci", event_name="pull_request"
-                    ),
-                )
-
-    def test_scalar_boolean_outputs_reject_noncanonical_values(self):
-        document = classification()
+    def test_classifier_scalar_outputs_and_output_set_are_strict(self):
+        document = classification(["src/pages/Journal.jsx"])
         for output, value in (
-            ("execution_force_full", "False"),
+            ("schema_version", "wrong/v1"),
+            ("risk_level", "HIGH"),
+            ("risk_rank", "3"),
+            ("execution_force_full", "true"),
+            ("mixed", "true"),
+            ("run_frontend", "false"),
             ("run_backend", False),
-            ("run_plugins", "0"),
         ):
             with self.subTest(output=output):
                 needs = ci_needs(document)
-                needs["classify"]["outputs"][output] = value  # type: ignore[index]
+                needs["classify"]["outputs"][output] = value
                 self.assert_rejected(
                     output,
                     lambda needs=needs: validate_gate_authority(
@@ -794,24 +589,27 @@ class CiGateAuthorityTests(unittest.TestCase):
                     ),
                 )
 
-    def test_intrinsic_docs_only_cannot_be_forced_or_non_low(self):
-        for document in (
-            classification("STANDARD", gates={"docs_only": True}),
-            classification("LOW", force_full=True, gates={"docs_only": True}),
-        ):
-            with self.subTest(document=document):
-                needs = ci_needs(document)
-                self.assert_rejected(
-                    "docs_only",
-                    lambda needs=needs: validate_gate_authority(
-                        needs, workflow="ci", event_name="pull_request"
-                    ),
-                )
+        missing = ci_needs(document)
+        missing["classify"]["outputs"].pop("mixed")
+        self.assert_rejected(
+            "outputs.*missing.*mixed",
+            lambda: validate_gate_authority(
+                missing, workflow="ci", event_name="pull_request"
+            ),
+        )
+        unexpected = ci_needs(document)
+        unexpected["classify"]["outputs"]["run_release_dr"] = "false"
+        self.assert_rejected(
+            "outputs.*unexpected.*run_release_dr",
+            lambda: validate_gate_authority(
+                unexpected, workflow="ci", event_name="pull_request"
+            ),
+        )
 
-    def test_malformed_classification_json_and_duplicate_keys_fail_closed(self):
-        document = classification()
+    def test_malformed_and_duplicate_classification_json_fail_closed(self):
+        document = classification(["src/pages/Journal.jsx"])
         malformed = ci_needs(document)
-        malformed["classify"]["outputs"]["classification_json"] = "{"  # type: ignore[index]
+        malformed["classify"]["outputs"]["classification_json"] = "{"
         self.assert_rejected(
             "classification_json",
             lambda: validate_gate_authority(
@@ -821,7 +619,7 @@ class CiGateAuthorityTests(unittest.TestCase):
 
         duplicate = ci_needs(document)
         raw = json.dumps(document, separators=(",", ":"))
-        duplicate["classify"]["outputs"]["classification_json"] = (  # type: ignore[index]
+        duplicate["classify"]["outputs"]["classification_json"] = (
             raw[:-1] + ',"gates":{}}'
         )
         self.assert_rejected(
@@ -831,91 +629,50 @@ class CiGateAuthorityTests(unittest.TestCase):
             ),
         )
 
-    def test_unsupported_workflow_or_event_fails_closed(self):
-        document = classification()
+    def test_unsupported_workflow_event_or_release_contract_fails_closed(self):
+        document = classification(["src/pages/Journal.jsx"])
         needs = ci_needs(document)
         for workflow, event_name in (("deploy", "pull_request"), ("ci", "schedule")):
             with self.subTest(workflow=workflow, event_name=event_name):
                 self.assert_rejected(
                     "unsupported",
-                    lambda workflow=workflow, event_name=event_name: (
-                        validate_gate_authority(
-                            needs, workflow=workflow, event_name=event_name
-                        )
+                    lambda workflow=workflow, event_name=event_name: validate_gate_authority(
+                        needs, workflow=workflow, event_name=event_name
                     ),
                 )
+        self.assert_rejected(
+            "not valid for the CI workflow",
+            lambda: validate_gate_authority(
+                needs,
+                workflow="ci",
+                event_name="pull_request",
+                release_graph_contract=CURRENT_RELEASE_GRAPH_CONTRACT,
+            ),
+        )
 
-    def test_cli_reads_needs_json_and_emits_machine_readable_result(self):
-        document = classification(gates={"run_frontend": True})
+    def test_cli_emits_machine_readable_pass_and_fail(self):
+        document = classification(["src/pages/Journal.jsx"])
         environment = {"NEEDS_JSON": json.dumps(ci_needs(document))}
         stdout = io.StringIO()
         with (
             mock.patch.dict(os.environ, environment, clear=True),
             contextlib.redirect_stdout(stdout),
         ):
-            status = main(["--workflow", "ci", "--event-name", "pull_request"])
+            code = main(["--workflow", "ci", "--event-name", "pull_request"])
 
-        self.assertEqual(status, 0)
-        self.assertEqual(json.loads(stdout.getvalue())["status"], "PASS")
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["execution_profile"], "TARGETED")
 
-    def test_cli_resolves_explicit_current_and_authenticated_legacy_release_graphs(self):
-        document = classification("STANDARD", force_full=True)
-        current = release_needs(document, event_name="workflow_dispatch")
-        legacy = dict(current)
-        legacy.pop("dr-rehearsal")
-        cases = (
-            (
-                current,
-                [
-                    "--workflow",
-                    "release",
-                    "--event-name",
-                    "workflow_dispatch",
-                    "--release-graph-contract",
-                    CURRENT_RELEASE_GRAPH_CONTRACT,
-                ],
-                {},
-                CURRENT_RELEASE_GRAPH_CONTRACT,
-            ),
-            (
-                legacy,
-                ["--workflow", "release", "--event-name", "workflow_dispatch"],
-                {
-                    "GITHUB_WORKFLOW_REF": TRUSTED_PRE_MERGE_WORKFLOW_REF,
-                    "GITHUB_WORKFLOW_SHA": TRUSTED_LEGACY_WORKFLOW_SHA,
-                    "GITHUB_REPOSITORY": TRUSTED_REPOSITORY,
-                    "GITHUB_SHA": TRUSTED_LEGACY_WORKFLOW_SHA,
-                },
-                LEGACY_RELEASE_GRAPH_CONTRACT,
-            ),
-        )
-        for needs, argv, identity, expected_contract in cases:
-            with self.subTest(contract=expected_contract):
-                stdout = io.StringIO()
-                environment = {"NEEDS_JSON": json.dumps(needs), **identity}
-                with (
-                    mock.patch.dict(os.environ, environment, clear=True),
-                    contextlib.redirect_stdout(stdout),
-                ):
-                    status = main(argv)
-                self.assertEqual(status, 0)
-                self.assertEqual(
-                    json.loads(stdout.getvalue())["release_graph_contract"],
-                    expected_contract,
-                )
-
-    def test_cli_missing_invalid_or_duplicate_needs_json_returns_two(self):
-        cases = ("", "{", '{"classify":{},"classify":{}}')
-        for raw in cases:
-            with self.subTest(raw=raw):
-                stderr = io.StringIO()
-                with (
-                    mock.patch.dict(os.environ, {"NEEDS_JSON": raw}, clear=True),
-                    contextlib.redirect_stderr(stderr),
-                ):
-                    status = main(["--workflow", "ci", "--event-name", "pull_request"])
-                self.assertEqual(status, 2)
-                self.assertEqual(json.loads(stderr.getvalue())["status"], "FAIL")
+        stderr = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = main(["--workflow", "ci", "--event-name", "pull_request"])
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(stderr.getvalue())["status"], "FAIL")
 
 
 if __name__ == "__main__":

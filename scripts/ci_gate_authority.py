@@ -10,8 +10,34 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-SCHEMA_VERSION = "animemo.ci-risk/v1"
+SCHEMA_VERSION = "animemo.ci-risk/v2"
 RISK_RANKS = {"LOW": 1, "STANDARD": 2, "HIGH": 3, "CRITICAL": 4}
+EXECUTION_PROFILES = frozenset(
+    {"DOCS_ONLY", "CONTRACT_VALIDATION_ONLY", "TARGETED", "FULL_AUTHORITY"}
+)
+
+AUDITED_CONTRACT_PRIMARY_DOCUMENTS = frozenset(
+    {
+        "docs/backup-contract-v1.md",
+        "docs/compatibility-matrix-v1.md",
+        "docs/doctor-basic-contract-v1.md",
+        "docs/migration-bundle-v1.md",
+        "docs/migration-secret-envelope-v1.md",
+        "docs/restore-contract-v1.md",
+    }
+)
+AUDITED_CONTRACT_CHANGE_PATHS = frozenset(
+    {
+        *AUDITED_CONTRACT_PRIMARY_DOCUMENTS,
+        "CONTEXT.md",
+        "README.md",
+        "docs/data-bundle-v1.md",
+        "scripts/tests/test_recovery_migration_contracts.py",
+    }
+)
+AUDITED_CONTRACT_VALIDATION_TESTS = frozenset(
+    {"scripts/tests/test_recovery_migration_contracts.py"}
+)
 
 TOP_LEVEL_KEYS = frozenset(
     {
@@ -25,7 +51,7 @@ TOP_LEVEL_KEYS = frozenset(
     }
 )
 RISK_KEYS = frozenset({"level", "rank", "reasons"})
-EXECUTION_KEYS = frozenset({"force_full", "reasons"})
+EXECUTION_KEYS = frozenset({"profile", "force_full", "reasons"})
 SIGNAL_NAMES = (
     "frontend",
     "backend",
@@ -35,9 +61,12 @@ SIGNAL_NAMES = (
     "integration",
     "bridge",
     "migration",
+    "database",
     "dependencies",
     "ci",
     "deployment",
+    "release",
+    "updater",
     "shared_contract",
     "first_run",
     "recovery",
@@ -48,6 +77,7 @@ MIXED_SIGNAL_NAMES = SIGNAL_NAMES[:-1]
 
 GATE_NAMES = (
     "docs_only",
+    "run_contract_validation",
     "mixed",
     "run_frontend",
     "run_backend",
@@ -60,8 +90,14 @@ GATE_NAMES = (
     "run_release_updater",
     "run_release_docker",
     "run_release_stateful",
+    "run_release_dr",
     "full_gate",
     "critical_gate",
+)
+SCALAR_GATE_NAMES = tuple(
+    name
+    for name in GATE_NAMES
+    if name not in {"run_contract_validation", "run_release_dr"}
 )
 CLASSIFIER_OUTPUT_NAMES = (
     "schema_version",
@@ -69,7 +105,7 @@ CLASSIFIER_OUTPUT_NAMES = (
     "risk_rank",
     "execution_force_full",
     "classification_json",
-    *GATE_NAMES,
+    *SCALAR_GATE_NAMES,
 )
 PRODUCT_GATE_NAMES = (
     "run_frontend",
@@ -99,7 +135,7 @@ RELEASE_JOB_GATES: dict[str, str | None] = {
     "updater-isolated": "run_release_updater",
     "docker": "run_release_docker",
     "stateful-upgrade": "run_release_stateful",
-    "dr-rehearsal": "run_release_stateful",
+    "dr-rehearsal": "run_release_dr",
 }
 LEGACY_RELEASE_JOB_GATES: dict[str, str | None] = {
     name: gate for name, gate in RELEASE_JOB_GATES.items() if name != "dr-rehearsal"
@@ -214,7 +250,7 @@ def _job_result(needs: Mapping[str, Any], name: str) -> str:
 
 def _validate_classification(
     needs: Mapping[str, Any],
-) -> tuple[Mapping[str, Any], str, int, bool, dict[str, bool]]:
+) -> tuple[Mapping[str, Any], str, int, str, bool, dict[str, bool]]:
     classify = _job(needs, "classify")
     classify_result = _field(classify, "result", label="needs.classify")
     if classify_result != "success":
@@ -271,6 +307,16 @@ def _validate_classification(
         label="classification_json.execution",
     )
     _exact_keys(execution, EXECUTION_KEYS, label="classification_json.execution")
+    execution_profile = _field(
+        execution, "profile", label="classification_json.execution"
+    )
+    if (
+        not isinstance(execution_profile, str)
+        or execution_profile not in EXECUTION_PROFILES
+    ):
+        raise GateAuthorityError(
+            f"classification execution profile is unsupported: {execution_profile!r}"
+        )
     force_full = _json_bool(
         _field(execution, "force_full", label="classification_json.execution"),
         label="classification_json.execution.force_full",
@@ -280,14 +326,54 @@ def _validate_classification(
         label="classification_json.execution.reasons",
     )
 
-    _list(
+    path_records = _list(
         _field(document, "paths", label="classification_json"),
         label="classification_json.paths",
     )
-    _list(
+    changed_paths: list[str] = []
+    path_risks: dict[str, str] = {}
+    for index, raw_record in enumerate(path_records):
+        record = _object(raw_record, label=f"classification_json.paths[{index}]")
+        _exact_keys(
+            record,
+            frozenset({"path", "risk_level", "rules"}),
+            label=f"classification_json.paths[{index}]",
+        )
+        path = _field(record, "path", label=f"classification_json.paths[{index}]")
+        if not isinstance(path, str) or not path:
+            raise GateAuthorityError(
+                f"classification_json.paths[{index}].path must be non-empty"
+            )
+        changed_paths.append(path)
+        path_risk = _field(
+            record, "risk_level", label=f"classification_json.paths[{index}]"
+        )
+        if path_risk not in RISK_RANKS:
+            raise GateAuthorityError(
+                f"classification_json.paths[{index}].risk_level is unsupported"
+            )
+        path_risks[path] = path_risk
+        _list(
+            _field(record, "rules", label=f"classification_json.paths[{index}]"),
+            label=f"classification_json.paths[{index}].rules",
+        )
+
+    unknown_paths = _list(
         _field(document, "unknown_paths", label="classification_json"),
         label="classification_json.unknown_paths",
     )
+    if any(not isinstance(path, str) or not path for path in unknown_paths):
+        raise GateAuthorityError(
+            "classification_json.unknown_paths must contain non-empty strings"
+        )
+    if not set(unknown_paths).issubset(changed_paths):
+        raise GateAuthorityError(
+            "classification_json.unknown_paths must be a subset of changed paths"
+        )
+    if unknown_paths != sorted(set(unknown_paths)):
+        raise GateAuthorityError(
+            "classification_json.unknown_paths must be sorted and contain no duplicates"
+        )
 
     signals = _object(
         _field(document, "signals", label="classification_json"),
@@ -309,75 +395,168 @@ def _validate_classification(
         for name in GATE_NAMES
     }
 
-    if gates["docs_only"] and (risk_level != "LOW" or force_full):
+    if changed_paths != sorted(set(changed_paths)):
         raise GateAuthorityError(
-            "classification_json.gates.docs_only must represent intrinsic LOW, "
-            "non-forced documentation-only risk"
+            "classification_json.paths must be sorted and contain no duplicates"
+        )
+    if changed_paths:
+        expected_risk = max(path_risks.values(), key=RISK_RANKS.__getitem__)
+        if risk_level != expected_risk:
+            raise GateAuthorityError(
+                "classification_json.risk.level must match the highest path risk: "
+                f"expected {expected_risk}, found {risk_level}"
+            )
+    elif risk_level != "CRITICAL":
+        raise GateAuthorityError(
+            "an empty changed-path set must retain fail-closed CRITICAL risk"
+        )
+
+    audited_sensitive_paths = (
+        AUDITED_CONTRACT_PRIMARY_DOCUMENTS | AUDITED_CONTRACT_VALIDATION_TESTS
+    )
+    for path in sorted(set(changed_paths) & audited_sensitive_paths):
+        if path_risks[path] != "HIGH":
+            raise GateAuthorityError(
+                f"audited contract path {path!r} must retain inherent HIGH risk"
+            )
+
+    root_docs = {"LICENSE", "NOTICE", "THIRD_PARTY_NOTICES", "TRADEMARKS"}
+    authority_docs_only = bool(changed_paths) and risk_level == "LOW" and all(
+        path in root_docs
+        or path.lower().startswith("docs/")
+        or path.lower().endswith((".md", ".mdx", ".rst"))
+        for path in changed_paths
+    )
+    audited_contract_change = (
+        bool(changed_paths)
+        and any(path in AUDITED_CONTRACT_PRIMARY_DOCUMENTS for path in changed_paths)
+        and all(path in AUDITED_CONTRACT_CHANGE_PATHS for path in changed_paths)
+    )
+    if force_full:
+        expected_profile = "FULL_AUTHORITY"
+    elif audited_contract_change:
+        expected_profile = "CONTRACT_VALIDATION_ONLY"
+    elif authority_docs_only:
+        expected_profile = "DOCS_ONLY"
+    else:
+        expected_profile = "TARGETED"
+    if execution_profile != expected_profile:
+        raise GateAuthorityError(
+            "classification_json.execution.profile violates audited path policy: "
+            f"expected {expected_profile}, found {execution_profile}"
+        )
+    if execution_profile == "CONTRACT_VALIDATION_ONLY" and risk_level != "HIGH":
+        raise GateAuthorityError(
+            "CONTRACT_VALIDATION_ONLY must retain inherent HIGH risk"
         )
 
     expected_mixed = sum(signal_values[name] for name in MIXED_SIGNAL_NAMES) > 1
-    if gates["mixed"] != expected_mixed:
-        raise GateAuthorityError(
-            "classification_json.gates.mixed does not match the primary signals: "
-            f"expected {expected_mixed}, found {gates['mixed']}"
-        )
+    targeted = execution_profile == "TARGETED"
+    conservative_broad = targeted and (bool(unknown_paths) or not changed_paths)
 
-    expected_full_gate = force_full or risk_rank >= RISK_RANKS["HIGH"]
-    if gates["full_gate"] != expected_full_gate:
-        raise GateAuthorityError(
-            "classification_json.gates.full_gate violates risk policy: "
-            f"expected {expected_full_gate}, found {gates['full_gate']}"
-        )
-    expected_critical_gate = force_full or risk_level == "CRITICAL"
-    if gates["critical_gate"] != expected_critical_gate:
-        raise GateAuthorityError(
-            "classification_json.gates.critical_gate violates risk policy: "
-            f"expected {expected_critical_gate}, found {gates['critical_gate']}"
-        )
+    def selected(*names: str) -> bool:
+        return targeted and any(signal_values[name] for name in names)
 
-    release_expectations = {
-        "run_release_full": gates["full_gate"],
-        "run_release_docker": gates["full_gate"],
-        "run_release_stateful": gates["full_gate"],
-        "run_release_updater": gates["critical_gate"],
+    expected_gates = {
+        "docs_only": execution_profile == "DOCS_ONLY",
+        "run_contract_validation": execution_profile
+        == "CONTRACT_VALIDATION_ONLY",
+        "mixed": expected_mixed,
+        "run_frontend": force_full
+        or conservative_broad
+        or selected("frontend"),
+        "run_backend": force_full
+        or conservative_broad
+        or selected(
+            "backend",
+            "auth",
+            "api_contract",
+            "migration",
+            "database",
+            "integration",
+            "shared_contract",
+            "first_run",
+            "media_storage",
+        ),
+        "run_bootstrap": force_full
+        or conservative_broad
+        or selected("ci", "deployment", "first_run", "updater"),
+        "run_plugins": force_full
+        or conservative_broad
+        or selected(
+            "plugin",
+            "integration",
+            "shared_contract",
+            "migration",
+            "recovery",
+            "release",
+        ),
+        "run_bridge": force_full
+        or conservative_broad
+        or selected("bridge", "integration", "shared_contract"),
+        "run_postgres": force_full
+        or conservative_broad
+        or selected(
+            "auth",
+            "api_contract",
+            "plugin",
+            "migration",
+            "database",
+            "integration",
+            "shared_contract",
+            "media_storage",
+            "first_run",
+            "recovery",
+        ),
+        "run_runtime": force_full
+        or conservative_broad
+        or selected("bridge", "integration", "shared_contract"),
+        "run_release_full": force_full,
+        "run_release_updater": force_full
+        or conservative_broad
+        or selected("updater", "release"),
+        "run_release_docker": force_full
+        or conservative_broad
+        or selected("deployment", "release", "first_run"),
+        "run_release_stateful": force_full
+        or conservative_broad
+        or selected("database", "deployment", "release", "updater", "first_run"),
+        "run_release_dr": force_full
+        or conservative_broad
+        or selected("recovery", "migration"),
+        "full_gate": force_full,
+        "critical_gate": risk_level == "CRITICAL",
     }
-    for name, expected in release_expectations.items():
+    for name, expected in expected_gates.items():
         if gates[name] != expected:
             raise GateAuthorityError(
-                f"classification_json.gates.{name} violates release policy: "
+                f"classification_json.gates.{name} violates execution policy: "
                 f"expected {expected}, found {gates[name]}"
-            )
-
-    if gates["full_gate"]:
-        omitted = [name for name in PRODUCT_GATE_NAMES if not gates[name]]
-        if omitted:
-            raise GateAuthorityError(
-                "classification_json full_gate omitted product gates: "
-                + ", ".join(omitted)
-            )
-        if gates["docs_only"]:
-            raise GateAuthorityError(
-                "classification_json full_gate cannot also select docs_only"
             )
 
     _scalar(outputs, "schema_version", SCHEMA_VERSION)
     _scalar(outputs, "risk_level", risk_level)
     _scalar(outputs, "risk_rank", str(risk_rank))
     _scalar(outputs, "execution_force_full", str(force_full).lower())
-    for name, value in gates.items():
+    for name in SCALAR_GATE_NAMES:
+        value = gates[name]
         _scalar(outputs, name, str(value).lower())
 
-    return document, risk_level, risk_rank, force_full, gates
+    return document, risk_level, risk_rank, execution_profile, force_full, gates
 
 
-def _ci_selected_jobs(event_name: str, gates: Mapping[str, bool]) -> list[str]:
-    docs_only = gates["docs_only"]
+def _ci_selected_jobs(
+    event_name: str, execution_profile: str, gates: Mapping[str, bool]
+) -> list[str]:
     selected: list[str] = []
     for job, gate in CI_JOB_GATES.items():
         if job == "fast-fail":
-            should_run = event_name != "push" and not docs_only
+            should_run = event_name != "push" and execution_profile != "DOCS_ONLY"
         elif job == "docs-only":
-            should_run = docs_only
+            should_run = execution_profile in {
+                "DOCS_ONLY",
+                "CONTRACT_VALIDATION_ONLY",
+            }
         else:
             assert gate is not None
             should_run = event_name != "push" and gates[gate]
@@ -508,9 +687,14 @@ def validate_gate_authority(
             caller_sha=caller_sha,
         )
     _exact_keys(needs, frozenset({"classify", *jobs}), label="NEEDS_JSON")
-    _document, risk_level, risk_rank, force_full, gates = _validate_classification(
-        needs
-    )
+    (
+        _document,
+        risk_level,
+        risk_rank,
+        execution_profile,
+        force_full,
+        gates,
+    ) = _validate_classification(needs)
     if event_name in FORCE_FULL_EVENTS and not force_full:
         raise GateAuthorityError(
             f"{event_name} requires classification execution.force_full=true"
@@ -521,7 +705,7 @@ def validate_gate_authority(
         )
 
     if workflow == "ci":
-        selected_jobs = _ci_selected_jobs(event_name, gates)
+        selected_jobs = _ci_selected_jobs(event_name, execution_profile, gates)
     else:
         selected_jobs = _release_selected_jobs(event_name, gates, jobs=jobs)
     unselected_jobs = _validate_job_matrix(
@@ -535,6 +719,7 @@ def validate_gate_authority(
         "schema_version": SCHEMA_VERSION,
         "risk_level": risk_level,
         "risk_rank": risk_rank,
+        "execution_profile": execution_profile,
         "execution_force_full": force_full,
         "selected_jobs": selected_jobs,
         "unselected_jobs": unselected_jobs,
