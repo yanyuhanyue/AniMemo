@@ -432,6 +432,7 @@ def main():
     parser = argparse.ArgumentParser(description="Reject official plugin package mutations without a version bump.")
     parser.add_argument("--base", default="")
     parser.add_argument("--head", default="")
+    parser.add_argument("--head-root", choices=(".",), help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         refs = resolve_refs(repo=ROOT, explicit_base=args.base, explicit_head=args.head)

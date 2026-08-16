@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "bridges" / "astrbot_plugin_animemo_bridge"
 OUT = ROOT / "dist"
+BRIDGE_ARCHIVE_NAME = "astrbot_plugin_animemo_bridge-0.1.3.zip"
 
 
 def version():
@@ -22,18 +23,20 @@ def version():
     return match.group(1).strip().strip('"\'') if match else "0.1.3"
 
 
-def canonical_output_target():
+def checked_output_target(output_root, archive_name, *, create):
     try:
-        metadata = OUT.lstat()
+        metadata = output_root.lstat()
     except FileNotFoundError:
-        OUT.mkdir(parents=True)
-        metadata = OUT.lstat()
-    if OUT.is_symlink():
+        if not create:
+            raise RuntimeError("output directory must already exist") from None
+        output_root.mkdir(parents=True)
+        metadata = output_root.lstat()
+    if output_root.is_symlink():
         raise RuntimeError("output directory must not be a symbolic link")
     if not stat.S_ISDIR(metadata.st_mode):
         raise RuntimeError("output directory must be a real directory")
 
-    target = OUT / f"astrbot_plugin_animemo_bridge-{version()}.zip"
+    target = output_root / archive_name
     try:
         target_metadata = target.lstat()
     except FileNotFoundError:
@@ -45,9 +48,24 @@ def canonical_output_target():
     return target
 
 
-def package():
+def canonical_output_target():
+    archive_name = f"astrbot_plugin_animemo_bridge-{version()}.zip"
+    return checked_output_target(OUT, archive_name, create=True)
+
+
+def runner_output_target(environ=os.environ):
+    if environ.get("GITHUB_ACTIONS") != "true":
+        raise RuntimeError("runner output is available only inside GitHub Actions")
+    runner_temp_value = str(environ.get("RUNNER_TEMP") or "")
+    runner_temp = Path(runner_temp_value)
+    if not runner_temp_value or not runner_temp.is_absolute():
+        raise RuntimeError("GitHub runner temp must be an absolute directory")
+    return checked_output_target(runner_temp, BRIDGE_ARCHIVE_NAME, create=False)
+
+
+def package(*, runner_output=False):
     runpy.run_path(str(ROOT / "scripts" / "validate-astrbot-bridge.py"), run_name="__bridge_validator__")["validate"]()
-    target = canonical_output_target()
+    target = runner_output_target() if runner_output else canonical_output_target()
     with tempfile.TemporaryDirectory(prefix="astrbot-bridge-export-") as temp:
         export_root = Path(temp) / "astrbot_plugin_animemo_bridge"
         shutil.copytree(
@@ -80,5 +98,14 @@ def package():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.parse_args()
-    package()
+    parser.add_argument("--output", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    runner_output = args.output is not None
+    if runner_output:
+        expected = os.path.join(os.environ.get("RUNNER_TEMP", ""), BRIDGE_ARCHIVE_NAME)
+        if os.environ.get("GITHUB_ACTIONS") != "true" or args.output != expected:
+            parser.error("--output must equal the exact GitHub runner output path")
+    try:
+        package(runner_output=runner_output)
+    except RuntimeError as error:
+        parser.exit(1, f"Bridge packaging failed: {error}\n")

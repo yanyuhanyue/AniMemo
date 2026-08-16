@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -8,7 +9,6 @@ from pathlib import Path
 from runpy import run_path
 
 from scripts import pluginctl
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -36,21 +36,60 @@ class SecurityToolPathTests(unittest.TestCase):
 
     def test_bridge_packager_rejects_arbitrary_output_paths(self):
         with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory) / "outside.zip"
             completed = subprocess.run(
                 [
                     sys.executable,
                     str(ROOT / "scripts" / "package-astrbot-bridge.py"),
                     "--output",
-                    str(Path(directory) / "outside.zip"),
+                    str(outside),
                 ],
                 cwd=ROOT,
                 check=False,
                 capture_output=True,
                 text=True,
             )
+            self.assertFalse(outside.exists())
 
         self.assertEqual(completed.returncode, 2)
-        self.assertIn("unrecognized arguments: --output", completed.stderr)
+        self.assertIn("must equal the exact GitHub runner output path", completed.stderr)
+
+    def test_bridge_packager_accepts_only_the_active_runner_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            expected = Path(directory) / "astrbot_plugin_animemo_bridge-0.1.3.zip"
+            environ = {
+                **os.environ,
+                "GITHUB_ACTIONS": "true",
+                "RUNNER_TEMP": directory,
+            }
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "package-astrbot-bridge.py"),
+                    "--output",
+                    str(expected),
+                ],
+                cwd=ROOT,
+                env=environ,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(expected.is_file())
+
+    def test_bridge_packager_canonical_target_tracks_metadata_version(self):
+        namespace = run_path(str(ROOT / "scripts" / "package-astrbot-bridge.py"))
+        output_target = namespace["canonical_output_target"]
+        with tempfile.TemporaryDirectory() as directory:
+            output_target.__globals__["OUT"] = Path(directory) / "dist"
+            output_target.__globals__["version"] = lambda: "9.8.7"
+
+            target = output_target()
+
+            self.assertEqual(target.name, "astrbot_plugin_animemo_bridge-9.8.7.zip")
 
     def test_bridge_packager_rejects_a_symlinked_dist_root(self):
         namespace = run_path(str(ROOT / "scripts" / "package-astrbot-bridge.py"))

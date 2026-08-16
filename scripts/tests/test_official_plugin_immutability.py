@@ -6,8 +6,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
-
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
@@ -31,6 +31,37 @@ class OfficialPluginImmutabilityTests(unittest.TestCase):
             ):
                 main()
             resolve_refs.assert_not_called()
+
+    def test_cli_maps_the_active_authority_head_root_to_the_repository(self):
+        refs = SimpleNamespace(base="a" * 40, head="b" * 40, source="test")
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "check_official_plugin_immutability.py",
+                    "--base",
+                    refs.base,
+                    "--head",
+                    refs.head,
+                    "--head-root",
+                    ".",
+                ],
+            ),
+            patch("check_official_plugin_immutability.resolve_refs", return_value=refs),
+            patch(
+                "check_official_plugin_immutability.check_repository",
+                return_value=SimpleNamespace(ok=True),
+            ) as check_repository,
+            patch("check_official_plugin_immutability._print_report"),
+        ):
+            main()
+
+        check_repository.assert_called_once_with(
+            ROOT,
+            refs.base,
+            refs.head,
+            head_root=ROOT,
+        )
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
