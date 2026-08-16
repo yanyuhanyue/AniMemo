@@ -110,7 +110,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -262,7 +262,7 @@ jobs:
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Prepare scoped upgrade temp root
@@ -319,7 +319,7 @@ jobs:
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 1
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Verify exact candidate checkout

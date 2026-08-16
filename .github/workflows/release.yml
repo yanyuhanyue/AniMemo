@@ -124,7 +124,7 @@ jobs:
         with:
           ref: ${{ steps.candidate.outputs.candidate_sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -218,7 +218,7 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.candidate_sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Prove the exact hosted qualification candidate
@@ -386,7 +386,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -540,7 +540,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -683,7 +683,7 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.candidate_sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -745,7 +745,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt

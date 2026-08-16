@@ -45,7 +45,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -170,7 +170,7 @@ jobs:
         with:
           name: stable-promotion-${{ needs.plan.outputs.stable_tag }}
           path: promotion-output
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -199,7 +199,7 @@ jobs:
         with:
           name: stable-promotion-${{ needs.plan.outputs.stable_tag }}
           path: promotion-output
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip

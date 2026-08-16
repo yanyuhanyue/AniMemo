@@ -179,7 +179,7 @@ jobs:
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r backend/requirements.txt
@@ -213,7 +213,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Run macOS/Linux setup smoke
@@ -268,7 +268,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r backend/requirements.txt
@@ -292,7 +292,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -327,7 +327,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r bridges/astrbot_plugin_animemo_bridge/requirements.txt
@@ -356,7 +356,7 @@ jobs:
           repository: AstrBotDevs/AstrBot
           ref: ${{ matrix.astrbot_ref }}
           path: .astrbot-runtime
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r .astrbot-runtime/requirements.txt
