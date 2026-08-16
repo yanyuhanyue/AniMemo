@@ -31,11 +31,12 @@ jobs:
       COMPOSE_HTTP_TIMEOUT: "120"
       COMPOSE_PROJECT_NAME: animemo-dr-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 1
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Verify exact candidate checkout

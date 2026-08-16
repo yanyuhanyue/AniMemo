@@ -71,8 +71,9 @@ jobs:
       created_at: ${{ steps.identity.outputs.created_at }}
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Bind the dispatch ref to an authorized release candidate
         id: candidate
@@ -120,11 +121,12 @@ jobs:
           git rev-parse --verify "$UPGRADE_BASE_SHA^{commit}"
           git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$candidate_sha"
           echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           ref: ${{ steps.candidate.outputs.candidate_sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -214,11 +216,12 @@ jobs:
       ANIMEMO_TEST_DATABASE_URL: postgresql://qualification:qualification-only@127.0.0.1:55432/qualification_source
       ANIMEMO_RESTORE_TEST_DATABASE_URL: postgresql://qualification:qualification-only@127.0.0.1:55432/qualification_target
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           ref: ${{ needs.preflight.outputs.candidate_sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Prove the exact hosted qualification candidate
@@ -377,16 +380,18 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: ${{ inputs.operation == 'qualify' }}
         with:
+          persist-credentials: false
           ref: ${{ needs.preflight.outputs.candidate_sha }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: ${{ inputs.operation == 'publish' }}
         with:
+          persist-credentials: false
           ref: main
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -528,8 +533,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           ref: ${{ needs.preflight.outputs.candidate_sha }}
           fetch-depth: 0
       - name: Prove exact read-only candidate identity
@@ -540,7 +546,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -679,11 +685,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           ref: ${{ needs.preflight.outputs.candidate_sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -741,11 +748,12 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
+          persist-credentials: true
           ref: main
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
