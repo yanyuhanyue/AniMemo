@@ -8,7 +8,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 COMMIT = "b" * 40
 API_DIGEST = "sha256:" + "3" * 64
@@ -22,6 +21,7 @@ class ReleaseCliTests(unittest.TestCase):
             cwd=ROOT,
             capture_output=True,
             text=True,
+            check=False,
         )
         self.assertEqual(completed.returncode, expected, completed.stderr or completed.stdout)
         return completed
@@ -48,10 +48,23 @@ class ReleaseCliTests(unittest.TestCase):
             root = Path(directory)
             target = root / "release-manifest.json"
             deployment_contract = root / "deployment-contract.json"
+            installer_materials = root / "installer-materials.tar"
+            wheelhouse = root / "wheelhouse"
+            wheelhouse.mkdir()
+            (wheelhouse / "qualified_dependency-1.0-py3-none-any.whl").write_bytes(
+                b"qualified wheel bytes"
+            )
             checksums = root / "checksums.txt"
+            self.run_cli(
+                "build-installer-materials",
+                "--root", ROOT,
+                "--wheelhouse", wheelhouse,
+                "--output", installer_materials,
+            )
             self.run_cli(
                 "generate-deployment-contract",
                 "--root", ROOT,
+                "--installer-materials", installer_materials,
                 "--output", deployment_contract,
             )
             self.run_cli(
@@ -65,23 +78,32 @@ class ReleaseCliTests(unittest.TestCase):
                 "--compatibility-file", ROOT / "release" / "compatibility.json",
                 "--deployment-contract-file", deployment_contract,
                 "--deployment-root", ROOT,
+                "--installer-materials", installer_materials,
                 "--output", target,
             )
             self.run_cli("validate-manifest", "--manifest", target, "--updater-version", "1.0.0")
             self.run_cli(
-                "write-checksums", "--output", checksums, target, deployment_contract
+                "write-checksums", "--output", checksums,
+                target, deployment_contract, installer_materials
             )
             expected_manifest = hashlib.sha256(target.read_bytes()).hexdigest()
             expected_deployment = hashlib.sha256(deployment_contract.read_bytes()).hexdigest()
+            expected_materials = hashlib.sha256(installer_materials.read_bytes()).hexdigest()
             self.assertEqual(
                 checksums.read_text(encoding="utf-8"),
                 f"{expected_manifest}  release-manifest.json\n"
-                f"{expected_deployment}  deployment-contract.json\n",
+                f"{expected_deployment}  deployment-contract.json\n"
+                f"{expected_materials}  installer-materials.tar\n",
             )
             payload = json.loads(target.read_text(encoding="utf-8"))
             self.assertEqual(
                 payload["deployment"]["contractSha256"],
                 "sha256:" + expected_deployment,
+            )
+            self.assertEqual(payload["schemaVersion"], 2)
+            self.assertEqual(
+                payload["deployment"]["installerMaterials"]["sha256"],
+                "sha256:" + expected_materials,
             )
 
     def test_generate_manifest_rejects_deployment_source_drift(self):
@@ -95,7 +117,21 @@ class ReleaseCliTests(unittest.TestCase):
             compose.write_text("services: {}\n", encoding="utf-8")
             overlay.write_text("services: {}\n", encoding="utf-8")
             contract = root / "deployment-contract.json"
-            self.run_cli("generate-deployment-contract", "--root", source_root, "--output", contract)
+            wheelhouse = root / "wheelhouse"
+            wheelhouse.mkdir()
+            (wheelhouse / "qualified_dependency-1.0-py3-none-any.whl").write_bytes(
+                b"qualified wheel bytes"
+            )
+            installer_materials = root / "installer-materials.tar"
+            self.run_cli(
+                "build-installer-materials", "--root", ROOT,
+                "--wheelhouse", wheelhouse, "--output", installer_materials,
+            )
+            self.run_cli(
+                "generate-deployment-contract", "--root", source_root,
+                "--installer-materials", installer_materials,
+                "--output", contract,
+            )
             compose.write_text("services:\n  changed: {}\n", encoding="utf-8")
 
             completed = self.run_cli(
@@ -109,6 +145,7 @@ class ReleaseCliTests(unittest.TestCase):
                 "--compatibility-file", ROOT / "release" / "compatibility.json",
                 "--deployment-contract-file", contract,
                 "--deployment-root", source_root,
+                "--installer-materials", installer_materials,
                 "--output", root / "release-manifest.json",
                 expected=2,
             )

@@ -12,11 +12,14 @@ Cloudflare usage snapshots are observability data only. The hard write guard use
 
 R2 thresholds use decimal GB (`1 GB = 1,000,000,000 bytes`). Local disk reserves use GiB (`1 GiB = 1,073,741,824 bytes`) and are labeled as GiB in the admin UI. Optional `CloudflareR2Account` budgets aggregate managed bytes and refreshed bucket snapshots across all linked buckets, so two buckets in one account share one configured account limit; accounts without a configured limit do not add a guard.
 
-For periodic external usage refresh, run the built-in command from a host scheduler every 30–60 minutes as appropriate for the deployment. On the production VPS, invoke it through the API container from the real Compose working directory:
+For periodic external usage refresh, run the built-in command from a host scheduler every 30–60 minutes as appropriate for the deployment. On a canonical v1.1 host, invoke it through the API container with the fixed project, exact Compose materials, and the runtime Adapter derived from managed configuration:
 
 ```bash
-cd /opt/1panel/docker/compose/animemo/app
-docker compose --env-file .env.production -f deploy/docker-compose.yml \
+cd /opt/animemo
+docker compose --project-name animemo \
+  --env-file /run/animemo-updater/managed.env \
+  -f /opt/animemo/deploy/docker-compose.yml \
+  -f /opt/animemo/updater/docker-compose.runtime.yml \
   exec -T api python manage.py refresh_media_storage_usage
 ```
 

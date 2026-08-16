@@ -131,6 +131,7 @@ OVERRIDE_FILE="$CURRENT_ROOT/deploy/docker-compose.upgrade-gate.yml"
 BUILD_OVERRIDE_FILE="$CURRENT_ROOT/deploy/docker-compose.build.yml"
 BASE_ADDED=false
 DIAGNOSTICS_RUNNING=false
+MANAGED_ENV_CREATED=false
 
 phase_marker() {
   local phase="$1"
@@ -293,6 +294,9 @@ cleanup() {
     git -C "$ROOT" worktree remove --force "$BASE_ROOT"
     git -C "$ROOT" worktree prune
   fi
+  if [[ "$MANAGED_ENV_CREATED" == true ]]; then
+    sudo -n rm -f -- /run/animemo-updater/managed.env
+  fi
   if [[ "$KEEP_TEMP" == true ]]; then
     echo "Stateful upgrade temp root retained: $TEMP_ROOT"
   else
@@ -431,6 +435,10 @@ SECURE_SSL_REDIRECT=false
 ALLOW_INSECURE_PRODUCTION_COOKIES=true
 PLUGIN_MIN_FREE_DISK_MB=0
 ANIMEMO_DATA_ROOT=$DATA_ROOT
+ANIMEMO_TEST_DATA_ROOT=$DATA_ROOT
+ANIMEMO_LISTEN_HOST=127.0.0.1
+ANIMEMO_LISTEN_PORT=8088
+ANIMEMO_CONFIG_REVISION=11111111-1111-4111-8111-111111111111
 STATEFUL_UPGRADE_ENV_FILE=$ENV_FILE
 STATEFUL_UPGRADE_META_ROOT=$META_ROOT
 STATEFUL_UPGRADE_HELPER_ROOT=$CURRENT_ROOT
@@ -438,7 +446,17 @@ UPGRADE_SOURCE_ROOT=$CURRENT_ROOT
 COMPOSE_PROJECT_NAME=$PROJECT_NAME
 ANIMEMO_API_IMAGE=$PROJECT_NAME-api:current
 ANIMEMO_WEB_IMAGE=$PROJECT_NAME-web:current
+ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
+ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
 EOF
+
+if [[ -e /run/animemo-updater/managed.env ]]; then
+  echo "Stateful upgrade gate refuses to replace an existing managed runtime env." >&2
+  exit 1
+fi
+sudo -n install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater
+sudo -n install -m 0600 -o "$(id -u)" -g "$(id -g)" "$ENV_FILE" /run/animemo-updater/managed.env
+MANAGED_ENV_CREATED=true
 
 echo "Upgrade Base SHA: $BASE_SHA"
 echo "Upgrade Head SHA: $HEAD_SHA"

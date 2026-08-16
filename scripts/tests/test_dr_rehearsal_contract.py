@@ -16,6 +16,15 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
         cls.release_gate = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8")
 
     def test_rehearsal_has_real_dump_then_a_only_destruction_then_fresh_b_restore(self):
+        for required in (
+            "ANIMEMO_CONFIG_REVISION=",
+            "ANIMEMO_TEST_DATA_ROOT=",
+            "ANIMEMO_LISTEN_HOST=127.0.0.1",
+            "ANIMEMO_LISTEN_PORT=8088",
+            "ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:",
+            "ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:",
+        ):
+            self.assertIn(required, self.script)
         dump = self.script.index("pg_dump --format=plain --no-owner --no-privileges")
         backup = self.script.index('dr_backup.py" create')
         destroy_a = self.script.index("== Destroy isolated instance A only ==")

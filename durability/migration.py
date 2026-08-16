@@ -50,10 +50,10 @@ from durability.instance import (
     APP_ROOT,
     DATA_ROOT,
     MANAGED_CONFIG_ROOT,
-    STANDARD_DEPLOYMENT_PROFILE,
     InstanceLocator,
     ListenIdentity,
     LocatorError,
+    instance_locator_payload,
     parse_instance_locator,
 )
 from durability.resource_budget import (
@@ -145,6 +145,7 @@ _TARGET_LOCAL_DISPOSITIONS: Final = {
     "appRoot": "TARGET-LOCAL",
     "dataRoot": "TARGET-LOCAL",
     "managedConfigPath": "TARGET-LOCAL",
+    "configRevision": "TARGET-LOCAL",
     "databaseHost": "TARGET-LOCAL",
     "databaseCredential": "TARGET-LOCAL",
     "redisHost": "TARGET-LOCAL",
@@ -400,17 +401,13 @@ class MigrationTargetWriter(Protocol):
 
     def begin(self, *, bundle_id: str, instance_id: str) -> None: ...
 
-    def stage_database(
-        self, path: Path, metadata: Mapping[str, object]
-    ) -> None: ...
+    def stage_database(self, path: Path, metadata: Mapping[str, object]) -> None: ...
 
     def stage_plugin_package(
         self, path: Path, metadata: Mapping[str, object]
     ) -> None: ...
 
-    def stage_local_media(
-        self, path: Path, metadata: Mapping[str, object]
-    ) -> None: ...
+    def stage_local_media(self, path: Path, metadata: Mapping[str, object]) -> None: ...
 
     def stage_configuration(
         self,
@@ -430,9 +427,7 @@ class MigrationTargetWriter(Protocol):
 
     def rollback(self, *, bundle_id: str) -> None: ...
 
-    def record_recovery_required(
-        self, evidence: MigrationRecoveryEvidence
-    ) -> None: ...
+    def record_recovery_required(self, evidence: MigrationRecoveryEvidence) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -540,7 +535,9 @@ def create_migration_bundle(
                 raise MigrationOperationalError(
                     "MIGRATION_RESOURCE_BOUNDS_EXCEEDED"
                 ) from None
-            raise MigrationOperationalError("MIGRATION_DATABASE_CAPTURE_FAILED") from None
+            raise MigrationOperationalError(
+                "MIGRATION_DATABASE_CAPTURE_FAILED"
+            ) from None
 
         copy_counter = CopyByteCounter(MAX_TOTAL_COPIED_BYTES)
         try:
@@ -597,9 +594,7 @@ def create_migration_bundle(
             "source": source,
             "deploymentContract": _safe_non_secret(request.deployment_contract),
             "databaseContract": _safe_non_secret(request.database_contract),
-            "configurationContract": _safe_non_secret(
-                request.configuration_contract
-            ),
+            "configurationContract": _safe_non_secret(request.configuration_contract),
             "database": database_metadata,
             "databaseReferences": database_references,
             "payloadMembers": payload_records,
@@ -612,9 +607,7 @@ def create_migration_bundle(
             "secretProfileIdentity": ENVELOPE_IDENTITY,
             "activationProfile": "explicit-source-target-handoff/v1",
         }
-        artifact_binding_digest = sha256_identity(
-            canonical_json_bytes(binding_record)
-        )
+        artifact_binding_digest = sha256_identity(canonical_json_bytes(binding_record))
         try:
             envelope = create_secret_envelope(
                 external_secret=request.external_secret,
@@ -627,7 +620,9 @@ def create_migration_bundle(
         except SecretEnvelopeUnsupportedError as error:
             raise MigrationUnsupportedError(error.code) from None
         except SecretEnvelopeError:
-            raise MigrationOperationalError("MIGRATION_SECRET_ENVELOPE_FAILED") from None
+            raise MigrationOperationalError(
+                "MIGRATION_SECRET_ENVELOPE_FAILED"
+            ) from None
         envelope_bytes = envelope.to_bytes()
         _write_private_bytes(staging / ENVELOPE_PATH, envelope_bytes)
 
@@ -649,9 +644,7 @@ def create_migration_bundle(
             "source": source,
             "deploymentContract": _safe_non_secret(request.deployment_contract),
             "databaseContract": _safe_non_secret(request.database_contract),
-            "configurationContract": _safe_non_secret(
-                request.configuration_contract
-            ),
+            "configurationContract": _safe_non_secret(request.configuration_contract),
             "database": database_metadata,
             "databaseReferences": database_references,
             "configuration": configuration,
@@ -801,23 +794,23 @@ def _consume_migration_snapshot(
     configuration = _read_json_member(verification.path, CONFIG_MEMBER)
     private_state = _read_json_member(verification.path, PRIVATE_MANIFEST_MEMBER)
     updater_state = _read_json_member(verification.path, UPDATER_STATE_MEMBER)
-    database_metadata = _read_json_member(
-        verification.path, DATABASE_METADATA_MEMBER
-    )
+    database_metadata = _read_json_member(verification.path, DATABASE_METADATA_MEMBER)
 
     completed: list[str] = []
     failed_step = "begin"
     database_boundary_crossed = False
     try:
-        target.begin(bundle_id=verification.bundle_id, instance_id=verification.instance_id)
+        target.begin(
+            bundle_id=verification.bundle_id, instance_id=verification.instance_id
+        )
         completed.append("begin")
         failed_step = "database"
         database_boundary_crossed = True
-        target.stage_database(
-            verification.path / DATABASE_MEMBER, database_metadata
-        )
+        target.stage_database(verification.path / DATABASE_MEMBER, database_metadata)
         completed.append("database")
-        for package in cast(Sequence[Mapping[str, object]], plugin_manifest["packages"]):
+        for package in cast(
+            Sequence[Mapping[str, object]], plugin_manifest["packages"]
+        ):
             failed_step = "plugin"
             target.stage_plugin_package(
                 verification.path / cast(str, package["casPath"]), package
@@ -971,9 +964,11 @@ def _validate_request(request: MigrationBundleRequest) -> dict[str, object]:
         )
     ):
         raise MigrationOperationalError("MIGRATION_CONTRACT_IDENTITY_INVALID")
-    if not isinstance(request.plugins, tuple) or not isinstance(
-        request.local_media, tuple
-    ) or not isinstance(request.r2_media, tuple):
+    if (
+        not isinstance(request.plugins, tuple)
+        or not isinstance(request.local_media, tuple)
+        or not isinstance(request.r2_media, tuple)
+    ):
         raise MigrationOperationalError("MIGRATION_REQUEST_INVALID")
     if not isinstance(request.target_r2_identities, Mapping):
         raise MigrationUnsupportedError("MIGRATION_R2_IDENTITY_INDETERMINATE")
@@ -988,9 +983,7 @@ def _validate_request(request: MigrationBundleRequest) -> dict[str, object]:
     return _configuration_json(request.source_locator, request.configuration)
 
 
-def _validate_private_state(
-    value: object, *, producer: bool
-) -> dict[str, object]:
+def _validate_private_state(value: object, *, producer: bool) -> dict[str, object]:
     if not isinstance(value, Mapping):
         _state_invalid("MIGRATION_PRIVATE_STATE_INVALID", producer)
     fields = set(value)
@@ -1005,8 +998,7 @@ def _validate_private_state(
     assert isinstance(normalized, dict)
     if (
         normalized.get("schemaVersion") != 1
-        or normalized.get("instanceLifecycle")
-        not in {"INITIALIZED", "UNINITIALIZED"}
+        or normalized.get("instanceLifecycle") not in {"INITIALIZED", "UNINITIALIZED"}
         or normalized.get("unknownFilesCopied") is not False
     ):
         _state_invalid("MIGRATION_PRIVATE_STATE_INVALID", producer)
@@ -1102,9 +1094,7 @@ def _validate_updater_history(
                 or _safe_non_secret(release) != release
             ):
                 _state_invalid("MIGRATION_UPDATER_STATE_INVALID", producer)
-            digest = _require_sha256(
-                evidence, "MIGRATION_UPDATER_STATE_INVALID"
-            )
+            digest = _require_sha256(evidence, "MIGRATION_UPDATER_STATE_INVALID")
         except MigrationError:
             _state_invalid("MIGRATION_UPDATER_STATE_INVALID", producer)
         if digest in previous_evidence:
@@ -1124,8 +1114,7 @@ def _validate_updater_history(
         if (
             not _is_uuid(operation_id)
             or operation_id in operation_ids
-            or item.get("operationType")
-            not in {"BOOTSTRAP", "ROLLBACK", "UPDATE"}
+            or item.get("operationType") not in {"BOOTSTRAP", "ROLLBACK", "UPDATE"}
         ):
             _state_invalid("MIGRATION_UPDATER_STATE_INVALID", producer)
         try:
@@ -1193,9 +1182,7 @@ def _configuration_json(
             source_listen if target_listen is None else _listen_json(target_listen)
         )
         expected = {
-            "publicOrigin": "RECONFIGURE"
-            if target_origin is not None
-            else "PRESERVE",
+            "publicOrigin": "RECONFIGURE" if target_origin is not None else "PRESERVE",
             "listen": "RECONFIGURE" if target_listen is not None else "PRESERVE",
         }
     else:
@@ -1274,30 +1261,16 @@ def _source_snapshot(probe: SourceConsistencyProbe) -> SourceConsistencySnapshot
 def _source_json(locator: InstanceLocator) -> dict[str, object]:
     if not isinstance(locator, InstanceLocator):
         raise MigrationUnsupportedError("MIGRATION_SOURCE_LOCATOR_UNSUPPORTED")
-    release_identity = _safe_non_secret(locator.release_identity)
-    if (
-        locator.schema_version != 1
-        or not _is_uuid(locator.instance_id)
-        or locator.app_root != APP_ROOT
-        or locator.data_root != DATA_ROOT
-        or locator.deployment_profile != STANDARD_DEPLOYMENT_PROFILE
-        or locator.managed_config_path == MANAGED_CONFIG_ROOT
-        or MANAGED_CONFIG_ROOT not in locator.managed_config_path.parents
-        or not isinstance(release_identity, dict)
-        or not release_identity
-    ):
+    try:
+        payload = instance_locator_payload(locator)
+        canonical = parse_instance_locator(payload)
+    except LocatorError as error:
+        raise MigrationUnsupportedError(
+            "MIGRATION_SOURCE_LOCATOR_UNSUPPORTED"
+        ) from error
+    if canonical != locator:
         raise MigrationUnsupportedError("MIGRATION_SOURCE_LOCATOR_UNSUPPORTED")
-    return {
-        "schemaVersion": locator.schema_version,
-        "instanceId": locator.instance_id,
-        "appRoot": str(locator.app_root),
-        "dataRoot": str(locator.data_root),
-        "deploymentProfile": locator.deployment_profile,
-        "listen": _listen_json(locator.listen),
-        "publicOrigin": _canonical_public_origin(locator.public_origin),
-        "managedConfigPath": str(locator.managed_config_path),
-        "releaseIdentity": release_identity,
-    }
+    return payload
 
 
 def _snapshot_json(snapshot: SourceConsistencySnapshot) -> dict[str, object]:
@@ -1346,9 +1319,7 @@ def _safe_non_secret(
             raise MigrationOperationalError("MIGRATION_METADATA_INVALID")
         return value
     if isinstance(value, str):
-        if len(value.encode("utf-8")) > MAX_IDENTITY_STRING or _string_is_secret(
-            value
-        ):
+        if len(value.encode("utf-8")) > MAX_IDENTITY_STRING or _string_is_secret(value):
             raise MigrationOperationalError("MIGRATION_SECRET_METADATA_FORBIDDEN")
         return value
     if isinstance(value, Mapping):
@@ -1368,8 +1339,7 @@ def _safe_non_secret(
         if len(value) > MAX_IDENTITY_MEMBERS:
             raise MigrationOperationalError("MIGRATION_METADATA_INVALID")
         return [
-            _safe_non_secret(item, depth=depth + 1, counter=counter)
-            for item in value
+            _safe_non_secret(item, depth=depth + 1, counter=counter) for item in value
         ]
     raise MigrationOperationalError("MIGRATION_METADATA_INVALID")
 
@@ -1380,7 +1350,15 @@ def _field_is_secret(key: str, value: object) -> bool:
         return False
     return not (
         normalized.endswith(
-            ("configured", "disposition", "identity", "path", "present", "required", "status")
+            (
+                "configured",
+                "disposition",
+                "identity",
+                "path",
+                "present",
+                "required",
+                "status",
+            )
         )
         and isinstance(value, (str, bool, int, type(None)))
     )
@@ -1446,9 +1424,7 @@ def _listen_json(value: object) -> dict[str, object]:
 
 def _prepare_destination_root(path: Path) -> Path:
     raw = Path(path).expanduser().absolute()
-    if _path_has_link_component(raw) or (
-        raw.exists() and not raw.is_dir()
-    ):
+    if _path_has_link_component(raw) or (raw.exists() and not raw.is_dir()):
         raise MigrationOperationalError("MIGRATION_DESTINATION_INVALID")
     try:
         raw.mkdir(parents=True, exist_ok=True)
@@ -1542,7 +1518,9 @@ def _copy_bundle_snapshot_regular(
                 )
             except ResourceLimitExceeded as error:
                 if error.reason is ResourceLimitReason.DECLARED_SIZE_MISMATCH:
-                    raise MigrationOperationalError("MIGRATION_SOURCE_CHANGED") from None
+                    raise MigrationOperationalError(
+                        "MIGRATION_SOURCE_CHANGED"
+                    ) from None
                 raise MigrationCorruptError(
                     "MIGRATION_RESOURCE_BOUNDS_EXCEEDED"
                 ) from None
@@ -1645,7 +1623,9 @@ def _capture_database_references(
             "MIGRATION_DATABASE_REFERENCE_PROBE_FAILED"
         ) from None
     if not isinstance(inventory, DatabaseReferenceInventory):
-        raise MigrationOperationalError("MIGRATION_DATABASE_REFERENCE_INVENTORY_INVALID")
+        raise MigrationOperationalError(
+            "MIGRATION_DATABASE_REFERENCE_INVENTORY_INVALID"
+        )
     generation = inventory.generation
     if (
         not isinstance(generation, str)
@@ -1653,18 +1633,22 @@ def _capture_database_references(
         or len(generation.encode("utf-8")) > 256
         or _string_is_secret(generation)
     ):
-        raise MigrationOperationalError("MIGRATION_DATABASE_REFERENCE_INVENTORY_INVALID")
+        raise MigrationOperationalError(
+            "MIGRATION_DATABASE_REFERENCE_INVENTORY_INVALID"
+        )
 
     plugins: list[dict[str, object]] = []
     for item in sorted(
         inventory.plugin_packages,
         key=lambda value: (
-            value.project_id.encode("utf-8"),
-            value.version_id.encode("utf-8"),
-            value.deployment_id.encode("utf-8"),
-        )
-        if isinstance(value, PluginDatabaseReference)
-        else (b"", b"", b""),
+            (
+                value.project_id.encode("utf-8"),
+                value.version_id.encode("utf-8"),
+                value.deployment_id.encode("utf-8"),
+            )
+            if isinstance(value, PluginDatabaseReference)
+            else (b"", b"", b"")
+        ),
     ):
         if not isinstance(item, PluginDatabaseReference):
             raise MigrationOperationalError(
@@ -1692,9 +1676,11 @@ def _capture_database_references(
     local: list[dict[str, object]] = []
     for item in sorted(
         inventory.local_media,
-        key=lambda value: value.media_id.encode("utf-8")
-        if isinstance(value, LocalMediaDatabaseReference)
-        else b"",
+        key=lambda value: (
+            value.media_id.encode("utf-8")
+            if isinstance(value, LocalMediaDatabaseReference)
+            else b""
+        ),
     ):
         if not isinstance(item, LocalMediaDatabaseReference):
             raise MigrationOperationalError(
@@ -1705,9 +1691,11 @@ def _capture_database_references(
     remote: list[dict[str, object]] = []
     for item in sorted(
         inventory.r2_media,
-        key=lambda value: value.media_id.encode("utf-8")
-        if isinstance(value, R2MediaDatabaseReference)
-        else b"",
+        key=lambda value: (
+            value.media_id.encode("utf-8")
+            if isinstance(value, R2MediaDatabaseReference)
+            else b""
+        ),
     ):
         if not isinstance(item, R2MediaDatabaseReference):
             raise MigrationOperationalError(
@@ -1738,7 +1726,9 @@ def _database_media_reference_common(
 ) -> dict[str, object]:
     size = item.size_bytes
     if isinstance(size, bool) or not isinstance(size, int) or size < 0:
-        raise MigrationOperationalError("MIGRATION_DATABASE_REFERENCE_INVENTORY_INVALID")
+        raise MigrationOperationalError(
+            "MIGRATION_DATABASE_REFERENCE_INVENTORY_INVALID"
+        )
     return {
         "mediaId": _safe_identifier(item.media_id),
         "objectKey": _canonical_object_key(item.object_key),
@@ -1756,15 +1746,14 @@ def _database_media_reference_common(
 def _require_unique_reference_identities(value: Mapping[str, object]) -> None:
     plugins = cast(Sequence[Mapping[str, object]], value["plugins"])
     plugin_ids = {
-        (item["projectId"], item["versionId"], item["deploymentId"])
-        for item in plugins
+        (item["projectId"], item["versionId"], item["deploymentId"]) for item in plugins
     }
     local = cast(Sequence[Mapping[str, object]], value["localMedia"])
     remote = cast(Sequence[Mapping[str, object]], value["r2Media"])
     media_ids = [item["mediaId"] for item in (*local, *remote)]
-    object_ids = [
-        ("local", item["objectKey"]) for item in local
-    ] + [(item["backendId"], item["objectKey"]) for item in remote]
+    object_ids = [("local", item["objectKey"]) for item in local] + [
+        (item["backendId"], item["objectKey"]) for item in remote
+    ]
     if (
         len(plugin_ids) != len(plugins)
         or len(set(media_ids)) != len(media_ids)
@@ -1790,9 +1779,7 @@ def _cross_check_database_references(
                 "manifestSnapshotDigest",
             )
         }
-        for package in cast(
-            Sequence[Mapping[str, object]], plugin_manifest["packages"]
-        )
+        for package in cast(Sequence[Mapping[str, object]], plugin_manifest["packages"])
     ]
     expected_local = [
         {
@@ -1842,12 +1829,14 @@ def _capture_plugins(
     for package in sorted(
         packages,
         key=lambda item: (
-            item.project_id.encode("utf-8"),
-            item.version_id.encode("utf-8"),
-            item.deployment_id.encode("utf-8"),
-        )
-        if isinstance(item, PluginPackage)
-        else (b"", b"", b""),
+            (
+                item.project_id.encode("utf-8"),
+                item.version_id.encode("utf-8"),
+                item.deployment_id.encode("utf-8"),
+            )
+            if isinstance(item, PluginPackage)
+            else (b"", b"", b"")
+        ),
     ):
         if not isinstance(package, PluginPackage):
             raise MigrationOperationalError("MIGRATION_PLUGIN_INVENTORY_INVALID")
@@ -1914,9 +1903,11 @@ def _capture_media(
     copied: set[str] = set()
     for item in sorted(
         local_media,
-        key=lambda value: value.media_id.encode("utf-8")
-        if isinstance(value, LocalMediaObject)
-        else b"",
+        key=lambda value: (
+            value.media_id.encode("utf-8")
+            if isinstance(value, LocalMediaObject)
+            else b""
+        ),
     ):
         if not isinstance(item, LocalMediaObject):
             raise MigrationOperationalError("MIGRATION_MEDIA_INVENTORY_INVALID")
@@ -1930,7 +1921,11 @@ def _capture_media(
             raise MigrationCorruptError("MIGRATION_MEDIA_OWNERSHIP_AMBIGUOUS")
         seen_objects.add(object_identity)
         _require_sha256(item.digest, "MIGRATION_MEDIA_DIGEST_INVALID")
-        if isinstance(item.size_bytes, bool) or not isinstance(item.size_bytes, int) or item.size_bytes < 0:
+        if (
+            isinstance(item.size_bytes, bool)
+            or not isinstance(item.size_bytes, int)
+            or item.size_bytes < 0
+        ):
             raise MigrationOperationalError("MIGRATION_MEDIA_SIZE_INVALID")
         member = f"media/local/{item.digest.removeprefix('sha256:')}"
         if member not in copied:
@@ -1959,9 +1954,9 @@ def _capture_media(
         )
     for item in sorted(
         r2_media,
-        key=lambda value: value.media_id.encode("utf-8")
-        if isinstance(value, R2MediaObject)
-        else b"",
+        key=lambda value: (
+            value.media_id.encode("utf-8") if isinstance(value, R2MediaObject) else b""
+        ),
     ):
         if not isinstance(item, R2MediaObject):
             raise MigrationOperationalError("MIGRATION_MEDIA_INVENTORY_INVALID")
@@ -1977,7 +1972,11 @@ def _capture_media(
         if _r2_identity_json(target_identity) != source_identity:
             raise MigrationUnsupportedError("MIGRATION_R2_TRANSFER_REQUIRED")
         _require_sha256(item.digest, "MIGRATION_MEDIA_DIGEST_INVALID")
-        if isinstance(item.size_bytes, bool) or not isinstance(item.size_bytes, int) or item.size_bytes < 0:
+        if (
+            isinstance(item.size_bytes, bool)
+            or not isinstance(item.size_bytes, int)
+            or item.size_bytes < 0
+        ):
             raise MigrationOperationalError("MIGRATION_MEDIA_SIZE_INVALID")
         object_key = _canonical_object_key(item.object_key)
         object_identity = (backend_id, object_key)
@@ -2032,14 +2031,10 @@ def _copy_verified_source(
         preflight_copy_sizes(
             (before.st_size,),
             maximum_member_bytes=MAX_MEMBER_BYTES,
-            maximum_total_bytes=(
-                copy_counter.maximum_bytes - copy_counter.copied
-            ),
+            maximum_total_bytes=(copy_counter.maximum_bytes - copy_counter.copied),
         )
     except ResourceLimitExceeded:
-        raise MigrationOperationalError(
-            "MIGRATION_RESOURCE_BOUNDS_EXCEEDED"
-        ) from None
+        raise MigrationOperationalError("MIGRATION_RESOURCE_BOUNDS_EXCEEDED") from None
     _make_private_directory(target.parent)
     descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     digest = hashlib.sha256()
@@ -2047,6 +2042,7 @@ def _copy_verified_source(
     try:
         with source.open("rb") as input_stream, os.fdopen(descriptor, "wb") as output:
             descriptor = -1
+
             class _DigestingTarget:
                 def write(self, chunk: bytes) -> int:
                     digest.update(chunk)
@@ -2062,7 +2058,9 @@ def _copy_verified_source(
                 )
             except ResourceLimitExceeded as error:
                 if error.reason is ResourceLimitReason.DECLARED_SIZE_MISMATCH:
-                    raise MigrationOperationalError("MIGRATION_SOURCE_CHANGED") from None
+                    raise MigrationOperationalError(
+                        "MIGRATION_SOURCE_CHANGED"
+                    ) from None
                 raise MigrationOperationalError(
                     "MIGRATION_RESOURCE_BOUNDS_EXCEEDED"
                 ) from None
@@ -2116,7 +2114,9 @@ def _payload_records(root: Path) -> list[dict[str, object]]:
 def _checksum_bytes(records: Sequence[Mapping[str, object]]) -> bytes:
     lines: list[str] = []
     previous: bytes | None = None
-    for record in sorted(records, key=lambda item: str(item.get("path", "")).encode("utf-8")):
+    for record in sorted(
+        records, key=lambda item: str(item.get("path", "")).encode("utf-8")
+    ):
         if set(record) != {"path", "sha256", "sizeBytes"}:
             raise MigrationCorruptError("MIGRATION_MEMBER_RECORD_INVALID")
         relative = _canonical_relative_path(record["path"])
@@ -2134,9 +2134,7 @@ def _checksum_bytes(records: Sequence[Mapping[str, object]]) -> bytes:
     return "".join(lines).encode("utf-8")
 
 
-def _strict_json_object(
-    encoded: bytes, *, maximum: int, code: str
-) -> dict[str, Any]:
+def _strict_json_object(encoded: bytes, *, maximum: int, code: str) -> dict[str, Any]:
     if len(encoded) > maximum:
         raise MigrationCorruptError(code)
 
@@ -2165,7 +2163,9 @@ def _strict_json_object(
 
 
 def _read_json_member(root: Path, relative: str) -> dict[str, Any]:
-    encoded = _read_regular_file(root / PurePosixPath(relative), maximum=MAX_JSON_MEMBER_BYTES)
+    encoded = _read_regular_file(
+        root / PurePosixPath(relative), maximum=MAX_JSON_MEMBER_BYTES
+    )
     parsed = _strict_json_object(
         encoded, maximum=MAX_JSON_MEMBER_BYTES, code="MIGRATION_JSON_MEMBER_CORRUPT"
     )
@@ -2289,13 +2289,17 @@ def _verify_bundle(root: Path, *, staging_allowed: bool) -> MigrationVerificatio
     ):
         raise MigrationCorruptError("MIGRATION_CONTRACT_IDENTITY_CORRUPT")
     source_release = cast(Mapping[str, object], source["releaseIdentity"])
-    if _validate_private_state(manifest["privateState"], producer=False) != manifest[
-        "privateState"
-    ]:
+    if (
+        _validate_private_state(manifest["privateState"], producer=False)
+        != manifest["privateState"]
+    ):
         raise MigrationCorruptError("MIGRATION_PRIVATE_STATE_INVALID")
-    if _validate_updater_state(
-        manifest["updaterState"], source_release, producer=False
-    ) != manifest["updaterState"]:
+    if (
+        _validate_updater_state(
+            manifest["updaterState"], source_release, producer=False
+        )
+        != manifest["updaterState"]
+    ):
         raise MigrationCorruptError("MIGRATION_UPDATER_STATE_INVALID")
 
     records = _payload_records(path)
@@ -2335,9 +2339,7 @@ def _verify_bundle(root: Path, *, staging_allowed: bool) -> MigrationVerificatio
         manifest["databaseReferences"], plugin_manifest, media_manifest
     )
     configuration_mode = _verify_configuration(configuration)
-    consistency_generation = _verify_source_consistency(
-        manifest["sourceConsistency"]
-    )
+    consistency_generation = _verify_source_consistency(manifest["sourceConsistency"])
 
     binding_record = manifest["artifactBindingRecord"]
     expected_binding_record = {
@@ -2404,16 +2406,20 @@ def _verify_bundle(root: Path, *, staging_allowed: bool) -> MigrationVerificatio
 
 
 def _verify_database(root: Path, database: Mapping[str, object]) -> None:
-    if set(database) != {
-        "path",
-        "dumpProfile",
-        "serverMajor",
-        "toolVersion",
-        "uncompressedSha256",
-        "uncompressedBytes",
-        "compressedSha256",
-        "compressedBytes",
-    } or database.get("path") != DATABASE_MEMBER:
+    if (
+        set(database)
+        != {
+            "path",
+            "dumpProfile",
+            "serverMajor",
+            "toolVersion",
+            "uncompressedSha256",
+            "uncompressedBytes",
+            "compressedSha256",
+            "compressedBytes",
+        }
+        or database.get("path") != DATABASE_MEMBER
+    ):
         raise MigrationCorruptError("MIGRATION_DATABASE_METADATA_CORRUPT")
     profile = database.get("dumpProfile")
     if profile != {
@@ -2439,10 +2445,9 @@ def _verify_database(root: Path, database: Mapping[str, object]) -> None:
             raise MigrationCorruptError("MIGRATION_DATABASE_METADATA_CORRUPT")
     member = root / DATABASE_MEMBER
     compressed_size = member.stat().st_size
-    if (
-        database["compressedBytes"] != compressed_size
-        or database["compressedSha256"] != _sha256_file(member)
-    ):
+    if database["compressedBytes"] != compressed_size or database[
+        "compressedSha256"
+    ] != _sha256_file(member):
         raise MigrationCorruptError("MIGRATION_DATABASE_COMPRESSED_CORRUPT")
     digest = hashlib.sha256()
     try:
@@ -2466,8 +2471,7 @@ def _verify_database(root: Path, database: Mapping[str, object]) -> None:
     if (
         not uncompressed_size
         or database["uncompressedBytes"] != uncompressed_size
-        or database["uncompressedSha256"]
-        != f"sha256:{digest.hexdigest()}"
+        or database["uncompressedSha256"] != f"sha256:{digest.hexdigest()}"
     ):
         raise MigrationCorruptError("MIGRATION_DATABASE_UNCOMPRESSED_CORRUPT")
 
@@ -2506,22 +2510,27 @@ def _verify_database_references(
 def _verify_plugins(
     manifest: Mapping[str, object], records: Sequence[Mapping[str, object]]
 ) -> None:
-    if set(manifest) != {
-        "packages",
-        "runtimeIncluded",
-        "previewsIncluded",
-        "stagingIncluded",
-        "locksIncluded",
-        "pluginDataDeletion",
-    } or any(
-        manifest.get(field) is not False
-        for field in (
+    if (
+        set(manifest)
+        != {
+            "packages",
             "runtimeIncluded",
             "previewsIncluded",
             "stagingIncluded",
             "locksIncluded",
+            "pluginDataDeletion",
+        }
+        or any(
+            manifest.get(field) is not False
+            for field in (
+                "runtimeIncluded",
+                "previewsIncluded",
+                "stagingIncluded",
+                "locksIncluded",
+            )
         )
-    ) or manifest.get("pluginDataDeletion") != "NEVER_AUTOMATIC":
+        or manifest.get("pluginDataDeletion") != "NEVER_AUTOMATIC"
+    ):
         raise MigrationCorruptError("MIGRATION_PLUGIN_MANIFEST_CORRUPT")
     packages = manifest.get("packages")
     if not isinstance(packages, list):
@@ -2552,7 +2561,12 @@ def _verify_plugins(
         if identity in identities:
             raise MigrationCorruptError("MIGRATION_PLUGIN_MANIFEST_CORRUPT")
         identities.add(identity)
-        ordering.append(cast(tuple[bytes, bytes, bytes], tuple(item.encode("utf-8") for item in identity)))
+        ordering.append(
+            cast(
+                tuple[bytes, bytes, bytes],
+                tuple(item.encode("utf-8") for item in identity),
+            )
+        )
         _require_sha256(package["digest"], "MIGRATION_PLUGIN_MANIFEST_CORRUPT")
         _require_sha256(
             package["manifestSnapshotDigest"], "MIGRATION_PLUGIN_MANIFEST_CORRUPT"
@@ -2586,14 +2600,17 @@ def _verify_plugins(
 def _verify_media(
     manifest: Mapping[str, object], records: Sequence[Mapping[str, object]]
 ) -> None:
-    if set(manifest) != {
-        "local",
-        "r2",
-        "unknownOrphanPolicy",
-        "automaticDeletion",
-    } or manifest.get("unknownOrphanPolicy") != "PRESERVE_NEVER_DELETE" or manifest.get(
-        "automaticDeletion"
-    ) is not False:
+    if (
+        set(manifest)
+        != {
+            "local",
+            "r2",
+            "unknownOrphanPolicy",
+            "automaticDeletion",
+        }
+        or manifest.get("unknownOrphanPolicy") != "PRESERVE_NEVER_DELETE"
+        or manifest.get("automaticDeletion") is not False
+    ):
         raise MigrationCorruptError("MIGRATION_MEDIA_MANIFEST_CORRUPT")
     local = manifest.get("local")
     remote = manifest.get("r2")
@@ -2605,15 +2622,20 @@ def _verify_media(
     object_identities: set[tuple[str, str]] = set()
     previous: bytes | None = None
     for item in local:
-        if not isinstance(item, Mapping) or set(item) != {
-            "mediaId",
-            "objectKey",
-            "digest",
-            "sizeBytes",
-            "memberPath",
-            "memoryReferences",
-            "strategy",
-        } or item.get("strategy") != "LOCAL_INCLUDED":
+        if (
+            not isinstance(item, Mapping)
+            or set(item)
+            != {
+                "mediaId",
+                "objectKey",
+                "digest",
+                "sizeBytes",
+                "memberPath",
+                "memoryReferences",
+                "strategy",
+            }
+            or item.get("strategy") != "LOCAL_INCLUDED"
+        ):
             raise MigrationCorruptError("MIGRATION_MEDIA_MANIFEST_CORRUPT")
         media_id = _verified_media_common(item, media_ids)
         object_identity = ("local", cast(str, item["objectKey"]))
@@ -2623,26 +2645,37 @@ def _verify_media(
         if previous is not None and media_id.encode("utf-8") <= previous:
             raise MigrationCorruptError("MIGRATION_MEDIA_MANIFEST_CORRUPT")
         previous = media_id.encode("utf-8")
-        expected_path = f"media/local/{cast(str, item['digest']).removeprefix('sha256:')}"
+        expected_path = (
+            f"media/local/{cast(str, item['digest']).removeprefix('sha256:')}"
+        )
         if item["memberPath"] != expected_path or expected_path not in member_records:
             raise MigrationCorruptError("MIGRATION_MEDIA_MEMBER_CORRUPT")
         member = member_records[expected_path]
-        if item["digest"] != member["sha256"] or item["sizeBytes"] != member["sizeBytes"]:
+        if (
+            item["digest"] != member["sha256"]
+            or item["sizeBytes"] != member["sizeBytes"]
+        ):
             raise MigrationCorruptError("MIGRATION_MEDIA_MEMBER_CORRUPT")
         declared.add(expected_path)
     previous = None
     for item in remote:
-        if not isinstance(item, Mapping) or set(item) != {
-            "mediaId",
-            "backendId",
-            "objectKey",
-            "digest",
-            "sizeBytes",
-            "physicalIdentity",
-            "memoryReferences",
-            "strategy",
-            "remoteBytesCopied",
-        } or item.get("strategy") != "SAME_R2" or item.get("remoteBytesCopied") is not False:
+        if (
+            not isinstance(item, Mapping)
+            or set(item)
+            != {
+                "mediaId",
+                "backendId",
+                "objectKey",
+                "digest",
+                "sizeBytes",
+                "physicalIdentity",
+                "memoryReferences",
+                "strategy",
+                "remoteBytesCopied",
+            }
+            or item.get("strategy") != "SAME_R2"
+            or item.get("remoteBytesCopied") is not False
+        ):
             raise MigrationCorruptError("MIGRATION_MEDIA_MANIFEST_CORRUPT")
         media_id = _verified_media_common(item, media_ids)
         object_identity = (
@@ -2658,13 +2691,17 @@ def _verify_media(
         try:
             _safe_identifier(item["backendId"])
             identity = item["physicalIdentity"]
-            if not isinstance(identity, Mapping) or _r2_identity_json(
-                R2PhysicalIdentity(
-                    endpoint=cast(str, identity.get("endpoint")),
-                    account_identity=cast(str, identity.get("accountIdentity")),
-                    bucket=cast(str, identity.get("bucket")),
+            if (
+                not isinstance(identity, Mapping)
+                or _r2_identity_json(
+                    R2PhysicalIdentity(
+                        endpoint=cast(str, identity.get("endpoint")),
+                        account_identity=cast(str, identity.get("accountIdentity")),
+                        bucket=cast(str, identity.get("bucket")),
+                    )
                 )
-            ) != identity:
+                != identity
+            ):
                 raise MigrationCorruptError("MIGRATION_R2_IDENTITY_CORRUPT")
         except MigrationError:
             raise MigrationCorruptError("MIGRATION_R2_IDENTITY_CORRUPT") from None
@@ -2677,9 +2714,7 @@ def _verify_media(
         raise MigrationCorruptError("MIGRATION_MEDIA_MANIFEST_CORRUPT")
 
 
-def _verified_media_common(
-    item: Mapping[str, object], media_ids: set[str]
-) -> str:
+def _verified_media_common(item: Mapping[str, object], media_ids: set[str]) -> str:
     try:
         media_id = _safe_identifier(item["mediaId"])
         _canonical_object_key(item["objectKey"])
@@ -2879,9 +2914,7 @@ def _verify_envelope(
         or not isinstance(envelope.get("ciphertext"), str)
     ):
         raise MigrationCorruptError("MIGRATION_ENVELOPE_STRUCTURE_CORRUPT")
-    record = next(
-        (item for item in records if item.get("path") == ENVELOPE_PATH), None
-    )
+    record = next((item for item in records if item.get("path") == ENVELOPE_PATH), None)
     if record is None or metadata != {
         "format": ENVELOPE_FORMAT,
         "schemaVersion": ENVELOPE_SCHEMA_VERSION,
@@ -2990,7 +3023,9 @@ def _validate_target_inspection(
     ):
         raise MigrationUnsupportedError("MIGRATION_TARGET_AUTHORITY_MISMATCH")
     plugins = manifest.get("plugins")
-    if not isinstance(plugins, Mapping) or not isinstance(plugins.get("packages"), list):
+    if not isinstance(plugins, Mapping) or not isinstance(
+        plugins.get("packages"), list
+    ):
         raise MigrationCorruptError("MIGRATION_PLUGIN_MANIFEST_CORRUPT")
     required_apis = {
         api
@@ -3119,8 +3154,10 @@ def _canonical_relative_path(value: object) -> str:
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise MigrationCorruptError("MIGRATION_MEMBER_PATH_INVALID")
     canonical = path.as_posix()
-    if canonical != value or len(canonical.encode("utf-8")) > 4096 or any(
-        len(part.encode("utf-8")) > 255 for part in path.parts
+    if (
+        canonical != value
+        or len(canonical.encode("utf-8")) > 4096
+        or any(len(part.encode("utf-8")) > 255 for part in path.parts)
     ):
         raise MigrationCorruptError("MIGRATION_MEMBER_PATH_INVALID")
     return canonical
@@ -3292,7 +3329,9 @@ def _r2_identity_json(identity: object) -> dict[str, str]:
     host = parsed.hostname.lower()
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    default_port = (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
+    default_port = (scheme == "https" and port == 443) or (
+        scheme == "http" and port == 80
+    )
     endpoint = f"{scheme}://{host}{'' if port is None or default_port else f':{port}'}"
     account = identity.account_identity.strip().lower()
     bucket = identity.bucket.strip().lower()
@@ -3313,6 +3352,8 @@ def _r2_identity_json(identity: object) -> dict[str, str]:
 def _listen_from_json(value: object) -> ListenIdentity:
     if not isinstance(value, Mapping) or set(value) != {"host", "port"}:
         raise MigrationOperationalError("MIGRATION_LISTEN_INVALID")
-    listen = ListenIdentity(host=cast(str, value["host"]), port=cast(int, value["port"]))
+    listen = ListenIdentity(
+        host=cast(str, value["host"]), port=cast(int, value["port"])
+    )
     _listen_json(listen)
     return listen

@@ -196,14 +196,14 @@ class MigrationRuntimeTests(unittest.TestCase):
             listen=ListenIdentity("127.0.0.1", 8000),
             public_origin="https://anime.example.invalid",
             managed_config_path=PurePosixPath("/data/animemo/config/animemo.json"),
+            config_revision="11111111-1111-4111-8111-111111111111",
             release_identity={
-                "version": "1.1.0",
+                "version": "v1.1.0",
                 "channel": "stable",
                 "commit": "a" * 40,
                 "manifestDigest": "sha256:" + "1" * 64,
-                "apiImageDigest": "sha256:" + "2" * 64,
-                "webImageDigest": "sha256:" + "3" * 64,
-                "provenanceIdentity": "github-release+ghcr",
+                "apiDigest": "sha256:" + "2" * 64,
+                "webDigest": "sha256:" + "3" * 64,
             },
         )
 
@@ -215,6 +215,7 @@ class MigrationRuntimeTests(unittest.TestCase):
             "appRoot": "TARGET-LOCAL",
             "dataRoot": "TARGET-LOCAL",
             "managedConfigPath": "TARGET-LOCAL",
+            "configRevision": "TARGET-LOCAL",
             "databaseHost": "TARGET-LOCAL",
             "databaseCredential": "TARGET-LOCAL",
             "redisHost": "TARGET-LOCAL",
@@ -284,16 +285,20 @@ class MigrationRuntimeTests(unittest.TestCase):
             ),
         )
         r2 = (
-            migration.R2MediaObject(
-                media_id="media-r2-2",
-                backend_id="r2-primary",
-                object_key="posters/two.webp",
-                digest="sha256:" + "5" * 64,
-                size_bytes=1234,
-                source_identity=self.r2_identity,
-                memory_references=("journal:2", "poster:2"),
-            ),
-        ) if with_r2 else ()
+            (
+                migration.R2MediaObject(
+                    media_id="media-r2-2",
+                    backend_id="r2-primary",
+                    object_key="posters/two.webp",
+                    digest="sha256:" + "5" * 64,
+                    size_bytes=1234,
+                    source_identity=self.r2_identity,
+                    memory_references=("journal:2", "poster:2"),
+                ),
+            )
+            if with_r2
+            else ()
+        )
         target_identities = (
             {"r2-primary": self.r2_identity}
             if target_r2_identities is None
@@ -482,9 +487,7 @@ class MigrationRuntimeTests(unittest.TestCase):
                 else updater_current
             ),
             target_r2_identities=(
-                {"r2-primary": self.r2_identity}
-                if identities is None
-                else identities
+                {"r2-primary": self.r2_identity} if identities is None else identities
             ),
             supported_plugin_sdk_apis=apis,
         )
@@ -497,14 +500,15 @@ class MigrationRuntimeTests(unittest.TestCase):
         self.assertEqual(result.instance_id, self.instance_id)
         self.assertEqual(verification.bundle_id, result.bundle_id)
         self.assertEqual(verification.manifest_digest, result.manifest_digest)
-        self.assertEqual(
-            runner.calls, [("DATABASE_URL_PRESENT", "pg_dump", 600)]
-        )
+        self.assertEqual(runner.calls, [("DATABASE_URL_PRESENT", "pg_dump", 600)])
         self.assertEqual(
             (result.path / migration.DATABASE_MEMBER).read_bytes()[:2], b"\x1f\x8b"
         )
         self.assertFalse(
-            any(path.name.startswith(migration.STAGING_PREFIX) for path in self.destination.iterdir())
+            any(
+                path.name.startswith(migration.STAGING_PREFIX)
+                for path in self.destination.iterdir()
+            )
         )
         self.assertEqual(
             verification.manifest["databaseReferences"]["generation"],
@@ -674,7 +678,10 @@ class MigrationRuntimeTests(unittest.TestCase):
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
         self.assertFalse((self.destination / str(self.bundle_id)).exists())
         self.assertFalse(
-            any(path.name.startswith(migration.STAGING_PREFIX) for path in self.destination.iterdir())
+            any(
+                path.name.startswith(migration.STAGING_PREFIX)
+                for path in self.destination.iterdir()
+            )
         )
 
     def test_same_r2_exact_match_succeeds(self) -> None:
@@ -718,9 +725,7 @@ class MigrationRuntimeTests(unittest.TestCase):
                 self.assertFalse((destination / str(self.bundle_id)).exists())
 
     def test_local_media_and_plugin_digest_or_missing_member_is_corrupt(self) -> None:
-        bad_plugin = replace(
-            self.request().plugins[0], digest="sha256:" + "0" * 64
-        )
+        bad_plugin = replace(self.request().plugins[0], digest="sha256:" + "0" * 64)
         with self.assertRaises(migration.MigrationCorruptError):
             self.create(request=replace(self.request(), plugins=(bad_plugin,)))
 
@@ -775,9 +780,13 @@ class MigrationRuntimeTests(unittest.TestCase):
                 )
                 result, _ = self.create(
                     request=request,
-                    bundle_id=uuid.UUID(f"{index + 3}2345678-1234-4678-9234-567812345678"),
+                    bundle_id=uuid.UUID(
+                        f"{index + 3}2345678-1234-4678-9234-567812345678"
+                    ),
                 )
-                config = json.loads((result.path / migration.CONFIG_MEMBER).read_bytes())
+                config = json.loads(
+                    (result.path / migration.CONFIG_MEMBER).read_bytes()
+                )
                 self.assertEqual(config["mode"], mode.value)
                 if mode is migration.ConfigurationMode.RECONFIGURE:
                     self.assertEqual(
@@ -809,9 +818,7 @@ class MigrationRuntimeTests(unittest.TestCase):
         verification = migration.verify_migration_bundle(result.path)
         target = FakeTarget(self.inspection(), fail_at="configuration")
 
-        with self.assertRaises(
-            migration.MigrationRecoveryRequiredError
-        ) as captured:
+        with self.assertRaises(migration.MigrationRecoveryRequiredError) as captured:
             migration.consume_migration_bundle(
                 result.path,
                 external_secret=self.external_key,
@@ -948,9 +955,7 @@ class MigrationRuntimeTests(unittest.TestCase):
         self.assertIn("upgrade", approved.events)
 
         upgrade_failure = FakeTarget(self.inspection(), fail_at="upgrade")
-        with self.assertRaises(
-            migration.MigrationRecoveryRequiredError
-        ) as captured:
+        with self.assertRaises(migration.MigrationRecoveryRequiredError) as captured:
             migration.consume_migration_bundle(
                 result.path,
                 external_secret=self.external_key,
@@ -990,7 +995,8 @@ class MigrationRuntimeTests(unittest.TestCase):
                 consumed, replace(handoff, administrator_confirmed=False)
             )
         with self.assertRaisesRegex(
-            migration.MigrationOperationalError, "MIGRATION_TARGET_LOCAL_NOT_ACTIVATABLE"
+            migration.MigrationOperationalError,
+            "MIGRATION_TARGET_LOCAL_NOT_ACTIVATABLE",
         ):
             migration.authorize_activation(
                 replace(
@@ -1027,7 +1033,9 @@ class MigrationRuntimeTests(unittest.TestCase):
         with self.assertRaises(migration.MigrationUnsupportedError):
             self.create(request=unsupported)
 
-    def test_preflight_rejects_overlap_updater_mismatch_and_media_ambiguity(self) -> None:
+    def test_preflight_rejects_overlap_updater_mismatch_and_media_ambiguity(
+        self,
+    ) -> None:
         overlap = replace(self.request(), destination_root=self.root)
         with self.assertRaisesRegex(
             migration.MigrationOperationalError,
@@ -1134,9 +1142,7 @@ class MigrationRuntimeTests(unittest.TestCase):
                     )
                 self.assertEqual(target.events, ["inspect"])
 
-        unavailable_authority = FakeTarget(
-            self.inspection(release_identity=None)
-        )
+        unavailable_authority = FakeTarget(self.inspection(release_identity=None))
         with self.assertRaisesRegex(
             migration.MigrationOperationalError,
             "MIGRATION_TARGET_AUTHORITY_UNAVAILABLE",
@@ -1165,10 +1171,10 @@ class MigrationRuntimeTests(unittest.TestCase):
             )
         self.assertNotIn("credential-like", str(captured.exception))
 
-        rollback_failure = FakeTarget(self.inspection(), fail_at="begin", rollback_fails=True)
-        with self.assertRaises(
-            migration.MigrationRecoveryRequiredError
-        ) as captured:
+        rollback_failure = FakeTarget(
+            self.inspection(), fail_at="begin", rollback_fails=True
+        )
+        with self.assertRaises(migration.MigrationRecoveryRequiredError) as captured:
             migration.consume_migration_bundle(
                 result.path,
                 external_secret=self.external_key,
@@ -1177,7 +1183,9 @@ class MigrationRuntimeTests(unittest.TestCase):
             )
         self.assertNotIn("callback detail", str(captured.exception))
         self.assertEqual(captured.exception.evidence.failed_step, "rollback")
-        self.assertEqual(rollback_failure.events, ["inspect", "begin", "rollback", "recovery"])
+        self.assertEqual(
+            rollback_failure.events, ["inspect", "begin", "rollback", "recovery"]
+        )
 
         rollback_evidence_failure = FakeTarget(
             self.inspection(), fail_at="begin", rollback_fails=True
@@ -1190,9 +1198,7 @@ class MigrationRuntimeTests(unittest.TestCase):
             raise RuntimeError("recovery record private detail")
 
         rollback_evidence_failure.record_recovery_required = fail_recovery_record
-        with self.assertRaises(
-            migration.MigrationRecoveryEvidenceError
-        ) as captured:
+        with self.assertRaises(migration.MigrationRecoveryEvidenceError) as captured:
             migration.consume_migration_bundle(
                 result.path,
                 external_secret=self.external_key,
@@ -1244,9 +1250,7 @@ class MigrationRuntimeTests(unittest.TestCase):
             original_event(name)
 
         evidence_failure._event = fail_database_then_recovery
-        with self.assertRaises(
-            migration.MigrationRecoveryEvidenceError
-        ) as captured:
+        with self.assertRaises(migration.MigrationRecoveryEvidenceError) as captured:
             migration.consume_migration_bundle(
                 result.path,
                 external_secret=self.external_key,

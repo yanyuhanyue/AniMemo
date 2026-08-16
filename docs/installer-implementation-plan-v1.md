@@ -1,10 +1,10 @@
 # AniMemo v1.1 Installer Implementation Plan
 
-Status: **PLANNING ONLY — IMPLEMENTATION BLOCKED ON THE REMAINING GATES IN SECTION 3**
+Status: **IMPLEMENTED IN PHASE 3C — GITHUB-HOSTED QUALIFICATION EVIDENCE REQUIRED FOR RELEASE USE**
 
 Target: AniMemo v1.1 pre-production clean break
 
-Scope: plan the future Installer implementation for **Fresh Install** and **Restore-to-New-Instance**. This document does not implement an installer, publish an installer artifact, modify `install.animemo.cc`, change the Release Producer, or authorize Release/Production work.
+Scope: define and record the implemented Installer for **Fresh Install** and **Restore-to-New-Instance**. Phase 3C updates the Release Producer only enough to create and verify exact Installer materials; it does not publish an installer, modify `install.animemo.cc`, create a Release, or authorize Production work.
 
 ## 1. Outcome and invariants
 
@@ -43,7 +43,7 @@ These runtime interfaces are the integration seams. Their presence is not permis
 
 ## 3. Mandatory pre-implementation gates
 
-No Full Installer implementation may start while any gate below is unresolved.
+All five gates were closed or narrowly re-frozen before the Full Installer was declared implemented. A real GitHub-hosted qualification run remains required evidence before any Release use.
 
 ### 3.1 Satisfied baseline: PCDC-001 canonical clean break
 
@@ -60,55 +60,27 @@ deploymentProfile = v1.1-standard
 
 The correction, affected documents/tests, integrity impact, and zero-debt conclusion are recorded in [v1.1 Pre-Production Debt Ledger](v1.1-pre-production-debt-ledger.md#pcdc-001--canonical-filesystem-clean-break). This gate is satisfied. The Installer supports only those canonical paths; pre-v1.1 layouts are neither auto-detected nor adapted. This plan contains no legacy branch and no custom-root branch.
 
-### 3.2 CURRENT GAP: complete installer artifact profile
+### 3.2 PASS: complete installer artifact profile
 
-The existing Release assets are only:
+Release Manifest/deployment schema v2 now binds deterministic `installer-materials.tar`, every regular member's canonical path, mode, size and SHA-256, the archive digest, and the complete offline material set required by Installer and Updater. `release.materials` performs bounded exact inspection/extraction and rejects missing, duplicate, unordered, unexpected, linked, oversized or changed material.
 
-```text
-release-manifest.json
-deployment-contract.json
-checksums.txt
-```
+The Release trust chain remains GitHub Release plus exact GHCR digests, Manifest, checksums, deployment/material contract, provenance and attestation. PostgreSQL and Redis use frozen `docker.io/library/...@sha256:` identities; mutable dependency tags are rejected. Platform qualification binds those same dependency digests. This is a narrow Release Contract schema-v2 correction, recorded in the Phase 3C correction document; promotion policy is unchanged.
 
-The current deployment contract binds only:
+### 3.3 PASS: canonical Updater discovery and adoption
 
-```text
-deploy/docker-compose.yml
-updater/docker-compose.runtime.yml
-```
+Updater now consumes only the strict canonical locator, managed configuration and fixed roots. `adopt_initial_release(...)` accepts a protected fixed request, re-verifies exact release/config/material/locator bindings, serializes through the operation lock, establishes native state once, and publishes the locator through CAS as the final discovery publication. Installer and Restore call this interface; they never hand-edit CURRENT/PREVIOUS. Interrupted adoption and locator publication become durable manual recovery and block later updates until reconciliation.
 
-It does not bind every program/deployment byte needed by a Full Installer, including the installer program, Updater program, launcher, systemd unit, sysusers/tmpfiles assets, and any future managed-config/Compose templates. `GitHubReleaseSource.fetch_verified()` returns the verified Manifest but does not expose a durable verified material set for all those bytes.
+### 3.4 PASS: managed configuration and Compose contract
 
-Before Full Installer implementation, a separate Release Contract review must define an exact, checksummed, provenance-attested Installer artifact profile or another single-authority exact material profile. The profile must remain rooted in GitHub Release plus GHCR exact digests; `install.animemo.cc`, a mutable branch, a source-page rendering, and mutable OCI tags are not alternatives. This plan neither changes nor authorizes changes to the Release Producer.
+`/data/animemo/config/animemo.json` (`animemo.managed-config/v1`) is the only configuration authority. It has a strict schema, explicit secret classification, private single-link regular-file checks and same-directory atomic replacement. `/run/animemo-updater/managed.env` is a private, derived and rebuildable Compose Adapter, never a reader or second authority. The exact Compose bytes support independent listen address/port. The locator writer binds config revision, Public Origin, Listen, release identity and canonical paths; config, locator, Compose and Updater mismatches fail closed.
 
-PostgreSQL and Redis image identity also needs an explicit qualified rule. The current Compose file uses mutable `postgres:16-alpine` and `redis:7-alpine`; implementation cannot silently claim those bytes are exact-release-bound. Release/compatibility review must either freeze verified digests or explicitly define their separately qualified authority.
+### 3.5 PASS PENDING HOSTED EVIDENCE: platform qualification
 
-### 3.3 Implementation dependency: canonical Updater discovery and adoption
+`animemo.platform-qualification/v1` defines `v1.1-standard-linux-amd64` through measured capabilities rather than invented distribution/version floors. The GitHub-hosted qualification job proves Docker/Compose behavior, systemd, secure filesystem semantics, exact PostgreSQL/Redis images, PostgreSQL 16 logical dump/restore, disk/memory/port and user/group operations, then emits candidate/workflow/run-bound evidence. Installer Compatibility consumes this exact evidence and cannot return compatible for a different profile or candidate. Local contract/rehearsal tests pass; a real hosted run must produce the final evidence before Release use.
 
-The current production `HostPaths` is fixed to `/opt/1panel/docker/compose/animemo/app`; the Updater reads `.env.production` from that app tree. A canonical `/opt/animemo` installation cannot safely hand off upgrade ownership until Updater discovery, Compose paths, health probing, systemd allowlists, and one-time CURRENT adoption all consume the validated locator/config contract.
+### 3.6 PASS: durable partial-install evidence
 
-The Full Installer work must wait for the Updater owner to provide a minimal, explicit, verifiable canonical release-adoption interface. This document does not design or publish that Updater interface and does not claim current runtime publication integration. Restore/Migration/Installer must eventually call the approved interface; they must not hand-edit CURRENT/PREVIOUS, forge a Manifest, or relax Updater fail-closed behavior.
-
-### 3.4 Managed configuration and Compose contract
-
-The locator schema is implemented for reading, but no canonical atomic writer exists. The exact managed-config filename/schema is not frozen. The current Compose file reads `../.env.production` from the replaceable app tree and fixes the host address to `127.0.0.1`, so it cannot express an explicit alternate loopback address or explicit `0.0.0.0` without changing verified deployment bytes.
-
-Before implementation, freeze and test:
-
-- one protected managed-config location under `/data/animemo/config/`;
-- secret/non-secret field classification and atomic update semantics;
-- the complete `instance.json` writer and release identity shape;
-- Compose consumption of the protected config without copying secrets into `/opt/animemo`;
-- a full listen address plus port, independently from Public Origin;
-- config, locator, Compose mounts, Updater discovery, and systemd allowlist agreement.
-
-### 3.5 Platform qualification
-
-Compatibility currently freezes Linux/amd64 and capability checks, but not a qualified distribution/kernel/Docker/Compose/`pg_restore` version matrix. The Installer must not invent version floors. Qualification-backed evidence must define the supported server profile and logical PostgreSQL import path before the compatibility adapter can return `COMPATIBLE`.
-
-### 3.6 Durable partial-install evidence
-
-After database import or another irreversible mutation, automatic cleanup cannot erase data or reverse migrations. Restore Runtime now provides `RecoveryEvidence` and requires `MutationPort.record_recovery_required(...)` before returning `RECOVERY_REQUIRED`. The remaining Installer gate is a stable Fresh-install operation record plus its `manual_recovery_required` handoff, so Doctor and an operator can identify the exact failed phase. It must reuse or explicitly extend the durable Updater operation model; an ad-hoc marker is not sufficient.
+Fresh Install uses the independent `animemo.operation` schema-v1 journal with stable phases, timestamps, completed steps, exact instance/release binding, error code and recovery status. Before irreversible mutation it performs only ownership-scoped cleanup or rollback. After database migration begins, failure cannot delete data or reverse migration and becomes `MANUAL_RECOVERY_REQUIRED`. Interrupted Restore uses a separate `restore-operations/` journal and blocks Updater lifecycle work until explicit reconciliation. Neither journal stores secrets.
 
 ## 4. Planned module shape
 
@@ -471,17 +443,39 @@ The Installer implementation and this plan exclude:
 - automatic source deletion/retirement after migration;
 - automatic repair, adoption, reset, data purge, random port selection, or foreign process/container handling;
 - mutable image tags, alternate repositories/registries/URLs, or installer-domain release authority;
-- full management CLI, Public Origin config CLI, listen config CLI, update/rollback CLI, or uninstall implementation;
-- Release Producer changes, installer artifact publication, `install.animemo.cc` changes, RC/Stable Release, or Production deployment;
+- management surface beyond `animemo-updater config` show/validate/dry-run/set/apply, update/rollback CLI, or uninstall implementation;
+- Release Producer changes beyond the exact Installer Material Profile, installer artifact publication, `install.animemo.cc` changes, RC/Stable Release, or Production deployment;
 - database schema or Resource Identity changes. If Installer work appears to require them, stop with `DATABASE_CONTRACT_REVIEW_REQUIRED`.
 
 ## 22. Plan acceptance
 
-Installer implementation may begin only when Sections 3.1 through 3.6 have recorded, reviewed outcomes and the exact Restore/Migration interfaces are available. It may claim v1.1 readiness only when both modes pass their integration suites, dry-run proves zero persistent mutation, non-interactive proves zero prompt, all executed bytes are exact-authority-bound, canonical Updater handoff works, Doctor has no required `SKIPPED`, cleanup fault injection preserves user-owned data, and no legacy compatibility branch exists.
+### Phase 3C re-freeze and implementation
 
-Until then the correct result is:
+Before implementation, the five mandatory gaps in Section 3 are corrected by
+the narrow pre-production record in
+[phase3c-pre-production-contract-corrections.md](phase3c-pre-production-contract-corrections.md):
+
+| Gate | Re-frozen contract | Implementation boundary |
+| --- | --- | --- |
+| A | Release Manifest/material schema v2, four exact assets, deterministic uncompressed material archive, four exact image identities | `release.materials` and `VerifiedReleaseMaterials` only |
+| B | Canonical `/opt/animemo` discovery, strict locator, initial adoption, locator-last publication | `durability.instance` and Updater adoption Interface |
+| C | `/data/animemo/config/animemo.json`, strict secret-safe schema, ephemeral Compose env Adapter, atomic config transaction | managed-config Module and fixed Compose Adapter |
+| D | `animemo.platform-qualification/v1` evidence and `v1.1-standard-linux-amd64` profile | capability collector/evaluator; no invented floors |
+| E | `animemo.operation/v1` envelope, explicit irreversible boundary, global recovery barrier | Fresh Installer operation Module |
+
+These are clean-break prerequisite corrections, not compatibility Adapters.
+Their scoped contract tests passed before the Full Installer completion claim.
+Fresh and Restore-to-New now use the exact Restore/Migration interfaces,
+secret-free plans, canonical Updater handoff and complete Doctor acceptance.
+Dry-run and non-interactive tests prove no prompt or persistent mutation before
+accepted execution, and no legacy compatibility branch exists.
+
+Current implementation result:
 
 ```text
-INSTALLER_IMPLEMENTATION_PLAN=READY
-FULL_INSTALLER_IMPLEMENTATION=BLOCKED
+INSTALLER_IMPLEMENTATION_PLAN=IMPLEMENTED
+FULL_INSTALLER_IMPLEMENTATION=LOCAL_PASS
+GITHUB_HOSTED_PLATFORM_EVIDENCE=REQUIRED_BEFORE_RELEASE
 ```
+
+This result does not authorize an RC, Stable Release or Production operation.

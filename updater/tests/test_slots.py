@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 import subprocess
 import tempfile
 import unittest
-from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from release.contract import build_manifest
 from updater.errors import StateError
@@ -89,6 +89,28 @@ class ReleaseSlotTests(unittest.TestCase):
             with self.assertRaisesRegex(StateError, "already initialized"):
                 slots.import_current(first)
 
+    def test_native_envelope_rejects_any_coexisting_legacy_slot_artifact(self):
+        for legacy_name in ("CURRENT.json", "PREVIOUS.json", "history"):
+            with (
+                self.subTest(legacy_name=legacy_name),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                slots = ReleaseSlots(root)
+                slots.import_current(manifest("v1.0.0", "1"))
+                legacy = root / legacy_name
+                if legacy_name == "history":
+                    legacy.mkdir()
+                else:
+                    legacy.write_text("{}", encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    StateError, "Legacy release slot state is unsupported"
+                ):
+                    slots.read()
+
+                self.assertTrue((root / "release-slots.json").is_file())
+
     def test_repeated_rollback_swaps_current_and_previous_each_time(self):
         with tempfile.TemporaryDirectory() as directory:
             slots = ReleaseSlots(Path(directory))
@@ -115,7 +137,7 @@ class ReleaseSlotTests(unittest.TestCase):
             link_directory(release_root / "history", outside)
             slots = ReleaseSlots(release_root)
 
-            with self.assertRaisesRegex(StateError, "directory"):
+            with self.assertRaisesRegex(StateError, "Legacy release slot state"):
                 slots.import_current(manifest("v1.0.0", "1"))
 
             self.assertFalse((release_root / "CURRENT.json").exists())
@@ -142,7 +164,7 @@ class ReleaseSlotTests(unittest.TestCase):
             link_directory(release_root / "history", outside)
             slots = ReleaseSlots(release_root)
 
-            with self.assertRaisesRegex(StateError, "directory"):
+            with self.assertRaisesRegex(StateError, "Legacy release slot state"):
                 slots.read()
 
     def test_read_rejects_a_hard_linked_current_file(self):
@@ -159,7 +181,7 @@ class ReleaseSlotTests(unittest.TestCase):
             (release_root / "CURRENT.json").hardlink_to(outside_root / "CURRENT.json")
             slots = ReleaseSlots(release_root)
 
-            with self.assertRaisesRegex(StateError, "file"):
+            with self.assertRaisesRegex(StateError, "Legacy release slot state"):
                 slots.read()
 
     def test_read_rejects_a_hard_linked_history_file(self):
@@ -182,7 +204,7 @@ class ReleaseSlotTests(unittest.TestCase):
             )
             slots = ReleaseSlots(release_root)
 
-            with self.assertRaisesRegex(StateError, "file"):
+            with self.assertRaisesRegex(StateError, "Legacy release slot state"):
                 slots.read()
 
     def test_read_rejects_a_hard_linked_atomic_envelope(self):
@@ -205,9 +227,14 @@ class ReleaseSlotTests(unittest.TestCase):
             slots.import_current(first)
             original = slots.read()
 
-            with mock.patch("updater.slots._atomic_json", side_effect=OSError("injected commit failure")):
-                with self.assertRaisesRegex(OSError, "injected"):
-                    slots.promote(second, operation_id="a" * 32)
+            with (
+                mock.patch(
+                    "updater.slots._atomic_json",
+                    side_effect=OSError("injected commit failure"),
+                ),
+                self.assertRaisesRegex(OSError, "injected"),
+            ):
+                slots.promote(second, operation_id="a" * 32)
 
             self.assertEqual(slots.read(), original)
 

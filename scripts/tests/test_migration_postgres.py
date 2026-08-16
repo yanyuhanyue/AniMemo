@@ -231,9 +231,9 @@ class IsolatedPostgreSQLMigrationTests(unittest.TestCase):
                     ).format(sql.Identifier(schema_name))
                 )
                 cursor.executemany(
-                    sql.SQL("INSERT INTO {}.memory_nodes VALUES (%s, %s, %s, %s, %s)").format(
-                        sql.Identifier(schema_name)
-                    ),
+                    sql.SQL(
+                        "INSERT INTO {}.memory_nodes VALUES (%s, %s, %s, %s, %s)"
+                    ).format(sql.Identifier(schema_name)),
                     expected_graph["memory"],
                 )
                 cursor.execute(
@@ -290,6 +290,7 @@ class IsolatedPostgreSQLMigrationTests(unittest.TestCase):
                         managed_config_path=PurePosixPath(
                             "/data/animemo/config/animemo.json"
                         ),
+                        config_revision="11111111-1111-4111-8111-111111111111",
                         release_identity=release_identity,
                     ),
                     source_probe=StableProbe(),
@@ -311,6 +312,7 @@ class IsolatedPostgreSQLMigrationTests(unittest.TestCase):
                             "appRoot": "TARGET-LOCAL",
                             "dataRoot": "TARGET-LOCAL",
                             "managedConfigPath": "TARGET-LOCAL",
+                            "configRevision": "TARGET-LOCAL",
                             "databaseHost": "TARGET-LOCAL",
                             "databaseCredential": "TARGET-LOCAL",
                             "redisHost": "TARGET-LOCAL",
@@ -338,9 +340,7 @@ class IsolatedPostgreSQLMigrationTests(unittest.TestCase):
                     },
                     external_secret=external_key,
                     secret_entries=(
-                        SecretEntry.preserve(
-                            "CREDENTIAL_ENCRYPTION_KEY", b"C" * 32
-                        ),
+                        SecretEntry.preserve("CREDENTIAL_ENCRYPTION_KEY", b"C" * 32),
                     ),
                 ),
                 bundle_id=bundle_id,

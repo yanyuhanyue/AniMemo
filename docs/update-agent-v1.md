@@ -7,8 +7,10 @@ AniMemo Update Agent 是独立的 Host Service，也是不可变 Core Release �
 生产资源固定为：
 
 ```text
-application: /opt/1panel/docker/compose/animemo/app
+application: /opt/animemo
 data:        /data/animemo
+config:      /data/animemo/config/animemo.json
+program:     /opt/animemo-updater
 state:       /var/lib/animemo-updater
 socket:      /run/animemo-updater/updater.sock
 repository:  yanyuhanyue/AniMemo
@@ -47,15 +49,17 @@ Socket mode 是 `0660`，目录 mode 是 `0750`，属主/组为 `animemo-updater
 
 ## Release verification
 
-Release discovery 只通过固定的 `https://api.github.com` REST authority 访问 `yanyuhanyue/AniMemo`，拒绝 redirect，并把 tag SemVer 通道与 GitHub Release 的 `draft/prerelease` metadata 绑定；错误标记的 Stable/RC/Beta 不进入可用列表。Agent 下载且只接受三项已上传资产 `release-manifest.json`、`deployment-contract.json`、`checksums.txt`，然后验证：
+Release discovery 只通过固定的 `https://api.github.com` REST authority 访问 `yanyuhanyue/AniMemo`，拒绝 redirect，并把 tag SemVer 通道与 GitHub Release 的 `draft/prerelease` metadata 绑定；错误标记的 Stable/RC/Beta 不进入可用列表。Agent 下载且只接受四项已上传资产 `release-manifest.json`、`deployment-contract.json`、`installer-materials.tar`、`checksums.txt`，然后验证：
 
-1. tag、channel、SemVer、40 位 commit 与 Manifest schema，并有界 peel lightweight/annotated tag，要求最终 Git commit 等于 `release.commit`；
-2. checksum 和固定 repository/platform/digest；
+1. tag、channel、SemVer、40 位 commit 与 Manifest schema v2，并有界 peel lightweight/annotated tag，要求最终 Git commit 等于 `release.commit`；
+2. checksum、固定 repository/platform/digest、四个 exact image identity，以及 deterministic uncompressed material tar 的 closed member contract；
 3. minimum updater version 与 database/configuration/Plugin SDK contract；
 4. 通过 repository attestation REST endpoint 按 digest 匿名发现 bundle；内联 bundle 可直接使用，GitHub 签发的 bundle URL 只允许固定 `tmaproduction.blob.core.windows.net` host、与 REST 条目相同的 repository ID 路径、HTTPS 和签名 query，下载时不携带 GitHub credential 且不跟随 redirect；`application/x-snappy` raw block 必须在读取其声明长度并通过 8 MiB 上限后解压为 JSON；随后在隔离的 GitHub/Docker credential 环境中使用本地 bundle，以 exact certificate identity（不与互斥的 workflow selector 混用）验证 API/Web OCI attestation 的 exact subject name/digest、repository、release workflow、OIDC issuer、main ref、应用 commit 与 SLSA predicate；
 5. 对 Manifest 与 deployment contract 执行同样的本地 bundle 验证，并绑定签署 workflow、exact subject name/digest 与 `provenance.sourceCommit`。
 
-Stable Manifest 保留 RC 的应用 commit 和 API/Web digest，但由 promotion workflow 的 commit 签署，因此 `release.commit` 与 `provenance.sourceCommit` 是两个明确身份。
+验证成功返回 durable `VerifiedReleaseMaterials`，而不是脱离下载生命周期的裸 Manifest。Installer/Updater 只能通过其 role-based Interface 取得已验证 material；Archive 解包、path/mode/size/digest 检查保持在 Release material Module 内。
+
+Stable Manifest 保留 RC 的应用 commit、四镜像 identity、deployment contract 与 material tar exact digest；Stable promotion 复制 RC assets，不重建。promotion workflow 的 commit 负责签署，因此 `release.commit` 与 `provenance.sourceCommit` 是两个明确身份。
 
 ## Compatibility and rollback
 
@@ -123,13 +127,19 @@ sudo sh deploy/install-updater.sh
 
 公开 GitHub Release metadata、tag 与 attestations 始终先走匿名 REST，Release assets 也先匿名下载；只有匿名 REST 返回 `401/403/429` 或匿名 asset download 失败时，才可从固定 Host `GH_CONFIG_DIR=/var/lib/animemo-updater/gh` 读取 read-only contents credential 做同一固定 repository 的可用性回退。GitHub 签发的 attestation bundle URL 不使用该 credential。Attestation verifier 始终使用匿名取得的本地 bundle，并隔离 GitHub 与 Docker credential；credential 只提高 rate limit/可用性，不参与 Release Authority 判定。GHCR Docker credential 保存在 Agent 用户的 Host home/config。token 不进入数据库、Staff UI、API/RPC、Manifest、Operation journal 或日志；不得使用 repo write、admin 或 workflow token。凭据安装、轮换和撤销是人工 Host 运维动作，不属于 Agent allowlist。
 
-一次性 CURRENT bootstrap：
+一次性 initial adoption 只能通过 Host/Installer 调用固定
+`adopt_initial_release(request) -> AdoptionReceipt` Interface。请求绑定 exact
+`VerifiedReleaseMaterials`、running identity、managed-config revision、canonical
+roots 与 locator projection；不能接受任意 path/repository/URL。Agent 在 global
+operation lock 下重新从 GitHub authority refresh verification，检查 API/Web
+实际 digest、Compose bytes、systemd allowlist 与 configuration alignment，只用
+`ReleaseSlots` 初始化 CURRENT，保持 PREVIOUS 为空，并把 canonical locator 作为
+最后 discovery publication。普通第二次 adoption 一律拒绝。
 
-```bash
-sudo sh deploy/bootstrap-updater.sh /path/to/verified/release-manifest.json
-```
-
-脚本把 operator 已验证的 Manifest 复制到固定 bootstrap 路径，再以 Agent 用户执行 `import-current`。导入会重新验证 Manifest，并且无论内容是否相同都拒绝第二次执行。生产 cutover 前必须另外证明运行 API/Web 的 exact digest 与该 Manifest 一致。
+首次 durable mutation 后失败进入 global `manual_recovery_required` barrier。
+恢复只能由 exact operation-id-bound Host reconcile 完成；RPC 不暴露 adoption
+或 reconcile。旧 `import-current`、本地 Manifest bootstrap、1Panel discovery、
+legacy slot reader 和 `.env.production` fallback 均不是 v1.1 Adapter。
 
 ## Staff interface and errors
 

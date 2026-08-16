@@ -440,6 +440,46 @@ Installer v1 不提供也不隐式执行：
 
 ## 17. Contract acceptance
 
+## 18. Phase 3C implementation refinement
+
+Phase 3C implements this contract behind one deep `Installer` Module. Its only
+domain Interface is:
+
+```text
+plan(InstallRequest) -> InstallPlan
+execute(InstallPlan, accepted_plan_digest) -> InstallResult
+```
+
+`InstallPlan` is canonical, machine-readable, non-secret, and binds operation
+ID, mode, target snapshot, exact `VerifiedReleaseMaterials` aggregate identity,
+qualified platform evidence, managed-config revision/projection, warnings, and
+ordered steps. Execute rejects a changed Release, target, platform, config, or
+Restore plan before mutation. CLI only parses/renders and calls this Interface.
+
+Fresh execution uses the versioned `animemo.operation/v1` journal and fsyncs the
+irreversible marker before database migration. It creates a new instance ID,
+publishes protected config, stages exact material, runs explicit migration and
+bootstrap jobs, proves exact running release, performs native Updater adoption,
+publishes locator last, and requires complete Doctor acceptance. Failure after
+the irreversible marker never reruns migration and returns durable
+`manual_recovery_required`.
+
+Restore-to-New is an Adapter over `prepare_restore` / `execute_restore`; it
+preserves the backup instance ID and existing Backup, Secret Envelope, Resource
+Budget, compatibility, recovery, and MI-1..MI-5 behavior. Installer does not
+copy Restore/Migration validators or write Updater slots.
+
+An exact healthy same-release invocation returns `NO_CHANGE` without rotating
+secrets or mutating state. A healthy different-release invocation returns
+`UPDATER_HANDOFF`. Foreign, partial, corrupt, data-without-locator, or conflicting
+configuration fails closed. The stable exit classes distinguish success,
+validation, compatibility, recovery, usage, and environment/tool failures.
+
+The normal CLI requires explicit acceptance in the same invocation;
+non-interactive execution requires `--accept` and never prompts. `--dry-run`
+does not create roots, files, operations, containers, systemd state, or Docker
+objects. Direct non-loopback listen remains an explicit warning-bearing choice.
+
 只有以下条件同时满足，未来 Installer implementation 才可宣称符合 v1：
 
 - install.animemo.cc 只运输 bootstrap；

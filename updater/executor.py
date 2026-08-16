@@ -18,6 +18,7 @@ class UpdateExecutor:
         release_source,
         deployment,
         runtime_state,
+        runtime_binding,
         lock_path,
         updater_version: str,
     ):
@@ -26,11 +27,12 @@ class UpdateExecutor:
         self.release_source = release_source
         self.deployment = deployment
         self.runtime_state = runtime_state
+        self.runtime_binding = runtime_binding
         self.lock_path = lock_path
         self.updater_version = updater_version
 
-    def acquire_lock(self) -> UpdateLock:
-        lease = UpdateLock(self.lock_path)
+    def acquire_lock(self, *, allow_reentrant: bool = False) -> UpdateLock:
+        lease = UpdateLock(self.lock_path, allow_reentrant=allow_reentrant)
         lease.__enter__()
         return lease
 
@@ -53,8 +55,24 @@ class UpdateExecutor:
             "configurationContract": runtime["configurationContract"],
         }
 
+    @staticmethod
+    def _require_same_datastore_images(
+        current: dict[str, object], target: dict[str, object]
+    ) -> None:
+        try:
+            unchanged = all(
+                current["images"][role] == target["images"][role]
+                for role in ("postgres", "redis")
+            )
+        except (KeyError, TypeError):
+            unchanged = False
+        if not unchanged:
+            raise CompatibilityError("DATASTORE_IMAGE_TRANSITION_REQUIRED")
+
     def _can_restore(self, current) -> bool:
-        return plan_switch(self._context(current), current, updater_version=self.updater_version).allowed
+        return plan_switch(
+            self._context(current), current, updater_version=self.updater_version
+        ).allowed
 
     def _resolve_uncertain_contracts(
         self,
@@ -91,7 +109,10 @@ class UpdateExecutor:
             refresh=True,
         )
         if verified != target:
-            raise CompatibilityError("Recovery target differs from the verified immutable release")
+            raise CompatibilityError(
+                "Recovery target differs from the verified immutable release"
+            )
+        self._require_same_datastore_images(current, target)
         self.deployment.pull(target)
 
         database = pending.get("database")
@@ -110,14 +131,21 @@ class UpdateExecutor:
             else:
                 raise StateError("Database contract transition is indeterminate")
             runtime = self.runtime_state.read()
-            if runtime["databaseContract"] not in {database["before"], database["after"]}:
-                raise StateError("Durable database contract conflicts with recovery evidence")
+            if runtime["databaseContract"] not in {
+                database["before"],
+                database["after"],
+            }:
+                raise StateError(
+                    "Durable database contract conflicts with recovery evidence"
+                )
             self.runtime_state.update(databaseContract=resolved_database)
             self.store.resolve_contract_transition(operation_id, "database")
 
         operation = self.store.get(operation_id)
         pending = operation.get("recovery", {}).get("pendingContractTransitions", {})
-        configuration = pending.get("configuration") if isinstance(pending, dict) else None
+        configuration = (
+            pending.get("configuration") if isinstance(pending, dict) else None
+        )
         if configuration is not None:
             if (
                 not isinstance(configuration, dict)
@@ -131,7 +159,9 @@ class UpdateExecutor:
                 configuration["before"],
                 configuration["after"],
             }:
-                raise StateError("Durable configuration contract conflicts with recovery evidence")
+                raise StateError(
+                    "Durable configuration contract conflicts with recovery evidence"
+                )
             plan = plan_switch(
                 self._context(current),
                 target,
@@ -154,17 +184,24 @@ class UpdateExecutor:
                 raise CompatibilityError(",".join(post_bootstrap_plan.reasons))
             self.store.resolve_contract_transition(operation_id, "configuration")
 
-        remaining = self.store.get(operation_id).get("recovery", {}).get(
-            "pendingContractTransitions",
+        remaining = (
+            self.store.get(operation_id)
+            .get("recovery", {})
+            .get(
+                "pendingContractTransitions",
+            )
         )
         if remaining != {}:
             raise StateError("Recovery contract transition remains unresolved")
 
     def reconcile(self, operation_id: str) -> dict[str, object]:
         with UpdateLock(self.lock_path):
+            self.runtime_binding.refresh()
             operation = self.store.get(operation_id)
             if operation["status"] != "manual_recovery_required":
-                raise StateError("Only an unresolved manual recovery operation can be reconciled")
+                raise StateError(
+                    "Only an unresolved manual recovery operation can be reconciled"
+                )
             current = self.slots.read()["current"]
             if current is None:
                 raise StateError("CURRENT release identity is not initialized")
@@ -194,7 +231,9 @@ class UpdateExecutor:
                 not isinstance(inspected_contracts, dict)
                 or inspected_contracts != live_contracts
             ):
-                raise StateError("CURRENT does not report the authoritative live contracts")
+                raise StateError(
+                    "CURRENT does not report the authoritative live contracts"
+                )
             runtime = {**runtime, "enabledPluginApis": plugins}
             context = DeploymentContext(
                 current_manifest=current,
@@ -206,6 +245,7 @@ class UpdateExecutor:
             if not plan.allowed:
                 raise CompatibilityError(",".join(plan.reasons))
             self.runtime_state.write(runtime)
+            self.runtime_binding.replace_release(current)
             return self.store.transition(
                 operation_id,
                 "reconciled",
@@ -221,12 +261,18 @@ class UpdateExecutor:
             )
             return
         try:
-            self.store.transition(operation_id, "rolling_back", detail="restoring previous API and Web images")
+            self.store.transition(
+                operation_id,
+                "rolling_back",
+                detail="restoring previous API and Web images",
+            )
             runtime = self.runtime_state.read()
             live_contracts = self._live_contracts(runtime)
             self.deployment.switch(current, live_contracts=live_contracts)
             self.deployment.verify_health(current, live_contracts=live_contracts)
-            current_plugins = sorted(self.deployment.inspect_enabled_plugin_apis(current))
+            current_plugins = sorted(
+                self.deployment.inspect_enabled_plugin_apis(current)
+            )
             self.runtime_state.update(enabledPluginApis=current_plugins)
             self.store.transition(
                 operation_id,
@@ -234,7 +280,11 @@ class UpdateExecutor:
                 detail="previous application restored; live data contracts retained",
             )
         except Exception as error:  # noqa: BLE001 - every switch failure must enter recovery state
-            self.store.transition(operation_id, "manual_recovery_required", detail=f"application rollback failed: {error}")
+            self.store.transition(
+                operation_id,
+                "manual_recovery_required",
+                detail=f"application rollback failed: {error}",
+            )
 
     def apply(
         self,
@@ -244,6 +294,7 @@ class UpdateExecutor:
         lock_held: bool = False,
     ) -> dict[str, object]:
         with self._lock_context(lock_held=lock_held):
+            self.runtime_binding.refresh()
             self.store.require_recovery_clear()
             current = self.slots.read()["current"]
             if current is None:
@@ -251,33 +302,62 @@ class UpdateExecutor:
 
             switched = False
             try:
-                self.store.transition(operation_id, "preflight", detail="checking fixed AniMemo host resources")
+                self.store.transition(
+                    operation_id,
+                    "preflight",
+                    detail="checking fixed AniMemo host resources",
+                )
                 self.deployment.preflight(target_manifest)
-                self.store.transition(operation_id, "fetching", detail="loading exact GitHub release assets")
+                self.store.transition(
+                    operation_id,
+                    "fetching",
+                    detail="loading exact GitHub release assets",
+                )
                 verified_manifest = self.release_source.fetch_verified(
                     target_manifest["release"]["version"],
                     updater_version=self.updater_version,
                     refresh=True,
                 )
-                self.store.transition(operation_id, "verifying", detail="validating release identity and provenance")
+                self.store.transition(
+                    operation_id,
+                    "verifying",
+                    detail="validating release identity and provenance",
+                )
                 if verified_manifest != target_manifest:
-                    raise CompatibilityError("Verified release differs from the planned immutable manifest")
+                    raise CompatibilityError(
+                        "Verified release differs from the planned immutable manifest"
+                    )
                 target_manifest = verified_manifest
+                self._require_same_datastore_images(current, target_manifest)
                 self.store.bind_recovery_target(operation_id, target_manifest)
-                current_plugins = sorted(self.deployment.inspect_enabled_plugin_apis(current))
+                current_plugins = sorted(
+                    self.deployment.inspect_enabled_plugin_apis(current)
+                )
                 self.runtime_state.update(enabledPluginApis=current_plugins)
-                plan = plan_switch(self._context(current), target_manifest, updater_version=self.updater_version)
+                plan = plan_switch(
+                    self._context(current),
+                    target_manifest,
+                    updater_version=self.updater_version,
+                )
                 if not plan.allowed:
                     raise CompatibilityError(",".join(plan.reasons))
 
                 if plan.migration_required:
-                    self.store.transition(operation_id, "backup", detail="creating a fresh verified database backup")
+                    self.store.transition(
+                        operation_id,
+                        "backup",
+                        detail="creating a fresh verified database backup",
+                    )
                     self.deployment.backup_database(operation_id)
                     self.deployment.verify_recent_backup()
                 else:
                     self.deployment.verify_recent_backup()
 
-                self.store.transition(operation_id, "pulling", detail="pulling exact API and Web image digests")
+                self.store.transition(
+                    operation_id,
+                    "pulling",
+                    detail="pulling exact API and Web image digests",
+                )
                 self.deployment.pull(target_manifest)
                 if plan.migration_required:
                     runtime = self.runtime_state.read()
@@ -287,10 +367,16 @@ class UpdateExecutor:
                         before=runtime["databaseContract"],
                         after=target_manifest["compatibility"]["database"]["contract"],
                     )
-                    self.store.transition(operation_id, "migrating", detail="running target API image migration")
+                    self.store.transition(
+                        operation_id,
+                        "migrating",
+                        detail="running target API image migration",
+                    )
                     self.deployment.migrate(target_manifest)
                     self.runtime_state.update(
-                        databaseContract=target_manifest["compatibility"]["database"]["contract"]
+                        databaseContract=target_manifest["compatibility"]["database"][
+                            "contract"
+                        ]
                     )
                     self.store.resolve_contract_transition(operation_id, "database")
                 runtime = self.runtime_state.read()
@@ -300,12 +386,20 @@ class UpdateExecutor:
                     before=runtime["configurationContract"],
                     after=target_manifest["compatibility"]["configuration"]["contract"],
                 )
-                self.store.transition(operation_id, "bootstrapping", detail="applying idempotent target bootstrap state")
+                self.store.transition(
+                    operation_id,
+                    "bootstrapping",
+                    detail="applying idempotent target bootstrap state",
+                )
                 self.deployment.bootstrap(target_manifest)
                 self.runtime_state.update(
-                    configurationContract=target_manifest["compatibility"]["configuration"]["contract"]
+                    configurationContract=target_manifest["compatibility"][
+                        "configuration"
+                    ]["contract"]
                 )
-                target_plugins = sorted(self.deployment.inspect_enabled_plugin_apis(target_manifest))
+                target_plugins = sorted(
+                    self.deployment.inspect_enabled_plugin_apis(target_manifest)
+                )
                 self.runtime_state.update(enabledPluginApis=target_plugins)
                 self.store.resolve_contract_transition(operation_id, "configuration")
                 post_bootstrap_plan = plan_switch(
@@ -316,26 +410,64 @@ class UpdateExecutor:
                 if not post_bootstrap_plan.allowed:
                     raise CompatibilityError(",".join(post_bootstrap_plan.reasons))
 
-                self.store.transition(operation_id, "switching", detail="replacing only AniMemo API and Web")
+                self.store.transition(
+                    operation_id,
+                    "switching",
+                    detail="replacing only AniMemo API and Web",
+                )
                 live_contracts = self._live_contracts(self.runtime_state.read())
                 self.deployment.switch(target_manifest, live_contracts=live_contracts)
                 switched = True
-                self.store.transition(operation_id, "verifying_health", detail="observing target health and restart stability")
-                self.deployment.verify_health(target_manifest, live_contracts=live_contracts)
+                self.store.transition(
+                    operation_id,
+                    "verifying_health",
+                    detail="observing target health and restart stability",
+                )
+                self.deployment.verify_health(
+                    target_manifest, live_contracts=live_contracts
+                )
                 self.slots.promote(target_manifest, operation_id=operation_id)
-                return self.store.transition(operation_id, "succeeded", detail="release switch completed")
+                try:
+                    self.runtime_binding.replace_release(target_manifest)
+                except Exception as error:  # noqa: BLE001 - locator divergence is recovery state
+                    return self.store.transition(
+                        operation_id,
+                        "manual_recovery_required",
+                        detail=f"CURRENT changed but locator publication failed: {error}",
+                    )
+                return self.store.transition(
+                    operation_id, "succeeded", detail="release switch completed"
+                )
             except CompatibilityError as error:
                 status = self.store.get(operation_id)["status"]
-                target = "failed_pre_switch" if status in {"idle", "preflight", "fetching", "verifying", "backup", "pulling"} else "manual_recovery_required"
+                target = (
+                    "failed_pre_switch"
+                    if status
+                    in {
+                        "idle",
+                        "preflight",
+                        "fetching",
+                        "verifying",
+                        "backup",
+                        "pulling",
+                    }
+                    else "manual_recovery_required"
+                )
                 return self.store.transition(operation_id, target, detail=str(error))
             except Exception as error:  # noqa: BLE001 - every execution failure must be journaled
                 status = self.store.get(operation_id)["status"]
                 if status in {"migrating", "bootstrapping"}:
-                    return self.store.transition(operation_id, "manual_recovery_required", detail=f"migration or bootstrap failed; database was not reversed: {error}")
+                    return self.store.transition(
+                        operation_id,
+                        "manual_recovery_required",
+                        detail=f"migration or bootstrap failed; database was not reversed: {error}",
+                    )
                 if switched or status in {"switching", "verifying_health"}:
                     self._rollback_after_switch(operation_id, current)
                     return self.store.get(operation_id)
-                return self.store.transition(operation_id, "failed_pre_switch", detail=str(error))
+                return self.store.transition(
+                    operation_id, "failed_pre_switch", detail=str(error)
+                )
 
     def rollback(
         self,
@@ -345,63 +477,123 @@ class UpdateExecutor:
         lock_held: bool = False,
     ) -> dict[str, object]:
         with self._lock_context(lock_held=lock_held):
+            self.runtime_binding.refresh()
             self.store.require_recovery_clear()
             current = self.slots.read()["current"]
             if current is None:
                 raise CompatibilityError("CURRENT release identity is not initialized")
             try:
-                self.store.transition(operation_id, "preflight", detail="checking application rollback compatibility")
+                self.store.transition(
+                    operation_id,
+                    "preflight",
+                    detail="checking application rollback compatibility",
+                )
                 self.deployment.preflight(previous_manifest)
-                self.store.transition(operation_id, "fetching", detail="loading PREVIOUS immutable release")
+                self.store.transition(
+                    operation_id,
+                    "fetching",
+                    detail="loading PREVIOUS immutable release",
+                )
                 verified_manifest = self.release_source.fetch_verified(
                     previous_manifest["release"]["version"],
                     updater_version=self.updater_version,
                     refresh=True,
                 )
-                self.store.transition(operation_id, "verifying", detail="validating PREVIOUS against live runtime contracts")
+                self.store.transition(
+                    operation_id,
+                    "verifying",
+                    detail="validating PREVIOUS against live runtime contracts",
+                )
                 if verified_manifest != previous_manifest:
-                    raise CompatibilityError("Verified PREVIOUS differs from the stored immutable manifest")
+                    raise CompatibilityError(
+                        "Verified PREVIOUS differs from the stored immutable manifest"
+                    )
                 previous_manifest = verified_manifest
-                current_plugins = sorted(self.deployment.inspect_enabled_plugin_apis(current))
+                self._require_same_datastore_images(current, previous_manifest)
+                current_plugins = sorted(
+                    self.deployment.inspect_enabled_plugin_apis(current)
+                )
                 self.runtime_state.update(enabledPluginApis=current_plugins)
-                plan = plan_switch(self._context(current), previous_manifest, updater_version=self.updater_version)
+                plan = plan_switch(
+                    self._context(current),
+                    previous_manifest,
+                    updater_version=self.updater_version,
+                )
                 if not plan.allowed:
                     raise CompatibilityError(",".join(plan.reasons))
                 self.deployment.verify_recent_backup()
-                self.store.transition(operation_id, "pulling", detail="pulling PREVIOUS API and Web image digests")
+                self.store.transition(
+                    operation_id,
+                    "pulling",
+                    detail="pulling PREVIOUS API and Web image digests",
+                )
                 self.deployment.pull(previous_manifest)
-                self.store.transition(operation_id, "switching", detail="replacing only AniMemo API and Web")
+                self.store.transition(
+                    operation_id,
+                    "switching",
+                    detail="replacing only AniMemo API and Web",
+                )
                 runtime = self.runtime_state.read()
                 live_contracts = self._live_contracts(runtime)
                 self.deployment.switch(previous_manifest, live_contracts=live_contracts)
-                self.store.transition(operation_id, "verifying_health", detail="observing rollback health")
-                self.deployment.verify_health(previous_manifest, live_contracts=live_contracts)
+                self.store.transition(
+                    operation_id, "verifying_health", detail="observing rollback health"
+                )
+                self.deployment.verify_health(
+                    previous_manifest, live_contracts=live_contracts
+                )
                 previous_plugins = sorted(
                     self.deployment.inspect_enabled_plugin_apis(previous_manifest)
                 )
                 self.runtime_state.update(enabledPluginApis=previous_plugins)
                 self.slots.restore_previous(operation_id=operation_id)
+                try:
+                    self.runtime_binding.replace_release(previous_manifest)
+                except Exception as error:  # noqa: BLE001 - locator divergence is recovery state
+                    return self.store.transition(
+                        operation_id,
+                        "manual_recovery_required",
+                        detail=f"PREVIOUS restored but locator publication failed: {error}",
+                    )
                 return self.store.transition(
                     operation_id,
                     "rolled_back",
                     detail="application rollback completed; live data contracts retained",
                 )
             except CompatibilityError as error:
-                return self.store.transition(operation_id, "failed_pre_switch", detail=str(error))
+                return self.store.transition(
+                    operation_id, "failed_pre_switch", detail=str(error)
+                )
             except Exception as error:  # noqa: BLE001 - every execution failure must be journaled
                 status = self.store.get(operation_id)["status"]
                 if status in {"switching", "verifying_health"}:
                     try:
-                        self.store.transition(operation_id, "rolling_back", detail="restoring pre-rollback current application")
+                        self.store.transition(
+                            operation_id,
+                            "rolling_back",
+                            detail="restoring pre-rollback current application",
+                        )
                         runtime = self.runtime_state.read()
                         live_contracts = self._live_contracts(runtime)
                         self.deployment.switch(current, live_contracts=live_contracts)
-                        self.deployment.verify_health(current, live_contracts=live_contracts)
+                        self.deployment.verify_health(
+                            current, live_contracts=live_contracts
+                        )
                         current_plugins = sorted(
                             self.deployment.inspect_enabled_plugin_apis(current)
                         )
                         self.runtime_state.update(enabledPluginApis=current_plugins)
-                        return self.store.transition(operation_id, "rolled_back", detail="rollback attempt reverted to current application")
+                        return self.store.transition(
+                            operation_id,
+                            "rolled_back",
+                            detail="rollback attempt reverted to current application",
+                        )
                     except Exception as rollback_error:  # noqa: BLE001 - failed recovery requires manual state
-                        return self.store.transition(operation_id, "manual_recovery_required", detail=f"rollback recovery failed: {rollback_error}")
-                return self.store.transition(operation_id, "failed_pre_switch", detail=str(error))
+                        return self.store.transition(
+                            operation_id,
+                            "manual_recovery_required",
+                            detail=f"rollback recovery failed: {rollback_error}",
+                        )
+                return self.store.transition(
+                    operation_id, "failed_pre_switch", detail=str(error)
+                )

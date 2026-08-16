@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -eu
+cd /opt/animemo-updater/current
+exec /opt/animemo-updater/current/.venv/bin/python -m updater "$@"

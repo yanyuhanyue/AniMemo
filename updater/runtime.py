@@ -1,13 +1,30 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from release.contract import ReleaseContractError, validate_manifest
+from durability.instance import (
+    InstanceLocator,
+    InstanceSnapshot,
+    LocalLocatorStore,
+    LocalReadOnlyHost,
+    LocatorError,
+    ReadOnlyHost,
+    instance_locator_payload,
+    load_instance_snapshot,
+    publish_instance_locator,
+    release_identity_from_manifest,
+)
+from durability.managed_config import (
+    LocalManagedConfigStore,
+    derive_runtime_environment,
+)
 
 from . import __version__
 from .agent import UpdateAgent
+from .binding import CanonicalRuntimeBinding
 from .deployment import HostPaths, ImmutableComposeDeployment
 from .errors import StateError
 from .executor import UpdateExecutor
@@ -19,7 +36,80 @@ from .source import GitHubReleaseSource
 from .state import OperationStore
 
 PRODUCTION_SOCKET_PATH = Path("/run/animemo-updater/updater.sock")
-PRODUCTION_BOOTSTRAP_MANIFEST = Path("/var/lib/animemo-updater/bootstrap/release-manifest.json")
+PRODUCTION_BOOTSTRAP_MANIFEST = Path(
+    "/var/lib/animemo-updater/bootstrap/release-manifest.json"
+)
+PRODUCTION_ADOPTION_REQUEST = Path(
+    "/var/lib/animemo-updater/bootstrap/initial-adoption.json"
+)
+
+
+class _InitialAdoptionOnlyBinding:
+    def refresh(self):
+        raise StateError("Update runtime requires a published canonical locator")
+
+    def replace_release(self, manifest):
+        del manifest
+        raise StateError("Update runtime requires a published canonical locator")
+
+
+@dataclass(frozen=True)
+class InitialAdoptionRequest:
+    locator: InstanceLocator
+    manifest: dict[str, object]
+
+
+@dataclass(frozen=True)
+class AdoptionReceipt:
+    operation_id: str
+    locator_digest: str
+    release_identity: Mapping[str, str]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "operationId": self.operation_id,
+            "locatorDigest": self.locator_digest,
+            "releaseIdentity": dict(self.release_identity),
+        }
+
+
+@dataclass(frozen=True)
+class CanonicalInstanceRegistry:
+    """Discover one canonical AniMemo Instance with no fallback sources."""
+
+    store: ReadOnlyHost
+    expected_owner_uid: int | None = None
+    expected_owner_gid: int | None = None
+
+    def __init__(
+        self,
+        *,
+        store: ReadOnlyHost | None = None,
+        expected_owner_uid: int | None = None,
+        expected_owner_gid: int | None = None,
+    ) -> None:
+        object.__setattr__(self, "store", store or LocalLocatorStore())
+        object.__setattr__(self, "expected_owner_uid", expected_owner_uid)
+        object.__setattr__(self, "expected_owner_gid", expected_owner_gid)
+
+    def snapshot(self) -> InstanceSnapshot:
+        return load_instance_snapshot(
+            self.store,
+            expected_owner_uid=self.expected_owner_uid,
+            expected_owner_gid=self.expected_owner_gid,
+        )
+
+    @classmethod
+    def production(cls) -> CanonicalInstanceRegistry:
+        if __import__("os").name == "nt":
+            raise StateError("Canonical production locator requires a POSIX host")
+        import grp
+        import pwd
+
+        return cls(
+            expected_owner_uid=pwd.getpwnam("animemo-updater").pw_uid,
+            expected_owner_gid=grp.getgrnam("animemo-api").gr_gid,
+        )
 
 
 @dataclass
@@ -34,6 +124,8 @@ class HostAgentRuntime:
     deployment: ImmutableComposeDeployment
     agent: UpdateAgent
     server: UnixRpcServer
+    registry: CanonicalInstanceRegistry | None = None
+    locator_store: LocalLocatorStore | None = None
 
     @classmethod
     def _build(
@@ -42,6 +134,8 @@ class HostAgentRuntime:
         paths: HostPaths,
         socket_path: Path,
         bootstrap_manifest: Path,
+        registry: CanonicalInstanceRegistry | None = None,
+        managed_environment: dict[str, str] | None = None,
         background: bool = True,
     ) -> HostAgentRuntime:
         state_root = paths.state_root
@@ -49,13 +143,26 @@ class HostAgentRuntime:
         runtime_state = RuntimeState(state_root)
         operations = OperationStore(state_root)
         source = GitHubReleaseSource(state_root / "cache" / "github-releases")
-        deployment = ImmutableComposeDeployment(paths)
+        deployment = ImmutableComposeDeployment(
+            paths,
+            managed_environment=managed_environment,
+        )
+        runtime_binding = (
+            CanonicalRuntimeBinding(
+                registry=registry,
+                config_store=LocalManagedConfigStore(),
+                deployment=deployment,
+            )
+            if registry is not None
+            else _InitialAdoptionOnlyBinding()
+        )
         executor = UpdateExecutor(
             store=operations,
             slots=slots,
             release_source=source,
             deployment=deployment,
             runtime_state=runtime_state,
+            runtime_binding=runtime_binding,
             lock_path=state_root / "update.lock",
             updater_version=__version__,
         )
@@ -78,14 +185,38 @@ class HostAgentRuntime:
             deployment=deployment,
             agent=agent,
             server=server,
+            registry=registry,
+            locator_store=(
+                registry.store
+                if registry is not None
+                and isinstance(registry.store, LocalLocatorStore)
+                else LocalLocatorStore.testing(state_root / "instance.json")
+            ),
         )
 
     @classmethod
     def production(cls) -> HostAgentRuntime:
+        registry = CanonicalInstanceRegistry.production()
+        snapshot = registry.snapshot()
+        config = LocalManagedConfigStore().read()
+        if (
+            config.config_revision != snapshot.locator.config_revision
+            or config.listen.host != snapshot.locator.listen.host
+            or config.listen.port != snapshot.locator.listen.port
+            or config.public_origin != snapshot.locator.public_origin
+        ):
+            raise StateError(
+                "Managed configuration does not match the canonical locator"
+            )
+        LocalManagedConfigStore().rebuild_runtime_env(
+            expected_revision=config.config_revision
+        )
         return cls._build(
-            paths=HostPaths.production(),
+            paths=HostPaths.production(snapshot),
             socket_path=PRODUCTION_SOCKET_PATH,
             bootstrap_manifest=PRODUCTION_BOOTSTRAP_MANIFEST,
+            registry=registry,
+            managed_environment=dict(derive_runtime_environment(config)),
         )
 
     @classmethod
@@ -116,47 +247,266 @@ class HostAgentRuntime:
             "webDigest": manifest["images"]["web"]["digest"],
         }
 
-    def import_current(self) -> dict[str, object]:
+    def adopt_initial_release(self, request: InitialAdoptionRequest) -> AdoptionReceipt:
+        if not isinstance(request, InitialAdoptionRequest):
+            raise StateError("Initial adoption request is invalid")
+        lock_lease = self.agent.executor.acquire_lock(allow_reentrant=True)
+        operation = None
         try:
-            manifest = json.loads(self.bootstrap_manifest.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise StateError("Fixed bootstrap release manifest is unavailable or invalid") from error
-        try:
-            validate_manifest(manifest, updater_version=__version__)
-        except ReleaseContractError as error:
-            raise StateError(f"Fixed bootstrap release manifest failed validation: {error}") from error
+            expected_identity, verified, enabled_plugin_apis = (
+                self._verify_initial_adoption(request)
+            )
+            self.agent.operations.require_recovery_clear()
+            slots = self.slots.read()
+            if (
+                slots["current"] is not None
+                or slots["previous"] is not None
+                or slots["history"]
+            ):
+                raise StateError(
+                    "CURRENT is already initialized; initial adoption is one-time"
+                )
+            if self.runtime_state.path.exists():
+                raise StateError("Runtime compatibility state already exists")
+            try:
+                load_instance_snapshot(self.locator_store)
+            except Exception as error:
+                if not getattr(error, "code", None) == "LOCATOR_MISSING":
+                    raise StateError(
+                        "Instance locator state is already initialized"
+                    ) from error
 
-        current = self.slots.read()["current"]
-        runtime_exists = self.runtime_state.path.exists()
-        if current is not None and runtime_exists:
-            raise StateError("CURRENT is already initialized; bootstrap import is one-time")
-        if current is None and runtime_exists:
-            raise StateError("Bootstrap state is inconsistent: runtime exists without CURRENT")
-        if current is not None:
-            if current != manifest:
-                raise StateError("Bootstrap manifest conflicts with partially imported CURRENT")
-            enabled_plugin_apis = self.deployment.inspect_enabled_plugin_apis(manifest)
+            operation = self.agent.operations.create(
+                "initial_adoption",
+                {
+                    "version": verified["release"]["version"],
+                    "locator": instance_locator_payload(request.locator),
+                },
+            )
+            operation_id = operation["id"]
+            self.agent.operations.transition(
+                operation_id, "preflight", detail="verified canonical adoption target"
+            )
+            self.agent.operations.transition(
+                operation_id, "fetching", detail="reverified exact Release authority"
+            )
+            self.agent.operations.transition(
+                operation_id, "verifying", detail="verified running release identity"
+            )
+            self.agent.operations.bind_recovery_target(operation_id, verified)
+            self.agent.operations.transition(
+                operation_id,
+                "adopting",
+                detail="publishing initial CURRENT and runtime state",
+            )
+            self.slots.import_current(verified)
             self.runtime_state.initialize_from_manifest(
-                manifest,
+                verified,
                 enabled_plugin_apis=enabled_plugin_apis,
             )
-            return self._identity(manifest)
+            published = publish_instance_locator(
+                request.locator,
+                store=self.locator_store,
+                owner_uid=(
+                    self.registry.expected_owner_uid
+                    if self.registry is not None
+                    else None
+                ),
+                owner_gid=(
+                    self.registry.expected_owner_gid
+                    if self.registry is not None
+                    else None
+                ),
+            )
+            completed = self.agent.operations.transition(
+                operation_id,
+                "succeeded",
+                detail="exact initial release adoption completed",
+            )
+            return AdoptionReceipt(
+                operation_id=completed["id"],
+                locator_digest=published.digest,
+                release_identity=expected_identity,
+            )
+        except Exception as error:
+            if operation is not None:
+                current = self.agent.operations.get(operation["id"])
+                if current["status"] == "adopting":
+                    self.agent.operations.transition(
+                        operation["id"],
+                        "manual_recovery_required",
+                        detail="initial adoption mutation failed; manual recovery is required",
+                    )
+                elif current["status"] not in {
+                    "failed_pre_switch",
+                    "manual_recovery_required",
+                }:
+                    self.agent.operations.transition(
+                        operation["id"],
+                        "failed_pre_switch",
+                        detail="initial adoption failed before durable state publication",
+                    )
+            if isinstance(error, StateError):
+                raise
+            raise StateError("Initial adoption requires manual recovery") from error
+        finally:
+            lock_lease.__exit__(None, None, None)
 
-        enabled_plugin_apis = self.deployment.inspect_enabled_plugin_apis(manifest)
-        self.slots.import_current(manifest)
-        self.runtime_state.initialize_from_manifest(
-            manifest,
-            enabled_plugin_apis=enabled_plugin_apis,
-        )
-        return self._identity(manifest)
+    def _verify_initial_adoption(
+        self,
+        request: InitialAdoptionRequest,
+    ) -> tuple[Mapping[str, str], dict[str, object], set[int]]:
+        """Reverify every adoption fact while the global operation lock is held."""
+
+        try:
+            expected_identity = release_identity_from_manifest(request.manifest)
+            if dict(expected_identity) != dict(request.locator.release_identity):
+                raise StateError(
+                    "Initial adoption release identity differs from the locator"
+                )
+            verified = self.agent.source.fetch_verified(
+                request.manifest["release"]["version"],
+                updater_version=__version__,
+                refresh=True,
+            )
+            if verified != request.manifest:
+                raise StateError(
+                    "Fresh verified release differs from the adoption request"
+                )
+            if self.paths.locator_digest is not None:
+                expected_paths = HostPaths.production(
+                    InstanceSnapshot(
+                        locator=request.locator,
+                        digest=self.paths.locator_digest,
+                        storage_digest="",
+                    )
+                )
+                if expected_paths != self.paths:
+                    raise StateError(
+                        "Initial adoption locator does not match production paths"
+                    )
+            self.deployment.verify_deployment_contract(verified)
+            self.deployment.verify_health(verified)
+            live_contracts = self.deployment.inspect_runtime_contracts(verified)
+            expected_contracts = {
+                "databaseContract": verified["compatibility"]["database"]["contract"],
+                "configurationContract": verified["compatibility"]["configuration"][
+                    "contract"
+                ],
+            }
+            if live_contracts != expected_contracts:
+                raise StateError(
+                    "Initial adoption live contracts differ from the release"
+                )
+            enabled_plugin_apis = self.deployment.inspect_enabled_plugin_apis(verified)
+            supported = set(verified["compatibility"]["pluginSdk"]["supportedApis"])
+            if not enabled_plugin_apis.issubset(supported):
+                raise StateError(
+                    "Initial adoption enabled Plugin SDK APIs are unsupported"
+                )
+            return expected_identity, verified, enabled_plugin_apis
+        except StateError:
+            raise
+        except Exception as error:
+            raise StateError(
+                "Initial adoption read-only verification failed"
+            ) from error
 
     def status(self) -> dict[str, object]:
         return self.agent.dispatch({"operation": "get_status", "params": {}})
 
     def reconcile(self, operation_id: str, confirmation: str) -> dict[str, object]:
         if confirmation != f"RECONCILE {operation_id}":
-            raise StateError("Host reconciliation confirmation does not match the operation")
+            raise StateError(
+                "Host reconciliation confirmation does not match the operation"
+            )
+        operation = self.agent.operations.get(operation_id)
+        if operation.get("kind") == "initial_adoption":
+            return self._reconcile_initial_adoption(operation)
         return self.agent.executor.reconcile(operation_id)
+
+    def _reconcile_initial_adoption(
+        self,
+        operation: dict[str, object],
+    ) -> dict[str, object]:
+        operation_id = str(operation.get("id", ""))
+        if operation.get("status") != "manual_recovery_required":
+            raise StateError("Initial adoption operation does not require recovery")
+        metadata = operation.get("metadata")
+        recovery = operation.get("recovery")
+        locator_payload = metadata.get("locator") if isinstance(metadata, dict) else None
+        manifest = (
+            recovery.get("targetManifest") if isinstance(recovery, dict) else None
+        )
+        if not isinstance(locator_payload, dict) or not isinstance(manifest, dict):
+            raise StateError("Initial adoption recovery evidence is incomplete")
+        from durability.instance import parse_instance_locator
+
+        request = InitialAdoptionRequest(
+            locator=parse_instance_locator(locator_payload),
+            manifest=manifest,
+        )
+        lock_lease = self.agent.executor.acquire_lock()
+        try:
+            expected_identity, verified, enabled_plugin_apis = (
+                self._verify_initial_adoption(request)
+            )
+            current = self.slots.read()
+            if current["previous"] is not None:
+                raise StateError("Initial adoption recovery found unexpected PREVIOUS")
+            if current["current"] is None:
+                self.slots.import_current(verified)
+            elif current["current"] != verified:
+                raise StateError("Initial adoption recovery CURRENT differs")
+            if not self.runtime_state.path.exists():
+                self.runtime_state.initialize_from_manifest(
+                    verified,
+                    enabled_plugin_apis=enabled_plugin_apis,
+                )
+            else:
+                runtime_identity = self.runtime_state.read()
+                expected_runtime = {
+                    "databaseContract": verified["compatibility"]["database"][
+                        "contract"
+                    ],
+                    "configurationContract": verified["compatibility"][
+                        "configuration"
+                    ]["contract"],
+                    "enabledPluginApis": sorted(enabled_plugin_apis),
+                }
+                if runtime_identity != expected_runtime:
+                    raise StateError("Initial adoption recovery runtime state differs")
+            try:
+                published = load_instance_snapshot(self.locator_store)
+            except LocatorError as error:
+                if error.code != "LOCATOR_MISSING":
+                    raise StateError("Initial adoption recovery locator is invalid") from error
+                published = publish_instance_locator(
+                    request.locator,
+                    store=self.locator_store,
+                    owner_uid=(
+                        self.registry.expected_owner_uid
+                        if self.registry is not None
+                        else None
+                    ),
+                    owner_gid=(
+                        self.registry.expected_owner_gid
+                        if self.registry is not None
+                        else None
+                    ),
+                )
+            if (
+                published.locator != request.locator
+                or dict(published.locator.release_identity) != dict(expected_identity)
+            ):
+                raise StateError("Initial adoption recovery locator differs")
+            return self.agent.operations.transition(
+                operation_id,
+                "reconciled",
+                detail="initial adoption recovery reverified CURRENT, runtime, and locator",
+            )
+        finally:
+            lock_lease.__exit__(None, None, None)
 
     def serve_forever(self) -> None:
         self.server.serve_forever()
@@ -164,3 +514,83 @@ class HostAgentRuntime:
 
 def production_runtime() -> HostAgentRuntime:
     return HostAgentRuntime.production()
+
+
+def load_initial_adoption_request() -> InitialAdoptionRequest:
+    try:
+        if __import__("os").name == "nt":
+            raise StateError("Initial adoption requires a POSIX host")
+        import grp
+        import pwd
+
+        secure = LocalReadOnlyHost().read_secure_bytes(
+            PurePosixPath(str(PRODUCTION_ADOPTION_REQUEST)),
+            limit=1024 * 1024,
+            expected_owner_uid=pwd.getpwnam("animemo-updater").pw_uid,
+            expected_owner_gid=grp.getgrnam("animemo-api").gr_gid,
+            required_mode=0o600,
+        )
+        raw = secure.payload.decode("utf-8")
+
+        def reject_constant(_: str) -> None:
+            raise TypeError
+
+        def reject_duplicates(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError
+                result[key] = value
+            return result
+
+        payload = json.loads(
+            raw,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
+        if not isinstance(payload, dict) or set(payload) != {"locator", "manifest"}:
+            raise TypeError
+        locator_payload = payload["locator"]
+        manifest = payload["manifest"]
+        if not isinstance(locator_payload, dict) or not isinstance(manifest, dict):
+            raise TypeError
+        from durability.instance import parse_instance_locator
+
+        return InitialAdoptionRequest(
+            locator=parse_instance_locator(locator_payload),
+            manifest=manifest,
+        )
+    except StateError:
+        raise
+    except Exception as error:
+        raise StateError(
+            "Fixed initial adoption request is unavailable or invalid"
+        ) from error
+
+
+def adopt_initial_release(request: InitialAdoptionRequest) -> AdoptionReceipt:
+    """Host-only exact initial adoption; the locator is published last."""
+
+    if not isinstance(request, InitialAdoptionRequest):
+        raise StateError("Initial adoption request is invalid")
+    registry = CanonicalInstanceRegistry.production()
+    config_store = LocalManagedConfigStore()
+    config = config_store.read()
+    if (
+        config.instance_id != request.locator.instance_id
+        or config.config_revision != request.locator.config_revision
+        or config.listen.host != request.locator.listen.host
+        or config.listen.port != request.locator.listen.port
+        or config.public_origin != request.locator.public_origin
+    ):
+        raise StateError("Managed configuration does not match the adoption locator")
+    config_store.rebuild_runtime_env(expected_revision=config.config_revision)
+    runtime = HostAgentRuntime._build(
+        paths=HostPaths.initial_adoption(request.locator),
+        socket_path=PRODUCTION_SOCKET_PATH,
+        bootstrap_manifest=PRODUCTION_BOOTSTRAP_MANIFEST,
+        registry=registry,
+        managed_environment=dict(derive_runtime_environment(config)),
+        background=False,
+    )
+    return runtime.adopt_initial_release(request)

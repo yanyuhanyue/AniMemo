@@ -142,7 +142,7 @@ jobs:
           mkdir -p "$data_root"/plugins "$data_root"/logs "$data_root"/backups "$data_root"/media "$data_root"/postgres "$data_root"/redis
           chmod -R a+rwx "$data_root"
           sudo install -d -m 0700 -o 10001 -g 10001 "$data_root/private"
-          cat > .env.production <<EOF
+          cat > .ci-runtime.env <<EOF
           DEBUG=false
           DJANGO_SECRET_KEY=ci-only-secret-key-012345678901234567890123456789012345678901234567890
           CREDENTIAL_ENCRYPTION_KEY=a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
@@ -164,8 +164,6 @@ jobs:
           CSRF_COOKIE_SECURE=false
           REFRESH_COOKIE_SECURE=false
           ALLOW_INSECURE_PRODUCTION_COOKIES=true
-          ANIMEMO_PORT=8088
-          ANIMEMO_DATA_ROOT=$data_root
           ANIMEMO_LISTEN_HOST=127.0.0.1
           ANIMEMO_LISTEN_PORT=8088
           ANIMEMO_CONFIG_REVISION=11111111-1111-4111-8111-111111111111
@@ -176,39 +174,23 @@ jobs:
           ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
           EOF
           sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater
-          sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .env.production /run/animemo-updater/managed.env
+          sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/managed.env
           echo "RELEASE_GATE_DATA_ROOT=$data_root" >> "$GITHUB_ENV"
       - name: Select candidate Compose contract
         shell: bash
         run: |
-          if [[ -f deploy/docker-compose.build.yml ]]; then
-            echo "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml" >> "$GITHUB_ENV"
-            echo "EXPLICIT_RELEASE_JOBS=true" >> "$GITHUB_ENV"
-          else
-            echo "COMPOSE_FILE=deploy/docker-compose.yml" >> "$GITHUB_ENV"
-            echo "EXPLICIT_RELEASE_JOBS=false" >> "$GITHUB_ENV"
-          fi
+          test -f deploy/docker-compose.build.yml
+          echo "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml" >> "$GITHUB_ENV"
       - name: Validate Compose configuration
-        run: docker compose --env-file .env.production config
+        run: docker compose --env-file .ci-runtime.env config
       - name: Build production images
-        shell: bash
-        run: |
-          if [[ "$EXPLICIT_RELEASE_JOBS" == "true" ]]; then
-            docker compose --env-file .env.production build api web
-          else
-            docker compose --env-file .env.production build
-          fi
+        run: docker compose --env-file .ci-runtime.env build api web
       - name: Start production-like stack
-        shell: bash
         run: |
-          if [[ "$EXPLICIT_RELEASE_JOBS" == "true" ]]; then
-            docker compose --env-file .env.production up -d --wait --wait-timeout 120 postgres redis
-            docker compose --env-file .env.production run --rm --no-deps migration
-            docker compose --env-file .env.production run --rm --no-deps bootstrap
-            docker compose --env-file .env.production up -d --no-deps api web
-          else
-            docker compose --env-file .env.production up -d
-          fi
+          docker compose --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis
+          docker compose --env-file .ci-runtime.env run --rm --no-deps migration
+          docker compose --env-file .ci-runtime.env run --rm --no-deps bootstrap
+          docker compose --env-file .ci-runtime.env up -d --no-deps api web
       - name: Run health and frontend smoke checks
         shell: bash
         run: |
@@ -217,13 +199,13 @@ jobs:
               break
             fi
             if [[ "$attempt" == 30 ]]; then
-              docker compose --env-file .env.production ps
+              docker compose --env-file .ci-runtime.env ps
               exit 1
             fi
             sleep 5
           done
           curl --fail --silent --show-error -H 'Host: ci.example.test' http://127.0.0.1:8088/ | grep -q '<div id="root">'
-          docker compose --env-file .env.production ps
+          docker compose --env-file .ci-runtime.env ps
       - name: Complete and lock the real first-run setup API
         shell: bash
         run: |
@@ -241,7 +223,7 @@ jobs:
               --password-env ANIMEMO_CI_SETUP_PASSWORD
       - name: Verify fresh D1A routes, pull-only capability, and empty sync state
         run: >-
-          docker compose --env-file .env.production exec -T api
+          docker compose --env-file .ci-runtime.env exec -T api
           python manage.py shell -c
           "from django.db import connection; from django.urls import resolve, reverse;
           from journal.external_accounts.providers.bangumi import BangumiAccountProvider;
@@ -261,10 +243,10 @@ jobs:
           print('Fresh D1A pull-only gate: PASS')"
       - name: Print logs on failure
         if: failure()
-        run: docker compose --env-file .env.production logs --no-color
+        run: docker compose --env-file .ci-runtime.env logs --no-color
       - name: Cleanup
         if: always()
-        run: docker compose --env-file .env.production down -v
+        run: docker compose --env-file .ci-runtime.env down -v
 
   stateful-upgrade:
     name: stateful-upgrade

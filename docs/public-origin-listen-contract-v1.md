@@ -2,8 +2,8 @@
 
 - **Status:** FROZEN FOR v1.1
 - **Version:** v1
-- **Scope:** AniMemo 的宿主机监听端点、canonical external origin、派生的应用安全配置、Bangumi OAuth callback，以及未来 `animemo config` 的事务边界。
-- **Non-goals:** 不配置 DNS、TLS、证书、公网反向代理、Cloudflare、firewall、80/443；不在本阶段实现 CLI。
+- **Scope:** AniMemo 的宿主机监听端点、canonical external origin、派生的应用安全配置、Bangumi OAuth callback，以及 `animemo-updater config` 的事务边界。
+- **Non-goals:** 不配置 DNS、TLS、证书、公网反向代理、Cloudflare、firewall 或 80/443。
 - **Compatibility:** 保持 API v1、Auth、Resource Identity、Plugin SDK v2、Integration Protocol v1、Release Identity 与 Updater fail-closed 行为不变。`https://animemo.cc` 只是当前实例配置，不是产品默认域名。
 - **Change policy:** 改变默认绑定范围、origin 规范化、callback 路径或配置事务语义属于 Contract 变更，必须记录兼容与迁移方案并通过相关 gates；不得静默修改。
 
@@ -34,20 +34,20 @@
 - 标准 Compose 必须在宿主机侧显式绑定 loopback；容器内部监听地址不改变宿主机暴露边界。
 - Installer、Updater 与 Doctor 的本地探测必须直接使用配置后的 loopback endpoint，不应依赖公网 DNS 回环。
 
-当前 `deploy/docker-compose.yml` 已使用 `127.0.0.1:${ANIMEMO_PORT:-8088}:80`；v1.1 不得把该默认放宽为 `0.0.0.0`。
+exact `deploy/docker-compose.yml` 从派生的 managed env 读取完整 `ANIMEMO_LISTEN_HOST` 与 `ANIMEMO_LISTEN_PORT`；托管配置缺失任一字段时 fail closed，不得把默认隐式放宽为 `0.0.0.0`。
 
 ### Alternate loopback port
 
-未来接口允许显式配置其他可用端口，例如：
+管理接口允许显式配置其他可用 loopback 地址或端口，例如：
 
 ```bash
-sudo animemo config listen 127.0.0.1:18088
+sudo animemo-updater config set-listen 127.0.0.1:18088
 ```
 
 或首次安装时：
 
 ```bash
-sudo sh /tmp/animemo-install.sh --listen 127.0.0.1:18088
+sudo animemo-installer install --channel stable --public-origin https://anime.example --listen 127.0.0.1:18088 --dry-run
 ```
 
 端口必须是 `1..65535`。实现可以支持 `127.0.0.0/8` 或 bracketed IPv6 loopback `[::1]:PORT`，但不得因解析失败退回 wildcard bind。
@@ -76,7 +76,7 @@ sudo sh /tmp/animemo-install.sh --listen 127.0.0.1:18088
 - 监听会扩大网络暴露；
 - firewall 与公网访问控制完全由管理员负责。
 
-显式非 loopback `--listen` 本身构成 direct-access opt-in；交互模式还应要求确认。`--non-interactive` 只能在调用者明确提供该非 loopback 值时继续，并仍须输出警告。仅设置 `0.0.0.0` 不得自动合成 Public Origin。
+显式非 loopback `--listen` 仍必须同时提供独立的 direct-exposure acceptance；交互与 non-interactive 路径使用同一机器可验证规则并输出警告。仅设置 `0.0.0.0` 不得自动合成 Public Origin。
 
 ## Public Origin semantics
 
@@ -131,12 +131,12 @@ https://animemo.cc/api/v1/external-accounts/bangumi/callback/
 
 `https://animemo.cc` 不是 product constant。callback 不得单独配置、不得从请求头动态猜测，也不得被数据库中的 provider credentials 覆盖。现有 `backend/config/settings.py` 与 `backend/config/test_public_origins.py` 已覆盖该派生关系。
 
-## Domain configuration transaction
+## Public Origin configuration transaction
 
-未来接口：
+正式接口：
 
 ```bash
-sudo animemo config domain https://new.example.com
+sudo animemo-updater config set-origin https://new.example.com
 ```
 
 它只修改 AniMemo application identity，固定执行：
@@ -163,7 +163,7 @@ Validate
 
 ## Listen configuration transaction
 
-未来 `animemo config listen HOST:PORT` 同样使用 validate、atomic update、AniMemo-scoped reload、health check、rollback 流程。配置命令必须先验证新 endpoint 可绑定，保留旧 endpoint 直到切换准备完成，并且只重载 AniMemo-owned runtime。它不得修改 public proxy；切换成功后应提醒管理员自行更新 proxy upstream。
+`animemo-updater config set-listen HOST:PORT` 生成非秘密 plan；`config apply --listen HOST:PORT --accept` 使用 validate、atomic update、AniMemo-scoped reconcile、health/exact-release/Doctor check 与 rollback 流程。配置命令先验证新 endpoint 可绑定，并且只协调 AniMemo-owned API/Web。它不得修改 public proxy；切换成功后应提醒管理员自行更新 proxy upstream。
 
 ## Reverse proxy expectations
 
@@ -180,20 +180,20 @@ AniMemo 可以验证可信代理配置与请求语义，但不得选择、安装
 
 ## Configuration precedence audit
 
-| Layer | CURRENT | TARGET | GAP | MIGRATION NEED |
+| Layer | PHASE 3C AUTHORITY | ENFORCEMENT | RESULT | MIGRATION NEED |
 | --- | --- | --- | --- | --- |
-| Compose listen | 固定 host `127.0.0.1`，端口读取 `ANIMEMO_PORT`，默认 `8088` | Versioned instance config 表示完整 listen endpoint | 目前只可改端口，direct access 尚无 canonical runtime interface | 后续 Installer/CLI 实现；本轮不改 Compose |
-| Runtime environment | Compose/Updater 从 app root 的 `.env.production` 读取 | 受保护、持久且与 replaceable app material 分离的 instance config | 当前配置与 application tree 同 lifecycle | 按 Filesystem Contract 做未来显式迁移 |
-| Django Public Origin | `ANIMEMO_PUBLIC_ORIGIN`；生产缺省仍指向当前实例 `https://animemo.cc` | v1.1 Installer 必须显式写入，缺失时 fail closed | 当前实例 fallback 容易被误认为产品默认 | 兼容现有 v1.0；v1.1 新安装不得依赖 fallback |
-| Allowed/CORS/CSRF | 生产要求显式非空并包含 Public Origin | 由同一 managed config 原子维护 | 尚无 `animemo config domain` | 后续 CLI 实现 |
-| Bangumi callback | 已由 Public Origin 派生 | 保持 | 无 callback identity gap | 无数据迁移 |
-| Updater health | 读取 Public Origin host/scheme 与 `ANIMEMO_PORT`，连接 loopback | 从 versioned instance metadata/config 发现 listen 与 origin | custom roots/listen 尚无 discovery record | 后续 additive metadata |
+| Compose listen | versioned managed config 表示完整 endpoint | exact Compose 从派生 Adapter 读取 host/port | PASS | 无 |
+| Runtime environment | `/data/animemo/config/animemo.json` 是唯一 authority | `/run/animemo-updater/managed.env` 只可从已验证 authority 重建 | PASS | 无双 reader |
+| Django Public Origin | Installer/配置管理必须显式写入 canonical origin | 缺失、非 canonical 或与 locator 不一致时 fail closed | PASS | Restore/Migration 使用显式 disposition |
+| Allowed/CORS/CSRF | 全部从同一 Public Origin 派生 | config mutation 保留单一 authority | PASS | 无 |
+| Bangumi callback | 从 Public Origin 加冻结路径派生 | 不允许独立 callback identity | PASS | 无 |
+| Updater health | 从 locator/config 发现 Listen 与 Public Origin | locator/config/Compose mismatch fail closed | PASS | 无 fallback |
 
-环境变量兼容可以保留，但优先级必须只有一个持久 source of truth。镜像中的开发/历史默认值不是生产 instance identity，也不是 Installer authority。
+不存在生产环境变量兼容 reader。镜像中的开发默认值不是生产 instance identity，也不是 Installer authority。
 
 ## Instance discovery interface
 
-Installer 必须原子写入 versioned、非 secret 的 `/var/lib/animemo-updater/instance.json`。Updater 与未来 Doctor 通过它发现至少以下逻辑字段：
+Canonical Updater adoption 原子写入 versioned、非 secret 的 `/var/lib/animemo-updater/instance.json`，作为最后一个 instance-discovery publication。Updater、Installer、Restore、Migration 与 Doctor 通过它发现至少以下逻辑字段：
 
 - installation profile/schema version；
 - app root 与 data root；
@@ -202,7 +202,7 @@ Installer 必须原子写入 versioned、非 secret 的 `/var/lib/animemo-update
 - 已验证的 release identity；
 - managed config 的位置。
 
-字段的最终序列化 schema 在 Installer 实现前通过 contract test 固定；本阶段不实现 reader/writer。metadata、managed config、systemd allowlist 或实际 Compose 配置彼此不一致时必须 fail closed。metadata 不得包含 secret。
+序列化 schema、严格 parser、atomic/CAS writer 与 contract tests 已固定。metadata、managed config、systemd allowlist 或实际 Compose 配置彼此不一致时 fail closed。metadata 不包含 secret。
 
 ## Security model
 
@@ -224,7 +224,27 @@ Installer 必须原子写入 versioned、非 secret 的 `/var/lib/animemo-update
 | OAuth callback 未登记 | 展示派生 callback | 更新 provider 配置 |
 | Firewall 阻断 | 不改 firewall | 修复 host/provider firewall |
 
-## Future compatibility
+## Phase 3C managed configuration correction
+
+The only v1.1 configuration authority is the protected canonical JSON file
+`/data/animemo/config/animemo.json` (`animemo.managed-config/v1`). Public Origin
+and Listen remain independent fields in that file. `/run/animemo-updater/managed.env`
+is an ephemeral, `0600` runtime Adapter produced from the validated config and
+the exact Release; it is never a second reader or authority.
+
+Management uses the thin `animemo-updater config` Adapter with `show`, `validate`,
+`set-origin`, `set-listen`, `dry-run`, and `apply` operations. A change binds the
+current non-secret config revision and instance ID, validates the proposed
+canonical values, atomically replaces the protected file, reconciles only the
+AniMemo API/Web services, checks local health and exact Release identity, then
+CAS-updates the locator mirror. Any failed rollback leaves a durable
+`manual_recovery_required` operation; it is not reported as success.
+
+Inputs must already be canonical. The parser rejects userinfo, wildcard,
+trailing-path/query/fragment, non-canonical host spelling, implicit wildcard
+listen, and unknown fields. No app-tree `.env.production`, custom root,
+ambient environment, DNS/TLS/proxy, or automatic public exposure fallback is
+read or written.
 
 - **Installer** 写入并验证 listen、Public Origin、managed config 与 instance metadata。
 - **Updater** 从受验证 metadata/config 发现 roots 与本地 health endpoint，不接受 Django RPC 提供任意 host path。
@@ -233,4 +253,4 @@ Installer 必须原子写入 versioned、非 secret 的 `/var/lib/animemo-update
 - **Migration** 可以改变 Public Origin 与 Listen endpoint，但必须保持两者语义独立。
 - **Doctor** 分别报告 application health、loopback listen、Public Origin config、DNS、TLS 与 proxy 状态；不得把其中一个 PASS 代替另一个。
 
-Backup、Restore、Migration、Migration Secret Envelope、Doctor 与 Compatibility Matrix 的实现全部 deferred to Phase 2+。
+Backup、Restore、Migration、Migration Secret Envelope、Doctor 与 Compatibility Matrix 已实现并由各自 canonical Runtime 拥有。Phase 3C 管理配置和 Installer 只调用这些接口，不复制其语义。

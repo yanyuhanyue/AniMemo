@@ -19,7 +19,6 @@ const dashboardSource = [
   "../src/pages/useDashboardImport.js",
 ].map((path) => readFileSync(new URL(path, import.meta.url), "utf8")).join("\n");
 const nginxSource = readFileSync(new URL("../deploy/nginx.conf", import.meta.url), "utf8");
-const openrestySource = readFileSync(new URL("../deploy/openresty-animemo.conf", import.meta.url), "utf8");
 const removedRouteAuthField = ["route", "requires", "Auth"].join("\\.");
 const removedRouteStaffField = ["route", "requires", "Admin"].join("\\.");
 
@@ -135,7 +134,7 @@ test("requires a staff second factor before self-account deletion", () => {
 });
 
 test("keeps production CSP in Nginx and allows React style attributes only", () => {
-  for (const source of [nginxSource, openrestySource]) {
+  for (const source of [nginxSource]) {
     assert.match(source, /default-src 'self'/);
     assert.match(source, /script-src 'self' 'sha256-[^']+'/);
     assert.match(source, /style-src 'self';/);
@@ -157,6 +156,4 @@ test("overwrites forwarding headers at the trusted proxy boundary", () => {
   assert.doesNotMatch(nginxSource, /proxy_set_header X-Forwarded-For \$http_x_forwarded_for/);
   assert.match(nginxSource, /proxy_set_header X-Forwarded-For \$remote_addr/);
   assert.match(nginxSource, /set_real_ip_from 172\.28\.0\.0\/16/);
-  assert.match(openrestySource, /proxy_set_header X-Forwarded-For \$remote_addr/);
-  assert.match(openrestySource, /proxy_set_header X-Forwarded-Proto https/);
 });

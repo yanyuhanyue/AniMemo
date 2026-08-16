@@ -10,16 +10,35 @@ from pathlib import Path
 from jsonschema import Draft202012Validator, FormatChecker
 from packaging.version import InvalidVersion, Version
 
+from .materials import (
+    INSTALLER_MATERIALS_NAME as MATERIAL_ARCHIVE_NAME,
+)
+from .materials import (
+    MaterialContractError,
+    inspect_installer_materials,
+    validate_material_contract,
+)
 
 REPOSITORY = "yanyuhanyue/AniMemo"
 API_REPOSITORY = "ghcr.io/yanyuhanyue/animemo-api"
 WEB_REPOSITORY = "ghcr.io/yanyuhanyue/animemo-web"
+POSTGRES_REPOSITORY = "docker.io/library/postgres"
+REDIS_REPOSITORY = "docker.io/library/redis"
+POSTGRES_DIGEST = (
+    "sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571"
+)
+REDIS_DIGEST = "sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf"
+DEPLOYMENT_PROFILE = "v1.1-standard"
+INSTALLER_MATERIALS_NAME = "installer-materials.tar"
+_DEFAULT_MATERIALS_DIGEST = "sha256:" + "0" * 64
 DEPLOYMENT_CONTRACT_PATHS = (
     "deploy/docker-compose.yml",
     "updater/docker-compose.runtime.yml",
 )
 SCHEMA_PATH = Path(__file__).with_name("release-manifest.schema.json")
-STABLE_TAG = re.compile(r"^v(?P<base>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$")
+STABLE_TAG = re.compile(
+    r"^v(?P<base>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$"
+)
 PRERELEASE_TAG = re.compile(
     r"^v(?P<base>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))-(?P<channel>beta|rc)\.(?P<sequence>[1-9][0-9]*)$"
 )
@@ -47,16 +66,31 @@ def validate_deployment_contract(
     payload: object,
     *,
     root: Path | None = None,
+    installer_materials: Path | None = None,
 ) -> dict[str, object]:
-    if not isinstance(payload, dict) or set(payload) != {"schemaVersion", "files"}:
+    if not isinstance(payload, dict) or set(payload) != {
+        "schemaVersion",
+        "profile",
+        "platform",
+        "archive",
+        "files",
+        "materials",
+    }:
         raise ReleaseContractError("Deployment contract has an invalid shape")
-    if payload["schemaVersion"] != 1 or not isinstance(payload["files"], list):
+    if (
+        payload["schemaVersion"] != 2
+        or payload["profile"] != DEPLOYMENT_PROFILE
+        or payload["platform"] != "linux/amd64"
+        or not isinstance(payload["files"], list)
+    ):
         raise ReleaseContractError("Deployment contract has an unsupported schema")
     files = payload["files"]
     if [item.get("path") for item in files if isinstance(item, dict)] != list(
         DEPLOYMENT_CONTRACT_PATHS
     ):
-        raise ReleaseContractError("Deployment contract files are incomplete or unordered")
+        raise ReleaseContractError(
+            "Deployment contract files are incomplete or unordered"
+        )
     for item in files:
         if (
             not isinstance(item, dict)
@@ -74,10 +108,36 @@ def validate_deployment_contract(
                 raise ReleaseContractError(
                     f"Deployment contract source checksum differs: {item['path']}"
                 )
+    material_contract = {
+        "schemaVersion": payload["schemaVersion"],
+        "profile": payload["profile"],
+        "platform": payload["platform"],
+        "archive": payload["archive"],
+        "materials": payload["materials"],
+    }
+    try:
+        validate_material_contract(material_contract)
+        if installer_materials is not None:
+            identity = inspect_installer_materials(installer_materials)
+            if payload["archive"] != {
+                "name": MATERIAL_ARCHIVE_NAME,
+                "sha256": identity.sha256,
+                "size": identity.size,
+                "format": "tar",
+            } or payload["materials"] != [item.as_dict() for item in identity.files]:
+                raise ReleaseContractError(
+                    "Deployment contract installer materials identity differs"
+                )
+    except MaterialContractError as error:
+        raise ReleaseContractError(str(error)) from error
     return payload
 
 
-def build_deployment_contract(root: Path) -> dict[str, object]:
+def build_deployment_contract(
+    root: Path,
+    *,
+    installer_materials: Path,
+) -> dict[str, object]:
     root = root.resolve()
     files: list[dict[str, str]] = []
     for relative in DEPLOYMENT_CONTRACT_PATHS:
@@ -87,11 +147,26 @@ def build_deployment_contract(root: Path) -> dict[str, object]:
                 f"Deployment contract source is unavailable: {relative}"
             )
         files.append({"path": relative, "sha256": _file_sha256(source)})
+    try:
+        identity = inspect_installer_materials(installer_materials)
+    except MaterialContractError as error:
+        raise ReleaseContractError(str(error)) from error
     payload = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "profile": DEPLOYMENT_PROFILE,
+        "platform": "linux/amd64",
+        "archive": {
+            "name": MATERIAL_ARCHIVE_NAME,
+            "sha256": identity.sha256,
+            "size": identity.size,
+            "format": "tar",
+        },
         "files": files,
+        "materials": [item.as_dict() for item in identity.files],
     }
-    return validate_deployment_contract(payload, root=root)
+    return validate_deployment_contract(
+        payload, root=root, installer_materials=installer_materials
+    )
 
 
 def deployment_contract_digest(payload: dict[str, object]) -> str:
@@ -113,7 +188,11 @@ def _stable_tags(tags: list[str]) -> list[tuple[Version, str]]:
         match = STABLE_TAG.fullmatch(tag)
         if match:
             result.append((_version(match.group("base"), label="stable tag"), tag))
-        elif tag.startswith("v") and re.match(r"^v[0-9]", tag) and not PRERELEASE_TAG.fullmatch(tag):
+        elif (
+            tag.startswith("v")
+            and re.match(r"^v[0-9]", tag)
+            and not PRERELEASE_TAG.fullmatch(tag)
+        ):
             raise ReleaseContractError(f"Invalid AniMemo release tag: {tag!r}")
     return sorted(result)
 
@@ -128,7 +207,11 @@ def previous_stable_tag(tags: list[str], *, target: str) -> str | None:
     if not target_match:
         raise ReleaseContractError(f"Invalid Stable target: {target!r}")
     target_version = _version(target_match.group("base"), label="Stable target")
-    candidates = [(version, tag) for version, tag in _stable_tags(tags) if version < target_version]
+    candidates = [
+        (version, tag)
+        for version, tag in _stable_tags(tags)
+        if version < target_version
+    ]
     return candidates[-1][1] if candidates else None
 
 
@@ -147,7 +230,9 @@ def resolve_prerelease(
     stable = _stable_tags(tags)
     if stable:
         if target_version_override:
-            raise ReleaseContractError("target-version-override is bootstrap-only after a stable release exists")
+            raise ReleaseContractError(
+                "target-version-override is bootstrap-only after a stable release exists"
+            )
         latest = stable[-1][0]
         major, minor, patch = latest.release
         if bump == "patch":
@@ -159,10 +244,14 @@ def resolve_prerelease(
         base = f"{major}.{minor}.{patch}"
     else:
         if not target_version_override:
-            raise ReleaseContractError("Initial release line requires --target-version-override (for example v1.0.0)")
+            raise ReleaseContractError(
+                "Initial release line requires --target-version-override (for example v1.0.0)"
+            )
         match = STABLE_TAG.fullmatch(target_version_override)
         if not match:
-            raise ReleaseContractError("Bootstrap target-version-override must be a stable vMAJOR.MINOR.PATCH tag")
+            raise ReleaseContractError(
+                "Bootstrap target-version-override must be a stable vMAJOR.MINOR.PATCH tag"
+            )
         base = match.group("base")
 
     sequences = [
@@ -175,7 +264,11 @@ def resolve_prerelease(
     sequence = max(sequences, default=0) + 1
     release_tag = f"v{base}-{channel}.{sequence}"
     assert_tag_absent(release_tag, tags)
-    return {"targetVersion": f"v{base}", "releaseTag": release_tag, "sequence": sequence}
+    return {
+        "targetVersion": f"v{base}",
+        "releaseTag": release_tag,
+        "sequence": sequence,
+    }
 
 
 def _timestamp(value: datetime | str) -> str:
@@ -216,15 +309,23 @@ def build_provenance_plan(
     try:
         parsed_created = datetime.fromisoformat(created.replace("Z", "+00:00"))
     except ValueError as error:
-        raise ReleaseContractError(f"Invalid provenance timestamp: {created!r}") from error
+        raise ReleaseContractError(
+            f"Invalid provenance timestamp: {created!r}"
+        ) from error
     if parsed_created.tzinfo is None:
         raise ReleaseContractError("Provenance timestamp must include a timezone")
 
     return {
         "_type": "https://in-toto.io/Statement/v1",
         "subject": [
-            {"name": API_REPOSITORY, "digest": {"sha256": _digest_hex(api_digest, label="API image")}},
-            {"name": WEB_REPOSITORY, "digest": {"sha256": _digest_hex(web_digest, label="Web image")}},
+            {
+                "name": API_REPOSITORY,
+                "digest": {"sha256": _digest_hex(api_digest, label="API image")},
+            },
+            {
+                "name": WEB_REPOSITORY,
+                "digest": {"sha256": _digest_hex(web_digest, label="Web image")},
+            },
         ],
         "predicateType": "https://slsa.dev/provenance/v1",
         "predicate": {
@@ -270,6 +371,7 @@ def build_manifest(
     configuration_contract: str,
     configuration_accepts: list[str],
     plugin_sdk_apis: list[int],
+    installer_materials_sha256: str = _DEFAULT_MATERIALS_DIGEST,
     promoted_from: str | None = None,
     provenance_workflow: str | None = None,
     provenance_source_commit: str | None = None,
@@ -281,7 +383,7 @@ def build_manifest(
         else ".github/workflows/release.yml"
     )
     payload = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "release": {
             "version": version,
             "channel": channel,
@@ -290,22 +392,52 @@ def build_manifest(
             "promotedFrom": promoted_from,
         },
         "images": {
-            "api": {"repository": API_REPOSITORY, "digest": api_digest, "platform": "linux/amd64"},
-            "web": {"repository": WEB_REPOSITORY, "digest": web_digest, "platform": "linux/amd64"},
+            "api": {
+                "repository": API_REPOSITORY,
+                "digest": api_digest,
+                "platform": "linux/amd64",
+            },
+            "web": {
+                "repository": WEB_REPOSITORY,
+                "digest": web_digest,
+                "platform": "linux/amd64",
+            },
+            "postgres": {
+                "repository": POSTGRES_REPOSITORY,
+                "digest": POSTGRES_DIGEST,
+                "platform": "linux/amd64",
+            },
+            "redis": {
+                "repository": REDIS_REPOSITORY,
+                "digest": REDIS_DIGEST,
+                "platform": "linux/amd64",
+            },
         },
         "deployment": {
+            "profile": DEPLOYMENT_PROFILE,
             "contractSha256": deployment_contract_sha256,
             "files": copy.deepcopy(deployment_files),
+            "installerMaterials": {
+                "name": INSTALLER_MATERIALS_NAME,
+                "sha256": installer_materials_sha256,
+                "format": "tar",
+            },
         },
         "minimumUpdaterVersion": minimum_updater_version,
         "compatibility": {
             "database": {
                 "contract": database_contract,
                 "appAccepts": database_accepts,
-                "migration": {"required": migration_required, "policy": migration_policy},
+                "migration": {
+                    "required": migration_required,
+                    "policy": migration_policy,
+                },
                 "applicationRollback": application_rollback,
             },
-            "configuration": {"contract": configuration_contract, "appAccepts": configuration_accepts},
+            "configuration": {
+                "contract": configuration_contract,
+                "appAccepts": configuration_accepts,
+            },
             "pluginSdk": {
                 "manifestSchema": 2,
                 "supportedApis": plugin_sdk_apis,
@@ -323,6 +455,7 @@ def build_manifest(
         "artifacts": {
             "manifest": "release-manifest.json",
             "deploymentContract": "deployment-contract.json",
+            "installerMaterials": INSTALLER_MATERIALS_NAME,
             "checksums": "checksums.txt",
         },
     }
@@ -334,13 +467,19 @@ def _schema() -> dict[str, object]:
     return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
-def validate_manifest(payload: dict[str, object], *, updater_version: str | None = None) -> None:
+def validate_manifest(
+    payload: dict[str, object], *, updater_version: str | None = None
+) -> None:
     validator = Draft202012Validator(_schema(), format_checker=FormatChecker())
-    errors = sorted(validator.iter_errors(payload), key=lambda item: list(item.absolute_path))
+    errors = sorted(
+        validator.iter_errors(payload), key=lambda item: list(item.absolute_path)
+    )
     if errors:
         error = errors[0]
         location = ".".join(str(part) for part in error.absolute_path) or "manifest"
-        raise ReleaseContractError(f"Invalid release manifest at {location}: {error.message}")
+        raise ReleaseContractError(
+            f"Invalid release manifest at {location}: {error.message}"
+        )
 
     release = payload["release"]
     version = release["version"]
@@ -349,19 +488,37 @@ def validate_manifest(payload: dict[str, object], *, updater_version: str | None
     stable = STABLE_TAG.fullmatch(version)
     if channel == "stable":
         if not stable or not release["promotedFrom"]:
-            raise ReleaseContractError("Stable manifests must identify an RC promotion source")
+            raise ReleaseContractError(
+                "Stable manifests must identify an RC promotion source"
+            )
         promoted = PRERELEASE_TAG.fullmatch(release["promotedFrom"])
-        if not promoted or promoted.group("channel") != "rc" or promoted.group("base") != stable.group("base"):
-            raise ReleaseContractError("Stable promotedFrom must be an RC for the exact stable version")
-    elif not prerelease or prerelease.group("channel") != channel or release["promotedFrom"] is not None:
-        raise ReleaseContractError("Prerelease version, channel, and promotedFrom are inconsistent")
+        if (
+            not promoted
+            or promoted.group("channel") != "rc"
+            or promoted.group("base") != stable.group("base")
+        ):
+            raise ReleaseContractError(
+                "Stable promotedFrom must be an RC for the exact stable version"
+            )
+    elif (
+        not prerelease
+        or prerelease.group("channel") != channel
+        or release["promotedFrom"] is not None
+    ):
+        raise ReleaseContractError(
+            "Prerelease version, channel, and promotedFrom are inconsistent"
+        )
 
     if payload["releaseNotes"]["tag"] != version:
-        raise ReleaseContractError("Release notes tag must equal the immutable release version")
+        raise ReleaseContractError(
+            "Release notes tag must equal the immutable release version"
+        )
     provenance = payload["provenance"]
     if channel == "stable":
         if provenance["workflow"] != ".github/workflows/promote-release.yml":
-            raise ReleaseContractError("Stable provenance must use the promotion workflow")
+            raise ReleaseContractError(
+                "Stable provenance must use the promotion workflow"
+            )
     elif (
         provenance["workflow"] != ".github/workflows/release.yml"
         or provenance["sourceCommit"] != release["commit"]
@@ -371,31 +528,44 @@ def validate_manifest(payload: dict[str, object], *, updater_version: str | None
         )
 
     deployment = payload["deployment"]
-    embedded_contract = {"schemaVersion": 1, "files": deployment["files"]}
-    validate_deployment_contract(embedded_contract)
-    if deployment_contract_digest(embedded_contract) != deployment["contractSha256"]:
+    if [item.get("path") for item in deployment["files"]] != list(
+        DEPLOYMENT_CONTRACT_PATHS
+    ):
         raise ReleaseContractError(
-            "Deployment contract digest does not bind the declared deployment files"
+            "Deployment contract files are incomplete or unordered"
         )
 
     database = payload["compatibility"]["database"]
     migration = database["migration"]
     if database["contract"] not in database["appAccepts"]:
-        raise ReleaseContractError("Target application must accept its declared database contract")
+        raise ReleaseContractError(
+            "Target application must accept its declared database contract"
+        )
     if migration["required"] != (migration["policy"] != "none"):
-        raise ReleaseContractError("Database migration required flag and migration policy are inconsistent")
+        raise ReleaseContractError(
+            "Database migration required flag and migration policy are inconsistent"
+        )
     if migration["policy"] == "none" and database["applicationRollback"] != "safe":
-        raise ReleaseContractError("No-migration releases must permit safe application rollback")
-    if migration["policy"] == "breaking-blocked" and database["applicationRollback"] != "blocked":
-        raise ReleaseContractError("Breaking-blocked migrations must block application rollback")
+        raise ReleaseContractError(
+            "No-migration releases must permit safe application rollback"
+        )
+    if (
+        migration["policy"] == "breaking-blocked"
+        and database["applicationRollback"] != "blocked"
+    ):
+        raise ReleaseContractError(
+            "Breaking-blocked migrations must block application rollback"
+        )
 
     configuration = payload["compatibility"]["configuration"]
     if configuration["contract"] not in configuration["appAccepts"]:
-        raise ReleaseContractError("Target application must accept its declared configuration contract")
+        raise ReleaseContractError(
+            "Target application must accept its declared configuration contract"
+        )
 
-    if updater_version is not None and _version(updater_version, label="updater version") < _version(
-        payload["minimumUpdaterVersion"], label="minimum updater version"
-    ):
+    if updater_version is not None and _version(
+        updater_version, label="updater version"
+    ) < _version(payload["minimumUpdaterVersion"], label="minimum updater version"):
         raise ReleaseContractError(
             f"Installed updater {updater_version} is older than required updater {payload['minimumUpdaterVersion']}"
         )

@@ -68,9 +68,12 @@ jobs:
           test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC_TAG" --jq '.prerelease')" = "true"
           gh release download "$RC_TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern release-manifest.json --pattern deployment-contract.json \
-            --pattern checksums.txt --dir rc-assets
+            --pattern installer-materials.tar --pattern checksums.txt --dir rc-assets
           (cd rc-assets && sha256sum --check checksums.txt)
           python -m release.cli validate-manifest --manifest rc-assets/release-manifest.json --updater-version 1.0.0
+          python -m release.cli validate-deployment-contract \
+            --contract rc-assets/deployment-contract.json \
+            --installer-materials rc-assets/installer-materials.tar
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -106,7 +109,11 @@ jobs:
           gh attestation verify rc-assets/deployment-contract.json \
             --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-digest "$rc_commit"
+          gh attestation verify rc-assets/installer-materials.tar \
+            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$rc_commit"
           cp --no-clobber rc-assets/deployment-contract.json promotion-output/deployment-contract.json
+          cp --no-clobber rc-assets/installer-materials.tar promotion-output/installer-materials.tar
           git tag --list 'v*' --sort=version:refname > "$RUNNER_TEMP/tags.txt"
           python -m release.cli promote-manifest \
             --rc-manifest rc-assets/release-manifest.json --tags-file "$RUNNER_TEMP/tags.txt" \
@@ -115,9 +122,13 @@ jobs:
             --output promotion-output/release-manifest.json
           python -m release.cli validate-manifest \
             --manifest promotion-output/release-manifest.json --updater-version 1.0.0
+          python -m release.cli validate-deployment-contract \
+            --contract promotion-output/deployment-contract.json \
+            --installer-materials promotion-output/installer-materials.tar
           python -m release.cli write-checksums \
             --output promotion-output/checksums.txt \
-            promotion-output/release-manifest.json promotion-output/deployment-contract.json
+            promotion-output/release-manifest.json promotion-output/deployment-contract.json \
+            promotion-output/installer-materials.tar
           (cd promotion-output && sha256sum --check checksums.txt)
           stable_tag="$(jq -r '.release.version' promotion-output/release-manifest.json)"
           python -m release.cli previous-stable \
@@ -250,7 +261,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for subject in release-manifest.json deployment-contract.json; do
+          for subject in release-manifest.json deployment-contract.json installer-materials.tar; do
             gh attestation verify "promotion-output/$subject" \
               --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/promote-release.yml" \
@@ -277,5 +288,5 @@ jobs:
           fi
           gh release create "$STABLE_TAG" \
             promotion-output/release-manifest.json promotion-output/deployment-contract.json \
-            promotion-output/checksums.txt \
+            promotion-output/installer-materials.tar promotion-output/checksums.txt \
             "${release_args[@]}"

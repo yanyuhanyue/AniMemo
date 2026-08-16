@@ -216,6 +216,27 @@ def _is_release_core(path: str) -> bool:
     }
 
 
+def _is_installer(path: str) -> bool:
+    return path.startswith("installer/")
+
+
+def _is_managed_configuration(path: str) -> bool:
+    return path in {
+        "durability/managed_config.py",
+        "scripts/tests/test_managed_config.py",
+        "updater/configuration.py",
+        "updater/tests/test_configuration.py",
+    }
+
+
+def _is_platform_qualification(path: str) -> bool:
+    return path in {
+        "durability/platform.py",
+        "scripts/platform_qualification.py",
+        "scripts/tests/test_platform_qualification.py",
+    }
+
+
 def _is_updater(path: str) -> bool:
     return path.startswith(("updater/", "deploy/updater/")) or path in {
         "backend/journal/staff_update_views.py",
@@ -508,6 +529,27 @@ RULES = (
         "Release producer, manifest, provenance, or release authority code changed.",
         ("release", "tooling"),
         _is_release_core,
+    ),
+    RiskRule(
+        "installer-runtime",
+        "CRITICAL",
+        "Installer planning, mutation, Restore, or acceptance behavior changed.",
+        ("deployment", "release", "updater", "recovery"),
+        _is_installer,
+    ),
+    RiskRule(
+        "managed-configuration-runtime",
+        "CRITICAL",
+        "Canonical managed configuration or its apply transaction changed.",
+        ("deployment", "updater", "recovery"),
+        _is_managed_configuration,
+    ),
+    RiskRule(
+        "platform-qualification-authority",
+        "CRITICAL",
+        "Hosted platform qualification evidence or its verifier changed.",
+        ("deployment", "release", "recovery"),
+        _is_platform_qualification,
     ),
     RiskRule(
         "updater-core",

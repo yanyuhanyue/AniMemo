@@ -43,10 +43,12 @@ Stable Promotion 固定 workflow dispatch 的 exact `github.sha`，并在首个�
 
 ## Manifest schema
 
-权威 JSON Schema 是 `release/release-manifest.schema.json`，当前 `schemaVersion` 为 `1`。Manifest 包含：
+权威 JSON Schema 是 `release/release-manifest.schema.json`，v1.1 Installer 当前只接受 `schemaVersion` 为 `2`。Manifest 包含：
 
 - release version/channel/commit/UTC timestamp/promotion source；
 - API/Web 固定 GHCR repository、`linux/amd64` platform 与 digest；
+- qualified PostgreSQL/Redis repository、platform 与不可变 digest；
+- `v1.1-standard` deployment profile、Installer material archive/逐文件 identity 与 platform qualification identity；
 - minimum updater version；
 - database、configuration 与 Plugin SDK compatibility；
 - release notes identity；
@@ -62,7 +64,7 @@ provenance.sourceCommit = 实际运行签署该 Manifest workflow 的 commit
 
 Beta/RC 通常由同一 Release workflow 产生，因此两者可相同。Stable 不重新 build，继续保留 RC 的 `release.commit` 与 API/Web digests，但 Stable Manifest 由 promotion workflow 签署，所以 `provenance.sourceCommit` 可以是后续 commit。消费者必须按各自语义验证，不能把 Stable promotion commit 冒充应用构建 commit。
 
-Schema 拒绝 image `tag` 字段、缺失 digest、非 40 位 commit、未知字段和未知 schema version。
+Schema 拒绝 image `tag` 字段、缺失 digest、非 40 位 commit、未知字段和未知 schema version。v1.1 没有 schema-v1 dual reader。
 
 ## Compatibility model
 
@@ -75,7 +77,7 @@ Schema 拒绝 image `tag` 字段、缺失 digest、非 40 位 commit、未知字
 
 目标应用只有在接受当前数据库与配置 contract、支持所有 enabled plugin 的 `sdkApi`，且 updater 版本满足 minimum 时才是 Safe Switch。迁移后回退时重新用 Previous Manifest 对当前 contract 计算：接受则只回退 API/Web、数据库保持当前；不接受则 Unsafe Downgrade 并阻断。`breaking-blocked` 不允许自动 migration 或 switch。
 
-当前 v1.0 contract 是：
+历史 v1.0 application contract 是：
 
 ```text
 database: animemo-db-v1
@@ -103,6 +105,50 @@ predicate: https://slsa.dev/provenance/v1
 Release Dry Run 只有 `contents: read`，会构建本地 OCI archive、生成 Manifest/checksum，并输出 `provenance-plan.unsigned.json` 来验证 SLSA subject、commit 与 workflow 输入。该文件明确不是密码学签名；只有非 Dry Run 的 publish job 才申请 `id-token: write` / `attestations: write`，调用 `actions/attest` 产生可验证证明。
 
 ## Tool interface
+
+## Phase 3C Installer Material Profile
+
+The pre-production v1.1 Release Manifest advances explicitly to schema v2 for
+the canonical Installer. A Release publishes exactly:
+
+```text
+release-manifest.json
+deployment-contract.json
+installer-materials.tar
+checksums.txt
+```
+
+`installer-materials.tar` is deterministic, uncompressed USTAR. The closed
+deployment/material contract binds every regular member by canonical relative
+path, SHA-256, byte size, mode, and semantic installation role. It includes the
+Installer, Updater, Release verifier, shared durability runtime, fixed Compose
+files, launcher/systemd/sysusers/tmpfiles assets, managed-config and operation
+schema/runtime, platform qualification material, and a complete offline
+wheelhouse. Symlinks, hard links, special files, absolute/parent paths,
+duplicates, uncontracted members, and size/count excess fail closed. The
+Installer never resolves packages online or fills missing bytes from a source
+checkout.
+
+Manifest v2 binds four `linux/amd64` exact images: API, Web, PostgreSQL, and
+Redis. The qualified dependency baseline is:
+
+```text
+docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
+docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+```
+
+Consumers receive `VerifiedReleaseMaterials`, which owns a durable verified
+material root and exposes only role/path and four-image lookup Interfaces. Plan
+may use cached verified evidence; execute refreshes GitHub Release metadata,
+assets, checksum, tag, provenance, attestation, contract, archive, and aggregate
+identity. Cache names and directories never become authority.
+
+Stable remains build-once/promote-many: promotion creates the signed Stable
+Manifest/checksums for the promoted tag while copying the RC deployment
+contract and material tar byte-for-byte and retaining all four image
+identities. It does not rebuild application or Installer material bytes.
+Schema-v1/three-asset Releases are not accepted by the v1.1 Installer and no
+dual reader exists.
 
 工具入口为 `python -m release.cli`：
 

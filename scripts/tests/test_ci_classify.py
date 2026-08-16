@@ -196,6 +196,38 @@ class CiClassificationTests(unittest.TestCase):
             "full_gate",
         )
 
+    def test_phase3c_paths_are_known_critical_and_select_required_gates(self):
+        cases = {
+            "installer/restore_production.py": (
+                "deployment",
+                "release",
+                "updater",
+                "recovery",
+            ),
+            "durability/managed_config.py": (
+                "deployment",
+                "updater",
+                "recovery",
+            ),
+            "updater/configuration.py": (
+                "deployment",
+                "updater",
+                "recovery",
+            ),
+            "scripts/platform_qualification.py": (
+                "deployment",
+                "release",
+                "recovery",
+            ),
+            "release/materials.py": ("release",),
+        }
+        for path, signals in cases.items():
+            with self.subTest(path=path):
+                result = self.assert_risk("CRITICAL", path)
+                self.assertEqual(result["execution_profile"], "TARGETED")
+                self.assert_true(result, *signals)
+                self.assert_false(result, "run_release_full", "full_gate")
+
     def test_case_f_database_migration_selects_postgres_and_stateful(self):
         result = classify_paths(["backend/journal/migrations/9999_gate_test.py"])
 

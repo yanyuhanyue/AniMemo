@@ -8,7 +8,7 @@
 
 **Definitions:** Restore 是让一个 verified instance Backup 在经过兼容性裁决后成为可运行 AniMemo instance；`PUBLISHED` 表示 target 通过全部验证后被发布，`RECOVERY_REQUIRED` 表示 destructive restore mutation 已开始但未安全发布。
 
-**Non-goals:** 本文不实现 Restore CLI/runtime、不执行生产恢复、不定义 in-place destructive restore、不实现 Backup、Migration、Export、Compatibility engine、Secret Envelope、Doctor 或全局 atomic rollback。
+**Non-goals:** 不执行生产恢复、不定义 in-place destructive restore、不把 Installer 变成第二 Restore/Compatibility/Secret Envelope/Doctor runtime，也不承诺全局 atomic rollback。
 
 **Dependencies:** 直接依赖 Backup Contract v1 和 Compatibility Matrix v1；继承 Phase 1 Deployment Boundary、Filesystem Layout、Installer、Public Origin / Listen Contract，并与 Migration Bundle、Migration Secret Envelope、Doctor 接口一致。
 
@@ -58,7 +58,7 @@ Restore 必须证明：
 
 任何 MI invariant 无法证明都不能输出 `PUBLISHED`。
 
-未来 validation fixtures 必须分别证明：external metadata 缺失不会删除 memory；provider identity 改变不会 orphan stable relation；identity merge 保留旧 references/history；unsupported memory bytes 不被丢弃；ambiguous target/identity/member 必须 fail closed 或进入 explicit repair。只验证首页可访问或总 row count 不满足 MI-1..MI-5。
+Validation fixtures 必须分别证明：external metadata 缺失不会删除 memory；provider identity 改变不会 orphan stable relation；identity merge 保留旧 references/history；unsupported memory bytes 不被丢弃；ambiguous target/identity/member 必须 fail closed 或进入 explicit repair。生产 adapter 通过 ORM/invariant probes 执行 MI-1..MI-5；只验证首页可访问或总 row count 不满足要求。
 
 ## 4. State machine
 
@@ -353,31 +353,31 @@ VALIDATE 至少覆盖：
 
 该future adoption interface不得被Installer的“目录存在”、`--force` 或手工删除实现。本轮默认拒绝Existing instance、Foreign和Partial/ambiguous destination。
 
-## 20. CURRENT → TARGET gap
+## 20. Phase 3C implementation status
 
-| Area | CURRENT | TARGET | Classification |
+| Area | BEFORE | PHASE 3C RESULT | Classification |
 | --- | --- | --- | --- |
 | Fresh A→B proof | 已有isolated logical restore rehearsal | 继续作为Restore Contract evidence | ALREADY SATISFIED |
 | Empty target guard | 旧helper要求empty target | Formal destination classification | ALREADY SATISFIED |
 | Authentication epoch | 命令与端到端test已存在 | publish前mandatory gate | ALREADY SATISFIED |
 | Automatic restore | Updater明确不自动restore | 继续fail closed | ALREADY SATISFIED |
-| Canonical state machine | 当前脚本是串行rehearsal | VERIFY→PLAN→RESTORE→VALIDATE | DOCUMENTATION GAP |
-| Four-state compatibility | 当前Release只裁决live switch | Backup-aware Compatibility Matrix | IMPLEMENTATION DEFERRED |
-| Locator/config roots | Phase 1只冻结future interface | rebuild target locator/config | IMPLEMENTATION DEFERRED |
-| Database staging/journal | 当前shell外部执行fresh import | durable Restore operation state | IMPLEMENTATION DEFERRED |
-| Selective filesystem/updater state | 当前helper整树复制 | strict allowlist与native schema adoption | IMPLEMENTATION DEFERRED |
-| Secret envelope/reference | 当前rehearsal依赖预置相同secret | authenticated restore flow | IMPLEMENTATION DEFERRED |
-| R2 | 当前未演练 | captured/reference-dependent validation | IMPLEMENTATION DEFERRED |
+| Canonical state machine | 串行rehearsal | `prepare_restore` / `execute_restore` owns VERIFY→PLAN→RESTORE→VALIDATE→PUBLISH | IMPLEMENTED |
+| Four-state compatibility | Release只裁决live switch | Backup-aware canonical Compatibility Matrix | IMPLEMENTED |
+| Locator/config roots | Phase 1只冻结future interface | canonical config、inactive restore-source evidence 与 final adoption publication | IMPLEMENTED |
+| Database staging/journal | shell外部执行fresh import | fixed Compose stdin logical restore 与独立 durable restore journal | IMPLEMENTED |
+| Selective filesystem/updater state | helper整树复制 | strict allowlist、plugin/media digest 与 native Updater adoption | IMPLEMENTED |
+| Secret envelope/reference | rehearsal依赖预置secret | authenticated resolver 与 preserve/reconfigure disposition | IMPLEMENTED |
+| R2 | 未进行生产演练 | reference/captured metadata由 Backup/Restore contract保留；unknown remote object不删除 | CONTRACT IMPLEMENTED / PRODUCTION NOT RUN |
 | Staff/Data Bundle wording | 有限Export历史使用backup/restore名称 | canonical docs 明确为Export/Import；未来产品文案继续收敛 | DOCUMENTATION GAP |
-| Exact source release unavailable | 当前rehearsal使用当前candidate | offline/recovery-compatible authority policy | RELEASE CONTRACT REVIEW NEEDED |
-| Existing instance destructive restore | 无安全contract | future explicit adoption interface | IMPLEMENTATION DEFERRED |
-| Full runtime | 无Restore CLI/runtime | future implementation conforming to this Contract | IMPLEMENTATION DEFERRED |
+| Exact release unavailable | rehearsal使用当前candidate | production Release adapter重新获取并验证选定 exact Release，缺失时 fail closed | IMPLEMENTED |
+| Existing instance destructive restore | 无安全contract | 仍明确拒绝；future explicit adoption interface需另行冻结 | OUT OF SCOPE |
+| Full runtime | 无Restore CLI/runtime | canonical Runtime、Installer assembly、production adapters 与 secret-safe CLI | IMPLEMENTED |
 
 旧 `scripts/dr_backup.py` / DR rehearsal 是noncanonical evidence，其差异不构成Phase 1 canonical Contract冲突，也不能直接成为Restore runtime。
 
-## 21. Future contract tests
+## 21. Contract tests
 
-未来实现至少必须增加：
+实现与持续回归至少覆盖：
 
 - `COMPATIBLE`、`REQUIRES_UPGRADE`、`UNSUPPORTED`、`CORRUPT` 的 table-driven vectors 与固定聚合结果；
 - VERIFY/PLAN 对 Fresh、Existing empty、Existing instance、Foreign、Partial/ambiguous destination 的零 mutation证明；
@@ -391,10 +391,10 @@ VALIDATE 至少覆盖：
 - pre/mid/post failure只清理本operation staging，不修改Backup、foreign/previous instance或公网基础设施；
 - MI-1..MI-5 独立fixtures和完整isolated A→B rehearsal。
 
-以上 runtime vectors 属于后续实现；本轮只增加小型文档 invariant tests，不创建 Restore runtime 测试框架。
+Phase 3B/3C runtime、PostgreSQL、Installer 和 production adapter tests 覆盖上述 canonical seams；真实 Docker/PostgreSQL/Fresh/Restore rehearsal 由 GitHub-hosted qualification 提供最终平台 evidence。
 
-## 22. Deferred implementation
+## 22. Remaining exclusions
 
-Restore CLI/runtime、operation journal、compatibility engine、database staging、secret resolution、R2 restore、locator publication、existing-instance adoption、production rehearsal和contract tests全部 **DEFERRED**。
+Existing-instance destructive restore、Production rehearsal/activation、公网基础设施变更与自动删除 remote objects 仍不在范围内。它们不是 Phase 3C runtime 的 fallback。
 
-本 Contract Freeze 不授权production mutation、Release、部署、读取secret、清空target、开始Migration或实现自动Restore。成功条件是语义冻结并与另外五份Phase 2 Contract完成一致性评审。
+本 Contract 不授权 Production mutation、Release、清空 existing/foreign target 或自动 Restore。Phase 3C 只允许 isolated local/CI qualification；真实 secret 只可通过受保护文件或 FD/stdin 进入 secret resolver，绝不进入 plan、argv、环境、journal 或 report。

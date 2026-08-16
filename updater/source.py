@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -22,12 +23,17 @@ from release.contract import (
     validate_deployment_contract,
     validate_manifest,
 )
+from release.materials import (
+    MaterialContractError,
+    MaterialFileIdentity,
+    VerifiedMaterialSet,
+    extract_installer_materials,
+)
 
 from .commands import CommandRunner
 from .errors import CommandFailed, RequestRejected, StateError
 from .protocol import CHANNELS, RELEASE_VERSION
 from .state import _absolute, _ensure_private_directory
-
 
 GITHUB_API_ROOT = "https://api.github.com"
 GITHUB_API_VERSION = "2026-03-10"
@@ -36,6 +42,7 @@ MAX_GITHUB_JSON_BYTES = 8 * 1024 * 1024
 EXPECTED_RELEASE_ASSETS = {
     "checksums.txt",
     "deployment-contract.json",
+    "installer-materials.tar",
     "release-manifest.json",
 }
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -70,7 +77,11 @@ class GitHubPublicRest:
             self._token = None
             return None
         token = result.stdout.strip()
-        self._token = token if token and not any(character.isspace() for character in token) else None
+        self._token = (
+            token
+            if token and not any(character.isspace() for character in token)
+            else None
+        )
         return self._token
 
     def _request_json(self, path: str, *, label: str, token: str | None):
@@ -98,12 +109,17 @@ class GitHubPublicRest:
         try:
             with self.opener.open(request, timeout=30) as response:
                 encoded = response.read(MAX_GITHUB_JSON_BYTES + 1)
-                content_type = str(
-                    getattr(response, "headers", {}).get(
-                        "Content-Type",
-                        "application/json",
+                content_type = (
+                    str(
+                        getattr(response, "headers", {}).get(
+                            "Content-Type",
+                            "application/json",
+                        )
                     )
-                ).partition(";")[0].strip().lower()
+                    .partition(";")[0]
+                    .strip()
+                    .lower()
+                )
         except HTTPError:
             raise
         except (OSError, URLError) as error:
@@ -120,7 +136,11 @@ class GitHubPublicRest:
             raise RequestRejected(f"{label} returned invalid JSON") from error
 
     def get_attestation_bundle(self, url: str, *, repository_id: int):
-        if type(repository_id) is not int or repository_id <= 0 or not isinstance(url, str):
+        if (
+            type(repository_id) is not int
+            or repository_id <= 0
+            or not isinstance(url, str)
+        ):
             raise RequestRejected("GitHub artifact attestation bundle URL is invalid")
         parsed = urlsplit(url)
         path_match = ATTESTATION_BUNDLE_PATH.fullmatch(parsed.path)
@@ -175,24 +195,58 @@ class GitHubPublicRest:
             return self._request_json(path, label=label, token=None)
         except HTTPError as anonymous_error:
             if anonymous_error.code not in {401, 403, 429}:
-                raise RequestRejected(f"{label} returned HTTP {anonymous_error.code}") from anonymous_error
+                raise RequestRejected(
+                    f"{label} returned HTTP {anonymous_error.code}"
+                ) from anonymous_error
             token = self.configured_token()
             if token is None:
-                raise RequestRejected(f"{label} returned HTTP {anonymous_error.code}") from anonymous_error
+                raise RequestRejected(
+                    f"{label} returned HTTP {anonymous_error.code}"
+                ) from anonymous_error
             try:
                 return self._request_json(path, label=label, token=token)
             except HTTPError as authenticated_error:
-                raise RequestRejected(f"{label} returned HTTP {authenticated_error.code}") from authenticated_error
+                raise RequestRejected(
+                    f"{label} returned HTTP {authenticated_error.code}"
+                ) from authenticated_error
+
+
+@dataclass(frozen=True)
+class VerifiedReleaseMaterials:
+    manifest: dict[str, object]
+    deployment_contract: dict[str, object]
+    verified: VerifiedMaterialSet
+    identity_digest: str
+
+    @property
+    def root(self) -> Path:
+        return self.verified.root
+
+    @property
+    def profile(self) -> str:
+        return str(self.deployment_contract["profile"])
+
+    def material(self, relative: str) -> Path:
+        return self.verified.material(relative)
+
+    def image(self, role: str) -> str:
+        images = self.manifest["images"]
+        if role not in {"api", "web", "postgres", "redis"}:
+            raise RequestRejected("Release image role is invalid")
+        image = images[role]
+        return f"{image['repository']}@{image['digest']}"
 
 
 class GitHubReleaseSource:
-    def __init__(self, cache_root: Path, *, runner=None, rest=None, cache_seconds: int = 300):
+    def __init__(
+        self, cache_root: Path, *, runner=None, rest=None, cache_seconds: int = 300
+    ):
         self.cache_root = _absolute(cache_root)
         self.runner = runner or CommandRunner()
         self.rest = rest or GitHubPublicRest(runner=self.runner)
         self.cache_seconds = cache_seconds
         self._release_cache: tuple[float, list[dict[str, object]]] | None = None
-        self._verified_cache: dict[str, tuple[float, dict[str, object]]] = {}
+        self._verified_cache: dict[str, tuple[float, VerifiedReleaseMaterials]] = {}
 
     @staticmethod
     def _anonymous_gh_environment(root: Path) -> dict[str, str]:
@@ -218,7 +272,11 @@ class GitHubReleaseSource:
 
     def _list_all(self, *, refresh: bool) -> list[dict[str, object]]:
         now = time.monotonic()
-        if not refresh and self._release_cache and now - self._release_cache[0] < self.cache_seconds:
+        if (
+            not refresh
+            and self._release_cache
+            and now - self._release_cache[0] < self.cache_seconds
+        ):
             return self._release_cache[1]
         payload = []
         for page in range(1, 101):
@@ -227,7 +285,9 @@ class GitHubReleaseSource:
                 label="GitHub release discovery",
             )
             if not isinstance(batch, list):
-                raise RequestRejected("GitHub release discovery returned invalid metadata")
+                raise RequestRejected(
+                    "GitHub release discovery returned invalid metadata"
+                )
             if any(
                 not isinstance(item, dict)
                 or not isinstance(item.get("tag_name"), str)
@@ -235,34 +295,55 @@ class GitHubReleaseSource:
                 or not isinstance(item.get("prerelease"), bool)
                 for item in batch
             ):
-                raise RequestRejected("GitHub release discovery returned invalid metadata")
+                raise RequestRejected(
+                    "GitHub release discovery returned invalid metadata"
+                )
             payload.extend(batch)
             if len(batch) < 100:
                 break
         else:
-            raise RequestRejected("GitHub release discovery exceeded the pagination limit")
-        releases = [item for item in payload if not item.get("draft") and RELEASE_VERSION.fullmatch(str(item.get("tag_name", "")))]
+            raise RequestRejected(
+                "GitHub release discovery exceeded the pagination limit"
+            )
+        releases = [
+            item
+            for item in payload
+            if not item.get("draft")
+            and RELEASE_VERSION.fullmatch(str(item.get("tag_name", "")))
+        ]
         self._release_cache = (now, releases)
         return releases
 
-    def list_releases(self, channel: str, *, refresh: bool = False) -> list[dict[str, object]]:
+    def list_releases(
+        self, channel: str, *, refresh: bool = False
+    ) -> list[dict[str, object]]:
         if channel not in CHANNELS:
             raise RequestRejected("Invalid release channel")
-        accepted = {"stable"}
-        if channel in {"rc", "beta"}:
-            accepted.add("rc")
-        if channel == "beta":
-            accepted.add("beta")
+        accepted = {channel}
         result = []
         for item in self._list_all(refresh=refresh):
             tag = str(item["tag_name"])
             parsed = Version(tag.removeprefix("v"))
             prerelease_channels = {"a": "alpha", "b": "beta", "rc": "rc"}
-            item_channel = "stable" if not parsed.is_prerelease else prerelease_channels.get(str(parsed.pre[0]), str(parsed.pre[0]))
+            item_channel = (
+                "stable"
+                if not parsed.is_prerelease
+                else prerelease_channels.get(str(parsed.pre[0]), str(parsed.pre[0]))
+            )
             metadata_matches = item.get("prerelease") is (item_channel != "stable")
             if item_channel in accepted and metadata_matches:
-                result.append({"version": tag, "channel": item_channel, "publishedAt": item.get("published_at")})
-        return sorted(result, key=lambda item: Version(item["version"].removeprefix("v")), reverse=True)
+                result.append(
+                    {
+                        "version": tag,
+                        "channel": item_channel,
+                        "publishedAt": item.get("published_at"),
+                    }
+                )
+        return sorted(
+            result,
+            key=lambda item: Version(item["version"].removeprefix("v")),
+            reverse=True,
+        )
 
     @staticmethod
     def _verify_checksum(root: Path) -> None:
@@ -273,21 +354,37 @@ class GitHubReleaseSource:
         expected = {}
         for line in lines:
             digest, separator, name = line.partition("  ")
-            if separator != "  " or len(digest) != 64 or name not in {
-                "release-manifest.json",
-                "deployment-contract.json",
-            }:
-                raise RequestRejected("Release checksums contain an unexpected artifact")
+            if (
+                separator != "  "
+                or len(digest) != 64
+                or name
+                not in {
+                    "release-manifest.json",
+                    "deployment-contract.json",
+                    "installer-materials.tar",
+                }
+            ):
+                raise RequestRejected(
+                    "Release checksums contain an unexpected artifact"
+                )
             if name in expected:
                 raise RequestRejected("Release checksums contain a duplicate artifact")
             expected[name] = digest
-        if set(expected) != {"release-manifest.json", "deployment-contract.json"}:
-            raise RequestRejected("Release checksums do not cover every release contract asset")
+        if set(expected) != {
+            "release-manifest.json",
+            "deployment-contract.json",
+            "installer-materials.tar",
+        }:
+            raise RequestRejected(
+                "Release checksums do not cover every release contract asset"
+            )
         for name, digest in expected.items():
             try:
                 actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
             except OSError as error:
-                raise RequestRejected(f"Release contract asset is unavailable: {name}") from error
+                raise RequestRejected(
+                    f"Release contract asset is unavailable: {name}"
+                ) from error
             if actual != digest:
                 raise RequestRejected(f"Release contract checksum mismatch: {name}")
 
@@ -298,7 +395,9 @@ class GitHubReleaseSource:
         )
         seen = set()
         for _ in range(8):
-            if not isinstance(payload, dict) or not isinstance(payload.get("object"), dict):
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("object"), dict
+            ):
                 raise RequestRejected("GitHub release tag is invalid")
             target = payload["object"]
             object_type = target.get("type")
@@ -307,7 +406,9 @@ class GitHubReleaseSource:
                 raise RequestRejected("GitHub release tag is invalid")
             if object_type == "commit":
                 if sha != expected_commit:
-                    raise RequestRejected("GitHub release tag and manifest commit differ")
+                    raise RequestRejected(
+                        "GitHub release tag and manifest commit differ"
+                    )
                 return
             if object_type != "tag":
                 raise RequestRejected("GitHub release tag does not resolve to a commit")
@@ -323,12 +424,18 @@ class GitHubReleaseSource:
             f"/repos/{REPOSITORY}/attestations/{digest}",
             label="GitHub artifact attestations",
         )
-        if not isinstance(payload, dict) or not isinstance(payload.get("attestations"), list):
-            raise RequestRejected("GitHub artifact attestations returned invalid metadata")
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("attestations"), list
+        ):
+            raise RequestRejected(
+                "GitHub artifact attestations returned invalid metadata"
+            )
         bundles = []
         for item in payload["attestations"]:
             if not isinstance(item, dict):
-                raise RequestRejected("GitHub artifact attestations returned an invalid bundle")
+                raise RequestRejected(
+                    "GitHub artifact attestations returned an invalid bundle"
+                )
             bundle = item.get("bundle")
             if bundle is None:
                 bundle = self.rest.get_attestation_bundle(
@@ -336,7 +443,9 @@ class GitHubReleaseSource:
                     repository_id=item.get("repository_id"),
                 )
             if not isinstance(bundle, dict):
-                raise RequestRejected("GitHub artifact attestations returned an invalid bundle")
+                raise RequestRejected(
+                    "GitHub artifact attestations returned an invalid bundle"
+                )
             bundles.append(bundle)
         if not bundles:
             raise RequestRejected("Required artifact attestation is unavailable")
@@ -350,47 +459,65 @@ class GitHubReleaseSource:
             )
             os.chmod(path, 0o600)
         except OSError as error:
-            raise RequestRejected("Artifact attestation bundle cannot be staged") from error
+            raise RequestRejected(
+                "Artifact attestation bundle cannot be staged"
+            ) from error
 
     @staticmethod
-    def _verify_attestation_result(output: str, expected_name: str, digest: str) -> None:
+    def _verify_attestation_result(
+        output: str, expected_name: str, digest: str
+    ) -> None:
         try:
             payload = json.loads(output)
         except json.JSONDecodeError as error:
-            raise RequestRejected("Artifact attestation verification returned invalid JSON") from error
+            raise RequestRejected(
+                "Artifact attestation verification returned invalid JSON"
+            ) from error
         expected_digest = digest.removeprefix("sha256:")
         if not isinstance(payload, list) or not payload:
-            raise RequestRejected("Artifact attestation verification returned no result")
+            raise RequestRejected(
+                "Artifact attestation verification returned no result"
+            )
         for item in payload:
             if not isinstance(item, dict):
                 continue
             verification = item.get("verificationResult")
-            statement = verification.get("statement") if isinstance(verification, dict) else None
+            statement = (
+                verification.get("statement")
+                if isinstance(verification, dict)
+                else None
+            )
             subjects = statement.get("subject") if isinstance(statement, dict) else None
             if not isinstance(subjects, list):
                 continue
             for subject in subjects:
-                subject_digest = subject.get("digest") if isinstance(subject, dict) else None
+                subject_digest = (
+                    subject.get("digest") if isinstance(subject, dict) else None
+                )
                 if (
                     isinstance(subject_digest, dict)
                     and subject.get("name") == expected_name
                     and subject_digest.get("sha256") == expected_digest
                 ):
                     return
-        raise RequestRejected("Artifact attestation subject does not match the release authority")
+        raise RequestRejected(
+            "Artifact attestation subject does not match the release authority"
+        )
 
-    def fetch_verified(
+    def fetch_verified_materials(
         self,
         version: str,
         *,
         updater_version: str = "1.0.0",
         refresh: bool = False,
-    ) -> dict[str, object]:
+    ) -> VerifiedReleaseMaterials:
         if not isinstance(version, str) or not RELEASE_VERSION.fullmatch(version):
             raise RequestRejected("Invalid immutable release version")
         cached = self._verified_cache.get(version)
         if not refresh and cached and time.monotonic() - cached[0] < self.cache_seconds:
-            validate_manifest(cached[1], updater_version=updater_version)
+            validate_manifest(cached[1].manifest, updater_version=updater_version)
+            for identity in cached[1].verified.files:
+                cached[1].material(identity.path)
             return cached[1]
         try:
             _ensure_private_directory(self.cache_root, self.cache_root)
@@ -407,16 +534,28 @@ class GitHubReleaseSource:
             or not isinstance(metadata.get("prerelease"), bool)
         ):
             raise RequestRejected("Exact GitHub release metadata is invalid")
-        with tempfile.TemporaryDirectory(prefix=f".{version}.", dir=self.cache_root) as temporary:
+        with tempfile.TemporaryDirectory(
+            prefix=f".{version}.", dir=self.cache_root
+        ) as temporary:
             destination = Path(temporary)
             environment = self._anonymous_gh_environment(destination)
             download = [
-                "/usr/bin/gh", "release", "download", version,
-                "--repo", REPOSITORY,
-                "--pattern", "release-manifest.json",
-                "--pattern", "deployment-contract.json",
-                "--pattern", "checksums.txt",
-                "--dir", str(destination),
+                "/usr/bin/gh",
+                "release",
+                "download",
+                version,
+                "--repo",
+                REPOSITORY,
+                "--pattern",
+                "release-manifest.json",
+                "--pattern",
+                "deployment-contract.json",
+                "--pattern",
+                "installer-materials.tar",
+                "--pattern",
+                "checksums.txt",
+                "--dir",
+                str(destination),
             ]
             try:
                 self.runner.run(download, env=environment, timeout=60)
@@ -436,34 +575,57 @@ class GitHubReleaseSource:
                 for name in (
                     "release-manifest.json",
                     "deployment-contract.json",
+                    "installer-materials.tar",
                     "checksums.txt",
                 )
             ]
-            if any(path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1 for path in assets):
+            if any(
+                path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1
+                for path in assets
+            ):
                 raise RequestRejected("Release assets must be private regular files")
             try:
-                manifest = json.loads((destination / "release-manifest.json").read_text(encoding="utf-8"))
+                manifest = json.loads(
+                    (destination / "release-manifest.json").read_text(encoding="utf-8")
+                )
             except (OSError, json.JSONDecodeError) as error:
                 raise RequestRejected("Release manifest is unreadable") from error
             validate_manifest(manifest, updater_version=updater_version)
             try:
                 deployment_contract = json.loads(
-                    (destination / "deployment-contract.json").read_text(encoding="utf-8")
+                    (destination / "deployment-contract.json").read_text(
+                        encoding="utf-8"
+                    )
                 )
-                validate_deployment_contract(deployment_contract)
+                validate_deployment_contract(
+                    deployment_contract,
+                    installer_materials=destination / "installer-materials.tar",
+                )
             except (OSError, json.JSONDecodeError, ValueError) as error:
-                raise RequestRejected("Deployment contract is unreadable or invalid") from error
+                raise RequestRejected(
+                    "Deployment contract is unreadable or invalid"
+                ) from error
             if (
                 deployment_contract_digest(deployment_contract)
                 != manifest["deployment"]["contractSha256"]
                 or deployment_contract["files"] != manifest["deployment"]["files"]
+                or deployment_contract["profile"] != manifest["deployment"]["profile"]
+                or {
+                    key: deployment_contract["archive"][key]
+                    for key in ("name", "sha256", "format")
+                }
+                != manifest["deployment"]["installerMaterials"]
             ):
-                raise RequestRejected("Deployment contract differs from the release manifest")
+                raise RequestRejected(
+                    "Deployment contract differs from the release manifest"
+                )
             if manifest["release"]["version"] != version:
                 raise RequestRejected("Release tag and manifest version differ")
             expected_prerelease = manifest["release"]["channel"] != "stable"
             if metadata["prerelease"] != expected_prerelease:
-                raise RequestRejected("GitHub release metadata and manifest channel differ")
+                raise RequestRejected(
+                    "GitHub release metadata and manifest channel differ"
+                )
             release_assets = metadata.get("assets")
             if not isinstance(release_assets, list) or any(
                 not isinstance(item, dict)
@@ -471,14 +633,18 @@ class GitHubReleaseSource:
                 or item.get("state") != "uploaded"
                 for item in release_assets
             ):
-                raise RequestRejected("GitHub release assets differ from the release contract")
+                raise RequestRejected(
+                    "GitHub release assets differ from the release contract"
+                )
             asset_names = [item["name"] for item in release_assets]
             if (
                 len(asset_names) != len(EXPECTED_RELEASE_ASSETS)
                 or len(asset_names) != len(set(asset_names))
                 or set(asset_names) != EXPECTED_RELEASE_ASSETS
             ):
-                raise RequestRejected("GitHub release assets differ from the release contract")
+                raise RequestRejected(
+                    "GitHub release assets differ from the release contract"
+                )
             commit = manifest["release"]["commit"]
             provenance_commit = manifest["provenance"]["sourceCommit"]
             self._verify_release_tag(version, commit)
@@ -500,37 +666,164 @@ class GitHubReleaseSource:
                 (
                     str(destination / "release-manifest.json"),
                     "release-manifest.json",
-                    "sha256:" + hashlib.sha256((destination / "release-manifest.json").read_bytes()).hexdigest(),
+                    "sha256:"
+                    + hashlib.sha256(
+                        (destination / "release-manifest.json").read_bytes()
+                    ).hexdigest(),
                     manifest["provenance"]["workflow"],
                     provenance_commit,
                 ),
                 (
                     str(destination / "deployment-contract.json"),
                     "deployment-contract.json",
-                    "sha256:" + hashlib.sha256((destination / "deployment-contract.json").read_bytes()).hexdigest(),
+                    "sha256:"
+                    + hashlib.sha256(
+                        (destination / "deployment-contract.json").read_bytes()
+                    ).hexdigest(),
+                    manifest["provenance"]["workflow"],
+                    provenance_commit,
+                ),
+                (
+                    str(destination / "installer-materials.tar"),
+                    "installer-materials.tar",
+                    "sha256:"
+                    + hashlib.sha256(
+                        (destination / "installer-materials.tar").read_bytes()
+                    ).hexdigest(),
                     manifest["provenance"]["workflow"],
                     provenance_commit,
                 ),
             ]
-            for index, (subject, expected_name, digest, workflow, source_commit) in enumerate(subjects):
+            for index, (
+                subject,
+                expected_name,
+                digest,
+                workflow,
+                source_commit,
+            ) in enumerate(subjects):
                 bundle = destination / f"attestation-{index}.jsonl"
                 self._write_attestation_bundle(digest, bundle)
                 result = self.runner.run(
                     [
-                        "/usr/bin/gh", "attestation", "verify", subject,
-                        "--bundle", str(bundle),
-                        "--repo", REPOSITORY,
-                        "--cert-identity", f"https://github.com/{REPOSITORY}/{workflow}@refs/heads/main",
-                        "--cert-oidc-issuer", "https://token.actions.githubusercontent.com",
-                        "--source-digest", source_commit,
-                        "--source-ref", "refs/heads/main",
-                        "--signer-digest", source_commit,
-                        "--predicate-type", "https://slsa.dev/provenance/v1",
-                        "--format", "json",
+                        "/usr/bin/gh",
+                        "attestation",
+                        "verify",
+                        subject,
+                        "--bundle",
+                        str(bundle),
+                        "--repo",
+                        REPOSITORY,
+                        "--cert-identity",
+                        f"https://github.com/{REPOSITORY}/{workflow}@refs/heads/main",
+                        "--cert-oidc-issuer",
+                        "https://token.actions.githubusercontent.com",
+                        "--source-digest",
+                        source_commit,
+                        "--source-ref",
+                        "refs/heads/main",
+                        "--signer-digest",
+                        source_commit,
+                        "--predicate-type",
+                        "https://slsa.dev/provenance/v1",
+                        "--format",
+                        "json",
                     ],
                     env=environment,
                     timeout=60,
                 )
                 self._verify_attestation_result(result.stdout, expected_name, digest)
-        self._verified_cache[version] = (time.monotonic(), manifest)
-        return manifest
+            material_cache = self.cache_root / "verified-materials"
+            try:
+                _ensure_private_directory(self.cache_root, material_cache)
+                final_root = material_cache / (
+                    version
+                    + "-"
+                    + manifest["deployment"]["installerMaterials"][
+                        "sha256"
+                    ].removeprefix("sha256:")
+                )
+                material_files = tuple(
+                    MaterialFileIdentity(
+                        path=item["path"],
+                        sha256=item["sha256"],
+                        size=item["size"],
+                        mode=int(item["mode"], 8),
+                    )
+                    for item in deployment_contract["materials"]
+                )
+                if final_root.exists():
+                    verified_set = VerifiedMaterialSet(
+                        root=final_root,
+                        archive_sha256=deployment_contract["archive"]["sha256"],
+                        files=material_files,
+                    )
+                    for identity in material_files:
+                        verified_set.material(identity.path)
+                else:
+                    staging_parent = Path(
+                        tempfile.mkdtemp(prefix=".materials.", dir=material_cache)
+                    )
+                    staging_root = staging_parent / "root"
+                    try:
+                        verified_set = extract_installer_materials(
+                            destination / "installer-materials.tar",
+                            {
+                                "schemaVersion": deployment_contract["schemaVersion"],
+                                "profile": deployment_contract["profile"],
+                                "platform": deployment_contract["platform"],
+                                "archive": deployment_contract["archive"],
+                                "materials": deployment_contract["materials"],
+                            },
+                            staging_root,
+                        )
+                        os.replace(staging_root, final_root)
+                        verified_set = VerifiedMaterialSet(
+                            root=final_root,
+                            archive_sha256=verified_set.archive_sha256,
+                            files=verified_set.files,
+                        )
+                    finally:
+                        try:
+                            staging_parent.rmdir()
+                        except OSError:
+                            pass
+            except (OSError, StateError, MaterialContractError) as error:
+                raise RequestRejected(
+                    "Verified installer materials cannot be published"
+                ) from error
+            identity_payload = {
+                "manifest": manifest,
+                "deploymentContract": deployment_contract,
+            }
+            identity_digest = (
+                "sha256:"
+                + hashlib.sha256(
+                    json.dumps(
+                        identity_payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
+            verified = VerifiedReleaseMaterials(
+                manifest=manifest,
+                deployment_contract=deployment_contract,
+                verified=verified_set,
+                identity_digest=identity_digest,
+            )
+        self._verified_cache[version] = (time.monotonic(), verified)
+        return verified
+
+    def fetch_verified(
+        self,
+        version: str,
+        *,
+        updater_version: str = "1.0.0",
+        refresh: bool = False,
+    ) -> dict[str, object]:
+        return self.fetch_verified_materials(
+            version,
+            updater_version=updater_version,
+            refresh=refresh,
+        ).manifest

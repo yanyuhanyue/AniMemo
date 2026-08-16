@@ -264,6 +264,16 @@ class OperationStateTests(unittest.TestCase):
             with UpdateLock(Path(lock_path)):
                 pass
 
+    def test_global_lock_is_reentrant_only_for_the_owning_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / "update.lock"
+            with UpdateLock(lock_path), UpdateLock(
+                lock_path, allow_reentrant=True
+            ):
+                self.assertTrue(lock_path.is_file())
+            with UpdateLock(lock_path):
+                pass
+
     def test_global_lock_rejects_a_linked_state_root(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

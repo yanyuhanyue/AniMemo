@@ -6,6 +6,7 @@ import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from release.contract import build_manifest
 from updater.agent import UpdateAgent
@@ -90,12 +91,14 @@ class UpdateAgentTests(unittest.TestCase):
         operations = OperationStore(root / "state")
         source = FakeSource([current, target])
         deployment = FakeDeployment()
+        runtime_binding = mock.Mock()
         executor = UpdateExecutor(
             store=operations,
             slots=slots,
             release_source=source,
             deployment=deployment,
             runtime_state=runtime,
+            runtime_binding=runtime_binding,
             lock_path=root / "state" / "update.lock",
             updater_version="1.0.0",
         )
