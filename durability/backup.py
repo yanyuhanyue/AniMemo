@@ -431,10 +431,13 @@ def create_backup(
     )
 
     try:
-        database = _create_database_member(
-            request,
+        database = capture_logical_postgres(
+            request.database_url,
             staging,
-            pg_dump_runner or SubprocessPgDumpRunner(),
+            server_major=request.source.database_contract.get("serverMajor"),
+            runner=pg_dump_runner,
+            executable=request.pg_dump_executable,
+            timeout=request.pg_dump_timeout,
         )
         member_records = _copy_payload_members(request, source_files, staging)
         member_records.append(database["member"])
@@ -784,19 +787,55 @@ def _preflight_sources(
     return source_files
 
 
-def _create_database_member(
-    request: BackupRequest,
+def capture_logical_postgres(
+    database_url: str,
     staging: Path,
-    runner: PgDumpRunner,
+    *,
+    server_major: object,
+    runner: PgDumpRunner | None = None,
+    executable: str = "pg_dump",
+    timeout: int = 600,
 ) -> dict[str, Any]:
+    """Capture the shared canonical logical PostgreSQL member.
+
+    Backup and Migration own different artifact manifests, but both consume
+    this exact pg_dump/gzip/checksum primitive.  The caller must supply an
+    already private, operation-owned staging directory.
+    """
+
+    staging = Path(staging)
+    if (
+        not staging.is_dir()
+        or _is_link_or_reparse(staging)
+        or (os.name != "nt" and stat.S_IMODE(staging.stat().st_mode) & 0o077)
+    ):
+        raise BackupError(
+            "PG_DUMP_DESTINATION_INVALID",
+            "logical database dump destination is not private staging",
+        )
+    if (
+        isinstance(server_major, bool)
+        or not isinstance(server_major, int)
+        or server_major <= 0
+    ):
+        raise BackupError(
+            "BACKUP_DATABASE_METADATA_INVALID",
+            "PostgreSQL server major is required",
+        )
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise BackupError("PG_DUMP_TIMEOUT_INVALID", "pg_dump timeout is invalid")
+    if not isinstance(executable, str) or not executable or "\x00" in executable:
+        raise BackupError("PG_DUMP_EXECUTABLE_INVALID", "pg_dump executable is invalid")
+
     raw = staging / ".database.sql.raw"
     compressed = staging / DATABASE_MEMBER
+    active_runner = runner or SubprocessPgDumpRunner()
     try:
-        tool_version = runner.run(
-            request.database_url,
+        tool_version = active_runner.run(
+            database_url,
             raw,
-            executable=request.pg_dump_executable,
-            timeout=request.pg_dump_timeout,
+            executable=executable,
+            timeout=timeout,
         )
         if not raw.is_file() or _is_link_or_reparse(raw):
             raise BackupError(
@@ -828,16 +867,6 @@ def _create_database_member(
         os.chmod(compressed, 0o600)
         compressed_bytes = compressed.stat().st_size
         compressed_digest = _sha256_file(compressed)
-        server_major = request.source.database_contract.get("serverMajor")
-        if (
-            isinstance(server_major, bool)
-            or not isinstance(server_major, int)
-            or server_major <= 0
-        ):
-            raise BackupError(
-                "BACKUP_DATABASE_METADATA_INVALID",
-                "PostgreSQL server major is required",
-            )
         if (
             not isinstance(tool_version, str)
             or not tool_version.startswith("pg_dump ")

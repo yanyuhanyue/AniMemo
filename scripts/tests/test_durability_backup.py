@@ -174,6 +174,7 @@ class BackupRuntimeTests(unittest.TestCase):
         self.assertEqual(
             verification.compatibility_artifact["artifactId"], str(self.backup_id)
         )
+
         self.assertEqual(
             verification.compatibility_artifact["manifestDigest"],
             result.manifest_digest,
@@ -198,6 +199,27 @@ class BackupRuntimeTests(unittest.TestCase):
         )
         with gzip.open(result.path / backup.DATABASE_MEMBER, "rb") as stream:
             self.assertEqual(stream.read(), runner.payload)
+
+    def test_shared_logical_postgres_capture_is_artifact_neutral(self) -> None:
+        staging = self.root / "shared-postgres-staging"
+        staging.mkdir(mode=0o700)
+        runner = FakePgDump()
+
+        captured = backup.capture_logical_postgres(
+            "postgresql://isolated-test.invalid/animemo",
+            staging,
+            server_major=16,
+            runner=runner,
+        )
+
+        self.assertEqual(runner.calls, [("DATABASE_URL_PRESENT", "pg_dump", 600)])
+        self.assertEqual(captured["path"], backup.DATABASE_MEMBER)
+        self.assertEqual(captured["serverMajor"], 16)
+        self.assertEqual(
+            gzip.decompress((staging / backup.DATABASE_MEMBER).read_bytes()),
+            runner.payload,
+        )
+        self.assertFalse((staging / ".database.sql.raw").exists())
 
     def test_checksums_are_sorted_complete_and_reproducible(self) -> None:
         first = self.create()
