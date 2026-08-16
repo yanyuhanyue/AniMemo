@@ -11,9 +11,15 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-SCHEMA_VERSION = "animemo.ci-risk/v1"
+SCHEMA_VERSION = "animemo.ci-risk/v2"
 RISK_LEVELS = ("LOW", "STANDARD", "HIGH", "CRITICAL")
 RISK_RANK = {level: rank for rank, level in enumerate(RISK_LEVELS, start=1)}
+EXECUTION_PROFILES = (
+    "DOCS_ONLY",
+    "CONTRACT_VALIDATION_ONLY",
+    "TARGETED",
+    "FULL_AUTHORITY",
+)
 
 FROZEN_CONTRACT_DOCUMENTS = frozenset(
     {
@@ -37,6 +43,53 @@ ROOT_LEGAL_DOCUMENTS = frozenset(
     }
 )
 
+AUDITED_CONTRACT_PRIMARY_DOCUMENTS = frozenset(
+    {
+        "docs/backup-contract-v1.md",
+        "docs/compatibility-matrix-v1.md",
+        "docs/doctor-basic-contract-v1.md",
+        "docs/migration-bundle-v1.md",
+        "docs/migration-secret-envelope-v1.md",
+        "docs/restore-contract-v1.md",
+    }
+)
+AUDITED_CONTRACT_SUPPORT_DOCUMENTS = frozenset(
+    {
+        "CONTEXT.md",
+        "README.md",
+        "docs/data-bundle-v1.md",
+    }
+)
+AUDITED_CONTRACT_VALIDATION_TESTS = frozenset(
+    {"scripts/tests/test_recovery_migration_contracts.py"}
+)
+AUDITED_CONTRACT_CHANGE_PATHS = frozenset(
+    {
+        *AUDITED_CONTRACT_PRIMARY_DOCUMENTS,
+        *AUDITED_CONTRACT_SUPPORT_DOCUMENTS,
+        *AUDITED_CONTRACT_VALIDATION_TESTS,
+    }
+)
+
+RECOVERY_RUNTIME_PREFIXES = ("durability/", "scripts/tests/test_durability_")
+RECOVERY_RUNTIME_PATHS = frozenset(
+    {
+        "scripts/dr-rehearsal.sh",
+        "scripts/dr_backup.py",
+        "scripts/dr_recovery_paths.py",
+        "scripts/tests/test_dr_backup.py",
+        "scripts/tests/test_dr_recovery_paths.py",
+        "scripts/tests/test_dr_rehearsal_contract.py",
+    }
+)
+STATEFUL_RUNTIME_PATHS = frozenset(
+    {
+        "scripts/stateful-upgrade-gate.sh",
+        "scripts/stateful_upgrade_fixture.py",
+        "scripts/tests/test_stateful_upgrade_diagnostics.py",
+    }
+)
+
 SIGNAL_NAMES = (
     "frontend",
     "backend",
@@ -46,9 +99,12 @@ SIGNAL_NAMES = (
     "integration",
     "bridge",
     "migration",
+    "database",
     "dependencies",
     "ci",
     "deployment",
+    "release",
+    "updater",
     "shared_contract",
     "first_run",
     "recovery",
@@ -58,6 +114,7 @@ SIGNAL_NAMES = (
 
 GATE_NAMES = (
     "docs_only",
+    "run_contract_validation",
     "mixed",
     "run_frontend",
     "run_backend",
@@ -70,6 +127,7 @@ GATE_NAMES = (
     "run_release_updater",
     "run_release_docker",
     "run_release_stateful",
+    "run_release_dr",
     "full_gate",
     "critical_gate",
 )
@@ -78,12 +136,14 @@ OUTPUT_NAMES = (
     "schema_version",
     "risk_level",
     "risk_rank",
+    "execution_profile",
     "execution_force_full",
     "reasons",
     "matched_rules",
     "unknown_paths",
     "classification_json",
     "docs_only",
+    "run_contract_validation",
     *SIGNAL_NAMES,
     "mixed",
     "run_frontend",
@@ -97,6 +157,7 @@ OUTPUT_NAMES = (
     "run_release_updater",
     "run_release_docker",
     "run_release_stateful",
+    "run_release_dr",
     "full_gate",
     "critical_gate",
 )
@@ -176,20 +237,59 @@ def _is_deployment(path: str) -> bool:
 
 
 def _is_durability(path: str) -> bool:
-    return path.startswith("durability/")
+    return path.startswith(RECOVERY_RUNTIME_PREFIXES)
 
 
 def _is_recovery(path: str) -> bool:
-    return not _is_docs(path) and _has(
-        path.lower(),
-        "backup",
-        "restore",
-        "rollback",
-        "recovery",
-        "disaster",
-        "stateful-upgrade",
-        "stateful_upgrade",
+    return path.startswith(RECOVERY_RUNTIME_PREFIXES) or path in RECOVERY_RUNTIME_PATHS
+
+
+def _is_migration_runtime(path: str) -> bool:
+    return (
+        path not in AUDITED_CONTRACT_VALIDATION_TESTS
+        and not _is_docs(path)
+        and path.startswith(
+            (
+                "durability/migration",
+                "scripts/migration",
+                "scripts/tests/test_migration_runtime",
+            )
+        )
     )
+
+
+def _is_stateful_runtime(path: str) -> bool:
+    return path in STATEFUL_RUNTIME_PATHS
+
+
+def _is_audited_contract_change_set(paths: list[str]) -> bool:
+    return (
+        bool(paths)
+        and any(path in AUDITED_CONTRACT_PRIMARY_DOCUMENTS for path in paths)
+        and all(path in AUDITED_CONTRACT_CHANGE_PATHS for path in paths)
+    )
+
+
+def _is_automation_script(path: str) -> bool:
+    return path.startswith("scripts/") and path not in AUDITED_CONTRACT_VALIDATION_TESTS
+
+
+def _dependency_signal_names(path: str) -> tuple[str, ...]:
+    if path in {"package.json", "package-lock.json", ".npmrc"}:
+        return ("frontend", "plugin")
+    if path.startswith("backend/"):
+        return ("backend", "database")
+    if path.startswith("bridges/"):
+        return ("bridge", "integration")
+    if path.startswith("durability/"):
+        return ("recovery",)
+    if path.startswith("release/"):
+        return ("release",)
+    if path.startswith("updater/"):
+        return ("updater",)
+    if path.startswith("scripts/"):
+        return ("ci", "tooling")
+    return ("frontend", "backend", "plugin", "database")
 
 
 def _is_first_run(path: str) -> bool:
@@ -236,11 +336,19 @@ def _is_settings(path: str) -> bool:
 
 def _is_auth_or_security(path: str) -> bool:
     lower = path.lower()
+    if lower.startswith(("durability/", "scripts/tests/test_durability_")):
+        return False
     return not _is_docs(path) and (
         lower.startswith("backend/accounts/")
         or _has(
             lower,
-            "auth",
+            "/auth/",
+            "/auth_",
+            "_auth.",
+            "_auth_",
+            "authentication",
+            "authorization",
+            "oauth",
             "security",
             "csrf",
             "token",
@@ -251,6 +359,7 @@ def _is_auth_or_security(path: str) -> bool:
             "turnstile",
             "anti_abuse",
         )
+        or _name(lower) in {"auth.py", "auth.ts", "auth.tsx", "auth.js", "auth.jsx"}
     )
 
 
@@ -396,14 +505,14 @@ RULES = (
         "release-core",
         "CRITICAL",
         "Release producer, manifest, provenance, or release authority code changed.",
-        ("deployment",),
+        ("release", "tooling"),
         _is_release_core,
     ),
     RiskRule(
         "updater-core",
         "CRITICAL",
         "Updater state, execution, deployment, or operator control changed.",
-        ("deployment",),
+        ("updater",),
         _is_updater,
     ),
     RiskRule(
@@ -417,15 +526,29 @@ RULES = (
         "durability-runtime",
         "CRITICAL",
         "Durable deployment, recovery, secret envelope, or diagnostic runtime changed.",
-        ("backend", "deployment", "recovery"),
+        ("recovery",),
         _is_durability,
+    ),
+    RiskRule(
+        "migration-runtime",
+        "CRITICAL",
+        "Instance migration runtime behavior changed.",
+        ("migration", "recovery"),
+        _is_migration_runtime,
     ),
     RiskRule(
         "recovery-rollback",
         "CRITICAL",
         "Backup, restore, rollback, or stateful recovery behavior changed.",
-        ("deployment", "recovery"),
+        ("recovery",),
         _is_recovery,
+    ),
+    RiskRule(
+        "stateful-upgrade-runtime",
+        "CRITICAL",
+        "Stateful production upgrade behavior or its diagnostics changed.",
+        ("deployment",),
+        _is_stateful_runtime,
     ),
     RiskRule(
         "first-run-security-boundary",
@@ -438,7 +561,7 @@ RULES = (
         "database-schema",
         "HIGH",
         "Database models, migrations, or PostgreSQL behavior changed.",
-        ("backend", "migration"),
+        ("backend", "database"),
         _is_database,
     ),
     RiskRule(
@@ -515,11 +638,18 @@ RULES = (
         _is_sensitive_documentation,
     ),
     RiskRule(
+        "audited-contract-validation-test",
+        "HIGH",
+        "An audited pure contract consistency test changed.",
+        (),
+        lambda path: path in AUDITED_CONTRACT_VALIDATION_TESTS,
+    ),
+    RiskRule(
         "automation-script",
         "HIGH",
         "Repository automation or its tests changed and requires broad validation.",
         ("ci", "tooling"),
-        lambda path: path.startswith("scripts/"),
+        _is_automation_script,
     ),
     RiskRule(
         "backend-product",
@@ -588,11 +718,7 @@ def _normalize_paths(paths: Iterable[str]) -> list[str]:
 
 
 def force_full_for_event(event_name: str, *, explicitly_forced: bool = False) -> bool:
-    return explicitly_forced or event_name in {
-        "merge_group",
-        "workflow_dispatch",
-        "workflow_call",
-    }
+    return explicitly_forced or event_name == "merge_group"
 
 
 def _json(value: object) -> str:
@@ -636,6 +762,9 @@ def _classification_document(
             )
             for category in rule.categories:
                 signal_values[category] = True
+        if _is_dependency(path):
+            for category in _dependency_signal_names(path):
+                signal_values[category] = True
 
     if not normalized:
         reason_paths[
@@ -659,9 +788,8 @@ def _classification_document(
     ]
     risk_level = max((reason["level"] for reason in reasons), key=RISK_RANK.__getitem__)
 
-    docs_only = (
+    intrinsic_docs_only = (
         bool(normalized)
-        and not force_full
         and all(
             _is_docs(path)
             and max(
@@ -672,8 +800,33 @@ def _classification_document(
             for path in normalized
         )
     )
-    full_gate = force_full or RISK_RANK[risk_level] >= RISK_RANK["HIGH"]
-    critical_gate = force_full or risk_level == "CRITICAL"
+
+    if force_full:
+        execution_profile = "FULL_AUTHORITY"
+        execution_rule = "authority-force-full"
+        execution_reason = "Explicit authority context selected the complete matrices."
+    elif intrinsic_docs_only:
+        execution_profile = "DOCS_ONLY"
+        execution_rule = "intrinsic-docs-only"
+        execution_reason = "Every changed path is audited LOW documentation."
+    elif _is_audited_contract_change_set(normalized):
+        execution_profile = "CONTRACT_VALIDATION_ONLY"
+        execution_rule = "audited-contract-change-set"
+        execution_reason = (
+            "Every changed path belongs to the audited contract validation allowlist."
+        )
+    else:
+        execution_profile = "TARGETED"
+        execution_rule = "targeted-signals"
+        execution_reason = "Component signals selected the minimum sufficient PR gates."
+
+    docs_only = execution_profile == "DOCS_ONLY"
+    run_contract_validation = execution_profile == "CONTRACT_VALIDATION_ONLY"
+    full_gate = execution_profile == "FULL_AUTHORITY"
+    critical_gate = risk_level == "CRITICAL"
+    conservative_broad = execution_profile == "TARGETED" and (
+        bool(unknown_paths) or not normalized
+    )
 
     primary_signals = (
         "frontend",
@@ -684,9 +837,12 @@ def _classification_document(
         "integration",
         "bridge",
         "migration",
+        "database",
         "dependencies",
         "ci",
         "deployment",
+        "release",
+        "updater",
         "shared_contract",
         "first_run",
         "recovery",
@@ -694,49 +850,130 @@ def _classification_document(
     )
     mixed = sum(signal_values[name] for name in primary_signals) > 1
 
-    run_frontend = signal_values["frontend"] or full_gate
+    targeted = execution_profile == "TARGETED"
+    run_frontend = full_gate or conservative_broad or (
+        targeted and signal_values["frontend"]
+    )
     run_backend = (
-        signal_values["backend"]
-        or signal_values["auth"]
-        or signal_values["api_contract"]
-        or signal_values["migration"]
-        or signal_values["integration"]
-        or signal_values["shared_contract"]
-        or signal_values["first_run"]
-        or full_gate
+        full_gate
+        or conservative_broad
+        or (
+            targeted
+            and any(
+                signal_values[name]
+                for name in (
+                    "backend",
+                    "auth",
+                    "api_contract",
+                    "migration",
+                    "database",
+                    "integration",
+                    "shared_contract",
+                    "first_run",
+                    "media_storage",
+                )
+            )
+        )
     )
     run_bootstrap = (
-        signal_values["ci"]
-        or signal_values["deployment"]
-        or signal_values["first_run"]
-        or full_gate
+        full_gate
+        or conservative_broad
+        or (
+            targeted
+            and any(
+                signal_values[name]
+                for name in ("ci", "deployment", "first_run", "updater")
+            )
+        )
     )
     run_plugins = (
-        signal_values["plugin"]
-        or signal_values["integration"]
-        or signal_values["shared_contract"]
-        or full_gate
+        full_gate
+        or conservative_broad
+        or (
+            targeted
+            and any(
+                signal_values[name]
+                for name in (
+                    "plugin",
+                    "integration",
+                    "shared_contract",
+                    "migration",
+                    "recovery",
+                    "release",
+                )
+            )
+        )
     )
     run_bridge = (
-        signal_values["bridge"]
-        or signal_values["integration"]
-        or signal_values["shared_contract"]
-        or full_gate
+        full_gate
+        or conservative_broad
+        or (
+            targeted
+            and any(
+                signal_values[name]
+                for name in ("bridge", "integration", "shared_contract")
+            )
+        )
     )
     run_postgres = (
-        signal_values["auth"]
-        or signal_values["api_contract"]
-        or signal_values["migration"]
-        or signal_values["integration"]
-        or signal_values["shared_contract"]
-        or signal_values["media_storage"]
-        or signal_values["first_run"]
-        or full_gate
+        full_gate
+        or conservative_broad
+        or (
+            targeted
+            and any(
+                signal_values[name]
+                for name in (
+                    "auth",
+                    "api_contract",
+                    "plugin",
+                    "migration",
+                    "database",
+                    "integration",
+                    "shared_contract",
+                    "media_storage",
+                    "first_run",
+                    "recovery",
+                )
+            )
+        )
     )
-    run_runtime = run_bridge or signal_values["deployment"] or full_gate
+    run_runtime = full_gate or conservative_broad or (
+        targeted
+        and any(
+            signal_values[name]
+            for name in ("bridge", "integration", "shared_contract")
+        )
+    )
+    run_release_updater = full_gate or conservative_broad or (
+        targeted and (signal_values["updater"] or signal_values["release"])
+    )
+    run_release_docker = full_gate or conservative_broad or (
+        targeted
+        and any(
+            signal_values[name]
+            for name in ("deployment", "release", "first_run")
+        )
+    )
+    run_release_stateful = full_gate or conservative_broad or (
+        targeted
+        and any(
+            signal_values[name]
+            for name in (
+                "database",
+                "deployment",
+                "release",
+                "updater",
+                "first_run",
+            )
+        )
+    )
+    run_release_dr = full_gate or conservative_broad or (
+        targeted and (signal_values["recovery"] or signal_values["migration"])
+    )
 
     gates = {
         "docs_only": docs_only,
+        "run_contract_validation": run_contract_validation,
         "mixed": mixed,
         "run_frontend": run_frontend,
         "run_backend": run_backend,
@@ -746,9 +983,10 @@ def _classification_document(
         "run_postgres": run_postgres,
         "run_runtime": run_runtime,
         "run_release_full": full_gate,
-        "run_release_updater": critical_gate,
-        "run_release_docker": full_gate,
-        "run_release_stateful": full_gate,
+        "run_release_updater": run_release_updater,
+        "run_release_docker": run_release_docker,
+        "run_release_stateful": run_release_stateful,
+        "run_release_dr": run_release_dr,
         "full_gate": full_gate,
         "critical_gate": critical_gate,
     }
@@ -760,17 +998,9 @@ def _classification_document(
             "reasons": reasons,
         },
         "execution": {
+            "profile": execution_profile,
             "force_full": force_full,
-            "reasons": (
-                [
-                    {
-                        "rule": "authority-event-force-full",
-                        "reason": "The event is an authoritative or explicitly forced full validation.",
-                    }
-                ]
-                if force_full
-                else []
-            ),
+            "reasons": [{"rule": execution_rule, "reason": execution_reason}],
         },
         "paths": path_matches,
         "unknown_paths": unknown_paths,
@@ -794,6 +1024,7 @@ def classify_paths(paths: list[str], *, force_full: bool = False) -> dict[str, s
         "schema_version": SCHEMA_VERSION,
         "risk_level": str(risk["level"]),
         "risk_rank": str(risk["rank"]),
+        "execution_profile": str(execution["profile"]),
         "execution_force_full": "true" if execution["force_full"] else "false",
         "reasons": _json(risk["reasons"]),
         "matched_rules": _json(document["paths"]),
@@ -849,21 +1080,62 @@ def write_outputs(result: dict[str, str], output_path: str) -> None:
 
 
 def self_test() -> None:
-    cases = {
-        "LOW": ["docs/architecture.md", "README.md"],
-        "STANDARD": ["src/App.jsx"],
-        "HIGH": ["backend/journal/migrations/0002_add.py"],
-        "CRITICAL": ["updater/agent.py"],
-    }
-    for expected_level, paths in cases.items():
+    cases = (
+        ("LOW", "DOCS_ONLY", ["docs/architecture.md", "README.md"]),
+        ("STANDARD", "TARGETED", ["src/App.jsx"]),
+        (
+            "HIGH",
+            "CONTRACT_VALIDATION_ONLY",
+            [
+                "docs/backup-contract-v1.md",
+                "scripts/tests/test_recovery_migration_contracts.py",
+            ],
+        ),
+        ("HIGH", "TARGETED", ["backend/journal/migrations/0002_add.py"]),
+        ("CRITICAL", "TARGETED", ["updater/agent.py"]),
+    )
+    for expected_level, expected_profile, paths in cases:
         result = classify_paths(paths)
         assert result["risk_level"] == expected_level, (expected_level, result)
+        assert result["execution_profile"] == expected_profile, (
+            expected_profile,
+            result,
+        )
+        assert result["full_gate"] == "false", result
         assert json.loads(result["matched_rules"]), result
     unknown = classify_paths(["future-system/new-control-plane.bin"])
     assert unknown["risk_level"] == "CRITICAL", unknown
+    assert unknown["execution_profile"] == "TARGETED", unknown
+    product_gates = (
+        "run_frontend",
+        "run_backend",
+        "run_bootstrap",
+        "run_plugins",
+        "run_bridge",
+        "run_postgres",
+        "run_runtime",
+    )
+    assert all(unknown[name] == "true" for name in product_gates), unknown
+    assert all(
+        unknown[name] == "true"
+        for name in (
+            "run_release_updater",
+            "run_release_docker",
+            "run_release_stateful",
+            "run_release_dr",
+        )
+    ), unknown
     assert json.loads(unknown["unknown_paths"]) == [
         "future-system/new-control-plane.bin"
     ], unknown
+    forced = classify_paths(["README.md"], force_full=True)
+    assert forced["risk_level"] == "LOW", forced
+    assert forced["execution_profile"] == "FULL_AUTHORITY", forced
+    assert forced["full_gate"] == "true", forced
+    assert forced["run_release_full"] == "true", forced
+    assert all(forced[name] == "true" for name in product_gates), forced
+    assert forced["run_release_stateful"] == "true", forced
+    assert forced["run_release_dr"] == "true", forced
     print("ci_classify self-test passed")
 
 

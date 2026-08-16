@@ -62,7 +62,7 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             self.assertIn("force_full:", source)
             self.assertIn(candidate_ref, source)
             self.assertNotIn("ref: ${{ inputs.candidate_sha || github.sha }}", source)
-            self.assertIn("inputs.force_full ||", source)
+            self.assertIn("CI_FORCE_FULL: ${{ inputs.force_full || false }}", source)
             self.assertIn("inputs.candidate_sha || github.event.pull_request.number || github.ref", source)
         self.assertIn("comparison_base_sha:", ci)
         self.assertIn("upgrade_base_sha:", release)
@@ -81,29 +81,46 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertNotIn("ANIME_JOURNAL_PORT", release)
         self.assertNotIn("ANIME_JOURNAL_DATA_ROOT", release)
 
-    def test_every_full_job_is_forced_and_every_animemo_checkout_is_candidate_pinned(self):
+    def test_full_selection_flows_only_through_classifier_gates_and_checkouts_are_pinned(self):
         ci = self.source("ci.yml")
         release = self.source("release-gate.yml")
 
-        for name in (
-            "fast-fail",
-            "frontend",
-            "backend",
-            "bootstrap-smoke",
-            "postgres",
-            "plugins",
-            "astrbot-bridge",
-            "astrbot-runtime",
-        ):
-            self.assertIn("inputs.force_full ||", self.job(ci, name), name)
-        for name in ("updater-isolated", "docker", "stateful-upgrade", "dr-rehearsal"):
-            self.assertIn("inputs.force_full ||", self.job(release, name), name)
+        ci_selectors = {
+            "frontend": "run_frontend",
+            "backend": "run_backend",
+            "bootstrap-smoke": "run_bootstrap",
+            "postgres": "run_postgres",
+            "plugins": "run_plugins",
+            "astrbot-bridge": "run_bridge",
+            "astrbot-runtime": "run_runtime",
+        }
+        for name, selector in ci_selectors.items():
+            job = self.job(ci, name)
+            self.assertNotIn("inputs.force_full ||", job, name)
+            self.assertIn(f"needs.classify.outputs.{selector} == 'true'", job, name)
+        self.assertNotIn("inputs.force_full ||", self.job(ci, "fast-fail"))
+        self.assertIn(
+            ".execution.profile != 'DOCS_ONLY'", self.job(ci, "fast-fail")
+        )
+
+        release_selectors = {
+            "updater-isolated": "run_release_updater",
+            "docker": "run_release_docker",
+            "stateful-upgrade": "run_release_stateful",
+        }
+        for name, selector in release_selectors.items():
+            job = self.job(release, name)
+            self.assertNotIn("inputs.force_full ||", job, name)
+            self.assertIn(f"needs.classify.outputs.{selector} == 'true'", job, name)
+        dr = self.job(release, "dr-rehearsal")
+        self.assertNotIn("inputs.force_full ||", dr)
+        self.assertIn(".gates.run_release_dr == true", dr)
 
         candidate_ref = (
             "ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && "
             "github.event.pull_request.head.sha || github.sha) }}"
         )
-        self.assertEqual(ci.count(candidate_ref), 10)
+        self.assertEqual(ci.count(candidate_ref), 11)
         self.assertEqual(release.count(candidate_ref), 7)
         self.assertIn(
             "repository: AstrBotDevs/AstrBot\n          ref: ${{ matrix.astrbot_ref }}",
@@ -116,6 +133,7 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("name: pr-fast-gate", ci)
         self.assertIn("name: ci-selection-authority", ci)
         self.assertIn("needs: selection-authority", self.job(ci, "pr-fast-gate"))
+        self.assertIn("!inputs.force_full", self.job(ci, "pr-fast-gate"))
         self.assertIn("name: release-gate-authority", release)
         self.assertIn("github.event_name == 'pull_request'", ci)
         self.assertIn("github.event_name != 'push'", ci)
@@ -171,7 +189,7 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(dependency, release_authority)
 
-    def test_release_jobs_use_distinct_high_and_critical_selectors(self):
+    def test_release_jobs_use_distinct_component_selectors(self):
         release = self.source("release-gate.yml")
         self.assertIn(
             "needs.classify.outputs.run_release_updater == 'true'",
@@ -186,9 +204,29 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             self.job(release, "stateful-upgrade"),
         )
         self.assertIn(
-            "needs.classify.outputs.run_release_stateful == 'true'",
+            "fromJSON(needs.classify.outputs.classification_json).gates.run_release_dr == true",
             self.job(release, "dr-rehearsal"),
         )
+        self.assertNotIn(
+            "run_release_stateful == 'true'", self.job(release, "dr-rehearsal")
+        )
+
+    def test_contract_validation_reuses_the_old_main_compatible_docs_slot(self):
+        ci = self.source("ci.yml")
+        contract = self.job(ci, "docs-only")
+        classify = self.job(ci, "classify")
+
+        self.assertIn("name: docs-or-contract-validation", contract)
+        self.assertIn("CONTRACT_VALIDATION_ONLY", contract)
+        self.assertIn("scripts.tests.test_recovery_migration_contracts", contract)
+        self.assertIn("python scripts/ci_classify.py --self-test", contract)
+        self.assertIn("python -m compileall -q", contract)
+        self.assertIn("git diff --check", contract)
+        self.assertIn("Validate CI authority contracts", self.job(ci, "fast-fail"))
+        self.assertIn(".signals.ci", self.job(ci, "fast-fail"))
+        self.assertNotIn("execution_profile:", classify)
+        self.assertNotIn("run_contract_validation:", classify)
+        self.assertNotIn("run_release_dr:", classify)
 
     def test_release_gate_bootstraps_both_legacy_and_explicit_job_compose_contracts(self):
         release = self.source("release-gate.yml")

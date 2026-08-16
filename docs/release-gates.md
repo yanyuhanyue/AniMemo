@@ -36,8 +36,7 @@ risk classification.
 
 1. **Development:** targeted local tests for the change being implemented.
 2. **PR Fast Gate:** changed-file classification, fast-fail checks, affected
-   subsystem gates, and immediate full fan-out for CI/deployment/high-risk
-   changes.
+   subsystem gates, and signal-selected release checks.
 3. **Pre-Merge Full Gate:** one full regression plus Release Gate for the exact
    final PR head against current `main`.
 4. **main:** lightweight post-merge verification only.
@@ -46,25 +45,73 @@ risk classification.
 
 ## Risk classification and execution policy
 
-`scripts/ci_classify.py` emits the versioned `animemo.ci-risk/v1` document.
-The document keeps the inherent changed-file risk separate from execution
-policy: `risk.level` describes the change, while `execution.force_full`
-records an authoritative/manual request to run everything. Forcing a full run
-must not rewrite a LOW change into a CRITICAL change.
+`scripts/ci_classify.py` emits the versioned `animemo.ci-risk/v2` document. Its
+four independent dimensions are:
 
-| Risk | Typical change | PR Fast product gates | PR Fast Release Gate |
-| --- | --- | --- | --- |
-| LOW | Safe documentation or repository metadata | Documentation authority only | None |
-| STANDARD | Ordinary frontend, backend, plugin, or test change | Affected subsystems only | None |
-| HIGH | Database/auth/API/plugin/integration/media contracts, dependency inputs, sensitive release documentation, or broad automation | Complete product matrix | Fresh Docker plus stateful Base-to-Current upgrade |
-| CRITICAL | CI authority, release producer, Updater, deployment, recovery, or first-run security boundary | Complete product matrix | Updater failure/recovery tests, Fresh Docker, and stateful Base-to-Current upgrade |
+- `risk.level`: inherent change severity (`LOW`, `STANDARD`, `HIGH`, or
+  `CRITICAL`);
+- `execution.profile`: `DOCS_ONLY`, `CONTRACT_VALIDATION_ONLY`, `TARGETED`, or
+  `FULL_AUTHORITY`;
+- `signals`: affected components such as backend, database, updater,
+  deployment, recovery, and CI authority;
+- `execution.force_full`: an explicit authority decision, never an inference
+  from HIGH or CRITICAL risk.
 
-An explicit `force_full` execution (Pre-Merge, Release Producer, merge-group
-future support, or audited manual dispatch) selects the complete product and
-release matrices regardless of inherent risk. Empty change sets and unknown
-paths escalate fail-closed to CRITICAL. Changed-file discovery disables rename
-pairing and evaluates both delete/add paths, so a move out of a sensitive area
-cannot hide its original authority boundary.
+| Execution profile | Meaning | PR behavior |
+| --- | --- | --- |
+| `DOCS_ONLY` | Every path is audited LOW documentation | Documentation authority only |
+| `CONTRACT_VALIDATION_ONLY` | Every path is in the audited Phase 2 contract set | Contract consistency, classifier self-test, compile check, and `git diff --check` |
+| `TARGETED` | Product/runtime/authority changes | Signals select the minimum sufficient product and release jobs |
+| `FULL_AUTHORITY` | Explicit full authority | Complete product matrix plus Updater, Docker, Stateful Upgrade, and DR Rehearsal |
+
+HIGH and CRITICAL continue to describe important and security-sensitive changes,
+but do not automatically select the whole product and release matrices. An
+explicit `force_full: true` execution (Pre-Merge, Release Producer, or audited
+manual dispatch), and the future `merge_group` authority event, select
+`FULL_AUTHORITY` without rewriting the inherent risk. A reusable or manual run
+without explicit force fails closed in the selection authority.
+
+Empty change sets and unknown paths become CRITICAL `TARGETED` classifications
+with every product, Updater, Docker, Stateful, and DR signal gate selected.
+They can never become a lightweight profile. Changed-file discovery disables
+rename pairing and evaluates both delete/add paths, so a move out of a sensitive
+area cannot hide its original authority boundary.
+
+### Audited contract-only profile
+
+`CONTRACT_VALIDATION_ONLY` requires at least one of these primary documents:
+
+- `docs/backup-contract-v1.md`
+- `docs/restore-contract-v1.md`
+- `docs/migration-bundle-v1.md`
+- `docs/migration-secret-envelope-v1.md`
+- `docs/doctor-basic-contract-v1.md`
+- `docs/compatibility-matrix-v1.md`
+
+Every changed path must also be one of those documents or an explicitly audited
+support path: `CONTEXT.md`, `README.md`, `docs/data-bundle-v1.md`, or
+`scripts/tests/test_recovery_migration_contracts.py`. The test is audited as a
+pure contract consistency check and is explicitly excluded from recovery-runtime
+filename matching. Any mixed path, suffix variation, unknown test, or actual
+`durability/` runtime path exits this profile.
+
+### Targeted signal policy
+
+The selector uses repository behavior, not risk rank, to choose work. Important
+examples are:
+
+| Signal | Selected validation |
+| --- | --- |
+| frontend / backend / plugin / bridge | Owning product jobs |
+| auth, API, integration, media, first-run | Backend plus relevant PostgreSQL/Bridge/runtime jobs |
+| database | Backend, PostgreSQL, and Stateful Upgrade |
+| updater | Bootstrap smoke, isolated Updater, and Stateful Upgrade |
+| deployment | Bootstrap smoke, Fresh Docker, and Stateful Upgrade |
+| recovery or migration runtime | Durability tests, PostgreSQL, and DR Rehearsal |
+| CI authority | Classifier/authority scoped tests plus bootstrap smoke |
+
+Dependency declarations add their owning component signal. Actual selection is
+encoded in the canonical v2 JSON and independently rechecked by gate authority.
 
 The classifier is only a selector. The independent `ci-selection-authority`
 and `release-gate-authority` jobs parse its complete schema and the actual
@@ -77,11 +124,11 @@ list of subsystem outcomes.
 ## PR Fast Gate
 
 Ordinary PR updates use `scripts/ci_classify.py` to select the affected gates.
-Docs-only, frontend-only, and backend-only changes do not automatically pay for
-the complete matrix. HIGH changes receive broad correctness plus Fresh Docker
-and stateful upgrade coverage. CRITICAL changes additionally receive the
-isolated Updater failure/recovery subset. The risk table above is authoritative
-for the selection split.
+Docs-only, audited contract-only, frontend-only, and backend-only changes do not
+automatically pay for the complete matrix. Database changes select PostgreSQL and
+Stateful Upgrade; recovery runtime selects DR; deployment selects Fresh Docker;
+Updater changes select the isolated Updater and stateful checks. Risk level never
+silently replaces these component signals.
 
 The stable `pr-fast-gate` aggregate succeeds only when classification and every
 selected PR job succeed; unselected jobs may skip. A newer PR commit cancels the
@@ -119,6 +166,7 @@ SHA and forces:
   isolated A -> B -> health -> Application Rollback A scenario;
 - fresh Docker validation;
 - stateful Base-to-Current upgrade validation;
+- isolated A-to-B disaster-recovery rehearsal;
 - the complete Release Gate.
 
 It then reloads the PR and current `main`, repeats the PR/head/base/freshness
@@ -146,6 +194,13 @@ Squash merge only after both `pr-fast-gate` and `pre-merge-authority` are green
 on the current head. The same final head normally receives one authoritative
 Full Regression; `main` does not repeat it.
 
+When a PR changes CI authority itself, candidate CI cannot be its only proof.
+Run this Pre-Merge workflow from the trusted old `main` definition against the
+exact candidate SHA before merge. After squash merge and normal main lightweight
+verification, dispatch the new main `CI` and `Release Gate` definitions against
+the exact merge SHA with `force_full: true`. This old-main plus new-main pair is
+the CI authority migration proof; it does not change branch-protection contexts.
+
 ## Exact-SHA reuse and build reuse
 
 Cross-run authority reuse is **DEFERRED**. A safe reusable result would have to
@@ -164,9 +219,9 @@ full-gate critical path. The release producer remains the build-once/promote-man
 authority for actual release artifacts.
 
 The 1,500-second sustained performance baseline is not a default PR job. It is
-manual/RC/risk-triggered evidence. Normal LOW/STANDARD patches should complete
-their selected PR gates plus one final Pre-Merge Full in tens of minutes, while
-major milestones and HIGH/CRITICAL infrastructure work retain extended gates.
+manual/RC/risk-triggered evidence. Normal changes should complete their selected
+PR gates plus one final Pre-Merge Full in tens of minutes, while component
+signals retain the extended gates they actually require.
 
 ## Core CI
 
@@ -225,6 +280,14 @@ recreating persistent state:
 The job never runs `down -v` between Base and Current. Cleanup is scoped to the
 Compose project label, its temporary worktree, and its temporary data directory.
 It never runs Docker system, volume, or network prune commands.
+
+## Disaster-recovery rehearsal gate
+
+The `dr-rehearsal` job validates portable backup and recovery behavior in an
+isolated A-to-B rehearsal. Recovery and migration runtime signals select this job
+independently of `stateful-upgrade`; database, Updater, release-transition, and
+deployment signals select Stateful Upgrade independently of DR. `force_full:
+true` always selects both jobs.
 
 ## Base resolution
 

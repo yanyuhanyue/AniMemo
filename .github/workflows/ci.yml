@@ -89,7 +89,7 @@ jobs:
   fast-fail:
     name: ci-fast-fail
     needs: classify
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.docs_only != 'true')
+    if: github.event_name != 'push' && fromJSON(needs.classify.outputs.classification_json).execution.profile != 'DOCS_ONLY'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -98,21 +98,52 @@ jobs:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - name: Validate changed-files classifier
         run: python scripts/ci_classify.py --self-test
+      - name: Validate CI authority contracts
+        if: ${{ fromJSON(needs.classify.outputs.classification_json).signals.ci }}
+        run: >-
+          python -m unittest
+          scripts.tests.test_ci_classify
+          scripts.tests.test_ci_gate_authority
+          scripts.tests.test_ci_authority_workflows
+          scripts.tests.test_release_workflows
+          -v
       - name: Validate tracked text
         run: git diff --check
 
   docs-only:
-    name: docs-only
+    name: docs-or-contract-validation
     needs: classify
-    if: ${{ !inputs.force_full && needs.classify.outputs.docs_only == 'true' }}
+    if: >-
+      fromJSON(needs.classify.outputs.classification_json).execution.profile == 'DOCS_ONLY' ||
+      fromJSON(needs.classify.outputs.classification_json).execution.profile == 'CONTRACT_VALIDATION_ONLY'
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Documentation-only change; product gates are not required."
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
+      - name: Record documentation-only selection
+        if: ${{ fromJSON(needs.classify.outputs.classification_json).execution.profile == 'DOCS_ONLY' }}
+        run: echo "Documentation-only change; product gates are not required."
+      - name: Validate audited contract consistency
+        if: ${{ fromJSON(needs.classify.outputs.classification_json).execution.profile == 'CONTRACT_VALIDATION_ONLY' }}
+        run: python -m unittest scripts.tests.test_recovery_migration_contracts -v
+      - name: Validate classifier contract
+        if: ${{ fromJSON(needs.classify.outputs.classification_json).execution.profile == 'CONTRACT_VALIDATION_ONLY' }}
+        run: python scripts/ci_classify.py --self-test
+      - name: Compile contract validation scripts
+        if: ${{ fromJSON(needs.classify.outputs.classification_json).execution.profile == 'CONTRACT_VALIDATION_ONLY' }}
+        run: >-
+          python -m compileall -q
+          scripts/ci_classify.py
+          scripts/tests/test_recovery_migration_contracts.py
+      - name: Validate tracked text
+        if: ${{ fromJSON(needs.classify.outputs.classification_json).execution.profile == 'CONTRACT_VALIDATION_ONLY' }}
+        run: git diff --check
 
   frontend:
     name: frontend
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_frontend == 'true')
+    if: github.event_name != 'push' && needs.classify.outputs.run_frontend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -136,7 +167,7 @@ jobs:
   backend:
     name: backend
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_backend == 'true')
+    if: github.event_name != 'push' && needs.classify.outputs.run_backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -173,7 +204,7 @@ jobs:
   bootstrap-smoke:
     name: bootstrap-smoke (${{ matrix.os }})
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_bootstrap == 'true')
+    if: github.event_name != 'push' && needs.classify.outputs.run_bootstrap == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -203,7 +234,7 @@ jobs:
   postgres:
     name: postgres
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_postgres == 'true')
+    if: github.event_name != 'push' && needs.classify.outputs.run_postgres == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -258,7 +289,7 @@ jobs:
   plugins:
     name: plugins
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_plugins == 'true')
+    if: github.event_name != 'push' && needs.classify.outputs.run_plugins == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -298,7 +329,7 @@ jobs:
   astrbot-bridge:
     name: astrbot-bridge
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_bridge == 'true')
+    if: github.event_name != 'push' && needs.classify.outputs.run_bridge == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -316,7 +347,7 @@ jobs:
   astrbot-runtime:
     name: astrbot-runtime (${{ matrix.astrbot_ref }})
     needs: [classify, fast-fail]
-    if: github.event_name != 'push' && (inputs.force_full || needs.classify.outputs.run_runtime == 'true')
+    if: github.event_name != 'push' && needs.classify.outputs.run_runtime == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -372,7 +403,7 @@ jobs:
 
   pr-fast-gate:
     name: pr-fast-gate
-    if: ${{ always() && github.event_name == 'pull_request' }}
+    if: ${{ always() && github.event_name == 'pull_request' && !inputs.force_full }}
     needs: selection-authority
     runs-on: ubuntu-latest
     steps:
