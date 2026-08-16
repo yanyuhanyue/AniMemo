@@ -48,7 +48,6 @@ jobs:
       - name: Run deterministic frontend performance probe
         env:
           FRONTEND_PERF_COMMIT: ${{ inputs.candidate_sha }}
-          FRONTEND_PERF_OUTPUT: ${{ github.workspace }}/artifacts/frontend.json
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
         run: |
           mkdir -p artifacts

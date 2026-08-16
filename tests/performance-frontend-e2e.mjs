@@ -18,9 +18,7 @@ const warmupRuns = 1;
 const measuredRuns = 5;
 const viewport = { width: 1440, height: 900 };
 const distRoot = resolve(projectRoot, "dist/client");
-const outputPath = process.env.FRONTEND_PERF_OUTPUT
-  ? resolveArtifactOutputPath(process.env.FRONTEND_PERF_OUTPUT, projectRoot)
-  : null;
+const outputPath = resolveArtifactOutputPath("artifacts/frontend.json", projectRoot);
 
 if (!existsSync(resolve(distRoot, "index.html"))) {
   throw new Error("Production build missing; run npm run build before the frontend performance probe.");
@@ -1009,9 +1007,7 @@ try {
     },
   };
   const serialized = `${JSON.stringify(report, null, 2)}\n`;
-  if (outputPath) {
-    writeArtifactFileSync(outputPath, serialized, projectRoot);
-  }
+  writeArtifactFileSync(outputPath, serialized, projectRoot);
   process.stdout.write(serialized);
 } finally {
   await browser?.close();

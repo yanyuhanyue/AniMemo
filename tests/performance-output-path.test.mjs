@@ -9,6 +9,19 @@ import {
   writeArtifactFileSync,
 } from "../scripts/performance-output.mjs";
 
+test("frontend probe uses only the fixed canonical artifact path", () => {
+  const source = readFileSync(
+    new URL("./performance-frontend-e2e.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /FRONTEND_PERF_OUTPUT/);
+  assert.match(
+    source,
+    /resolveArtifactOutputPath\("artifacts\/frontend\.json", projectRoot\)/,
+  );
+});
+
 test("keeps configured performance output inside the artifacts root", () => {
   const projectRoot = mkdtempSync(join(tmpdir(), "animemo-perf-output-"));
   try {
