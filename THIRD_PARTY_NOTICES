@@ -10,7 +10,7 @@ Run `python scripts/check_license_docs.py` to verify this snapshot without chang
 
 | Repository input | SHA-256 | Coverage |
 |---|---|---|
-| `package-lock.json` | `576f0b6f10b67ef0a4360f1028722f64bbd4c9f08eb972ecdec332ec6d4d54e5` | Exact Node dependency graph, versions, package license metadata, and registry tarballs |
+| `package-lock.json` | `c0aaa71bff7997dcaf6047f565e0764d3b98e2f072a77bb1d1a246f46259a1e2` | Exact Node dependency graph, versions, package license metadata, and registry tarballs |
 | `backend/requirements.txt` | `db0c4cfeeea40f0b8a7d4d7f392b8d493caedf0f467ea8d1a6a8358c506b5a90` | 44 exact Python production pins |
 | `release/requirements.txt` | `dc33c76807b0f3672bd53d14a3916350ba5a876cced309d009caed2c630853fd` | Release updater Python pins |
 | `bridges/astrbot_plugin_animemo_bridge/requirements.txt` | `9d25b578e8e7489ee686d0eabaf1b2b2444b3b0761ac3d55548f9e00c99fb2de` | AstrBot bridge constraint |
