@@ -9,6 +9,7 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from unittest import mock
 
 from durability import migration
 from durability.compatibility import (
@@ -508,6 +509,18 @@ class MigrationRuntimeTests(unittest.TestCase):
         self.assertEqual(
             verification.manifest["databaseReferences"]["generation"],
             "database-references-5",
+        )
+
+    def test_database_capture_resource_limit_has_stable_migration_code(self) -> None:
+        with (
+            mock.patch.object(FakePgDump, "payload", b"A" * (3 * 1024 * 1024)),
+            self.assertRaises(migration.MigrationOperationalError) as raised,
+        ):
+            self.create()
+
+        self.assertEqual(
+            raised.exception.code,
+            "MIGRATION_RESOURCE_BOUNDS_EXCEEDED",
         )
 
     def test_unique_bundle_id_preserves_instance_id(self) -> None:

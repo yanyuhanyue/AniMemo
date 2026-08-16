@@ -17,6 +17,7 @@ if importlib.util.find_spec("cryptography") is None:
 
 from durability import backup, secret_envelope
 from durability.canonical import canonical_json_bytes
+from durability.resource_budget import DurabilityResourceBudget
 
 
 class FakePgDump:
@@ -609,6 +610,60 @@ class BackupRuntimeTests(unittest.TestCase):
             if path.is_file()
         }
         self.assertEqual(before, after)
+
+    def test_verify_rejects_declared_member_size_over_resource_policy(self) -> None:
+        result = self.create()
+        manifest_path = result.path / backup.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_bytes())
+        member = next(
+            item
+            for item in manifest["filesystem"]["members"]
+            if item["path"] != backup.DATABASE_MEMBER
+        )
+        member["sizeBytes"] = (
+            backup._RESOURCE_BUDGET.maximum_filesystem_member_bytes + 1
+        )
+        manifest_path.write_bytes(canonical_json_bytes(manifest) + b"\n")
+
+        with self.assertRaisesRegex(
+            backup.BackupError,
+            "BACKUP_RESOURCE_BOUNDS_EXCEEDED",
+        ):
+            backup.verify_backup(result.path)
+
+    def test_verify_rejects_database_bomb_while_streaming(self) -> None:
+        result = self.create(runner=FakePgDump(bytes(range(256)) * 12_288))
+        size_budget = DurabilityResourceBudget(
+            maximum_compressed_member_bytes=16 * 1024 * 1024,
+            maximum_uncompressed_database_bytes=1024 * 1024,
+            maximum_filesystem_member_bytes=16 * 1024 * 1024,
+            maximum_total_copied_bytes=64 * 1024 * 1024,
+            maximum_compression_ratio=1_000,
+        )
+        with (
+            mock.patch.object(backup, "_RESOURCE_BUDGET", size_budget),
+            self.assertRaisesRegex(
+                backup.BackupError,
+                "BACKUP_RESOURCE_BOUNDS_EXCEEDED",
+            ),
+        ):
+            backup.verify_backup(result.path)
+
+        ratio_budget = DurabilityResourceBudget(
+            maximum_compressed_member_bytes=16 * 1024 * 1024,
+            maximum_uncompressed_database_bytes=8 * 1024 * 1024,
+            maximum_filesystem_member_bytes=16 * 1024 * 1024,
+            maximum_total_copied_bytes=64 * 1024 * 1024,
+            maximum_compression_ratio=2,
+        )
+        with (
+            mock.patch.object(backup, "_RESOURCE_BUDGET", ratio_budget),
+            self.assertRaisesRegex(
+                backup.BackupError,
+                "BACKUP_RESOURCE_BOUNDS_EXCEEDED",
+            ),
+        ):
+            backup.verify_backup(result.path)
 
 
 if __name__ == "__main__":
