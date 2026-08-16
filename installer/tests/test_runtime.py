@@ -283,6 +283,24 @@ class RestoreFake:
 
 
 class InstallerRuntimeTests(unittest.TestCase):
+    def test_exact_release_selector_accepts_only_stable_or_rc(self) -> None:
+        self.assertEqual(ReleaseSelector(version="v1.1.0").version, "v1.1.0")
+        self.assertEqual(
+            ReleaseSelector(version="v1.1.0-rc.2").version,
+            "v1.1.0-rc.2",
+        )
+        for version in (
+            "v1.1.0-beta.1",
+            "v1.1",
+            "latest",
+            "v01.1.0",
+            "v1.1.0-rc.0",
+        ):
+            with self.subTest(version=version), self.assertRaisesRegex(
+                InstallerError, "INSTALL_RELEASE_VERSION_INVALID"
+            ):
+                ReleaseSelector(version=version)
+
     def setUp(self) -> None:
         self.releases = ReleaseFake()
         self.target = TargetFake()

@@ -186,7 +186,7 @@ def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> 
                 return EXIT_VALIDATION
         result = runtime.execute(plan, accepted_plan_digest=plan.plan_digest)
         _write(result.as_dict(), json_output=args.json_output)
-        if result.outcome.value in {"SUCCEEDED", "NO_CHANGE", "UPDATER_HANDOFF"}:
+        if result.outcome.value in {"SUCCEEDED", "NO_CHANGE"}:
             return EXIT_SUCCESS
         return {
             "RECOVERY_REQUIRED": EXIT_RECOVERY,

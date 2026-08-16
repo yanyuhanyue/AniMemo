@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import stat
 import tempfile
 import unittest
@@ -14,9 +15,14 @@ from durability.instance import (
 )
 from durability.managed_config import parse_managed_config
 from installer import production
-from installer.production import ProductionTargetPort
+from installer.production import (
+    ProductionManagedConfigurationPort,
+    ProductionTargetPort,
+)
 from installer.runtime import (
     InstallerAdapterError,
+    InstallerError,
+    ListenRequest,
     PlatformEvidence,
     ReleaseEvidence,
     TargetClass,
@@ -111,7 +117,55 @@ class ConfigStoreFixture:
         return self.config
 
 
+class EmptyRuntimeRunner:
+    def __init__(self, *, compose_resource: bool = False) -> None:
+        self.compose_resource = compose_resource
+
+    def run(self, argv):
+        if argv[:3] == ["/usr/bin/systemctl", "show", "animemo-updater.service"]:
+            return SimpleNamespace(stdout="not-found\n")
+        if self.compose_resource and argv[1:3] == ["container", "ls"]:
+            return SimpleNamespace(stdout="container-id\n")
+        return SimpleNamespace(stdout="")
+
+
 class ProductionTargetPortTests(unittest.TestCase):
+    def test_launcher_without_locator_is_partial_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            roots = tuple(root / name for name in ("app", "data", "updater", "state", "run"))
+            launcher = root / "animemo-updater"
+            launcher.write_bytes(b"partial launcher")
+            with (
+                mock.patch.object(production, "_CANONICAL_ROOTS", roots),
+                mock.patch.object(
+                    production,
+                    "_CANONICAL_EXTERNAL_ARTIFACTS",
+                    (launcher,),
+                ),
+            ):
+                evidence = ProductionTargetPort(
+                    runner=EmptyRuntimeRunner()
+                ).inspect()
+
+        self.assertEqual(evidence.classification, TargetClass.PARTIAL_AMBIGUOUS)
+
+    def test_compose_resources_without_locator_are_partial_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            roots = tuple(root / name for name in ("app", "data", "updater", "state", "run"))
+            with (
+                mock.patch.object(production, "_CANONICAL_ROOTS", roots),
+                mock.patch.object(
+                    production, "_CANONICAL_EXTERNAL_ARTIFACTS", ()
+                ),
+            ):
+                evidence = ProductionTargetPort(
+                    runner=EmptyRuntimeRunner(compose_resource=True)
+                ).inspect()
+
+        self.assertEqual(evidence.classification, TargetClass.PARTIAL_AMBIGUOUS)
+
     def inspect_target(
         self,
         root: Path,
@@ -202,6 +256,83 @@ class ProductionTargetPortTests(unittest.TestCase):
         self.assertFalse(evidence.exact_release_running)
         self.assertFalse(evidence.doctor_complete)
         self.assertEqual(doctor.accepted, 1)
+
+
+class ProductionConfigurationPreflightTests(unittest.TestCase):
+    def test_config_publication_becomes_the_expected_operation_state(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as config_directory,
+            tempfile.TemporaryDirectory() as runtime_directory,
+        ):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as available:
+                available.bind(("127.0.0.1", 0))
+                port = available.getsockname()[1]
+            store = production.LocalManagedConfigStore(
+                config_root=Path(config_directory),
+                runtime_root=Path(runtime_directory),
+            )
+            adapter = ProductionManagedConfigurationPort(store)
+            plan = adapter.plan(
+                instance_id=INSTANCE_ID,
+                public_origin="https://anime.example",
+                listen=ListenRequest("127.0.0.1", port),
+                insecure_http_accepted=False,
+            )
+
+            adapter.publish(plan)
+
+            self.assertEqual(adapter.config_for(plan).instance_id, INSTANCE_ID)
+
+    def test_requested_port_collision_fails_during_plan(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as config_directory,
+            tempfile.TemporaryDirectory() as runtime_directory,
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied,
+        ):
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen()
+            port = occupied.getsockname()[1]
+            store = production.LocalManagedConfigStore(
+                config_root=Path(config_directory),
+                runtime_root=Path(runtime_directory),
+            )
+            adapter = ProductionManagedConfigurationPort(store)
+
+            with self.assertRaisesRegex(InstallerError, "INSTALL_PORT_CONFLICT"):
+                adapter.plan(
+                    instance_id=INSTANCE_ID,
+                    public_origin="https://anime.example",
+                    listen=ListenRequest("127.0.0.1", port),
+                    insecure_http_accepted=False,
+                )
+
+    def test_port_is_rechecked_at_execution_boundary(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as config_directory,
+            tempfile.TemporaryDirectory() as runtime_directory,
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation,
+        ):
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+            reservation.close()
+            store = production.LocalManagedConfigStore(
+                config_root=Path(config_directory),
+                runtime_root=Path(runtime_directory),
+            )
+            adapter = ProductionManagedConfigurationPort(store)
+            plan = adapter.plan(
+                instance_id=INSTANCE_ID,
+                public_origin="https://anime.example",
+                listen=ListenRequest("127.0.0.1", port),
+                insecure_http_accepted=False,
+            )
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+                occupied.bind(("127.0.0.1", port))
+                occupied.listen()
+                with self.assertRaisesRegex(
+                    InstallerError, "INSTALL_PORT_CONFLICT"
+                ):
+                    adapter.revalidate(plan)
 
 
 if __name__ == "__main__":

@@ -589,8 +589,13 @@ class GitHubReleaseSourceTests(unittest.TestCase):
             beta = source.list_releases("beta", refresh=True)
 
             self.assertEqual([item["version"] for item in stable], ["v1.0.0"])
-            self.assertEqual([item["version"] for item in rc], ["v1.0.0", "v1.0.0-rc.10", "v1.0.0-rc.2"])
-            self.assertEqual([item["version"] for item in beta], ["v1.1.0-beta.1", "v1.0.0", "v1.0.0-rc.10", "v1.0.0-rc.2"])
+            self.assertEqual(
+                [item["version"] for item in rc],
+                ["v1.0.0-rc.10", "v1.0.0-rc.2"],
+            )
+            self.assertEqual(
+                [item["version"] for item in beta], ["v1.1.0-beta.1"]
+            )
 
     def test_release_discovery_rejects_non_object_entries(self):
         with tempfile.TemporaryDirectory() as directory:

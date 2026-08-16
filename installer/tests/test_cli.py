@@ -11,6 +11,8 @@ from installer.runtime import (
     InstallerMode,
     InstallRequest,
     ReleaseSelector,
+    TargetClass,
+    TargetEvidence,
 )
 
 
@@ -44,6 +46,40 @@ class _Runtime:
 
 
 class InstallerCliTests(unittest.TestCase):
+    def test_updater_handoff_is_a_nonzero_rejection(self) -> None:
+        holder = _Runtime()
+        holder.runtime._target.evidence = TargetEvidence(
+            TargetClass.ACTIVE,
+            digest("4"),
+            instance_id="12345678-1234-4234-9234-123456789abc",
+            release_manifest_digest=digest("a"),
+            material_identity_digest=digest("b"),
+            config_revision="22345678-1234-4234-9234-123456789abc",
+            public_origin="https://anime.example",
+            listen_host="127.0.0.1",
+            listen_port=8088,
+            exact_release_running=True,
+            doctor_complete=True,
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(
+                [
+                    "install",
+                    "--channel",
+                    "rc",
+                    "--public-origin",
+                    "https://anime.example",
+                    "--non-interactive",
+                    "--accept",
+                    "--json",
+                ],
+                runtime=holder.runtime,
+            )
+
+        self.assertEqual(code, EXIT_VALIDATION)
+        self.assertIn('"outcome": "UPDATER_HANDOFF"', output.getvalue())
+
     def test_restore_requires_one_explicit_secret_acquisition_mode(self) -> None:
         with self.assertRaises(SystemExit):
             main(

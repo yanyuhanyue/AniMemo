@@ -877,7 +877,7 @@ class ProductionRestoreMutation:
 
     def stage_updater(self) -> None:
         plan = self._plan()
-        launcher = Path("/opt/animemo-updater/animemo-updater")
+        launcher = Path("/opt/animemo-updater/launcher")
         expected = self.fresh.releases.materials_for(plan.release).material(
             "deploy/updater/animemo-updater"
         )

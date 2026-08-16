@@ -7,12 +7,15 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from durability import backup, restore, secret_envelope
 from durability.canonical import canonical_json_bytes
 from durability.managed_config import LocalManagedConfigStore
+from installer import restore_production
 from installer.production import ProductionManagedConfigurationPort
 from installer.restore_production import (
+    ProductionRestoreMutation,
     ProductionRestoreRuntimePort,
     RestoreOperationJournal,
     _read_protected_file,
@@ -58,6 +61,81 @@ class _Releases:
 
 class _Fresh:
     pass
+
+
+class _LauncherMaterials:
+    def __init__(self, launcher: Path) -> None:
+        self.launcher = launcher
+
+    def material(self, path: str) -> Path:
+        if path != "deploy/updater/animemo-updater":
+            raise AssertionError("unexpected restore material")
+        return self.launcher
+
+
+class _LauncherReleases:
+    def __init__(self, materials: _LauncherMaterials) -> None:
+        self.materials = materials
+
+    def materials_for(self, _release):
+        return self.materials
+
+
+class _LauncherFresh:
+    def __init__(self, materials: _LauncherMaterials) -> None:
+        self.releases = _LauncherReleases(materials)
+
+
+class ProductionRestoreUpdaterTests(unittest.TestCase):
+    def test_stage_uses_the_canonical_installed_updater_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = root / "verified-launcher"
+            expected.write_bytes(b"canonical launcher\n")
+            canonical = root / "opt" / "animemo-updater" / "launcher"
+            canonical.parent.mkdir(parents=True)
+            canonical.write_bytes(expected.read_bytes())
+            os.chmod(canonical, 0o755)
+            legacy = canonical.with_name("animemo-updater")
+            real_path = Path
+
+            def mapped_path(value):
+                if str(value) == "/opt/animemo-updater/launcher":
+                    return canonical
+                if str(value) == "/opt/animemo-updater/animemo-updater":
+                    return legacy
+                return real_path(value)
+
+            mutation = ProductionRestoreMutation(
+                fresh=_LauncherFresh(_LauncherMaterials(expected)),
+                configuration=SimpleNamespace(),
+                installer_id="a" * 32,
+            )
+            mutation.installation_plan = SimpleNamespace(release=object())
+            with (
+                mock.patch.object(restore_production, "Path", side_effect=mapped_path),
+                mock.patch.object(
+                    restore_production.stat,
+                    "S_IMODE",
+                    return_value=0o755,
+                ),
+                mock.patch.object(
+                    restore_production,
+                    "ReleaseSlots",
+                    return_value=SimpleNamespace(
+                        read=lambda: {"current": None, "previous": None}
+                    ),
+                ),
+                mock.patch.object(
+                    restore_production,
+                    "UPDATER_STATE_ROOT",
+                    root / "updater-state",
+                ),
+            ):
+                mutation.stage_updater()
+
+            self.assertTrue(mutation.adoption_ready)
+            self.assertFalse(legacy.exists())
 
 
 class ProductionRestorePlanTests(unittest.TestCase):

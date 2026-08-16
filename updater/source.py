@@ -319,11 +319,7 @@ class GitHubReleaseSource:
     ) -> list[dict[str, object]]:
         if channel not in CHANNELS:
             raise RequestRejected("Invalid release channel")
-        accepted = {"stable"}
-        if channel in {"rc", "beta"}:
-            accepted.add("rc")
-        if channel == "beta":
-            accepted.add("beta")
+        accepted = {channel}
         result = []
         for item in self._list_all(refresh=refresh):
             tag = str(item["tag_name"])

@@ -121,6 +121,62 @@ _CANONICAL_ROOTS = tuple(
         UPDATER_RUNTIME_ROOT,
     )
 )
+_CANONICAL_EXTERNAL_ARTIFACTS = tuple(
+    Path(path)
+    for path in (
+        "/usr/local/bin/animemo-updater",
+        "/etc/systemd/system/animemo-updater.service",
+        "/etc/systemd/system/multi-user.target.wants/animemo-updater.service",
+        "/usr/lib/sysusers.d/animemo-updater.conf",
+        "/usr/lib/tmpfiles.d/animemo-updater.conf",
+    )
+)
+_CANONICAL_RUNTIME_QUERIES = (
+    (
+        (
+            "/usr/bin/systemctl",
+            "show",
+            "animemo-updater.service",
+            "--property=LoadState",
+            "--value",
+        ),
+        frozenset({"", "not-found"}),
+    ),
+    (
+        (
+            "/usr/bin/docker",
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--filter",
+            "label=com.docker.compose.project=animemo",
+        ),
+        frozenset({""}),
+    ),
+    (
+        (
+            "/usr/bin/docker",
+            "network",
+            "ls",
+            "--quiet",
+            "--filter",
+            "label=com.docker.compose.project=animemo",
+        ),
+        frozenset({""}),
+    ),
+    (
+        (
+            "/usr/bin/docker",
+            "volume",
+            "ls",
+            "--quiet",
+            "--filter",
+            "label=com.docker.compose.project=animemo",
+        ),
+        frozenset({""}),
+    ),
+)
 _PLATFORM_EVIDENCE_MATERIAL = "release/platform-qualification.json"
 
 
@@ -195,9 +251,7 @@ class ProductionReleasePort:
         if selector.channel is not None:
             requested = selector.channel
             actual = str(manifest["release"]["channel"])
-            if (requested == "stable" and actual != "stable") or (
-                requested == "rc" and actual not in {"stable", "rc"}
-            ):
+            if actual != requested:
                 raise InstallerError(
                     "INSTALL_RELEASE_CHANNEL_MISMATCH",
                     outcome=InstallOutcome.VALIDATION_FAILED,
@@ -479,6 +533,19 @@ class ProductionTargetPort:
             return False
         return True
 
+    def _external_runtime_present(self) -> bool:
+        for path in _CANONICAL_EXTERNAL_ARTIFACTS:
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            return True
+        for argv, absent_values in _CANONICAL_RUNTIME_QUERIES:
+            result = self.runner.run(list(argv))
+            if str(result.stdout or "").strip() not in absent_values:
+                return True
+        return False
+
     def inspect(self) -> TargetEvidence:
         locator_path = Path(str(INSTANCE_LOCATOR_PATH))
         if locator_path.exists() or locator_path.is_symlink():
@@ -581,6 +648,22 @@ class ProductionTargetPort:
                 empty = False
             states.append("empty" if empty else "data")
         evidence_digest = sha256_identity(canonical_json_bytes(states))
+        if any(item == "data" for item in states):
+            return TargetEvidence(TargetClass.PARTIAL_AMBIGUOUS, evidence_digest)
+        try:
+            external_runtime = self._external_runtime_present()
+        except OSError:
+            return TargetEvidence(
+                TargetClass.CORRUPT,
+                sha256_identity(b"canonical-runtime-unreadable"),
+            )
+        if external_runtime:
+            return TargetEvidence(
+                TargetClass.PARTIAL_AMBIGUOUS,
+                sha256_identity(
+                    canonical_json_bytes({"roots": states, "externalRuntime": True})
+                ),
+            )
         if all(item == "absent" for item in states):
             return TargetEvidence(TargetClass.ABSENT, evidence_digest)
         if all(item in {"absent", "empty"} for item in states):
@@ -593,6 +676,19 @@ class ProductionManagedConfigurationPort:
         self.store = store or LocalManagedConfigStore()
         self._planned: dict[str, ManagedConfig] = {}
         self._existing: dict[str, bool] = {}
+
+    @staticmethod
+    def _assert_listen_available(listen: ListenConfig) -> None:
+        address = ipaddress.ip_address(listen.host)
+        family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                probe.bind((listen.host, listen.port))
+        except OSError:
+            raise InstallerError(
+                "INSTALL_PORT_CONFLICT",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            ) from None
 
     @staticmethod
     def _fresh_config(
@@ -659,6 +755,7 @@ class ProductionManagedConfigurationPort:
                 listen=listen,
                 insecure_http_accepted=insecure_http_accepted,
             )
+            self._assert_listen_available(config.listen)
         safe_identity = sha256_identity(
             canonical_json_bytes(config.secret_safe_dict())
         )
@@ -695,6 +792,8 @@ class ProductionManagedConfigurationPort:
             raise ManagedConfigError("CONFIG_PLAN_STALE")
         if exists and self.store.read() != config:
             raise ManagedConfigError("CONFIG_PLAN_STALE")
+        if not exists:
+            self._assert_listen_available(config.listen)
 
     def config_for(self, evidence: ConfigPlanEvidence) -> ManagedConfig:
         self.revalidate(evidence)
@@ -737,6 +836,7 @@ class ProductionManagedConfigurationPort:
         if self._existing[evidence.config_revision]:
             return
         self.store.write(config, expected_revision=None, must_not_exist=True)
+        self._existing[evidence.config_revision] = True
 
 
 _PHASES = {

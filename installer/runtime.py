@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import re
 import uuid
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
@@ -34,6 +35,9 @@ INSTALL_PLAN_IDENTITY = "animemo.install-plan/v1"
 INSTALL_RESULT_IDENTITY = "animemo.install-result/v1"
 STANDARD_DEPLOYMENT_PROFILE = "v1.1-standard"
 STANDARD_PLATFORM_PROFILE = "v1.1-standard-linux-amd64"
+_INSTALL_RELEASE_VERSION = re.compile(
+    r"^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-rc\.[1-9][0-9]*)?$"
+)
 
 
 class InstallerMode(StrEnum):
@@ -158,10 +162,8 @@ class ReleaseSelector:
                 "INSTALL_RELEASE_CHANNEL_INVALID",
                 outcome=InstallOutcome.VALIDATION_FAILED,
             )
-        if self.version is not None and (
-            not self.version
-            or len(self.version) > 128
-            or self.version.strip() != self.version
+        if self.version is not None and not _INSTALL_RELEASE_VERSION.fullmatch(
+            self.version
         ):
             raise InstallerError(
                 "INSTALL_RELEASE_VERSION_INVALID",
