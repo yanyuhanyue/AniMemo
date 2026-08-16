@@ -11,7 +11,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in os.sys.path:
     os.sys.path.insert(0, str(SCRIPTS))
 
-from ci_refs import resolve_refs
+from ci_refs import _load_event, resolve_refs
 
 
 class CIRefResolutionTests(unittest.TestCase):
@@ -89,3 +89,15 @@ class CIRefResolutionTests(unittest.TestCase):
         )
         self.assertEqual((refs.base, refs.head), (self.base, self.head))
         self.assertEqual(refs.source, "workflow_call upgrade_base_sha")
+
+    def test_runner_event_path_loads_the_runner_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            event_path.write_text(
+                json.dumps({"before": self.base}),
+                encoding="utf-8",
+            )
+
+            event = _load_event({"GITHUB_EVENT_PATH": str(event_path)})
+
+        self.assertEqual(event, {"before": self.base})

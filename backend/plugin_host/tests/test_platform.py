@@ -374,6 +374,13 @@ class PluginPlatformApiTests(APITestCase):
         preview_metadata = self.client.get(f"/api/plugins/previews/{preview_session}/")
         self.assertEqual(preview_metadata.status_code, 200, preview_metadata.data)
         self.assertIn("/plugin-previews/session/", preview_metadata.data["frontendEntry"])
+        preview_entry = preview_metadata.data["frontendEntry"]
+        preview_asset = self.client.get(preview_entry)
+        self.assertEqual(preview_asset.status_code, 200)
+        preview_asset.close()
+        preview_prefix = preview_entry.rsplit("/", 1)[0]
+        self.assertEqual(self.client.get(f"{preview_prefix}/../manifest.json").status_code, 404)
+        self.assertEqual(self.client.get(preview_entry.replace("/1.0.0/", "/9.9.9/")).status_code, 404)
         other_client = APIClient()
         other_client.force_authenticate(self.other)
         self.assertEqual(other_client.post(f"/api/plugins/my/versions/{version.pk}/preview/").status_code, 404)
@@ -400,6 +407,21 @@ class PluginPlatformApiTests(APITestCase):
         asset = self.client.get(metadata.data["plugins"][0]["frontendEntry"])
         self.assertEqual(asset.status_code, 200)
         asset.close()
+        asset_entry = metadata.data["plugins"][0]["frontendEntry"]
+        asset_prefix = asset_entry.rsplit("/", 1)[0]
+        self.assertEqual(self.client.get(f"{asset_prefix}/../manifest.json").status_code, 404)
+        self.assertEqual(self.client.get(asset_entry.replace("/1.0.0/", "/9.9.9/")).status_code, 404)
+
+    def test_rollback_route_rejects_path_like_slug_before_storage_use(self):
+        admin_client = APIClient()
+        admin_client.force_authenticate(self.admin)
+        sentinel = Path(self.root.name) / "outside-sentinel.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
+
+        response = admin_client.post("/api/staff/plugins/%2e%2e/rollback/")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
 
     def test_uninstall_retains_only_current_users_data_by_default(self):
         project, version = self._create_and_upload()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -66,6 +67,47 @@ def unsigned_payload() -> dict[str, object]:
 
 
 class PlatformQualificationTests(unittest.TestCase):
+    def test_command_runner_accepts_only_qualification_executables(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, stdout="26.1.3\n")
+        allowed = ("docker", "sudo", "pg_dump", "psql", "systemd")
+
+        with mock.patch.object(
+            producer.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            for executable in allowed:
+                with self.subTest(executable=executable):
+                    self.assertEqual(producer._run((executable, "--version")), "26.1.3")
+
+        self.assertEqual(run.call_count, len(allowed))
+        for call, executable in zip(run.call_args_list, allowed, strict=True):
+            self.assertEqual(call.args[0], [executable, "--version"])
+
+    def test_command_runner_rejects_untrusted_executables_and_control_bytes(
+        self,
+    ) -> None:
+        rejected = (
+            ("powershell", "-Command", "Write-Output unsafe"),
+            ("/bin/sh", "-c", "true"),
+            ("docker\x00ignored", "info"),
+            ("docker", "info\nversion"),
+            ("docker", 123),
+            (),
+        )
+
+        with mock.patch.object(producer.subprocess, "run") as run:
+            for command in rejected:
+                with (
+                    self.subTest(command=command),
+                    self.assertRaisesRegex(
+                        producer.QualificationProbeError,
+                        "PLATFORM_PROBE_COMMAND_REJECTED",
+                    ),
+                ):
+                    producer._run(command)  # type: ignore[arg-type]
+            run.assert_not_called()
+
     def test_finalize_parse_and_digest_bind_exact_observed_evidence(self) -> None:
         qualification = finalize_platform_qualification(unsigned_payload())
         restored = parse_platform_qualification(

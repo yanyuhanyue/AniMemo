@@ -117,3 +117,14 @@ class ManifestV2Tests(SimpleTestCase):
             validate_manifest(self.valid_manifest(coreCapabilities=[{"name": "journal"}]))
         with self.assertRaisesRegex(ManifestError, "settings definition"):
             validate_manifest(self.valid_manifest(settings=[{"key": "enabled", "scope": "user"}]))
+
+    def test_backend_runtime_rejects_every_noncanonical_entry_path(self):
+        for entry in ("../outside.py", "/tmp/outside.py", "backend/../outside.py"):
+            with self.subTest(entry=entry), self.assertRaisesRegex(ManifestError, "固定 backend/plugin.py"):
+                validate_manifest(
+                    self.valid_manifest(
+                        runtimes=["backend"],
+                        backend={"entry": entry},
+                        extensions=["backend.api"],
+                    )
+                )

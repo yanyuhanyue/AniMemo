@@ -39,7 +39,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
       - run: npm ci
       - run: npm run build
       - name: Install Chromium for the production browser probe
@@ -49,7 +48,6 @@ jobs:
       - name: Run deterministic frontend performance probe
         env:
           FRONTEND_PERF_COMMIT: ${{ inputs.candidate_sha }}
-          FRONTEND_PERF_OUTPUT: ${{ github.workspace }}/artifacts/frontend.json
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
         run: |
           mkdir -p artifacts
@@ -117,8 +115,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: backend/requirements.txt
       - run: python -m pip install -r backend/requirements.txt
       - name: Apply migrations to the ephemeral PostgreSQL service
         working-directory: backend

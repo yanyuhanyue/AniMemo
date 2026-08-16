@@ -3,11 +3,13 @@ import { copyFile, mkdir, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveFixedLoopbackOrigin } from "./qa-origin.mjs";
+
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const qaDir = path.join(projectRoot, "qa");
 const videoTempRoot = path.join(qaDir, ".playwright-video");
 const browsersPath = path.join(projectRoot, ".playwright-browsers");
-const baseUrl = process.env.QA_BASE_URL || "http://127.0.0.1:5173";
+const baseUrl = resolveFixedLoopbackOrigin(process.env.QA_BASE_URL, 5173, "QA_BASE_URL");
 const viewport = { width: 1440, height: 900 };
 
 process.env.PLAYWRIGHT_BROWSERS_PATH = browsersPath;

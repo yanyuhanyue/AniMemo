@@ -67,6 +67,20 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("comparison_base_sha:", ci)
         self.assertIn("upgrade_base_sha:", release)
 
+    def test_classifiers_write_only_to_the_runner_output_file(self):
+        expected = (
+            'run: python scripts/ci_classify.py --base "$CI_BASE_SHA" '
+            '--head "$CI_HEAD_SHA" --github-output "$GITHUB_OUTPUT"'
+        )
+        for name in ("ci.yml", "release-gate.yml"):
+            invocations = [
+                line.strip()
+                for line in self.source(name).splitlines()
+                if "scripts/ci_classify.py" in line and "--github-output" in line
+            ]
+            with self.subTest(workflow=name):
+                self.assertEqual(invocations, [expected])
+
     def test_pre_merge_passes_candidate_public_origin_to_trusted_reusable_gates(self):
         source = self.source("pre-merge-full.yml")
         self.assertIn("public_origin: https://ci.example.test", source)
@@ -145,7 +159,8 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
 
         self.assertEqual(plugins.count('--head "$CANDIDATE_SHA"'), 2)
         self.assertIn('--base "$COMPARISON_BASE_SHA" --head "$CANDIDATE_SHA"', plugins)
-        self.assertNotIn("check_official_plugin_immutability.py --head-root .", plugins)
+        self.assertNotIn("--head-root", plugins)
+        self.assertNotIn("--repo", plugins)
 
     def test_selection_authorities_validate_actual_job_results(self):
         ci = self.source("ci.yml")

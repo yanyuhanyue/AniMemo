@@ -6,17 +6,63 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in os.sys.path:
     os.sys.path.insert(0, str(SCRIPTS))
 
-from check_official_plugin_immutability import GateInputError, check_repository
+from check_official_plugin_immutability import GateInputError, check_repository, main
 
 
 class OfficialPluginImmutabilityTests(unittest.TestCase):
+    def test_cli_rejects_arbitrary_repository_and_worktree_roots(self):
+        for option in ("--repo", "--head-root"):
+            with (
+                self.subTest(option=option),
+                patch("sys.argv", ["check_official_plugin_immutability.py", option, "../outside"]),
+                patch(
+                    "check_official_plugin_immutability.resolve_refs",
+                    side_effect=AssertionError("untrusted root reached ref resolution"),
+                ) as resolve_refs,
+                self.assertRaises(SystemExit),
+            ):
+                main()
+            resolve_refs.assert_not_called()
+
+    def test_cli_maps_the_active_authority_head_root_to_the_repository(self):
+        refs = SimpleNamespace(base="a" * 40, head="b" * 40, source="test")
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "check_official_plugin_immutability.py",
+                    "--base",
+                    refs.base,
+                    "--head",
+                    refs.head,
+                    "--head-root",
+                    ".",
+                ],
+            ),
+            patch("check_official_plugin_immutability.resolve_refs", return_value=refs),
+            patch(
+                "check_official_plugin_immutability.check_repository",
+                return_value=SimpleNamespace(ok=True),
+            ) as check_repository,
+            patch("check_official_plugin_immutability._print_report"),
+        ):
+            main()
+
+        check_repository.assert_called_once_with(
+            ROOT,
+            refs.base,
+            refs.head,
+            head_root=ROOT,
+        )
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.repo = Path(self.temporary.name)
@@ -125,6 +171,14 @@ class OfficialPluginImmutabilityTests(unittest.TestCase):
         self._write_plugin("alpha", version="version-one")
         head = self._commit("invalid")
         with self.assertRaises(GateInputError):
+            self._report(base, head)
+
+    def test_noncanonical_official_slug_fails_before_filesystem_use(self):
+        base = self._base()
+        self._write_registry(("alpha", "../outside"))
+        head = self._commit("invalid slug")
+
+        with self.assertRaisesRegex(GateInputError, "official plugin slug"):
             self._report(base, head)
 
     def test_new_official_plugin_passes(self):

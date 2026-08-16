@@ -12,6 +12,7 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
         cls.script = (ROOT / "scripts" / "dr-rehearsal.sh").read_text(encoding="utf-8")
         cls.path_guard = (ROOT / "scripts" / "dr_recovery_paths.py").read_text(encoding="utf-8")
         cls.fixture = (ROOT / "scripts" / "stateful_upgrade_fixture.py").read_text(encoding="utf-8")
+        cls.upgrade_gate = (ROOT / "scripts" / "stateful-upgrade-gate.sh").read_text(encoding="utf-8")
         cls.workflow = (ROOT / ".github" / "workflows" / "dr-rehearsal.yml").read_text(encoding="utf-8")
         cls.release_gate = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8")
 
@@ -140,6 +141,33 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
         self.assertNotIn("animemo.cc", self.script)
         self.assertNotIn("re-anime.cc", self.script)
         self.assertNotIn("/data/animemo/postgres", self.script)
+
+    def test_stateful_fixture_callers_use_only_fixed_container_metadata_paths(self):
+        dr_calls = [
+            line.strip()
+            for line in self.script.splitlines()
+            if "stateful_upgrade_fixture.py" in line
+        ]
+        upgrade_calls = [
+            line.strip()
+            for line in self.upgrade_gate.splitlines()
+            if "stateful_upgrade_fixture.py" in line
+        ]
+
+        self.assertEqual(len(dr_calls), 3)
+        self.assertEqual(len(upgrade_calls), 4)
+        for line in dr_calls:
+            self.assertRegex(
+                line,
+                r"stateful_upgrade_fixture\.py (?:seed --output|verify --input) "
+                r"/app/ci-meta/stateful\.json$",
+            )
+        for line in upgrade_calls:
+            self.assertRegex(
+                line,
+                r"stateful_upgrade_fixture\.py (?:seed --output|verify --input) "
+                r"/app/ci-meta/base-state\.json$",
+            )
 
     def test_workflow_is_manual_reusable_exact_sha_and_isolated(self):
         self.assertIn("workflow_dispatch:", self.workflow)
