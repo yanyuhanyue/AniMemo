@@ -43,6 +43,36 @@ def workflow(name):
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
+    def test_candidate_workflows_never_save_dependency_caches(self):
+        for name in ("ci.yml", "performance.yml", "release.yml"):
+            with self.subTest(workflow=name):
+                document = workflow(name)
+                setup_steps = [
+                    step
+                    for job in document["jobs"].values()
+                    for step in job.get("steps", [])
+                    if step.get("uses", "").startswith(
+                        ("actions/setup-node@", "actions/setup-python@")
+                    )
+                ]
+                self.assertTrue(setup_steps)
+                for step in setup_steps:
+                    settings = step.get("with", {})
+                    self.assertNotIn("cache", settings)
+                    self.assertNotIn("cache-dependency-path", settings)
+
+    def test_dr_rehearsal_has_no_cache_artifact_secret_or_write_authority(self):
+        document = workflow("dr-rehearsal.yml")
+        source = (ROOT / ".github" / "workflows" / "dr-rehearsal.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(document["permissions"], {"contents": "read"})
+        self.assertNotIn("actions/cache@", source)
+        self.assertNotIn("cache:", source)
+        self.assertNotIn("actions/upload-artifact@", source)
+        self.assertNotIn("secrets.", source)
+
     def test_all_workflows_reject_duplicate_mapping_keys(self):
         for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
             with self.subTest(workflow=path.name):

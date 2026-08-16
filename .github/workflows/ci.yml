@@ -153,7 +153,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
       - run: npm ci
       - run: npm run lint
       - run: npm run build
@@ -183,10 +182,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            backend/requirements.txt
-            scripts/requirements-tools.txt
       - run: python -m pip install -r backend/requirements.txt
       - run: python -m pip install -r scripts/requirements-tools.txt
       - run: python -m ruff check --select E9,F63,F7,F82 backend bridges scripts
@@ -218,7 +213,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -277,8 +271,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: backend/requirements.txt
       - run: python -m pip install -r backend/requirements.txt
       - run: python -c "import os, psycopg; psycopg.connect(os.environ['DATABASE_URL']).close(); print('PostgreSQL service is reachable')"
       - run: python manage.py shell -c "from django.db import connection; assert connection.vendor == 'postgresql', connection.vendor; print(connection.vendor)"
@@ -300,7 +292,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
