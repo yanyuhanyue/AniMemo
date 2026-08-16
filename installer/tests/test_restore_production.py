@@ -13,11 +13,11 @@ from durability import backup, restore, secret_envelope
 from durability.canonical import canonical_json_bytes
 from durability.managed_config import LocalManagedConfigStore
 from installer import restore_production
+from installer.operations import RestoreOperationJournal
 from installer.production import ProductionManagedConfigurationPort
 from installer.restore_production import (
     ProductionRestoreMutation,
     ProductionRestoreRuntimePort,
-    RestoreOperationJournal,
     _read_protected_file,
 )
 from installer.runtime import (

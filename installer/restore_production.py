@@ -35,7 +35,6 @@ from durability.instance import DATA_ROOT, UPDATER_STATE_ROOT
 from durability.managed_config import (
     derive_runtime_environment,
 )
-from durability.private_store import AtomicPrivateFile, PrivateStoreError
 from durability.restore import (
     DestinationClass,
     DestinationSnapshot,
@@ -63,6 +62,7 @@ from durability.secret_envelope import (
     Passphrase,
     SecretEnvelopeError,
 )
+from installer.operations import RestoreOperationJournal
 from installer.runtime import (
     ConfigPlanEvidence,
     InstallerAdapterError,
@@ -82,7 +82,6 @@ from updater.runtime import InitialAdoptionRequest
 from updater.slots import ReleaseSlots
 from updater.state import UpdateLock
 
-_RESTORE_OPERATION_LIMIT = 1024 * 1024
 _SAFE_SOURCE_MODES = frozenset({0o600, 0o640, 0o644, 0o700, 0o750, 0o755})
 
 
@@ -256,178 +255,6 @@ def _secret_resolver(request: RestoreProtectionRequest):
             error.code,
             outcome=InstallOutcome.VALIDATION_FAILED,
         ) from None
-
-
-class RestoreOperationJournal:
-    """One secret-free durable record spanning Restore and final Doctor."""
-
-    def __init__(self, state_root: Path = Path(str(UPDATER_STATE_ROOT))) -> None:
-        self.state_root = state_root
-
-    def _store(self, operation_id: str) -> AtomicPrivateFile:
-        if len(operation_id) != 32 or any(
-            character not in "0123456789abcdef" for character in operation_id
-        ):
-            raise RestoreAdapterError("RESTORE_OPERATION_ID_INVALID")
-        return AtomicPrivateFile(
-            self.state_root,
-            f"restore-operations/{operation_id}.json",
-            create_parents=True,
-        )
-
-    def _read(self, operation_id: str) -> dict[str, object]:
-        try:
-            raw = self._store(operation_id).read(limit=_RESTORE_OPERATION_LIMIT)
-            payload = json.loads(raw)
-        except (PrivateStoreError, UnicodeError, ValueError, json.JSONDecodeError):
-            raise RestoreAdapterError("RESTORE_OPERATION_EVIDENCE_INVALID") from None
-        if (
-            not isinstance(payload, dict)
-            or payload.get("operationIdentity")
-            != "animemo.restore-operation/v1"
-            or payload.get("id") != operation_id
-        ):
-            raise RestoreAdapterError("RESTORE_OPERATION_EVIDENCE_INVALID")
-        return payload
-
-    def recovery_block(self) -> dict[str, object] | None:
-        root = self.state_root / "restore-operations"
-        if not root.exists():
-            return None
-        if root.is_symlink() or not root.is_dir():
-            raise RestoreAdapterError("RESTORE_OPERATION_EVIDENCE_INVALID")
-        blocked = []
-        for path in sorted(root.glob("*.json")):
-            payload = self._read(path.stem)
-            if payload.get("status") == "manual_recovery_required":
-                blocked.append(payload)
-        if not blocked:
-            return None
-        return max(blocked, key=lambda item: str(item.get("id", "")))
-
-    def recover_incomplete(self) -> list[str]:
-        root = self.state_root / "restore-operations"
-        if not root.exists():
-            return []
-        if root.is_symlink() or not root.is_dir():
-            raise RestoreAdapterError("RESTORE_OPERATION_EVIDENCE_INVALID")
-        recovered = []
-        for path in sorted(root.glob("*.json")):
-            payload = self._read(path.stem)
-            if payload.get("status") != "running":
-                continue
-            payload["status"] = "manual_recovery_required"
-            payload["failedStep"] = "process.interrupted"
-            payload["errorCode"] = "RESTORE_INTERRUPTED"
-            payload["targetActive"] = None
-            self._write(path.stem, payload)
-            recovered.append(path.stem)
-        return recovered
-
-    def _write(
-        self,
-        operation_id: str,
-        payload: Mapping[str, object],
-        *,
-        must_not_exist: bool = False,
-    ) -> None:
-        body = {
-            "operationIdentity": "animemo.restore-operation/v1",
-            **dict(payload),
-        }
-        try:
-            self._store(operation_id).write(
-                canonical_json_bytes(body) + b"\n",
-                must_not_exist=must_not_exist,
-            )
-        except PrivateStoreError as error:
-            raise RestoreAdapterError("RESTORE_OPERATION_EVIDENCE_FAILED") from error
-
-    def begin(self, installer_id: str, plan: RestorePlan) -> None:
-        self._write(
-            installer_id,
-            {
-                "id": installer_id,
-                "restoreOperationId": plan.operation_id,
-                "backupId": plan.backup_id,
-                "instanceId": plan.instance_id,
-                "planDigest": plan.plan_digest,
-                "status": "running",
-                "completedSteps": [],
-                "failedStep": None,
-                "errorCode": None,
-                "targetActive": False,
-            },
-            must_not_exist=True,
-        )
-
-    def recovery(self, installer_id: str, evidence: RecoveryEvidence) -> None:
-        self._write(
-            installer_id,
-            {
-                "id": installer_id,
-                "restoreOperationId": evidence.operation_id,
-                "backupId": evidence.backup_id,
-                "instanceId": None,
-                "planDigest": evidence.plan_digest,
-                "status": "manual_recovery_required",
-                "completedSteps": list(evidence.completed_steps),
-                "failedStep": evidence.failed_step,
-                "errorCode": evidence.error_code,
-                "targetActive": evidence.target_active,
-            },
-        )
-
-    def published(self, installer_id: str, plan: RestorePlan) -> None:
-        self._write(
-            installer_id,
-            {
-                "id": installer_id,
-                "restoreOperationId": plan.operation_id,
-                "backupId": plan.backup_id,
-                "instanceId": plan.instance_id,
-                "planDigest": plan.plan_digest,
-                "status": "runtime_published",
-                "completedSteps": list(restore.REQUIRED_VALIDATIONS),
-                "failedStep": None,
-                "errorCode": None,
-                "targetActive": True,
-            },
-        )
-
-    def doctor_succeeded(self, installer_id: str, plan: RestorePlan) -> None:
-        self._write(
-            installer_id,
-            {
-                "id": installer_id,
-                "restoreOperationId": plan.operation_id,
-                "backupId": plan.backup_id,
-                "instanceId": plan.instance_id,
-                "planDigest": plan.plan_digest,
-                "status": "succeeded",
-                "completedSteps": [*restore.REQUIRED_VALIDATIONS, "doctor.accept"],
-                "failedStep": None,
-                "errorCode": None,
-                "targetActive": True,
-            },
-        )
-
-    def doctor_failed(self, installer_id: str, plan: RestorePlan) -> None:
-        self._write(
-            installer_id,
-            {
-                "id": installer_id,
-                "restoreOperationId": plan.operation_id,
-                "backupId": plan.backup_id,
-                "instanceId": plan.instance_id,
-                "planDigest": plan.plan_digest,
-                "status": "manual_recovery_required",
-                "completedSteps": list(restore.REQUIRED_VALIDATIONS),
-                "failedStep": "doctor.accept",
-                "errorCode": "INSTALL_DOCTOR_FAILED",
-                "targetActive": True,
-            },
-        )
 
 
 class ProductionRestoreDestination:
@@ -953,7 +780,11 @@ class ProductionRestoreMutation:
             raise RestoreAdapterError("RESTORE_PUBLICATION_NOT_READY")
         try:
             self.fresh.adopt_updater(self._plan())
-            self.journal.published(self.installer_id, self.restore_plan)
+            self.journal.published(
+                self.installer_id,
+                self.restore_plan,
+                completed_steps=restore.REQUIRED_VALIDATIONS,
+            )
         except InstallerAdapterError as error:
             raise _stable_restore_error(error.code) from None
 
@@ -1376,12 +1207,16 @@ class ProductionRestoreRuntimePort:
         try:
             self.fresh.doctor_acceptance(installation_plan)
             context.mutation.journal.doctor_succeeded(
-                context.installer_id, context.restore_plan
+                context.installer_id,
+                context.restore_plan,
+                completed_steps=restore.REQUIRED_VALIDATIONS,
             )
         except Exception:  # noqa: BLE001 - Doctor is a redacted adapter boundary
             try:
                 context.mutation.journal.doctor_failed(
-                    context.installer_id, context.restore_plan
+                    context.installer_id,
+                    context.restore_plan,
+                    completed_steps=restore.REQUIRED_VALIDATIONS,
                 )
             except Exception:  # noqa: BLE001 - evidence failure supersedes detail
                 raise InstallerAdapterError(

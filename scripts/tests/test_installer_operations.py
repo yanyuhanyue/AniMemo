@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from installer.operations import (
     PHASE_ORDER,
@@ -13,6 +14,7 @@ from installer.operations import (
     FreshInstallPhase,
     FreshInstallRecoveryRequired,
     FreshInstallStatus,
+    RestoreOperationJournal,
     create_fresh_install_operation,
     fail_fresh_install,
     mark_irreversible_mutation_started,
@@ -23,6 +25,8 @@ from installer.operations import (
     succeed_fresh_install,
     transition_phase,
 )
+from updater.errors import RecoveryRequired
+from updater.state import OperationStore
 
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
@@ -222,6 +226,28 @@ class FreshInstallJournalTests(unittest.TestCase):
                 os.chmod(operations / ("b" * 32 + ".json"), 0o600)
             journal = FreshInstallOperationJournal(state_root)
             self.assertIsNone(journal.recovery_block())
+
+
+class RestoreOperationJournalTests(unittest.TestCase):
+    def test_interrupted_restore_becomes_updater_recovery_barrier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_root = Path(directory)
+            operation_id = "c" * 32
+            journal = RestoreOperationJournal(state_root)
+            journal.begin(
+                operation_id,
+                SimpleNamespace(
+                    operation_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    backup_id="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                    instance_id=INSTANCE_ID,
+                    plan_digest=DIGEST_A,
+                ),
+            )
+
+            store = OperationStore(state_root)
+            self.assertEqual(store.recover_incomplete(), [operation_id])
+            with self.assertRaises(RecoveryRequired):
+                store.require_recovery_clear()
 
 
 if __name__ == "__main__":

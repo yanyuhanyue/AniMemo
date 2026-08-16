@@ -356,7 +356,7 @@ class OperationStore:
             raise RecoveryRequired(
                 f"Manual recovery operation {blocked['id']} must be reconciled on the host"
             )
-        from installer.restore_production import RestoreOperationJournal
+        from installer.operations import RestoreOperationJournal
 
         restore_block = RestoreOperationJournal(self.root).recovery_block()
         if restore_block is not None:
@@ -408,7 +408,7 @@ class OperationStore:
                     detail="agent restarted after migration or switch began",
                 )
             recovered.append(payload["id"])
-        from installer.restore_production import RestoreOperationJournal
+        from installer.operations import RestoreOperationJournal
 
         recovered.extend(RestoreOperationJournal(self.root).recover_incomplete())
         return recovered

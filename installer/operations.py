@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import re
 import secrets
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, Protocol
 from uuid import UUID
 
 from durability.canonical import canonical_json_bytes
@@ -16,6 +17,8 @@ OPERATION_FORMAT = "animemo.operation"
 OPERATION_SCHEMA_VERSION = 1
 FRESH_INSTALL_KIND = "fresh_install"
 MAX_OPERATION_BYTES = 1024 * 1024
+RESTORE_OPERATION_IDENTITY = "animemo.restore-operation/v1"
+RESTORE_OPERATION_LIMIT = 1024 * 1024
 
 _ID = re.compile(r"^[0-9a-f]{32}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -98,6 +101,31 @@ class FreshInstallRecoveryRequired(FreshInstallOperationError):
     def __init__(self, operation_id: str) -> None:
         self.operation_id = operation_id
         super().__init__("FRESH_INSTALL_RECOVERY_REQUIRED")
+
+
+class RestoreOperationError(RuntimeError):
+    """Stable failure while reading or publishing Restore operation evidence."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class _RestorePlanRecord(Protocol):
+    operation_id: str
+    backup_id: str
+    instance_id: str
+    plan_digest: str
+
+
+class _RestoreRecoveryRecord(Protocol):
+    operation_id: str
+    backup_id: str
+    plan_digest: str
+    completed_steps: Sequence[str]
+    failed_step: str
+    error_code: str
+    target_active: bool | None
 
 
 @dataclass(frozen=True)
@@ -622,6 +650,199 @@ class FreshInstallOperationJournal:
             raise FreshInstallRecoveryRequired(blocked.operation_id)
 
 
+class RestoreOperationJournal:
+    """Secret-free Restore records without importing the Restore runtime."""
+
+    def __init__(self, state_root: Path = Path("/var/lib/animemo-updater")) -> None:
+        self.state_root = state_root
+
+    def _store(self, operation_id: str) -> AtomicPrivateFile:
+        if len(operation_id) != 32 or any(
+            character not in "0123456789abcdef" for character in operation_id
+        ):
+            raise RestoreOperationError("RESTORE_OPERATION_ID_INVALID")
+        return AtomicPrivateFile(
+            self.state_root,
+            f"restore-operations/{operation_id}.json",
+            create_parents=True,
+        )
+
+    def _read(self, operation_id: str) -> dict[str, object]:
+        try:
+            raw = self._store(operation_id).read(limit=RESTORE_OPERATION_LIMIT)
+            payload = json.loads(raw)
+        except (PrivateStoreError, UnicodeError, ValueError, json.JSONDecodeError):
+            raise RestoreOperationError(
+                "RESTORE_OPERATION_EVIDENCE_INVALID"
+            ) from None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("operationIdentity") != RESTORE_OPERATION_IDENTITY
+            or payload.get("id") != operation_id
+        ):
+            raise RestoreOperationError("RESTORE_OPERATION_EVIDENCE_INVALID")
+        return payload
+
+    def recovery_block(self) -> dict[str, object] | None:
+        root = self.state_root / "restore-operations"
+        if not root.exists():
+            return None
+        if root.is_symlink() or not root.is_dir():
+            raise RestoreOperationError("RESTORE_OPERATION_EVIDENCE_INVALID")
+        blocked = []
+        for path in sorted(root.glob("*.json")):
+            payload = self._read(path.stem)
+            if payload.get("status") == "manual_recovery_required":
+                blocked.append(payload)
+        if not blocked:
+            return None
+        return max(blocked, key=lambda item: str(item.get("id", "")))
+
+    def recover_incomplete(self) -> list[str]:
+        root = self.state_root / "restore-operations"
+        if not root.exists():
+            return []
+        if root.is_symlink() or not root.is_dir():
+            raise RestoreOperationError("RESTORE_OPERATION_EVIDENCE_INVALID")
+        recovered = []
+        for path in sorted(root.glob("*.json")):
+            payload = self._read(path.stem)
+            if payload.get("status") != "running":
+                continue
+            payload["status"] = "manual_recovery_required"
+            payload["failedStep"] = "process.interrupted"
+            payload["errorCode"] = "RESTORE_INTERRUPTED"
+            payload["targetActive"] = None
+            self._write(path.stem, payload)
+            recovered.append(path.stem)
+        return recovered
+
+    def _write(
+        self,
+        operation_id: str,
+        payload: Mapping[str, object],
+        *,
+        must_not_exist: bool = False,
+    ) -> None:
+        body = {
+            "operationIdentity": RESTORE_OPERATION_IDENTITY,
+            **dict(payload),
+        }
+        try:
+            self._store(operation_id).write(
+                canonical_json_bytes(body) + b"\n",
+                must_not_exist=must_not_exist,
+            )
+        except PrivateStoreError as error:
+            raise RestoreOperationError(
+                "RESTORE_OPERATION_EVIDENCE_FAILED"
+            ) from error
+
+    def begin(self, installer_id: str, plan: _RestorePlanRecord) -> None:
+        self._write(
+            installer_id,
+            {
+                "id": installer_id,
+                "restoreOperationId": plan.operation_id,
+                "backupId": plan.backup_id,
+                "instanceId": plan.instance_id,
+                "planDigest": plan.plan_digest,
+                "status": "running",
+                "completedSteps": [],
+                "failedStep": None,
+                "errorCode": None,
+                "targetActive": False,
+            },
+            must_not_exist=True,
+        )
+
+    def recovery(self, installer_id: str, evidence: _RestoreRecoveryRecord) -> None:
+        self._write(
+            installer_id,
+            {
+                "id": installer_id,
+                "restoreOperationId": evidence.operation_id,
+                "backupId": evidence.backup_id,
+                "instanceId": None,
+                "planDigest": evidence.plan_digest,
+                "status": "manual_recovery_required",
+                "completedSteps": list(evidence.completed_steps),
+                "failedStep": evidence.failed_step,
+                "errorCode": evidence.error_code,
+                "targetActive": evidence.target_active,
+            },
+        )
+
+    def published(
+        self,
+        installer_id: str,
+        plan: _RestorePlanRecord,
+        *,
+        completed_steps: Sequence[str],
+    ) -> None:
+        self._write(
+            installer_id,
+            {
+                "id": installer_id,
+                "restoreOperationId": plan.operation_id,
+                "backupId": plan.backup_id,
+                "instanceId": plan.instance_id,
+                "planDigest": plan.plan_digest,
+                "status": "runtime_published",
+                "completedSteps": list(completed_steps),
+                "failedStep": None,
+                "errorCode": None,
+                "targetActive": True,
+            },
+        )
+
+    def doctor_succeeded(
+        self,
+        installer_id: str,
+        plan: _RestorePlanRecord,
+        *,
+        completed_steps: Sequence[str],
+    ) -> None:
+        self._write(
+            installer_id,
+            {
+                "id": installer_id,
+                "restoreOperationId": plan.operation_id,
+                "backupId": plan.backup_id,
+                "instanceId": plan.instance_id,
+                "planDigest": plan.plan_digest,
+                "status": "succeeded",
+                "completedSteps": [*completed_steps, "doctor.accept"],
+                "failedStep": None,
+                "errorCode": None,
+                "targetActive": True,
+            },
+        )
+
+    def doctor_failed(
+        self,
+        installer_id: str,
+        plan: _RestorePlanRecord,
+        *,
+        completed_steps: Sequence[str],
+    ) -> None:
+        self._write(
+            installer_id,
+            {
+                "id": installer_id,
+                "restoreOperationId": plan.operation_id,
+                "backupId": plan.backup_id,
+                "instanceId": plan.instance_id,
+                "planDigest": plan.plan_digest,
+                "status": "manual_recovery_required",
+                "completedSteps": list(completed_steps),
+                "failedStep": "doctor.accept",
+                "errorCode": "INSTALL_DOCTOR_FAILED",
+                "targetActive": True,
+            },
+        )
+
+
 __all__ = [
     "FRESH_INSTALL_KIND",
     "OPERATION_FORMAT",
@@ -633,6 +854,8 @@ __all__ = [
     "FreshInstallPhase",
     "FreshInstallRecoveryRequired",
     "FreshInstallStatus",
+    "RestoreOperationError",
+    "RestoreOperationJournal",
     "create_fresh_install_operation",
     "fail_fresh_install",
     "mark_irreversible_mutation_started",
