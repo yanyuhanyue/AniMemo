@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import unicodedata
@@ -36,7 +37,7 @@ STAGING_PREFIX = ".animemo-backup-staging-"
 STAGING_STATE_NAME = "staging-state.json"
 PG_DUMP_ARGUMENTS = ("--format=plain", "--no-owner", "--no-privileges")
 
-_ALLOWED_FILESYSTEM_ROOTS = frozenset(
+CANONICAL_FILESYSTEM_ROOTS = frozenset(
     {
         "filesystem/config",
         "filesystem/plugins/cas",
@@ -46,6 +47,7 @@ _ALLOWED_FILESYSTEM_ROOTS = frozenset(
         "updater-state",
     }
 )
+_ALLOWED_FILESYSTEM_ROOTS = CANONICAL_FILESYSTEM_ROOTS
 _EXCLUDED_COMPONENTS = (
     "postgresql-physical-data",
     "redis",
@@ -112,6 +114,23 @@ _DATABASE_QUERY_ENV = {
     "sslrootcert": "PGSSLROOTCERT",
     "target_session_attrs": "PGTARGETSESSIONATTRS",
 }
+_SAFE_DATABASE_PROCESS_ENV = frozenset(
+    {
+        "COMSPEC",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "WINDIR",
+    }
+)
 
 
 class BackupError(RuntimeError):
@@ -267,10 +286,13 @@ class SubprocessPgDumpRunner:
         executable: str,
         timeout: int,
     ) -> str:
-        environment = _pg_environment(database_url)
+        environment = postgres_connection_environment(database_url)
+        resolved_executable = shutil.which(executable, path=environment.get("PATH"))
+        if resolved_executable is None:
+            raise BackupError("PG_DUMP_VERSION_FAILED", "pg_dump version probe failed")
         try:
             version = subprocess.run(
-                [executable, "--version"],
+                [resolved_executable, "--version"],
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -297,7 +319,7 @@ class SubprocessPgDumpRunner:
             with os.fdopen(descriptor, "wb") as stream:
                 descriptor = -1
                 completed = subprocess.run(
-                    [executable, *PG_DUMP_ARGUMENTS],
+                    [resolved_executable, *PG_DUMP_ARGUMENTS],
                     check=False,
                     stdout=stream,
                     stderr=subprocess.DEVNULL,
@@ -323,7 +345,9 @@ class SubprocessPgDumpRunner:
         return tool_version
 
 
-def _pg_environment(database_url: str) -> dict[str, str]:
+def postgres_connection_environment(database_url: str) -> dict[str, str]:
+    """Return a scrubbed libpq environment for the authoritative database URL."""
+
     try:
         parsed = urlsplit(database_url)
         port = parsed.port or 5432
@@ -360,27 +384,11 @@ def _pg_environment(database_url: str) -> dict[str, str]:
             )
         query[name] = value
 
-    environment = os.environ.copy()
-    for name in (
-        "PGAPPNAME",
-        "PGCONNECT_TIMEOUT",
-        "PGDATABASE",
-        "PGHOST",
-        "PGOPTIONS",
-        "PGPASSFILE",
-        "PGPASSWORD",
-        "PGPORT",
-        "PGSERVICE",
-        "PGSERVICEFILE",
-        "PGSSLCERT",
-        "PGSSLCRL",
-        "PGSSLKEY",
-        "PGSSLMODE",
-        "PGSSLROOTCERT",
-        "PGTARGETSESSIONATTRS",
-        "PGUSER",
-    ):
-        environment.pop(name, None)
+    environment = {
+        name.upper(): value
+        for name, value in os.environ.items()
+        if name.upper() in _SAFE_DATABASE_PROCESS_ENV
+    }
     environment.update(
         {
             "PGDATABASE": database_name,
@@ -394,6 +402,11 @@ def _pg_environment(database_url: str) -> dict[str, str]:
     for name, value in query.items():
         environment[_DATABASE_QUERY_ENV[name]] = value
     return environment
+
+
+# Retained as a private alias for Phase 3A callers while shared durability
+# runtimes converge on the public, format-neutral name above.
+_pg_environment = postgres_connection_environment
 
 
 def create_backup(

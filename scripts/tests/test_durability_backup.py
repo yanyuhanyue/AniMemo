@@ -406,7 +406,14 @@ class BackupRuntimeTests(unittest.TestCase):
             "postgresql://animemo:not-a-real-secret@postgres.example:5433/animemo"
             "?sslmode=require&connect_timeout=7"
         )
-        environment = backup._pg_environment(database_url)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ANIMEMO_UNRELATED_SECRET": "must-not-reach-database-process",
+                "PGSERVICE": "must-not-be-inherited",
+            },
+        ):
+            environment = backup.postgres_connection_environment(database_url)
 
         self.assertEqual(environment["PGHOST"], "postgres.example")
         self.assertEqual(environment["PGPORT"], "5433")
@@ -416,6 +423,8 @@ class BackupRuntimeTests(unittest.TestCase):
         self.assertEqual(environment["PGCONNECT_TIMEOUT"], "7")
         self.assertIn("PGPASSWORD", environment)
         self.assertNotIn(database_url, environment.values())
+        self.assertNotIn("ANIMEMO_UNRELATED_SECRET", environment)
+        self.assertNotIn("PGSERVICE", environment)
 
     def test_empty_pg_dump_is_rejected(self) -> None:
         with self.assertRaisesRegex(backup.BackupError, "PG_DUMP_EMPTY"):
