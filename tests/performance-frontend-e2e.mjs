@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+
+import { resolveArtifactOutputPath, writeArtifactFileSync } from "../scripts/performance-output.mjs";
 
 process.env.PLAYWRIGHT_BROWSERS_PATH ||= resolve(".playwright-browsers");
 const { chromium } = await import("@playwright/test");
@@ -17,7 +19,7 @@ const measuredRuns = 5;
 const viewport = { width: 1440, height: 900 };
 const distRoot = resolve(projectRoot, "dist/client");
 const outputPath = process.env.FRONTEND_PERF_OUTPUT
-  ? resolve(process.env.FRONTEND_PERF_OUTPUT)
+  ? resolveArtifactOutputPath(process.env.FRONTEND_PERF_OUTPUT, projectRoot)
   : null;
 
 if (!existsSync(resolve(distRoot, "index.html"))) {
@@ -1008,8 +1010,7 @@ try {
   };
   const serialized = `${JSON.stringify(report, null, 2)}\n`;
   if (outputPath) {
-    mkdirSync(dirname(outputPath), { recursive: true });
-    writeFileSync(outputPath, serialized, "utf8");
+    writeArtifactFileSync(outputPath, serialized, projectRoot);
   }
   process.stdout.write(serialized);
 } finally {
