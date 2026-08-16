@@ -8,7 +8,7 @@ Scope: 冻结 AniMemo 新实例安装器的发布权威、bootstrap 信任边界
 
 Non-goals: 本 Contract 不实现 install.sh、animemo CLI、Updater 路径切换、Backup、Restore、Migration、Doctor、DNS、TLS、反向代理或生产部署。
 
-Compatibility: 保持 Release Contract v1、Exact Artifact Semantics、First-run Installation Identity 和 Update Agent v1 的 fail-closed 行为不变；v1.0 legacy 实例继续使用兼容 profile，不被新安装器静默搬迁。
+Compatibility: 保持 Release Contract v1、Exact Artifact Semantics、First-run Installation Identity 和 Update Agent v1 的 fail-closed 行为不变；v1.1 是 pre-production clean break，只支持 canonical roots 与 `v1.1-standard` profile，不读取、识别、adopt 或迁移 pre-v1.1 layout。
 
 Change policy: 本文中的 MUST、MUST NOT、SHOULD 和 MAY 是规范性要求。改变 Release Authority、默认路径、默认监听、channel 解析、实例定位或幂等矩阵属于 Contract 变更，必须先记录兼容性影响并经独立审查；不得通过实现细节静默改变语义。
 
@@ -184,8 +184,6 @@ Release listing 只发现 candidate。排序不按发布时间、创建时间、
 | --dry-run | false | 完成参数、state、platform、network 和 release verification；零持久 mutation |
 | --non-interactive | false | 禁止 prompt；任何缺失输入立即失败 |
 | --listen ADDRESS:PORT | 127.0.0.1:8088 | 本地监听；8088 只是默认端口 |
-| --app-root PATH | /opt/animemo | application/deployment material root |
-| --data-root PATH | /data/animemo | persistent instance data root |
 
 未知参数、重复且冲突的参数、空值、相对路径、非法端口或非法 SemVer 必须在 mutation 前失败。
 
@@ -223,13 +221,13 @@ Non-interactive 不降低 collision、foreign state、direct exposure 或 destru
 
 非 loopback listen 只能由用户显式提供。Installer 必须在 mutation 前显示网络暴露警告；non-interactive 模式也必须在输出中保留警告。警告至少覆盖 HTTPS、Secure Cookie、OAuth/provider callback、Turnstile、firewall 和公网暴露责任。Installer 不得自动配置 firewall。
 
-### 7.4 App 与 data roots
+### 7.4 Canonical roots
 
---app-root 和 --data-root 必须是规范化后的绝对路径，不能是 /、/opt、/data、/var、/etc、/root、/home 等过宽目标，也不能包含未解析的父目录跳转。
+Installer v1 只使用 Filesystem Layout v1 的五个 exact canonical roots。
+`--app-root`、`--data-root`、环境变量 root override 与 custom deployment
+profile 均不属于 v1 surface。
 
-目标及其受管父目录不得是 symlink 或 junction。Installer 只能在经过分类的 AniMemo-owned 空目录或已由 matching instance locator 证明归属的目录内写入。
-
-Custom roots 必须被 instance locator 记录，并与 Updater、Compose 和 systemd allowlist 的实际路径一致。Installer 不得只改 env 而留下 Updater 继续读取另一个 root。
+目标及其受管父目录不得是 symlink 或 junction。Installer 只能在经过分类的 AniMemo-owned empty directory 或已由 matching `v1.1-standard` instance locator 证明归属的 canonical directory 内写入。任何 custom、foreign 或 partial root 都必须在 mutation 前 fail closed。
 
 ## 8. Public Origin 输入
 
@@ -290,7 +288,7 @@ instance.json 必须：
 - owner 为 animemo-updater，mode 0600，禁止 group/world-readable；
 - 为单链接普通文件；
 - 位于非 symlink 的 /var/lib/animemo-updater；
-- 至少在语义上绑定 schema version、app root、data root、deployment/compatibility profile、canonical listen、canonical Public Origin、managed config location 和 exact installed release identity；
+- 至少在语义上绑定 schema version、canonical app root、canonical data root、精确 `v1.1-standard` deployment profile、canonical listen、canonical Public Origin、managed config location 和 exact installed release identity；
 - 不保存 credential、password、token、setup code、credential encryption key 或 provider secret。
 
 实际 JSON schema、writer 和 reader implementation 延后，但实现不得通过解析 env、当前工作目录、Compose label、1Panel 路径或目录是否存在来覆盖 locator 中的 authoritative root。
@@ -329,26 +327,18 @@ Installer 永远不得：
 
 失败后的 cleanup 只能删除本次执行创建且通过唯一 staging identity 证明归属的临时路径。任何持久数据或执行前已存在的文件都不能被 cleanup 删除。
 
-## 12. Legacy v1.0 compatibility profile
+## 12. Pre-production clean break
 
-现有 v1.0 production Updater 使用：
+AniMemo 尚未投入生产。Installer v1 不包含 pre-v1.1 filesystem/config
+reader、panel profile、custom-root profile 或 cutover operation，也不扫描已知
+旧路径来判断 collision。
 
-    app root:  /opt/1panel/docker/compose/animemo/app
-    data root: /data/animemo
+Existing state 只通过 fixed locator、canonical roots、Compose identity、port
+ownership 与 exact release evidence 分类。无法形成 matching canonical instance
+proof 的内容属于 Foreign、Partial 或 Existing Data Without Instance State；
+Installer 必须 fail closed，且不得移动、覆盖、删除、adopt 或为其生成 locator。
 
-该路径作为 legacy-v1.0 compatibility profile 保留。它不是新安装默认值，也不得被描述为 Standard Filesystem Layout。
-
-新 Installer 检测到 legacy profile 时必须按 Existing Instance 处理，不得把 /opt/animemo 当作第二个并行实例继续安装。
-
-未来 app-root cutover 必须是显式、可验证、可回滚的兼容操作，并同步更新 instance locator、Updater discovery、Compose 和 systemd allowlist。本阶段不执行 cutover。
-
-Cutover 不移动 /data/animemo。
-
-历史迁移：
-
-    /data/anime-journal → /data/animemo
-
-已经完成。Installer、compatibility profile 和未来 cutover 都不得再次执行、自动探测并重放或反向执行该迁移。
+该修正不放松 Data/Memory Integrity：unknown existing bytes 永远不是删除授权。
 
 ## 13. Transaction 与失败所有权
 
@@ -391,7 +381,7 @@ Installer 至少应稳定区分：
 | release_unavailable | 固定 authority 暂时不可访问 |
 | release_verification_failed | Manifest/checksum/tag/digest/deployment/provenance/attestation 不一致 |
 | filesystem_conflict | root、permission、link 或 foreign file 冲突 |
-| instance_conflict | locator、legacy profile、Compose 或 existing instance 不一致 |
+| instance_conflict | locator、canonical profile、Compose 或 existing instance 不一致 |
 | port_conflict | listen endpoint 被 foreign process 占用 |
 | configuration_invalid | Public Origin 或 application config 无效 |
 | partial_installation | 检测到未完成或不一致的受管状态 |
@@ -405,7 +395,7 @@ Installer 至少应稳定区分：
 - 哪个 invariant 失败；
 - 哪个路径、port、release tag 或 contract field 发生冲突；
 - 是否发生任何持久 mutation；
-- 下一步是修正输入、使用 Updater、执行显式 cutover，还是 manual recovery。
+- 下一步是修正输入、使用 Updater，还是 manual recovery。
 
 不得输出 env value、secret、token、credential、setup code、Authorization header、带 credential URL 或日志中的敏感内容。
 
@@ -428,9 +418,9 @@ Installer v1 不提供也不隐式执行：
 - shared PostgreSQL/Redis restart
 - random port selection
 - foreign process termination
-- legacy data migration replay
+- pre-v1.1 filesystem/config discovery、import 或 migration replay
 
-deploy/deploy.sh 的 1Panel/OpenResty bootstrap/break-glass 行为是 legacy recovery path，不是 Installer v1 的实现基础或默认行为。
+历史 deploy/deploy.sh 的 panel/proxy bootstrap 行为不是 Installer v1 的实现基础、输入或 fallback。
 
 ## 16. Future interfaces
 
@@ -438,11 +428,11 @@ deploy/deploy.sh 的 1Panel/OpenResty bootstrap/break-glass 行为是 legacy rec
 
 - Backup Contract：从 instance.json 与 Filesystem Layout v1 发现 data root；不得把 app binaries 或 runtime socket 当作 instance backup。
 - Restore Contract：验证 target roots 与 locator 状态；不得把 existing foreign data 当作空目标。
-- Migration Bundle：携带 app/data root 与 compatibility profile metadata；不重跑历史路径迁移。
+- Migration Bundle：携带 canonical app/data root 与 `v1.1-standard` profile metadata。
 - Migration Secret Envelope：credential transport 另行设计，secret 永不进入 instance.json。
 - Doctor Basic：读取 locator、listen、Public Origin、systemd/Compose alignment 和 exact release identity并进行只读诊断。
 - animemo CLI：复用同一 locator 和 error classes，不自行猜测 roots。
-- Updater：从 locator 发现新实例 roots，同时保留 legacy-v1.0 compatibility profile；路径切换必须显式。
+- Updater：只从 validated canonical locator 发现新实例 roots，unknown profile fail closed。
 - Compatibility Matrix：冻结精确 Linux distribution、Docker/Compose 版本和其他 host compatibility。
 - Full Installer implementation：实现 install.sh、transaction、staging 和状态机。
 
@@ -460,10 +450,10 @@ deploy/deploy.sh 的 1Panel/OpenResty bootstrap/break-glass 行为是 legacy rec
 - dry run 零持久 mutation；
 - non-interactive 零 prompt；
 - 默认 listen 为 loopback；
-- custom roots 与 locator、Updater、Compose、systemd 一致；
+- roots 固定为 Filesystem Layout v1 canonical set，profile 精确为 `v1.1-standard`；
 - same-version 是验证后的 no-op；
 - partial、foreign、unknown data 零覆盖零删除；
-- legacy root 兼容且不重跑历史数据迁移；
+- pre-v1.1 filesystem/config reader、custom profile、fallback 与 cutover 为零；
 - DNS、TLS、proxy、firewall 和 hosting panel 不成为安装依赖；
 - 未实现或未验证的未来能力保持 deferred。
 

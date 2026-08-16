@@ -133,7 +133,7 @@ Doctor 不得因一个 check 抛出异常而丢失其他可安全执行的 check
 
 locator 缺失、损坏或与 config/Compose/systemd/Updater 不一致时不得从 env、当前目录、1Panel path、container label 或“看起来存在”的目录自动修复/覆盖。Doctor 可以继续执行不依赖 disputed root 的安全 checks，但 locator/alignment 必须 FAIL，overall 不得 PASS。
 
-Legacy v1.0 profile 可以只读报告 `legacy_profile_detected` 与 `explicit_cutover_required`。Doctor 不生成 locator，不把 `/opt/animemo` 当第二实例，也不重跑 `/data/anime-journal` → `/data/animemo`。
+Doctor 不扫描或识别 pre-v1.1、panel 或 custom profile，也不提供 legacy-specific status。缺失 locator、unknown profile 或 noncanonical root 只按 canonical checks 返回 FAIL；不得尝试生成 locator、adopt、cutover 或 fallback。
 
 ## 6. Minimum check catalog
 
@@ -142,7 +142,7 @@ Legacy v1.0 profile 可以只读报告 `legacy_profile_detected` 与 `explicit_c
 | CHECK ID | REQUIRED BEHAVIOR |
 |---|---|
 | `instance.locator` | 验证 locator path/type/schema/owner/mode、instanceId、roots/profile 与 non-secret rule |
-| `filesystem.roots` | 验证五个 canonical/custom roots 的 canonicalization、存在性、类型、非 link 与不重叠 |
+| `filesystem.roots` | 验证五个 exact canonical roots 的 canonicalization、存在性、类型、非 link 与不重叠 |
 | `filesystem.permissions` | 按 Filesystem Layout 检查 owner/mode；不递归修复 |
 | `filesystem.capacity` | 报告 app/data/updater state 与 Docker storage 可用空间；阈值由 Compatibility/Backup Contract 提供 |
 | `configuration.required` | 仅报告 required config `EXISTS/MISSING/VALID/INVALID`；不输出 value |

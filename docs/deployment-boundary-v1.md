@@ -4,7 +4,7 @@
 **Version:** v1
 **Scope:** 冻结 AniMemo 服务与宿主机公网基础设施之间的职责边界，包括应用栈、配置、生命周期、监听端点、反向代理接口、升级与故障归属。
 **Non-goals:** 本文不实现 Installer、Managed Proxy、Backup、Restore、Migration、Doctor，不规定特定面板、DNS、TLS、反向代理或服务器供应商。
-**Compatibility:** 保持 API v1、Auth、Resource Identity、Plugin SDK v2、Integration Protocol v1、Release Identity、Deployment Contract 与 Updater fail-closed 行为不变。v1.0 的 1Panel/OpenResty/certbot 路径仅作为当前生产与 legacy evidence，不成为 v1.1 Installer 依赖。
+**Compatibility:** 保持 API v1、Auth、Resource Identity、Plugin SDK v2、Integration Protocol v1、Release Identity、Deployment Contract 与 Updater fail-closed 行为不变。pre-v1.1 的 1Panel/OpenResty/certbot 记录只作为历史 evidence；v1.1 runtime 不读取、识别、迁移或兼容该布局。
 **Change policy:** v1.1 内兼容性澄清可以追加；任何改变 ownership、安全默认、Release Authority、监听暴露范围或升级职责的修改都属于 Contract 变更，必须有显式架构记录、兼容性分析与评审，不得静默修改。
 
 ## Boundary principle
@@ -154,17 +154,17 @@ Public Origin 的详细语义由 [`Public Origin / Listen Contract v1`](public-o
 
 非 loopback listen 只允许显式 opt-in，并必须显示有关无 HTTPS、Secure Cookie、OAuth/provider callback、Turnstile、网络暴露和 firewall 责任的警告。它不是安装默认值，也不把公网安全责任转移给 AniMemo。
 
-## Legacy production evidence
+## Historical pre-production evidence
 
-仓库中的 1Panel app root、OpenResty 站点配置、certbot cron、当前生产域名与 `deploy/deploy.sh` 行为记录 v1.0 current-production/legacy history。它们可以为兼容迁移和事故恢复提供 evidence，但：
+仓库中的旧 app root、OpenResty 站点配置、certbot cron、历史域名与 `deploy/deploy.sh` 行为只记录 pre-v1.1 development history。AniMemo 尚未投入生产，因此它们不是 v1.1 compatibility input，也不授权实现旧布局 reader、cutover 或 fallback：
 
 - 不定义 v1.1 的产品部署边界；
 - 不成为 v1.1 Installer 的依赖或默认值；
 - 不授权再次执行历史 `/data/anime-journal` 到 `/data/animemo` 迁移；
 - 不授权 Installer 写入/reload OpenResty 或执行证书自动化；
-- 不得为采用标准路径而未经协调直接移动当前生产实例。
+- 不得被 Runtime 扫描、读取、adopt、移动或转换。
 
-标准路径迁移必须由 [`Filesystem Layout v1`](filesystem-layout-v1.md) 定义兼容与识别语义，并保持现有 Updater/rollback 在完成协调切换前可用。
+v1.1 只支持 [`Filesystem Layout v1`](filesystem-layout-v1.md) 的 canonical profile。发现非 canonical 或无权属 evidence 的状态必须作为 Foreign 或 Partial/Ambiguous fail closed，且不得覆盖或删除其中的数据。
 
 ## Future compatibility
 

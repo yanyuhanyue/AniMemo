@@ -8,7 +8,7 @@ Scope: 冻结 AniMemo 标准安装、持久数据、Updater 程序、Updater 持
 
 Non-goals: 本 Contract 不实现 Installer、Backup、Restore、Migration Bundle、Migration Secret Envelope 或 Doctor，不迁移任何现有实例，不定义 Docker、DNS、TLS、防火墙或公网反向代理的管理方式。
 
-Compatibility: v1.1 新安装使用本文件的标准路径；现有 v1.0 实例的 `/opt/1panel/docker/compose/animemo/app` 是只读识别的 compatibility profile，必须通过未来显式 cutover 转换，不能原地改写 v1.0 Updater 常量、用 symlink 冒充标准路径或再次移动已经位于 `/data/animemo` 的数据。
+Compatibility: v1.1 使用本文件唯一的 canonical layout 与 `v1.1-standard` profile。AniMemo 尚未投入生产，因此 pre-v1.1/1Panel/custom layout 不进入 Runtime compatibility surface；不得扫描、读取、adopt、fallback、cutover 或用 symlink 冒充标准路径。该 clean break 不授权覆盖或删除任何 existing data。
 
 Change policy: v1 冻结后，兼容性澄清和更严格的安全约束可以追加；任何改变路径语义、持久性、备份集合、删除边界或 discovery identity 的变更都必须有记录、兼容计划和新的 Contract 版本，不得静默修改。
 
@@ -30,7 +30,7 @@ AniMemo 的标准 filesystem roots 是：
 /run/animemo-updater
 ```
 
-这些路径是默认值，不是网络协议或 Release Authority。Installer Contract 明确允许 custom app/data root 时，custom root 必须满足本文件相同的安全和生命周期语义，并通过受验证的 instance locator 让 Updater 与 Doctor 发现；不能依靠进程当前目录、面板目录、环境猜测或 symlink。
+这些路径是 v1.1 唯一受支持的 roots，不是网络协议或 Release Authority。Installer、Updater、Backup、Restore、Migration 与 Doctor 必须通过受验证的 instance locator 使用这些 exact paths；不能依靠进程当前目录、面板目录、环境猜测、custom root 或 symlink。
 
 必须保持以下生命周期分离：
 
@@ -107,7 +107,7 @@ AniMemo 的标准 filesystem roots 是：
 - `schemaVersion`；
 - `appRoot`；
 - `dataRoot`；
-- `deploymentProfile`，至少可区分 v1.1 standard 与 v1.0 compatibility profile；
+- `deploymentProfile`，精确为 `v1.1-standard`；
 - canonical `listen` identity；
 - canonical `publicOrigin`；
 - immutable `releaseIdentity`，足以绑定 version/channel/commit、Manifest 与 exact OCI digests。
@@ -123,40 +123,25 @@ Updater 的 systemd read/write allowlist 必须由 Installer 从已验证、cano
 - `/var/lib/animemo-updater` 的持久状态访问；
 - `/run/animemo-updater` 的 runtime socket 访问。
 
-metadata、systemd drop-in、实际 canonical path 或 deployment profile 任一不一致时，Updater 必须 fail closed，不能扩大为父目录、`/opt`、`/data` 或整个 filesystem。custom root 不得只更新环境文件而保留旧 allowlist。
+metadata、systemd drop-in、实际 canonical path 或 deployment profile 任一不一致时，Updater 必须 fail closed，不能扩大为父目录、`/opt`、`/data` 或整个 filesystem，也不得接受 custom root。
 
-## 5. v1.0 compatibility 与 future explicit cutover
+## 5. Pre-production canonical clean break
 
-当前 v1.0 profile 使用：
+v1.1 Runtime 只接受 `v1.1-standard` locator 与本 Contract 的五个 exact
+roots。pre-v1.1、panel-owned 或 custom filesystem layouts 均为 unsupported
+input，不是 compatibility profile，也不存在 product cutover state machine。
 
-```text
-application: /opt/1panel/docker/compose/animemo/app
-data:        /data/animemo
-```
+Runtime discovery 明确禁止：
 
-这是 compatibility evidence，不是 v1.1 新安装布局。Phase 1 不移动生产文件，也不修改 frozen v1.0 Updater 的 fixed-path fail-closed behavior。
+- 扫描已知旧路径、当前目录、environment 或 Compose label寻找 instance；
+- 读取旧 protected-config location 或旧 variable alias；
+- 自动创建 locator、adopt existing data、移动目录或建立 symlink；
+- 重放任何历史 data-path migration；
+- 修改 panel、共享 proxy、DNS、TLS、防火墙或其他管理员基础设施。
 
-未来 cutover 必须是显式、可观测、可回滚的 AniMemo-scoped operation：
-
-1. 验证 source instance、当前 immutable release identity、data root 和 protected config。
-2. 从正式 Release Authority 在 `/opt/animemo` 重建非 secret application/deployment material；不能信任旧目录副本代替验证。
-3. 把 protected configuration 原子转移到 data-root 的受保护 `config/`；不把 secret 留在新 app root。
-4. 原子写入 versioned `instance.json`，记录 standard deployment profile 与 canonical roots。
-5. 从相同 verified metadata 生成并安装精确 systemd allowlist/drop-in。
-6. 执行 AniMemo-scoped reload、health check 和 release identity verification。
-7. 任一步失败时恢复旧 profile、旧 locator/allowlist 与服务状态；保留 source tree 供 rollback。
-8. 只有在 retention policy、rollback window 和 ownership evidence 均满足后，未来独立 cleanup 才可考虑旧 app tree。
-
-cutover 明确禁止：
-
-- 用 symlink 把旧 app root 或新 app root 伪装成另一方；
-- 在 metadata 切换前删除旧 app tree；
-- 移动、复制或清空已经正确位于 `/data/animemo` 的 data root；
-- 重新执行历史 `/data/anime-journal` → `/data/animemo` migration；
-- 因发现 legacy 变量名、dated 文档或 compatibility profile 而自动搬迁数据；
-- 修改 1Panel、共享 OpenResty、DNS、TLS、防火墙或其他共享 VPS 组件。
-
-`/data/anime-journal` 只允许出现在明确标注为历史记录的 evidence 中。Installer、Updater、Doctor 和 Migration discovery 都不得把它作为当前默认值或自动迁移触发器。
+如果 canonical root 或 locator 周围存在 unknown、foreign 或 partial state，
+操作必须 fail closed。Clean break 只移除未发布布局的 reader，不提供删除、
+覆盖或重建 user-owned data 的权限。
 
 ## 6. Backup / Restore / Migration / Export 边界
 
@@ -198,12 +183,14 @@ source 与 target 使用同一 R2 bucket 时，Migration 不需要复制 poster/
 - Installer：创建安全 roots、检测 foreign/partial install、写 protected config、原子写 `instance.json` 并协调 systemd allowlist。
 - Updater：从 validated locator 发现 roots；只读 app material，只写被授权 state/data/runtime 区域；路径不一致时 fail closed。
 - Backup：根据本文件的 inclusion classification 生成 logical database、local media、plugins、必要 config/state 及校验 metadata。
-- Restore：验证空目标或兼容 existing instance、重建可重建 material、恢复 durable data，并重新生成 runtime state。
-- Migration：理解 app/data roots 与 deployment profile，但不把 deployment binaries 当用户数据复制，不重跑 legacy path migration。
+- Restore：只验证 Fresh 或 Existing Empty canonical target、重建可重建 material、恢复 durable data，并重新生成 runtime state。
+- Migration：只接受 canonical roots 与 `v1.1-standard` profile，不把 deployment binaries 当用户数据复制。
 - Doctor：只读验证 locator、canonical paths、owner/mode、mount/write boundary、systemd allowlist、listen/public origin discovery 与 release identity，不显示 secret。
 
-## 9. Current implementation compatibility evidence
+## 9. Pre-production correction record
 
-截至 v1.1 Phase 1 authority baseline，当前实现已使用 `/data/animemo`、`/opt/animemo-updater`、`/var/lib/animemo-updater` 和 `/run/animemo-updater`；主要差异是 v1.0 app root 仍固定在 1Panel compatibility path。相关 current-state 文档为 [VPS Deployment](deployment-vps.md) 和 [Update Agent v1](update-agent-v1.md)。它们描述现有实例，不得覆盖本文件对 v1.1 新安装 target 和 future cutover 的规范。
+Phase 3B 在 Runtime 实现前移除了原先的 custom/legacy profile 与 future
+cutover requirement。理由、影响和零债务结论记录在
+[v1.1 Pre-Production Debt Ledger](v1.1-pre-production-debt-ledger.md#pcdc-001--canonical-filesystem-clean-break)。
 
 本 Contract 的成功条件是边界冻结。它不授权本阶段创建 Installer、执行 cutover、移动生产数据、连接生产或开始 Backup/Restore/Migration/Doctor implementation。
