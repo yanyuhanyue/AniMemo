@@ -228,11 +228,19 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertNotIn("run_contract_validation:", classify)
         self.assertNotIn("run_release_dr:", classify)
 
-    def test_release_gate_bootstraps_both_legacy_and_explicit_job_compose_contracts(self):
+    def test_release_gate_bridges_trusted_and_canonical_compose_contracts(self):
         release = self.source("release-gate.yml")
 
         self.assertIn("ANIMEMO_API_IMAGE=animemo-api:release-gate", release)
         self.assertIn("ANIMEMO_WEB_IMAGE=animemo-web:release-gate", release)
+        self.assertIn("ANIMEMO_TEST_DATA_ROOT=$data_root", release)
+        self.assertIn("ANIMEMO_LISTEN_HOST=127.0.0.1", release)
+        self.assertIn("ANIMEMO_LISTEN_PORT=8088", release)
+        self.assertIn("ANIMEMO_CONFIG_REVISION=11111111-1111-4111-8111-111111111111", release)
+        self.assertIn("ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:", release)
+        self.assertIn("ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:", release)
+        self.assertIn(".env.production /run/animemo-updater/managed.env", release)
+        self.assertIn("python -m pip install -r durability/requirements.txt", release)
         self.assertIn('if [[ -f deploy/docker-compose.build.yml ]]; then', release)
         self.assertIn(
             "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",
