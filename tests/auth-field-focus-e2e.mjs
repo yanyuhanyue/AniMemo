@@ -4,20 +4,21 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveFixedLoopbackOrigin } from "../scripts/qa-origin.mjs";
+
 process.env.PLAYWRIGHT_BROWSERS_PATH ||= resolve(".playwright-browsers");
 const { chromium } = await import("@playwright/test");
 
 const host = "127.0.0.1";
-const port = Number(process.env.AUTH_FOCUS_PORT || 4174);
-const externalBaseUrl = process.env.AUTH_FOCUS_BASE_URL;
-const baseUrl = externalBaseUrl || `http://${host}:${port}`;
+const port = 4174;
+const baseUrl = resolveFixedLoopbackOrigin(process.env.AUTH_FOCUS_BASE_URL, port, "AUTH_FOCUS_BASE_URL");
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const viewport = {
   width: Number(process.env.AUTH_FOCUS_VIEWPORT_WIDTH || 1440),
   height: Number(process.env.AUTH_FOCUS_VIEWPORT_HEIGHT || 900),
 };
 
-if (!externalBaseUrl && !existsSync(resolve(projectRoot, "dist/client/index.html"))) {
+if (!existsSync(resolve(projectRoot, "dist/client/index.html"))) {
   throw new Error("Production build missing; run npm run build before the auth browser regression.");
 }
 
@@ -70,7 +71,7 @@ async function assertIconSurvivesFocus(page, placeholder) {
   assert.equal(after.iconOwnsPoint, true, `${placeholder}: icon is covered after focus (${JSON.stringify(after)})`);
 }
 
-const server = externalBaseUrl ? null : spawn(
+const server = spawn(
   process.execPath,
   [resolve(projectRoot, "node_modules/vite/bin/vite.js"), "preview", "--host", host, "--port", String(port)],
   {
