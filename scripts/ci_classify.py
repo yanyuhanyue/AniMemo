@@ -467,6 +467,7 @@ def _is_sensitive_documentation(path: str) -> bool:
     lower = path.lower()
     return _is_docs(path) and (
         lower in FROZEN_CONTRACT_DOCUMENTS
+        or lower in AUDITED_CONTRACT_PRIMARY_DOCUMENTS
         or lower.startswith("docs/contracts/")
         or _has(
             lower,
