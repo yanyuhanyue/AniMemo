@@ -26,6 +26,15 @@ from typing import Any, Protocol
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from .canonical import canonical_json_bytes, sha256_identity
+from .resource_budget import (
+    DEFAULT_RESOURCE_BUDGET,
+    CopyByteCounter,
+    DatabaseExpansionGuard,
+    ResourceLimitExceeded,
+    ResourceLimitReason,
+    bounded_copy,
+    preflight_copy_sizes,
+)
 
 FORMAT = "animemo-instance-backup"
 SCHEMA_VERSION = 1
@@ -83,6 +92,7 @@ _MAX_CHECKSUM_BYTES = 64 * 1024 * 1024
 _MAX_SECRET_REFERENCE_BYTES = 1024 * 1024
 _MAX_NON_SECRET_METADATA_BYTES = 1024 * 1024
 _MAX_MEMBER_COUNT = 250_000
+_RESOURCE_BUDGET = DEFAULT_RESOURCE_BUDGET
 _FORBIDDEN_SOURCE_PARTS = frozenset(
     {
         ".docker",
@@ -452,7 +462,19 @@ def create_backup(
             executable=request.pg_dump_executable,
             timeout=request.pg_dump_timeout,
         )
-        member_records = _copy_payload_members(request, source_files, staging)
+        copy_counter = CopyByteCounter(
+            _RESOURCE_BUDGET.maximum_total_copied_bytes
+        )
+        try:
+            copy_counter.consume(database["compressedBytes"])
+        except ResourceLimitExceeded as error:
+            raise _resource_bounds_error(error) from None
+        member_records = _copy_payload_members(
+            request,
+            source_files,
+            staging,
+            copy_counter=copy_counter,
+        )
         member_records.append(database["member"])
         member_records.sort(key=lambda item: item["path"].encode("utf-8"))
 
@@ -495,6 +517,7 @@ def create_backup(
         secret_record = _copy_secret_member(
             request.secret,
             staging,
+            copy_counter=copy_counter,
             binding=SecretEnvelopeBinding(
                 artifact_id=str(identifier),
                 artifact_binding_record=binding_record,
@@ -861,6 +884,14 @@ def capture_logical_postgres(
             )
         if raw_stat.st_size == 0:
             raise BackupError("PG_DUMP_EMPTY", "logical database dump is empty")
+        if (
+            raw_stat.st_size
+            > _RESOURCE_BUDGET.maximum_uncompressed_database_bytes
+        ):
+            raise BackupError(
+                "BACKUP_RESOURCE_BOUNDS_EXCEEDED",
+                ResourceLimitReason.UNCOMPRESSED_DATABASE_BYTES.value,
+            )
         uncompressed_digest = _sha256_file(raw)
         descriptor = os.open(compressed, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
@@ -879,6 +910,14 @@ def capture_logical_postgres(
                 os.close(descriptor)
         os.chmod(compressed, 0o600)
         compressed_bytes = compressed.stat().st_size
+        try:
+            expansion = DatabaseExpansionGuard(
+                compressed_bytes=compressed_bytes,
+                budget=_RESOURCE_BUDGET,
+            )
+            expansion.consume(raw_stat.st_size)
+        except ResourceLimitExceeded as error:
+            raise _resource_bounds_error(error) from None
         compressed_digest = _sha256_file(compressed)
         if (
             not isinstance(tool_version, str)
@@ -919,8 +958,25 @@ def _copy_payload_members(
     request: BackupRequest,
     source_files: Mapping[str, tuple[tuple[str, Path, int], ...]],
     staging: Path,
+    *,
+    copy_counter: CopyByteCounter,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
+    source_sizes = tuple(
+        source.lstat().st_size
+        for files in source_files.values()
+        for _relative, source, _source_mode in files
+    )
+    try:
+        preflight_copy_sizes(
+            source_sizes,
+            maximum_member_bytes=_RESOURCE_BUDGET.maximum_filesystem_member_bytes,
+            maximum_total_bytes=(
+                copy_counter.maximum_bytes - copy_counter.copied
+            ),
+        )
+    except ResourceLimitExceeded as error:
+        raise _resource_bounds_error(error) from None
     for filesystem_source in sorted(
         request.filesystem_sources, key=lambda item: item.logical_root.encode("utf-8")
     ):
@@ -932,7 +988,12 @@ def _copy_payload_members(
             logical_path = f"{filesystem_source.logical_root}/{relative}"
             target = staging / PurePosixPath(logical_path)
             _make_private_directory(target.parent)
-            _copy_regular_file(source, target)
+            _copy_regular_file(
+                source,
+                target,
+                copy_counter=copy_counter,
+                expected_size=source.lstat().st_size,
+            )
             records.append(
                 {
                     "path": logical_path,
@@ -948,6 +1009,7 @@ def _copy_secret_member(
     secret: SecretSource | None,
     staging: Path,
     *,
+    copy_counter: CopyByteCounter,
     binding: SecretEnvelopeBinding,
 ) -> dict[str, Any] | None:
     if secret is None:
@@ -970,6 +1032,19 @@ def _copy_secret_member(
                 "secret envelope factory returned invalid bytes",
             )
         _validate_envelope_binding(envelope_bytes, binding)
+        try:
+            preflight_copy_sizes(
+                (len(envelope_bytes),),
+                maximum_member_bytes=(
+                    _RESOURCE_BUDGET.maximum_filesystem_member_bytes
+                ),
+                maximum_total_bytes=(
+                    copy_counter.maximum_bytes - copy_counter.copied
+                ),
+            )
+            copy_counter.consume(len(envelope_bytes))
+        except ResourceLimitExceeded as error:
+            raise _resource_bounds_error(error) from None
         _write_private_bytes(target, envelope_bytes)
     else:
         if secret.source is None:  # guarded by request validation
@@ -980,7 +1055,12 @@ def _copy_secret_member(
             _validate_envelope_binding(envelope_bytes, binding)
         else:
             _validate_secret_reference(source)
-        _copy_regular_file(source, target)
+        _copy_regular_file(
+            source,
+            target,
+            copy_counter=copy_counter,
+            expected_size=source.lstat().st_size,
+        )
     return {
         "path": logical_path,
         "sha256": f"sha256:{_sha256_file(target)}",
@@ -1443,6 +1523,9 @@ def _verify_tree(
             "BACKUP_MANIFEST_INVALID", "manifest member inventory is invalid"
         )
     manifest_members: dict[str, Mapping[str, Any]] = {}
+    declared_copy_counter = CopyByteCounter(
+        _RESOURCE_BUDGET.maximum_total_copied_bytes
+    )
     for record in members:
         if not isinstance(record, dict) or not isinstance(record.get("path"), str):
             raise BackupError(
@@ -1459,6 +1542,28 @@ def _verify_tree(
             raise BackupError(
                 "BACKUP_MANIFEST_INVALID", "manifest member size is invalid"
             )
+        maximum_member_bytes = (
+            _RESOURCE_BUDGET.maximum_compressed_member_bytes
+            if member_path == DATABASE_MEMBER
+            else _RESOURCE_BUDGET.maximum_filesystem_member_bytes
+        )
+        try:
+            preflight_copy_sizes(
+                (size_bytes,),
+                maximum_member_bytes=maximum_member_bytes,
+                maximum_total_bytes=(
+                    declared_copy_counter.maximum_bytes
+                    - declared_copy_counter.copied
+                ),
+                member_reason=(
+                    ResourceLimitReason.COMPRESSED_MEMBER_BYTES
+                    if member_path == DATABASE_MEMBER
+                    else ResourceLimitReason.FILESYSTEM_MEMBER_BYTES
+                ),
+            )
+            declared_copy_counter.consume(size_bytes)
+        except ResourceLimitExceeded as error:
+            raise _resource_bounds_error(error) from None
         if member_path in manifest_members:
             raise BackupError(
                 "BACKUP_MANIFEST_INVALID", "manifest member path is duplicated"
@@ -1525,12 +1630,12 @@ def _verify_tree(
         )
     for relative, expected_digest in expected_members.items():
         member_path = root / PurePosixPath(relative)
+        record = manifest_members[relative]
         actual_digest = _sha256_file(member_path)
         if actual_digest != expected_digest:
             raise BackupError(
                 "BACKUP_CHECKSUM_MISMATCH", "backup member checksum failed"
             )
-        record = manifest_members[relative]
         if (
             record.get("sha256") != f"sha256:{expected_digest}"
             or record.get("sizeBytes") != member_path.stat().st_size
@@ -1581,16 +1686,22 @@ def _verify_tree(
         )
     database_path = root / DATABASE_MEMBER
     uncompressed_digest = hashlib.sha256()
-    uncompressed_bytes = 0
     try:
+        expansion = DatabaseExpansionGuard(
+            compressed_bytes=database_path.stat().st_size,
+            budget=_RESOURCE_BUDGET,
+        )
         with gzip.open(database_path, "rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                expansion.consume(len(chunk))
                 uncompressed_digest.update(chunk)
-                uncompressed_bytes += len(chunk)
+    except ResourceLimitExceeded as error:
+        raise _resource_bounds_error(error) from None
     except (OSError, EOFError) as error:
         raise BackupError(
             "BACKUP_DATABASE_GZIP_INVALID", "database gzip stream is invalid"
         ) from error
+    uncompressed_bytes = expansion.uncompressed_bytes
     if uncompressed_bytes == 0:
         raise BackupError("BACKUP_DATABASE_EMPTY", "database dump is empty")
     if (
@@ -1785,6 +1896,7 @@ def _checksum_bytes(records: Sequence[Mapping[str, Any]]) -> bytes:
 def _enumerate_artifact_files(root: Path) -> set[str]:
     found: set[str] = set()
     normalized: set[str] = set()
+    copy_counter = CopyByteCounter(_RESOURCE_BUDGET.maximum_total_copied_bytes)
     for item in root.rglob("*"):
         if _is_link_or_reparse(item):
             raise BackupError(
@@ -1805,6 +1917,27 @@ def _enumerate_artifact_files(root: Path) -> set[str]:
                 "BACKUP_UNSAFE_MEMBER",
                 "backup contains a non-regular or hard-linked member",
             )
+        maximum_member_bytes = (
+            _RESOURCE_BUDGET.maximum_compressed_member_bytes
+            if relative == DATABASE_MEMBER
+            else _RESOURCE_BUDGET.maximum_filesystem_member_bytes
+        )
+        try:
+            preflight_copy_sizes(
+                (item_stat.st_size,),
+                maximum_member_bytes=maximum_member_bytes,
+                maximum_total_bytes=(
+                    copy_counter.maximum_bytes - copy_counter.copied
+                ),
+                member_reason=(
+                    ResourceLimitReason.COMPRESSED_MEMBER_BYTES
+                    if relative == DATABASE_MEMBER
+                    else ResourceLimitReason.FILESYSTEM_MEMBER_BYTES
+                ),
+            )
+            copy_counter.consume(item_stat.st_size)
+        except ResourceLimitExceeded as error:
+            raise _resource_bounds_error(error) from None
         _require_private_mode(item, directory=False)
         canonical = _canonical_relative_path(relative)
         collision = unicodedata.normalize("NFC", canonical).casefold()
@@ -1869,8 +2002,18 @@ def _safe_source_file(path: Path) -> Path:
     return path.resolve()
 
 
-def _copy_regular_file(source: Path, target: Path) -> None:
+def _copy_regular_file(
+    source: Path,
+    target: Path,
+    *,
+    copy_counter: CopyByteCounter | None = None,
+    expected_size: int | None = None,
+) -> None:
     source_stat = source.lstat()
+    active_counter = copy_counter or CopyByteCounter(
+        _RESOURCE_BUDGET.maximum_total_copied_bytes
+    )
+    expected = source_stat.st_size if expected_size is None else expected_size
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     source_fd = os.open(source, flags)
     target_fd = -1
@@ -1894,8 +2037,23 @@ def _copy_regular_file(source: Path, target: Path) -> None:
         ):
             source_fd = -1
             target_fd = -1
-            for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
-                output_stream.write(chunk)
+            try:
+                bounded_copy(
+                    input_stream,
+                    output_stream,
+                    counter=active_counter,
+                    maximum_member_bytes=(
+                        _RESOURCE_BUDGET.maximum_filesystem_member_bytes
+                    ),
+                    expected_size=expected,
+                )
+            except ResourceLimitExceeded as error:
+                if error.reason is ResourceLimitReason.DECLARED_SIZE_MISMATCH:
+                    raise BackupError(
+                        "BACKUP_SOURCE_CHANGED",
+                        "source member changed during backup",
+                    ) from None
+                raise _resource_bounds_error(error) from None
             output_stream.flush()
             os.fsync(output_stream.fileno())
         after_stat = source.lstat()
@@ -1919,6 +2077,10 @@ def _copy_regular_file(source: Path, target: Path) -> None:
             os.close(source_fd)
         if target_fd >= 0:
             os.close(target_fd)
+
+
+def _resource_bounds_error(error: ResourceLimitExceeded) -> BackupError:
+    return BackupError("BACKUP_RESOURCE_BOUNDS_EXCEEDED", error.reason.value)
 
 
 def _read_regular_file(path: Path, *, maximum: int) -> bytes:

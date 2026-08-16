@@ -21,6 +21,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from functools import partial
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Final, NoReturn, Protocol, cast
@@ -54,6 +55,15 @@ from durability.instance import (
     ListenIdentity,
     LocatorError,
     parse_instance_locator,
+)
+from durability.resource_budget import (
+    DEFAULT_RESOURCE_BUDGET,
+    CopyByteCounter,
+    DatabaseExpansionGuard,
+    ResourceLimitExceeded,
+    ResourceLimitReason,
+    bounded_copy,
+    preflight_copy_sizes,
 )
 from durability.secret_envelope import (
     ENVELOPE_FORMAT,
@@ -89,9 +99,15 @@ MAX_MANIFEST_BYTES: Final = 4 * 1024 * 1024
 MAX_JSON_MEMBER_BYTES: Final = 4 * 1024 * 1024
 MAX_CHECKSUM_BYTES: Final = 4 * 1024 * 1024
 MAX_MEMBER_COUNT: Final = 10_000
-MAX_MEMBER_BYTES: Final = 8 * 1024 * 1024 * 1024
-MAX_DATABASE_UNCOMPRESSED_BYTES: Final = 64 * 1024 * 1024 * 1024
-MAX_COMPRESSION_RATIO: Final = 10_000
+MAX_MEMBER_BYTES: Final = DEFAULT_RESOURCE_BUDGET.maximum_filesystem_member_bytes
+MAX_COMPRESSED_MEMBER_BYTES: Final = (
+    DEFAULT_RESOURCE_BUDGET.maximum_compressed_member_bytes
+)
+MAX_DATABASE_UNCOMPRESSED_BYTES: Final = (
+    DEFAULT_RESOURCE_BUDGET.maximum_uncompressed_database_bytes
+)
+MAX_TOTAL_COPIED_BYTES: Final = DEFAULT_RESOURCE_BUDGET.maximum_total_copied_bytes
+MAX_COMPRESSION_RATIO: Final = DEFAULT_RESOURCE_BUDGET.maximum_compression_ratio
 MAX_IDENTITY_MEMBERS: Final = 20_000
 MAX_IDENTITY_DEPTH: Final = 12
 MAX_IDENTITY_STRING: Final = 8_192
@@ -519,8 +535,20 @@ def create_migration_bundle(
                 executable=request.pg_dump_executable,
                 timeout=request.pg_dump_timeout,
             )
-        except BackupError:
+        except BackupError as error:
+            if error.code == "BACKUP_RESOURCE_BOUNDS_EXCEEDED":
+                raise MigrationOperationalError(
+                    "MIGRATION_RESOURCE_BOUNDS_EXCEEDED"
+                ) from None
             raise MigrationOperationalError("MIGRATION_DATABASE_CAPTURE_FAILED") from None
+
+        copy_counter = CopyByteCounter(MAX_TOTAL_COPIED_BYTES)
+        try:
+            copy_counter.consume(database["compressedBytes"])
+        except ResourceLimitExceeded:
+            raise MigrationOperationalError(
+                "MIGRATION_RESOURCE_BOUNDS_EXCEEDED"
+            ) from None
 
         database_metadata = {
             key: value for key, value in database.items() if key != "member"
@@ -529,13 +557,18 @@ def create_migration_bundle(
         database_references = _capture_database_references(
             request.database_reference_probe
         )
-        plugin_manifest = _capture_plugins(staging, request.plugins)
+        plugin_manifest = _capture_plugins(
+            staging,
+            request.plugins,
+            copy_counter=copy_counter,
+        )
         _write_json(staging / PLUGIN_MANIFEST_MEMBER, plugin_manifest)
         media_manifest = _capture_media(
             staging,
             request.local_media,
             request.r2_media,
             request.target_r2_identities,
+            copy_counter=copy_counter,
         )
         _cross_check_database_references(
             database_references,
@@ -1437,22 +1470,89 @@ def _copy_finalized_bundle_snapshot(source: Path, snapshot: Path) -> None:
     if not stat.S_ISDIR(metadata.st_mode) or _is_link_or_reparse(source):
         raise MigrationCorruptError("MIGRATION_BUNDLE_ROOT_UNSAFE")
     try:
-        for item in source.rglob("*"):
-            item_stat = item.lstat()
-            if stat.S_ISREG(item_stat.st_mode) and (
-                item_stat.st_nlink != 1 or _is_sparse(item_stat)
-            ):
-                raise MigrationCorruptError("MIGRATION_MEMBER_UNSAFE")
+        _enumerate_bundle_files(source)
+        copy_counter = CopyByteCounter(MAX_TOTAL_COPIED_BYTES)
         shutil.copytree(
             source,
             snapshot,
             symlinks=True,
-            copy_function=shutil.copy2,
+            copy_function=partial(
+                _copy_bundle_snapshot_regular,
+                copy_counter=copy_counter,
+            ),
         )
     except MigrationError:
         raise
     except OSError:
         raise MigrationOperationalError("MIGRATION_SNAPSHOT_FAILED") from None
+
+
+def _copy_bundle_snapshot_regular(
+    source: str,
+    destination: str,
+    *,
+    copy_counter: CopyByteCounter,
+) -> str:
+    source_path = Path(source)
+    destination_path = Path(destination)
+    before = source_path.lstat()
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or _is_link_or_reparse(source_path)
+        or _is_sparse(before)
+    ):
+        raise MigrationCorruptError("MIGRATION_MEMBER_UNSAFE")
+    source_fd = os.open(source_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    destination_fd = -1
+    try:
+        opened = os.fstat(source_fd)
+        if not stat.S_ISREG(opened.st_mode) or (
+            before.st_dev,
+            before.st_ino,
+        ) != (opened.st_dev, opened.st_ino):
+            raise MigrationOperationalError("MIGRATION_SOURCE_CHANGED")
+        destination_fd = os.open(
+            destination_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with (
+            os.fdopen(source_fd, "rb") as input_stream,
+            os.fdopen(destination_fd, "wb") as output_stream,
+        ):
+            source_fd = -1
+            destination_fd = -1
+            try:
+                bounded_copy(
+                    input_stream,
+                    output_stream,
+                    counter=copy_counter,
+                    maximum_member_bytes=(
+                        MAX_COMPRESSED_MEMBER_BYTES
+                        if source_path.name == DATABASE_MEMBER
+                        else MAX_MEMBER_BYTES
+                    ),
+                    expected_size=opened.st_size,
+                    member_reason=(
+                        ResourceLimitReason.COMPRESSED_MEMBER_BYTES
+                        if source_path.name == DATABASE_MEMBER
+                        else ResourceLimitReason.FILESYSTEM_MEMBER_BYTES
+                    ),
+                )
+            except ResourceLimitExceeded as error:
+                if error.reason is ResourceLimitReason.DECLARED_SIZE_MISMATCH:
+                    raise MigrationOperationalError("MIGRATION_SOURCE_CHANGED") from None
+                raise MigrationCorruptError(
+                    "MIGRATION_RESOURCE_BOUNDS_EXCEEDED"
+                ) from None
+        os.chmod(destination_path, 0o600)
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+        if destination_fd >= 0:
+            os.close(destination_fd)
+    return str(destination_path)
 
 
 def _cleanup_owned_staging(destination: Path, staging: Path) -> None:
@@ -1731,7 +1831,10 @@ def _cross_check_database_references(
 
 
 def _capture_plugins(
-    staging: Path, packages: Sequence[PluginPackage]
+    staging: Path,
+    packages: Sequence[PluginPackage],
+    *,
+    copy_counter: CopyByteCounter,
 ) -> dict[str, object]:
     records: list[dict[str, object]] = []
     identities: set[tuple[str, str, str]] = set()
@@ -1767,7 +1870,10 @@ def _capture_plugins(
         member = f"plugins/cas/{package.digest.removeprefix('sha256:')}.ajplugin"
         if member not in copied:
             _copy_verified_source(
-                Path(package.source), staging / PurePosixPath(member), package.digest
+                Path(package.source),
+                staging / PurePosixPath(member),
+                package.digest,
+                copy_counter=copy_counter,
             )
             copied.add(member)
         size = (staging / PurePosixPath(member)).stat().st_size
@@ -1798,6 +1904,8 @@ def _capture_media(
     local_media: Sequence[LocalMediaObject],
     r2_media: Sequence[R2MediaObject],
     target_identities: Mapping[str, R2PhysicalIdentity],
+    *,
+    copy_counter: CopyByteCounter,
 ) -> dict[str, object]:
     local_records: list[dict[str, object]] = []
     remote_records: list[dict[str, object]] = []
@@ -1831,6 +1939,7 @@ def _capture_media(
                 staging / PurePosixPath(member),
                 item.digest,
                 expected_size=item.size_bytes,
+                copy_counter=copy_counter,
             )
             copied.add(member)
         elif (staging / PurePosixPath(member)).stat().st_size != item.size_bytes:
@@ -1904,6 +2013,7 @@ def _copy_verified_source(
     expected_digest: str,
     *,
     expected_size: int | None = None,
+    copy_counter: CopyByteCounter,
 ) -> None:
     try:
         before = source.lstat()
@@ -1918,6 +2028,18 @@ def _copy_verified_source(
         raise MigrationCorruptError("MIGRATION_SOURCE_MEMBER_UNSAFE")
     if expected_size is not None and before.st_size != expected_size:
         raise MigrationCorruptError("MIGRATION_SOURCE_MEMBER_SIZE_MISMATCH")
+    try:
+        preflight_copy_sizes(
+            (before.st_size,),
+            maximum_member_bytes=MAX_MEMBER_BYTES,
+            maximum_total_bytes=(
+                copy_counter.maximum_bytes - copy_counter.copied
+            ),
+        )
+    except ResourceLimitExceeded:
+        raise MigrationOperationalError(
+            "MIGRATION_RESOURCE_BOUNDS_EXCEEDED"
+        ) from None
     _make_private_directory(target.parent)
     descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     digest = hashlib.sha256()
@@ -1925,10 +2047,25 @@ def _copy_verified_source(
     try:
         with source.open("rb") as input_stream, os.fdopen(descriptor, "wb") as output:
             descriptor = -1
-            for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-                copied += len(chunk)
-                output.write(chunk)
+            class _DigestingTarget:
+                def write(self, chunk: bytes) -> int:
+                    digest.update(chunk)
+                    return output.write(chunk)
+
+            try:
+                copied = bounded_copy(
+                    input_stream,
+                    cast(Any, _DigestingTarget()),
+                    counter=copy_counter,
+                    maximum_member_bytes=MAX_MEMBER_BYTES,
+                    expected_size=before.st_size,
+                )
+            except ResourceLimitExceeded as error:
+                if error.reason is ResourceLimitReason.DECLARED_SIZE_MISMATCH:
+                    raise MigrationOperationalError("MIGRATION_SOURCE_CHANGED") from None
+                raise MigrationOperationalError(
+                    "MIGRATION_RESOURCE_BOUNDS_EXCEEDED"
+                ) from None
             output.flush()
             os.fsync(output.fileno())
         after = source.lstat()
@@ -2308,23 +2445,24 @@ def _verify_database(root: Path, database: Mapping[str, object]) -> None:
     ):
         raise MigrationCorruptError("MIGRATION_DATABASE_COMPRESSED_CORRUPT")
     digest = hashlib.sha256()
-    uncompressed_size = 0
     try:
+        expansion = DatabaseExpansionGuard(
+            compressed_bytes=compressed_size,
+            budget=DEFAULT_RESOURCE_BUDGET,
+        )
         with gzip.open(member, "rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                uncompressed_size += len(chunk)
-                if uncompressed_size > MAX_DATABASE_UNCOMPRESSED_BYTES or (
-                    compressed_size > 0
-                    and uncompressed_size > compressed_size * MAX_COMPRESSION_RATIO
-                ):
-                    raise MigrationCorruptError("MIGRATION_DATABASE_BOUNDS_EXCEEDED")
+                expansion.consume(len(chunk))
                 digest.update(chunk)
+    except ResourceLimitExceeded:
+        raise MigrationCorruptError("MIGRATION_DATABASE_BOUNDS_EXCEEDED") from None
     except MigrationError:
         raise
     except (gzip.BadGzipFile, EOFError):
         raise MigrationCorruptError("MIGRATION_DATABASE_GZIP_CORRUPT") from None
     except OSError:
         raise MigrationOperationalError("MIGRATION_DATABASE_UNAVAILABLE") from None
+    uncompressed_size = expansion.uncompressed_bytes
     if (
         not uncompressed_size
         or database["uncompressedBytes"] != uncompressed_size
@@ -2913,6 +3051,7 @@ def _parse_checksum_bytes(value: bytes) -> dict[str, str]:
 def _enumerate_bundle_files(root: Path) -> dict[str, Path]:
     files: dict[str, Path] = {}
     normalized: set[str] = set()
+    copy_counter = CopyByteCounter(MAX_TOTAL_COPIED_BYTES)
     try:
         items = root.rglob("*")
         for item in items:
@@ -2926,13 +3065,35 @@ def _enumerate_bundle_files(root: Path) -> dict[str, Path]:
                 if os.name != "nt" and stat.S_IMODE(item_stat.st_mode) & 0o077:
                     raise MigrationCorruptError("MIGRATION_MEMBER_PERMISSIONS_INVALID")
                 continue
+            maximum_member_bytes = (
+                MAX_COMPRESSED_MEMBER_BYTES
+                if relative == DATABASE_MEMBER
+                else MAX_MEMBER_BYTES
+            )
             if (
                 not stat.S_ISREG(item_stat.st_mode)
                 or item_stat.st_nlink != 1
-                or item_stat.st_size > MAX_MEMBER_BYTES
                 or _is_sparse(item_stat)
             ):
                 raise MigrationCorruptError("MIGRATION_MEMBER_UNSAFE")
+            try:
+                preflight_copy_sizes(
+                    (item_stat.st_size,),
+                    maximum_member_bytes=maximum_member_bytes,
+                    maximum_total_bytes=(
+                        copy_counter.maximum_bytes - copy_counter.copied
+                    ),
+                    member_reason=(
+                        ResourceLimitReason.COMPRESSED_MEMBER_BYTES
+                        if relative == DATABASE_MEMBER
+                        else ResourceLimitReason.FILESYSTEM_MEMBER_BYTES
+                    ),
+                )
+                copy_counter.consume(item_stat.st_size)
+            except ResourceLimitExceeded:
+                raise MigrationCorruptError(
+                    "MIGRATION_RESOURCE_BOUNDS_EXCEEDED"
+                ) from None
             if os.name != "nt" and stat.S_IMODE(item_stat.st_mode) & 0o077:
                 raise MigrationCorruptError("MIGRATION_MEMBER_PERMISSIONS_INVALID")
             canonical = _canonical_relative_path(relative)

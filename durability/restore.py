@@ -20,6 +20,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Protocol
 
@@ -35,6 +36,15 @@ from .compatibility import (
     ReasonCode,
     UpgradeAction,
     evaluate_compatibility,
+)
+from .resource_budget import (
+    DEFAULT_RESOURCE_BUDGET,
+    CopyByteCounter,
+    DatabaseExpansionGuard,
+    ResourceLimitExceeded,
+    ResourceLimitReason,
+    bounded_copy,
+    preflight_copy_sizes,
 )
 from .secret_envelope import (
     OneTimeKey,
@@ -100,6 +110,7 @@ _EXECUTION_STEPS = (
     "validate",
     "target.publish",
 )
+_RESOURCE_BUDGET = DEFAULT_RESOURCE_BUDGET
 
 
 class DestinationClass(StrEnum):
@@ -526,6 +537,11 @@ def _prepare_snapshot(request: RestoreRequest) -> _PreparedSnapshot:
     except backup.BackupError as error:
         if error.code == "BACKUP_IO_FAILED":
             raise RestorePreflightError("RESTORE_BACKUP_UNAVAILABLE") from None
+        if error.code == "BACKUP_RESOURCE_BOUNDS_EXCEEDED":
+            raise RestorePreflightError(
+                "RESTORE_RESOURCE_BOUNDS_EXCEEDED",
+                compatibility_outcome=CompatibilityOutcome.CORRUPT,
+            ) from None
         raise RestorePreflightError(
             "RESTORE_BACKUP_CORRUPT",
             compatibility_outcome=CompatibilityOutcome.CORRUPT,
@@ -827,11 +843,17 @@ def _operation_backup_snapshot(
                     "RESTORE_BACKUP_CORRUPT",
                     compatibility_outcome=CompatibilityOutcome.CORRUPT,
                 )
+            copy_counter = CopyByteCounter(
+                _RESOURCE_BUDGET.maximum_total_copied_bytes
+            )
             shutil.copytree(
                 source,
                 snapshot_root,
                 symlinks=True,
-                copy_function=_copy_snapshot_regular,
+                copy_function=partial(
+                    _copy_snapshot_regular,
+                    copy_counter=copy_counter,
+                ),
             )
             os.chmod(snapshot_root, 0o700)
         except RestoreError:
@@ -841,7 +863,12 @@ def _operation_backup_snapshot(
         yield snapshot_root
 
 
-def _copy_snapshot_regular(source: str, destination: str) -> str:
+def _copy_snapshot_regular(
+    source: str,
+    destination: str,
+    *,
+    copy_counter: CopyByteCounter,
+) -> str:
     """Copy one regular member without following a link introduced by a swap."""
 
     source_path = Path(source)
@@ -884,7 +911,32 @@ def _copy_snapshot_regular(source: str, destination: str) -> str:
         ):
             source_fd = -1
             destination_fd = -1
-            shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
+            try:
+                bounded_copy(
+                    input_stream,
+                    output_stream,
+                    counter=copy_counter,
+                    maximum_member_bytes=(
+                        _RESOURCE_BUDGET.maximum_compressed_member_bytes
+                        if source_path.name == backup.DATABASE_MEMBER
+                        else _RESOURCE_BUDGET.maximum_filesystem_member_bytes
+                    ),
+                    expected_size=opened.st_size,
+                    member_reason=(
+                        ResourceLimitReason.COMPRESSED_MEMBER_BYTES
+                        if source_path.name == backup.DATABASE_MEMBER
+                        else ResourceLimitReason.FILESYSTEM_MEMBER_BYTES
+                    ),
+                )
+            except ResourceLimitExceeded as error:
+                if error.reason is ResourceLimitReason.DECLARED_SIZE_MISMATCH:
+                    raise RestorePreflightError(
+                        "RESTORE_BACKUP_SNAPSHOT_CHANGED"
+                    ) from None
+                raise RestorePreflightError(
+                    "RESTORE_RESOURCE_BOUNDS_EXCEEDED",
+                    compatibility_outcome=CompatibilityOutcome.CORRUPT,
+                ) from None
         os.chmod(destination_path, 0o600)
     finally:
         if source_fd >= 0:
@@ -1068,11 +1120,8 @@ class LocalFilesystemStager:
                 or staging in source_root.parents
             ):
                 raise RestoreAdapterError("FILESYSTEM_STAGING_OVERLAP")
-            raw_staging.mkdir(parents=True, mode=0o700)
-            if _is_link_or_reparse(raw_staging):
-                raise RestoreAdapterError("FILESYSTEM_STAGING_UNSAFE")
-            os.chmod(raw_staging, 0o700)
             seen: set[str] = set()
+            prepared_members: list[tuple[str, Path, int]] = []
             for raw_path in member_paths:
                 relative = _restore_member_path(raw_path)
                 if relative in seen:
@@ -1082,6 +1131,29 @@ class LocalFilesystemStager:
                 source_stat = source.lstat()
                 if source.is_symlink() or not stat.S_ISREG(source_stat.st_mode):
                     raise RestoreAdapterError("FILESYSTEM_MEMBER_UNSAFE")
+                prepared_members.append((relative, source, source_stat.st_size))
+            try:
+                preflight_copy_sizes(
+                    (size for _relative, _source, size in prepared_members),
+                    maximum_member_bytes=(
+                        _RESOURCE_BUDGET.maximum_filesystem_member_bytes
+                    ),
+                    maximum_total_bytes=(
+                        _RESOURCE_BUDGET.maximum_total_copied_bytes
+                    ),
+                )
+            except ResourceLimitExceeded:
+                raise RestoreAdapterError(
+                    "FILESYSTEM_RESOURCE_BOUNDS_EXCEEDED"
+                ) from None
+            raw_staging.mkdir(parents=True, mode=0o700)
+            if _is_link_or_reparse(raw_staging):
+                raise RestoreAdapterError("FILESYSTEM_STAGING_UNSAFE")
+            os.chmod(raw_staging, 0o700)
+            copy_counter = CopyByteCounter(
+                _RESOURCE_BUDGET.maximum_total_copied_bytes
+            )
+            for relative, source, expected_size in prepared_members:
                 target = raw_staging / PurePosixPath(relative)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 os.chmod(target.parent, 0o700)
@@ -1089,7 +1161,27 @@ class LocalFilesystemStager:
                     source.open("rb") as source_stream,
                     target.open("xb") as target_stream,
                 ):
-                    shutil.copyfileobj(source_stream, target_stream, length=1024 * 1024)
+                    try:
+                        bounded_copy(
+                            source_stream,
+                            target_stream,
+                            counter=copy_counter,
+                            maximum_member_bytes=(
+                                _RESOURCE_BUDGET.maximum_filesystem_member_bytes
+                            ),
+                            expected_size=expected_size,
+                        )
+                    except ResourceLimitExceeded as error:
+                        if (
+                            error.reason
+                            is ResourceLimitReason.DECLARED_SIZE_MISMATCH
+                        ):
+                            raise RestoreAdapterError(
+                                "FILESYSTEM_MEMBER_CHANGED"
+                            ) from None
+                        raise RestoreAdapterError(
+                            "FILESYSTEM_RESOURCE_BOUNDS_EXCEEDED"
+                        ) from None
                     target_stream.flush()
                     os.fsync(target_stream.fileno())
                 os.chmod(target, 0o600)
@@ -1229,12 +1321,25 @@ class SubprocessPostgresRestore:
             raise RestoreAdapterError("DATABASE_TARGET_NOT_EMPTY")
         try:
             with tempfile.TemporaryFile(mode="w+b") as sql:
-                uncompressed = 0
+                try:
+                    expansion = DatabaseExpansionGuard(
+                        compressed_bytes=Path(dump_path).stat().st_size,
+                        budget=_RESOURCE_BUDGET,
+                    )
+                except ResourceLimitExceeded:
+                    raise RestoreAdapterError(
+                        "DATABASE_RESOURCE_BOUNDS_EXCEEDED"
+                    ) from None
                 with gzip.open(Path(dump_path), "rb") as compressed:
                     for chunk in iter(lambda: compressed.read(1024 * 1024), b""):
+                        try:
+                            expansion.consume(len(chunk))
+                        except ResourceLimitExceeded:
+                            raise RestoreAdapterError(
+                                "DATABASE_RESOURCE_BOUNDS_EXCEEDED"
+                            ) from None
                         sql.write(chunk)
-                        uncompressed += len(chunk)
-                if uncompressed == 0:
+                if expansion.uncompressed_bytes == 0:
                     raise RestoreAdapterError("DATABASE_DUMP_EMPTY")
                 sql.flush()
                 sql.seek(0)

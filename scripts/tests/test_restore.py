@@ -21,6 +21,7 @@ from durability.compatibility import (
     ReasonCode,
     UpgradeAction,
 )
+from durability.resource_budget import DurabilityResourceBudget
 
 
 class FakePgDump:
@@ -601,6 +602,59 @@ class RestoreRuntimeTests(unittest.TestCase):
         self.assertEqual(self.events, [])
         self.assertFalse(mutation.published)
 
+    def test_resource_bomb_fails_before_destination_or_mutation(self):
+        request, destination, release, updater, mutation = self.request()
+        budget = DurabilityResourceBudget(
+            maximum_compressed_member_bytes=1024 * 1024,
+            maximum_uncompressed_database_bytes=16,
+            maximum_filesystem_member_bytes=1024 * 1024,
+            maximum_total_copied_bytes=16 * 1024 * 1024,
+            maximum_compression_ratio=1_000,
+        )
+        with (
+            mock.patch.object(backup, "_RESOURCE_BUDGET", budget),
+            self.assertRaises(restore.RestorePreflightError) as raised,
+        ):
+            restore.prepare_restore(request)
+
+        self.assertEqual(
+            raised.exception.code,
+            "RESTORE_RESOURCE_BOUNDS_EXCEEDED",
+        )
+        self.assertEqual(
+            raised.exception.compatibility_outcome,
+            CompatibilityOutcome.CORRUPT,
+        )
+        self.assertEqual(destination.calls, 0)
+        self.assertEqual(release.verify_calls, 0)
+        self.assertEqual(updater.verify_calls, 0)
+        self.assertEqual(self.events, [])
+        self.assertFalse(mutation.published)
+
+    def test_resource_failure_after_mutation_records_recovery_required(self):
+        request, _, _, _, mutation = self.request()
+        plan = restore.prepare_restore(request)
+
+        class BoundsDatabase:
+            def restore(self, dump_path):
+                raise restore.RestoreAdapterError(
+                    "DATABASE_RESOURCE_BOUNDS_EXCEEDED"
+                )
+
+        result = restore.execute_restore(
+            replace(request, database=BoundsDatabase()),
+            plan,
+            accepted_plan_digest=plan.plan_digest,
+        )
+
+        self.assertEqual(result.state, restore.RestoreTerminalState.RECOVERY_REQUIRED)
+        self.assertIsNotNone(result.recovery_evidence)
+        self.assertEqual(
+            result.recovery_evidence.error_code,
+            "DATABASE_RESOURCE_BOUNDS_EXCEEDED",
+        )
+        self.assertFalse(mutation.published)
+
     def test_unreadable_backup_is_operational_not_corrupt(self):
         request, _, _, _, mutation = self.request()
         with (
@@ -863,6 +917,63 @@ class LocalFilesystemStagerTests(unittest.TestCase):
                 )
             self.assertFalse((real_parent / "nested").exists())
 
+    def test_member_and_total_copy_budgets_fail_before_staging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_root = root / "backup"
+            first = backup_root / "filesystem" / "media" / "first.bin"
+            second = backup_root / "filesystem" / "media" / "second.bin"
+            first.parent.mkdir(parents=True)
+            first.write_bytes(b"a" * 6)
+            second.write_bytes(b"b" * 6)
+
+            member_budget = DurabilityResourceBudget(
+                maximum_compressed_member_bytes=32,
+                maximum_uncompressed_database_bytes=64,
+                maximum_filesystem_member_bytes=5,
+                maximum_total_copied_bytes=20,
+                maximum_compression_ratio=4,
+            )
+            member_staging = root / "member-staging"
+            with (
+                mock.patch.object(restore, "_RESOURCE_BUDGET", member_budget),
+                self.assertRaisesRegex(
+                    restore.RestoreAdapterError,
+                    "FILESYSTEM_RESOURCE_BOUNDS_EXCEEDED",
+                ),
+            ):
+                restore.LocalFilesystemStager().stage(
+                    backup_root,
+                    member_staging,
+                    ("filesystem/media/first.bin",),
+                )
+            self.assertFalse(member_staging.exists())
+
+            total_budget = DurabilityResourceBudget(
+                maximum_compressed_member_bytes=32,
+                maximum_uncompressed_database_bytes=64,
+                maximum_filesystem_member_bytes=10,
+                maximum_total_copied_bytes=10,
+                maximum_compression_ratio=4,
+            )
+            total_staging = root / "total-staging"
+            with (
+                mock.patch.object(restore, "_RESOURCE_BUDGET", total_budget),
+                self.assertRaisesRegex(
+                    restore.RestoreAdapterError,
+                    "FILESYSTEM_RESOURCE_BOUNDS_EXCEEDED",
+                ),
+            ):
+                restore.LocalFilesystemStager().stage(
+                    backup_root,
+                    total_staging,
+                    (
+                        "filesystem/media/first.bin",
+                        "filesystem/media/second.bin",
+                    ),
+                )
+            self.assertFalse(total_staging.exists())
+
 
 class PostgresRestoreAdapterTests(unittest.TestCase):
     def test_uses_fail_on_error_logical_psql_without_credentials_in_argv(self):
@@ -916,6 +1027,47 @@ class PostgresRestoreAdapterTests(unittest.TestCase):
         for inherited in ("PGPASSWORD", "PGSERVICE"):
             self.assertNotIn(inherited, empty_env)
             self.assertNotIn(inherited, import_env)
+
+    def test_compression_bomb_is_rejected_before_database_import(self):
+        class Runner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, argv, *, stdin, env, timeout):
+                self.calls.append(tuple(argv))
+                if "--tuples-only" in argv:
+                    return restore.ProcessResult(0, b"0\n")
+                return restore.ProcessResult(0, b"")
+
+        runner = Runner()
+        adapter = restore.SubprocessPostgresRestore(
+            "postgresql://test-user@isolated.invalid/target",
+            runner=runner,
+        )
+        budget = DurabilityResourceBudget(
+            maximum_compressed_member_bytes=1024 * 1024,
+            maximum_uncompressed_database_bytes=2 * 1024 * 1024,
+            maximum_filesystem_member_bytes=1024 * 1024,
+            maximum_total_copied_bytes=4 * 1024 * 1024,
+            maximum_compression_ratio=2,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            dump = Path(directory) / "database.sql.gz"
+            with (
+                dump.open("wb") as raw,
+                gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as stream,
+            ):
+                stream.write(b"z" * (1024 * 1024))
+            with (
+                mock.patch.object(restore, "_RESOURCE_BUDGET", budget),
+                self.assertRaisesRegex(
+                    restore.RestoreAdapterError,
+                    "DATABASE_RESOURCE_BOUNDS_EXCEEDED",
+                ),
+            ):
+                adapter.restore(dump)
+
+        self.assertEqual(len(runner.calls), 1)
 
 
 if __name__ == "__main__":
