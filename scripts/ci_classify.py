@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -1079,17 +1080,40 @@ def classify_paths(paths: list[str], *, force_full: bool = False) -> dict[str, s
     return {name: result[name] for name in OUTPUT_NAMES}
 
 
+_ZERO_COMMIT_SHA = "0" * 40
+_COMMIT_SHA_PATTERN = re.compile(r"[0-9a-fA-F]{40}\Z")
+
+
+def _canonical_commit_sha(
+    value: str | None,
+    name: str,
+    *,
+    allow_zero: bool = False,
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or _COMMIT_SHA_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"{name} must be an exact 40-character commit SHA")
+    canonical = f"{int(value, 16):040x}"
+    if canonical == _ZERO_COMMIT_SHA and not allow_zero:
+        raise ValueError(f"{name} must be a non-zero 40-character commit SHA")
+    return canonical
+
+
 def changed_paths(base: str | None, head: str | None) -> list[str]:
-    if base and base != "0" * 40 and head:
+    base_sha = _canonical_commit_sha(base, "base", allow_zero=True)
+    head_sha = _canonical_commit_sha(head, "head")
+    if base_sha and base_sha != _ZERO_COMMIT_SHA and head_sha:
         command = [
             "git",
             "diff",
             "--no-renames",
             "--name-only",
             "-z",
-            f"{base}...{head}",
+            f"{base_sha}...{head_sha}",
+            "--",
         ]
-    elif head:
+    elif head_sha:
         command = [
             "git",
             "diff-tree",
@@ -1098,7 +1122,8 @@ def changed_paths(base: str | None, head: str | None) -> list[str]:
             "--name-only",
             "-r",
             "-z",
-            head,
+            head_sha,
+            "--",
         ]
     else:
         command = [
@@ -1110,6 +1135,7 @@ def changed_paths(base: str | None, head: str | None) -> list[str]:
             "-r",
             "-z",
             "HEAD",
+            "--",
         ]
     completed = subprocess.run(command, check=True, capture_output=True)
     return _normalize_paths(

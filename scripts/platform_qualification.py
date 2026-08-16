@@ -53,16 +53,40 @@ class QualificationProbeError(RuntimeError):
 
 
 Command = Callable[[Sequence[str]], str]
+_QUALIFICATION_EXECUTABLES = {
+    "docker": "docker",
+    "pg_dump": "pg_dump",
+    "psql": "psql",
+    "sudo": "sudo",
+    "systemd": "systemd",
+}
 
 
 def _fail(code: str) -> None:
     raise QualificationProbeError(code)
 
 
+def _validated_probe_command(command: Sequence[str]) -> list[str]:
+    if isinstance(command, (str, bytes)) or not command:
+        _fail("PLATFORM_PROBE_COMMAND_REJECTED")
+    values = list(command)
+    if any(
+        not isinstance(value, str)
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        for value in values
+    ):
+        _fail("PLATFORM_PROBE_COMMAND_REJECTED")
+    executable = _QUALIFICATION_EXECUTABLES.get(values[0])
+    if executable is None:
+        _fail("PLATFORM_PROBE_COMMAND_REJECTED")
+    return [executable, *values[1:]]
+
+
 def _run(command: Sequence[str]) -> str:
+    validated_command = _validated_probe_command(command)
     try:
         completed = subprocess.run(
-            list(command),
+            validated_command,
             check=False,
             capture_output=True,
             text=True,

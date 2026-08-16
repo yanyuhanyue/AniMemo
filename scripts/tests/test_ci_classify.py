@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.ci_classify import (
     AUDITED_CONTRACT_PRIMARY_DOCUMENTS,
@@ -533,6 +534,68 @@ class CiClassificationTests(unittest.TestCase):
         self.assertEqual(result["execution_profile"], "TARGETED")
         self.assertEqual(result["run_release_updater"], "true")
         self.assertEqual(result["full_gate"], "false")
+
+    def test_changed_paths_rejects_untrusted_revision_inputs(self):
+        valid_sha = "a" * 40
+        cases = (
+            ("--output=outside", valid_sha),
+            ("abc123", valid_sha),
+            (valid_sha, "--help"),
+            (valid_sha, "f" * 39),
+            (valid_sha, "0" * 40),
+        )
+
+        with mock.patch("scripts.ci_classify.subprocess.run") as run:
+            for base, head in cases:
+                with (
+                    self.subTest(base=base, head=head),
+                    self.assertRaisesRegex(ValueError, "40-character commit SHA"),
+                ):
+                    changed_paths(base, head)
+            run.assert_not_called()
+
+    def test_changed_paths_canonicalizes_shas_and_uses_git_argument_boundary(self):
+        completed = subprocess.CompletedProcess([], 0, stdout=b"README.md\0")
+        with mock.patch("scripts.ci_classify.subprocess.run", return_value=completed) as run:
+            self.assertEqual(changed_paths("A" * 40, "b" * 40), ["README.md"])
+
+        run.assert_called_once_with(
+            [
+                "git",
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                f"{'a' * 40}...{'b' * 40}",
+                "--",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+    def test_changed_paths_accepts_zero_base_only_for_initial_push(self):
+        completed = subprocess.CompletedProcess([], 0, stdout=b"package-lock.json\0")
+        with mock.patch("scripts.ci_classify.subprocess.run", return_value=completed) as run:
+            self.assertEqual(
+                changed_paths("0" * 40, "C" * 40),
+                ["package-lock.json"],
+            )
+
+        run.assert_called_once_with(
+            [
+                "git",
+                "diff-tree",
+                "--no-commit-id",
+                "--no-renames",
+                "--name-only",
+                "-r",
+                "-z",
+                "c" * 40,
+                "--",
+            ],
+            check=True,
+            capture_output=True,
+        )
 
     def test_all_repository_tracked_paths_have_audited_rules(self):
         completed = subprocess.run(
