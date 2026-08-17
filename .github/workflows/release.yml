@@ -21,11 +21,6 @@ on:
         default: rc
         type: choice
         options: [beta, rc]
-      dry_run:
-        description: Deprecated compatibility input; qualify requires true and publish requires false
-        required: false
-        default: true
-        type: boolean
       candidate_sha:
         description: Optional exact candidate commit for a read-only dry-run; forbidden for publish
         required: false
@@ -79,7 +74,6 @@ jobs:
         id: candidate
         env:
           OPERATION: ${{ inputs.operation }}
-          DRY_RUN: ${{ inputs.dry_run }}
           REQUESTED_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           INTENDED_MAIN_SHA: ${{ inputs.intended_main_sha }}
           UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}
@@ -89,12 +83,6 @@ jobs:
           git fetch --force --tags origin "+refs/heads/main:refs/remotes/origin/main"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-          case "$OPERATION:$DRY_RUN" in
-            qualify:true) ;;
-            publish:false) ;;
-            *) echo "operation and dry_run are inconsistent" >&2; exit 1 ;;
-          esac
-
           main_sha="$(git rev-parse origin/main^{commit})"
           test "$INTENDED_MAIN_SHA" = "$main_sha"
           candidate_sha="$GITHUB_SHA"
@@ -103,7 +91,7 @@ jobs:
             test "$GITHUB_REF" = "refs/heads/main"
             test "$GITHUB_SHA" = "$main_sha"
             test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"
-          elif [[ "$DRY_RUN" = "true" && -n "$REQUESTED_CANDIDATE_SHA" ]]; then
+          elif [[ -n "$REQUESTED_CANDIDATE_SHA" ]]; then
             [[ "$REQUESTED_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
             test "$REQUESTED_CANDIDATE_SHA" = "$GITHUB_SHA"
             test "$(git rev-parse HEAD)" = "$REQUESTED_CANDIDATE_SHA"

@@ -11,6 +11,7 @@ import unittest
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 
 from cramjam import snappy
@@ -574,6 +575,40 @@ class GitHubReleaseSourceTests(unittest.TestCase):
                 f"/repos/yanyuhanyue/AniMemo/git/ref/tags/{manifest['release']['version']}",
                 [path for path, _ in rest.calls],
             )
+
+    def test_anonymous_gh_environment_is_a_closed_non_secret_allowlist(self):
+        inherited = {
+            "HOME": "/host-home",
+            "PATH": "/attacker-controlled",
+            "DATABASE_URL": "postgresql://secret",
+            "AWS_SECRET_ACCESS_KEY": "cloud-secret",
+            "UNRELATED_SERVICE_TOKEN": "service-secret",
+            "GH_TOKEN": "github-secret",
+            "HTTPS_PROXY": "https://proxy-secret@example.test",
+        }
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, inherited, clear=True
+        ):
+            root = Path(directory)
+            environment = GitHubReleaseSource._anonymous_gh_environment(root)
+
+        self.assertEqual(
+            set(environment),
+            {
+                "HOME",
+                "TMPDIR",
+                "GH_CONFIG_DIR",
+                "DOCKER_CONFIG",
+                "GH_PROMPT_DISABLED",
+                "LANG",
+                "LC_ALL",
+            },
+        )
+        self.assertEqual(environment["HOME"], str(root / "home"))
+        self.assertEqual(environment["TMPDIR"], str(root / "tmp"))
+        self.assertEqual(environment["GH_PROMPT_DISABLED"], "1")
+        self.assertEqual(environment["LANG"], "C.UTF-8")
+        self.assertEqual(environment["LC_ALL"], "C.UTF-8")
 
     def test_channels_are_semver_sorted_and_filtered(self):
         with tempfile.TemporaryDirectory() as directory:

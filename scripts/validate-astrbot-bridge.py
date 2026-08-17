@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +34,7 @@ def validate():
     if metadata.get("version") != "0.1.3":
         raise SystemExit("AstrBot Bridge localized diagnostics release must use version 0.1.3")
     schema = json.loads((BRIDGE / "_conf_schema.json").read_text(encoding="utf-8"))
-    required_config = {"enabled", "animemo_base_url", "key_id", "secret", "poll_events", "poll_wait_seconds", "request_timeout_seconds", "allow_group_commands", "developer_commands", "verify_tls"}
+    required_config = {"enabled", "animemo_base_url", "key_id", "secret", "poll_events", "poll_wait_seconds", "request_timeout_seconds", "allow_group_commands", "developer_commands"}
     if set(schema) != required_config:
         raise SystemExit("_conf_schema.json configuration keys do not match Bridge contract")
     for key, item in schema.items():
@@ -51,7 +50,6 @@ def validate():
         "request_timeout_seconds": "int",
         "allow_group_commands": "bool",
         "developer_commands": "bool",
-        "verify_tls": "bool",
     }
     for key, expected in expected_types.items():
         if schema[key].get("type") != expected:
@@ -60,8 +58,6 @@ def validate():
         raise SystemExit("secret must use invisible=true; production should prefer the environment override")
     if schema["allow_group_commands"].get("default") is not False:
         raise SystemExit("allow_group_commands must remain disabled by default")
-    if schema["verify_tls"].get("default") is not True:
-        raise SystemExit("verify_tls must remain enabled by default")
     page_root = BRIDGE / "pages" / "status"
     missing_page = sorted(name for name in PAGE_REQUIRED if not (page_root / name).is_file())
     if missing_page:
@@ -85,11 +81,17 @@ def validate():
     if "requests" in requirements or "httpx" not in requirements:
         raise SystemExit("requirements.txt must use httpx and must not use requests")
     production_main = (BRIDGE / "main.py").read_text(encoding="utf-8")
+    client_source = (BRIDGE / "animemo_bridge" / "client.py").read_text(encoding="utf-8")
     for forbidden in ("_FallbackLogger", "class Star:", "class Context:", "astrbot.api.message"):
         if forbidden in production_main:
             raise SystemExit(f"production Bridge contains a fake or invalid AstrBot runtime path: {forbidden}")
     if "_config_bool" not in production_main or "_validated_timing" not in production_main:
         raise SystemExit("production Bridge must validate runtime boolean and timing values")
+    if "verify_tls" in production_main or "verify_tls" in client_source or "verify=" in client_source:
+        raise SystemExit("production Bridge must not expose a TLS verification bypass")
+    for required_url_guard in ("canonical_service_origin", "parsed.username", "parsed.password", "parsed.path"):
+        if required_url_guard not in client_source:
+            raise SystemExit(f"production Bridge is missing canonical HTTPS origin guard: {required_url_guard}")
     event_source = (BRIDGE / "animemo_bridge" / "events.py").read_text(encoding="utf-8")
     if "astrbot.api.message" in event_source:
         raise SystemExit("event delivery must import MessageChain from astrbot.api.event")

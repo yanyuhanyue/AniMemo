@@ -242,12 +242,13 @@ plugin removal fails. The logs print both the canonical content digest and the
 exact archive SHA for diagnostics, together with the resolved Base SHA, Head SHA,
 and resolution source.
 
-Content identity is not archive identity. For example, the same payload may have
-content digest `CCC` while a deflated archive has SHA `AAA` and a stored archive
-has SHA `BBB`. The immutable version remains unchanged because its payload is the
-same. CAS still addresses the actual archive bytes, and an already-published
-official version retains the original `AAA` blob instead of being rewritten to
-`BBB`.
+Content identity is not archive identity. The gate applies the candidate's one
+canonical package builder to both Base and Current source trees, so it never
+executes a package builder loaded from an arbitrary Git ref and never carries a
+legacy builder. Its rebuilt archive SHA is diagnostic for that candidate
+builder; it does not claim to reconstruct a historical published archive. CAS
+still addresses the actual published archive bytes, and an already-published
+official version retains its original blob instead of being rewritten.
 
 ## Fresh Docker release gate
 

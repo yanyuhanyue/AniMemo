@@ -299,7 +299,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(set(release["on"]), {"workflow_dispatch"})
         inputs = release["on"]["workflow_dispatch"]["inputs"]
         self.assertEqual(inputs["channel"]["options"], ["beta", "rc"])
-        self.assertIn("dry_run", inputs)
+        self.assertEqual(inputs["operation"]["options"], ["qualify", "publish"])
+        self.assertNotIn("dry_run", inputs)
         self.assertIn("candidate_sha", inputs)
         self.assertEqual(inputs["candidate_sha"]["required"], "false")
         self.assertIn("upgrade_base_sha", inputs)
@@ -505,7 +506,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         for guard in (
             'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"',
             'test "$INTENDED_MAIN_SHA" = "$main_sha"',
-            'if [[ "$DRY_RUN" = "true" && -n "$REQUESTED_CANDIDATE_SHA" ]]',
+            'elif [[ -n "$REQUESTED_CANDIDATE_SHA" ]]',
             'test "$REQUESTED_CANDIDATE_SHA" = "$GITHUB_SHA"',
             'test "$(git rev-parse HEAD)" = "$REQUESTED_CANDIDATE_SHA"',
             'test -z "$REQUESTED_CANDIDATE_SHA"',
@@ -516,6 +517,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             'git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$candidate_sha"',
         ):
             self.assertIn(guard, preflight)
+        self.assertNotIn("DRY_RUN", preflight)
         self.assertNotIn("ref", release["jobs"]["preflight"]["steps"][0]["with"])
         self.assertIn('ref: ${{ steps.candidate.outputs.candidate_sha }}', preflight)
         for job_name in ("full-ci", "full-release-gate", "performance"):

@@ -19,6 +19,28 @@ from animemo_bridge.signing import sign_hmac_request
 
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):
+    def test_bridge_config_rejects_non_https_service_urls(self):
+        for base_url in ("http://animemo.example", "http://127.0.0.1:8000"):
+            with self.subTest(base_url=base_url), self.assertRaisesRegex(ValueError, "HTTPS"):
+                BridgeConfig.from_values(base_url, "key", "secret")
+
+    def test_bridge_config_rejects_credentials_embedded_in_service_url(self):
+        with self.assertRaisesRegex(ValueError, "凭证"):
+            BridgeConfig.from_values("https://operator:password@animemo.example", "key", "secret")
+
+    def test_bridge_config_requires_a_canonical_service_origin(self):
+        for base_url in (
+            "https://animemo.example/api",
+            "https://animemo.example/?tenant=one",
+            "https://animemo.example/#status",
+            "https://animemo.example:invalid",
+        ):
+            with self.subTest(base_url=base_url), self.assertRaises(ValueError):
+                BridgeConfig.from_values(base_url, "key", "secret")
+
+        config = BridgeConfig.from_values("https://animemo.example/", "key", "secret")
+        self.assertEqual(config.base_url, "https://animemo.example")
+
     async def test_query_and_body_are_signed_as_sent(self):
         seen = []
 

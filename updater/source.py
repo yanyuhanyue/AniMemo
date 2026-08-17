@@ -250,25 +250,21 @@ class GitHubReleaseSource:
 
     @staticmethod
     def _anonymous_gh_environment(root: Path) -> dict[str, str]:
-        environment = os.environ.copy()
-        for name in (
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-            "GH_ENTERPRISE_TOKEN",
-            "GITHUB_ENTERPRISE_TOKEN",
-            "GH_HOST",
-            "DOCKER_AUTH_CONFIG",
-            "REGISTRY_AUTH_FILE",
-        ):
-            environment.pop(name, None)
+        home = root / "home"
+        temporary = root / "tmp"
         gh_config = root / "gh"
         docker_config = root / "docker"
-        gh_config.mkdir(mode=0o700)
-        docker_config.mkdir(mode=0o700)
-        environment["GH_CONFIG_DIR"] = str(gh_config)
-        environment["DOCKER_CONFIG"] = str(docker_config)
-        environment["GH_PROMPT_DISABLED"] = "1"
-        return environment
+        for directory in (home, temporary, gh_config, docker_config):
+            directory.mkdir(mode=0o700)
+        return {
+            "HOME": str(home),
+            "TMPDIR": str(temporary),
+            "GH_CONFIG_DIR": str(gh_config),
+            "DOCKER_CONFIG": str(docker_config),
+            "GH_PROMPT_DISABLED": "1",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        }
 
     def _list_all(self, *, refresh: bool) -> list[dict[str, object]]:
         now = time.monotonic()

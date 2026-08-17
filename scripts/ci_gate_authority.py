@@ -137,16 +137,7 @@ RELEASE_JOB_GATES: dict[str, str | None] = {
     "stateful-upgrade": "run_release_stateful",
     "dr-rehearsal": "run_release_dr",
 }
-LEGACY_RELEASE_JOB_GATES: dict[str, str | None] = {
-    name: gate for name, gate in RELEASE_JOB_GATES.items() if name != "dr-rehearsal"
-}
 CURRENT_RELEASE_GRAPH_CONTRACT = "animemo.release-gate.jobs/v2"
-LEGACY_RELEASE_GRAPH_CONTRACT = "animemo.release-gate.jobs/v1"
-TRUSTED_REPOSITORY = "yanyuhanyue/AniMemo"
-TRUSTED_PRE_MERGE_WORKFLOW_REF = (
-    "yanyuhanyue/AniMemo/.github/workflows/pre-merge-full.yml@refs/heads/main"
-)
-TRUSTED_LEGACY_WORKFLOW_SHA = "8727aa97dc092d12e4a4abb15b85ce1f46d1020d"
 
 SUPPORTED_EVENTS = frozenset(
     {"push", "pull_request", "merge_group", "workflow_call", "workflow_dispatch"}
@@ -612,42 +603,13 @@ def _validate_job_matrix(
 
 def _release_graph_jobs(
     release_graph_contract: str,
-    *,
-    workflow_ref: str,
-    workflow_sha: str,
-    repository: str,
-    caller_sha: str,
 ) -> tuple[str, Mapping[str, str | None]]:
     if release_graph_contract == CURRENT_RELEASE_GRAPH_CONTRACT:
         return CURRENT_RELEASE_GRAPH_CONTRACT, RELEASE_JOB_GATES
-    if release_graph_contract:
-        raise GateAuthorityError(
-            f"unsupported release graph contract: {release_graph_contract!r}"
-        )
-
-    legacy_identity = {
-        "workflow_ref": workflow_ref,
-        "workflow_sha": workflow_sha,
-        "repository": repository,
-        "caller_sha": caller_sha,
-    }
-    expected_identity = {
-        "workflow_ref": TRUSTED_PRE_MERGE_WORKFLOW_REF,
-        "workflow_sha": TRUSTED_LEGACY_WORKFLOW_SHA,
-        "repository": TRUSTED_REPOSITORY,
-        "caller_sha": TRUSTED_LEGACY_WORKFLOW_SHA,
-    }
-    if legacy_identity == expected_identity:
-        return LEGACY_RELEASE_GRAPH_CONTRACT, LEGACY_RELEASE_JOB_GATES
-
-    mismatches = [
-        name
-        for name, expected in expected_identity.items()
-        if legacy_identity[name] != expected
-    ]
+    if not release_graph_contract:
+        raise GateAuthorityError("release graph contract is required")
     raise GateAuthorityError(
-        "release graph contract is required; authenticated legacy identity "
-        "did not match: " + ", ".join(mismatches)
+        f"unsupported release graph contract: {release_graph_contract!r}"
     )
 
 
@@ -657,10 +619,6 @@ def validate_gate_authority(
     workflow: str,
     event_name: str,
     release_graph_contract: str = "",
-    workflow_ref: str = "",
-    workflow_sha: str = "",
-    repository: str = "",
-    caller_sha: str = "",
 ) -> dict[str, object]:
     """Validate classifier identity and the exact selected/skipped workflow matrix."""
 
@@ -680,11 +638,7 @@ def validate_gate_authority(
         jobs = CI_JOB_GATES
     else:
         resolved_release_graph_contract, jobs = _release_graph_jobs(
-            release_graph_contract,
-            workflow_ref=workflow_ref,
-            workflow_sha=workflow_sha,
-            repository=repository,
-            caller_sha=caller_sha,
+            release_graph_contract
         )
     _exact_keys(needs, frozenset({"classify", *jobs}), label="NEEDS_JSON")
     (
@@ -746,10 +700,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             workflow=args.workflow,
             event_name=args.event_name,
             release_graph_contract=args.release_graph_contract,
-            workflow_ref=os.getenv("GITHUB_WORKFLOW_REF", ""),
-            workflow_sha=os.getenv("GITHUB_WORKFLOW_SHA", ""),
-            repository=os.getenv("GITHUB_REPOSITORY", ""),
-            caller_sha=os.getenv("GITHUB_SHA", ""),
         )
     except GateAuthorityError as error:
         print(

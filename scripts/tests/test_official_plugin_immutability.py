@@ -126,6 +126,29 @@ class OfficialPluginImmutabilityTests(unittest.TestCase):
         head = self._commit("unrelated")
         self.assertTrue(self._report(base, head).ok)
 
+    def test_missing_canonical_registry_has_no_legacy_fallback(self):
+        base = self._base()
+        canonical = (
+            self.repo / "backend" / "plugin_host" / "official_packages.py"
+        )
+        canonical.unlink()
+        legacy = (
+            self.repo
+            / "backend"
+            / "plugin_host"
+            / "management"
+            / "commands"
+            / "sync_official_plugins.py"
+        )
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("OFFICIAL_PLUGIN_SLUGS = ('alpha',)\n", encoding="utf-8")
+        head = self._commit("remove canonical registry")
+
+        with self.assertRaisesRegex(
+            GateInputError, "Canonical official plugin registry is unavailable"
+        ):
+            self._report(base, head)
+
     def test_changed_package_same_version_fails(self):
         base = self._base()
         self._write_plugin("alpha", backend="changed")
@@ -134,7 +157,7 @@ class OfficialPluginImmutabilityTests(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertEqual(report.violations[0].code, "immutable_content_changed")
 
-    def test_same_content_with_different_archive_compression_passes(self):
+    def test_same_content_uses_one_candidate_canonical_archive_builder(self):
         base = self._base()
         module = self.repo / "backend" / "plugin_host" / "official_packages.py"
         source = module.read_text(encoding="utf-8").replace("ZIP_DEFLATED", "ZIP_STORED")
@@ -145,7 +168,7 @@ class OfficialPluginImmutabilityTests(unittest.TestCase):
 
         self.assertTrue(report.ok)
         result = report.results[0]
-        self.assertNotEqual(result.base.package_sha, result.current.package_sha)
+        self.assertEqual(result.base.package_sha, result.current.package_sha)
         self.assertEqual(result.base.content_digest, result.current.content_digest)
 
     def test_changed_package_with_patch_bump_passes(self):
