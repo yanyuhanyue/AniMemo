@@ -1,0 +1,162 @@
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+change-template: "- $TITLE @$AUTHOR (#$NUMBER)"
+change-title-escapes: "\\<*_&"
+no-changes-template: "- 本周期没有可列入变更日志的合并请求。"
+
+categories:
+  - type: pre-exclude
+    when:
+      label: skip-changelog
+
+  - title: "🔒 安全与稳定性"
+    exclusive: true
+    when:
+      label: release/security
+
+  - title: "✨ 新增功能"
+    exclusive: true
+    semver-increment: minor
+    when:
+      label: release/feature
+
+  - title: "🐛 Bug 修复"
+    exclusive: true
+    when:
+      label: release/fix
+
+  - title: "🎨 界面与交互"
+    exclusive: true
+    when:
+      label: release/ui
+
+  - title: "💡 功能与体验优化"
+    exclusive: true
+    when:
+      label: release/improvement
+
+  - title: "🚀 性能与代码改进"
+    exclusive: true
+    when:
+      labels:
+        - release/performance
+        - release/refactor
+
+  - title: "🧱 部署与运维"
+    exclusive: true
+    when:
+      label: release/deployment
+
+  - title: "🧰 CI / 工程化"
+    exclusive: true
+    when:
+      label: release/ci
+
+  - title: "⬆️ 依赖更新"
+    exclusive: true
+    when:
+      label: release/dependencies
+
+  - title: "📝 文档"
+    exclusive: true
+    when:
+      label: release/docs
+
+  - title: "📦 其他变更"
+
+autolabeler:
+  - label: release/security
+    files:
+      - ".github/SECURITY.md"
+      - "backend/**/*security*.py"
+      - "backend/**/permissions.py"
+      - "durability/secret_envelope.py"
+      - "docs/security/**"
+      - "docs/security.md"
+    title:
+      - "/(?:security|安全|漏洞|加固)/i"
+
+  - label: release/feature
+    branch:
+      - "/^(?:feature|feat)\\/.+/"
+    title:
+      - "/^(?:feat|feature)(?:\\(.+\\))?!?:/i"
+      - "/(?:新增|新功能)/"
+
+  - label: release/fix
+    branch:
+      - "/^(?:fix|bugfix)\\/.+/"
+    title:
+      - "/^(?:fix|bugfix)(?:\\(.+\\))?!?:/i"
+      - "/(?:修复|Bug 修复)/i"
+
+  - label: release/ui
+    files:
+      - "src/**"
+      - "public/**"
+      - "index.html"
+      - "postcss.config.js"
+      - "tailwind.config.js"
+      - "vite.config.mjs"
+    title:
+      - "/(?:UI|界面|交互|样式)/i"
+
+  - label: release/improvement
+    title:
+      - "/^(?:improve|enhance)(?:\\(.+\\))?!?:/i"
+      - "/(?:体验优化|功能优化|改进)/"
+
+  - label: release/performance
+    title:
+      - "/^(?:perf|performance)(?:\\(.+\\))?!?:/i"
+      - "/(?:性能优化|性能改进)/"
+
+  - label: release/refactor
+    title:
+      - "/^refactor(?:\\(.+\\))?!?:/i"
+      - "/重构/"
+
+  - label: release/deployment
+    files:
+      - "deploy/**"
+      - "durability/**"
+      - "installer/**"
+      - "release/**"
+      - "updater/**"
+    title:
+      - "/(?:deploy|installer|updater|部署|安装|运维)/i"
+
+  - label: release/ci
+    files:
+      - ".github/workflows/**"
+      - "scripts/ci_*.py"
+      - "scripts/tests/test_ci_*.py"
+    title:
+      - "/^(?:ci|build)(?:\\(.+\\))?!?:/i"
+      - "/(?:CI|工程化)/"
+
+  - label: release/dependencies
+    files:
+      - ".github/dependabot.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "**/requirements.in"
+      - "**/requirements.txt"
+    title:
+      - "/^(?:deps|dependencies)(?:\\(.+\\))?!?:/i"
+      - "/(?:依赖更新|升级依赖)/"
+
+  - label: release/docs
+    files:
+      - "**/*.md"
+      - "docs/**"
+    title:
+      - "/^(?:docs|documentation)(?:\\(.+\\))?!?:/i"
+      - "/(?:文档|说明)/"
+
+template: |
+  本草稿由已合并的 Pull Request 自动汇总；发布前仍须通过 AniMemo 的 Release Gate。
+
+  $CHANGES
+
+  > 此页面是变更草稿，不代表 RC、Stable、部署或发布授权。

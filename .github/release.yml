@@ -3,24 +3,40 @@ changelog:
     labels:
       - duplicate
       - invalid
+      - skip-changelog
       - wontfix
   categories:
-    - title: "🚀 新功能"
+    - title: "🔒 安全与稳定性"
       labels:
-        - enhancement
+        - release/security
+    - title: "✨ 新增功能"
+      labels:
+        - release/feature
     - title: "🐛 Bug 修复"
       labels:
-        - bug
-    - title: "🏗 架构与基础设施"
+        - release/fix
+    - title: "🎨 界面与交互"
       labels:
-        - github_actions
-        - dependencies
-    - title: "🎨 Web / UI"
+        - release/ui
+    - title: "💡 功能与体验优化"
       labels:
-        - javascript
-    - title: "📚 文档"
+        - release/improvement
+    - title: "🚀 性能与代码改进"
       labels:
-        - documentation
-    - title: "其他变更"
+        - release/performance
+        - release/refactor
+    - title: "🧱 部署与运维"
+      labels:
+        - release/deployment
+    - title: "🧰 CI / 工程化"
+      labels:
+        - release/ci
+    - title: "⬆️ 依赖更新"
+      labels:
+        - release/dependencies
+    - title: "📝 文档"
+      labels:
+        - release/docs
+    - title: "📦 其他变更"
       labels:
         - "*"
