@@ -39,6 +39,19 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn('test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"', source)
         self.assertIn('test "$GITHUB_SHA" = "$current_main_sha"', source)
 
+    def test_pre_merge_workflow_keeps_dispatch_inputs_out_of_shell_source(self):
+        source = self.source("pre-merge-full.yml")
+        self.assertEqual(source.count("PR_NUMBER: ${{ inputs.pr_number }}"), 2)
+        self.assertIn("PR_NUMBER: ${{ steps.snapshot.outputs.pr_number }}", source)
+        self.assertIn("PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}", source)
+        for unsafe in (
+            'pulls/${{ inputs.pr_number }}',
+            '--pr-number "${{ inputs.pr_number }}"',
+            'PR #${{ inputs.pr_number }}',
+        ):
+            with self.subTest(unsafe=unsafe):
+                self.assertNotIn(unsafe, source)
+
     def test_pre_merge_workflow_publishes_pending_and_terminal_authority_status(self):
         source = self.source("pre-merge-full.yml")
         self.assertEqual(source.count("-f context=pre-merge-authority"), 2)

@@ -19,6 +19,41 @@ BRIDGE_ARCHIVE_NAME = "astrbot_plugin_animemo_bridge-0.1.3.zip"
 GITHUB_RUNNER_TEMP = ROOT.parents[1] / "_temp"
 
 
+def _is_link(path):
+    return path.is_symlink() or (
+        hasattr(path, "is_junction") and path.is_junction()
+    )
+
+
+def validate_source_tree(source_root=BRIDGE):
+    """Reject link traversal before any Bridge source file is read or copied."""
+    source_root = Path(source_root)
+    try:
+        root_metadata = source_root.lstat()
+    except OSError as error:
+        raise RuntimeError("Bridge source root is unavailable") from error
+    if _is_link(source_root) or not stat.S_ISDIR(root_metadata.st_mode):
+        raise RuntimeError("Bridge source root must be a real directory")
+
+    for current_root, directory_names, file_names in os.walk(
+        source_root,
+        followlinks=False,
+    ):
+        current = Path(current_root)
+        for name in directory_names:
+            candidate = current / name
+            metadata = candidate.lstat()
+            if _is_link(candidate) or not stat.S_ISDIR(metadata.st_mode):
+                raise RuntimeError("Bridge source tree must not contain links")
+        for name in file_names:
+            candidate = current / name
+            metadata = candidate.lstat()
+            if _is_link(candidate) or not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError(
+                    "Bridge source tree must contain only regular files"
+                )
+
+
 def version():
     match = re.search(r"^version:\s*(.+)$", (BRIDGE / "metadata.yaml").read_text(encoding="utf-8"), re.MULTILINE)
     return match.group(1).strip().strip('"\'') if match else "0.1.3"
@@ -64,6 +99,7 @@ def runner_output_target(environ=os.environ):
 
 
 def package(*, runner_output=False):
+    validate_source_tree()
     runpy.run_path(str(ROOT / "scripts" / "validate-astrbot-bridge.py"), run_name="__bridge_validator__")["validate"]()
     target = runner_output_target() if runner_output else canonical_output_target()
     with tempfile.TemporaryDirectory(prefix="astrbot-bridge-export-") as temp:

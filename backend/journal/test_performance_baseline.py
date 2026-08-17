@@ -8,6 +8,7 @@ from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from integrations.models import IntegrationConnection
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken
 
@@ -74,6 +75,22 @@ class PerformanceMeasurementContractTests(TestCase):
         probes, _total_pages = build_probe_context(seed_result)
 
         self.assertEqual(probes["auth_session"]().status_code, 200)
+
+    def test_seed_rotates_performance_integration_credentials(self):
+        first_result = seed_backend_performance_data("small")
+        first = IntegrationConnection.objects.get(
+            pk=first_result.integration_connection_id
+        )
+        first_key_id = first.key_id
+        first_secret = first.get_secret()
+
+        second_result = seed_backend_performance_data("small", reset=True)
+        second = IntegrationConnection.objects.get(
+            pk=second_result.integration_connection_id
+        )
+
+        self.assertNotEqual(second.key_id, first_key_id)
+        self.assertNotEqual(second.get_secret(), first_secret)
 
     def test_load_user_journeys_are_distinct_owned_read_fixtures(self):
         seed_backend_performance_data("small")

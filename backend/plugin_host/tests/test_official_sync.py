@@ -75,6 +75,23 @@ class OfficialPluginSyncTests(TestCase):
             self.assertTrue(archive.infolist())
             self.assertTrue(all(item.date_time == ZIP_TIMESTAMP for item in archive.infolist()))
 
+    def test_official_package_rejects_a_linked_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "official-plugin"
+            source.mkdir()
+            outside = Path(directory) / "manifest.json"
+            outside.write_text('{"id":"outside"}\n', encoding="utf-8")
+            linked = source / "manifest.json"
+            try:
+                linked.symlink_to(outside)
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314:
+                    self.skipTest("symlink creation is unavailable on this Windows host")
+                raise
+
+            with self.assertRaisesRegex(RuntimeError, "must not contain links"):
+                build_official_package(source)
+
     def test_canonical_content_identity_is_independent_of_archive_compression(self):
         source = Path(__file__).resolve().parents[3] / "plugins" / "watch-history-importer"
         archive_a = build_official_package(source)

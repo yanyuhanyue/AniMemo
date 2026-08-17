@@ -12,6 +12,7 @@ import argparse
 import concurrent.futures
 import dataclasses
 import http.cookiejar
+import ipaddress
 import json
 import os
 import random
@@ -149,6 +150,17 @@ def validate_target(base_url: str) -> str:
     hostname = parsed.hostname.rstrip(".").lower()
     if hostname in PRODUCTION_HOSTS or hostname.endswith((".animemo.cc", ".re-anime.cc")):
         raise HarnessConfigurationError("production AniMemo targets are forbidden")
+    try:
+        loopback = ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        loopback = hostname == "localhost"
+    reserved_test_host = hostname == "example.test" or hostname.endswith(
+        ".example.test"
+    )
+    if parsed.scheme == "http" and not (loopback or reserved_test_host):
+        raise HarnessConfigurationError(
+            "plain HTTP load targets must use loopback or the reserved example.test domain"
+        )
     if parsed.query or parsed.fragment:
         raise HarnessConfigurationError("base URL must not contain query or fragment components")
     normalized_path = parsed.path.rstrip("/")

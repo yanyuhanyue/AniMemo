@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import stat
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
@@ -8,6 +10,42 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 OFFICIAL_PLUGIN_SLUGS = ("watch-history-importer",)
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 CONTENT_IDENTITY_VERSION = 1
+
+
+def _is_link(path):
+    return path.is_symlink() or (
+        hasattr(path, "is_junction") and path.is_junction()
+    )
+
+
+def _validate_source_tree(source_root):
+    source_root = Path(source_root)
+    try:
+        root_metadata = source_root.lstat()
+    except OSError as error:
+        raise RuntimeError("Official plugin source root is unavailable") from error
+    if _is_link(source_root) or not stat.S_ISDIR(root_metadata.st_mode):
+        raise RuntimeError("Official plugin source root must be a real directory")
+
+    for current_root, directory_names, file_names in os.walk(
+        source_root,
+        followlinks=False,
+    ):
+        current = Path(current_root)
+        for name in directory_names:
+            candidate = current / name
+            metadata = candidate.lstat()
+            if _is_link(candidate) or not stat.S_ISDIR(metadata.st_mode):
+                raise RuntimeError(
+                    "Official plugin source tree must not contain links or special files"
+                )
+        for name in file_names:
+            candidate = current / name
+            metadata = candidate.lstat()
+            if _is_link(candidate) or not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError(
+                    "Official plugin source tree must not contain links or special files"
+                )
 
 
 def _zip_info(name):
@@ -20,6 +58,7 @@ def _zip_info(name):
 
 def collect_official_package_files(source_root):
     source_root = Path(source_root)
+    _validate_source_tree(source_root)
     paths = [source_root / "manifest.json"]
     frontend = source_root / "frontend"
     for name in ("plugin.js", "plugin.css"):

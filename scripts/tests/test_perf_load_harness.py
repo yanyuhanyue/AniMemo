@@ -84,6 +84,8 @@ class PerformanceLoadHarnessTests(unittest.TestCase):
             "https://media.animemo.cc/api",
             "https://re-anime.cc",
             "http://45.207.221.83:8088",
+            "http://10.0.0.7:8088",
+            "http://perf.internal:8088",
             "https://user:password@example.test",
             "ftp://localhost",
             "localhost:8088",
@@ -92,6 +94,10 @@ class PerformanceLoadHarnessTests(unittest.TestCase):
                 validate_target(url)
 
         self.assertEqual(validate_target("http://127.0.0.1:8088/"), "http://127.0.0.1:8088")
+        self.assertEqual(
+            validate_target("http://perf.example.test:8088/"),
+            "http://perf.example.test:8088",
+        )
         self.assertEqual(validate_target("https://animemo-perf.example.test"), "https://animemo-perf.example.test")
 
     def test_credentials_are_explicit_and_secrets_come_from_environment(self):
