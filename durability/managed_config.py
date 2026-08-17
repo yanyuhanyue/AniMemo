@@ -477,10 +477,15 @@ def _parse_payload(payload: object) -> ManagedConfig:
     if len(django_secret) < 50:
         _fail("CONFIG_APPLICATION_INVALID")
     try:
-        decoded_key = base64.urlsafe_b64decode(credential_key.encode("ascii"))
+        decoded_key = base64.b64decode(
+            credential_key.encode("ascii"), altchars=b"-_", validate=True
+        )
     except (UnicodeEncodeError, ValueError):
         _fail("CONFIG_APPLICATION_INVALID")
-    if len(decoded_key) != 32:
+    if (
+        len(decoded_key) != 32
+        or base64.urlsafe_b64encode(decoded_key).decode("ascii") != credential_key
+    ):
         _fail("CONFIG_APPLICATION_INVALID")
     media_origin_raw = application_raw["mediaPublicOrigin"]
     media_origin = (

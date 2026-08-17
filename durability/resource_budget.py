@@ -83,6 +83,20 @@ class CopyByteCounter:
         self.copied += count
 
 
+def _write_all(target: BinaryIO, chunk: bytes) -> None:
+    remaining = memoryview(chunk)
+    while remaining:
+        written = target.write(remaining)
+        if (
+            isinstance(written, bool)
+            or not isinstance(written, int)
+            or written <= 0
+            or written > len(remaining)
+        ):
+            raise OSError("TARGET_WRITE_INCOMPLETE")
+        remaining = remaining[written:]
+
+
 def preflight_copy_sizes(
     sizes: Iterable[int],
     *,
@@ -143,7 +157,7 @@ def bounded_copy(
         if copied > maximum_member_bytes:
             raise ResourceLimitExceeded(member_reason)
         counter.consume(len(chunk))
-        target.write(chunk)
+        _write_all(target, chunk)
 
     if expected_size is not None and copied != expected_size:
         raise ResourceLimitExceeded(ResourceLimitReason.DECLARED_SIZE_MISMATCH)

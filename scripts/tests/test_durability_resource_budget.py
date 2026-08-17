@@ -80,6 +80,48 @@ class ResourceBudgetTests(unittest.TestCase):
 
         self.assertLessEqual(len(target.getvalue()), 6)
 
+    def test_partial_target_writes_are_completed_without_silent_truncation(self) -> None:
+        class PartialWriter:
+            def __init__(self) -> None:
+                self.output = BytesIO()
+
+            def write(self, chunk) -> int:
+                accepted = min(2, len(chunk))
+                return self.output.write(bytes(chunk[:accepted]))
+
+        target = PartialWriter()
+        counter = CopyByteCounter(self.budget.maximum_total_copied_bytes)
+
+        copied = bounded_copy(
+            BytesIO(b"complete"),
+            target,  # type: ignore[arg-type]
+            counter=counter,
+            maximum_member_bytes=self.budget.maximum_filesystem_member_bytes,
+            expected_size=8,
+            chunk_bytes=4,
+        )
+
+        self.assertEqual(copied, 8)
+        self.assertEqual(counter.copied, 8)
+        self.assertEqual(target.output.getvalue(), b"complete")
+
+    def test_zero_progress_target_write_fails_closed(self) -> None:
+        class StalledWriter:
+            @staticmethod
+            def write(_chunk) -> int:
+                return 0
+
+        with self.assertRaisesRegex(OSError, "TARGET_WRITE_INCOMPLETE"):
+            bounded_copy(
+                BytesIO(b"data"),
+                StalledWriter(),  # type: ignore[arg-type]
+                counter=CopyByteCounter(
+                    self.budget.maximum_total_copied_bytes
+                ),
+                maximum_member_bytes=self.budget.maximum_filesystem_member_bytes,
+                expected_size=4,
+            )
+
     def test_actual_single_member_and_total_stream_limits_fail_closed(self) -> None:
         with self.assertRaisesRegex(
             ResourceLimitExceeded,

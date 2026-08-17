@@ -107,6 +107,25 @@ class ManagedConfigSchemaTests(unittest.TestCase):
             with self.subTest(raw=raw[:40]), self.assertRaises(ManagedConfigError):
                 parse_managed_config(raw)
 
+    def test_credential_encryption_key_must_be_canonical_urlsafe_base64(self) -> None:
+        invalid_character = payload()
+        invalid_character["application"]["credentialEncryptionKey"] = (  # type: ignore[index]
+            CREDENTIAL_KEY + "!"
+        )
+        missing_padding = payload()
+        missing_padding["application"]["credentialEncryptionKey"] = (  # type: ignore[index]
+            CREDENTIAL_KEY.rstrip("=")
+        )
+
+        for candidate in (invalid_character, missing_padding):
+            with (
+                self.subTest(candidate=candidate),
+                self.assertRaisesRegex(
+                    ManagedConfigError, "CONFIG_APPLICATION_INVALID"
+                ),
+            ):
+                parse_managed_config(encoded(candidate))
+
     def test_origin_listen_and_direct_access_require_explicit_opt_in(self) -> None:
         wildcard = payload()
         wildcard["publicOrigin"] = "https://*.example.com"
