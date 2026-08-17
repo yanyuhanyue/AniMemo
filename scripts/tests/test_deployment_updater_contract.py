@@ -179,13 +179,17 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             '"--predicate-type"',
         ):
             self.assertIn(required_option, source)
-        for credential in (
-            '"GH_TOKEN"',
-            '"GITHUB_TOKEN"',
+        for isolated_environment_key in (
+            '"HOME"',
+            '"TMPDIR"',
             '"GH_CONFIG_DIR"',
             '"DOCKER_CONFIG"',
+            '"GH_PROMPT_DISABLED"',
         ):
-            self.assertIn(credential, source)
+            self.assertIn(isolated_environment_key, source)
+        self.assertIn('authenticated_environment["GH_TOKEN"] = token', source)
+        self.assertNotIn('"GITHUB_TOKEN"', source)
+        self.assertNotIn("os.environ.copy()", source)
 
     def test_agent_switch_is_scoped_and_plugin_compatibility_uses_live_state(self):
         deployment = (ROOT / "updater/deployment.py").read_text(encoding="utf-8")
