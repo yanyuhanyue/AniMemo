@@ -164,8 +164,62 @@ jobs:
       - name: Install Chromium for critical browser regressions
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
-        run: npx playwright install --with-deps chromium
-      - run: npm run qa:critical
+        run: |
+          set -euo pipefail
+          stage_start="$(date +%s)"
+          echo "PROVISION_STAGE=ENVIRONMENT STATUS=START"
+          echo "PLAYWRIGHT_VERSION=$(npx playwright --version)"
+          if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ] && [ -d "${PLAYWRIGHT_BROWSERS_PATH}" ]; then
+            echo "BROWSER_CACHE_DIRECTORY_PRESENT=YES"
+          else
+            echo "BROWSER_CACHE_DIRECTORY_PRESENT=NO"
+          fi
+          echo "PROVISION_STAGE=ENVIRONMENT STATUS=PASS ELAPSED_SECONDS=$(( $(date +%s) - stage_start ))"
+
+          stage_start="$(date +%s)"
+          echo "PROVISION_STAGE=OS_DEPENDENCIES STATUS=START"
+          if timeout --foreground --signal=TERM --kill-after=30s 8m npx playwright install-deps chromium; then
+            stage_status=0
+          else
+            stage_status=$?
+          fi
+          stage_elapsed=$(( $(date +%s) - stage_start ))
+          if [ "$stage_status" -eq 124 ]; then
+            stage_class=OS_DEPENDENCY_TIMEOUT
+          elif [ "$stage_status" -ne 0 ]; then
+            stage_class=OS_DEPENDENCY_FAILURE
+          else
+            stage_class=PASS
+          fi
+          echo "PROVISION_STAGE=OS_DEPENDENCIES STATUS=$stage_class EXIT_CODE=$stage_status ELAPSED_SECONDS=$stage_elapsed"
+          if [ "$stage_status" -ne 0 ]; then exit "$stage_status"; fi
+
+          stage_start="$(date +%s)"
+          echo "PROVISION_STAGE=BROWSER_DOWNLOAD STATUS=START"
+          if timeout --foreground --signal=TERM --kill-after=30s 8m npx playwright install chromium; then
+            stage_status=0
+          else
+            stage_status=$?
+          fi
+          stage_elapsed=$(( $(date +%s) - stage_start ))
+          if [ "$stage_status" -eq 124 ]; then
+            stage_class=BROWSER_DOWNLOAD_TIMEOUT
+          elif [ "$stage_status" -ne 0 ]; then
+            stage_class=BROWSER_DOWNLOAD_FAILURE
+          else
+            stage_class=PASS
+          fi
+          echo "PROVISION_STAGE=BROWSER_DOWNLOAD STATUS=$stage_class EXIT_CODE=$stage_status ELAPSED_SECONDS=$stage_elapsed"
+          if [ "$stage_status" -ne 0 ]; then exit "$stage_status"; fi
+
+          echo "PROVISION_STAGE=EXECUTABLE_VERIFICATION STATUS=START"
+          if node -e 'const fs=require("fs"); const {chromium}=require("playwright"); process.exit(fs.existsSync(chromium.executablePath()) ? 0 : 1)'; then
+            echo "PROVISION_STAGE=EXECUTABLE_VERIFICATION STATUS=PASS"
+          else
+            echo "PROVISION_STAGE=EXECUTABLE_VERIFICATION STATUS=EXECUTABLE_MISSING"
+            exit 1
+          fi
+      - run: timeout --foreground --signal=TERM --kill-after=30s 8m npm run qa:critical
 
   backend:
     name: backend
