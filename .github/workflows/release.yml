@@ -605,11 +605,14 @@ jobs:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           TARGET_VERSION: ${{ needs.preflight.outputs.target_version }}
           PREVIOUS_STABLE: ${{ needs.preflight.outputs.previous_stable }}
+          UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$PREVIOUS_STABLE"
-          release_notes_base="$(git rev-parse "$PREVIOUS_STABLE^{commit}")"
+          release_notes_base="$UPGRADE_BASE_SHA"
+          if [[ -n "$PREVIOUS_STABLE" ]]; then
+            release_notes_base="$(git rev-parse "$PREVIOUS_STABLE^{commit}")"
+          fi
           git merge-base --is-ancestor "$release_notes_base" "$CANDIDATE_SHA"
           mkdir -p release-output
           python scripts/release_notes_snapshot.py \
