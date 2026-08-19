@@ -30,6 +30,7 @@ class InstallBootstrapTests(unittest.TestCase):
 uname() { printf 'Linux\\n'; }
 id() { printf '0\\n'; }
 gh() { return 1; }
+docker() { return 0; }
 python3() { return 97; }
 tar() { return 97; }
 sha256sum() { return 97; }
@@ -159,6 +160,22 @@ printf '%s' "$ANIMEMO_TEST_CURL_BODY" >"$destination"
                 check=False,
             )
         self.assertNotEqual(result.returncode, 0)
+
+    def test_fresh_bootstrap_owns_only_fixed_ubuntu_runtime_dependencies(self):
+        source = BOOTSTRAP.read_text(encoding="utf-8")
+        self.assertIn("install_runtime_dependencies()", source)
+        self.assertIn("grep -Eq '^ID=\"?ubuntu\"?$' /etc/os-release", source)
+        for package in (
+            "docker.io",
+            "docker-compose-v2",
+            "gh",
+            "python3-venv",
+        ):
+            self.assertIn(package, source)
+        self.assertIn("systemctl enable --now docker", source)
+        self.assertIn("docker info", source)
+        self.assertNotIn("get.docker.com", source)
+        self.assertNotIn("curl |", source)
 
 
 if __name__ == "__main__":

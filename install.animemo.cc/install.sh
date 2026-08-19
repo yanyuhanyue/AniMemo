@@ -25,6 +25,25 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+install_runtime_dependencies() {
+  command -v apt-get >/dev/null 2>&1 || fail "supported package manager is unavailable" 69
+  [ -r /etc/os-release ] || fail "supported operating system identity is unavailable" 69
+  grep -Eq '^ID="?ubuntu"?$' /etc/os-release || fail "unsupported operating system" 69
+  apt-get update || fail "runtime dependency catalog refresh failed" 69
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    ca-certificates \
+    coreutils \
+    curl \
+    docker.io \
+    docker-compose-v2 \
+    gh \
+    python3 \
+    python3-venv \
+    tar \
+    || fail "runtime dependency installation failed" 69
+  systemctl enable --now docker || fail "Docker runtime activation failed" 69
+}
+
 main() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -79,18 +98,31 @@ case "$PUBLIC_ORIGIN" in
   *) fail "public origin must use https" 2 ;;
 esac
 
-for tool in gh python3 tar sha256sum; do
+dependencies_missing=0
+for tool in curl docker gh python3 tar sha256sum; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    dependencies_missing=1
+  fi
+done
+if [ "$dependencies_missing" -eq 1 ]; then
+  install_runtime_dependencies
+fi
+
+for tool in curl docker gh python3 tar sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool" 69
 done
-if [ "$SOURCE" = "official-mirror" ]; then
-  command -v curl >/dev/null 2>&1 || fail "required tool is unavailable: curl" 69
-fi
+docker info >/dev/null 2>&1 || fail "Docker runtime is unavailable" 69
 
 STAGING=$(mktemp -d "${TMPDIR:-/tmp}/animemo-bootstrap.XXXXXX") || fail "temporary directory creation failed" 73
 chmod 700 "$STAGING" || fail "temporary directory permission failed" 73
 
 if [ -z "$VERSION" ]; then
-  VERSION=$(gh api "repos/$REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null) || fail "GitHub Release discovery failed" 69
+  VERSION=$(curl -fsSL --proto '=https' --tlsv1.2 --max-redirs 0 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'User-Agent: AniMemo-Installer-Bootstrap' \
+    "https://api.github.com/repos/$REPOSITORY/releases/latest" \
+    | python3 -c 'import json,sys; value=json.load(sys.stdin).get("tag_name"); print(value if isinstance(value, str) else "")') \
+    || fail "GitHub Release discovery failed" 69
 fi
 case "$VERSION" in
   v[0-9]*.[0-9]*.[0-9]*) ;;
