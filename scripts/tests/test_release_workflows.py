@@ -417,6 +417,22 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("name: performance-long-operation-capacity", source)
         self.assertIn("path: artifacts/capacity", source)
 
+    def test_hosted_browser_gates_avoid_apt_and_launch_the_downloaded_chromium(self):
+        for name in ("ci.yml", "performance.yml"):
+            with self.subTest(workflow=name):
+                source = (ROOT / ".github" / "workflows" / name).read_text(
+                    encoding="utf-8"
+                )
+                self.assertNotIn("playwright install-deps", source)
+                self.assertNotIn("playwright install --with-deps", source)
+                self.assertIn("playwright install chromium", source)
+                self.assertIn("chromium.launch", source)
+                self.assertIn("BROWSER_RUNTIME_VERIFICATION", source)
+                self.assertLess(
+                    source.index("playwright install chromium"),
+                    source.index("chromium.launch"),
+                )
+
     def test_fresh_docker_gates_complete_the_real_one_time_setup_api(self):
         release_gate = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8")
         performance = (ROOT / ".github" / "workflows" / "performance.yml").read_text(encoding="utf-8")

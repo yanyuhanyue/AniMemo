@@ -45,7 +45,14 @@ jobs:
       - name: Install Chromium for the production browser probe
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
-        run: npx playwright install --with-deps chromium
+        run: |
+          set -euo pipefail
+          echo "PROVISION_STAGE=BROWSER_DOWNLOAD STATUS=START"
+          timeout --foreground --signal=TERM --kill-after=30s 8m npx playwright install chromium
+          echo "PROVISION_STAGE=BROWSER_DOWNLOAD STATUS=PASS"
+          echo "PROVISION_STAGE=BROWSER_RUNTIME_VERIFICATION STATUS=START"
+          timeout --foreground --signal=TERM --kill-after=15s 2m node -e '(async()=>{const {chromium}=require("playwright");const browser=await chromium.launch({headless:true});await browser.close();})().catch(error=>{console.error(error);process.exit(1);})'
+          echo "PROVISION_STAGE=BROWSER_RUNTIME_VERIFICATION STATUS=PASS"
       - name: Run deterministic frontend performance probe
         env:
           FRONTEND_PERF_COMMIT: ${{ inputs.candidate_sha }}

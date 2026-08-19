@@ -177,24 +177,6 @@ jobs:
           echo "PROVISION_STAGE=ENVIRONMENT STATUS=PASS ELAPSED_SECONDS=$(( $(date +%s) - stage_start ))"
 
           stage_start="$(date +%s)"
-          echo "PROVISION_STAGE=OS_DEPENDENCIES STATUS=START"
-          if timeout --foreground --signal=TERM --kill-after=30s 8m npx playwright install-deps chromium; then
-            stage_status=0
-          else
-            stage_status=$?
-          fi
-          stage_elapsed=$(( $(date +%s) - stage_start ))
-          if [ "$stage_status" -eq 124 ]; then
-            stage_class=OS_DEPENDENCY_TIMEOUT
-          elif [ "$stage_status" -ne 0 ]; then
-            stage_class=OS_DEPENDENCY_FAILURE
-          else
-            stage_class=PASS
-          fi
-          echo "PROVISION_STAGE=OS_DEPENDENCIES STATUS=$stage_class EXIT_CODE=$stage_status ELAPSED_SECONDS=$stage_elapsed"
-          if [ "$stage_status" -ne 0 ]; then exit "$stage_status"; fi
-
-          stage_start="$(date +%s)"
           echo "PROVISION_STAGE=BROWSER_DOWNLOAD STATUS=START"
           if timeout --foreground --signal=TERM --kill-after=30s 8m npx playwright install chromium; then
             stage_status=0
@@ -217,6 +199,14 @@ jobs:
             echo "PROVISION_STAGE=EXECUTABLE_VERIFICATION STATUS=PASS"
           else
             echo "PROVISION_STAGE=EXECUTABLE_VERIFICATION STATUS=EXECUTABLE_MISSING"
+            exit 1
+          fi
+
+          echo "PROVISION_STAGE=BROWSER_RUNTIME_VERIFICATION STATUS=START"
+          if timeout --foreground --signal=TERM --kill-after=15s 2m node -e '(async()=>{const {chromium}=require("playwright");const browser=await chromium.launch({headless:true});await browser.close();})().catch(error=>{console.error(error);process.exit(1);})'; then
+            echo "PROVISION_STAGE=BROWSER_RUNTIME_VERIFICATION STATUS=PASS"
+          else
+            echo "PROVISION_STAGE=BROWSER_RUNTIME_VERIFICATION STATUS=LAUNCH_FAILURE"
             exit 1
           fi
       - run: timeout --foreground --signal=TERM --kill-after=30s 8m npm run qa:critical
