@@ -45,8 +45,13 @@ def _validate_test_namespace_owner(
 def authority_test_namespace(root: Path):
     """Use a current-UID namespace without adding a production bypass."""
 
+    root = Path(root)
+    root.chmod(0o700)
+    for item in root.iterdir():
+        if item.is_file() and not item.is_symlink():
+            item.chmod(0o600)
     with (
-        mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", Path(root)),
+        mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", root),
         mock.patch(
             "installer.bootstrap._validate_mode_owner",
             side_effect=_validate_test_namespace_owner,
