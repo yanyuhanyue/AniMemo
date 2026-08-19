@@ -622,6 +622,21 @@ class OfflineDurableStateTests(unittest.TestCase):
 
 
 class PretrustedTrustMaterialTests(unittest.TestCase):
+    @unittest.skipUnless(
+        os.name == "posix" and os.geteuid() != 0,
+        "仅验证 POSIX 非 root 对生产信任目录的拒绝边界",
+    )
+    def test_production_loader_rejects_current_uid_pretrust_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "pretrusted-v1"
+            _pretrusted_material_fixture(root)
+
+            with self.assertRaisesRegex(
+                RequestRejected,
+                "生产预置信任目录不是 root 独占写入",
+            ):
+                PretrustedTrustMaterial.load(root)
+
     def test_closed_pretrusted_material_loads_with_exact_profile_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "pretrusted-v1"

@@ -322,8 +322,9 @@ class InstallerRuntimeTests(unittest.TestCase):
     def test_local_bundle_requires_exact_version_payload_and_release_attestation(
         self,
     ) -> None:
-        payload = Path("C:/offline/payload.tar")
-        sidecar = Path("C:/offline/release-attestation.sigstore.json")
+        offline_root = Path(tempfile.gettempdir()).resolve() / "animemo-offline"
+        payload = offline_root / "payload.tar"
+        sidecar = offline_root / "release-attestation.sigstore.json"
         request = InstallRequest(
             mode=InstallerMode.FRESH,
             selector=ReleaseSelector(version="v1.1.0"),

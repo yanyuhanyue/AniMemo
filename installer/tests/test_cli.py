@@ -152,8 +152,9 @@ class InstallerCliTests(unittest.TestCase):
             transport_source=InstallTransportSource.LOCAL_BUNDLE,
             transport_policy_identity=policy.identity,
         )
-        payload = Path("C:/offline/payload.tar")
-        sidecar = Path("C:/offline/release-attestation.sigstore.json")
+        offline_root = Path(tempfile.gettempdir()).resolve() / "animemo-offline"
+        payload = offline_root / "payload.tar"
+        sidecar = offline_root / "release-attestation.sigstore.json"
         output = io.StringIO()
         with (
             mock.patch(
