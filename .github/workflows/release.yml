@@ -63,6 +63,7 @@ jobs:
     outputs:
       target_version: ${{ steps.version.outputs.target_version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
+      previous_stable: ${{ steps.previous.outputs.previous_stable }}
       created_at: ${{ steps.identity.outputs.created_at }}
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
     steps:
@@ -141,6 +142,17 @@ jobs:
             --bump "$VERSION_BUMP" \
             --channel "$RELEASE_CHANNEL" \
             --target-version-override "$TARGET_VERSION_OVERRIDE" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Resolve the exact previous Stable notes boundary
+        id: previous
+        env:
+          TARGET_VERSION: ${{ steps.version.outputs.target_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag --list 'v*' --sort=version:refname > "$RUNNER_TEMP/tags.txt"
+          python -m release.cli previous-stable \
+            --tags-file "$RUNNER_TEMP/tags.txt" --target "$TARGET_VERSION" \
             --github-output "$GITHUB_OUTPUT"
       - name: Reject existing tag or GitHub Release
         env:
@@ -466,6 +478,14 @@ jobs:
           test -f "$evidence_file"
           platform_file="$RUNNER_TEMP/qualification/platform-qualification.json"
           test -f "$platform_file"
+          notes_file="$RUNNER_TEMP/qualification/release-notes.json"
+          notes_markdown="$RUNNER_TEMP/qualification/release-notes.md"
+          test -f "$notes_file"
+          test -f "$notes_markdown"
+          notes_identity="$(jq -r '.identity // empty' "$notes_file")"
+          notes_markdown_sha256="sha256:$(sha256sum "$notes_markdown" | awk '{print $1}')"
+          test "$(jq -r '.release_notes.snapshot_identity // empty' "$evidence_file")" = "$notes_identity"
+          test "$(jq -r '.release_notes.markdown_sha256 // empty' "$evidence_file")" = "$notes_markdown_sha256"
           python scripts/platform_qualification.py verify \
             --input "$platform_file" \
             --candidate-sha "${{ needs.preflight.outputs.candidate_sha }}" \
@@ -495,21 +515,32 @@ jobs:
           export QUALIFICATION_ARCHIVE_SHA256="$(jq -r '.digest' "$RUNNER_TEMP/qualification-metadata-artifact.json")"
           export QUALIFICATION_WORKFLOW_REF="$(cat "$RUNNER_TEMP/qualification-workflow-ref.txt")"
           export QUALIFICATION_WORKFLOW_SHA="$(cat "$RUNNER_TEMP/qualification-workflow-sha.txt")"
+          export RELEASE_NOTES_IDENTITY="$(jq -r '.identity' "$RUNNER_TEMP/qualification/release-notes.json")"
+          export RELEASE_NOTES_MARKDOWN_SHA256="sha256:$(sha256sum "$RUNNER_TEMP/qualification/release-notes.md" | awk '{print $1}')"
           python scripts/release_authority.py
-      - name: Stage the validated platform qualification for Phase B material production
+      - name: Stage the validated platform and Release Notes for Phase B production
         if: ${{ inputs.operation == 'publish' }}
         shell: bash
         run: |
           set -euo pipefail
-          install -d -m 0700 validated-platform-qualification
+          install -d -m 0700 validated-release-input
           install -m 0600 \
             "$RUNNER_TEMP/qualification/platform-qualification.json" \
-            validated-platform-qualification/platform-qualification.json
+            validated-release-input/platform-qualification.json
+          install -m 0600 \
+            "$RUNNER_TEMP/qualification/release-notes.json" \
+            validated-release-input/release-notes.json
+          install -m 0600 \
+            "$RUNNER_TEMP/qualification/release-notes.md" \
+            validated-release-input/release-notes.md
+          install -m 0600 \
+            "$RUNNER_TEMP/qualification/release-qualification-$QUALIFICATION_RUN_ID.json" \
+            validated-release-input/release-qualification.json
       - uses: actions/upload-artifact@v4
         if: ${{ inputs.operation == 'publish' }}
         with:
           name: validated-platform-qualification-${{ github.run_id }}
-          path: validated-platform-qualification/platform-qualification.json
+          path: validated-release-input/
           if-no-files-found: error
           retention-days: 1
 
@@ -520,6 +551,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -538,6 +570,30 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
+      - name: Freeze deterministic PR metadata and render qualified Release Notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          TARGET_VERSION: ${{ needs.preflight.outputs.target_version }}
+          PREVIOUS_STABLE: ${{ needs.preflight.outputs.previous_stable }}
+          UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-output
+          python scripts/release_notes_snapshot.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --range-start "$UPGRADE_BASE_SHA" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --previous-stable "$PREVIOUS_STABLE" \
+            --release-tag "$RELEASE_TAG" \
+            --target-version "$TARGET_VERSION" \
+            --channel "${{ inputs.channel }}" \
+            --supported-os "Ubuntu 24.04 LTS" \
+            --output-input release-output/release-notes-input.json \
+            --output-json release-output/release-notes.json \
+            --output-markdown release-output/release-notes.md
       - uses: actions/download-artifact@v4
         with:
           name: platform-qualification-${{ github.run_id }}
@@ -686,6 +742,10 @@ jobs:
         with:
           name: platform-qualification-${{ github.run_id }}
           path: platform-qualification-input
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dry-run-${{ needs.preflight.outputs.release_tag }}
+          path: release-dry-run-input
       - name: Generate qualification evidence after complete Phase A
         env:
           OPERATION: qualify
@@ -702,9 +762,14 @@ jobs:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           CREATED_AT: ${{ needs.preflight.outputs.created_at }}
           QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/release-qualification-${{ github.run_id }}.json
+          RELEASE_NOTES_IDENTITY_FILE: release-dry-run-input/release-notes.json
+          RELEASE_NOTES_MARKDOWN_FILE: release-dry-run-input/release-notes.md
         shell: bash
         run: |
           set -euo pipefail
+          export RELEASE_NOTES_IDENTITY="$(jq -r '.identity // empty' "$RELEASE_NOTES_IDENTITY_FILE")"
+          export RELEASE_NOTES_MARKDOWN_SHA256="sha256:$(sha256sum "$RELEASE_NOTES_MARKDOWN_FILE" | awk '{print $1}')"
+          [[ "$RELEASE_NOTES_IDENTITY" =~ ^sha256:[0-9a-f]{64}$ ]]
           python scripts/release_authority.py
           mkdir -p release-qualification
           cp "$RUNNER_TEMP/release-qualification-${GITHUB_RUN_ID}.json" \
@@ -717,6 +782,10 @@ jobs:
             --workflow-path .github/workflows/release.yml
           cp platform-qualification-input/platform-qualification.json \
             release-qualification/platform-qualification.json
+          cp release-dry-run-input/release-notes.json \
+            release-qualification/release-notes.json
+          cp release-dry-run-input/release-notes.md \
+            release-qualification/release-notes.md
       - uses: actions/upload-artifact@v4
         with:
           name: release-qualification-${{ github.run_id }}
@@ -760,6 +829,16 @@ jobs:
           install -m 0644 \
             validated-platform-qualification-input/platform-qualification.json \
             release/platform-qualification.json
+          install -d -m 0700 release-output
+          install -m 0600 \
+            validated-platform-qualification-input/release-notes.json \
+            release-output/release-notes.json
+          install -m 0600 \
+            validated-platform-qualification-input/release-notes.md \
+            release-output/release-notes.md
+          install -m 0600 \
+            validated-platform-qualification-input/release-qualification.json \
+            release-output/release-qualification.json
       - name: Recheck immutable release identity immediately before publishing
         env:
           GH_TOKEN: ${{ github.token }}
@@ -948,7 +1027,26 @@ jobs:
           gh attestation verify release-output/installer-materials.tar \
             --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-digest "$GITHUB_SHA"
-      - name: Create immutable tag and GitHub Pre-release
+      - name: Generate the closed publication plan without mutation
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          API_DIGEST: ${{ steps.published.outputs.api_digest }}
+          WEB_DIGEST: ${{ steps.published.outputs.web_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m release.cli plan-publication-files \
+            --repository "$GITHUB_REPOSITORY" \
+            --channel "${{ inputs.channel }}" \
+            --tag "$RELEASE_TAG" --commit "$GITHUB_SHA" \
+            --qualification release-output/release-qualification.json \
+            --release-notes release-output/release-notes.json \
+            --release-notes-markdown release-output/release-notes.md \
+            --asset-directory release-output \
+            --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
+            --output release-output/publication-plan.json
+          test "$(jq -r '.external_mutation_mode' release-output/publication-plan.json)" = "PLAN_ONLY"
+      - name: Create the immutable annotated RC tag
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
@@ -959,7 +1057,99 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git tag --annotate "$RELEASE_TAG" "$GITHUB_SHA" --message "AniMemo $RELEASE_TAG"
           git push origin "refs/tags/$RELEASE_TAG"
+      - name: Create an unpublished GitHub Draft Pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
           gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft --prerelease --latest=false \
+            --title "AniMemo $RELEASE_TAG" --notes-file release-output/release-notes.md
+      - name: Upload and read back the complete Draft asset set
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
             release-output/release-manifest.json release-output/deployment-contract.json \
             release-output/installer-materials.tar release-output/checksums.txt \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false --generate-notes
+            --repo "$GITHUB_REPOSITORY"
+          rm -rf "$RUNNER_TEMP/draft-readback"
+          mkdir -p "$RUNNER_TEMP/draft-readback"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern release-manifest.json --pattern deployment-contract.json \
+            --pattern installer-materials.tar --pattern checksums.txt \
+            --dir "$RUNNER_TEMP/draft-readback"
+          target="$(git rev-list -n 1 "$RELEASE_TAG")"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            | jq --arg target "$target" \
+              '{id,tag:.tag_name,target:$target,draft,prerelease,body,assets:[.assets[]|{name,size,digest}]}' \
+              > "$RUNNER_TEMP/draft-metadata.json"
+          python scripts/release_publication.py verify-draft \
+            --plan release-output/publication-plan.json \
+            --metadata "$RUNNER_TEMP/draft-metadata.json" \
+            --download-directory "$RUNNER_TEMP/draft-readback" \
+            --notes-file release-output/release-notes.md
+      - name: Publish only the fully verified Draft Pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --draft=false --prerelease --latest=false
+      - name: Verify the public RC without authenticated asset transport
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          API_DIGEST: ${{ steps.published.outputs.api_digest }}
+          WEB_DIGEST: ${{ steps.published.outputs.web_digest }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/public-readback"
+          mkdir -p "$RUNNER_TEMP/public-readback"
+          public_api="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+          env -u GH_TOKEN curl --fail --location --silent --show-error \
+            -H 'Accept: application/vnd.github+json' "$public_api" \
+            > "$RUNNER_TEMP/public-release.json"
+          target="$(git rev-list -n 1 "$RELEASE_TAG")"
+          jq --arg target "$target" \
+            '{id,tag:.tag_name,target:$target,draft,prerelease,body,assets:[.assets[]|{name,size,digest}]}' \
+            "$RUNNER_TEMP/public-release.json" > "$RUNNER_TEMP/public-metadata.json"
+          for name in release-manifest.json deployment-contract.json installer-materials.tar checksums.txt; do
+            url="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .browser_download_url' \
+              "$RUNNER_TEMP/public-release.json")"
+            test -n "$url"
+            env -u GH_TOKEN curl --fail --location --silent --show-error \
+              "$url" -o "$RUNNER_TEMP/public-readback/$name"
+          done
+          for subject in release-manifest.json deployment-contract.json installer-materials.tar; do
+            gh attestation verify "release-output/$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA"
+          done
+          python scripts/release_publication.py verify-post-publish \
+            --plan release-output/publication-plan.json \
+            --metadata "$RUNNER_TEMP/public-metadata.json" \
+            --download-directory "$RUNNER_TEMP/public-readback" \
+            --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
+            --public-unauthenticated-assets --attestations-verified \
+            > release-output/post-publish-verification.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-publication-metadata-${{ needs.preflight.outputs.release_tag }}
+          path: |
+            release-output/release-qualification.json
+            release-output/release-notes.json
+            release-output/release-notes.md
+            release-output/publication-plan.json
+            release-output/post-publish-verification.json
+          if-no-files-found: error
+          retention-days: 90

@@ -173,7 +173,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         publish = source[
             source.index("      - name: Download and verify Phase A qualification evidence") :
-            source.index("      - name: Stage the validated platform qualification")
+            source.index("      - name: Stage the validated platform and Release Notes")
         ]
 
         run_id_guard = '[[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]'
@@ -489,7 +489,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_dry_run_is_read_only_and_publish_permissions_are_minimal(self):
         release = workflow("release.yml")
         dry_permissions = release["jobs"]["dry-run"]["permissions"]
-        self.assertEqual(dry_permissions, {"contents": "read"})
+        self.assertEqual(
+            dry_permissions, {"contents": "read", "pull-requests": "read"}
+        )
         publish_permissions = release["jobs"]["publish"]["permissions"]
         self.assertEqual(publish_permissions["contents"], "write")
         self.assertEqual(publish_permissions["packages"], "write")
@@ -704,18 +706,24 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("recorded_ip == proxy_ip", source)
         self.assertNotIn("TRUSTED_PROXY_IPS=172.16.0.0/12", source)
 
-    def test_stable_notes_start_at_previous_stable_when_one_exists(self):
+    def test_stable_notes_derive_from_the_frozen_rc_snapshot(self):
         source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
         self.assertIn("previous-stable", source)
-        self.assertIn("--notes-start-tag", source)
+        self.assertIn("promote-release-notes", source)
+        self.assertIn("--rc-notes promotion-output/rc-release-notes.json", source)
+        self.assertIn("--notes-file promotion-output/release-notes.md", source)
+        self.assertNotIn("--generate-notes", source)
 
     def test_stable_promotion_has_no_image_build_and_requires_acceptance(self):
         promotion_path = ROOT / ".github" / "workflows" / "promote-release.yml"
         source = promotion_path.read_text(encoding="utf-8")
         promotion = yaml.load(source, Loader=yaml.BaseLoader)
         self.assertEqual(set(promotion["on"]), {"workflow_dispatch"})
-        self.assertIn("acceptance_confirmation", promotion["on"]["workflow_dispatch"]["inputs"])
+        self.assertNotIn("acceptance_confirmation", promotion["on"]["workflow_dispatch"]["inputs"])
         self.assertIn("dry_run", promotion["on"]["workflow_dispatch"]["inputs"])
+        self.assertIn('acceptance_path="release/acceptance-records/$RC_TAG.json"', source)
+        self.assertIn("git ls-files --error-unmatch", source)
+        self.assertIn("scripts/rc_live_acceptance.py", source)
         self.assertNotIn("docker/build-push-action", source)
         self.assertNotIn("docker build", source)
         self.assertIn("RC_COMMIT == STABLE_COMMIT", source)
@@ -746,6 +754,49 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             '! gh release view "$STABLE_TAG" --repo "$GITHUB_REPOSITORY"',
         ):
             self.assertIn(guard, before_first_mutation)
+
+    def test_rc_publication_is_draft_upload_verify_publish_with_qualified_notes(self):
+        release = workflow("release.yml")
+        names = [step.get("name", "") for step in release["jobs"]["publish"]["steps"]]
+        expected = (
+            "Generate the closed publication plan without mutation",
+            "Create the immutable annotated RC tag",
+            "Create an unpublished GitHub Draft Pre-release",
+            "Upload and read back the complete Draft asset set",
+            "Publish only the fully verified Draft Pre-release",
+            "Verify the public RC without authenticated asset transport",
+        )
+        indices = [names.index(name) for name in expected]
+        self.assertEqual(indices, sorted(indices))
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("--generate-notes", source)
+        self.assertIn("release_notes.snapshot_identity", source)
+        self.assertIn("RELEASE_NOTES_MARKDOWN_SHA256", source)
+        self.assertIn("release-notes.md", source)
+        self.assertIn("env -u GH_TOKEN curl", source)
+        self.assertLess(
+            source.index('gh release create "$RELEASE_TAG"'),
+            source.index('gh release upload "$RELEASE_TAG"'),
+        )
+        self.assertLess(
+            source.index('gh release upload "$RELEASE_TAG"'),
+            source.index('gh release edit "$RELEASE_TAG"'),
+        )
+
+    def test_stable_publication_uses_the_same_draft_transaction_and_never_rebuilds(self):
+        source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish_source = source[source.index("  publish:\n") :]
+        self.assertIn("Create an unpublished Stable Draft Release", source)
+        self.assertIn("Upload and read back the complete Stable Draft asset set", source)
+        self.assertIn("Publish only the fully verified Stable Draft as Latest", source)
+        self.assertIn("Verify the public Stable release without authenticated asset transport", source)
+        self.assertNotIn("docker/build-push-action", source)
+        self.assertNotIn("docker build", source)
+        self.assertIn("plan-stable-publication-files", source)
         self.assertNotIn(
             'test "$(git rev-parse origin/main)" = "$GITHUB_SHA"',
             publish_source[publish_source.index("crane tag") :],
