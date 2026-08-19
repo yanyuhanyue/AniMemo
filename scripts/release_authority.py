@@ -82,6 +82,10 @@ def validate_phase_a_authority(
             event=str(identity.get("event", "workflow_dispatch")),
             status=str(identity.get("status", "completed")),
             conclusion=str(identity.get("conclusion", "success")),
+            release_notes_identity=identity.get("release_notes_identity"),
+            release_notes_markdown_sha256=identity.get(
+                "release_notes_markdown_sha256"
+            ),
         )
     except (KeyError, TypeError, ValueError, QualificationError) as error:
         raise ReleaseAuthorityError(str(error)) from error
@@ -192,6 +196,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             "emit_evidence": bool(os.getenv("QUALIFICATION_ARTIFACT_PATH", "")),
             "event": os.getenv("EVENT_NAME", os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")),
+            "release_notes_identity": os.getenv("RELEASE_NOTES_IDENTITY", "") or None,
+            "release_notes_markdown_sha256": os.getenv(
+                "RELEASE_NOTES_MARKDOWN_SHA256", ""
+            )
+            or None,
         }
         result = validate_phase_a_authority(channel, needs, identity=identity)
         artifact_path = os.getenv("QUALIFICATION_ARTIFACT_PATH", "")
@@ -215,6 +224,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "workflow_ref": os.getenv("QUALIFICATION_WORKFLOW_REF", ""),
             "workflow_sha": os.getenv("QUALIFICATION_WORKFLOW_SHA", ""),
             "release_graph_contract": os.getenv("RELEASE_GRAPH_CONTRACT", "animemo.release-gate.jobs/v2"),
+            "release_notes_identity": os.getenv("RELEASE_NOTES_IDENTITY", ""),
+            "release_notes_markdown_sha256": os.getenv(
+                "RELEASE_NOTES_MARKDOWN_SHA256", ""
+            ),
         }
         expected = {key: value for key, value in expected.items() if value != ""}
         def _json_env(name: str) -> Mapping[str, Any] | None:

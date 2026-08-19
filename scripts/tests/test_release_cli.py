@@ -193,6 +193,101 @@ class ReleaseCliTests(unittest.TestCase):
         self.assertEqual(payload["code"], "release_contract_invalid")
         self.assertIn("detail", payload)
 
+    def test_generate_release_notes_and_publication_plan_are_deterministic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            notes_input = root / "notes-input.json"
+            notes_json = root / "release-notes.json"
+            notes_markdown = root / "release-notes.md"
+            notes_input.write_text(
+                json.dumps(
+                    {
+                        "context": {
+                            "candidate_sha": COMMIT,
+                            "comparison_base_sha": "a" * 40,
+                            "previous_stable": "v1.0.0",
+                            "release_tag": "v1.1.0-rc.TEST",
+                            "target_version": "v1.1.0",
+                            "channel": "rc",
+                            "minimum_updater_version": "1.0.0",
+                            "supported_os": ["Ubuntu 24.04 LTS"],
+                            "docker_requirement": "Docker Engine 27+ with Compose v2",
+                            "release_assets": [
+                                "release-manifest.json",
+                                "deployment-contract.json",
+                                "installer-materials.tar",
+                                "checksums.txt",
+                            ],
+                        },
+                        "pulls": [
+                            {
+                                "number": 131,
+                                "title": "v1.1 分发收敛",
+                                "source_identity": COMMIT,
+                                "labels": ["release/feature"],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            first = self.run_cli(
+                "generate-release-notes",
+                "--input", notes_input,
+                "--output-json", notes_json,
+                "--output-markdown", notes_markdown,
+            )
+            first_json = notes_json.read_bytes()
+            first_markdown = notes_markdown.read_bytes()
+            second = self.run_cli(
+                "generate-release-notes",
+                "--input", notes_input,
+                "--output-json", notes_json,
+                "--output-markdown", notes_markdown,
+            )
+            self.assertEqual(first_json, notes_json.read_bytes())
+            self.assertEqual(first_markdown, notes_markdown.read_bytes())
+            self.assertEqual(json.loads(first.stdout)["identity"], json.loads(second.stdout)["identity"])
+
+            assets = {}
+            for name, content in {
+                "release-manifest.json": b"manifest",
+                "deployment-contract.json": b"deployment",
+                "installer-materials.tar": b"materials",
+                "checksums.txt": b"checksums",
+            }.items():
+                assets[name] = {
+                    "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+                    "size": len(content),
+                }
+            plan_input = root / "plan-input.json"
+            plan_output = root / "publication-plan.json"
+            plan_input.write_text(
+                json.dumps(
+                    {
+                        "repository": "yanyuhanyue/AniMemo",
+                        "channel": "rc",
+                        "tag": "v1.1.0-rc.TEST",
+                        "commit": COMMIT,
+                        "qualification_identity": "sha256:" + "6" * 64,
+                        "release_notes_identity": json.loads(notes_json.read_text(encoding="utf-8"))["identity"],
+                        "release_notes_markdown_sha256": "sha256:" + hashlib.sha256(first_markdown).hexdigest(),
+                        "assets": assets,
+                        "api_digest": API_DIGEST,
+                        "web_digest": WEB_DIGEST,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed = self.run_cli(
+                "plan-publication", "--input", plan_input, "--output", plan_output
+            )
+            plan = json.loads(completed.stdout)
+            self.assertEqual(plan, json.loads(plan_output.read_text(encoding="utf-8")))
+            self.assertEqual(plan["external_mutation_mode"], "PLAN_ONLY")
+            self.assertNotIn("--generate-notes", plan["commands"]["create_draft"])
+
 
 if __name__ == "__main__":
     unittest.main()

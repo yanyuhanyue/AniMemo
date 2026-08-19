@@ -55,6 +55,49 @@ class QualificationContractTests(unittest.TestCase):
         self.assertTrue(self.evidence["artifact_sha256"].startswith("sha256:"))
         validate_qualification_evidence(self.evidence)
 
+    def test_v2_qualification_binds_frozen_notes_snapshot_and_markdown(self):
+        notes_identity = "sha256:" + "1" * 64
+        markdown_identity = "sha256:" + "2" * 64
+        evidence = build_qualification_evidence(
+            workflow_ref=".github/workflows/release.yml@refs/heads/rc-candidate",
+            workflow_sha=self.candidate,
+            run_id="12345",
+            run_attempt=2,
+            candidate_sha=self.candidate,
+            upgrade_base_sha=self.base,
+            channel="rc",
+            target_version="v1.0.0",
+            release_tag="v1.0.0-rc.1",
+            needs=self.needs,
+            release_notes_identity=notes_identity,
+            release_notes_markdown_sha256=markdown_identity,
+        )
+        self.assertEqual(evidence["schema"], "animemo.release-qualification/v2")
+        self.assertEqual(
+            evidence["release_notes"],
+            {
+                "snapshot_identity": notes_identity,
+                "markdown_sha256": markdown_identity,
+            },
+        )
+        validate_qualification_evidence(
+            evidence,
+            expected={
+                "release_notes_identity": notes_identity,
+                "release_notes_markdown_sha256": markdown_identity,
+            },
+        )
+        with self.assertRaises(QualificationError):
+            validate_qualification_evidence(
+                evidence,
+                expected={"release_notes_identity": "sha256:" + "0" * 64},
+            )
+        with self.assertRaises(QualificationError):
+            validate_qualification_evidence(
+                self.evidence,
+                expected={"release_notes_identity": notes_identity},
+            )
+
     def test_unknown_or_missing_fields_and_tampering_fail_closed(self):
         unknown = copy.deepcopy(self.evidence)
         unknown["trust_override"] = True
