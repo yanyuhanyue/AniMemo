@@ -21,6 +21,7 @@ from installer.bootstrap import (
     close_bootstrap_authorization,
     commit_bootstrap_authorization,
 )
+from scripts.tests.trust_kit_fixture import authority_test_namespace
 from updater.trust_lifecycle import TrustCommitReceipt
 
 
@@ -78,7 +79,7 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
                     member.mtime = 0
                     bundle.addfile(member, io.BytesIO(data))
 
-            with mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", root):
+            with authority_test_namespace(root):
                 commit_bootstrap_authorization(_payload(archive))
                 capability = BootstrapPrivilegeGate().consume(
                     version="v1.1.0-rc.1",
@@ -105,7 +106,7 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             protected.write_bytes(b"verified materials")
             lifecycle = mock.Mock()
 
-            with mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", root):
+            with authority_test_namespace(root):
                 authorization = commit_bootstrap_authorization(_payload(protected))
                 lifecycle.provision_initial.return_value = TrustCommitReceipt(
                     commit_identity="sha256:" + "3" * 64,
@@ -142,7 +143,7 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
                 subprocess.CompletedProcess([], 0, '{"asset":"verified"}\n', ""),
             )
             with (
-                mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", root),
+                authority_test_namespace(root),
                 mock.patch("installer.bootstrap.subprocess.run", side_effect=completed) as run,
             ):
                 receipt = authorize_online_stage0(
@@ -168,7 +169,7 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             (root / "installer-materials.tar").write_bytes(b"verified materials")
             old = subprocess.CompletedProcess([], 0, "gh version 2.96.0\n", "")
             with (
-                mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", root),
+                authority_test_namespace(root),
                 mock.patch("installer.bootstrap.subprocess.run", return_value=old) as run,
                 self.assertRaisesRegex(
                     BootstrapAuthorityError,
@@ -189,7 +190,7 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             protected.write_bytes(b"verified materials")
             payload = _payload(protected)
 
-            with mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", root):
+            with authority_test_namespace(root):
                 receipt = commit_bootstrap_authorization(payload)
                 again = commit_bootstrap_authorization(payload)
                 gate = BootstrapPrivilegeGate()
@@ -211,7 +212,7 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             second = dict(first)
             second["tag"] = "v1.1.0-rc.2"
 
-            with mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", root):
+            with authority_test_namespace(root):
                 commit_bootstrap_authorization(first)
                 with self.assertRaisesRegex(
                     BootstrapAuthorityError,
@@ -226,7 +227,7 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             protected.write_bytes(b"verified materials")
             payload = _payload(protected)
 
-            with mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", root):
+            with authority_test_namespace(root):
                 commit_bootstrap_authorization(payload)
                 protected.write_bytes(b"tampered materials")
                 with self.assertRaisesRegex(
@@ -264,7 +265,7 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             payload["stage0"] = dict(payload["stage0"])
             payload["stage0"]["carrier"] = "TEST_FIXTURE"
             with (
-                mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", protected.parent),
+                authority_test_namespace(protected.parent),
                 self.assertRaisesRegex(
                     BootstrapAuthorityError,
                     "BOOTSTRAP_STAGE0_INVALID",
@@ -277,7 +278,7 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             root = Path(directory)
             protected = root / "installer-materials.tar"
             protected.write_bytes(b"verified materials")
-            with mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", root):
+            with authority_test_namespace(root):
                 receipt = commit_bootstrap_authorization(_payload(protected))
             data = json.loads((root / "bootstrap-authorization.json").read_text())
             self.assertEqual(data["authorizationIdentity"], receipt.identity)

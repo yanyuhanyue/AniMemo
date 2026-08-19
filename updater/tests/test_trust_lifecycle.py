@@ -11,6 +11,11 @@ from pathlib import Path
 from unittest import mock
 
 from installer.bootstrap import BootstrapPrivilegeGate, commit_bootstrap_authorization
+from scripts.tests.trust_kit_fixture import (
+    authority_test_namespace,
+    load_test_pretrusted_material,
+    safe_test_state_root,
+)
 from updater.offline import OFFLINE_POLICY_IDENTITY, TrustProfile, _canonical_json_bytes
 from updater.trust_lifecycle import (
     ProductionTrustLifecycle,
@@ -114,7 +119,7 @@ def _authorization(authority_root: Path, archive: Path):
         },
         "verifiedAt": "2026-08-19T00:00:00Z",
     }
-    with mock.patch("installer.bootstrap.BOOTSTRAP_AUTHORITY_ROOT", authority_root):
+    with authority_test_namespace(authority_root):
         commit_bootstrap_authorization(payload)
         return BootstrapPrivilegeGate().consume(
             version="v1.1.0-rc.1",
@@ -207,6 +212,20 @@ class _UpdateVerifier:
 
 
 class ProductionTrustLifecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        state_root = mock.patch(
+            "updater.trust_lifecycle._safe_state_root",
+            side_effect=safe_test_state_root,
+        )
+        material_loader = mock.patch(
+            "updater.trust_lifecycle.PretrustedTrustMaterial.load",
+            side_effect=load_test_pretrusted_material,
+        )
+        state_root.start()
+        material_loader.start()
+        self.addCleanup(material_loader.stop)
+        self.addCleanup(state_root.stop)
+
     def test_tuf_successor_is_verified_derived_atomic_and_replay_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
