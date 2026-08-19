@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -24,6 +27,16 @@ PINNED_RELEASE_ACTIONS = {
     "actions/setup-python": "5fda3b95a4ea91299a34e894583c3862153e4b97",
     "actions/download-artifact": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
 }
+
+
+def _bash_path() -> str | None:
+    if os.name == "nt":
+        candidates = (
+            Path(r"C:\Program Files\Git\bin\bash.exe"),
+            Path(r"C:\Program Files\Git\usr\bin\bash.exe"),
+        )
+        return next((str(path) for path in candidates if path.is_file()), None)
+    return shutil.which("bash")
 
 
 class UniqueKeyLoader(yaml.BaseLoader):
@@ -912,12 +925,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         required = set()
         for path in compose_sources:
-            required.update(
+            path_required = set(
                 re.findall(
                     r"\$\{([A-Z0-9_]+):\?[^}]+\}",
                     path.read_text(encoding="utf-8"),
                 )
             )
+            self.assertTrue(path_required, path)
+            required.update(path_required)
         env_file = re.search(
             r'cat > "\$ENV_FILE" <<EOF\n(?P<body>.*?)\nEOF',
             source,
@@ -929,6 +944,81 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
 
         self.assertSetEqual(required - bindings, set())
+        self.assertLess(
+            env_file.start(),
+            source.index('"${COMPOSE[@]}" config --quiet'),
+        )
+
+    def test_exact_image_rehearsal_rejects_mutable_dependency_images_before_work(self):
+        bash = _bash_path()
+        if bash is None:
+            self.skipTest("Git Bash or bash is required for the rehearsal CLI gate.")
+
+        script = (ROOT / "scripts" / "rehearse-release-images.sh").as_posix()
+        valid_postgres = "docker.io/library/postgres@sha256:" + "a" * 64
+        valid_redis = "docker.io/library/redis@sha256:" + "b" * 64
+        invalid_pairs = (
+            ("", valid_redis),
+            (valid_postgres, ""),
+            ("docker.io/library/postgres:16", valid_redis),
+            ("registry.example/postgres@sha256:" + "a" * 64, valid_redis),
+            ("docker.io/library/postgres@sha256:" + "a" * 63, valid_redis),
+            ("docker.io/library/postgres@sha256:" + "A" * 64, valid_redis),
+            (valid_postgres, "docker.io/library/redis:7"),
+            (valid_postgres, "registry.example/redis@sha256:" + "b" * 64),
+            (valid_postgres, "docker.io/library/redis@sha256:" + "b" * 63),
+            (valid_postgres, "docker.io/library/redis@sha256:" + "B" * 64),
+        )
+
+        def run(postgres: str, redis: str) -> subprocess.CompletedProcess[str]:
+            environment = os.environ.copy()
+            environment["GITHUB_ACTIONS"] = "true"
+            environment.pop("RUNNER_TEMP", None)
+            if postgres:
+                environment["ANIMEMO_POSTGRES_IMAGE"] = postgres
+            else:
+                environment.pop("ANIMEMO_POSTGRES_IMAGE", None)
+            if redis:
+                environment["ANIMEMO_REDIS_IMAGE"] = redis
+            else:
+                environment.pop("ANIMEMO_REDIS_IMAGE", None)
+            return subprocess.run(
+                [
+                    bash,
+                    script,
+                    "--api-image",
+                    "api@sha256:test",
+                    "--web-image",
+                    "web@sha256:test",
+                    "--version",
+                    "v1.1.0-rc.1",
+                    "--commit",
+                    "c" * 40,
+                    "--channel",
+                    "rc",
+                    "--confirm-isolated",
+                ],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        for postgres, redis in invalid_pairs:
+            with self.subTest(postgres=postgres, redis=redis):
+                completed = run(postgres, redis)
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn(
+                    "Exact immutable PostgreSQL and Redis image identities are required.",
+                    completed.stderr,
+                )
+                self.assertNotIn("RUNNER_TEMP must be", completed.stderr)
+
+        completed = run(valid_postgres, valid_redis)
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("RUNNER_TEMP must be an absolute isolated runner path.", completed.stderr)
+        self.assertNotIn("Exact immutable PostgreSQL", completed.stderr)
 
     def test_exact_image_rehearsal_trusts_only_the_runtime_web_proxy(self):
         source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(encoding="utf-8")
