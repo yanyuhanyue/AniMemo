@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import sys
 import tempfile
@@ -226,6 +227,157 @@ class LocalBundleTests(unittest.TestCase):
                     release_attestation=sidecar,
                     cache_root=root / "cache",
                     verifier=OfflineReleaseVerifier(),
+                    updater_version="1.1.0",
+                )
+
+    def test_private_staging_can_be_reopened_by_exact_transport_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = root / "payload.tar"
+            sidecar = root / "proof.json"
+            payload.write_bytes(b"portable payload")
+            sidecar.write_bytes(b"release proof")
+            cache = root / "cache"
+            manifest = stable_manifest()
+            materials = VerifiedReleaseMaterials(
+                manifest=manifest,
+                deployment_contract={},
+                verified=VerifiedMaterialSet(
+                    root=root / "materials",
+                    archive_sha256=digest("f"),
+                    files=(),
+                ),
+                identity_digest=digest("e"),
+            )
+
+            fake_offline = types.ModuleType("updater.offline")
+
+            class VerifiedPortableRelease:
+                def __init__(self) -> None:
+                    self.materials = materials
+                    self.images = images(root, manifest)
+                    self.payload_sha256 = (
+                        "sha256:0d6fd443e2c97b4515030b925865149ecfc6102c1a9b044049c5818f3d570702"
+                    )
+                    self.authority_evidence = object()
+                    self.release_attestation_identity = (
+                        "sha256:"
+                        + __import__("hashlib").sha256(b"release proof").hexdigest()
+                    )
+                    self.trust_profile_version = 1
+                    self.trust_profile_identity = digest("4")
+
+            class OfflineReleaseVerifier:
+                def verify(self, **_kwargs):
+                    return VerifiedPortableRelease()
+
+            fake_offline.VerifiedPortableRelease = VerifiedPortableRelease
+            fake_offline.OfflineReleaseVerifier = OfflineReleaseVerifier
+            with mock.patch.dict(sys.modules, {"updater.offline": fake_offline}):
+                first = LocalBundleReleaseSource.from_media(
+                    payload=payload,
+                    release_attestation=sidecar,
+                    cache_root=cache,
+                    verifier=OfflineReleaseVerifier(),
+                    updater_version="1.1.0",
+                )
+                payload.unlink()
+                sidecar.unlink()
+                reopened = LocalBundleReleaseSource.from_staged(
+                    cache_root=cache,
+                    transport_identity="sha256:" + first.receipt.identity,
+                    verifier=OfflineReleaseVerifier(),
+                    updater_version="1.1.0",
+                )
+
+            self.assertEqual(reopened.receipt, first.receipt)
+            self.assertIs(
+                reopened.fetch_verified_materials(
+                    "v1.0.0", updater_version="1.1.0"
+                ),
+                materials,
+            )
+            binding = reopened.release_binding("v1.0.0")
+            self.assertEqual(
+                binding["transportIdentity"],
+                "sha256:" + first.receipt.identity,
+            )
+            self.assertEqual(binding["trustProfileVersion"], 1)
+
+    def test_reopen_rejects_tampered_private_transport_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = root / "payload.tar"
+            sidecar = root / "proof.json"
+            payload.write_bytes(b"payload")
+            sidecar.write_bytes(b"proof")
+            acquired = LocalBundleTransport().acquire(
+                payload=payload,
+                release_attestation=sidecar,
+                private_staging=root / "cache" / "transport",
+            )
+            receipt_path = acquired.root / "transport-receipt.json"
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["identity"] = "0" * 64
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+            fake_offline = types.ModuleType("updater.offline")
+            fake_offline.VerifiedPortableRelease = type(
+                "VerifiedPortableRelease", (), {}
+            )
+            fake_offline.OfflineReleaseVerifier = type(
+                "OfflineReleaseVerifier", (), {"verify": lambda self, **kwargs: None}
+            )
+            with (
+                mock.patch.dict(sys.modules, {"updater.offline": fake_offline}),
+                self.assertRaisesRegex(
+                    LocalBundleError, "LOCAL_BUNDLE_RECEIPT_INVALID"
+                ),
+            ):
+                LocalBundleReleaseSource.from_staged(
+                    cache_root=root / "cache",
+                    transport_identity="sha256:" + acquired.receipt.identity,
+                    verifier=fake_offline.OfflineReleaseVerifier(),
+                    updater_version="1.1.0",
+                )
+
+    def test_reopen_rejects_duplicate_transport_receipt_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = root / "payload.tar"
+            sidecar = root / "proof.json"
+            payload.write_bytes(b"payload")
+            sidecar.write_bytes(b"proof")
+            acquired = LocalBundleTransport().acquire(
+                payload=payload,
+                release_attestation=sidecar,
+                private_staging=root / "cache" / "transport",
+            )
+            receipt_path = acquired.root / "transport-receipt.json"
+            encoded = receipt_path.read_text(encoding="ascii")
+            receipt_path.write_text(
+                '{"schema":"animemo.local-bundle-transport-receipt/v1",'
+                + encoded[1:],
+                encoding="ascii",
+            )
+
+            fake_offline = types.ModuleType("updater.offline")
+            fake_offline.VerifiedPortableRelease = type(
+                "VerifiedPortableRelease", (), {}
+            )
+            fake_offline.OfflineReleaseVerifier = type(
+                "OfflineReleaseVerifier", (), {"verify": lambda self, **kwargs: None}
+            )
+            with (
+                mock.patch.dict(sys.modules, {"updater.offline": fake_offline}),
+                self.assertRaisesRegex(
+                    LocalBundleError, "LOCAL_BUNDLE_RECEIPT_INVALID"
+                ),
+            ):
+                LocalBundleReleaseSource.from_staged(
+                    cache_root=root / "cache",
+                    transport_identity="sha256:" + acquired.receipt.identity,
+                    verifier=fake_offline.OfflineReleaseVerifier(),
                     updater_version="1.1.0",
                 )
 

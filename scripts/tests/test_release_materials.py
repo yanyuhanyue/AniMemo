@@ -100,6 +100,54 @@ class InstallerMaterialsTests(unittest.TestCase):
         ):
             _validate_dynamic_material(PLATFORM_QUALIFICATION_MATERIAL, b"{}")
 
+    def test_offline_release_verifier_is_packaged_as_an_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            source_root = temporary / "source"
+            fixed = (
+                "deploy/docker-compose.yml",
+                "deploy/install-updater.sh",
+                "deploy/updater/animemo-updater",
+                "deploy/updater/animemo-updater.service",
+                "deploy/updater/animemo-updater.sysusers.conf",
+                "deploy/updater/animemo-updater.tmpfiles.conf",
+            )
+            for relative in fixed:
+                target = source_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(relative + "\n", encoding="utf-8")
+            for package in ("durability", "release", "updater", "installer"):
+                package_root = source_root / package
+                package_root.mkdir(parents=True, exist_ok=True)
+                (package_root / "__init__.py").write_text("", encoding="utf-8")
+            verifier = (
+                source_root
+                / "release"
+                / "release_attestation_verifier"
+                / "offline-release-verifier"
+            )
+            verifier.parent.mkdir(parents=True)
+            verifier.write_bytes(b"qualified linux verifier")
+            wheelhouse = temporary / "wheelhouse"
+            wheelhouse.mkdir()
+            (wheelhouse / "qualified_dependency-1.0-py3-none-any.whl").write_bytes(
+                b"qualified wheel bytes"
+            )
+
+            identity = build_installer_materials(
+                source_root,
+                wheelhouse=wheelhouse,
+                output=temporary / "installer-materials.tar",
+            )
+
+            packaged = next(
+                item
+                for item in identity.files
+                if item.path
+                == "release/release_attestation_verifier/offline-release-verifier"
+            )
+            self.assertEqual(packaged.mode, 0o755)
+
     def test_valid_staged_platform_qualification_is_bound_into_the_archive(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)

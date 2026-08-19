@@ -27,25 +27,34 @@ class ValidatingAgent:
 
 
 class UnixRpcTests(unittest.TestCase):
-    def test_local_bundle_blocker_code_is_preserved_over_rpc(self):
+    def test_local_bundle_pair_is_accepted_and_missing_pair_is_rejected_over_rpc(self):
         with tempfile.TemporaryDirectory() as directory:
             server = UnixRpcServer(
                 Path(directory) / "updater.sock",
                 ValidatingAgent(),
             )
 
-            response = server._response(
+            request = {
+                "operation": "plan_update",
+                "params": {
+                    "version": "v1.0.0",
+                    "source": "local-bundle",
+                    "bundlePayload": "/media/payload.tar",
+                    "releaseAttestation": "/media/release-attestation.json",
+                },
+            }
+            accepted = server._response(request)
+            rejected = server._response(
                 {
                     "operation": "plan_update",
                     "params": {"version": "v1.0.0", "source": "local-bundle"},
                 }
             )
 
-            self.assertFalse(response["ok"])
-            self.assertEqual(
-                response["error"]["code"],
-                "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY",
-            )
+            self.assertTrue(accepted["ok"])
+            self.assertEqual(accepted["result"], request)
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["error"]["code"], "request_rejected")
 
     def test_server_refuses_to_delete_a_regular_file_at_the_socket_path(self):
         with tempfile.TemporaryDirectory() as directory:

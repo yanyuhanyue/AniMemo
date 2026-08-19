@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
+from pathlib import Path
 
-from scripts.release_authority import ReleaseAuthorityError, validate_release_authority
+from release.portable import BLOCKED_PORTABLE_PUBLICATION_AUTHORITY
+from release.publication import build_publication_plan
+from scripts.release_authority import (
+    ReleaseAuthorityError,
+    validate_portable_pipeline_authority,
+    validate_release_authority,
+)
 
 
 def needs(*, preflight="success", full_ci="success", release_gate="success", performance="skipped"):
@@ -15,6 +23,104 @@ def needs(*, preflight="success", full_ci="success", release_gate="success", per
 
 
 class ReleaseAuthorityTests(unittest.TestCase):
+    def test_portable_pipeline_authority_binds_declared_asset_without_expanding_canonical_four(self):
+        portable = b"portable"
+        name = "animemo-v1.1.0-rc.TEST-portable.tar"
+        plan = build_publication_plan(
+            repository="yanyuhanyue/AniMemo",
+            channel="rc",
+            tag="v1.1.0-rc.TEST",
+            commit="a" * 40,
+            qualification_identity="sha256:" + "1" * 64,
+            release_notes_identity="sha256:" + "2" * 64,
+            release_notes_markdown_sha256="sha256:" + "3" * 64,
+            assets={
+                asset: {"sha256": "sha256:" + str(index) * 64, "size": index}
+                for index, asset in enumerate(
+                    (
+                        "checksums.txt",
+                        "deployment-contract.json",
+                        "installer-materials.tar",
+                        "release-manifest.json",
+                    ),
+                    1,
+                )
+            },
+            api_digest="sha256:" + "5" * 64,
+            web_digest="sha256:" + "6" * 64,
+            transport_assets={
+                name: {
+                    "role": "PORTABLE_RELEASE_BUNDLE",
+                    "sha256": "sha256:" + hashlib.sha256(portable).hexdigest(),
+                    "size": len(portable),
+                }
+            },
+        )
+        receipt = {
+            "archive": f"release-output/{name}",
+            "sha256": "sha256:" + hashlib.sha256(portable).hexdigest(),
+            "files": 12,
+            "imageRoles": ["api", "postgres", "redis", "web"],
+            "authorityState": BLOCKED_PORTABLE_PUBLICATION_AUTHORITY,
+        }
+
+        result = validate_portable_pipeline_authority(plan, receipt)
+
+        self.assertEqual(result["canonical_authority_asset_count"], 4)
+        self.assertEqual(result["declared_transport_asset_count"], 1)
+        self.assertEqual(result["build_once"], "PASS")
+        changed = dict(receipt)
+        changed["sha256"] = "sha256:" + "f" * 64
+        with self.assertRaises(ReleaseAuthorityError):
+            validate_portable_pipeline_authority(plan, changed)
+    def test_release_workflow_builds_one_declared_portable_before_draft_and_exports_sidecar_after_publish(self):
+        workflow = (
+            Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Materialize exact OCI layouts without rebuilding", workflow)
+        self.assertIn("python -m release.cli build-portable", workflow)
+        self.assertIn("--portable \"release-output/$PORTABLE_ASSET\"", workflow)
+        self.assertIn("release-output/$PORTABLE_ASSET", workflow)
+        self.assertIn("python scripts/acquire_release_attestation.py", workflow)
+        self.assertIn("animemo-$RELEASE_TAG-release-attestation.json", workflow)
+        self.assertLess(
+            workflow.index("python -m release.cli build-portable"),
+            workflow.index("Create an unpublished GitHub Draft Pre-release"),
+        )
+        self.assertGreater(
+            workflow.index("python scripts/acquire_release_attestation.py"),
+            workflow.index("Publish only the fully verified Draft Pre-release"),
+        )
+        self.assertIn(
+            '--payload "$RUNNER_TEMP/public-readback/$PORTABLE_ASSET"', workflow
+        )
+
+    def test_stable_workflow_reuses_rc_oci_layouts_and_exports_a_new_stable_sidecar(self):
+        workflow = (
+            Path(__file__).resolve().parents[2]
+            / ".github"
+            / "workflows"
+            / "promote-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("python -m release.cli promote-portable", workflow)
+        self.assertIn("--rc-payload \"rc-assets/$RC_PORTABLE_ASSET\"", workflow)
+        self.assertIn("--portable \"promotion-output/$STABLE_PORTABLE_ASSET\"", workflow)
+        self.assertIn("python scripts/acquire_release_attestation.py", workflow)
+        for name in (
+            "release-manifest",
+            "deployment-contract",
+            "installer-materials",
+        ):
+            self.assertIn(
+                f"--actions-source-commit {name}=$GITHUB_SHA", workflow
+            )
+        self.assertIn(
+            '--payload "$RUNNER_TEMP/stable-public-readback/$STABLE_PORTABLE_ASSET"',
+            workflow,
+        )
+        self.assertNotIn("docker/build-push-action", workflow)
     def test_beta_accepts_only_an_intentionally_skipped_performance_gate(self):
         self.assertEqual(validate_release_authority("beta", needs()), {"channel": "beta", "status": "PASS"})
         for result in ("success", "failure", "cancelled"):

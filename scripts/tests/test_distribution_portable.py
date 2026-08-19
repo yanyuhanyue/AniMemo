@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import hashlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 from jsonschema import Draft202012Validator
@@ -16,15 +19,24 @@ from jsonschema import Draft202012Validator
 from release.portable import (
     BLOCKED_PORTABLE_PUBLICATION_AUTHORITY,
     CANONICAL_RELEASE_ASSET_PATHS,
+    MAX_PORTABLE_FILE_BYTES,
+    MAX_PORTABLE_FILES,
+    MAX_PORTABLE_INDEX_BYTES,
+    MAX_PORTABLE_PATH_DEPTH,
+    MAX_PORTABLE_PATH_LENGTH,
+    MAX_PORTABLE_TOTAL_BYTES,
     PortableAuthorityError,
     PortableBundleError,
     build_portable_payload,
     canonical_json_bytes,
     inspect_portable_archive,
     portable_publication_authority_gate,
+    portable_release_asset_name,
+    promote_portable_payload,
     stage_portable_payload,
     validate_portable_bundle,
 )
+from release.publication import build_publication_plan
 from updater.oci import (
     OCI_CONFIG_MEDIA_TYPE,
     OCI_IMAGE_INDEX_MEDIA_TYPE,
@@ -50,23 +62,35 @@ def write_json_blob(root: Path, value: object) -> tuple[str, int]:
     return identity, len(payload)
 
 
-def write_oci_layout(root: Path, role: str) -> dict[str, object]:
+def write_oci_layout(
+    root: Path,
+    role: str,
+    *,
+    layer_media_type: str = OCI_LAYER_MEDIA_TYPE,
+) -> dict[str, object]:
     root.mkdir(parents=True)
     (root / "oci-layout").write_bytes(
         canonical_json_bytes({"imageLayoutVersion": "1.0.0"})
     )
+    uncompressed_layer = ("layer:" + role).encode("ascii")
+    layer = uncompressed_layer
+    if layer_media_type.endswith("+gzip"):
+        layer = gzip.compress(layer, mtime=0)
+    layer_digest = digest(layer)
+    layer_target = root / "blobs" / "sha256" / layer_digest[7:]
+    layer_target.parent.mkdir(parents=True, exist_ok=True)
+    layer_target.write_bytes(layer)
     config_digest, config_size = write_json_blob(
         root,
         {
             "architecture": "amd64",
             "os": "linux",
-            "rootfs": {"diff_ids": [], "type": "layers"},
+            "rootfs": {
+                "diff_ids": [digest(uncompressed_layer)],
+                "type": "layers",
+            },
         },
     )
-    layer = ("layer:" + role).encode("ascii")
-    layer_digest = digest(layer)
-    layer_target = root / "blobs" / "sha256" / layer_digest[7:]
-    layer_target.write_bytes(layer)
     manifest_digest, manifest_size = write_json_blob(
         root,
         {
@@ -78,7 +102,7 @@ def write_oci_layout(root: Path, role: str) -> dict[str, object]:
             "layers": [
                 {
                     "digest": layer_digest,
-                    "mediaType": OCI_LAYER_MEDIA_TYPE,
+                    "mediaType": layer_media_type,
                     "size": len(layer),
                 }
             ],
@@ -157,6 +181,140 @@ def write_complete_bundle_directory(root: Path, archive: Path):
 
 
 class PortableBundleTests(unittest.TestCase):
+    def test_release_cli_builds_only_from_four_explicit_exact_oci_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            images = write_complete_portable_source(source)
+            output = root / portable_release_asset_name("v1.1.0-rc.TEST")
+            command = [
+                sys.executable,
+                "-m",
+                "release.cli",
+                "build-portable",
+                "--source-root",
+                str(source),
+                "--output",
+                str(output),
+            ]
+            for image in images:
+                command.extend(
+                    [
+                        "--image",
+                        f"{image['role']}={image['repository']}@{image['digest']}",
+                    ]
+                )
+
+            completed = subprocess.run(
+                command,
+                cwd=Path(__file__).resolve().parents[2],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["archive"], str(output))
+            self.assertEqual(result["imageRoles"], ["api", "postgres", "redis", "web"])
+            self.assertEqual(inspect_portable_archive(output).archive_sha256, result["sha256"])
+            plan = build_publication_plan(
+                repository="yanyuhanyue/AniMemo",
+                channel="rc",
+                tag="v1.1.0-rc.TEST",
+                commit="a" * 40,
+                qualification_identity="sha256:" + "1" * 64,
+                release_notes_identity="sha256:" + "2" * 64,
+                release_notes_markdown_sha256="sha256:" + "3" * 64,
+                assets={
+                    name: {"sha256": digest(name.encode("utf-8")), "size": len(name)}
+                    for name in (
+                        "checksums.txt",
+                        "deployment-contract.json",
+                        "installer-materials.tar",
+                        "release-manifest.json",
+                    )
+                },
+                api_digest="sha256:" + "4" * 64,
+                web_digest="sha256:" + "5" * 64,
+                transport_assets={
+                    output.name: {
+                        "role": "PORTABLE_RELEASE_BUNDLE",
+                        "sha256": result["sha256"],
+                        "size": output.stat().st_size,
+                    }
+                },
+            )
+            plan_path = root / "publication-plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            verified = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "release.cli",
+                    "verify-declared-portable",
+                    "--plan",
+                    str(plan_path),
+                    "--payload",
+                    str(output),
+                ],
+                cwd=Path(__file__).resolve().parents[2],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+
+    def test_frozen_resource_limits_and_deterministic_release_asset_name(self):
+        self.assertEqual(MAX_PORTABLE_FILES, 16384)
+        self.assertEqual(MAX_PORTABLE_FILE_BYTES, 8 * 1024 * 1024 * 1024)
+        self.assertEqual(MAX_PORTABLE_TOTAL_BYTES, 32 * 1024 * 1024 * 1024)
+        self.assertEqual(MAX_PORTABLE_INDEX_BYTES, 4 * 1024 * 1024)
+        self.assertEqual(MAX_PORTABLE_PATH_LENGTH, 240)
+        self.assertEqual(MAX_PORTABLE_PATH_DEPTH, 6)
+        self.assertEqual(
+            portable_release_asset_name("v1.1.0-rc.TEST"),
+            "animemo-v1.1.0-rc.TEST-portable.tar",
+        )
+
+    def test_stable_payload_reuses_rc_oci_bytes_and_does_not_embed_post_publish_sidecar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rc_source = root / "rc-source"
+            rc_source.mkdir()
+            images = write_complete_portable_source(rc_source)
+            rc_payload = root / portable_release_asset_name("v1.1.0-rc.TEST")
+            rc = build_portable_payload(rc_source, rc_payload, images)
+            stable_authority = root / "stable-authority"
+            stable_authority.mkdir()
+            for relative in CANONICAL_RELEASE_ASSET_PATHS:
+                name = PurePosixPath(relative).name
+                (stable_authority / name).write_bytes(("stable:" + name).encode("ascii"))
+            stable_payload = root / portable_release_asset_name("v1.1.0")
+
+            stable = promote_portable_payload(
+                rc_payload,
+                authority_directory=stable_authority,
+                archive=stable_payload,
+            )
+
+            rc_oci = {
+                item.path: (item.sha256, item.size)
+                for item in rc.files
+                if item.path.startswith("oci/")
+            }
+            stable_oci = {
+                item.path: (item.sha256, item.size)
+                for item in stable.files
+                if item.path.startswith("oci/")
+            }
+            self.assertEqual(stable_oci, rc_oci)
+            self.assertFalse(
+                any("attestation" in item.path for item in stable.files)
+            )
+            self.assertNotEqual(stable.archive_sha256, rc.archive_sha256)
+
     def test_payload_builder_is_deterministic_ustar_and_stages_privately(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)
@@ -468,6 +626,25 @@ class PortableBundleTests(unittest.TestCase):
 
 
 class OCIImageTests(unittest.TestCase):
+    def test_standard_gzip_compressed_oci_layer_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            images = [
+                write_oci_layout(
+                    root / "oci" / role,
+                    role,
+                    layer_media_type="application/vnd.oci.image.layer.v1.tar+gzip",
+                )
+                for role in sorted(REQUIRED_IMAGE_REPOSITORIES)
+            ]
+
+            verified = verify_oci_image_set(root, images)
+
+            self.assertEqual(
+                tuple(image.role for image in verified.images),
+                tuple(sorted(REQUIRED_IMAGE_REPOSITORIES)),
+            )
+
     def test_exact_four_role_descriptor_dag_verifies_and_only_builds_a_local_plan(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

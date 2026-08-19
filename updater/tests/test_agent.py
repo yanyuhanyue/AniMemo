@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import threading
@@ -14,6 +15,7 @@ from release.contract import build_manifest
 from updater.agent import UpdateAgent
 from updater.errors import RecoveryRequired, RequestRejected, StateError
 from updater.executor import UpdateExecutor
+from updater.local_bundle import LocalBundleTransportPolicy
 from updater.plans import PlanStore
 from updater.runtime_state import RuntimeState
 from updater.slots import ReleaseSlots
@@ -81,12 +83,42 @@ class FakeSource:
         refresh=False,
     ):
         del updater_version
-        self.events.append((self.transport_policy.source.value, version, refresh))
+        source = self.transport_policy.source
+        self.events.append((getattr(source, "value", source), version, refresh))
         manifest_value = self.manifests[version]
         return SimpleNamespace(
             manifest=manifest_value,
             identity_digest=manifest_value["images"]["api"]["digest"],
         )
+
+
+class FakeLocalBundleSource(FakeSource):
+    def __init__(self, manifests, *, transport_identity="sha256:" + "7" * 64):
+        super().__init__(manifests)
+        self.transport_policy = LocalBundleTransportPolicy()
+        self.transport_identity = transport_identity
+
+    def release_binding(self, version):
+        item = self.manifests[version]
+        encoded = json.dumps(
+            item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return {
+            "source": "local-bundle",
+            "transportPolicyIdentity": self.transport_policy.identity,
+            "verifiedReleaseIdentity": item["images"]["api"]["digest"],
+            "transportIdentity": self.transport_identity,
+            "payloadIdentity": "sha256:" + "6" * 64,
+            "releaseAttestationIdentity": "sha256:" + "5" * 64,
+            "trustProfileVersion": 1,
+            "trustProfileIdentity": "sha256:" + "4" * 64,
+            "manifestIdentity": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+            "deploymentContractIdentity": item["deployment"]["contractSha256"],
+            "apiDigest": item["images"]["api"]["digest"],
+            "webDigest": item["images"]["web"]["digest"],
+            "postgresDigest": item["images"]["postgres"]["digest"],
+            "redisDigest": item["images"]["redis"]["digest"],
+        }
 
 
 class FakeDeployment:
@@ -100,6 +132,9 @@ class FakeDeployment:
     def pull_verified(self, materials, policy):
         del materials, policy
         self.calls.append("pull")
+    def import_local_verified(self, source, materials, policy):
+        del source, materials, policy
+        self.calls.append("local_import")
     def migrate(self, item): self.calls.append("migrate")
     def bootstrap(self, item): self.calls.append("bootstrap")
     def inspect_enabled_plugin_apis(self, item):
@@ -110,7 +145,13 @@ class FakeDeployment:
 
 
 class UpdateAgentTests(unittest.TestCase):
-    def make_agent(self, directory, *, runtime_refresh_seconds=30):
+    def make_agent(
+        self,
+        directory,
+        *,
+        runtime_refresh_seconds=30,
+        local_bundle_resolver_factory=None,
+    ):
         current = manifest("v1.0.0", "1")
         target = manifest("v1.0.1", "2")
         root = Path(directory)
@@ -148,8 +189,181 @@ class UpdateAgentTests(unittest.TestCase):
             runtime_refresh_seconds=runtime_refresh_seconds,
             resolver_factory=resolver_factory,
             transport_policy=source.transport_policy,
+            local_bundle_resolver_factory=local_bundle_resolver_factory,
         )
         return agent, deployment
+
+    def test_local_bundle_plan_and_apply_bind_exact_authority_without_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls = []
+            local_source = FakeLocalBundleSource(
+                [manifest("v1.0.0", "1"), manifest("v1.0.1", "2")]
+            )
+
+            def local_factory(*, payload=None, release_attestation=None, binding=None):
+                calls.append((payload, release_attestation, binding))
+                if binding is not None:
+                    self.assertEqual(
+                        binding["transportIdentity"],
+                        local_source.transport_identity,
+                    )
+                return local_source
+
+            agent, deployment = self.make_agent(
+                directory,
+                local_bundle_resolver_factory=local_factory,
+            )
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "local-bundle",
+                        "bundlePayload": "/media/portable.tar",
+                        "releaseAttestation": "/media/release-attestation.json",
+                    },
+                }
+            )
+            stored = agent.plans.get(plan["planId"])
+            agent._local_resolvers.clear()
+            result = agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+
+            self.assertEqual(plan["source"], "local-bundle")
+            self.assertEqual(
+                plan["releaseAttestationIdentity"], "sha256:" + "5" * 64
+            )
+            self.assertEqual(
+                stored["releaseBinding"], local_source.release_binding("v1.0.1")
+            )
+            self.assertTrue(stored["planningContextIdentity"].startswith("sha256:"))
+            self.assertEqual(result["operation"]["status"], "succeeded")
+            self.assertIn("switch:v1.0.1", deployment.calls)
+            self.assertIn("local_import", deployment.calls)
+            self.assertNotIn("pull", deployment.calls)
+            self.assertEqual(len(calls), 2)
+            self.assertIsNotNone(calls[-1][2])
+
+    def test_local_bundle_attestation_substitution_is_rejected_before_switch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            local_source = FakeLocalBundleSource(
+                [manifest("v1.0.0", "1"), manifest("v1.0.1", "2")]
+            )
+            agent, deployment = self.make_agent(
+                directory,
+                local_bundle_resolver_factory=lambda **_kwargs: local_source,
+            )
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "local-bundle",
+                        "bundlePayload": "/media/portable.tar",
+                        "releaseAttestation": "/media/release-attestation.json",
+                    },
+                }
+            )
+            path = agent.plans.root / f"{plan['planId']}.json"
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            stored["releaseBinding"]["releaseAttestationIdentity"] = (
+                "sha256:" + "8" * 64
+            )
+            path.write_text(
+                json.dumps(stored, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(StateError):
+                agent.dispatch(
+                    {
+                        "operation": "apply_update",
+                        "params": {
+                            "planId": plan["planId"],
+                            "confirmation": "APPLY v1.0.1",
+                        },
+                    }
+                )
+            self.assertNotIn("switch:v1.0.1", deployment.calls)
+
+    def test_local_bundle_manual_rollback_requires_and_uses_exact_previous_bundle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current_source = FakeLocalBundleSource(
+                [manifest("v1.0.0", "1"), manifest("v1.0.1", "2")],
+                transport_identity="sha256:" + "7" * 64,
+            )
+            previous_source = FakeLocalBundleSource(
+                [manifest("v1.0.0", "1")],
+                transport_identity="sha256:" + "8" * 64,
+            )
+            created = []
+
+            def local_factory(*, payload=None, release_attestation=None, binding=None):
+                del release_attestation
+                if binding is not None:
+                    return (
+                        current_source
+                        if binding["transportIdentity"]
+                        == current_source.transport_identity
+                        else previous_source
+                    )
+                created.append(payload)
+                return previous_source if "previous" in str(payload) else current_source
+
+            agent, deployment = self.make_agent(
+                directory,
+                local_bundle_resolver_factory=local_factory,
+            )
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "local-bundle",
+                        "bundlePayload": "/media/current-portable.tar",
+                        "releaseAttestation": "/media/current-proof.json",
+                    },
+                }
+            )
+            agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+
+            with self.assertRaises(RequestRejected):
+                agent.dispatch(
+                    {
+                        "operation": "rollback_previous",
+                        "params": {"confirmation": "ROLLBACK PREVIOUS"},
+                    }
+                )
+            rolled_back = agent.dispatch(
+                {
+                    "operation": "rollback_previous",
+                    "params": {
+                        "confirmation": "ROLLBACK PREVIOUS",
+                        "source": "local-bundle",
+                        "bundlePayload": "/media/previous-portable.tar",
+                        "releaseAttestation": "/media/previous-proof.json",
+                    },
+                }
+            )
+
+            self.assertEqual(rolled_back["operation"]["status"], "rolled_back")
+            self.assertIn(Path("/media/previous-portable.tar"), created)
+            self.assertGreaterEqual(deployment.calls.count("local_import"), 2)
 
     @staticmethod
     def enter_manual_recovery(agent):

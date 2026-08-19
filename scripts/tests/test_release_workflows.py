@@ -599,6 +599,39 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 40", release_gate)
         self.assertIn('merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"', gate)
 
+    def test_release_verifier_is_built_offline_from_a_pinned_go_toolchain(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            release.count(
+                "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16"
+            ),
+            2,
+        )
+        self.assertEqual(release.count("go-version: '1.25.8'"), 2)
+        self.assertEqual(
+            release.count("release/release_attestation_verifier/go.sum"), 2
+        )
+        self.assertEqual(release.count("go mod download"), 2)
+        self.assertEqual(release.count("GOPROXY=off GOSUMDB=off go mod verify"), 2)
+        self.assertEqual(
+            release.count("GOPROXY=off GOSUMDB=off go test ./..."), 2
+        )
+        self.assertEqual(
+            release.count(
+                "CGO_ENABLED=0 GOPROXY=off GOSUMDB=off go build "
+                "-mod=readonly -trimpath -o offline-release-verifier ."
+            ),
+            2,
+        )
+        self.assertEqual(
+            release.count(
+                "test -x release/release_attestation_verifier/offline-release-verifier"
+            ),
+            2,
+        )
+
     def test_platform_qualification_is_hosted_scoped_and_injected_exactly(self):
         release = workflow("release.yml")
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
