@@ -33,6 +33,11 @@ if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ || ! "$CHANNEL" =~ ^(beta|rc)$ ]]; then
   echo "Release identity arguments are invalid." >&2
   exit 2
 fi
+if [[ ! "${ANIMEMO_POSTGRES_IMAGE:-}" =~ ^docker\.io/library/postgres@sha256:[0-9a-f]{64}$ ||
+      ! "${ANIMEMO_REDIS_IMAGE:-}" =~ ^docker\.io/library/redis@sha256:[0-9a-f]{64}$ ]]; then
+  echo "Exact immutable PostgreSQL and Redis image identities are required." >&2
+  exit 2
+fi
 if [[ -z "${RUNNER_TEMP:-}" || "$RUNNER_TEMP" != /* ]]; then
   echo "RUNNER_TEMP must be an absolute isolated runner path." >&2
   exit 2
@@ -90,10 +95,13 @@ SESSION_COOKIE_SECURE=false
 CSRF_COOKIE_SECURE=false
 REFRESH_COOKIE_SECURE=false
 ALLOW_INSECURE_PRODUCTION_COOKIES=true
-ANIMEMO_PORT=18088
+ANIMEMO_LISTEN_HOST=127.0.0.1
+ANIMEMO_LISTEN_PORT=18088
 ANIMEMO_DATA_ROOT=$DATA_ROOT
 ANIMEMO_API_IMAGE=$API_IMAGE
 ANIMEMO_WEB_IMAGE=$WEB_IMAGE
+ANIMEMO_POSTGRES_IMAGE=$ANIMEMO_POSTGRES_IMAGE
+ANIMEMO_REDIS_IMAGE=$ANIMEMO_REDIS_IMAGE
 ANIMEMO_RELEASE_VERSION=$VERSION
 ANIMEMO_RELEASE_COMMIT=$COMMIT
 ANIMEMO_RELEASE_CHANNEL=$CHANNEL

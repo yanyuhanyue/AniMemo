@@ -901,6 +901,35 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             source.index('"${COMPOSE[@]}" config --quiet'),
         )
 
+    def test_exact_image_rehearsal_closes_every_required_compose_variable(self):
+        source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(
+            encoding="utf-8"
+        )
+        compose_sources = (
+            ROOT / "deploy" / "docker-compose.yml",
+            ROOT / "updater" / "docker-compose.runtime.yml",
+            ROOT / "deploy" / "docker-compose.upgrade-gate.yml",
+        )
+        required = set()
+        for path in compose_sources:
+            required.update(
+                re.findall(
+                    r"\$\{([A-Z0-9_]+):\?[^}]+\}",
+                    path.read_text(encoding="utf-8"),
+                )
+            )
+        env_file = re.search(
+            r'cat > "\$ENV_FILE" <<EOF\n(?P<body>.*?)\nEOF',
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(env_file)
+        bindings = set(
+            re.findall(r"^([A-Z0-9_]+)=", env_file.group("body"), re.MULTILINE)
+        )
+
+        self.assertSetEqual(required - bindings, set())
+
     def test_exact_image_rehearsal_trusts_only_the_runtime_web_proxy(self):
         source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(encoding="utf-8")
 
