@@ -424,13 +424,18 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     encoding="utf-8"
                 )
                 self.assertNotIn("playwright install-deps", source)
-                self.assertNotIn("playwright install --with-deps", source)
+                self.assertNotIn("--with-deps", source)
                 self.assertIn("playwright install chromium", source)
                 self.assertIn("chromium.launch", source)
+                self.assertIn("browser.close()", source)
                 self.assertIn("BROWSER_RUNTIME_VERIFICATION", source)
                 self.assertLess(
                     source.index("playwright install chromium"),
                     source.index("chromium.launch"),
+                )
+                self.assertLess(
+                    source.index("chromium.launch"),
+                    source.index("browser.close()"),
                 )
 
     def test_fresh_docker_gates_complete_the_real_one_time_setup_api(self):
