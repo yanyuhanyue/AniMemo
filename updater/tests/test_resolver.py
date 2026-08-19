@@ -74,7 +74,7 @@ class FixtureTransport:
                 transport_id=self.transport_id,
             )
         root = private_staging / f"fixture-{self.transport_id.value}"
-        root.mkdir()
+        root.mkdir(mode=0o700)
         objects = []
         for name in RELEASE_BUNDLE_OBJECTS:
             payload = self.assets[name]
