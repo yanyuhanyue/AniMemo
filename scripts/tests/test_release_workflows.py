@@ -887,6 +887,20 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn('docker system prune', source)
         self.assertNotIn('docker builder prune', source)
 
+    def test_exact_image_rehearsal_closes_the_required_configuration_revision(self):
+        source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(
+            encoding="utf-8"
+        )
+        revision = "33333333-3333-4333-8333-333333333333"
+
+        self.assertEqual(source.count("ANIMEMO_CONFIG_REVISION"), 2)
+        self.assertIn(f"ANIMEMO_CONFIG_REVISION={revision}", source)
+        self.assertIn('export ANIMEMO_CONFIG_REVISION="33333333-3333-4333-8333-333333333333"', source)
+        self.assertLess(
+            source.index(f"ANIMEMO_CONFIG_REVISION={revision}"),
+            source.index('"${COMPOSE[@]}" config --quiet'),
+        )
+
     def test_exact_image_rehearsal_trusts_only_the_runtime_web_proxy(self):
         source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(encoding="utf-8")
 
