@@ -82,7 +82,10 @@ def _fsync_directory(path: Path) -> None:
 def _safe_state_root(path: Path) -> Path:
     if not path.is_absolute():
         _reject("TRUST_STATE_ROOT_INVALID")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError:
+        _reject("TRUST_STATE_ROOT_INVALID")
     try:
         metadata = path.lstat()
     except OSError:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from release.publication_evidence import (
     close_actions_provenance_claim,
     close_github_release_publication,
 )
+from scripts.tests.trust_kit_fixture import load_test_pretrusted_material
 from updater.errors import RequestRejected
 from updater.oci import VerifiedOCIImage, VerifiedOCIImageSet
 from updater.offline import (
@@ -45,6 +47,18 @@ _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
 _DIGEST_C = "sha256:" + "c" * 64
 _COMMIT = "1" * 40
+
+
+def _load_pretrusted_material_fixture(root: Path) -> PretrustedTrustMaterial:
+    if os.name == "posix" and os.geteuid() != 0:
+        return load_test_pretrusted_material(root)
+    return PretrustedTrustMaterial.load(root)
+
+
+def _pretrusted_fixture_rejection() -> type[BaseException]:
+    if os.name == "posix" and os.geteuid() != 0:
+        return AssertionError
+    return RequestRejected
 
 
 def _release_claim() -> dict[str, object]:
@@ -385,7 +399,8 @@ def _pretrusted_material_fixture(root: Path) -> TrustProfile:
         policy_identity=OFFLINE_POLICY_IDENTITY,
         activation_sequence=1,
     )
-    root.mkdir()
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
     (root / "trust-profile.json").write_bytes(
         canonical_json_bytes(profile.as_bootstrap_record())
     )
@@ -395,7 +410,8 @@ def _pretrusted_material_fixture(root: Path) -> TrustProfile:
     (root / "sigstore-tuf-root.json").write_bytes(sigstore_tuf_root)
     verifier_path = root / "offline-release-verifier"
     verifier_path.write_bytes(verifier)
-    verifier_path.chmod(0o755)
+    for path in root.iterdir():
+        path.chmod(0o700 if path == verifier_path else 0o600)
     return profile
 
 
@@ -611,7 +627,7 @@ class PretrustedTrustMaterialTests(unittest.TestCase):
             root = Path(temporary) / "pretrusted-v1"
             expected = _pretrusted_material_fixture(root)
 
-            material = PretrustedTrustMaterial.load(root)
+            material = _load_pretrusted_material_fixture(root)
 
             self.assertEqual(material.profile.identity, expected.identity)
             self.assertEqual(material.profile.profile_version, 1)
@@ -657,7 +673,7 @@ class PretrustedTrustMaterialTests(unittest.TestCase):
                 canonical_json_bytes(activated.as_bootstrap_record())
             )
 
-            material = PretrustedTrustMaterial.load(root)
+            material = _load_pretrusted_material_fixture(root)
 
             self.assertEqual(material.profile.identity, activated.identity)
             self.assertEqual(material.profile.profile_version, 2)
@@ -677,15 +693,19 @@ class PretrustedTrustMaterialTests(unittest.TestCase):
             root = Path(temporary) / "pretrusted-v1"
             _pretrusted_material_fixture(root)
             (root / "github-trusted-root.jsonl").write_bytes(b"tampered root")
-            with self.assertRaisesRegex(RequestRejected, "预置信任材料身份不一致"):
-                PretrustedTrustMaterial.load(root)
+            with self.assertRaisesRegex(
+                _pretrusted_fixture_rejection(), "预置信任材料身份不一致"
+            ):
+                _load_pretrusted_material_fixture(root)
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "pretrusted-v1"
             _pretrusted_material_fixture(root)
             (root / "bundle-supplied-root.json").write_bytes(b"untrusted")
-            with self.assertRaisesRegex(RequestRejected, "预置信任目录未关闭"):
-                PretrustedTrustMaterial.load(root)
+            with self.assertRaisesRegex(
+                _pretrusted_fixture_rejection(), "预置信任目录未关闭"
+            ):
+                _load_pretrusted_material_fixture(root)
 
 
 class SigstoreGoEvidenceVerifierTests(unittest.TestCase):
@@ -693,7 +713,7 @@ class SigstoreGoEvidenceVerifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "pretrusted-v1"
             profile = _pretrusted_material_fixture(root)
-            material = PretrustedTrustMaterial.load(root)
+            material = _load_pretrusted_material_fixture(root)
             calls = []
             claim = {
                 "authorityRole": "TRUST_METADATA_ONLY",
@@ -746,7 +766,7 @@ class SigstoreGoEvidenceVerifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "pretrusted-v1"
             profile = _pretrusted_material_fixture(root)
-            material = PretrustedTrustMaterial.load(root)
+            material = _load_pretrusted_material_fixture(root)
             verifier = SigstoreGoEvidenceVerifier(
                 material,
                 runner=mock.Mock(),
@@ -763,7 +783,7 @@ class SigstoreGoEvidenceVerifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "pretrusted-v1"
             profile = _pretrusted_material_fixture(root)
-            material = PretrustedTrustMaterial.load(root)
+            material = _load_pretrusted_material_fixture(root)
             calls = []
 
             def runner(command, **kwargs):
@@ -798,7 +818,7 @@ class SigstoreGoEvidenceVerifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "pretrusted-v1"
             profile = _pretrusted_material_fixture(root)
-            material = PretrustedTrustMaterial.load(root)
+            material = _load_pretrusted_material_fixture(root)
 
             def runner(command, **kwargs):
                 return subprocess.CompletedProcess(
