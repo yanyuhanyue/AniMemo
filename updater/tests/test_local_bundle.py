@@ -42,6 +42,65 @@ def images(root: Path, manifest: dict[str, object]) -> VerifiedOCIImageSet:
 
 
 class LocalBundleTests(unittest.TestCase):
+    def test_source_accepts_the_persistent_production_verifier_type(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = root / "payload.tar"
+            sidecar = root / "proof.json"
+            payload.write_bytes(b"portable payload")
+            sidecar.write_bytes(b"immutable release proof")
+            manifest = stable_manifest()
+            materials = VerifiedReleaseMaterials(
+                manifest=manifest,
+                deployment_contract={},
+                verified=VerifiedMaterialSet(
+                    root=root / "materials",
+                    archive_sha256=digest("f"),
+                    files=(),
+                ),
+                identity_digest=digest("e"),
+            )
+            fake_offline = types.ModuleType("updater.offline")
+
+            class VerifiedPortableRelease:
+                def __init__(self) -> None:
+                    self.materials = materials
+                    self.images = images(root, manifest)
+                    self.payload_sha256 = digest("0")
+                    self.authority_evidence = object()
+
+            class OfflineReleaseVerifier:
+                pass
+
+            class PersistentOfflineReleaseVerifier:
+                def verify(self, **_kwargs):
+                    value = VerifiedPortableRelease()
+                    value.payload_sha256 = "sha256:" + __import__("hashlib").sha256(
+                        b"portable payload"
+                    ).hexdigest()
+                    return value
+
+            fake_offline.VerifiedPortableRelease = VerifiedPortableRelease
+            fake_offline.OfflineReleaseVerifier = OfflineReleaseVerifier
+            fake_offline.PersistentOfflineReleaseVerifier = (
+                PersistentOfflineReleaseVerifier
+            )
+
+            with mock.patch.dict(sys.modules, {"updater.offline": fake_offline}):
+                source = LocalBundleReleaseSource.from_media(
+                    payload=payload,
+                    release_attestation=sidecar,
+                    cache_root=root / "cache",
+                    verifier=PersistentOfflineReleaseVerifier(),
+                    updater_version="1.1.0",
+                )
+
+            self.assertIs(
+                source.fetch_verified_materials(
+                    "v1.0.0", updater_version="1.1.0"
+                ),
+                materials,
+            )
     def test_source_verifies_private_staged_bytes_and_never_rereads_original_media(
         self,
     ) -> None:
@@ -79,7 +138,20 @@ class LocalBundleTests(unittest.TestCase):
                 def __init__(self) -> None:
                     self.calls: list[tuple[Path, Path, bytes, bytes]] = []
 
-                def verify(self, *, payload, sidecar, destination, updater_version):
+                def verify(
+                    self,
+                    *,
+                    payload,
+                    sidecar,
+                    destination,
+                    updater_version,
+                    expected_rollback_version=None,
+                ):
+                    self.assertions = (
+                        destination,
+                        updater_version,
+                        expected_rollback_version,
+                    )
                     self.calls.append(
                         (
                             payload,
@@ -88,7 +160,6 @@ class LocalBundleTests(unittest.TestCase):
                             sidecar.read_bytes(),
                         )
                     )
-                    self.assertions = (destination, updater_version)
                     return VerifiedPortableRelease()
 
             fake_offline.VerifiedPortableRelease = VerifiedPortableRelease

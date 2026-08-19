@@ -164,6 +164,7 @@ class HostAgentRuntime:
             payload=None,
             release_attestation=None,
             binding=None,
+            expected_rollback_version=None,
         ):
             from .offline import production_offline_release_verifier
 
@@ -173,17 +174,24 @@ class HostAgentRuntime:
                 if (
                     payload is not None
                     or release_attestation is not None
+                    or expected_rollback_version is not None
                     or not isinstance(binding, dict)
                 ):
                     raise StateError("Local bundle resolver binding is invalid")
                 transport_identity = binding.get("transportIdentity")
+                bound_rollback_version = binding.get("expectedRollbackVersion")
                 if not isinstance(transport_identity, str):
                     raise StateError("Local bundle transport binding is invalid")
+                if bound_rollback_version is not None and not isinstance(
+                    bound_rollback_version, str
+                ):
+                    raise StateError("Local bundle rollback binding is invalid")
                 return LocalBundleReleaseSource.from_staged(
                     cache_root=local_cache,
                     transport_identity=transport_identity,
                     verifier=verifier,
                     updater_version=__version__,
+                    expected_rollback_version=bound_rollback_version,
                 )
             if not isinstance(payload, Path) or not isinstance(
                 release_attestation, Path
@@ -195,6 +203,7 @@ class HostAgentRuntime:
                 cache_root=local_cache,
                 verifier=verifier,
                 updater_version=__version__,
+                expected_rollback_version=expected_rollback_version,
             )
 
         configured_local_factory = (

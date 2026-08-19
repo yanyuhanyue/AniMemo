@@ -577,6 +577,56 @@ class PretrustedTrustMaterialTests(unittest.TestCase):
             self.assertEqual(material.profile.policy_identity, OFFLINE_POLICY_IDENTITY)
             self.assertEqual(material.verifier_path, root / "offline-release-verifier")
 
+    def test_activated_successor_profile_reloads_without_lineage_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "pretrusted-v1"
+            current = _pretrusted_material_fixture(root)
+            activated = TrustProfile(
+                profile_version=2,
+                parent_profile_identity=current.identity,
+                repository=current.repository,
+                repository_id=current.repository_id,
+                owner_id=current.owner_id,
+                github_release_certificate_identity=(
+                    current.github_release_certificate_identity
+                ),
+                github_trusted_root_sha256=current.github_trusted_root_sha256,
+                sigstore_trusted_root_sha256=(
+                    current.sigstore_trusted_root_sha256
+                ),
+                verifier_id=current.verifier_id,
+                minimum_verifier_version=current.minimum_verifier_version,
+                revocation_epoch=2,
+                revocation_snapshot_sha256=_DIGEST_C,
+                verifier_identity=current.verifier_identity,
+                policy_identity=current.policy_identity,
+                activation_sequence=2,
+            )
+            (root / "trust-profile.json").write_bytes(
+                canonical_json_bytes(activated.as_bootstrap_record())
+            )
+
+            material = PretrustedTrustMaterial.load(root)
+
+            self.assertEqual(material.profile.identity, activated.identity)
+            self.assertEqual(material.profile.profile_version, 2)
+            self.assertIsNone(material.profile.parent_profile_identity)
+
+    def test_unbound_successor_profile_cannot_advance_authority(self) -> None:
+        current = _profile()
+        bound = _successor(current)
+        unbound = TrustProfile.from_bootstrap_record(bound.as_bootstrap_record())
+        state = OfflineAuthorityState.initial(current)
+
+        with self.assertRaisesRegex(RequestRejected, "后继信任 profile 不是精确连续更新"):
+            advance_trust_profile(
+                current_profile=current,
+                successor_profile=unbound,
+                state=state,
+                external_verifier=_TrustUpdateVerifier({}),
+                update_bundle=b"unbound successor",
+            )
+
     def test_tampered_or_open_ended_pretrusted_store_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "pretrusted-v1"
@@ -735,6 +785,58 @@ class OfflineOrchestrationTests(unittest.TestCase):
             self.assertEqual(first.next_state.generation, 1)
             self.assertEqual(second.next_state.generation, 1)
             self.assertEqual(first.publication_identity, second.publication_identity)
+
+    def test_previously_accepted_release_requires_exact_rollback_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload, sidecar, release_claim, action_claims = _portable_fixture(root)
+            profile = _profile()
+            verifier = OfflineReleaseVerifier(
+                trust_profile=profile,
+                external_verifier=_PublicationVerifier(release_claim, action_claims),
+                oci_verifier=_qualified_oci_verifier,
+                idempotent_reverification=True,
+            )
+            accepted = verifier.verify(
+                payload=payload,
+                sidecar=sidecar,
+                destination=root / "accepted-materials",
+                updater_version="1.0.0",
+                state=OfflineAuthorityState.initial(profile),
+            )
+            higher = accepted.next_state.accept_publication(
+                profile=profile,
+                publication_identity="sha256:" + "9" * 64,
+                release_version="v1.0.1",
+            )
+
+            with self.assertRaisesRegex(RequestRejected, "重放"):
+                verifier.verify(
+                    payload=payload,
+                    sidecar=sidecar,
+                    destination=root / "regular-materials",
+                    updater_version="1.0.0",
+                    state=higher,
+                )
+            rolled_back = verifier.verify(
+                payload=payload,
+                sidecar=sidecar,
+                destination=root / "rollback-materials",
+                updater_version="1.0.0",
+                state=higher,
+                expected_rollback_version="v1.0.0",
+            )
+
+            self.assertEqual(rolled_back.next_state, higher)
+            with self.assertRaisesRegex(RequestRejected, "重放"):
+                verifier.verify(
+                    payload=payload,
+                    sidecar=sidecar,
+                    destination=root / "wrong-rollback-materials",
+                    updater_version="1.0.0",
+                    state=higher,
+                    expected_rollback_version="v0.9.0",
+                )
 
 
 if __name__ == "__main__":

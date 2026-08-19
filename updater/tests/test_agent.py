@@ -97,13 +97,14 @@ class FakeLocalBundleSource(FakeSource):
         super().__init__(manifests)
         self.transport_policy = LocalBundleTransportPolicy()
         self.transport_identity = transport_identity
+        self.expected_rollback_version = None
 
     def release_binding(self, version):
         item = self.manifests[version]
         encoded = json.dumps(
             item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
-        return {
+        result = {
             "source": "local-bundle",
             "transportPolicyIdentity": self.transport_policy.identity,
             "verifiedReleaseIdentity": item["images"]["api"]["digest"],
@@ -119,6 +120,9 @@ class FakeLocalBundleSource(FakeSource):
             "postgresDigest": item["images"]["postgres"]["digest"],
             "redisDigest": item["images"]["redis"]["digest"],
         }
+        if self.expected_rollback_version is not None:
+            result["expectedRollbackVersion"] = self.expected_rollback_version
+        return result
 
 
 class FakeDeployment:
@@ -305,8 +309,17 @@ class UpdateAgentTests(unittest.TestCase):
             )
             created = []
 
-            def local_factory(*, payload=None, release_attestation=None, binding=None):
+            rollback_versions = []
+
+            def local_factory(
+                *,
+                payload=None,
+                release_attestation=None,
+                binding=None,
+                expected_rollback_version=None,
+            ):
                 del release_attestation
+                rollback_versions.append(expected_rollback_version)
                 if binding is not None:
                     return (
                         current_source
@@ -315,7 +328,11 @@ class UpdateAgentTests(unittest.TestCase):
                         else previous_source
                     )
                 created.append(payload)
-                return previous_source if "previous" in str(payload) else current_source
+                selected = (
+                    previous_source if "previous" in str(payload) else current_source
+                )
+                selected.expected_rollback_version = expected_rollback_version
+                return selected
 
             agent, deployment = self.make_agent(
                 directory,
@@ -362,7 +379,14 @@ class UpdateAgentTests(unittest.TestCase):
             )
 
             self.assertEqual(rolled_back["operation"]["status"], "rolled_back")
+            self.assertEqual(
+                rolled_back["operation"]["metadata"]["releaseBinding"][
+                    "expectedRollbackVersion"
+                ],
+                "v1.0.0",
+            )
             self.assertIn(Path("/media/previous-portable.tar"), created)
+            self.assertIn("v1.0.0", rollback_versions)
             self.assertGreaterEqual(deployment.calls.count("local_import"), 2)
 
     @staticmethod

@@ -605,6 +605,7 @@ class UpdateAgent:
                     payload=Path(params["bundlePayload"]),
                     release_attestation=Path(params["releaseAttestation"]),
                     binding=None,
+                    expected_rollback_version=previous["release"]["version"],
                 )
                 resolver_policy = getattr(resolver, "transport_policy", None)
                 if (

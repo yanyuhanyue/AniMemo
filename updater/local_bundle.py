@@ -464,16 +464,23 @@ class LocalBundleTransport:
                 shutil.rmtree(pending, ignore_errors=True)
 
 
-def _offline_types() -> tuple[type, type]:
+def _offline_types() -> tuple[tuple[type, ...], type]:
     try:
         module = importlib.import_module("updater.offline")
-        verifier_type = module.OfflineReleaseVerifier
+        verifier_types = tuple(
+            candidate
+            for candidate in (
+                getattr(module, "OfflineReleaseVerifier", None),
+                getattr(module, "PersistentOfflineReleaseVerifier", None),
+            )
+            if isinstance(candidate, type)
+        )
         release_type = module.VerifiedPortableRelease
     except (AttributeError, ImportError) as error:
         raise LocalBundleError("LOCAL_BUNDLE_OFFLINE_VERIFIER_UNAVAILABLE") from error
-    if not isinstance(verifier_type, type) or not isinstance(release_type, type):
+    if not verifier_types or not isinstance(release_type, type):
         raise LocalBundleError("LOCAL_BUNDLE_OFFLINE_VERIFIER_UNAVAILABLE")
-    return verifier_type, release_type
+    return verifier_types, release_type
 
 
 def _validate_verified_release(value: Any, receipt: LocalBundleReceipt) -> Any:
@@ -519,14 +526,16 @@ class LocalBundleReleaseSource:
         verifier: Any,
         updater_version: str,
         verification_destination: Path,
+        expected_rollback_version: str | None = None,
     ) -> None:
-        verifier_type, _ = _offline_types()
-        if not isinstance(verifier, verifier_type):
+        verifier_types, _ = _offline_types()
+        if not isinstance(verifier, verifier_types):
             raise LocalBundleError("LOCAL_BUNDLE_OFFLINE_VERIFIER_UNAVAILABLE")
         self._acquired = acquired
         self._verifier = verifier
         self._updater_version = updater_version
         self._verification_destination = verification_destination
+        self._expected_rollback_version = expected_rollback_version
         self._verified = self._verify()
 
     @classmethod
@@ -538,6 +547,7 @@ class LocalBundleReleaseSource:
         cache_root: Path,
         verifier: Any,
         updater_version: str,
+        expected_rollback_version: str | None = None,
     ) -> LocalBundleReleaseSource:
         cache = _direct_private_directory(Path(cache_root), create=True)
         acquired = LocalBundleTransport().acquire(
@@ -550,6 +560,7 @@ class LocalBundleReleaseSource:
             verifier=verifier,
             updater_version=updater_version,
             verification_destination=cache / "verified-materials",
+            expected_rollback_version=expected_rollback_version,
         )
 
     @classmethod
@@ -560,6 +571,7 @@ class LocalBundleReleaseSource:
         transport_identity: str,
         verifier: Any,
         updater_version: str,
+        expected_rollback_version: str | None = None,
     ) -> LocalBundleReleaseSource:
         if (
             type(transport_identity) is not str
@@ -580,6 +592,7 @@ class LocalBundleReleaseSource:
             verifier=verifier,
             updater_version=updater_version,
             verification_destination=cache / "verified-materials",
+            expected_rollback_version=expected_rollback_version,
         )
 
     def _verify(self) -> Any:
@@ -588,6 +601,7 @@ class LocalBundleReleaseSource:
             sidecar=self._acquired.material("release-attestation"),
             destination=self._verification_destination,
             updater_version=self._updater_version,
+            expected_rollback_version=self._expected_rollback_version,
         )
         return _validate_verified_release(verified, self._acquired.receipt)
 
@@ -631,7 +645,7 @@ class LocalBundleReleaseSource:
             ).encode("utf-8")
         ).hexdigest()
         try:
-            return {
+            result = {
                 "source": "local-bundle",
                 "transportPolicyIdentity": self.transport_policy.identity,
                 "verifiedReleaseIdentity": materials.identity_digest,
@@ -649,6 +663,11 @@ class LocalBundleReleaseSource:
                 "postgresDigest": manifest["images"]["postgres"]["digest"],
                 "redisDigest": manifest["images"]["redis"]["digest"],
             }
+            if self._expected_rollback_version is not None:
+                result["expectedRollbackVersion"] = (
+                    self._expected_rollback_version
+                )
+            return result
         except (KeyError, TypeError) as error:
             raise LocalBundleError("LOCAL_BUNDLE_AUTHORITY_BINDING_INVALID") from error
 

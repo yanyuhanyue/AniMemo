@@ -129,7 +129,7 @@ class TrustProfile:
         if self.profile_version == 1:
             if self.parent_profile_identity is not None:
                 raise ValueError("首个信任 profile 不得声明父身份")
-        else:
+        elif self.parent_profile_identity is not None:
             _require_digest(
                 self.parent_profile_identity,
                 label="父信任 profile 身份",  # type: ignore[arg-type]
@@ -863,7 +863,13 @@ class OfflineReleaseVerifier:
         destination: Path,
         updater_version: str,
         state: OfflineAuthorityState | None = None,
+        expected_rollback_version: str | None = None,
     ) -> VerifiedPortableRelease:
+        if expected_rollback_version is not None:
+            try:
+                Version(expected_rollback_version.removeprefix("v"))
+            except (AttributeError, InvalidVersion) as error:
+                raise RequestRejected("PREVIOUS 回滚版本身份无效") from error
         sidecar_bundle = _read_official_sidecar(sidecar)
         if self._production_blocked_reason is not None:
             raise RequestRejected(self._production_blocked_reason)
@@ -977,7 +983,10 @@ class OfflineReleaseVerifier:
             if (
                 self._idempotent_reverification
                 and publication.identity in state.accepted_publication_identities
-                and state.highest_release_version == publication.tag
+                and (
+                    state.highest_release_version == publication.tag
+                    or expected_rollback_version == publication.tag
+                )
             ):
                 next_state = state
             else:
@@ -1264,6 +1273,7 @@ class PersistentOfflineReleaseVerifier:
         destination: Path,
         updater_version: str,
         state: OfflineAuthorityState | None = None,
+        expected_rollback_version: str | None = None,
     ) -> VerifiedPortableRelease:
         if state is not None:
             raise RequestRejected("生产持久化验证器禁止调用方注入权威状态")
@@ -1290,6 +1300,7 @@ class PersistentOfflineReleaseVerifier:
                 destination=destination,
                 updater_version=updater_version,
                 state=durable,
+                expected_rollback_version=expected_rollback_version,
             )
             if verified.next_state != durable:
                 self._store_state(verified.next_state)
