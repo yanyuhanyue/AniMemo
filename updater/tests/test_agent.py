@@ -1,21 +1,24 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from release.contract import build_manifest
 from updater.agent import UpdateAgent
-from updater.errors import RecoveryRequired, RequestRejected
+from updater.errors import RecoveryRequired, RequestRejected, StateError
 from updater.executor import UpdateExecutor
 from updater.plans import PlanStore
 from updater.runtime_state import RuntimeState
 from updater.slots import ReleaseSlots
 from updater.state import OperationStore
+from updater.transport import ExplicitTransportPolicy
 
 
 def manifest(version: str, digit: str):
@@ -46,8 +49,14 @@ def manifest(version: str, digit: str):
 
 
 class FakeSource:
-    def __init__(self, manifests):
-        self.manifests = {item["release"]["version"]: item for item in manifests}
+    def __init__(self, manifests, *, policy=None, events=None):
+        self.manifests = (
+            manifests
+            if isinstance(manifests, dict)
+            else {item["release"]["version"]: item for item in manifests}
+        )
+        self.transport_policy = policy or ExplicitTransportPolicy.github()
+        self.events = events if events is not None else []
 
     def list_releases(self, channel, refresh=False):
         accepted = {"stable"} if channel == "stable" else {"stable", "rc"}
@@ -59,7 +68,25 @@ class FakeSource:
         ]
 
     def fetch_verified(self, version, updater_version="1.0.0", refresh=False):
-        return self.manifests[version]
+        return self.fetch_verified_materials(
+            version,
+            updater_version=updater_version,
+            refresh=refresh,
+        ).manifest
+
+    def fetch_verified_materials(
+        self,
+        version,
+        updater_version="1.0.0",
+        refresh=False,
+    ):
+        del updater_version
+        self.events.append((self.transport_policy.source.value, version, refresh))
+        manifest_value = self.manifests[version]
+        return SimpleNamespace(
+            manifest=manifest_value,
+            identity_digest=manifest_value["images"]["api"]["digest"],
+        )
 
 
 class FakeDeployment:
@@ -70,6 +97,9 @@ class FakeDeployment:
     def verify_recent_backup(self): self.calls.append("backup_check")
     def backup_database(self, operation_id): self.calls.append("backup")
     def pull(self, item): self.calls.append("pull")
+    def pull_verified(self, materials, policy):
+        del materials, policy
+        self.calls.append("pull")
     def migrate(self, item): self.calls.append("migrate")
     def bootstrap(self, item): self.calls.append("bootstrap")
     def inspect_enabled_plugin_apis(self, item):
@@ -90,6 +120,11 @@ class UpdateAgentTests(unittest.TestCase):
         runtime.initialize_from_manifest(current, enabled_plugin_apis={2})
         operations = OperationStore(root / "state")
         source = FakeSource([current, target])
+        resolver_factory = lambda policy: FakeSource(
+            source.manifests,
+            policy=policy,
+            events=source.events,
+        )
         deployment = FakeDeployment()
         runtime_binding = mock.Mock()
         executor = UpdateExecutor(
@@ -111,6 +146,8 @@ class UpdateAgentTests(unittest.TestCase):
             executor=executor,
             background=False,
             runtime_refresh_seconds=runtime_refresh_seconds,
+            resolver_factory=resolver_factory,
+            transport_policy=source.transport_policy,
         )
         return agent, deployment
 
@@ -164,9 +201,265 @@ class UpdateAgentTests(unittest.TestCase):
                 "params": {"planId": plan["planId"], "confirmation": "APPLY v1.0.1"},
             })
 
+            self.assertEqual(plan["source"], "github")
+            self.assertEqual(
+                plan["transportPolicyIdentity"],
+                ExplicitTransportPolicy.github().identity,
+            )
             self.assertEqual(result["operation"]["status"], "succeeded")
             self.assertIn("switch:v1.0.1", deployment.calls)
             self.assertEqual(agent.dispatch({"operation": "get_status", "params": {}})["current"]["version"], "v1.0.1")
+
+    def test_plan_persists_explicit_mirror_policy_and_apply_reuses_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "official-mirror",
+                    },
+                }
+            )
+            stored = agent.plans.get(plan["planId"])
+            result = agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+
+            policy = ExplicitTransportPolicy.official_mirror()
+            self.assertEqual(plan["source"], "official-mirror")
+            self.assertEqual(plan["transportPolicyIdentity"], policy.identity)
+            self.assertEqual(plan["verifiedReleaseIdentity"], "sha256:" + "2" * 64)
+            self.assertEqual(
+                stored["releaseBinding"],
+                {
+                    "source": "official-mirror",
+                    "transportPolicyIdentity": policy.identity,
+                    "verifiedReleaseIdentity": "sha256:" + "2" * 64,
+                },
+            )
+            self.assertEqual(
+                result["operation"]["metadata"]["releaseBinding"],
+                stored["releaseBinding"],
+            )
+            target_fetches = [
+                event for event in agent.source.events if event[1] == "v1.0.1"
+            ]
+            self.assertTrue(target_fetches)
+            self.assertEqual(
+                {event[0] for event in target_fetches},
+                {"official-mirror"},
+            )
+
+    def test_failed_explicit_mirror_selection_never_falls_back_to_github(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            selected = []
+
+            def unavailable(policy):
+                selected.append(policy.source.value)
+                raise StateError("selected mirror unavailable")
+
+            agent.resolver_factory = unavailable
+            with self.assertRaisesRegex(StateError, "mirror unavailable"):
+                agent.dispatch(
+                    {
+                        "operation": "plan_update",
+                        "params": {
+                            "version": "v1.0.1",
+                            "source": "official-mirror",
+                        },
+                    }
+                )
+
+            self.assertEqual(selected, ["official-mirror"])
+            self.assertEqual(agent.source.events, [])
+
+    def test_restarted_agent_applies_the_plan_with_its_persisted_mirror_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_agent, _ = self.make_agent(directory)
+            plan = first_agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "official-mirror",
+                    },
+                }
+            )
+            root = Path(directory)
+            restarted_source = FakeSource(first_agent.source.manifests)
+            deployment = FakeDeployment()
+            executor = UpdateExecutor(
+                store=first_agent.operations,
+                slots=first_agent.slots,
+                release_source=restarted_source,
+                deployment=deployment,
+                runtime_state=first_agent.runtime_state,
+                runtime_binding=mock.Mock(),
+                lock_path=root / "state" / "update.lock",
+                updater_version="1.0.0",
+            )
+            restarted = UpdateAgent(
+                source=restarted_source,
+                operations=first_agent.operations,
+                plans=PlanStore(root / "state"),
+                slots=first_agent.slots,
+                runtime_state=first_agent.runtime_state,
+                executor=executor,
+                background=False,
+                resolver_factory=lambda policy: FakeSource(
+                    restarted_source.manifests,
+                    policy=policy,
+                    events=restarted_source.events,
+                ),
+                transport_policy=restarted_source.transport_policy,
+            )
+
+            result = restarted.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+
+            self.assertEqual(result["operation"]["status"], "succeeded")
+            self.assertTrue(restarted_source.events)
+            self.assertEqual(
+                {event[0] for event in restarted_source.events},
+                {"official-mirror"},
+            )
+
+    def test_rollback_binds_previous_release_to_the_current_operation_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "official-mirror",
+                    },
+                }
+            )
+            agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+            agent.source.events.clear()
+
+            result = agent.dispatch(
+                {
+                    "operation": "rollback_previous",
+                    "params": {"confirmation": "ROLLBACK PREVIOUS"},
+                }
+            )
+
+            self.assertEqual(result["operation"]["status"], "rolled_back")
+            self.assertEqual(
+                result["operation"]["metadata"]["releaseBinding"],
+                {
+                    "source": "official-mirror",
+                    "transportPolicyIdentity": (
+                        ExplicitTransportPolicy.official_mirror().identity
+                    ),
+                    "verifiedReleaseIdentity": "sha256:" + "1" * 64,
+                },
+            )
+            self.assertTrue(agent.source.events)
+            self.assertEqual(
+                {event[0] for event in agent.source.events},
+                {"official-mirror"},
+            )
+
+    def test_apply_rejects_verified_release_identity_drift_without_switching(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, deployment = self.make_agent(directory)
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {"version": "v1.0.1", "source": "github"},
+                }
+            )
+            path = agent.plans.root / f"{plan['planId']}.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["releaseBinding"]["verifiedReleaseIdentity"] = "sha256:" + "9" * 64
+            path.write_text(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            result = agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+
+            self.assertEqual(result["operation"]["status"], "failed_pre_switch")
+            self.assertNotIn("switch:v1.0.1", deployment.calls)
+
+    def test_operation_recovery_rebinds_the_persisted_policy_without_redetection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "official-mirror",
+                    },
+                }
+            )
+            applied = agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+            operation = agent.operations.get(applied["operation"]["id"])
+            agent.executor.release_source = agent.source
+
+            agent.bind_operation_resolver(operation)
+
+            self.assertEqual(
+                agent.executor.release_source.transport_policy.source.value,
+                "official-mirror",
+            )
+
+    def test_incomplete_legacy_operation_without_policy_binding_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            operation = agent.operations.create(
+                "apply_update",
+                {"version": "v1.0.1", "planId": "a" * 32},
+            )
+            agent.operations.transition(operation["id"], "preflight")
+
+            with self.assertRaisesRegex(StateError, "explicit migration"):
+                agent.recover()
 
     def test_wrong_confirmation_and_reused_plan_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
 import unittest
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from unittest import mock
 
 from durability.compatibility import (
     EVALUATION_ORDER,
@@ -17,6 +19,7 @@ from durability.compatibility import (
 )
 from durability.doctor import (
     DOCTOR_CHECK_IDS,
+    DISTRIBUTION_CHECK_IDS,
     CompatibilityEvidence,
     DoctorRunner,
     DoctorStatus,
@@ -38,6 +41,24 @@ from durability.instance import (
 
 CHECKED_AT = "2026-08-15T16:00:00Z"
 DIGEST = "sha256:" + "a" * 64
+
+
+def transport_policy_identity() -> str:
+    payload = json.dumps(
+        {
+            "fallback": "forbidden",
+            "policy_version": 1,
+            "selection_origin": "persisted-instance-policy",
+            "source": "github",
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
+IDENTITY = transport_policy_identity()
 
 
 def locator_payload() -> dict[str, object]:
@@ -192,6 +213,7 @@ def passing_probes() -> dict[str, object]:
         "filesystem.roots",
         "filesystem.permissions",
         "compatibility.state",
+        *DISTRIBUTION_CHECK_IDS,
     }
     return {
         check_id: (
@@ -200,6 +222,62 @@ def passing_probes() -> dict[str, object]:
         for check_id in DOCTOR_CHECK_IDS
         if check_id not in built_in
     }
+
+
+def distribution_snapshot() -> dict[str, object]:
+    images = {
+        "api": DIGEST,
+        "postgres": DIGEST,
+        "redis": DIGEST,
+        "web": DIGEST,
+    }
+    return {
+        "schemaVersion": 1,
+        "configuredTransportPolicy": {
+            "fallbackAllowed": False,
+            "identity": IDENTITY,
+            "selectionOrigin": "persisted-instance-policy",
+            "source": "github",
+        },
+        "recentTransportReceipt": {
+            "identity": "c" * 64,
+            "ociImages": images,
+            "planIdentity": "d" * 64,
+            "policyIdentity": IDENTITY,
+            "releaseManifestDigest": DIGEST,
+            "source": "github",
+            "valid": True,
+        },
+        "verifiedReleaseIdentity": dict(locator_payload()["releaseIdentity"]),
+        "verifiedOCIIdentity": images,
+        "plan": {
+            "identity": "d" * 64,
+            "ociImages": images,
+            "policyIdentity": IDENTITY,
+            "releaseManifestDigest": DIGEST,
+            "source": "github",
+        },
+    }
+
+
+class NetworkSentinel:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def call(self) -> None:
+        self.call_count += 1
+        raise AssertionError("Doctor must not use a distribution network adapter")
+
+
+class FakeDistributionReader:
+    def __init__(self, snapshot: dict[str, object], network: NetworkSentinel) -> None:
+        self.snapshot = snapshot
+        self.network = network
+        self.calls: list[str] = []
+
+    def read_local_snapshot(self, locator) -> dict[str, object]:
+        self.calls.append(locator.instance_id)
+        return self.snapshot
 
 
 class CanonicalLocatorTests(unittest.TestCase):
@@ -242,12 +320,314 @@ class CanonicalLocatorTests(unittest.TestCase):
 
 
 class DoctorBasicRuntimeTests(unittest.TestCase):
+    def test_distribution_transport_policy_uses_only_the_closed_local_snapshot(self):
+        network = NetworkSentinel()
+        reader = FakeDistributionReader(distribution_snapshot(), network)
+        with mock.patch(
+            "socket.socket", side_effect=AssertionError("network forbidden")
+        ) as socket_guard, mock.patch(
+            "socket.create_connection",
+            side_effect=AssertionError("network forbidden"),
+        ) as connection_guard, mock.patch(
+            "socket.getaddrinfo", side_effect=AssertionError("DNS forbidden")
+        ) as dns_guard:
+            report = DoctorRunner(
+                host=FakeReadOnlyHost(),
+                probes=passing_probes(),
+                compatibility=compatibility_evidence(),
+                distribution_reader=reader,
+                clock=lambda: CHECKED_AT,
+            ).run()
+
+        by_id = {check.check_id: check for check in report.checks}
+        self.assertEqual(
+            DISTRIBUTION_CHECK_IDS,
+            (
+                "distribution.transport-policy",
+                "distribution.transport-receipt",
+                "distribution.release-identity",
+                "distribution.oci-identity",
+                "distribution.plan-receipt-drift",
+            ),
+        )
+        self.assertEqual(
+            by_id["distribution.transport-policy"].status, DoctorStatus.PASS
+        )
+        self.assertEqual(
+            by_id["distribution.transport-policy"].code,
+            "DISTRIBUTION_TRANSPORT_POLICY_VALID",
+        )
+        self.assertEqual(reader.calls, [locator_payload()["instanceId"]])
+        self.assertEqual(network.call_count, 0)
+        self.assertEqual(socket_guard.call_count, 0)
+        self.assertEqual(connection_guard.call_count, 0)
+        self.assertEqual(dns_guard.call_count, 0)
+
+    def test_distribution_snapshot_failure_is_redacted_and_does_not_call_network(self):
+        marker = "credential=must-not-appear"
+        network = NetworkSentinel()
+
+        class BrokenLocalReader:
+            def read_local_snapshot(self, _locator):
+                raise RuntimeError(marker)
+
+        report = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=BrokenLocalReader(),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        by_id = {check.check_id: check for check in report.checks}
+
+        self.assertNotIn(marker, json.dumps(report.as_dict(), ensure_ascii=False))
+        self.assertEqual(
+            {
+                by_id[check_id].code
+                for check_id in DISTRIBUTION_CHECK_IDS
+            },
+            {"DISTRIBUTION_SNAPSHOT_UNAVAILABLE"},
+        )
+        self.assertEqual(
+            {by_id[check_id].status for check_id in DISTRIBUTION_CHECK_IDS},
+            {DoctorStatus.SKIPPED},
+        )
+        self.assertEqual(by_id["service.api.health"].status, DoctorStatus.PASS)
+        self.assertEqual(network.call_count, 0)
+
+    def test_distribution_snapshot_schema_is_closed_and_secret_safe(self):
+        marker = "must-not-appear"
+        snapshot = distribution_snapshot()
+        snapshot["credential"] = marker
+        report = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(
+                snapshot, NetworkSentinel()
+            ),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        by_id = {check.check_id: check for check in report.checks}
+
+        self.assertNotIn(marker, json.dumps(report.as_dict(), ensure_ascii=False))
+        self.assertEqual(
+            {by_id[check_id].code for check_id in DISTRIBUTION_CHECK_IDS},
+            {"DISTRIBUTION_SNAPSHOT_INVALID"},
+        )
+        self.assertEqual(
+            {by_id[check_id].status for check_id in DISTRIBUTION_CHECK_IDS},
+            {DoctorStatus.FAIL},
+        )
+
+    def test_malformed_distribution_subsection_does_not_abort_other_checks(self):
+        marker = "credential=must-not-appear"
+        snapshot = distribution_snapshot()
+        snapshot["recentTransportReceipt"] = {
+            **snapshot["recentTransportReceipt"],
+            "ociImages": marker,
+        }
+
+        report = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(
+                snapshot, NetworkSentinel()
+            ),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        by_id = {check.check_id: check for check in report.checks}
+
+        self.assertNotIn(marker, json.dumps(report.as_dict(), ensure_ascii=False))
+        self.assertEqual(
+            by_id["distribution.transport-receipt"].status, DoctorStatus.FAIL
+        )
+        self.assertEqual(
+            by_id["distribution.plan-receipt-drift"].status, DoctorStatus.FAIL
+        )
+        self.assertEqual(
+            by_id["distribution.transport-policy"].status, DoctorStatus.PASS
+        )
+        self.assertEqual(by_id["service.web.health"].status, DoctorStatus.PASS)
+
+    def test_recent_transport_receipt_is_validated_against_the_local_policy(self):
+        network = NetworkSentinel()
+        valid_reader = FakeDistributionReader(distribution_snapshot(), network)
+        valid = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=valid_reader,
+            clock=lambda: CHECKED_AT,
+        ).run()
+        valid_check = {
+            check.check_id: check for check in valid.checks
+        }["distribution.transport-receipt"]
+        self.assertEqual(valid_check.status, DoctorStatus.PASS)
+        self.assertEqual(valid_check.code, "DISTRIBUTION_TRANSPORT_RECEIPT_VALID")
+
+        invalid_snapshot = distribution_snapshot()
+        invalid_snapshot["recentTransportReceipt"] = {
+            **invalid_snapshot["recentTransportReceipt"],
+            "policyIdentity": "e" * 64,
+        }
+        invalid = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(invalid_snapshot, network),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        invalid_check = {
+            check.check_id: check for check in invalid.checks
+        }["distribution.transport-receipt"]
+        self.assertEqual(invalid_check.status, DoctorStatus.FAIL)
+        self.assertEqual(
+            invalid_check.code, "DISTRIBUTION_TRANSPORT_RECEIPT_POLICY_MISMATCH"
+        )
+
+        unverified_snapshot = distribution_snapshot()
+        unverified_snapshot["recentTransportReceipt"] = {
+            **unverified_snapshot["recentTransportReceipt"],
+            "valid": False,
+        }
+        unverified = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(unverified_snapshot, network),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        unverified_check = {check.check_id: check for check in unverified.checks}[
+            "distribution.transport-receipt"
+        ]
+        self.assertEqual(unverified_check.status, DoctorStatus.FAIL)
+        self.assertEqual(
+            unverified_check.code, "DISTRIBUTION_TRANSPORT_RECEIPT_INVALID"
+        )
+        self.assertEqual(network.call_count, 0)
+
+    def test_verified_release_identity_must_equal_the_canonical_locator_identity(self):
+        network = NetworkSentinel()
+        valid = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(
+                distribution_snapshot(), network
+            ),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        valid_check = {check.check_id: check for check in valid.checks}[
+            "distribution.release-identity"
+        ]
+        self.assertEqual(valid_check.status, DoctorStatus.PASS)
+        self.assertEqual(valid_check.code, "DISTRIBUTION_RELEASE_IDENTITY_VERIFIED")
+
+        drifted_snapshot = distribution_snapshot()
+        drifted_snapshot["verifiedReleaseIdentity"] = {
+            **drifted_snapshot["verifiedReleaseIdentity"],
+            "manifestDigest": "sha256:" + "f" * 64,
+        }
+        drifted = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(drifted_snapshot, network),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        drifted_check = {check.check_id: check for check in drifted.checks}[
+            "distribution.release-identity"
+        ]
+        self.assertEqual(drifted_check.status, DoctorStatus.FAIL)
+        self.assertEqual(
+            drifted_check.code, "DISTRIBUTION_RELEASE_IDENTITY_MISMATCH"
+        )
+        self.assertEqual(network.call_count, 0)
+
+    def test_verified_oci_identity_requires_four_roles_and_locator_api_web_binding(self):
+        network = NetworkSentinel()
+        valid = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(
+                distribution_snapshot(), network
+            ),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        valid_check = {check.check_id: check for check in valid.checks}[
+            "distribution.oci-identity"
+        ]
+        self.assertEqual(valid_check.status, DoctorStatus.PASS)
+        self.assertEqual(valid_check.code, "DISTRIBUTION_OCI_IDENTITY_VERIFIED")
+
+        drifted_snapshot = distribution_snapshot()
+        drifted_snapshot["verifiedOCIIdentity"] = {
+            **drifted_snapshot["verifiedOCIIdentity"],
+            "web": "sha256:" + "f" * 64,
+        }
+        drifted = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(drifted_snapshot, network),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        drifted_check = {check.check_id: check for check in drifted.checks}[
+            "distribution.oci-identity"
+        ]
+        self.assertEqual(drifted_check.status, DoctorStatus.FAIL)
+        self.assertEqual(drifted_check.code, "DISTRIBUTION_OCI_IDENTITY_MISMATCH")
+        self.assertEqual(network.call_count, 0)
+
+    def test_distribution_plan_and_receipt_must_bind_the_same_verified_identities(self):
+        network = NetworkSentinel()
+        valid = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(
+                distribution_snapshot(), network
+            ),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        valid_check = {check.check_id: check for check in valid.checks}[
+            "distribution.plan-receipt-drift"
+        ]
+        self.assertEqual(valid_check.status, DoctorStatus.PASS)
+        self.assertEqual(valid_check.code, "DISTRIBUTION_PLAN_RECEIPT_ALIGNED")
+
+        drifted_snapshot = distribution_snapshot()
+        drifted_snapshot["recentTransportReceipt"] = {
+            **drifted_snapshot["recentTransportReceipt"],
+            "planIdentity": "e" * 64,
+        }
+        drifted = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(drifted_snapshot, network),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        drifted_check = {check.check_id: check for check in drifted.checks}[
+            "distribution.plan-receipt-drift"
+        ]
+        self.assertEqual(drifted_check.status, DoctorStatus.FAIL)
+        self.assertEqual(drifted_check.code, "DISTRIBUTION_PLAN_RECEIPT_DRIFT")
+        self.assertEqual(network.call_count, 0)
+
     def test_complete_read_only_report_uses_stable_schema_and_check_ids(self):
         host = FakeReadOnlyHost()
+        network = NetworkSentinel()
         report = DoctorRunner(
             host=host,
             probes=passing_probes(),
             compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(
+                distribution_snapshot(), network
+            ),
             clock=lambda: CHECKED_AT,
         ).run()
 
@@ -265,16 +645,26 @@ class DoctorBasicRuntimeTests(unittest.TestCase):
             {call[0] for call in host.calls},
             {"lstat", "read_secure_bytes", "user_id", "group_id"},
         )
+        self.assertEqual(network.call_count, 0)
 
     def test_missing_locator_does_not_scan_legacy_paths_or_call_dependent_probes(self):
         host = FakeReadOnlyHost(include_locator=False)
         called: list[str] = []
+        network = NetworkSentinel()
+        distribution_reader = FakeDistributionReader(
+            distribution_snapshot(), network
+        )
         probes = {
             check_id: (lambda _locator, check_id=check_id: called.append(check_id))
             for check_id in DOCTOR_CHECK_IDS
         }
 
-        report = DoctorRunner(host=host, probes=probes, clock=lambda: CHECKED_AT).run()
+        report = DoctorRunner(
+            host=host,
+            probes=probes,
+            distribution_reader=distribution_reader,
+            clock=lambda: CHECKED_AT,
+        ).run()
 
         self.assertEqual(report.overall_status, DoctorStatus.FAIL)
         self.assertEqual(called, [])
@@ -287,6 +677,8 @@ class DoctorBasicRuntimeTests(unittest.TestCase):
         self.assertFalse(
             any("1panel" in path or "anime-journal" in path for path in inspected)
         )
+        self.assertEqual(distribution_reader.calls, [])
+        self.assertEqual(network.call_count, 0)
 
     def test_probe_exception_is_redacted_and_does_not_abort_independent_checks(self):
         marker = "must-not-appear"

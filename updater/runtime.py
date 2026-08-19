@@ -32,8 +32,9 @@ from .plans import PlanStore
 from .runtime_state import RuntimeState
 from .server import UnixRpcServer
 from .slots import ReleaseSlots
-from .source import GitHubReleaseSource
+from .source import ReleaseResolver
 from .state import OperationStore
+from .transport import ExplicitTransportPolicy
 
 PRODUCTION_SOCKET_PATH = Path("/run/animemo-updater/updater.sock")
 PRODUCTION_BOOTSTRAP_MANIFEST = Path(
@@ -124,6 +125,7 @@ class HostAgentRuntime:
     deployment: ImmutableComposeDeployment
     agent: UpdateAgent
     server: UnixRpcServer
+    transport_policy: ExplicitTransportPolicy
     registry: CanonicalInstanceRegistry | None = None
     locator_store: LocalLocatorStore | None = None
 
@@ -137,12 +139,30 @@ class HostAgentRuntime:
         registry: CanonicalInstanceRegistry | None = None,
         managed_environment: dict[str, str] | None = None,
         background: bool = True,
+        release_resolver=None,
+        resolver_factory=None,
+        transport_policy: ExplicitTransportPolicy | None = None,
     ) -> HostAgentRuntime:
         state_root = paths.state_root
         slots = ReleaseSlots(state_root / "releases")
         runtime_state = RuntimeState(state_root)
         operations = OperationStore(state_root)
-        source = GitHubReleaseSource(state_root / "cache" / "github-releases")
+        selected_policy = transport_policy or ExplicitTransportPolicy.github()
+        if type(selected_policy) is not ExplicitTransportPolicy:
+            raise StateError("Updater transport policy is invalid")
+        cache_root = state_root / "cache" / "releases"
+
+        def default_resolver_factory(policy):
+            return ReleaseResolver(cache_root, policy=policy)
+
+        configured_factory = resolver_factory or default_resolver_factory
+        source = release_resolver or configured_factory(selected_policy)
+        source_policy = getattr(source, "transport_policy", None)
+        if (
+            type(source_policy) is not ExplicitTransportPolicy
+            or source_policy.identity != selected_policy.identity
+        ):
+            raise StateError("Release Resolver and transport policy differ")
         deployment = ImmutableComposeDeployment(
             paths,
             managed_environment=managed_environment,
@@ -174,6 +194,8 @@ class HostAgentRuntime:
             runtime_state=runtime_state,
             executor=executor,
             background=background,
+            resolver_factory=configured_factory,
+            transport_policy=selected_policy,
         )
         server = UnixRpcServer(socket_path, agent)
         return cls(
@@ -185,6 +207,7 @@ class HostAgentRuntime:
             deployment=deployment,
             agent=agent,
             server=server,
+            transport_policy=selected_policy,
             registry=registry,
             locator_store=(
                 registry.store
@@ -229,12 +252,18 @@ class HostAgentRuntime:
         socket_path: Path,
         bootstrap_manifest: Path,
         background: bool = False,
+        release_resolver=None,
+        resolver_factory=None,
+        transport_policy: ExplicitTransportPolicy | None = None,
     ) -> HostAgentRuntime:
         return cls._build(
             paths=HostPaths.testing(app=app_root, data=data_root, state=state_root),
             socket_path=socket_path.resolve(),
             bootstrap_manifest=bootstrap_manifest.resolve(),
             background=background,
+            release_resolver=release_resolver,
+            resolver_factory=resolver_factory,
+            transport_policy=transport_policy,
         )
 
     @staticmethod
@@ -423,6 +452,7 @@ class HostAgentRuntime:
         operation = self.agent.operations.get(operation_id)
         if operation.get("kind") == "initial_adoption":
             return self._reconcile_initial_adoption(operation)
+        self.agent.bind_operation_resolver(operation)
         return self.agent.executor.reconcile(operation_id)
 
     def _reconcile_initial_adoption(

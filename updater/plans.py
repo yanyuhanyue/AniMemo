@@ -15,6 +15,7 @@ from .state import (
     _read_private_text,
     _validate_private_directory,
 )
+from .transport import ExplicitTransportPolicy
 
 
 def _now() -> datetime:
@@ -24,6 +25,37 @@ def _now() -> datetime:
 def _manifest_hash(manifest: dict[str, object]) -> str:
     encoded = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_release_binding(value: object) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != {
+        "source",
+        "transportPolicyIdentity",
+        "verifiedReleaseIdentity",
+    }:
+        raise StateError("Update plan release binding is invalid")
+    source = value.get("source")
+    if source == "github":
+        policy = ExplicitTransportPolicy.github()
+    elif source == "official-mirror":
+        policy = ExplicitTransportPolicy.official_mirror()
+    else:
+        raise StateError("Update plan transport source is invalid")
+    verified_identity = value.get("verifiedReleaseIdentity")
+    policy_identity = value.get("transportPolicyIdentity")
+    if (
+        not isinstance(verified_identity, str)
+        or len(verified_identity) != 71
+        or not verified_identity.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in verified_identity[7:])
+        or policy_identity != policy.identity
+    ):
+        raise StateError("Update plan release binding is invalid")
+    return {
+        "source": source,
+        "transportPolicyIdentity": policy_identity,
+        "verifiedReleaseIdentity": verified_identity,
+    }
 
 
 class PlanStore:
@@ -37,10 +69,18 @@ class PlanStore:
             raise RequestRejected("Invalid update plan id")
         return self.root / f"{plan_id}.json"
 
-    def create(self, manifest: dict[str, object], plan: dict[str, object]) -> dict[str, object]:
+    def create(
+        self,
+        manifest: dict[str, object],
+        plan: dict[str, object],
+        *,
+        release_binding: dict[str, str],
+    ) -> dict[str, object]:
         validate_manifest(manifest)
+        binding = _validate_release_binding(release_binding)
         created = _now()
         payload = {
+            "schemaVersion": 2,
             "id": secrets.token_hex(16),
             "createdAt": created.isoformat().replace("+00:00", "Z"),
             "expiresAt": (created + timedelta(seconds=self.ttl_seconds)).isoformat().replace("+00:00", "Z"),
@@ -48,6 +88,7 @@ class PlanStore:
             "manifestHash": _manifest_hash(manifest),
             "manifest": manifest,
             "plan": plan,
+            "releaseBinding": binding,
         }
         _atomic_json(self._path(payload["id"]), payload, root=self.state_root)
         return payload
@@ -60,6 +101,11 @@ class PlanStore:
             raise RequestRejected("Update plan is unavailable") from error
         if payload.get("id") != plan_id or payload.get("manifestHash") != _manifest_hash(payload["manifest"]):
             raise StateError("Update plan manifest binding is invalid")
+        if payload.get("schemaVersion") != 2:
+            raise StateError(
+                "Update plan schema is unsupported; explicit migration is required"
+            )
+        _validate_release_binding(payload.get("releaseBinding"))
         expires = datetime.fromisoformat(str(payload["expiresAt"]).replace("Z", "+00:00"))
         if expires <= _now():
             raise RequestRejected("Update plan has expired")

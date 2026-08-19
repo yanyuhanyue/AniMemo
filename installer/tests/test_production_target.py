@@ -17,16 +17,20 @@ from durability.managed_config import parse_managed_config
 from installer import production
 from installer.production import (
     ProductionManagedConfigurationPort,
+    ProductionReleasePort,
     ProductionTargetPort,
 )
 from installer.runtime import (
     InstallerAdapterError,
     InstallerError,
+    InstallTransportSource,
     ListenRequest,
     PlatformEvidence,
     ReleaseEvidence,
+    ReleaseSelector,
     TargetClass,
 )
+from release.materials import VerifiedMaterialSet
 from scripts.tests.test_durability_instance import locator_payload
 from scripts.tests.test_managed_config import (
     INSTANCE_ID,
@@ -34,6 +38,10 @@ from scripts.tests.test_managed_config import (
     encoded,
 )
 from updater.tests.test_deployment import manifest
+from updater.oci import AcquiredRuntimeImage, ImageAcquisitionReceipt
+from updater.source import VerifiedReleaseMaterials
+from updater.tests.test_source import stable_manifest
+from updater.transport import ExplicitTransportPolicy
 
 
 def digest(character: str) -> str:
@@ -130,6 +138,85 @@ class EmptyRuntimeRunner:
 
 
 class ProductionTargetPortTests(unittest.TestCase):
+    def test_local_bundle_is_blocked_at_the_production_authority_gate(self) -> None:
+        with self.assertRaisesRegex(
+            InstallerError,
+            "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY",
+        ):
+            ProductionReleasePort(
+                transport_source=InstallTransportSource.LOCAL_BUNDLE,
+            )
+
+    def test_injected_resolver_must_use_the_selected_policy(self) -> None:
+        resolver = SimpleNamespace(
+            transport_policy=ExplicitTransportPolicy.official_mirror()
+        )
+        with self.assertRaisesRegex(
+            InstallerError,
+            "INSTALL_RELEASE_RESOLVER_POLICY_MISMATCH",
+        ):
+            ProductionReleasePort(source=resolver)  # type: ignore[arg-type]
+
+    def test_release_and_image_acquisition_use_the_same_explicit_policy(self) -> None:
+        policy = ExplicitTransportPolicy.official_mirror()
+        release_manifest = stable_manifest()
+        with tempfile.TemporaryDirectory() as temporary:
+            materials = VerifiedReleaseMaterials(
+                manifest=release_manifest,
+                deployment_contract={},
+                verified=VerifiedMaterialSet(
+                    root=Path(temporary),
+                    archive_sha256=digest("a"),
+                    files=(),
+                ),
+                identity_digest=digest("b"),
+            )
+
+            class Resolver:
+                transport_policy = policy
+
+                def fetch_verified_materials(self, version, **_kwargs):
+                    if version != "v1.0.0":
+                        raise AssertionError("unexpected release")
+                    return materials
+
+            class Acquirer:
+                def __init__(self) -> None:
+                    self.calls = []
+
+                def acquire(self, candidate, candidate_policy):
+                    self.calls.append((candidate, candidate_policy))
+                    return ImageAcquisitionReceipt(
+                        verified_release_identity=candidate.identity_digest,
+                        transport_policy_identity=candidate_policy.identity,
+                        images=tuple(
+                            AcquiredRuntimeImage(
+                                role=role,
+                                canonical_reference=candidate.image(role),
+                                observed_reference=candidate.image(role),
+                            )
+                            for role in ("api", "postgres", "redis", "web")
+                        ),
+                        identity="c" * 64,
+                    )
+
+            acquirer = Acquirer()
+            releases = ProductionReleasePort(
+                source=Resolver(),
+                transport_source=InstallTransportSource.OFFICIAL_MIRROR,
+                transport_policy=policy,
+                image_acquirer=acquirer,  # type: ignore[arg-type]
+            )
+            evidence = releases.resolve(
+                ReleaseSelector(version="v1.0.0"),
+                refresh=False,
+            )
+            receipt = releases.acquire_images(evidence)
+
+        self.assertEqual(acquirer.calls, [(materials, policy)])
+        self.assertEqual(receipt.verified_release_identity, materials.identity_digest)
+        self.assertEqual(receipt.transport_policy_identity, policy.identity)
+
     def test_launcher_without_locator_is_partial_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

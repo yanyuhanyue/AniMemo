@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -10,6 +11,7 @@ from pathlib import Path
 from release.contract import build_manifest
 from updater.errors import StateError
 from updater.plans import PlanStore
+from updater.transport import ExplicitTransportPolicy
 
 
 def manifest():
@@ -52,7 +54,72 @@ def link_directory(link: Path, target: Path) -> None:
         )
 
 
+def release_binding(source: str = "github") -> dict[str, str]:
+    policy = (
+        ExplicitTransportPolicy.github()
+        if source == "github"
+        else ExplicitTransportPolicy.official_mirror()
+    )
+    return {
+        "verifiedReleaseIdentity": "sha256:" + "f" * 64,
+        "source": source,
+        "transportPolicyIdentity": policy.identity,
+    }
+
+
 class PlanStoreTests(unittest.TestCase):
+    def test_plan_v2_persists_exact_verified_release_and_transport_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PlanStore(Path(directory))
+
+            plan = store.create(
+                manifest(),
+                {"target": "v1.0.0"},
+                release_binding=release_binding("official-mirror"),
+            )
+            restored = store.get(plan["id"])
+
+            self.assertEqual(restored["schemaVersion"], 2)
+            self.assertEqual(
+                restored["releaseBinding"],
+                release_binding("official-mirror"),
+            )
+
+    def test_legacy_or_tampered_plan_binding_fails_closed(self):
+        mutations = (
+            lambda payload: payload.pop("schemaVersion"),
+            lambda payload: payload["releaseBinding"].__setitem__(
+                "verifiedReleaseIdentity",
+                "f" * 64,
+            ),
+            lambda payload: payload["releaseBinding"].__setitem__(
+                "transportPolicyIdentity",
+                "0" * 64,
+            ),
+            lambda payload: payload["releaseBinding"].__setitem__(
+                "source",
+                "local-bundle",
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate), tempfile.TemporaryDirectory() as directory:
+                store = PlanStore(Path(directory))
+                plan = store.create(
+                    manifest(),
+                    {"target": "v1.0.0"},
+                    release_binding=release_binding(),
+                )
+                path = store.root / f"{plan['id']}.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                mutate(payload)
+                path.write_text(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+
+                with self.assertRaises(StateError):
+                    store.get(plan["id"])
+
     def test_plan_store_rejects_a_plans_directory_link(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -64,7 +131,11 @@ class PlanStoreTests(unittest.TestCase):
             store = PlanStore(state_root)
 
             with self.assertRaisesRegex(StateError, "directory"):
-                store.create(manifest(), {"target": "v1.0.0"})
+                store.create(
+                    manifest(),
+                    {"target": "v1.0.0"},
+                    release_binding=release_binding(),
+                )
 
             self.assertEqual(list(outside.iterdir()), [])
 
@@ -73,7 +144,11 @@ class PlanStoreTests(unittest.TestCase):
             root = Path(directory)
             state_root = root / "state"
             outside_root = root / "outside"
-            plan = PlanStore(outside_root).create(manifest(), {"target": "v1.0.0"})
+            plan = PlanStore(outside_root).create(
+                manifest(),
+                {"target": "v1.0.0"},
+                release_binding=release_binding(),
+            )
             state_root.mkdir()
             link_directory(state_root / "plans", outside_root / "plans")
             store = PlanStore(state_root)
@@ -85,7 +160,11 @@ class PlanStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             outside_root = root / "outside"
-            plan = PlanStore(outside_root).create(manifest(), {"target": "v1.0.0"})
+            plan = PlanStore(outside_root).create(
+                manifest(),
+                {"target": "v1.0.0"},
+                release_binding=release_binding(),
+            )
             state_root = root / "state"
             plans = state_root / "plans"
             plans.mkdir(parents=True)

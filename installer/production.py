@@ -88,11 +88,17 @@ from updater import __version__ as updater_version
 from updater.commands import CommandRunner
 from updater.deployment import HostPaths, ImmutableComposeDeployment
 from updater.errors import StateError
+from updater.oci import (
+    AcquiredRuntimeImage,
+    ImageAcquirer,
+    ImageAcquisitionReceipt,
+)
 from updater.runtime import InitialAdoptionRequest, adopt_initial_release
 from updater.runtime_state import RuntimeState
 from updater.slots import ReleaseSlots
-from updater.source import GitHubReleaseSource, VerifiedReleaseMaterials
+from updater.source import ReleaseResolver, VerifiedReleaseMaterials
 from updater.state import OperationStore, UpdateLock
+from updater.transport import ExplicitTransportPolicy
 
 from .restore_production import ProductionRestoreRuntimePort
 from .runtime import (
@@ -103,12 +109,14 @@ from .runtime import (
     InstallOutcome,
     InstallPhase,
     InstallPlan,
+    InstallTransportSource,
     ListenRequest,
     PlatformEvidence,
     ReleaseEvidence,
     ReleaseSelector,
     TargetClass,
     TargetEvidence,
+    explicit_transport_policy,
 )
 
 _CANONICAL_ROOTS = tuple(
@@ -202,9 +210,34 @@ class ProductionReleasePort:
     def __init__(
         self,
         *,
-        source: GitHubReleaseSource | None = None,
+        source: ReleaseResolver | None = None,
         cache_root: Path | None = None,
+        transport_source: InstallTransportSource = InstallTransportSource.GITHUB,
+        transport_policy: ExplicitTransportPolicy | None = None,
+        image_acquirer: ImageAcquirer | None = None,
     ) -> None:
+        if type(transport_source) is not InstallTransportSource:
+            raise InstallerError(
+                "INSTALL_TRANSPORT_SOURCE_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        expected_policy = explicit_transport_policy(transport_source)
+        if expected_policy is None:
+            raise InstallerError(
+                "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        selected_policy = transport_policy or expected_policy
+        if (
+            type(selected_policy) is not ExplicitTransportPolicy
+            or selected_policy.source is not expected_policy.source
+            or selected_policy.identity != expected_policy.identity
+            or selected_policy.fallback_allowed is not False
+        ):
+            raise InstallerError(
+                "INSTALL_TRANSPORT_POLICY_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
         if source is None:
             if cache_root is None:
@@ -212,8 +245,22 @@ class ProductionReleasePort:
                     prefix="animemo-installer-release-"
                 )
                 cache_root = Path(self._temporary.name) / "cache"
-            source = GitHubReleaseSource(cache_root)
+            source = ReleaseResolver(cache_root, policy=selected_policy)
+        source_policy = getattr(source, "transport_policy", selected_policy)
+        if (
+            type(source_policy) is not ExplicitTransportPolicy
+            or source_policy.source is not selected_policy.source
+            or source_policy.identity != selected_policy.identity
+            or source_policy.fallback_allowed is not False
+        ):
+            raise InstallerError(
+                "INSTALL_RELEASE_RESOLVER_POLICY_MISMATCH",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
         self.source = source
+        self.transport_source = transport_source
+        self.transport_policy = selected_policy
+        self.image_acquirer = image_acquirer or ImageAcquirer()
         self._materials: dict[str, VerifiedReleaseMaterials] = {}
         self._latest: VerifiedReleaseMaterials | None = None
         self._latest_evidence: ReleaseEvidence | None = None
@@ -267,6 +314,8 @@ class ProductionReleasePort:
             ),
             deployment_profile=str(manifest["deployment"]["profile"]),
             platform_profile="v1.1-standard-linux-amd64",
+            transport_source=self.transport_source,
+            transport_policy_identity=self.transport_policy.identity,
         )
         self._materials[evidence.manifest_digest] = materials
         self._latest = materials
@@ -289,6 +338,40 @@ class ProductionReleasePort:
         for identity in materials.verified.files:
             materials.material(identity.path)
         return materials
+
+    def acquire_images(self, evidence: ReleaseEvidence) -> ImageAcquisitionReceipt:
+        materials = self.materials_for(evidence)
+        try:
+            receipt = self.image_acquirer.acquire(materials, self.transport_policy)
+        except InstallerError:
+            raise
+        except Exception:  # noqa: BLE001 - image acquisition Adapter is redacted
+            raise InstallerError(
+                "INSTALL_IMAGE_ACQUISITION_FAILED",
+                outcome=InstallOutcome.ENVIRONMENT_FAILED,
+            ) from None
+        expected_roles = ("api", "postgres", "redis", "web")
+        if (
+            type(receipt) is not ImageAcquisitionReceipt
+            or receipt.verified_release_identity != materials.identity_digest
+            or receipt.transport_policy_identity != self.transport_policy.identity
+            or type(receipt.images) is not tuple
+            or tuple(item.role for item in receipt.images) != expected_roles
+            or any(
+                type(item) is not AcquiredRuntimeImage
+                or item.canonical_reference != materials.image(item.role)
+                or item.observed_reference != item.canonical_reference
+                for item in receipt.images
+            )
+            or not isinstance(receipt.identity, str)
+            or len(receipt.identity) != 64
+            or any(character not in "0123456789abcdef" for character in receipt.identity)
+        ):
+            raise InstallerError(
+                "INSTALL_IMAGE_ACQUISITION_RECEIPT_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        return receipt
 
     def latest_materials(self) -> VerifiedReleaseMaterials:
         if self._latest is None:
@@ -1380,7 +1463,7 @@ class ProductionFreshInstallPort:
             )
             deployment = self._compose(plan)
             manifest = self._manifest(plan)
-            deployment.pull(manifest)
+            self.releases.acquire_images(plan.release)
             for role, directory in (
                 ("postgres", Path(str(DATA_ROOT / "postgres"))),
                 ("redis", Path(str(DATA_ROOT / "redis"))),
@@ -1517,8 +1600,15 @@ class ProductionFreshInstallPort:
                 )
 
 
-def build_runtime() -> Installer:
-    releases = ProductionReleasePort()
+def build_runtime(
+    *,
+    transport_source: InstallTransportSource = InstallTransportSource.GITHUB,
+    transport_policy: ExplicitTransportPolicy | None = None,
+) -> Installer:
+    releases = ProductionReleasePort(
+        transport_source=transport_source,
+        transport_policy=transport_policy,
+    )
     configuration = ProductionManagedConfigurationPort()
     compatibility = ProductionCompatibilityPort(releases)
     platform = ProductionPlatformPort(releases)

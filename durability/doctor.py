@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -38,6 +39,14 @@ DOCTOR_REPORT_FORMAT = "animemo-doctor-report"
 DOCTOR_REPORT_VERSION = 1
 DOCTOR_MODE = "READ-ONLY"
 
+DISTRIBUTION_CHECK_IDS = (
+    "distribution.transport-policy",
+    "distribution.transport-receipt",
+    "distribution.release-identity",
+    "distribution.oci-identity",
+    "distribution.plan-receipt-drift",
+)
+
 DOCTOR_CHECK_IDS = (
     "instance.locator",
     "filesystem.roots",
@@ -59,6 +68,7 @@ DOCTOR_CHECK_IDS = (
     "updater.state",
     "release.identity",
     "release.updater-consistency",
+    *DISTRIBUTION_CHECK_IDS,
     "plugins.integrity",
     "media.integrity",
     "backup.readiness",
@@ -74,6 +84,18 @@ _BUILT_IN_CHECKS = frozenset(
     }
 )
 _CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_LOCAL_IDENTITY = re.compile(r"^[0-9a-f]{64}$")
+_SHA256_IDENTITY = re.compile(r"^sha256:[0-9a-f]{64}$")
+_DISTRIBUTION_SNAPSHOT_FIELDS = frozenset(
+    {
+        "schemaVersion",
+        "configuredTransportPolicy",
+        "recentTransportReceipt",
+        "verifiedReleaseIdentity",
+        "verifiedOCIIdentity",
+        "plan",
+    }
+)
 
 
 class DoctorStatus(StrEnum):
@@ -203,6 +225,31 @@ _DEFINITIONS: dict[str, CheckDefinition] = {
         "Release and Updater consistency",
         "Reconcile through the approved Updater interface.",
     ),
+    "distribution.transport-policy": CheckDefinition(
+        "release",
+        "Configured distribution transport policy",
+        "Reconcile the persisted transport policy through the approved Updater path.",
+    ),
+    "distribution.transport-receipt": CheckDefinition(
+        "release",
+        "Recent distribution transport receipt",
+        "Revalidate the recent local transport receipt without reacquiring materials.",
+    ),
+    "distribution.release-identity": CheckDefinition(
+        "release",
+        "Verified local release identity",
+        "Reconcile the locally verified release with the canonical instance locator.",
+    ),
+    "distribution.oci-identity": CheckDefinition(
+        "release",
+        "Verified local OCI identity",
+        "Reconcile the four locally verified OCI roles with the release identity.",
+    ),
+    "distribution.plan-receipt-drift": CheckDefinition(
+        "release",
+        "Distribution plan and receipt alignment",
+        "Recreate an explicit plan through the approved local Updater path.",
+    ),
     "plugins.integrity": CheckDefinition(
         "data-integrity",
         "Plugin integrity",
@@ -230,6 +277,19 @@ class DoctorHost(ReadOnlyHost, Protocol):
     def user_id(self, name: str) -> int: ...
 
     def group_id(self, name: str) -> int: ...
+
+
+class DistributionStateReader(Protocol):
+    """Read one already-local, non-secret distribution state snapshot.
+
+    Implementations are a no-write/no-refresh boundary: they may validate existing
+    local plan and receipt bytes, but must not resolve, download, mirror, acquire,
+    repair, or switch a configured transport source.
+    """
+
+    def read_local_snapshot(
+        self, locator: InstanceLocator
+    ) -> Mapping[str, object]: ...
 
 
 class LocalDoctorHost(LocalReadOnlyHost):
@@ -348,11 +408,13 @@ class DoctorRunner:
         host: DoctorHost | None = None,
         probes: Mapping[str, Probe] | None = None,
         compatibility: CompatibilityEvidence | None = None,
+        distribution_reader: DistributionStateReader | None = None,
         clock: Callable[[], str],
     ) -> None:
         self._host = host or LocalDoctorHost()
         self._probes = dict(probes or {})
         self._compatibility_evidence = compatibility
+        self._distribution_reader = distribution_reader
         self._clock = clock
 
     def _locator_result(self) -> tuple[ProbeResult, InstanceLocator | None]:
@@ -454,6 +516,246 @@ class DoctorRunner:
             return ProbeResult.failed("PROBE_RESULT_INVALID")
         return result
 
+    def _distribution_snapshot(
+        self, locator: InstanceLocator
+    ) -> tuple[Mapping[str, object] | None, ProbeResult | None]:
+        if self._distribution_reader is None:
+            return None, ProbeResult.skipped("DISTRIBUTION_SNAPSHOT_UNAVAILABLE")
+        try:
+            snapshot = self._distribution_reader.read_local_snapshot(locator)
+        except Exception:  # noqa: BLE001 - never expose local reader details
+            return None, ProbeResult.skipped("DISTRIBUTION_SNAPSHOT_UNAVAILABLE")
+        if (
+            not isinstance(snapshot, Mapping)
+            or set(snapshot) != _DISTRIBUTION_SNAPSHOT_FIELDS
+            or snapshot.get("schemaVersion") != 1
+            or isinstance(snapshot.get("schemaVersion"), bool)
+        ):
+            return None, ProbeResult.failed("DISTRIBUTION_SNAPSHOT_INVALID")
+        return snapshot, None
+
+    @staticmethod
+    def _distribution_transport_policy(
+        snapshot: Mapping[str, object]
+    ) -> ProbeResult:
+        policy = snapshot.get("configuredTransportPolicy")
+        if not isinstance(policy, Mapping) or set(policy) != {
+            "fallbackAllowed",
+            "identity",
+            "selectionOrigin",
+            "source",
+        }:
+            return ProbeResult.failed("DISTRIBUTION_TRANSPORT_POLICY_INVALID")
+        source = policy.get("source")
+        selection_origin = policy.get("selectionOrigin")
+        identity = policy.get("identity")
+        if (
+            source not in {"github", "official-mirror"}
+            or selection_origin
+            not in {"explicit-admin-input", "persisted-instance-policy"}
+            or type(policy.get("fallbackAllowed")) is not bool
+            or policy.get("fallbackAllowed") is not False
+            or not isinstance(identity, str)
+            or _LOCAL_IDENTITY.fullmatch(identity) is None
+        ):
+            return ProbeResult.failed("DISTRIBUTION_TRANSPORT_POLICY_INVALID")
+        canonical = json.dumps(
+            {
+                "fallback": "forbidden",
+                "policy_version": 1,
+                "selection_origin": selection_origin,
+                "source": source,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+        if hashlib.sha256(canonical).hexdigest() != identity:
+            return ProbeResult.failed("DISTRIBUTION_TRANSPORT_POLICY_IDENTITY_INVALID")
+        return ProbeResult.passed("DISTRIBUTION_TRANSPORT_POLICY_VALID")
+
+    @staticmethod
+    def _distribution_oci_identity(value: object) -> bool:
+        return (
+            isinstance(value, Mapping)
+            and set(value) == {"api", "postgres", "redis", "web"}
+            and all(
+                isinstance(identity, str)
+                and _SHA256_IDENTITY.fullmatch(identity) is not None
+                for identity in value.values()
+            )
+        )
+
+    @classmethod
+    def _distribution_transport_receipt(
+        cls, snapshot: Mapping[str, object]
+    ) -> ProbeResult:
+        receipt = snapshot.get("recentTransportReceipt")
+        if receipt is None:
+            return ProbeResult.skipped("DISTRIBUTION_TRANSPORT_RECEIPT_UNAVAILABLE")
+        if not isinstance(receipt, Mapping) or set(receipt) != {
+            "identity",
+            "ociImages",
+            "planIdentity",
+            "policyIdentity",
+            "releaseManifestDigest",
+            "source",
+            "valid",
+        }:
+            return ProbeResult.failed("DISTRIBUTION_TRANSPORT_RECEIPT_INVALID")
+        if (
+            type(receipt.get("valid")) is not bool
+            or not isinstance(receipt.get("identity"), str)
+            or _LOCAL_IDENTITY.fullmatch(receipt["identity"]) is None
+            or not isinstance(receipt.get("planIdentity"), str)
+            or _LOCAL_IDENTITY.fullmatch(receipt["planIdentity"]) is None
+            or not isinstance(receipt.get("policyIdentity"), str)
+            or _LOCAL_IDENTITY.fullmatch(receipt["policyIdentity"]) is None
+            or receipt.get("source") not in {"github", "official-mirror"}
+            or not isinstance(receipt.get("releaseManifestDigest"), str)
+            or _SHA256_IDENTITY.fullmatch(receipt["releaseManifestDigest"]) is None
+            or not cls._distribution_oci_identity(receipt.get("ociImages"))
+        ):
+            return ProbeResult.failed("DISTRIBUTION_TRANSPORT_RECEIPT_INVALID")
+        if receipt["valid"] is not True:
+            return ProbeResult.failed("DISTRIBUTION_TRANSPORT_RECEIPT_INVALID")
+        policy = snapshot.get("configuredTransportPolicy")
+        if not isinstance(policy, Mapping) or receipt["policyIdentity"] != policy.get(
+            "identity"
+        ):
+            return ProbeResult.failed(
+                "DISTRIBUTION_TRANSPORT_RECEIPT_POLICY_MISMATCH"
+            )
+        if receipt.get("source") != policy.get("source"):
+            return ProbeResult.failed(
+                "DISTRIBUTION_TRANSPORT_RECEIPT_SOURCE_MISMATCH"
+            )
+        return ProbeResult.passed("DISTRIBUTION_TRANSPORT_RECEIPT_VALID")
+
+    @staticmethod
+    def _distribution_release_identity(
+        snapshot: Mapping[str, object], locator: InstanceLocator
+    ) -> ProbeResult:
+        identity = snapshot.get("verifiedReleaseIdentity")
+        expected = dict(locator.release_identity)
+        if not isinstance(identity, Mapping) or set(identity) != set(expected):
+            return ProbeResult.failed("DISTRIBUTION_RELEASE_IDENTITY_INVALID")
+        if dict(identity) != expected:
+            return ProbeResult.failed("DISTRIBUTION_RELEASE_IDENTITY_MISMATCH")
+        return ProbeResult.passed("DISTRIBUTION_RELEASE_IDENTITY_VERIFIED")
+
+    @classmethod
+    def _verified_distribution_oci_identity(
+        cls, snapshot: Mapping[str, object], locator: InstanceLocator
+    ) -> ProbeResult:
+        images = snapshot.get("verifiedOCIIdentity")
+        if not cls._distribution_oci_identity(images):
+            return ProbeResult.failed("DISTRIBUTION_OCI_IDENTITY_INVALID")
+        if not isinstance(images, Mapping):
+            return ProbeResult.failed("DISTRIBUTION_OCI_IDENTITY_INVALID")
+        if (
+            images["api"] != locator.release_identity["apiDigest"]
+            or images["web"] != locator.release_identity["webDigest"]
+        ):
+            return ProbeResult.failed("DISTRIBUTION_OCI_IDENTITY_MISMATCH")
+        return ProbeResult.passed("DISTRIBUTION_OCI_IDENTITY_VERIFIED")
+
+    @classmethod
+    def _distribution_plan_receipt_drift(
+        cls, snapshot: Mapping[str, object]
+    ) -> ProbeResult:
+        plan = snapshot.get("plan")
+        receipt = snapshot.get("recentTransportReceipt")
+        if plan is None or receipt is None:
+            return ProbeResult.skipped("DISTRIBUTION_PLAN_OR_RECEIPT_UNAVAILABLE")
+        if not isinstance(plan, Mapping) or set(plan) != {
+            "identity",
+            "ociImages",
+            "policyIdentity",
+            "releaseManifestDigest",
+            "source",
+        }:
+            return ProbeResult.failed("DISTRIBUTION_PLAN_INVALID")
+        if not isinstance(receipt, Mapping) or set(receipt) != {
+            "identity",
+            "ociImages",
+            "planIdentity",
+            "policyIdentity",
+            "releaseManifestDigest",
+            "source",
+            "valid",
+        }:
+            return ProbeResult.failed("DISTRIBUTION_TRANSPORT_RECEIPT_INVALID")
+        if (
+            type(receipt.get("valid")) is not bool
+            or not isinstance(receipt.get("identity"), str)
+            or _LOCAL_IDENTITY.fullmatch(receipt["identity"]) is None
+            or not isinstance(receipt.get("planIdentity"), str)
+            or _LOCAL_IDENTITY.fullmatch(receipt["planIdentity"]) is None
+            or not isinstance(receipt.get("policyIdentity"), str)
+            or _LOCAL_IDENTITY.fullmatch(receipt["policyIdentity"]) is None
+            or receipt.get("source") not in {"github", "official-mirror"}
+            or not isinstance(receipt.get("releaseManifestDigest"), str)
+            or _SHA256_IDENTITY.fullmatch(receipt["releaseManifestDigest"]) is None
+            or not cls._distribution_oci_identity(receipt.get("ociImages"))
+        ):
+            return ProbeResult.failed("DISTRIBUTION_TRANSPORT_RECEIPT_INVALID")
+        if (
+            not isinstance(plan.get("identity"), str)
+            or _LOCAL_IDENTITY.fullmatch(plan["identity"]) is None
+            or not isinstance(plan.get("policyIdentity"), str)
+            or _LOCAL_IDENTITY.fullmatch(plan["policyIdentity"]) is None
+            or plan.get("source") not in {"github", "official-mirror"}
+            or not isinstance(plan.get("releaseManifestDigest"), str)
+            or _SHA256_IDENTITY.fullmatch(plan["releaseManifestDigest"]) is None
+            or not cls._distribution_oci_identity(plan.get("ociImages"))
+        ):
+            return ProbeResult.failed("DISTRIBUTION_PLAN_INVALID")
+        verified_release = snapshot.get("verifiedReleaseIdentity")
+        verified_oci = snapshot.get("verifiedOCIIdentity")
+        if not isinstance(verified_release, Mapping) or not cls._distribution_oci_identity(
+            verified_oci
+        ):
+            return ProbeResult.failed("DISTRIBUTION_VERIFIED_IDENTITY_INVALID")
+        aligned = (
+            receipt.get("valid") is True
+            and plan["identity"] == receipt.get("planIdentity")
+            and plan["policyIdentity"] == receipt.get("policyIdentity")
+            and plan["source"] == receipt.get("source")
+            and plan["releaseManifestDigest"]
+            == receipt.get("releaseManifestDigest")
+            == verified_release.get("manifestDigest")
+            and dict(plan["ociImages"])
+            == dict(receipt.get("ociImages", {}))
+            == dict(verified_oci)
+        )
+        if not aligned:
+            return ProbeResult.failed("DISTRIBUTION_PLAN_RECEIPT_DRIFT")
+        return ProbeResult.passed("DISTRIBUTION_PLAN_RECEIPT_ALIGNED")
+
+    def _distribution_result(
+        self,
+        check_id: str,
+        snapshot: Mapping[str, object] | None,
+        snapshot_error: ProbeResult | None,
+        locator: InstanceLocator,
+    ) -> ProbeResult:
+        if snapshot_error is not None:
+            return snapshot_error
+        if snapshot is None:
+            return ProbeResult.failed("DISTRIBUTION_SNAPSHOT_INVALID")
+        if check_id == "distribution.release-identity":
+            return self._distribution_release_identity(snapshot, locator)
+        if check_id == "distribution.oci-identity":
+            return self._verified_distribution_oci_identity(snapshot, locator)
+        if check_id == "distribution.plan-receipt-drift":
+            return self._distribution_plan_receipt_drift(snapshot)
+        functions = {
+            "distribution.transport-policy": self._distribution_transport_policy,
+            "distribution.transport-receipt": self._distribution_transport_receipt,
+        }
+        return functions[check_id](snapshot)
+
     def run(self) -> DoctorReport:
         checked_at = self._clock()
         locator_result, locator = self._locator_result()
@@ -461,12 +763,22 @@ class DoctorRunner:
             _check("instance.locator", locator_result, checked_at)
         ]
         compatibility_decision: CompatibilityDecision | None = None
+        distribution_snapshot: Mapping[str, object] | None = None
+        distribution_error: ProbeResult | None = None
+        if locator is not None:
+            distribution_snapshot, distribution_error = self._distribution_snapshot(
+                locator
+            )
 
         for check_id in DOCTOR_CHECK_IDS[1:]:
             if locator is None:
                 result = ProbeResult.skipped("LOCATOR_DEPENDENCY_UNAVAILABLE")
             elif check_id == "compatibility.state":
                 result, compatibility_decision = self._compatibility()
+            elif check_id in DISTRIBUTION_CHECK_IDS:
+                result = self._distribution_result(
+                    check_id, distribution_snapshot, distribution_error, locator
+                )
             elif check_id in _BUILT_IN_CHECKS:
                 try:
                     result = self._run_builtin(check_id, locator)

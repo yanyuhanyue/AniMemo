@@ -24,6 +24,7 @@ from installer.runtime import (
     InstallOutcome,
     InstallPhase,
     InstallRequest,
+    InstallTransportSource,
     ListenRequest,
     PlatformEvidence,
     ReleaseEvidence,
@@ -34,6 +35,7 @@ from installer.runtime import (
     TargetClass,
     TargetEvidence,
 )
+from updater.transport import ExplicitTransportPolicy
 
 
 def digest(character: str) -> str:
@@ -341,6 +343,50 @@ class InstallerRuntimeTests(unittest.TestCase):
         self.assertNotIn('"secrets"', rendered.casefold())
         self.assertNotIn('"credentials"', rendered.casefold())
         self.assertNotIn('"password"', rendered.casefold())
+
+    def test_plan_binds_one_explicit_transport_policy_through_execution(self) -> None:
+        policy = ExplicitTransportPolicy.official_mirror()
+        self.releases.evidence = replace(
+            self.releases.evidence,
+            transport_source=InstallTransportSource.OFFICIAL_MIRROR,
+            transport_policy_identity=policy.identity,
+        )
+        plan = self.runtime.plan(
+            self.request(
+                transport_source=InstallTransportSource.OFFICIAL_MIRROR,
+            )
+        )
+
+        self.assertIs(
+            plan.transport_source,
+            InstallTransportSource.OFFICIAL_MIRROR,
+        )
+        self.assertEqual(plan.transport_policy_identity, policy.identity)
+        self.assertEqual(plan.body()["transportSource"], "official-mirror")
+        self.assertEqual(plan.body()["transportPolicyIdentity"], policy.identity)
+
+        self.runtime.execute(plan, accepted_plan_digest=plan.plan_digest)
+        self.assertEqual(self.releases.calls, [False, True, True])
+
+    def test_release_transport_policy_mismatch_stops_before_target_inspection(
+        self,
+    ) -> None:
+        policy = ExplicitTransportPolicy.official_mirror()
+        self.releases.evidence = replace(
+            self.releases.evidence,
+            transport_source=InstallTransportSource.OFFICIAL_MIRROR,
+            transport_policy_identity=policy.identity,
+        )
+
+        with self.assertRaisesRegex(
+            InstallerError,
+            "INSTALL_RELEASE_TRANSPORT_POLICY_MISMATCH",
+        ):
+            self.runtime.plan(self.request())
+
+        self.assertEqual(self.target.calls, 0)
+        self.assertEqual(self.operations.events, [])
+        self.assertEqual(self.fresh.calls, [])
 
     def test_fresh_execute_reverifies_and_adoption_publishes_before_doctor(
         self,

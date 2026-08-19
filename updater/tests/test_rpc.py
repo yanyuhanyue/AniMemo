@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from updater.client import MAX_RESPONSE_BYTES, AgentUnavailable, UnixAgentClient
 from updater.errors import StateError
+from updater.protocol import validate_request
 from updater.server import MAX_REQUEST_BYTES, UnixRpcServer
 
 
@@ -20,7 +21,32 @@ class EchoAgent:
         return {"echo": request["operation"]}
 
 
+class ValidatingAgent:
+    def dispatch(self, request):
+        return validate_request(request)
+
+
 class UnixRpcTests(unittest.TestCase):
+    def test_local_bundle_blocker_code_is_preserved_over_rpc(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = UnixRpcServer(
+                Path(directory) / "updater.sock",
+                ValidatingAgent(),
+            )
+
+            response = server._response(
+                {
+                    "operation": "plan_update",
+                    "params": {"version": "v1.0.0", "source": "local-bundle"},
+                }
+            )
+
+            self.assertFalse(response["ok"])
+            self.assertEqual(
+                response["error"]["code"],
+                "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY",
+            )
+
     def test_server_refuses_to_delete_a_regular_file_at_the_socket_path(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "updater.sock"

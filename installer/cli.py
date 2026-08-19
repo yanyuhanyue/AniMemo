@@ -14,10 +14,12 @@ from .runtime import (
     InstallerError,
     InstallerMode,
     InstallRequest,
+    InstallTransportSource,
     ListenRequest,
     ReleaseSelector,
     RestoreProtectionKind,
     RestoreProtectionRequest,
+    explicit_transport_policy,
 )
 
 EXIT_SUCCESS = 0
@@ -70,6 +72,11 @@ def _parser() -> argparse.ArgumentParser:
         selector = child.add_mutually_exclusive_group(required=True)
         selector.add_argument("--channel", choices=("stable", "rc"))
         selector.add_argument("--version")
+        child.add_argument(
+            "--source",
+            choices=tuple(source.value for source in InstallTransportSource),
+            default=InstallTransportSource.GITHUB.value,
+        )
         child.add_argument("--public-origin", required=True)
         child.add_argument("--listen", type=_listen, default=ListenRequest())
         child.add_argument("--accept-direct-exposure", action="store_true")
@@ -118,6 +125,7 @@ def _request(args: argparse.Namespace) -> InstallRequest:
         mode=args.mode,
         selector=ReleaseSelector(channel=args.channel, version=args.version),
         public_origin=args.public_origin,
+        transport_source=InstallTransportSource(args.source),
         listen=replace(
             args.listen,
             direct_exposure_accepted=args.accept_direct_exposure,
@@ -156,7 +164,12 @@ def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> 
         if runtime is None:
             from .production import build_runtime
 
-            runtime = build_runtime()
+            runtime = build_runtime(
+                transport_source=request.transport_source,
+                transport_policy=explicit_transport_policy(
+                    request.transport_source
+                ),
+            )
         plan = runtime.plan(request)
         if args.dry_run:
             _write(plan.as_dict(), json_output=args.json_output)

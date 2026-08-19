@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
+from unittest import mock
 
 from installer.cli import EXIT_SUCCESS, EXIT_VALIDATION, _listen, main
 from installer.runtime import (
@@ -10,10 +12,12 @@ from installer.runtime import (
     InstallerError,
     InstallerMode,
     InstallRequest,
+    InstallTransportSource,
     ReleaseSelector,
     TargetClass,
     TargetEvidence,
 )
+from updater.transport import ExplicitTransportPolicy
 
 
 def digest(character: str) -> str:
@@ -46,6 +50,87 @@ class _Runtime:
 
 
 class InstallerCliTests(unittest.TestCase):
+    def test_release_source_has_no_auto_url_or_fallback_value(self) -> None:
+        for source in (
+            "auto",
+            "fallback",
+            "https://download.example.invalid/release",
+        ):
+            with self.subTest(source=source), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    main(
+                        [
+                            "install",
+                            "--channel",
+                            "rc",
+                            "--source",
+                            source,
+                            "--public-origin",
+                            "https://anime.example",
+                            "--dry-run",
+                        ],
+                        runtime=_Runtime().runtime,
+                    )
+
+    def test_local_bundle_stops_before_the_production_resolver(self) -> None:
+        output = io.StringIO()
+        with mock.patch(
+            "installer.production.ReleaseResolver",
+            side_effect=AssertionError("production resolver must not be constructed"),
+        ) as resolver, redirect_stdout(output):
+            code = main(
+                [
+                    "install",
+                    "--channel",
+                    "rc",
+                    "--source",
+                    "local-bundle",
+                    "--public-origin",
+                    "https://anime.example",
+                    "--dry-run",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(code, EXIT_VALIDATION)
+        self.assertIn(
+            "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY",
+            output.getvalue(),
+        )
+        resolver.assert_not_called()
+
+    def test_official_mirror_is_explicit_and_bound_into_the_plan(self) -> None:
+        holder = _Runtime()
+        policy = ExplicitTransportPolicy.official_mirror()
+        holder.runtime._releases.evidence = replace(
+            holder.runtime._releases.evidence,
+            transport_source=InstallTransportSource.OFFICIAL_MIRROR,
+            transport_policy_identity=policy.identity,
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(
+                [
+                    "install",
+                    "--channel",
+                    "rc",
+                    "--source",
+                    "official-mirror",
+                    "--public-origin",
+                    "https://anime.example",
+                    "--dry-run",
+                    "--json",
+                ],
+                runtime=holder.runtime,
+            )
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertIn('"transportSource": "official-mirror"', output.getvalue())
+        self.assertIn(
+            f'"transportPolicyIdentity": "{policy.identity}"',
+            output.getvalue(),
+        )
+
     def test_updater_handoff_is_a_nonzero_rejection(self) -> None:
         holder = _Runtime()
         holder.runtime._target.evidence = TargetEvidence(
@@ -175,6 +260,7 @@ class InstallerCliTests(unittest.TestCase):
 
         self.assertEqual(code, EXIT_SUCCESS)
         self.assertIn('"planDigest"', output.getvalue())
+        self.assertIn('"transportSource": "github"', output.getvalue())
 
 
 if __name__ == "__main__":

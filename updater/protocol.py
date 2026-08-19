@@ -9,12 +9,17 @@ RELEASE_VERSION = re.compile(
 )
 IDENTIFIER = re.compile(r"^[0-9a-f]{32}$")
 CHANNELS = {"stable", "rc", "beta"}
+TRANSPORT_SOURCES = {"github", "official-mirror"}
+
+
+class BlockedPortablePublicationAuthority(RequestRejected):
+    code = "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY"
 
 OPERATION_FIELDS = {
     "get_status": {},
     "list_releases": {"channel": str, "refresh": bool},
     "check_update": {"channel": str},
-    "plan_update": {"version": str},
+    "plan_update": {"version": str, "source": str},
     "apply_update": {"planId": str, "confirmation": str},
     "rollback_previous": {"confirmation": str},
     "get_operation": {"operationId": str},
@@ -61,6 +66,12 @@ def validate_request(request: object) -> dict[str, object]:
         _reject("Invalid release channel")
     if "version" in params and not RELEASE_VERSION.fullmatch(params["version"]):
         _reject("Invalid immutable release version")
+    if operation == "plan_update" and params.get("source") == "local-bundle":
+        raise BlockedPortablePublicationAuthority(
+            "Portable local bundle publication authority is not frozen"
+        )
+    if "source" in params and params["source"] not in TRANSPORT_SOURCES:
+        _reject("Invalid release transport source")
     for name in ("planId", "operationId"):
         if name in params and not IDENTIFIER.fullmatch(params[name]):
             _reject(f"Invalid {name}")

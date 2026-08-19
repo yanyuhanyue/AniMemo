@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 
 from updater.errors import RequestRejected
-from updater.protocol import validate_request
+from updater.protocol import (
+    BlockedPortablePublicationAuthority,
+    validate_request,
+)
 
 
 class ProtocolAllowlistTests(unittest.TestCase):
@@ -50,6 +53,46 @@ class ProtocolAllowlistTests(unittest.TestCase):
         ]:
             with self.subTest(request=request), self.assertRaises(RequestRejected):
                 validate_request(request)
+
+    def test_plan_update_source_is_closed_and_local_bundle_is_stably_blocked(self):
+        accepted = (
+            {"operation": "plan_update", "params": {"version": "v1.0.0"}},
+            {
+                "operation": "plan_update",
+                "params": {"version": "v1.0.0", "source": "github"},
+            },
+            {
+                "operation": "plan_update",
+                "params": {
+                    "version": "v1.0.0",
+                    "source": "official-mirror",
+                },
+            },
+        )
+        for request in accepted:
+            with self.subTest(request=request):
+                self.assertEqual(validate_request(request), request)
+
+        with self.assertRaises(BlockedPortablePublicationAuthority) as raised:
+            validate_request(
+                {
+                    "operation": "plan_update",
+                    "params": {"version": "v1.0.0", "source": "local-bundle"},
+                }
+            )
+        self.assertEqual(
+            raised.exception.code,
+            "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY",
+        )
+
+        for source in ("auto", "geo", "https://attacker.invalid/release"):
+            with self.subTest(source=source), self.assertRaises(RequestRejected):
+                validate_request(
+                    {
+                        "operation": "plan_update",
+                        "params": {"version": "v1.0.0", "source": source},
+                    }
+                )
 
 
 if __name__ == "__main__":
