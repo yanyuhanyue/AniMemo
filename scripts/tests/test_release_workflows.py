@@ -620,6 +620,24 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ):
             self.assertNotIn(mutation, dry_run)
 
+    def test_release_notes_start_at_the_previous_stable_not_the_upgrade_baseline(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        dry_run = source[source.index("  dry-run:\n") : source.index("  publish:\n")]
+
+        self.assertIn('test -n "$PREVIOUS_STABLE"', dry_run)
+        self.assertIn(
+            'release_notes_base="$(git rev-parse "$PREVIOUS_STABLE^{commit}")"',
+            dry_run,
+        )
+        self.assertIn(
+            'git merge-base --is-ancestor "$release_notes_base" "$CANDIDATE_SHA"',
+            dry_run,
+        )
+        self.assertIn('--range-start "$release_notes_base"', dry_run)
+        self.assertNotIn('--range-start "$UPGRADE_BASE_SHA"', dry_run)
+
     def test_release_images_receive_the_same_runtime_identity_as_the_manifest(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         self.assertGreaterEqual(source.count("ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}"), 4)
