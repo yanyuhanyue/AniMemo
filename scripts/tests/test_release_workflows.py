@@ -945,7 +945,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
         self.assertSetEqual(required - bindings, set())
         self.assertLess(
-            env_file.start(),
+            env_file.end(),
             source.index('"${COMPOSE[@]}" config --quiet'),
         )
 
