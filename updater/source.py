@@ -51,6 +51,13 @@ EXPECTED_RELEASE_ASSETS = {
     "installer-materials.tar",
     "release-manifest.json",
 }
+
+
+def _expected_release_asset_names(version: str) -> set[str]:
+    expected = set(EXPECTED_RELEASE_ASSETS)
+    if Version(version.removeprefix("v")).release >= (1, 1, 0):
+        expected.add(f"animemo-{version}-portable.tar")
+    return expected
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 ATTESTATION_BUNDLE_PATH = re.compile(
     r"^/attestations/(?P<repository_id>[1-9][0-9]*)/"
@@ -614,10 +621,11 @@ class GitHubReleaseSource:
                     "GitHub release assets differ from the release contract"
                 )
             asset_names = [item["name"] for item in release_assets]
+            expected_release_assets = _expected_release_asset_names(version)
             if (
-                len(asset_names) != len(EXPECTED_RELEASE_ASSETS)
+                len(asset_names) != len(expected_release_assets)
                 or len(asset_names) != len(set(asset_names))
-                or set(asset_names) != EXPECTED_RELEASE_ASSETS
+                or set(asset_names) != expected_release_assets
             ):
                 raise RequestRejected(
                     "GitHub release assets differ from the release contract"
@@ -749,6 +757,7 @@ class GitHubReleaseSource:
                             state=item["state"],
                         )
                         for item in release_assets
+                        if item["name"] in EXPECTED_RELEASE_ASSETS
                     ),
                     attestations=tuple(attestation_evidence),
                 )

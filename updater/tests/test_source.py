@@ -778,6 +778,53 @@ class GitHubReleaseSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(RequestRejected, "assets differ"):
                 source.fetch_verified("v1.0.0")
 
+    def test_v1_1_release_accepts_exact_portable_transport_asset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = stable_manifest()
+            manifest["release"]["version"] = "v1.1.0"
+            manifest["release"]["promotedFrom"] = "v1.1.0-rc.1"
+            manifest["releaseNotes"]["tag"] = "v1.1.0"
+            metadata = dict(FakePublicRest(manifest).exact_release)
+            metadata["assets"] = [
+                *metadata["assets"],
+                {
+                    "name": "animemo-v1.1.0-portable.tar",
+                    "state": "uploaded",
+                },
+            ]
+            source = GitHubReleaseSource(
+                Path(directory),
+                runner=FakeRunner(manifest),
+                rest=FakePublicRest(manifest, exact_release=metadata),
+            )
+
+            verified = source.fetch_verified_materials("v1.1.0")
+
+            self.assertEqual(verified.manifest["release"]["version"], "v1.1.0")
+
+    def test_v1_1_release_rejects_portable_transport_asset_lookalike(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = stable_manifest()
+            manifest["release"]["version"] = "v1.1.0"
+            manifest["release"]["promotedFrom"] = "v1.1.0-rc.1"
+            manifest["releaseNotes"]["tag"] = "v1.1.0"
+            metadata = dict(FakePublicRest(manifest).exact_release)
+            metadata["assets"] = [
+                *metadata["assets"],
+                {
+                    "name": "animemo-v1.1.0-lookalike-portable.tar",
+                    "state": "uploaded",
+                },
+            ]
+            source = GitHubReleaseSource(
+                Path(directory),
+                runner=FakeRunner(manifest),
+                rest=FakePublicRest(manifest, exact_release=metadata),
+            )
+
+            with self.assertRaisesRegex(RequestRejected, "assets differ"):
+                source.fetch_verified_materials("v1.1.0")
+
     def test_release_asset_metadata_must_be_a_unique_uploaded_object_list(self):
         manifest = stable_manifest()
         valid_assets = FakePublicRest(manifest).exact_release["assets"]

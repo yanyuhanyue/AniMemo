@@ -572,6 +572,21 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertLess(rehearse, publish)
         self.assertNotIn("push: true", source[publish_section:publish])
 
+    def test_immutable_release_setting_is_checked_before_any_rc_publication(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = source[source.index("  publish:\n") :]
+        setting_gate = (
+            'test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" '
+            '--jq \'.enabled\')" = "true"'
+        )
+
+        self.assertIn(setting_gate, publish)
+        self.assertLess(publish.index(setting_gate), publish.index("docker/login-action"))
+        self.assertLess(publish.index(setting_gate), publish.index("docker push"))
+        self.assertLess(publish.index(setting_gate), publish.index("git push origin"))
+
     def test_release_contract_assets_and_real_upgrade_delta_are_fail_closed(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         promotion = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
