@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://animemo.example/schemas/github-release-publication-v1.json",
+  "title": "AniMemo verified GitHub immutable release publication claim",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "predicateType",
+    "immutable",
+    "repository",
+    "tag",
+    "tagCommit",
+    "draft",
+    "prerelease",
+    "signedAt",
+    "certificate",
+    "assets"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "predicateType": {
+      "const": "https://in-toto.io/attestation/release/v0.2"
+    },
+    "immutable": {"const": true},
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "repositoryId", "ownerId"],
+      "properties": {
+        "name": {"const": "yanyuhanyue/AniMemo"},
+        "repositoryId": {"const": "1327429673"},
+        "ownerId": {"const": "111261350"}
+      }
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-(?:beta|rc)\\.[1-9][0-9]*)?$"
+    },
+    "tagCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "draft": {"const": false},
+    "prerelease": {"type": "boolean"},
+    "signedAt": {"type": "string", "format": "date-time"},
+    "certificate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "issuerOrganization"],
+      "properties": {
+        "identity": {"const": "https://dotcom.releases.github.com"},
+        "issuerOrganization": {"const": "GitHub, Inc."}
+      }
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "prefixItems": [
+        {"$ref": "#/$defs/checksums"},
+        {"$ref": "#/$defs/deployment"},
+        {"$ref": "#/$defs/materials"},
+        {"$ref": "#/$defs/manifest"}
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "assetBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256", "size"],
+      "properties": {
+        "name": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "size": {"type": "integer", "minimum": 0, "maximum": 4294967296}
+      }
+    },
+    "checksums": {
+      "allOf": [
+        {"$ref": "#/$defs/assetBase"},
+        {"properties": {"name": {"const": "checksums.txt"}}}
+      ]
+    },
+    "deployment": {
+      "allOf": [
+        {"$ref": "#/$defs/assetBase"},
+        {"properties": {"name": {"const": "deployment-contract.json"}}}
+      ]
+    },
+    "materials": {
+      "allOf": [
+        {"$ref": "#/$defs/assetBase"},
+        {"properties": {"name": {"const": "installer-materials.tar"}}}
+      ]
+    },
+    "manifest": {
+      "allOf": [
+        {"$ref": "#/$defs/assetBase"},
+        {"properties": {"name": {"const": "release-manifest.json"}}}
+      ]
+    }
+  }
+}

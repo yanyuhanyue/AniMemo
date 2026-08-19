@@ -35,6 +35,7 @@ from installer.runtime import (
     TargetClass,
     TargetEvidence,
 )
+from updater.local_bundle import LOCAL_BUNDLE_POLICY_IDENTITY
 from updater.transport import ExplicitTransportPolicy
 
 
@@ -298,10 +299,66 @@ class InstallerRuntimeTests(unittest.TestCase):
             "v01.1.0",
             "v1.1.0-rc.0",
         ):
-            with self.subTest(version=version), self.assertRaisesRegex(
-                InstallerError, "INSTALL_RELEASE_VERSION_INVALID"
+            with (
+                self.subTest(version=version),
+                self.assertRaisesRegex(
+                    InstallerError, "INSTALL_RELEASE_VERSION_INVALID"
+                ),
             ):
                 ReleaseSelector(version=version)
+
+    def test_local_bundle_requires_exact_version_payload_and_release_attestation(
+        self,
+    ) -> None:
+        payload = Path("C:/offline/payload.tar")
+        sidecar = Path("C:/offline/release-attestation.sigstore.json")
+        request = InstallRequest(
+            mode=InstallerMode.FRESH,
+            selector=ReleaseSelector(version="v1.1.0"),
+            public_origin="https://anime.example",
+            transport_source=InstallTransportSource.LOCAL_BUNDLE,
+            local_bundle_payload=payload,
+            local_bundle_release_attestation=sidecar,
+        )
+
+        self.assertEqual(request.local_bundle_payload, payload)
+        self.assertEqual(request.local_bundle_release_attestation, sidecar)
+        self.assertEqual(
+            request.transport_policy_identity,
+            LOCAL_BUNDLE_POLICY_IDENTITY,
+        )
+        for selector, candidate_payload, candidate_sidecar in (
+            (ReleaseSelector(channel="rc"), payload, sidecar),
+            (ReleaseSelector(version="v1.1.0"), None, sidecar),
+            (ReleaseSelector(version="v1.1.0"), payload, None),
+        ):
+            with (
+                self.subTest(selector=selector),
+                self.assertRaisesRegex(
+                    InstallerError,
+                    "INSTALL_LOCAL_BUNDLE_INPUT_REQUIRED",
+                ),
+            ):
+                InstallRequest(
+                    mode=InstallerMode.FRESH,
+                    selector=selector,
+                    public_origin="https://anime.example",
+                    transport_source=InstallTransportSource.LOCAL_BUNDLE,
+                    local_bundle_payload=candidate_payload,
+                    local_bundle_release_attestation=candidate_sidecar,
+                )
+
+        with self.assertRaisesRegex(
+            InstallerError,
+            "INSTALL_LOCAL_BUNDLE_INPUT_FORBIDDEN",
+        ):
+            InstallRequest(
+                mode=InstallerMode.FRESH,
+                selector=ReleaseSelector(version="v1.1.0"),
+                public_origin="https://anime.example",
+                local_bundle_payload=payload,
+                local_bundle_release_attestation=sidecar,
+            )
 
     def setUp(self) -> None:
         self.releases = ReleaseFake()
@@ -410,7 +467,9 @@ class InstallerRuntimeTests(unittest.TestCase):
                 "doctor",
             ],
         )
-        self.assertLess(self.fresh.calls.index("adopt"), self.fresh.calls.index("doctor"))
+        self.assertLess(
+            self.fresh.calls.index("adopt"), self.fresh.calls.index("doctor")
+        )
         migration_markers = [
             event
             for event in self.operations.events

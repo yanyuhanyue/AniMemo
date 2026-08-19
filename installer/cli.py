@@ -77,6 +77,8 @@ def _parser() -> argparse.ArgumentParser:
             choices=tuple(source.value for source in InstallTransportSource),
             default=InstallTransportSource.GITHUB.value,
         )
+        child.add_argument("--bundle-payload", type=Path)
+        child.add_argument("--release-attestation", type=Path)
         child.add_argument("--public-origin", required=True)
         child.add_argument("--listen", type=_listen, default=ListenRequest())
         child.add_argument("--accept-direct-exposure", action="store_true")
@@ -103,9 +105,7 @@ def _request(args: argparse.Namespace) -> InstallRequest:
     restore_protection = None
     if args.mode is InstallerMode.RESTORE_TO_NEW:
         if args.protection_none:
-            restore_protection = RestoreProtectionRequest(
-                RestoreProtectionKind.NONE
-            )
+            restore_protection = RestoreProtectionRequest(RestoreProtectionKind.NONE)
         elif args.one_time_key_file is not None:
             restore_protection = RestoreProtectionRequest(
                 RestoreProtectionKind.ONE_TIME_KEY_FILE,
@@ -126,6 +126,14 @@ def _request(args: argparse.Namespace) -> InstallRequest:
         selector=ReleaseSelector(channel=args.channel, version=args.version),
         public_origin=args.public_origin,
         transport_source=InstallTransportSource(args.source),
+        local_bundle_payload=(
+            args.bundle_payload.absolute() if args.bundle_payload is not None else None
+        ),
+        local_bundle_release_attestation=(
+            args.release_attestation.absolute()
+            if args.release_attestation is not None
+            else None
+        ),
         listen=replace(
             args.listen,
             direct_exposure_accepted=args.accept_direct_exposure,
@@ -166,8 +174,10 @@ def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> 
 
             runtime = build_runtime(
                 transport_source=request.transport_source,
-                transport_policy=explicit_transport_policy(
-                    request.transport_source
+                transport_policy=explicit_transport_policy(request.transport_source),
+                local_bundle_payload=request.local_bundle_payload,
+                local_bundle_release_attestation=(
+                    request.local_bundle_release_attestation
                 ),
             )
         plan = runtime.plan(request)

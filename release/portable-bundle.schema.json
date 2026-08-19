@@ -23,14 +23,74 @@
     },
     "files": {
       "type": "array",
+      "minItems": 4,
       "maxItems": 4096,
       "uniqueItems": true,
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "authority/checksums.txt"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "authority/deployment-contract.json"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "authority/installer-materials.tar"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "authority/release-manifest.json"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ],
       "items": {
         "$ref": "#/$defs/fileIdentity"
       }
     },
     "ociImages": {
       "type": "array",
+      "minItems": 4,
       "maxItems": 4,
       "uniqueItems": true,
       "items": {
@@ -49,6 +109,28 @@
       "maxLength": 1024,
       "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000]+$"
     },
+    "payloadPath": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/relativePath"
+        },
+        {
+          "anyOf": [
+            {
+              "enum": [
+                "authority/checksums.txt",
+                "authority/deployment-contract.json",
+                "authority/installer-materials.tar",
+                "authority/release-manifest.json"
+              ]
+            },
+            {
+              "pattern": "^oci/(?:api|postgres|redis|web)/.+$"
+            }
+          ]
+        }
+      ]
+    },
     "fileIdentity": {
       "type": "object",
       "additionalProperties": false,
@@ -59,7 +141,7 @@
       ],
       "properties": {
         "path": {
-          "$ref": "#/$defs/relativePath"
+          "$ref": "#/$defs/payloadPath"
         },
         "sha256": {
           "$ref": "#/$defs/digest"

@@ -37,9 +37,13 @@ from scripts.tests.test_managed_config import (
     REVISION,
     encoded,
 )
-from updater.tests.test_deployment import manifest
+from updater.local_bundle import (
+    LocalBundleReleaseSource,
+    LocalBundleTransportPolicy,
+)
 from updater.oci import AcquiredRuntimeImage, ImageAcquisitionReceipt
 from updater.source import VerifiedReleaseMaterials
+from updater.tests.test_deployment import manifest
 from updater.tests.test_source import stable_manifest
 from updater.transport import ExplicitTransportPolicy
 
@@ -77,9 +81,11 @@ class ReleaseFixture:
         self.materials = SimpleNamespace(
             manifest=self.manifest,
             verified=SimpleNamespace(files=(identity,)),
-            material=lambda path: expected
-            if path == relative.as_posix()
-            else (_ for _ in ()).throw(KeyError(path)),
+            material=lambda path: (
+                expected
+                if path == relative.as_posix()
+                else (_ for _ in ()).throw(KeyError(path))
+            ),
         )
         self.installed = installed
 
@@ -138,14 +144,88 @@ class EmptyRuntimeRunner:
 
 
 class ProductionTargetPortTests(unittest.TestCase):
-    def test_local_bundle_is_blocked_at_the_production_authority_gate(self) -> None:
+    def test_local_bundle_without_payload_attestation_and_verifier_fails_closed(
+        self,
+    ) -> None:
         with self.assertRaisesRegex(
             InstallerError,
-            "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY",
+            "INSTALL_LOCAL_BUNDLE_INPUT_REQUIRED",
         ):
             ProductionReleasePort(
                 transport_source=InstallTransportSource.LOCAL_BUNDLE,
             )
+
+    def test_local_bundle_uses_offline_verified_source_and_local_oci_acquirer(
+        self,
+    ) -> None:
+        release_manifest = stable_manifest()
+        policy = LocalBundleTransportPolicy()
+        with tempfile.TemporaryDirectory() as temporary:
+            materials = VerifiedReleaseMaterials(
+                manifest=release_manifest,
+                deployment_contract={},
+                verified=VerifiedMaterialSet(
+                    root=Path(temporary),
+                    archive_sha256=digest("a"),
+                    files=(),
+                ),
+                identity_digest=digest("b"),
+            )
+
+            class Resolver(LocalBundleReleaseSource):
+                def __init__(self) -> None:
+                    pass
+
+                def fetch_verified_materials(self, version, **_kwargs):
+                    if version != "v1.0.0":
+                        raise AssertionError("unexpected release")
+                    return materials
+
+                def acquire_images(self, candidate, image_acquirer):
+                    return image_acquirer.acquire_local(
+                        candidate,
+                        object(),
+                        policy,
+                    )
+
+            class Acquirer:
+                def __init__(self) -> None:
+                    self.calls = []
+
+                def acquire_local(self, candidate, verified_images, candidate_policy):
+                    self.calls.append((candidate, verified_images, candidate_policy))
+                    return ImageAcquisitionReceipt(
+                        verified_release_identity=candidate.identity_digest,
+                        transport_policy_identity=candidate_policy.identity,
+                        images=tuple(
+                            AcquiredRuntimeImage(
+                                role=role,
+                                canonical_reference=candidate.image(role),
+                                observed_reference=candidate.image(role),
+                            )
+                            for role in ("api", "postgres", "redis", "web")
+                        ),
+                        identity="c" * 64,
+                    )
+
+            acquirer = Acquirer()
+            releases = ProductionReleasePort(
+                source=Resolver(),
+                transport_source=InstallTransportSource.LOCAL_BUNDLE,
+                transport_policy=policy,
+                image_acquirer=acquirer,  # type: ignore[arg-type]
+            )
+            evidence = releases.resolve(
+                ReleaseSelector(version="v1.0.0"),
+                refresh=False,
+            )
+            receipt = releases.acquire_images(evidence)
+
+        self.assertEqual(len(acquirer.calls), 1)
+        self.assertIs(acquirer.calls[0][0], materials)
+        self.assertIs(acquirer.calls[0][2], policy)
+        self.assertEqual(receipt.verified_release_identity, materials.identity_digest)
+        self.assertEqual(receipt.transport_policy_identity, policy.identity)
 
     def test_injected_resolver_must_use_the_selected_policy(self) -> None:
         resolver = SimpleNamespace(
@@ -220,7 +300,9 @@ class ProductionTargetPortTests(unittest.TestCase):
     def test_launcher_without_locator_is_partial_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            roots = tuple(root / name for name in ("app", "data", "updater", "state", "run"))
+            roots = tuple(
+                root / name for name in ("app", "data", "updater", "state", "run")
+            )
             launcher = root / "animemo-updater"
             launcher.write_bytes(b"partial launcher")
             with (
@@ -231,21 +313,19 @@ class ProductionTargetPortTests(unittest.TestCase):
                     (launcher,),
                 ),
             ):
-                evidence = ProductionTargetPort(
-                    runner=EmptyRuntimeRunner()
-                ).inspect()
+                evidence = ProductionTargetPort(runner=EmptyRuntimeRunner()).inspect()
 
         self.assertEqual(evidence.classification, TargetClass.PARTIAL_AMBIGUOUS)
 
     def test_compose_resources_without_locator_are_partial_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            roots = tuple(root / name for name in ("app", "data", "updater", "state", "run"))
+            roots = tuple(
+                root / name for name in ("app", "data", "updater", "state", "run")
+            )
             with (
                 mock.patch.object(production, "_CANONICAL_ROOTS", roots),
-                mock.patch.object(
-                    production, "_CANONICAL_EXTERNAL_ARTIFACTS", ()
-                ),
+                mock.patch.object(production, "_CANONICAL_EXTERNAL_ARTIFACTS", ()),
             ):
                 evidence = ProductionTargetPort(
                     runner=EmptyRuntimeRunner(compose_resource=True)
@@ -416,9 +496,7 @@ class ProductionConfigurationPreflightTests(unittest.TestCase):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
                 occupied.bind(("127.0.0.1", port))
                 occupied.listen()
-                with self.assertRaisesRegex(
-                    InstallerError, "INSTALL_PORT_CONFLICT"
-                ):
+                with self.assertRaisesRegex(InstallerError, "INSTALL_PORT_CONFLICT"):
                     adapter.revalidate(plan)
 
 

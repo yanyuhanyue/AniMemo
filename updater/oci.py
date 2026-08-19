@@ -4,21 +4,31 @@ import hashlib
 import json
 import os
 import stat
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 
 from .authority import VerifiedReleaseMaterials
 from .commands import CommandRunner
 from .errors import CommandFailed
 from .transport import ExplicitTransportPolicy
 
-
 OCI_IMAGE_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 OCI_IMAGE_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
 OCI_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar"
 OCI_PLATFORM = "linux/amd64"
+OCI_STREAM_CHUNK_BYTES = 1024 * 1024
+MAX_OCI_METADATA_BYTES = 16 * 1024 * 1024
+MAX_OCI_BLOB_BYTES = 4 * 1024 * 1024 * 1024
+MAX_OCI_LAYERS = 256
+MAX_OCI_LAYOUT_FILES = MAX_OCI_LAYERS + 4
+MAX_OCI_LAYOUT_DIRECTORIES = 4
+MAX_OCI_LAYOUT_TOTAL_BYTES = 16 * 1024 * 1024 * 1024
+MAX_OCI_PATH_BYTES = 1024
+MAX_OCI_PATH_DEPTH = 8
+MAX_OCI_PATH_COMPONENT_BYTES = 255
 OCI_PROCESS_ENV_ALLOWLIST = frozenset(
     {
         "DOCKER_CONFIG",
@@ -75,6 +85,18 @@ class VerifiedOCIImageSet:
         raise OCIContractError("OCI_IMAGE_ROLE_NOT_VERIFIED")
 
 
+class VerifiedOCIImageImporter(Protocol):
+    """Runtime boundary that imports only a previously verified local image."""
+
+    def import_verified_image(self, image: VerifiedOCIImage) -> str:
+        """Return the exact repository@digest observed after local import."""
+
+
+@dataclass(frozen=True)
+class VerifiedLocalImageImportReceipt:
+    images: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class LocalImageAcquisitionEntry:
     role: str
@@ -111,7 +133,9 @@ class ImageAcquirer:
     must terminate at this same exact-digest readback seam.
     """
 
-    def __init__(self, *, runner=None, environment: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, *, runner=None, environment: dict[str, str] | None = None
+    ) -> None:
         self.runner = runner or CommandRunner()
         self.environment = (
             dict(environment)
@@ -222,6 +246,10 @@ def _digest(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
+def _is_link_like(path: Path) -> bool:
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
 def _validate_digest(value: Any) -> str:
     if (
         not isinstance(value, str)
@@ -245,8 +273,26 @@ def _validate_relative_path(value: Any) -> str:
     parsed = PurePosixPath(value)
     if parsed.is_absolute() or any(part in {"", ".", ".."} for part in parsed.parts):
         raise OCIContractError("OCI_LAYOUT_PATH_INVALID")
-    if parsed.as_posix() != value or ":" in parsed.parts[0]:
+    if parsed.as_posix() != value or ":" in value:
         raise OCIContractError("OCI_LAYOUT_PATH_NOT_CANONICAL")
+    if (
+        unicodedata.normalize("NFC", value) != value
+        or len(value.encode("utf-8")) > MAX_OCI_PATH_BYTES
+        or len(parsed.parts) > MAX_OCI_PATH_DEPTH
+    ):
+        raise OCIContractError("OCI_LAYOUT_PATH_NOT_CANONICAL")
+    for part in parsed.parts:
+        if (
+            len(part.encode("utf-8")) > MAX_OCI_PATH_COMPONENT_BYTES
+            or part.endswith((" ", "."))
+            or any(ord(character) < 32 for character in part)
+        ):
+            raise OCIContractError("OCI_LAYOUT_PATH_NOT_CANONICAL")
+        stem = part.split(".", 1)[0].casefold()
+        if stem in {"con", "prn", "aux", "nul"} or (
+            len(stem) == 4 and stem[:3] in {"com", "lpt"} and stem[3] in "123456789"
+        ):
+            raise OCIContractError("OCI_LAYOUT_PATH_NOT_CANONICAL")
     return value
 
 
@@ -279,22 +325,52 @@ def _parse_json(value: bytes) -> dict[str, Any]:
     return parsed
 
 
-def _read_regular_file(path: Path) -> bytes:
+def _open_regular_file(path: Path, *, max_bytes: int):
     try:
-        metadata = path.lstat()
+        before = path.lstat()
     except OSError as error:
         raise OCIContractError("OCI_FILE_UNAVAILABLE") from error
-    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+    if _is_link_like(path) or not stat.S_ISREG(before.st_mode):
         raise OCIContractError("OCI_FILE_TYPE_FORBIDDEN")
-    if metadata.st_nlink != 1:
+    if before.st_nlink != 1:
         raise OCIContractError("OCI_HARDLINK_FORBIDDEN")
+    if before.st_size < 0 or before.st_size > max_bytes:
+        raise OCIContractError("OCI_FILE_SIZE_LIMIT")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        value = path.read_bytes()
+        descriptor = os.open(path, flags)
     except OSError as error:
         raise OCIContractError("OCI_FILE_UNREADABLE") from error
-    if len(value) != metadata.st_size:
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_size != before.st_size
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise OCIContractError("OCI_FILE_CHANGED_DURING_OPEN")
+        return os.fdopen(descriptor, "rb", closefd=True), opened.st_size
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _read_regular_file(path: Path, *, max_bytes: int = MAX_OCI_METADATA_BYTES) -> bytes:
+    stream, expected_size = _open_regular_file(path, max_bytes=max_bytes)
+    value = bytearray()
+    with stream:
+        while True:
+            chunk = stream.read(min(OCI_STREAM_CHUNK_BYTES, max_bytes + 1 - len(value)))
+            if not chunk:
+                break
+            value.extend(chunk)
+            if len(value) > max_bytes:
+                raise OCIContractError("OCI_FILE_SIZE_LIMIT")
+        after = os.fstat(stream.fileno())
+    if len(value) != expected_size or after.st_size != expected_size:
         raise OCIContractError("OCI_FILE_CHANGED_DURING_READ")
-    return value
+    return bytes(value)
 
 
 def _expect_keys(value: dict[str, Any], expected: set[str], code: str) -> None:
@@ -330,15 +406,43 @@ def _descriptor(
     return _validate_digest(value["digest"]), _validate_size(value["size"])
 
 
-def _blob(layout: Path, digest: str, size: int) -> bytes:
+def _blob(
+    layout: Path,
+    digest: str,
+    size: int,
+    *,
+    capture: bool = False,
+) -> bytes | None:
     digest = _validate_digest(digest)
+    if size > MAX_OCI_BLOB_BYTES:
+        raise OCIContractError("OCI_BLOB_SIZE_LIMIT")
     target = layout / "blobs" / "sha256" / digest[7:]
-    value = _read_regular_file(target)
-    if len(value) != size:
+    stream, expected_size = _open_regular_file(target, max_bytes=MAX_OCI_BLOB_BYTES)
+    if expected_size != size:
+        stream.close()
         raise OCIContractError("OCI_DESCRIPTOR_SIZE_MISMATCH")
-    if _digest(value) != digest:
+    hasher = hashlib.sha256()
+    captured = bytearray() if capture else None
+    consumed = 0
+    with stream:
+        while True:
+            chunk = stream.read(OCI_STREAM_CHUNK_BYTES)
+            if not chunk:
+                break
+            consumed += len(chunk)
+            if consumed > size:
+                raise OCIContractError("OCI_DESCRIPTOR_SIZE_MISMATCH")
+            hasher.update(chunk)
+            if captured is not None:
+                if consumed > MAX_OCI_METADATA_BYTES:
+                    raise OCIContractError("OCI_METADATA_SIZE_LIMIT")
+                captured.extend(chunk)
+        after = os.fstat(stream.fileno())
+    if consumed != size or after.st_size != size:
+        raise OCIContractError("OCI_DESCRIPTOR_SIZE_MISMATCH")
+    if "sha256:" + hasher.hexdigest() != digest:
         raise OCIContractError("OCI_DESCRIPTOR_DIGEST_MISMATCH")
-    return value
+    return bytes(captured) if captured is not None else None
 
 
 def _closed_layout(layout: Path) -> tuple[set[str], set[str]]:
@@ -346,11 +450,12 @@ def _closed_layout(layout: Path) -> tuple[set[str], set[str]]:
         root_stat = layout.lstat()
     except OSError as error:
         raise OCIContractError("OCI_LAYOUT_UNAVAILABLE") from error
-    if layout.is_symlink() or not stat.S_ISDIR(root_stat.st_mode):
+    if _is_link_like(layout) or not stat.S_ISDIR(root_stat.st_mode):
         raise OCIContractError("OCI_LAYOUT_ROOT_INVALID")
     result: set[str] = set()
     directories_seen: set[str] = set()
     folded: set[str] = set()
+    total_size = 0
     for current, directories, names in os.walk(layout, topdown=True, followlinks=False):
         current_path = Path(current)
         for name in directories:
@@ -359,17 +464,29 @@ def _closed_layout(layout: Path) -> tuple[set[str], set[str]]:
                 metadata = directory.lstat()
             except OSError as error:
                 raise OCIContractError("OCI_DIRECTORY_UNAVAILABLE") from error
-            if directory.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+            if _is_link_like(directory) or not stat.S_ISDIR(metadata.st_mode):
                 raise OCIContractError("OCI_DIRECTORY_TYPE_FORBIDDEN")
             relative = directory.relative_to(layout).as_posix()
             directories_seen.add(_validate_relative_path(relative))
+            if len(directories_seen) > MAX_OCI_LAYOUT_DIRECTORIES:
+                raise OCIContractError("OCI_LAYOUT_DIRECTORY_LIMIT")
         for name in names:
-            relative = (current_path / name).relative_to(layout).as_posix()
+            target = current_path / name
+            try:
+                metadata = target.lstat()
+            except OSError as error:
+                raise OCIContractError("OCI_FILE_UNAVAILABLE") from error
+            relative = target.relative_to(layout).as_posix()
             relative = _validate_relative_path(relative)
             if relative.casefold() in folded:
                 raise OCIContractError("OCI_CASE_COLLISION")
             result.add(relative)
             folded.add(relative.casefold())
+            total_size += metadata.st_size
+            if len(result) > MAX_OCI_LAYOUT_FILES:
+                raise OCIContractError("OCI_LAYOUT_FILE_LIMIT")
+            if total_size > MAX_OCI_LAYOUT_TOTAL_BYTES:
+                raise OCIContractError("OCI_LAYOUT_TOTAL_SIZE_LIMIT")
     return result, directories_seen
 
 
@@ -400,7 +517,9 @@ def _expectation(value: Any) -> OCIImageExpectation:
     )
 
 
-def verify_oci_image(layout: Path, expectation: OCIImageExpectation) -> VerifiedOCIImage:
+def verify_oci_image(
+    layout: Path, expectation: OCIImageExpectation
+) -> VerifiedOCIImage:
     layout = Path(layout)
     actual_files, actual_directories = _closed_layout(layout)
     layout_document = _parse_json(_read_regular_file(layout / "oci-layout"))
@@ -422,7 +541,8 @@ def verify_oci_image(layout: Path, expectation: OCIImageExpectation) -> Verified
     )
     if manifest_digest != expectation.digest:
         raise OCIContractError("OCI_EXPECTED_MANIFEST_DIGEST_MISMATCH")
-    manifest_bytes = _blob(layout, manifest_digest, manifest_size)
+    manifest_bytes = _blob(layout, manifest_digest, manifest_size, capture=True)
+    assert manifest_bytes is not None
     manifest = _parse_json(manifest_bytes)
     _expect_keys(
         manifest,
@@ -437,11 +557,13 @@ def verify_oci_image(layout: Path, expectation: OCIImageExpectation) -> Verified
     config_digest, config_size = _descriptor(
         manifest["config"], media_type=OCI_CONFIG_MEDIA_TYPE, with_platform=False
     )
-    config = _parse_json(_blob(layout, config_digest, config_size))
+    config_bytes = _blob(layout, config_digest, config_size, capture=True)
+    assert config_bytes is not None
+    config = _parse_json(config_bytes)
     if config.get("os") != "linux" or config.get("architecture") != "amd64":
         raise OCIContractError("OCI_CONFIG_PLATFORM_MISMATCH")
     layers = manifest["layers"]
-    if not isinstance(layers, list):
+    if not isinstance(layers, list) or len(layers) > MAX_OCI_LAYERS:
         raise OCIContractError("OCI_LAYERS_INVALID")
     layer_digests: list[str] = []
     for layer in layers:
@@ -513,3 +635,53 @@ def plan_local_image_acquisition(
         for image in verified.images
     )
     return LocalImageAcquisitionPlan(entries)
+
+
+def import_verified_oci_image_set(
+    verified: VerifiedOCIImageSet,
+    importer: VerifiedOCIImageImporter,
+) -> VerifiedLocalImageImportReceipt:
+    """Import exact local layouts without weakening their release identity.
+
+    This seam deliberately owns no registry or tag fallback.  The injected
+    importer may touch the local runtime, but acceptance remains bound to the
+    already verified canonical repository@digest returned by that importer.
+    """
+
+    if type(verified) is not VerifiedOCIImageSet:
+        raise OCIContractError("OCI_IMAGE_SET_NOT_VERIFIED")
+    if [image.role for image in verified.images] != sorted(REQUIRED_IMAGE_REPOSITORIES):
+        raise OCIContractError("OCI_IMAGE_SET_NOT_VERIFIED")
+    operation = getattr(importer, "import_verified_image", None)
+    if not callable(operation):
+        raise OCIContractError("OCI_LOCAL_IMPORTER_INVALID")
+    observed: list[str] = []
+    for image in verified.images:
+        if (
+            image.repository != REQUIRED_IMAGE_REPOSITORIES[image.role]
+            or image.platform != OCI_PLATFORM
+        ):
+            raise OCIContractError("OCI_IMAGE_SET_NOT_VERIFIED")
+        refreshed = verify_oci_image(
+            image.layout,
+            OCIImageExpectation(
+                role=image.role,
+                repository=image.repository,
+                digest=image.digest,
+                platform=image.platform,
+                layout_path=f"oci/{image.role}",
+            ),
+        )
+        if refreshed != image:
+            raise OCIContractError("OCI_IMAGE_SET_NOT_VERIFIED")
+        expected = f"{refreshed.repository}@{refreshed.digest}"
+        try:
+            result = operation(refreshed)
+        except OCIContractError:
+            raise
+        except Exception as error:
+            raise OCIContractError("OCI_LOCAL_IMPORT_FAILED") from error
+        if type(result) is not str or result != expected:
+            raise OCIContractError("OCI_LOCAL_IMPORT_DIGEST_MISMATCH")
+        observed.append(result)
+    return VerifiedLocalImageImportReceipt(images=tuple(observed))

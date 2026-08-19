@@ -88,6 +88,10 @@ from updater import __version__ as updater_version
 from updater.commands import CommandRunner
 from updater.deployment import HostPaths, ImmutableComposeDeployment
 from updater.errors import StateError
+from updater.local_bundle import (
+    LocalBundleReleaseSource,
+    LocalBundleTransportPolicy,
+)
 from updater.oci import (
     AcquiredRuntimeImage,
     ImageAcquirer,
@@ -213,8 +217,13 @@ class ProductionReleasePort:
         source: ReleaseResolver | None = None,
         cache_root: Path | None = None,
         transport_source: InstallTransportSource = InstallTransportSource.GITHUB,
-        transport_policy: ExplicitTransportPolicy | None = None,
+        transport_policy: ExplicitTransportPolicy
+        | LocalBundleTransportPolicy
+        | None = None,
         image_acquirer: ImageAcquirer | None = None,
+        local_bundle_payload: Path | None = None,
+        local_bundle_release_attestation: Path | None = None,
+        offline_verifier=None,
     ) -> None:
         if type(transport_source) is not InstallTransportSource:
             raise InstallerError(
@@ -222,20 +231,27 @@ class ProductionReleasePort:
                 outcome=InstallOutcome.VALIDATION_FAILED,
             )
         expected_policy = explicit_transport_policy(transport_source)
-        if expected_policy is None:
-            raise InstallerError(
-                "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY",
-                outcome=InstallOutcome.VALIDATION_FAILED,
-            )
         selected_policy = transport_policy or expected_policy
         if (
-            type(selected_policy) is not ExplicitTransportPolicy
-            or selected_policy.source is not expected_policy.source
+            type(selected_policy) is not type(expected_policy)
+            or selected_policy.source != expected_policy.source
             or selected_policy.identity != expected_policy.identity
             or selected_policy.fallback_allowed is not False
         ):
             raise InstallerError(
                 "INSTALL_TRANSPORT_POLICY_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        if (
+            source is None
+            and transport_source is InstallTransportSource.LOCAL_BUNDLE
+            and (
+                not isinstance(local_bundle_payload, Path)
+                or not isinstance(local_bundle_release_attestation, Path)
+            )
+        ):
+            raise InstallerError(
+                "INSTALL_LOCAL_BUNDLE_INPUT_REQUIRED",
                 outcome=InstallOutcome.VALIDATION_FAILED,
             )
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
@@ -245,11 +261,67 @@ class ProductionReleasePort:
                     prefix="animemo-installer-release-"
                 )
                 cache_root = Path(self._temporary.name) / "cache"
-            source = ReleaseResolver(cache_root, policy=selected_policy)
+            if transport_source is InstallTransportSource.LOCAL_BUNDLE:
+                assert isinstance(local_bundle_payload, Path)
+                assert isinstance(local_bundle_release_attestation, Path)
+                if offline_verifier is None:
+                    try:
+                        from updater.offline import (
+                            production_offline_release_verifier,
+                        )
+
+                        offline_verifier = production_offline_release_verifier()
+                    except Exception:  # noqa: BLE001 - closed authority factory
+                        raise InstallerError(
+                            "INSTALL_OFFLINE_VERIFIER_UNAVAILABLE",
+                            outcome=InstallOutcome.VALIDATION_FAILED,
+                        ) from None
+                try:
+                    source = LocalBundleReleaseSource.from_media(
+                        payload=local_bundle_payload,
+                        release_attestation=local_bundle_release_attestation,
+                        cache_root=cache_root,
+                        verifier=offline_verifier,
+                        updater_version=updater_version,
+                    )
+                except Exception:  # noqa: BLE001 - offline authority boundary
+                    if self._temporary is not None:
+                        self._temporary.cleanup()
+                        self._temporary = None
+                    raise InstallerError(
+                        "INSTALL_LOCAL_BUNDLE_VERIFICATION_FAILED",
+                        outcome=InstallOutcome.VALIDATION_FAILED,
+                    ) from None
+            else:
+                if (
+                    local_bundle_payload is not None
+                    or local_bundle_release_attestation is not None
+                    or offline_verifier is not None
+                ):
+                    raise InstallerError(
+                        "INSTALL_LOCAL_BUNDLE_INPUT_FORBIDDEN",
+                        outcome=InstallOutcome.VALIDATION_FAILED,
+                    )
+                source = ReleaseResolver(cache_root, policy=selected_policy)
+        elif transport_source is InstallTransportSource.LOCAL_BUNDLE:
+            if not isinstance(source, LocalBundleReleaseSource):
+                raise InstallerError(
+                    "INSTALL_LOCAL_BUNDLE_RESOLVER_INVALID",
+                    outcome=InstallOutcome.VALIDATION_FAILED,
+                )
+        elif (
+            local_bundle_payload is not None
+            or local_bundle_release_attestation is not None
+            or offline_verifier is not None
+        ):
+            raise InstallerError(
+                "INSTALL_LOCAL_BUNDLE_INPUT_FORBIDDEN",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
         source_policy = getattr(source, "transport_policy", selected_policy)
         if (
-            type(source_policy) is not ExplicitTransportPolicy
-            or source_policy.source is not selected_policy.source
+            type(source_policy) is not type(selected_policy)
+            or source_policy.source != selected_policy.source
             or source_policy.identity != selected_policy.identity
             or source_policy.fallback_allowed is not False
         ):
@@ -309,9 +381,7 @@ class ProductionReleasePort:
             commit=str(manifest["release"]["commit"]),
             manifest_digest=_manifest_digest(manifest),
             material_identity_digest=materials.identity_digest,
-            deployment_identity_digest=str(
-                manifest["deployment"]["contractSha256"]
-            ),
+            deployment_identity_digest=str(manifest["deployment"]["contractSha256"]),
             deployment_profile=str(manifest["deployment"]["profile"]),
             platform_profile="v1.1-standard-linux-amd64",
             transport_source=self.transport_source,
@@ -342,7 +412,13 @@ class ProductionReleasePort:
     def acquire_images(self, evidence: ReleaseEvidence) -> ImageAcquisitionReceipt:
         materials = self.materials_for(evidence)
         try:
-            receipt = self.image_acquirer.acquire(materials, self.transport_policy)
+            if self.transport_source is InstallTransportSource.LOCAL_BUNDLE:
+                receipt = self.source.acquire_images(
+                    materials,
+                    self.image_acquirer,
+                )
+            else:
+                receipt = self.image_acquirer.acquire(materials, self.transport_policy)
         except InstallerError:
             raise
         except Exception:  # noqa: BLE001 - image acquisition Adapter is redacted
@@ -351,6 +427,7 @@ class ProductionReleasePort:
                 outcome=InstallOutcome.ENVIRONMENT_FAILED,
             ) from None
         expected_roles = ("api", "postgres", "redis", "web")
+        local_immutable = self.transport_source is InstallTransportSource.LOCAL_BUNDLE
         if (
             type(receipt) is not ImageAcquisitionReceipt
             or receipt.verified_release_identity != materials.identity_digest
@@ -360,12 +437,25 @@ class ProductionReleasePort:
             or any(
                 type(item) is not AcquiredRuntimeImage
                 or item.canonical_reference != materials.image(item.role)
-                or item.observed_reference != item.canonical_reference
+                or (
+                    item.observed_reference != item.canonical_reference
+                    and (
+                        not local_immutable
+                        or len(item.observed_reference) != 71
+                        or not item.observed_reference.startswith("sha256:")
+                        or any(
+                            character not in "0123456789abcdef"
+                            for character in item.observed_reference[7:]
+                        )
+                    )
+                )
                 for item in receipt.images
             )
             or not isinstance(receipt.identity, str)
             or len(receipt.identity) != 64
-            or any(character not in "0123456789abcdef" for character in receipt.identity)
+            or any(
+                character not in "0123456789abcdef" for character in receipt.identity
+            )
         ):
             raise InstallerError(
                 "INSTALL_IMAGE_ACQUISITION_RECEIPT_INVALID",
@@ -498,8 +588,12 @@ def collect_host_capabilities(
     machine = host_platform.machine().lower()
     architecture = "amd64" if machine in {"x86_64", "amd64"} else machine
     filesystem = _filesystem_capabilities()
-    compose_version = _command_available(runner, ["/usr/bin/docker", "compose", "version"])
-    compose_help = _command_available(runner, ["/usr/bin/docker", "compose", "up", "--help"])
+    compose_version = _command_available(
+        runner, ["/usr/bin/docker", "compose", "version"]
+    )
+    compose_help = _command_available(
+        runner, ["/usr/bin/docker", "compose", "up", "--help"]
+    )
     docker = _command_available(runner, ["/usr/bin/docker", "info"])
     systemd = _command_available(runner, ["/usr/bin/systemctl", "--version"])
     pg_dump = _command_available(runner, ["/usr/bin/pg_dump", "--version"])
@@ -785,7 +879,10 @@ class ProductionManagedConfigurationPort:
         origin = canonical_public_origin(public_origin)
         direct = not ipaddress.ip_address(listen.host).is_loopback
         insecure = origin.startswith("http://")
-        if direct != listen.direct_exposure_accepted or insecure != insecure_http_accepted:
+        if (
+            direct != listen.direct_exposure_accepted
+            or insecure != insecure_http_accepted
+        ):
             raise ManagedConfigError("CONFIG_DIRECT_ACCESS_ACK_REQUIRED")
         return ManagedConfig(
             instance_id=instance_id,
@@ -821,7 +918,9 @@ class ProductionManagedConfigurationPort:
         listen: ListenRequest,
         insecure_http_accepted: bool,
     ) -> ConfigPlanEvidence:
-        exists = self.store.authority_path.exists() or self.store.authority_path.is_symlink()
+        exists = (
+            self.store.authority_path.exists() or self.store.authority_path.is_symlink()
+        )
         if exists:
             config = self.store.read()
             if (
@@ -839,9 +938,7 @@ class ProductionManagedConfigurationPort:
                 insecure_http_accepted=insecure_http_accepted,
             )
             self._assert_listen_available(config.listen)
-        safe_identity = sha256_identity(
-            canonical_json_bytes(config.secret_safe_dict())
-        )
+        safe_identity = sha256_identity(canonical_json_bytes(config.secret_safe_dict()))
         warnings = tuple(
             warning
             for condition, warning in (
@@ -866,11 +963,15 @@ class ProductionManagedConfigurationPort:
 
     def revalidate(self, plan: ConfigPlanEvidence) -> None:
         config = self._planned.get(plan.config_revision)
-        if config is None or sha256_identity(
-            canonical_json_bytes(config.secret_safe_dict())
-        ) != plan.non_secret_identity_digest:
+        if (
+            config is None
+            or sha256_identity(canonical_json_bytes(config.secret_safe_dict()))
+            != plan.non_secret_identity_digest
+        ):
             raise ManagedConfigError("CONFIG_PLAN_STALE")
-        exists = self.store.authority_path.exists() or self.store.authority_path.is_symlink()
+        exists = (
+            self.store.authority_path.exists() or self.store.authority_path.is_symlink()
+        )
         if exists != self._existing[plan.config_revision]:
             raise ManagedConfigError("CONFIG_PLAN_STALE")
         if exists and self.store.read() != config:
@@ -1008,9 +1109,7 @@ class ProductionOperationPort:
                 self.current,
                 error_code=error_code,
                 at=_utc_now(),
-                rollback_succeeded=(
-                    False if recovery_required else rollback_succeeded
-                ),
+                rollback_succeeded=(False if recovery_required else rollback_succeeded),
             )
         )
 
@@ -1129,9 +1228,7 @@ class ProductionDoctorAcceptance:
             expected = materials.material(
                 "deploy/updater/animemo-updater.service"
             ).read_bytes()
-            installed = Path(
-                "/etc/systemd/system/animemo-updater.service"
-            ).read_bytes()
+            installed = Path("/etc/systemd/system/animemo-updater.service").read_bytes()
             result = self.runner.run(
                 [
                     "/usr/bin/systemctl",
@@ -1153,17 +1250,16 @@ class ProductionDoctorAcceptance:
                 if address.is_unspecified
                 else address.compressed
             )
-            with socket.create_connection(
-                (probe_host, current.listen.port), timeout=5
-            ):
+            with socket.create_connection((probe_host, current.listen.port), timeout=5):
                 return True
 
         def updater_socket() -> bool:
             path = Path(str(UPDATER_RUNTIME_ROOT / "updater.sock"))
             metadata = path.lstat()
-            return stat.S_ISSOCK(metadata.st_mode) and stat.S_IMODE(
-                metadata.st_mode
-            ) == 0o660
+            return (
+                stat.S_ISSOCK(metadata.st_mode)
+                and stat.S_IMODE(metadata.st_mode) == 0o660
+            )
 
         def updater_state() -> bool:
             state_root = Path(str(UPDATER_STATE_ROOT))
@@ -1185,9 +1281,7 @@ class ProductionDoctorAcceptance:
 
         def plugins() -> bool:
             enabled = deployment.inspect_enabled_plugin_apis(manifest)
-            supported = set(
-                manifest["compatibility"]["pluginSdk"]["supportedApis"]
-            )
+            supported = set(manifest["compatibility"]["pluginSdk"]["supportedApis"])
             return enabled.issubset(supported)
 
         def safe_directory(path: Path, mode: int) -> bool:
@@ -1223,10 +1317,12 @@ class ProductionDoctorAcceptance:
                 "COMPOSE_ALIGNED",
                 "COMPOSE_ALIGNMENT_FAILED",
                 lambda: (
-                    deployment.verify_deployment_contract(manifest),
-                    deployment.validate_compose(manifest),
-                )
-                is not None,
+                    (
+                        deployment.verify_deployment_contract(manifest),
+                        deployment.validate_compose(manifest),
+                    )
+                    is not None
+                ),
             ),
             "network.listen": self._guarded(
                 "LISTEN_REACHABLE", "LISTEN_UNREACHABLE", listen
@@ -1234,8 +1330,10 @@ class ProductionDoctorAcceptance:
             "identity.public-origin": self._guarded(
                 "PUBLIC_ORIGIN_VALID",
                 "PUBLIC_ORIGIN_INVALID",
-                lambda: config().public_origin
-                == canonical_public_origin(config().public_origin),
+                lambda: (
+                    config().public_origin
+                    == canonical_public_origin(config().public_origin)
+                ),
             ),
             "database.postgresql.connectivity": self._guarded(
                 "POSTGRESQL_REACHABLE",
@@ -1245,10 +1343,10 @@ class ProductionDoctorAcceptance:
             "database.schema-compatibility": self._guarded(
                 "DATABASE_SCHEMA_COMPATIBLE",
                 "DATABASE_SCHEMA_INCOMPATIBLE",
-                lambda: deployment.inspect_runtime_contracts(manifest)[
-                    "databaseContract"
-                ]
-                == manifest["compatibility"]["database"]["contract"],
+                lambda: (
+                    deployment.inspect_runtime_contracts(manifest)["databaseContract"]
+                    == manifest["compatibility"]["database"]["contract"]
+                ),
             ),
             "cache.redis.connectivity": self._guarded(
                 "REDIS_REACHABLE",
@@ -1420,10 +1518,14 @@ class ProductionFreshInstallPort:
         materials = self.releases.materials_for(plan.release)
         target = Path(str(APP_ROOT))
         if target.exists() or target.is_symlink():
-            _safe_adapter_error("INSTALL_APP_ROOT_EXISTS", mutation=False, recovery=False)
+            _safe_adapter_error(
+                "INSTALL_APP_ROOT_EXISTS", mutation=False, recovery=False
+            )
         staging = target.parent / f".animemo-{plan.operation_id}"
         if staging.exists() or staging.is_symlink():
-            _safe_adapter_error("INSTALL_STAGING_EXISTS", mutation=False, recovery=False)
+            _safe_adapter_error(
+                "INSTALL_STAGING_EXISTS", mutation=False, recovery=False
+            )
         try:
             staging.mkdir(mode=0o755)
             for identity in materials.verified.files:
@@ -1580,13 +1682,13 @@ class ProductionFreshInstallPort:
         except InstallerAdapterError:
             raise
         except Exception:  # noqa: BLE001 - complete Doctor Adapter boundary
-            _safe_adapter_error(
-                "INSTALL_DOCTOR_FAILED", mutation=True, recovery=True
-            )
+            _safe_adapter_error("INSTALL_DOCTOR_FAILED", mutation=True, recovery=True)
 
     def cleanup_owned_staging(self, plan: InstallPlan) -> None:
         del plan
-        for path in sorted(self._created, key=lambda item: len(item.parts), reverse=True):
+        for path in sorted(
+            self._created, key=lambda item: len(item.parts), reverse=True
+        ):
             try:
                 if path.is_file() and not path.is_symlink():
                     path.unlink()
@@ -1603,11 +1705,17 @@ class ProductionFreshInstallPort:
 def build_runtime(
     *,
     transport_source: InstallTransportSource = InstallTransportSource.GITHUB,
-    transport_policy: ExplicitTransportPolicy | None = None,
+    transport_policy: ExplicitTransportPolicy
+    | LocalBundleTransportPolicy
+    | None = None,
+    local_bundle_payload: Path | None = None,
+    local_bundle_release_attestation: Path | None = None,
 ) -> Installer:
     releases = ProductionReleasePort(
         transport_source=transport_source,
         transport_policy=transport_policy,
+        local_bundle_payload=local_bundle_payload,
+        local_bundle_release_attestation=local_bundle_release_attestation,
     )
     configuration = ProductionManagedConfigurationPort()
     compatibility = ProductionCompatibilityPort(releases)

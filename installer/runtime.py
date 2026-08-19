@@ -30,6 +30,10 @@ from durability.compatibility import (
     DimensionAssessment,
     evaluate_compatibility,
 )
+from updater.local_bundle import (
+    LOCAL_BUNDLE_POLICY_IDENTITY,
+    LocalBundleTransportPolicy,
+)
 from updater.transport import ExplicitTransportPolicy
 
 INSTALL_PLAN_IDENTITY = "animemo.install-plan/v1"
@@ -54,13 +58,13 @@ class InstallTransportSource(StrEnum):
 
 def explicit_transport_policy(
     source: InstallTransportSource,
-) -> ExplicitTransportPolicy | None:
+) -> ExplicitTransportPolicy | LocalBundleTransportPolicy:
     if source is InstallTransportSource.GITHUB:
         return ExplicitTransportPolicy.github()
     if source is InstallTransportSource.OFFICIAL_MIRROR:
         return ExplicitTransportPolicy.official_mirror()
     if source is InstallTransportSource.LOCAL_BUNDLE:
-        return None
+        return LocalBundleTransportPolicy()
     raise InstallerError(
         "INSTALL_TRANSPORT_SOURCE_INVALID",
         outcome=InstallOutcome.VALIDATION_FAILED,
@@ -69,18 +73,9 @@ def explicit_transport_policy(
 
 def transport_policy_identity(source: InstallTransportSource) -> str:
     policy = explicit_transport_policy(source)
-    if policy is not None:
-        return policy.identity
-    return sha256_identity(
-        canonical_json_bytes(
-            {
-                "authority": "blocked-portable-publication-authority",
-                "fallback": "forbidden",
-                "policyVersion": 1,
-                "source": InstallTransportSource.LOCAL_BUNDLE.value,
-            }
-        )
-    ).removeprefix("sha256:")
+    if source is InstallTransportSource.LOCAL_BUNDLE:
+        return LOCAL_BUNDLE_POLICY_IDENTITY
+    return policy.identity
 
 
 class RestoreProtectionKind(StrEnum):
@@ -293,6 +288,8 @@ class InstallRequest:
     selector: ReleaseSelector
     public_origin: str
     transport_source: InstallTransportSource = InstallTransportSource.GITHUB
+    local_bundle_payload: Path | None = None
+    local_bundle_release_attestation: Path | None = None
     listen: ListenRequest = ListenRequest()
     backup_root: Path | None = None
     restore_protection: RestoreProtectionRequest | None = None
@@ -311,6 +308,26 @@ class InstallRequest:
             "transport_policy_identity",
             transport_policy_identity(self.transport_source),
         )
+        if self.transport_source is InstallTransportSource.LOCAL_BUNDLE:
+            if (
+                self.selector.version is None
+                or not isinstance(self.local_bundle_payload, Path)
+                or not self.local_bundle_payload.is_absolute()
+                or not isinstance(self.local_bundle_release_attestation, Path)
+                or not self.local_bundle_release_attestation.is_absolute()
+            ):
+                raise InstallerError(
+                    "INSTALL_LOCAL_BUNDLE_INPUT_REQUIRED",
+                    outcome=InstallOutcome.VALIDATION_FAILED,
+                )
+        elif (
+            self.local_bundle_payload is not None
+            or self.local_bundle_release_attestation is not None
+        ):
+            raise InstallerError(
+                "INSTALL_LOCAL_BUNDLE_INPUT_FORBIDDEN",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
         if self.mode is InstallerMode.FRESH and (
             self.backup_root is not None or self.restore_protection is not None
         ):
@@ -880,9 +897,7 @@ class Installer:
         )
         if restore is not None:
             try:
-                configuration = self._restore.bind_configuration(
-                    restore, configuration
-                )
+                configuration = self._restore.bind_configuration(restore, configuration)
             except InstallerError:
                 raise
             except Exception:  # noqa: BLE001 - Restore Adapter is redacted
@@ -1234,12 +1249,9 @@ class Installer:
                 "INSTALL_RELEASE_EVIDENCE_INVALID",
                 outcome=InstallOutcome.VALIDATION_FAILED,
             )
-        if (
-            evidence.transport_source is not transport_source
-            or not hmac.compare_digest(
-                evidence.transport_policy_identity,
-                transport_policy_identity,
-            )
+        if evidence.transport_source is not transport_source or not hmac.compare_digest(
+            evidence.transport_policy_identity,
+            transport_policy_identity,
         ):
             raise InstallerError(
                 "INSTALL_RELEASE_TRANSPORT_POLICY_MISMATCH",

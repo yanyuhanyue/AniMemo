@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import io
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
+from pathlib import Path
 from unittest import mock
 
 from installer.cli import EXIT_SUCCESS, EXIT_VALIDATION, _listen, main
@@ -17,6 +19,7 @@ from installer.runtime import (
     TargetClass,
     TargetEvidence,
 )
+from updater.local_bundle import LocalBundleTransportPolicy
 from updater.transport import ExplicitTransportPolicy
 
 
@@ -56,33 +59,35 @@ class InstallerCliTests(unittest.TestCase):
             "fallback",
             "https://download.example.invalid/release",
         ):
-            with self.subTest(source=source), redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit):
-                    main(
-                        [
-                            "install",
-                            "--channel",
-                            "rc",
-                            "--source",
-                            source,
-                            "--public-origin",
-                            "https://anime.example",
-                            "--dry-run",
-                        ],
-                        runtime=_Runtime().runtime,
-                    )
+            with (
+                self.subTest(source=source),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                main(
+                    [
+                        "install",
+                        "--channel",
+                        "rc",
+                        "--source",
+                        source,
+                        "--public-origin",
+                        "https://anime.example",
+                        "--dry-run",
+                    ],
+                    runtime=_Runtime().runtime,
+                )
 
-    def test_local_bundle_stops_before_the_production_resolver(self) -> None:
+    def test_local_bundle_requires_exact_version_payload_and_release_attestation(
+        self,
+    ) -> None:
         output = io.StringIO()
-        with mock.patch(
-            "installer.production.ReleaseResolver",
-            side_effect=AssertionError("production resolver must not be constructed"),
-        ) as resolver, redirect_stdout(output):
+        with redirect_stdout(output):
             code = main(
                 [
                     "install",
-                    "--channel",
-                    "rc",
+                    "--version",
+                    "v1.1.0",
                     "--source",
                     "local-bundle",
                     "--public-origin",
@@ -94,9 +99,101 @@ class InstallerCliTests(unittest.TestCase):
 
         self.assertEqual(code, EXIT_VALIDATION)
         self.assertIn(
-            "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY",
+            "INSTALL_LOCAL_BUNDLE_INPUT_REQUIRED",
             output.getvalue(),
         )
+
+    def test_local_bundle_paths_are_wired_to_production_but_not_rendered_in_plan(
+        self,
+    ) -> None:
+        holder = _Runtime()
+        policy = LocalBundleTransportPolicy()
+        holder.runtime._releases.evidence = replace(
+            holder.runtime._releases.evidence,
+            version="v1.1.0",
+            channel="stable",
+            transport_source=InstallTransportSource.LOCAL_BUNDLE,
+            transport_policy_identity=policy.identity,
+        )
+        payload = Path("C:/offline/payload.tar")
+        sidecar = Path("C:/offline/release-attestation.sigstore.json")
+        output = io.StringIO()
+        with (
+            mock.patch(
+                "installer.production.build_runtime",
+                return_value=holder.runtime,
+            ) as factory,
+            redirect_stdout(output),
+        ):
+            code = main(
+                [
+                    "install",
+                    "--version",
+                    "v1.1.0",
+                    "--source",
+                    "local-bundle",
+                    "--bundle-payload",
+                    str(payload),
+                    "--release-attestation",
+                    str(sidecar),
+                    "--public-origin",
+                    "https://anime.example",
+                    "--dry-run",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        factory.assert_called_once_with(
+            transport_source=InstallTransportSource.LOCAL_BUNDLE,
+            transport_policy=policy,
+            local_bundle_payload=payload,
+            local_bundle_release_attestation=sidecar,
+        )
+        rendered = output.getvalue()
+        self.assertIn('"transportSource": "local-bundle"', rendered)
+        self.assertNotIn(str(payload), rendered)
+        self.assertNotIn(str(sidecar), rendered)
+
+    def test_local_bundle_without_immutable_publication_proof_fails_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = root / "payload.tar"
+            sidecar = root / "release-attestation.sigstore.json"
+            payload.write_bytes(b"payload")
+            sidecar.write_bytes(b"unverified structural lookalike")
+            output = io.StringIO()
+            with (
+                mock.patch(
+                    "installer.production.ReleaseResolver",
+                    side_effect=AssertionError(
+                        "network resolver must not be constructed"
+                    ),
+                ) as resolver,
+                redirect_stdout(output),
+            ):
+                code = main(
+                    [
+                        "install",
+                        "--version",
+                        "v1.1.0",
+                        "--source",
+                        "local-bundle",
+                        "--bundle-payload",
+                        str(payload),
+                        "--release-attestation",
+                        str(sidecar),
+                        "--public-origin",
+                        "https://anime.example",
+                        "--dry-run",
+                        "--json",
+                    ]
+                )
+
+        self.assertEqual(code, EXIT_VALIDATION)
+        self.assertIn("INSTALL_LOCAL_BUNDLE_VERIFICATION_FAILED", output.getvalue())
         resolver.assert_not_called()
 
     def test_official_mirror_is_explicit_and_bound_into_the_plan(self) -> None:
