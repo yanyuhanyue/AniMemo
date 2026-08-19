@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import tarfile
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from durability.platform import (
 )
 from release.contract import build_deployment_contract, validate_deployment_contract
 from release.materials import (
+    INITIAL_TRUST_KIT_PREFIX,
     PLATFORM_QUALIFICATION_MATERIAL,
     MaterialContractError,
     _validate_dynamic_material,
@@ -19,6 +21,7 @@ from release.materials import (
     extract_installer_materials,
 )
 from scripts.tests.test_platform_qualification import unsigned_payload
+from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -51,12 +54,19 @@ class InstallerMaterialsTests(unittest.TestCase):
             )
             first = temporary / "first.tar"
             second = temporary / "second.tar"
+            trust_kit = create_test_initial_trust_kit(temporary)
 
             first_identity = build_installer_materials(
-                ROOT, wheelhouse=wheelhouse, output=first
+                ROOT,
+                wheelhouse=wheelhouse,
+                output=first,
+                initial_trust_kit=trust_kit,
             )
             second_identity = build_installer_materials(
-                ROOT, wheelhouse=wheelhouse, output=second
+                ROOT,
+                wheelhouse=wheelhouse,
+                output=second,
+                initial_trust_kit=trust_kit,
             )
 
             self.assertEqual(first.read_bytes(), second.read_bytes())
@@ -92,6 +102,25 @@ class InstallerMaterialsTests(unittest.TestCase):
                     for member in members
                 )
             )
+
+    def test_production_material_builder_requires_initial_trust_kit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            wheelhouse = temporary / "wheelhouse"
+            wheelhouse.mkdir()
+            (wheelhouse / "qualified_dependency-1.0-py3-none-any.whl").write_bytes(
+                b"qualified wheel bytes"
+            )
+
+            with self.assertRaisesRegex(
+                MaterialContractError,
+                "Initial pretrust kit is required",
+            ):
+                build_installer_materials(
+                    ROOT,
+                    wheelhouse=wheelhouse,
+                    output=temporary / "installer-materials.tar",
+                )
 
     def test_staged_platform_qualification_must_be_canonical_evidence(self):
         _validate_dynamic_material("release/ordinary.json", b"{}")
@@ -138,6 +167,7 @@ class InstallerMaterialsTests(unittest.TestCase):
                 source_root,
                 wheelhouse=wheelhouse,
                 output=temporary / "installer-materials.tar",
+                initial_trust_kit=create_test_initial_trust_kit(temporary),
             )
 
             packaged = next(
@@ -182,6 +212,7 @@ class InstallerMaterialsTests(unittest.TestCase):
                 source_root,
                 wheelhouse=wheelhouse,
                 output=temporary / "installer-materials.tar",
+                initial_trust_kit=create_test_initial_trust_kit(temporary),
             )
 
             platform_material = next(
@@ -204,7 +235,10 @@ class InstallerMaterialsTests(unittest.TestCase):
             wheel.write_bytes(b"qualified wheel bytes")
             archive = temporary / "installer-materials.tar"
             identity = build_installer_materials(
-                ROOT, wheelhouse=wheelhouse, output=archive
+                ROOT,
+                wheelhouse=wheelhouse,
+                output=archive,
+                initial_trust_kit=create_test_initial_trust_kit(temporary),
             )
             destination = temporary / "verified"
 
@@ -222,9 +256,33 @@ class InstallerMaterialsTests(unittest.TestCase):
     def test_extraction_rejects_link_entries_and_removes_owned_staging(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)
+            trust_kit = create_test_initial_trust_kit(temporary)
             archive = temporary / "installer-materials.tar"
             with tarfile.open(archive, mode="w:", format=tarfile.USTAR_FORMAT) as tar:
-                member = tarfile.TarInfo("payload")
+                fixture_materials = []
+                for source in sorted(trust_kit.iterdir(), key=lambda item: item.name):
+                    value = source.read_bytes()
+                    relative = f"{INITIAL_TRUST_KIT_PREFIX}/{source.name}"
+                    member = tarfile.TarInfo(relative)
+                    member.size = len(value)
+                    member.mode = (
+                        0o755 if source.name == "offline-release-verifier" else 0o644
+                    )
+                    member.mtime = 0
+                    member.uid = 0
+                    member.gid = 0
+                    member.uname = ""
+                    member.gname = ""
+                    tar.addfile(member, io.BytesIO(value))
+                    fixture_materials.append(
+                        {
+                            "path": relative,
+                            "sha256": "sha256:" + hashlib.sha256(value).hexdigest(),
+                            "size": len(value),
+                            "mode": format(member.mode, "04o"),
+                        }
+                    )
+                member = tarfile.TarInfo("zz-payload")
                 member.type = tarfile.SYMTYPE
                 member.linkname = "outside"
                 member.mode = 0o644
@@ -242,8 +300,9 @@ class InstallerMaterialsTests(unittest.TestCase):
                     "format": "tar",
                 },
                 "materials": [
+                    *fixture_materials,
                     {
-                        "path": "payload",
+                        "path": "zz-payload",
                         "sha256": "sha256:" + hashlib.sha256(b"").hexdigest(),
                         "size": 0,
                         "mode": "0644",
@@ -267,7 +326,10 @@ class InstallerMaterialsTests(unittest.TestCase):
             )
             archive = temporary / "installer-materials.tar"
             identity = build_installer_materials(
-                ROOT, wheelhouse=wheelhouse, output=archive
+                ROOT,
+                wheelhouse=wheelhouse,
+                output=archive,
+                initial_trust_kit=create_test_initial_trust_kit(temporary),
             )
 
             contract = build_deployment_contract(ROOT, installer_materials=archive)

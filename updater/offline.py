@@ -115,6 +115,16 @@ class TrustProfile:
     github_release_certificate_identity: str
     github_trusted_root_sha256: str
     sigstore_trusted_root_sha256: str
+    github_tuf_root_sha256: str
+    github_tuf_root_version: int
+    github_tuf_timestamp_version: int
+    github_tuf_snapshot_version: int
+    github_tuf_targets_version: int
+    sigstore_tuf_root_sha256: str
+    sigstore_tuf_root_version: int
+    sigstore_tuf_timestamp_version: int
+    sigstore_tuf_snapshot_version: int
+    sigstore_tuf_targets_version: int
     verifier_id: str
     minimum_verifier_version: str
     revocation_epoch: int
@@ -129,14 +139,18 @@ class TrustProfile:
         if self.profile_version == 1:
             if self.parent_profile_identity is not None:
                 raise ValueError("首个信任 profile 不得声明父身份")
-        elif self.parent_profile_identity is not None:
+        elif self.parent_profile_identity is None:
+            raise ValueError("后继信任 profile 必须声明父身份")
+        else:
             _require_digest(
                 self.parent_profile_identity,
-                label="父信任 profile 身份",  # type: ignore[arg-type]
+                label="父信任 profile 身份",
             )
         for value, label in (
             (self.github_trusted_root_sha256, "GitHub 信任根"),
             (self.sigstore_trusted_root_sha256, "Sigstore 信任根"),
+            (self.github_tuf_root_sha256, "GitHub TUF bootstrap root"),
+            (self.sigstore_tuf_root_sha256, "Sigstore TUF bootstrap root"),
             (self.revocation_snapshot_sha256, "撤销快照"),
         ):
             _require_digest(value, label=label)
@@ -158,6 +172,22 @@ class TrustProfile:
             raise ValueError("外部验证器最低版本无效") from error
         if type(self.revocation_epoch) is not int or self.revocation_epoch < 0:
             raise ValueError("撤销 epoch 无效")
+        if (
+            any(
+                type(value) is not int or value < 1
+                for value in (
+                    self.github_tuf_root_version,
+                    self.github_tuf_timestamp_version,
+                    self.github_tuf_snapshot_version,
+                    self.github_tuf_targets_version,
+                    self.sigstore_tuf_root_version,
+                    self.sigstore_tuf_timestamp_version,
+                    self.sigstore_tuf_snapshot_version,
+                    self.sigstore_tuf_targets_version,
+                )
+            )
+        ):
+            raise ValueError("TUF bootstrap root 版本无效")
         if self.verifier_identity is None:
             object.__setattr__(
                 self,
@@ -188,11 +218,32 @@ class TrustProfile:
         return _canonical_digest(
             {
                 "activationSequence": self.activation_sequence,
+                "githubReleaseCertificateIdentity": (
+                    self.github_release_certificate_identity
+                ),
                 "githubRootIdentity": self.github_trusted_root_sha256,
+                "githubTufRootIdentity": self.github_tuf_root_sha256,
+                "githubTufRootVersion": self.github_tuf_root_version,
+                "githubTufSnapshotVersion": self.github_tuf_snapshot_version,
+                "githubTufTargetsVersion": self.github_tuf_targets_version,
+                "githubTufTimestampVersion": self.github_tuf_timestamp_version,
+                "minimumVerifierVersion": self.minimum_verifier_version,
+                "ownerId": self.owner_id,
+                "parentProfileIdentity": self.parent_profile_identity,
                 "profileVersion": self.profile_version,
                 "policyIdentity": self.policy_identity,
-                "schemaVersion": 1,
+                "repository": self.repository,
+                "repositoryId": self.repository_id,
+                "revocationEpoch": self.revocation_epoch,
+                "revocationSnapshotIdentity": self.revocation_snapshot_sha256,
+                "schemaVersion": 2,
                 "sigstoreRootIdentity": self.sigstore_trusted_root_sha256,
+                "sigstoreTufRootIdentity": self.sigstore_tuf_root_sha256,
+                "sigstoreTufRootVersion": self.sigstore_tuf_root_version,
+                "sigstoreTufSnapshotVersion": self.sigstore_tuf_snapshot_version,
+                "sigstoreTufTargetsVersion": self.sigstore_tuf_targets_version,
+                "sigstoreTufTimestampVersion": self.sigstore_tuf_timestamp_version,
+                "verifierId": self.verifier_id,
                 "verifierIdentity": self.verifier_identity,
             }
         )
@@ -200,12 +251,33 @@ class TrustProfile:
     def as_bootstrap_record(self) -> dict[str, object]:
         return {
             "activationSequence": self.activation_sequence,
+            "githubReleaseCertificateIdentity": (
+                self.github_release_certificate_identity
+            ),
             "githubRootIdentity": self.github_trusted_root_sha256,
+            "githubTufRootIdentity": self.github_tuf_root_sha256,
+            "githubTufRootVersion": self.github_tuf_root_version,
+            "githubTufSnapshotVersion": self.github_tuf_snapshot_version,
+            "githubTufTargetsVersion": self.github_tuf_targets_version,
+            "githubTufTimestampVersion": self.github_tuf_timestamp_version,
+            "minimumVerifierVersion": self.minimum_verifier_version,
+            "ownerId": self.owner_id,
+            "parentProfileIdentity": self.parent_profile_identity,
             "policyIdentity": self.policy_identity,
             "profileIdentity": self.identity,
             "profileVersion": self.profile_version,
-            "schemaVersion": 1,
+            "repository": self.repository,
+            "repositoryId": self.repository_id,
+            "revocationEpoch": self.revocation_epoch,
+            "revocationSnapshotIdentity": self.revocation_snapshot_sha256,
+            "schemaVersion": 2,
             "sigstoreRootIdentity": self.sigstore_trusted_root_sha256,
+            "sigstoreTufRootIdentity": self.sigstore_tuf_root_sha256,
+            "sigstoreTufRootVersion": self.sigstore_tuf_root_version,
+            "sigstoreTufSnapshotVersion": self.sigstore_tuf_snapshot_version,
+            "sigstoreTufTargetsVersion": self.sigstore_tuf_targets_version,
+            "sigstoreTufTimestampVersion": self.sigstore_tuf_timestamp_version,
+            "verifierId": self.verifier_id,
             "verifierIdentity": self.verifier_identity,
         }
 
@@ -213,47 +285,78 @@ class TrustProfile:
     def from_bootstrap_record(cls, record: Mapping[str, object]) -> TrustProfile:
         expected = {
             "activationSequence",
+            "githubReleaseCertificateIdentity",
             "githubRootIdentity",
+            "githubTufRootIdentity",
+            "githubTufRootVersion",
+            "githubTufSnapshotVersion",
+            "githubTufTargetsVersion",
+            "githubTufTimestampVersion",
+            "minimumVerifierVersion",
+            "ownerId",
+            "parentProfileIdentity",
             "policyIdentity",
             "profileIdentity",
             "profileVersion",
+            "repository",
+            "repositoryId",
+            "revocationEpoch",
+            "revocationSnapshotIdentity",
             "schemaVersion",
             "sigstoreRootIdentity",
+            "sigstoreTufRootIdentity",
+            "sigstoreTufRootVersion",
+            "sigstoreTufSnapshotVersion",
+            "sigstoreTufTargetsVersion",
+            "sigstoreTufTimestampVersion",
+            "verifierId",
             "verifierIdentity",
         }
         if not isinstance(record, dict) or set(record) != expected:
             raise RequestRejected("预置信任 profile 字段集合未关闭")
         if (
-            record["schemaVersion"] != 1
+            record["schemaVersion"] != 2
             or type(record["profileVersion"]) is not int
             or record["profileVersion"] < 1  # type: ignore[operator]
             or type(record["activationSequence"]) is not int
             or record["activationSequence"] < 1  # type: ignore[operator]
             or record["policyIdentity"] != OFFLINE_POLICY_IDENTITY
+            or record["repository"] != "yanyuhanyue/AniMemo"
+            or record["repositoryId"] != REPOSITORY_ID
+            or record["ownerId"] != OWNER_ID
+            or record["githubReleaseCertificateIdentity"]
+            != GITHUB_RELEASE_CERTIFICATE_IDENTITY
+            or record["verifierId"] != "github-sigstore-offline"
         ):
             raise RequestRejected("预置信任 profile 策略或版本无效")
         try:
             profile = cls(
                 profile_version=record["profileVersion"],  # type: ignore[arg-type]
-                parent_profile_identity=None,
-                repository="yanyuhanyue/AniMemo",
-                repository_id=REPOSITORY_ID,
-                owner_id=OWNER_ID,
-                github_release_certificate_identity=(
-                    GITHUB_RELEASE_CERTIFICATE_IDENTITY
-                ),
+                parent_profile_identity=record["parentProfileIdentity"],  # type: ignore[arg-type]
+                repository=record["repository"],  # type: ignore[arg-type]
+                repository_id=record["repositoryId"],  # type: ignore[arg-type]
+                owner_id=record["ownerId"],  # type: ignore[arg-type]
+                github_release_certificate_identity=record[
+                    "githubReleaseCertificateIdentity"
+                ],  # type: ignore[arg-type]
                 github_trusted_root_sha256=record["githubRootIdentity"],  # type: ignore[arg-type]
                 sigstore_trusted_root_sha256=record["sigstoreRootIdentity"],  # type: ignore[arg-type]
-                verifier_id="github-sigstore-offline",
-                minimum_verifier_version="2.97.0",
-                revocation_epoch=record["activationSequence"],  # type: ignore[arg-type]
-                revocation_snapshot_sha256=_canonical_digest(
-                    {
-                        "revokedIdentities": [],
-                        "schemaVersion": 1,
-                        "sequence": record["activationSequence"],
-                    }
-                ),
+                github_tuf_root_sha256=record["githubTufRootIdentity"],  # type: ignore[arg-type]
+                github_tuf_root_version=record["githubTufRootVersion"],  # type: ignore[arg-type]
+                github_tuf_timestamp_version=record["githubTufTimestampVersion"],  # type: ignore[arg-type]
+                github_tuf_snapshot_version=record["githubTufSnapshotVersion"],  # type: ignore[arg-type]
+                github_tuf_targets_version=record["githubTufTargetsVersion"],  # type: ignore[arg-type]
+                sigstore_tuf_root_sha256=record["sigstoreTufRootIdentity"],  # type: ignore[arg-type]
+                sigstore_tuf_root_version=record["sigstoreTufRootVersion"],  # type: ignore[arg-type]
+                sigstore_tuf_timestamp_version=record["sigstoreTufTimestampVersion"],  # type: ignore[arg-type]
+                sigstore_tuf_snapshot_version=record["sigstoreTufSnapshotVersion"],  # type: ignore[arg-type]
+                sigstore_tuf_targets_version=record["sigstoreTufTargetsVersion"],  # type: ignore[arg-type]
+                verifier_id=record["verifierId"],  # type: ignore[arg-type]
+                minimum_verifier_version=record["minimumVerifierVersion"],  # type: ignore[arg-type]
+                revocation_epoch=record["revocationEpoch"],  # type: ignore[arg-type]
+                revocation_snapshot_sha256=record[
+                    "revocationSnapshotIdentity"
+                ],  # type: ignore[arg-type]
                 verifier_identity=record["verifierIdentity"],  # type: ignore[arg-type]
                 policy_identity=record["policyIdentity"],  # type: ignore[arg-type]
                 activation_sequence=record["activationSequence"],  # type: ignore[arg-type]
@@ -271,6 +374,8 @@ class PretrustedTrustMaterial:
     profile: TrustProfile
     github_trusted_root_path: Path
     sigstore_trusted_root_path: Path
+    github_tuf_root_path: Path
+    sigstore_tuf_root_path: Path
     verifier_path: Path
 
     @classmethod
@@ -288,8 +393,10 @@ class PretrustedTrustMaterial:
             raise RequestRejected("生产预置信任目录不是 root 独占写入")
         expected = {
             "github-trusted-root.jsonl",
+            "github-tuf-root.json",
             "offline-release-verifier",
             "sigstore-trusted-root.jsonl",
+            "sigstore-tuf-root.json",
             "trust-profile.json",
         }
         try:
@@ -321,6 +428,8 @@ class PretrustedTrustMaterial:
         github_path = root / "github-trusted-root.jsonl"
         sigstore_path = root / "sigstore-trusted-root.jsonl"
         verifier_path = root / "offline-release-verifier"
+        github_tuf_path = root / "github-tuf-root.json"
+        sigstore_tuf_path = root / "sigstore-tuf-root.json"
         identities = {
             "github": "sha256:"
             + hashlib.sha256(
@@ -334,15 +443,32 @@ class PretrustedTrustMaterial:
             + hashlib.sha256(
                 _read_pretrusted_file(verifier_path, max_bytes=256 * 1024 * 1024)
             ).hexdigest(),
+            "githubTuf": "sha256:"
+            + hashlib.sha256(
+                _read_pretrusted_file(github_tuf_path, max_bytes=16 * 1024 * 1024)
+            ).hexdigest(),
+            "sigstoreTuf": "sha256:"
+            + hashlib.sha256(
+                _read_pretrusted_file(sigstore_tuf_path, max_bytes=16 * 1024 * 1024)
+            ).hexdigest(),
         }
         if identities != {
             "github": profile.github_trusted_root_sha256,
             "sigstore": profile.sigstore_trusted_root_sha256,
             "verifier": profile.verifier_identity,
+            "githubTuf": profile.github_tuf_root_sha256,
+            "sigstoreTuf": profile.sigstore_tuf_root_sha256,
         }:
             raise RequestRejected("预置信任材料身份不一致")
         if os.name != "nt":
-            for path in (root / "trust-profile.json", github_path, sigstore_path, verifier_path):
+            for path in (
+                root / "trust-profile.json",
+                github_path,
+                sigstore_path,
+                github_tuf_path,
+                sigstore_tuf_path,
+                verifier_path,
+            ):
                 metadata = path.lstat()
                 if metadata.st_uid != 0 or metadata.st_mode & 0o022:
                     raise RequestRejected("生产预置信任材料不是 root 独占写入")
@@ -353,6 +479,8 @@ class PretrustedTrustMaterial:
             profile=profile,
             github_trusted_root_path=github_path,
             sigstore_trusted_root_path=sigstore_path,
+            github_tuf_root_path=github_tuf_path,
+            sigstore_tuf_root_path=sigstore_tuf_path,
             verifier_path=verifier_path,
         )
 
@@ -641,6 +769,71 @@ class SigstoreGoEvidenceVerifier:
     ) -> Mapping[str, object]:
         raise RequestRejected("生产信任轮换验证器尚未在本 profile 激活")
 
+    def verify_tuf_update_package(
+        self,
+        *,
+        package: bytes,
+        current_profile: TrustProfile,
+    ) -> Mapping[str, object]:
+        """使用同一冻结二进制验证两条官方 TUF 连续更新链。"""
+
+        if (
+            type(package) is not bytes
+            or not package
+            or len(package) > 64 * 1024 * 1024
+            or type(current_profile) is not TrustProfile
+            or current_profile.identity != self._material.profile.identity
+        ):
+            raise RequestRejected("TUF 信任更新外部验证输入不完整")
+        try:
+            decoded = json.loads(package.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RequestRejected("TUF 信任更新包不可解析") from error
+        if _canonical_json_bytes(decoded) != package:
+            raise RequestRejected("TUF 信任更新包不是 canonical JSON")
+        request = {
+            "authorityRole": "TRUST_METADATA_ONLY",
+            "fromProfileIdentity": current_profile.identity,
+            "github": {
+                "snapshotVersion": current_profile.github_tuf_snapshot_version,
+                "targetsVersion": current_profile.github_tuf_targets_version,
+                "timestampVersion": current_profile.github_tuf_timestamp_version,
+                "trustedRootSha256": current_profile.github_trusted_root_sha256,
+                "tufRootSha256": current_profile.github_tuf_root_sha256,
+                "tufRootVersion": current_profile.github_tuf_root_version,
+            },
+            "mode": "tuf-trust-update",
+            "schemaVersion": 1,
+            "sigstore": {
+                "snapshotVersion": current_profile.sigstore_tuf_snapshot_version,
+                "targetsVersion": current_profile.sigstore_tuf_targets_version,
+                "timestampVersion": current_profile.sigstore_tuf_timestamp_version,
+                "trustedRootSha256": current_profile.sigstore_trusted_root_sha256,
+                "tufRootSha256": current_profile.sigstore_tuf_root_sha256,
+                "tufRootVersion": current_profile.sigstore_tuf_root_version,
+            },
+        }
+        with tempfile.TemporaryDirectory(prefix="animemo-tuf-update-") as temp:
+            root = Path(temp)
+            package_path = root / "trust-update.json"
+            request_path = root / "request.json"
+            package_path.write_bytes(package)
+            request_path.write_bytes(_canonical_json_bytes(request))
+            return self._execute_closed(
+                (
+                    str(self._material.verifier_path),
+                    "--trust-update",
+                    str(package_path),
+                    "--github-tuf-root",
+                    str(self._material.github_tuf_root_path),
+                    "--sigstore-tuf-root",
+                    str(self._material.sigstore_tuf_root_path),
+                    "--request",
+                    str(request_path),
+                ),
+                rejected_message="冻结的外部验证器拒绝 TUF 更新",
+            )
+
     def _invoke(
         self,
         *,
@@ -656,9 +849,6 @@ class SigstoreGoEvidenceVerifier:
             request_path = root / "request.json"
             bundle_path.write_bytes(_canonical_json_bytes(sigstore_bundle))
             request_path.write_bytes(_canonical_json_bytes(dict(request)))
-            environment = {"LANG": "C", "LC_ALL": "C"}
-            if os.name == "nt" and "SystemRoot" in os.environ:
-                environment["SystemRoot"] = os.environ["SystemRoot"]
             command = (
                 str(self._material.verifier_path),
                 "--bundle",
@@ -668,18 +858,32 @@ class SigstoreGoEvidenceVerifier:
                 "--request",
                 str(request_path),
             )
-            try:
-                completed = self._runner(
-                    command,
-                    check=False,
-                    capture_output=True,
-                    env=environment,
-                    timeout=60,
-                )
-            except (OSError, subprocess.SubprocessError) as error:
-                raise RequestRejected("冻结的外部验证器执行失败") from error
+            return self._execute_closed(
+                command,
+                rejected_message="冻结的外部验证器拒绝证明",
+            )
+
+    def _execute_closed(
+        self,
+        command: tuple[str, ...],
+        *,
+        rejected_message: str,
+    ) -> Mapping[str, object]:
+        environment = {"LANG": "C", "LC_ALL": "C"}
+        if os.name == "nt" and "SystemRoot" in os.environ:
+            environment["SystemRoot"] = os.environ["SystemRoot"]
+        try:
+            completed = self._runner(
+                command,
+                check=False,
+                capture_output=True,
+                env=environment,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RequestRejected("冻结的外部验证器执行失败") from error
         if completed.returncode != 0:
-            raise RequestRejected("冻结的外部验证器拒绝证明")
+            raise RequestRejected(rejected_message)
         if completed.stderr or not completed.stdout or len(completed.stdout) > 1024 * 1024:
             raise RequestRejected("冻结的外部验证器输出通道未关闭")
         try:
@@ -766,6 +970,22 @@ def advance_trust_profile(
         or successor_profile.github_release_certificate_identity
         != current_profile.github_release_certificate_identity
         or successor_profile.verifier_id != current_profile.verifier_id
+        or successor_profile.github_tuf_root_version
+        < current_profile.github_tuf_root_version
+        or successor_profile.github_tuf_timestamp_version
+        < current_profile.github_tuf_timestamp_version
+        or successor_profile.github_tuf_snapshot_version
+        < current_profile.github_tuf_snapshot_version
+        or successor_profile.github_tuf_targets_version
+        < current_profile.github_tuf_targets_version
+        or successor_profile.sigstore_tuf_root_version
+        < current_profile.sigstore_tuf_root_version
+        or successor_profile.sigstore_tuf_timestamp_version
+        < current_profile.sigstore_tuf_timestamp_version
+        or successor_profile.sigstore_tuf_snapshot_version
+        < current_profile.sigstore_tuf_snapshot_version
+        or successor_profile.sigstore_tuf_targets_version
+        < current_profile.sigstore_tuf_targets_version
         or successor_profile.revocation_epoch <= current_profile.revocation_epoch
     ):
         raise RequestRejected("后继信任 profile 不是精确连续更新")
@@ -1226,11 +1446,19 @@ def production_offline_release_verifier(
 ) -> OfflineReleaseVerifier | PersistentOfflineReleaseVerifier:
     """从固定系统路径装载生产信任；缺任一材料时保持 fail closed。"""
 
-    root = Path("/usr/share/animemo/offline-trust/v1")
     try:
-        material = PretrustedTrustMaterial.load(root)
+        from .trust_lifecycle import (
+            TRUST_STATE_ROOT,
+            ProductionTrustLifecycle,
+            TrustLifecycleError,
+        )
+
+        lifecycle = ProductionTrustLifecycle.production()
+        active = lifecycle.load_active()
+        material = active.material
+        profile_lineage = lifecycle.load_profile_lineage(active)
         external = SigstoreGoEvidenceVerifier(material)
-    except (RequestRejected, ValueError):
+    except (RequestRejected, TrustLifecycleError, ValueError):
         return OfflineReleaseVerifier(
             trust_profile=None,
             external_verifier=None,
@@ -1247,7 +1475,8 @@ def production_offline_release_verifier(
     return PersistentOfflineReleaseVerifier(
         inner=inner,
         profile=material.profile,
-        state_path=Path("/var/lib/animemo/offline-authority-state.json"),
+        state_path=TRUST_STATE_ROOT / "release-authority-state.json",
+        profile_lineage=profile_lineage,
     )
 
 
@@ -1260,10 +1489,18 @@ class PersistentOfflineReleaseVerifier:
         inner: OfflineReleaseVerifier,
         profile: TrustProfile,
         state_path: Path,
+        profile_lineage: frozenset[str] | None = None,
     ) -> None:
         self._inner = inner
         self._profile = profile
         self._state_path = Path(state_path)
+        self._profile_lineage = (
+            frozenset({profile.identity})
+            if profile_lineage is None
+            else frozenset(profile_lineage)
+        )
+        if profile.identity not in self._profile_lineage:
+            raise ValueError("离线权威 profile lineage 未包含活动 profile")
 
     def verify(
         self,
@@ -1326,7 +1563,18 @@ class PersistentOfflineReleaseVerifier:
             state.active_profile_version != self._profile.profile_version
             or state.active_profile_identity != self._profile.identity
         ):
-            raise RequestRejected("离线权威耐久状态与预置信任 profile 不一致")
+            if (
+                state.active_profile_identity not in self._profile_lineage
+                or state.active_profile_version >= self._profile.profile_version
+            ):
+                raise RequestRejected("离线权威耐久状态与预置信任 profile 不一致")
+            state = replace(
+                state,
+                generation=state.generation + 1,
+                active_profile_version=self._profile.profile_version,
+                active_profile_identity=self._profile.identity,
+            )
+            self._store_state(state)
         return state
 
     def _store_state(self, state: OfflineAuthorityState) -> None:

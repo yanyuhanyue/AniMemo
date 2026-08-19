@@ -85,6 +85,10 @@ class RestoreProtectionKind(StrEnum):
     PASSPHRASE_FD = "passphrase-fd"
 
 
+class BootstrapPrivilegeGatePort(Protocol):
+    def consume(self, *, version: str, release_commit: str) -> object: ...
+
+
 class TargetClass(StrEnum):
     ABSENT = "ABSENT"
     VERIFIED_EMPTY = "VERIFIED_EMPTY"
@@ -813,6 +817,7 @@ class Installer:
         operations: OperationPort,
         fresh: FreshInstallPort,
         restore: RestoreRuntimePort,
+        bootstrap_privilege_gate: BootstrapPrivilegeGatePort,
     ) -> None:
         self._releases = releases
         self._target = target
@@ -822,6 +827,7 @@ class Installer:
         self._operations = operations
         self._fresh = fresh
         self._restore = restore
+        self._bootstrap_privilege_gate = bootstrap_privilege_gate
 
     def plan(self, request: InstallRequest) -> InstallPlan:
         """Build a read-only, exact, secret-free operation plan."""
@@ -988,6 +994,16 @@ class Installer:
                 state="active",
                 reason_code="INSTALL_USE_UPDATER",
             )
+        try:
+            self._bootstrap_privilege_gate.consume(
+                version=plan.release.version,
+                release_commit=plan.release.commit,
+            )
+        except Exception:  # noqa: BLE001 - privilege boundary is redacted
+            raise InstallerError(
+                "INSTALL_BOOTSTRAP_AUTHORITY_REQUIRED",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            ) from None
         if plan.action is InstallAction.RESTORE_TO_NEW:
             assert plan.restore is not None
             try:

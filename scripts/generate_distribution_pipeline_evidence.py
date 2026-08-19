@@ -47,6 +47,7 @@ from release.vm_qualification import (
     validate_pre_publish_qualification,
 )
 from scripts.release_qualification import REQUIRED_GATES, build_qualification_evidence
+from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
 
 TASK = "V1_1_DISTRIBUTION_VM_QUALIFICATION_AND_AUTOMATED_RELEASE_PIPELINE_V1_CONVERGENCE"
 REPOSITORY = "yanyuhanyue/AniMemo"
@@ -147,7 +148,12 @@ def _synthetic_release(repo: Path, root: Path, commit: str, notes: dict[str, Any
         b"AniMemo deterministic no-publication fixture wheel\n"
     )
     materials_path = output / "installer-materials.tar"
-    build_installer_materials(repo, wheelhouse=wheelhouse, output=materials_path)
+    build_installer_materials(
+        repo,
+        wheelhouse=wheelhouse,
+        output=materials_path,
+        initial_trust_kit=create_test_initial_trust_kit(root / "qualification"),
+    )
     deployment = build_deployment_contract(repo, installer_materials=materials_path)
     validate_deployment_contract(deployment, root=repo, installer_materials=materials_path)
     _write_json(output, "deployment-contract.json", deployment, enveloped=False)

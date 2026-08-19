@@ -48,6 +48,7 @@ from .publication import (
     build_publication_plan,
     validate_publication_plan,
 )
+from .trust_bootstrap import TrustBootstrapError, build_initial_trust_kit
 
 
 def _read_tags(path: Path) -> list[str]:
@@ -153,7 +154,10 @@ def _generate_deployment_contract(args) -> dict[str, object]:
 
 def _build_installer_materials(args) -> dict[str, object]:
     identity = build_installer_materials(
-        args.root, wheelhouse=args.wheelhouse, output=args.output
+        args.root,
+        wheelhouse=args.wheelhouse,
+        output=args.output,
+        initial_trust_kit=args.initial_trust_kit,
     )
     return {
         "archive": str(args.output),
@@ -271,6 +275,13 @@ def _build_portable(args) -> dict[str, object]:
         "imageRoles": [item["role"] for item in images],
         "authorityState": inspection.index["authorityState"],
     }
+
+
+def _build_initial_trust_kit(args) -> dict[str, object]:
+    return build_initial_trust_kit(
+        verifier=args.verifier,
+        output=args.output,
+    )
 
 
 def _promote_portable(args) -> dict[str, object]:
@@ -522,7 +533,13 @@ def _parser() -> argparse.ArgumentParser:
     materials.add_argument("--root", type=Path, required=True)
     materials.add_argument("--wheelhouse", type=Path, required=True)
     materials.add_argument("--output", type=Path, required=True)
+    materials.add_argument("--initial-trust-kit", type=Path, required=True)
     materials.set_defaults(handler=_build_installer_materials)
+
+    trust_bootstrap = subparsers.add_parser("build-initial-trust-kit")
+    trust_bootstrap.add_argument("--verifier", type=Path, required=True)
+    trust_bootstrap.add_argument("--output", type=Path, required=True)
+    trust_bootstrap.set_defaults(handler=_build_initial_trust_kit)
 
     validate = subparsers.add_parser("validate-manifest")
     validate.add_argument("--manifest", type=Path, required=True)
@@ -649,6 +666,7 @@ def main(argv: list[str] | None = None) -> int:
         PortableBundleError,
         OCIContractError,
         MirrorError,
+        TrustBootstrapError,
         KeyError,
         TypeError,
         OSError,

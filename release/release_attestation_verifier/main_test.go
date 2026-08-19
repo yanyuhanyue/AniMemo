@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,7 +15,181 @@ import (
 	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/verify"
+	"github.com/sigstore/sigstore/pkg/signature"
+	"github.com/theupdateframework/go-tuf/v2/metadata"
 )
+
+func tufUpdateFixture(t *testing.T) ([]byte, tufTrackPackage, []byte) {
+	t.Helper()
+	publicKey1, privateKey1, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey2, privateKey2, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer1, err := signature.LoadSignerVerifier(privateKey1, crypto.Hash(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer2, err := signature.LoadSignerVerifier(privateKey2, crypto.Hash(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key1, err := metadata.KeyFromPublicKey(publicKey1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key2, err := metadata.KeyFromPublicKey(publicKey2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().UTC().Add(24 * time.Hour)
+	buildRoot := func(version int64, key *metadata.Key, signers ...signature.SignerVerifier) []byte {
+		root := metadata.Root(expires)
+		root.Signed.Version = version
+		for _, role := range []string{
+			metadata.ROOT,
+			metadata.SNAPSHOT,
+			metadata.TARGETS,
+			metadata.TIMESTAMP,
+		} {
+			if err := root.Signed.AddKey(key, role); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, signer := range signers {
+			if _, err := root.Sign(signer); err != nil {
+				t.Fatal(err)
+			}
+		}
+		value, err := root.ToBytes(true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	root1 := buildRoot(1, key1, signer1)
+	root2 := buildRoot(2, key2, signer1, signer2)
+	trustedRoot := []byte("{\"mediaType\":\"application/vnd.dev.sigstore.trustedroot+json;version=0.1\"}\n")
+
+	targets := metadata.Targets(expires)
+	targets.Signed.Version = 2
+	target, err := metadata.TargetFile().FromBytes("trusted_root.json", trustedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets.Signed.Targets["trusted_root.json"] = target
+	if _, err := targets.Sign(signer2); err != nil {
+		t.Fatal(err)
+	}
+	targetsBytes, err := targets.ToBytes(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := metadata.Snapshot(expires)
+	snapshot.Signed.Version = 2
+	snapshot.Signed.Meta["targets.json"] = metadata.MetaFile(2)
+	if _, err := snapshot.Sign(signer2); err != nil {
+		t.Fatal(err)
+	}
+	snapshotBytes, err := snapshot.ToBytes(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	timestamp := metadata.Timestamp(expires)
+	timestamp.Signed.Version = 2
+	timestamp.Signed.Meta["snapshot.json"] = metadata.MetaFile(2)
+	if _, err := timestamp.Sign(signer2); err != nil {
+		t.Fatal(err)
+	}
+	timestampBytes, err := timestamp.ToBytes(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root1, tufTrackPackage{
+		RootChain:   [][]byte{root2},
+		Timestamp:   timestampBytes,
+		Snapshot:    snapshotBytes,
+		Targets:     targetsBytes,
+		TrustedRoot: trustedRoot,
+	}, trustedRoot
+}
+
+func TestVerifyTUFTrackEnforcesThresholdChainAndTargetIdentity(t *testing.T) {
+	root1, update, _ := tufUpdateFixture(t)
+	rootPath := filepath.Join(t.TempDir(), "root.json")
+	if err := os.WriteFile(rootPath, root1, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousTrustedRoot := []byte("{\"previous\":true}\n")
+	current := tufCurrentState{
+		TUFRootSHA256:     buildIdentity(root1),
+		TUFRootVersion:    1,
+		TimestampVersion:  1,
+		SnapshotVersion:   1,
+		TargetsVersion:    1,
+		TrustedRootSHA256: buildIdentity(previousTrustedRoot),
+	}
+	claim, err := verifyTUFTrack(update, rootPath, current, false)
+	if err != nil {
+		t.Fatalf("expected verified successor, got %v", err)
+	}
+	if claim.TUFRootVersion != 2 || claim.TimestampVersion != 2 ||
+		claim.SnapshotVersion != 2 || claim.TargetsVersion != 2 {
+		t.Fatalf("unexpected successor versions: %#v", claim)
+	}
+	if claim.TrustedRootSHA256 != buildIdentity(update.TrustedRoot) ||
+		len(claim.SupersededMaterialIdentities) != 2 ||
+		len(claim.RevokedSignerKeyIDs) != 1 {
+		t.Fatalf("unexpected material claim: %#v", claim)
+	}
+
+	tampered := update
+	tampered.TrustedRoot = append([]byte(nil), update.TrustedRoot...)
+	tampered.TrustedRoot[0] ^= 1
+	if _, err := verifyTUFTrack(tampered, rootPath, current, false); err == nil {
+		t.Fatal("tampered trusted root target must be rejected")
+	}
+
+	rollbackCurrent := current
+	rollbackCurrent.TimestampVersion = 2
+	if _, err := verifyTUFTrack(update, rootPath, rollbackCurrent, false); err == nil {
+		t.Fatal("metadata rollback or replay must be rejected")
+	}
+}
+
+func TestVerifyTUFInitialTrackStartsOnlyFromPinnedBootstrapRoot(t *testing.T) {
+	root1, update, _ := tufUpdateFixture(t)
+	rootPath := filepath.Join(t.TempDir(), "root.json")
+	if err := os.WriteFile(rootPath, root1, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current := tufCurrentState{
+		TUFRootSHA256:     buildIdentity(root1),
+		TUFRootVersion:    1,
+		TimestampVersion:  0,
+		SnapshotVersion:   0,
+		TargetsVersion:    0,
+		TrustedRootSHA256: buildIdentity(root1),
+	}
+
+	claim, err := verifyTUFTrack(update, rootPath, current, true)
+	if err != nil {
+		t.Fatalf("expected verified initial metadata, got %v", err)
+	}
+	if claim.TUFRootVersion != 2 || len(claim.SupersededMaterialIdentities) != 0 ||
+		len(claim.RevokedSignerKeyIDs) != 0 {
+		t.Fatalf("unexpected bootstrap claim: %#v", claim)
+	}
+	current.TrustedRootSHA256 = buildIdentity([]byte("bundle supplied root"))
+	if _, err := verifyTUFTrack(update, rootPath, current, true); err == nil {
+		t.Fatal("bootstrap request not bound to the pinned root must be rejected")
+	}
+}
 
 func TestCloseReleaseStatementRequiresExactAuthorityAndSubjects(t *testing.T) {
 	request := releaseRequest{

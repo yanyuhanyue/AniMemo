@@ -72,6 +72,7 @@ from durability.platform import (
     assess_platform,
     parse_platform_qualification,
 )
+from installer.bootstrap import ProductionBootstrapPrivilegeGate
 from installer.operations import (
     FreshInstallOperation,
     FreshInstallOperationJournal,
@@ -1746,6 +1747,7 @@ def build_runtime(
             configuration=configuration,
             fresh=fresh,
         ),
+        bootstrap_privilege_gate=ProductionBootstrapPrivilegeGate(),
     )
 
 

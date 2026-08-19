@@ -2,20 +2,20 @@ const sourceDetails = Object.freeze({
   github: {
     label: "GitHub",
     rail: "GitHub transport",
-    command: "sudo sh /tmp/animemo-install.sh --source github",
+    command: "gh release verify-asset <EXACT_TAG> ./animemo-stage0/installer-materials.tar --repo yanyuhanyue/AniMemo",
     status: "当前选择：GitHub。不会自动回退到其他运输来源。",
   },
   "official-mirror": {
     label: "AniMemo Official Mirror",
     rail: "Official Mirror transport",
-    command: "sudo sh /tmp/animemo-install.sh --source official-mirror",
+    command: "gh release verify-asset <EXACT_TAG> ./animemo-stage0/installer-materials.tar --repo yanyuhanyue/AniMemo",
     status: "当前选择：AniMemo Official Mirror。GitHub Release 仍提供唯一发布权威；镜像失败时不会静默回退。",
   },
   "local-bundle": {
     label: "Portable / Offline Bundle",
     rail: "Portable transport (blocked)",
-    command: "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY",
-    status: "Portable 布局与 OCI foundation 可资格认证；production install authority 尚未冻结，当前会 fail closed。",
+    command: "OFFLINE_STAGE0_REQUIRES_OPERATOR_PRETRUST",
+    status: "Portable 只运输；没有 independently pretrusted verifier 与 roots 时必须 fail closed。",
   },
 });
 

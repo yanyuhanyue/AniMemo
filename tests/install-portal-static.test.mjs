@@ -27,9 +27,11 @@ test("安装入口完整说明权威、运输、Fresh、升级与恢复路径", 
   ]) {
     assert.match(html, new RegExp(phrase));
   }
-  assert.match(html, /curl -fsSLo \/tmp\/animemo-install\.sh https:\/\/install\.animemo\.cc\/install\.sh/);
-  assert.match(html, /<code id="run-command">sudo sh \/tmp\/animemo-install\.sh<\/code>/);
-  assert.match(html, /BLOCKED_PORTABLE_PUBLICATION_AUTHORITY/);
+  assert.match(html, /gh release verify &lt;EXACT_TAG&gt;/);
+  assert.match(html, /gh release download/);
+  assert.match(html, /gh release verify-asset/);
+  assert.doesNotMatch(html, /sudo sh|curl[^<]*install\.sh/);
+  assert.match(html, /independently pretrusted verifier/);
 });
 
 test("页面来源选择显式且没有隐式地理切换或最快源承诺", async () => {
@@ -55,18 +57,9 @@ test("页面依赖均为同源静态资源并提供无障碍复制反馈", async
   assert.doesNotMatch(html, /<button[^>]+role="listitem"/);
 });
 
-test("薄 bootstrap 只接受闭合 transport 参数并拒绝 portable production activation", async () => {
+test("远程 bootstrap 已退役且不再承担任何执行或权威职责", async () => {
   const shell = await source("install.sh");
-  assert.match(shell, /--source/);
-  assert.match(shell, /github\|official-mirror\|local-bundle/);
-  assert.match(shell, /BLOCKED_PORTABLE_PUBLICATION_AUTHORITY/);
-  assert.match(shell, /mktemp/);
-  assert.match(shell, /trap .*EXIT/);
-  assert.match(shell, /gh attestation verify/);
-  assert.match(shell, /OFFICIAL_MIRROR_ROOT="https:\/\/download\.animemo\.app\/github\/yanyuhanyue\/AniMemo\/releases"/);
-  assert.match(shell, /\/dev\/tty/);
-  assert.match(shell, /main\(\) \{/);
-  assert.match(shell, /\nmain "\$@"\s*$/);
-  assert.doesNotMatch(shell, /curl[^\n]*\|[^\n]*(?:sh|bash)/);
-  assert.doesNotMatch(shell, /eval\s|source\s+\$|\.\s+\$/);
+  assert.match(shell, /REMOTE_BOOTSTRAP_EXECUTION_DISABLED/);
+  assert.match(shell, /exit 78/);
+  assert.doesNotMatch(shell, /sudo|apt-get|systemctl|docker|curl|gh release|python3|tar\s|eval\s/);
 });

@@ -66,6 +66,18 @@ class ReleaseFake:
         return self.evidence
 
 
+class BootstrapGateFake:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.fail = False
+
+    def consume(self, *, version: str, release_commit: str) -> object:
+        self.calls.append((version, release_commit))
+        if self.fail:
+            raise RuntimeError("bootstrap authority unavailable")
+        return object()
+
+
 class TargetFake:
     def __init__(self, evidence: TargetEvidence | None = None) -> None:
         self.evidence = evidence or TargetEvidence(TargetClass.ABSENT, digest("4"))
@@ -369,6 +381,7 @@ class InstallerRuntimeTests(unittest.TestCase):
         self.operations = OperationFake()
         self.fresh = FreshFake()
         self.restore = RestoreFake()
+        self.bootstrap_gate = BootstrapGateFake()
         self.runtime = Installer(
             releases=self.releases,
             target=self.target,
@@ -378,6 +391,7 @@ class InstallerRuntimeTests(unittest.TestCase):
             operations=self.operations,
             fresh=self.fresh,
             restore=self.restore,
+            bootstrap_privilege_gate=self.bootstrap_gate,
         )
 
     def request(self, **changes) -> InstallRequest:
@@ -400,6 +414,19 @@ class InstallerRuntimeTests(unittest.TestCase):
         self.assertNotIn('"secrets"', rendered.casefold())
         self.assertNotIn('"credentials"', rendered.casefold())
         self.assertNotIn('"password"', rendered.casefold())
+
+    def test_bootstrap_privilege_gate_blocks_before_first_mutation(self) -> None:
+        plan = self.runtime.plan(self.request())
+        self.bootstrap_gate.fail = True
+
+        with self.assertRaisesRegex(
+            InstallerError,
+            "INSTALL_BOOTSTRAP_AUTHORITY_REQUIRED",
+        ):
+            self.runtime.execute(plan, accepted_plan_digest=plan.plan_digest)
+
+        self.assertEqual(self.fresh.calls, [])
+        self.assertEqual(self.operations.events, [])
 
     def test_plan_binds_one_explicit_transport_policy_through_execution(self) -> None:
         policy = ExplicitTransportPolicy.official_mirror()

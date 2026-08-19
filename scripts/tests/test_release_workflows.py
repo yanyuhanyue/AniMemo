@@ -206,6 +206,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             source.index("      - name: Download and verify Phase A qualification evidence") :
             source.index("      - name: Stage the validated platform and Release Notes")
         ]
+        stage = source[
+            source.index("      - name: Stage the validated platform and Release Notes") :
+            source.index("      - uses: actions/upload-artifact@", source.index("      - name: Stage the validated platform and Release Notes"))
+        ]
 
         run_id_guard = '[[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]'
         evidence_path = (
@@ -215,6 +219,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         authority_path = (
             "QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/qualification/"
             "release-qualification-${{ inputs.qualification_run_id }}.json"
+        )
+        self.assertIn(
+            "QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}",
+            stage,
         )
         self.assertIn(run_id_guard, publish)
         self.assertIn(evidence_path, publish)
@@ -617,6 +625,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertLess(publish.index(setting_gate), publish.index("docker/login-action"))
         self.assertLess(publish.index(setting_gate), publish.index("docker push"))
         self.assertLess(publish.index(setting_gate), publish.index("git push origin"))
+        self.assertLess(
+            publish.index("build-initial-trust-kit"),
+            publish.index("docker/login-action"),
+        )
+        self.assertLess(
+            publish.index("build-initial-trust-kit"),
+            publish.index("docker push"),
+        )
 
     def test_release_contract_assets_and_real_upgrade_delta_are_fail_closed(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -677,6 +693,57 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             ),
             2,
         )
+        self.assertEqual(release.count("build-initial-trust-kit"), 2)
+        self.assertNotIn(
+            "--output release/release_attestation_verifier/pretrust-v2",
+            release,
+        )
+        self.assertGreaterEqual(release.count("$RUNNER_TEMP/animemo-pretrust-v2"), 8)
+        self.assertEqual(
+            release.count(
+                '--initial-trust-kit "$RUNNER_TEMP/animemo-pretrust-v2"'
+            ),
+            2,
+        )
+
+    def test_publish_rebinds_exact_qualified_prepublication_materials(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        dry_run_identity = release.index(
+            "> release-output/prepublication-materials.json"
+        )
+        qualification_copy = release.index(
+            "cp release-dry-run-input/prepublication-materials.json"
+        )
+        publish_rebuild = release.index(
+            "Rebuild and bind exact qualified prepublication materials before mutation"
+        )
+        immutable_recheck = release.index(
+            "Recheck immutable release identity immediately before publishing"
+        )
+        docker_login = release.index("docker/login-action@", publish_rebuild)
+        self.assertLess(dry_run_identity, qualification_copy)
+        self.assertLess(publish_rebuild, immutable_recheck)
+        self.assertLess(publish_rebuild, docker_login)
+        self.assertIn("initialTrustBootstrapSha256", release)
+        self.assertIn("installerMaterialsSha256", release)
+        self.assertIn('test "$actual_trust" =', release)
+        self.assertIn('test "$actual_materials" =', release)
+
+    def test_every_github_authority_job_gates_the_exact_cli_security_version(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        promotion = (
+            ROOT / ".github" / "workflows" / "promote-release.yml"
+        ).read_text(encoding="utf-8")
+        gate = "Gate exact GitHub CLI security baseline"
+
+        self.assertIn("GH_REQUIRED_VERSION: 2.97.0", release)
+        self.assertIn("GH_REQUIRED_VERSION: 2.97.0", promotion)
+        self.assertEqual(release.count(gate), 4)
+        self.assertEqual(promotion.count(gate), 2)
 
     def test_platform_qualification_is_hosted_scoped_and_injected_exactly(self):
         release = workflow("release.yml")

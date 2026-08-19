@@ -7,8 +7,10 @@ import ipaddress
 import json
 import sys
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
+from .bootstrap import BootstrapAuthorityError
 from .runtime import (
     Installer,
     InstallerError,
@@ -167,6 +169,7 @@ def _write(value: object, *, json_output: bool) -> None:
 
 def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> int:
     args = _parser().parse_args(argv)
+    production_composition = runtime is None
     try:
         request = _request(args)
         if runtime is None:
@@ -207,6 +210,20 @@ def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> 
                     json_output=args.json_output,
                 )
                 return EXIT_VALIDATION
+        if (
+            production_composition
+            and request.transport_source is not InstallTransportSource.LOCAL_BUNDLE
+            and plan.action.value not in {"NO_CHANGE", "UPDATER_HANDOFF"}
+        ):
+            from .bootstrap import authorize_online_stage0
+
+            authorize_online_stage0(
+                tag=plan.release.version,
+                release_commit=plan.release.commit,
+                verified_at=datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+            )
         result = runtime.execute(plan, accepted_plan_digest=plan.plan_digest)
         _write(result.as_dict(), json_output=args.json_output)
         if result.outcome.value in {"SUCCEEDED", "NO_CHANGE"}:
@@ -222,6 +239,15 @@ def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> 
             json_output=bool(getattr(args, "json_output", False)),
         )
         return _exit_code(error)
+    except BootstrapAuthorityError:
+        _write(
+            {
+                "outcome": "VALIDATION_FAILED",
+                "reasonCode": "INSTALL_BOOTSTRAP_STAGE0_FAILED",
+            },
+            json_output=bool(getattr(args, "json_output", False)),
+        )
+        return EXIT_VALIDATION
     except (OSError, EOFError, KeyboardInterrupt):
         _write(
             {"outcome": "ENVIRONMENT_FAILED", "reasonCode": "INSTALL_INPUT_FAILED"},

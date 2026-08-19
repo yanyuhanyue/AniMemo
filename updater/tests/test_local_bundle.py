@@ -380,12 +380,14 @@ class LocalBundleTests(unittest.TestCase):
             root = Path(directory)
             payload = root / "payload.tar"
             sidecar = root / "proof.json"
+            cache_root = root / "cache"
+            cache_root.mkdir(mode=0o700)
             payload.write_bytes(b"payload")
             sidecar.write_bytes(b"proof")
             acquired = LocalBundleTransport().acquire(
                 payload=payload,
                 release_attestation=sidecar,
-                private_staging=root / "cache" / "transport",
+                private_staging=cache_root / "transport",
             )
             receipt_path = acquired.root / "transport-receipt.json"
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -406,7 +408,7 @@ class LocalBundleTests(unittest.TestCase):
                 ),
             ):
                 LocalBundleReleaseSource.from_staged(
-                    cache_root=root / "cache",
+                    cache_root=cache_root,
                     transport_identity="sha256:" + acquired.receipt.identity,
                     verifier=fake_offline.OfflineReleaseVerifier(),
                     updater_version="1.1.0",
@@ -417,12 +419,14 @@ class LocalBundleTests(unittest.TestCase):
             root = Path(directory)
             payload = root / "payload.tar"
             sidecar = root / "proof.json"
+            cache_root = root / "cache"
+            cache_root.mkdir(mode=0o700)
             payload.write_bytes(b"payload")
             sidecar.write_bytes(b"proof")
             acquired = LocalBundleTransport().acquire(
                 payload=payload,
                 release_attestation=sidecar,
-                private_staging=root / "cache" / "transport",
+                private_staging=cache_root / "transport",
             )
             receipt_path = acquired.root / "transport-receipt.json"
             encoded = receipt_path.read_text(encoding="ascii")
@@ -446,7 +450,7 @@ class LocalBundleTests(unittest.TestCase):
                 ),
             ):
                 LocalBundleReleaseSource.from_staged(
-                    cache_root=root / "cache",
+                    cache_root=cache_root,
                     transport_identity="sha256:" + acquired.receipt.identity,
                     verifier=fake_offline.OfflineReleaseVerifier(),
                     updater_version="1.1.0",

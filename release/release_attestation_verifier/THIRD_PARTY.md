@@ -21,8 +21,10 @@ v2.97.0 的阈值。
 `go-licenses`（或等价维护工具）生成并留存。当前源码实现不在运行时发现、选择或
 信任任何 bundle 内携带的根。
 
-生产安装布局由 `INSTALLATION_CONTRACT.json` 关闭。Updater 只从固定绝对路径
-`/usr/share/animemo/offline-trust/v1` 装载四个精确文件，逐一验证 profile 中的
+旧版四文件安装布局保留在 `INSTALLATION_CONTRACT.json`，不得原地改写。v1.1 的
+生产初始配置与 TUF 生命周期由版本化 successor `INSTALLATION_CONTRACT_V2.json`
+关闭：Stage‑0 capability 只允许把六个精确运行时文件提交到
+`/var/lib/animemo/offline-trust/v2/generations`，再原子切换 active state，并逐一验证 profile 中的
 SHA-256 identity；不会读取 PATH、环境变量或 bundle 自带根。发布材料打包器必须
 把已构建 binary 和两份由各自 TUF 仓库预先取得并审核的单一 trusted-root JSON
 安装到该布局，所有文件由 root 拥有，binary 为 0755，其余为 0644。

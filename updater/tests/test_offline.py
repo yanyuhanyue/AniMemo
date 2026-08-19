@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest import mock
 
 from release.contract import REPOSITORY
 from release.portable import build_portable_payload, canonical_json_bytes
@@ -229,6 +230,16 @@ def _profile() -> TrustProfile:
         github_release_certificate_identity=("https://dotcom.releases.github.com"),
         github_trusted_root_sha256=_DIGEST_A,
         sigstore_trusted_root_sha256=_DIGEST_B,
+        github_tuf_root_sha256=_DIGEST_A,
+        github_tuf_root_version=1,
+        github_tuf_timestamp_version=1,
+        github_tuf_snapshot_version=1,
+        github_tuf_targets_version=1,
+        sigstore_tuf_root_sha256=_DIGEST_B,
+        sigstore_tuf_root_version=1,
+        sigstore_tuf_timestamp_version=1,
+        sigstore_tuf_snapshot_version=1,
+        sigstore_tuf_targets_version=1,
         verifier_id="github-sigstore-offline",
         minimum_verifier_version="1.0.0",
         revocation_epoch=1,
@@ -314,6 +325,16 @@ def _successor(profile: TrustProfile) -> TrustProfile:
         ),
         github_trusted_root_sha256="sha256:" + "4" * 64,
         sigstore_trusted_root_sha256="sha256:" + "5" * 64,
+        github_tuf_root_sha256="sha256:" + "7" * 64,
+        github_tuf_root_version=2,
+        github_tuf_timestamp_version=2,
+        github_tuf_snapshot_version=2,
+        github_tuf_targets_version=2,
+        sigstore_tuf_root_sha256="sha256:" + "8" * 64,
+        sigstore_tuf_root_version=2,
+        sigstore_tuf_timestamp_version=2,
+        sigstore_tuf_snapshot_version=2,
+        sigstore_tuf_targets_version=2,
         verifier_id=profile.verifier_id,
         minimum_verifier_version="1.1.0",
         revocation_epoch=2,
@@ -324,6 +345,8 @@ def _successor(profile: TrustProfile) -> TrustProfile:
 def _pretrusted_material_fixture(root: Path) -> TrustProfile:
     github_root = b"production GitHub TUF-derived trusted root\n"
     sigstore_root = b"production Sigstore TUF-derived trusted root\n"
+    github_tuf_root = b'{"signed":{"version":1},"signatures":[]}\n'
+    sigstore_tuf_root = b'{"signed":{"version":1},"signatures":[]}\n'
     verifier = b"frozen sigstore-go release verifier binary"
     profile = TrustProfile(
         profile_version=1,
@@ -340,6 +363,20 @@ def _pretrusted_material_fixture(root: Path) -> TrustProfile:
         sigstore_trusted_root_sha256=(
             "sha256:" + hashlib.sha256(sigstore_root).hexdigest()
         ),
+        github_tuf_root_sha256=(
+            "sha256:" + hashlib.sha256(github_tuf_root).hexdigest()
+        ),
+        github_tuf_root_version=1,
+        github_tuf_timestamp_version=1,
+        github_tuf_snapshot_version=1,
+        github_tuf_targets_version=1,
+        sigstore_tuf_root_sha256=(
+            "sha256:" + hashlib.sha256(sigstore_tuf_root).hexdigest()
+        ),
+        sigstore_tuf_root_version=1,
+        sigstore_tuf_timestamp_version=1,
+        sigstore_tuf_snapshot_version=1,
+        sigstore_tuf_targets_version=1,
         verifier_id="github-sigstore-offline",
         minimum_verifier_version="2.97.0",
         revocation_epoch=1,
@@ -354,7 +391,11 @@ def _pretrusted_material_fixture(root: Path) -> TrustProfile:
     )
     (root / "github-trusted-root.jsonl").write_bytes(github_root)
     (root / "sigstore-trusted-root.jsonl").write_bytes(sigstore_root)
-    (root / "offline-release-verifier").write_bytes(verifier)
+    (root / "github-tuf-root.json").write_bytes(github_tuf_root)
+    (root / "sigstore-tuf-root.json").write_bytes(sigstore_tuf_root)
+    verifier_path = root / "offline-release-verifier"
+    verifier_path.write_bytes(verifier)
+    verifier_path.chmod(0o755)
     return profile
 
 
@@ -577,7 +618,7 @@ class PretrustedTrustMaterialTests(unittest.TestCase):
             self.assertEqual(material.profile.policy_identity, OFFLINE_POLICY_IDENTITY)
             self.assertEqual(material.verifier_path, root / "offline-release-verifier")
 
-    def test_activated_successor_profile_reloads_without_lineage_field(self) -> None:
+    def test_activated_successor_profile_reloads_with_exact_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "pretrusted-v1"
             current = _pretrusted_material_fixture(root)
@@ -594,6 +635,16 @@ class PretrustedTrustMaterialTests(unittest.TestCase):
                 sigstore_trusted_root_sha256=(
                     current.sigstore_trusted_root_sha256
                 ),
+                github_tuf_root_sha256=current.github_tuf_root_sha256,
+                github_tuf_root_version=current.github_tuf_root_version + 1,
+                github_tuf_timestamp_version=current.github_tuf_timestamp_version + 1,
+                github_tuf_snapshot_version=current.github_tuf_snapshot_version + 1,
+                github_tuf_targets_version=current.github_tuf_targets_version + 1,
+                sigstore_tuf_root_sha256=current.sigstore_tuf_root_sha256,
+                sigstore_tuf_root_version=current.sigstore_tuf_root_version + 1,
+                sigstore_tuf_timestamp_version=current.sigstore_tuf_timestamp_version + 1,
+                sigstore_tuf_snapshot_version=current.sigstore_tuf_snapshot_version + 1,
+                sigstore_tuf_targets_version=current.sigstore_tuf_targets_version + 1,
                 verifier_id=current.verifier_id,
                 minimum_verifier_version=current.minimum_verifier_version,
                 revocation_epoch=2,
@@ -610,22 +661,16 @@ class PretrustedTrustMaterialTests(unittest.TestCase):
 
             self.assertEqual(material.profile.identity, activated.identity)
             self.assertEqual(material.profile.profile_version, 2)
-            self.assertIsNone(material.profile.parent_profile_identity)
+            self.assertEqual(material.profile.parent_profile_identity, current.identity)
 
-    def test_unbound_successor_profile_cannot_advance_authority(self) -> None:
+    def test_unbound_successor_profile_cannot_be_loaded(self) -> None:
         current = _profile()
         bound = _successor(current)
-        unbound = TrustProfile.from_bootstrap_record(bound.as_bootstrap_record())
-        state = OfflineAuthorityState.initial(current)
+        record = bound.as_bootstrap_record()
+        record["parentProfileIdentity"] = None
 
-        with self.assertRaisesRegex(RequestRejected, "后继信任 profile 不是精确连续更新"):
-            advance_trust_profile(
-                current_profile=current,
-                successor_profile=unbound,
-                state=state,
-                external_verifier=_TrustUpdateVerifier({}),
-                update_bundle=b"unbound successor",
-            )
+        with self.assertRaisesRegex(RequestRejected, "预置信任 profile 身份字段无效"):
+            TrustProfile.from_bootstrap_record(record)
 
     def test_tampered_or_open_ended_pretrusted_store_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -644,6 +689,76 @@ class PretrustedTrustMaterialTests(unittest.TestCase):
 
 
 class SigstoreGoEvidenceVerifierTests(unittest.TestCase):
+    def test_tuf_update_uses_pretrusted_roots_and_closed_current_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "pretrusted-v1"
+            profile = _pretrusted_material_fixture(root)
+            material = PretrustedTrustMaterial.load(root)
+            calls = []
+            claim = {
+                "authorityRole": "TRUST_METADATA_ONLY",
+                "fromProfileIdentity": profile.identity,
+                "github": {"tufRootVersion": 2},
+                "schemaVersion": 1,
+                "sigstore": {"tufRootVersion": 2},
+            }
+
+            def runner(command, **kwargs):
+                request_path = Path(command[command.index("--request") + 1])
+                calls.append((command, kwargs, json.loads(request_path.read_text())))
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=canonical_json_bytes(claim) + b"\n",
+                    stderr=b"",
+                )
+
+            package = canonical_json_bytes(
+                {
+                    "authorityRole": "TRUST_METADATA_ONLY",
+                    "fromProfileIdentity": profile.identity,
+                    "github": {},
+                    "schemaVersion": 1,
+                    "sigstore": {},
+                }
+            )
+            observed = SigstoreGoEvidenceVerifier(
+                material,
+                runner=runner,
+            ).verify_tuf_update_package(
+                package=package,
+                current_profile=profile,
+            )
+
+            self.assertEqual(observed, claim)
+            command, kwargs, request = calls[0]
+            self.assertEqual(command[0], str(material.verifier_path))
+            self.assertIn(str(material.github_tuf_root_path), command)
+            self.assertIn(str(material.sigstore_tuf_root_path), command)
+            self.assertEqual(request["fromProfileIdentity"], profile.identity)
+            self.assertEqual(
+                request["github"]["tufRootSha256"],
+                profile.github_tuf_root_sha256,
+            )
+            self.assertEqual(set(kwargs["env"]) - {"SystemRoot"}, {"LANG", "LC_ALL"})
+
+    def test_tuf_update_rejects_noncanonical_package_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "pretrusted-v1"
+            profile = _pretrusted_material_fixture(root)
+            material = PretrustedTrustMaterial.load(root)
+            verifier = SigstoreGoEvidenceVerifier(
+                material,
+                runner=mock.Mock(),
+            )
+
+            with self.assertRaisesRegex(RequestRejected, "canonical JSON"):
+                verifier.verify_tuf_update_package(
+                    package=b'{"schemaVersion": 1}\n',
+                    current_profile=profile,
+                )
+            verifier._runner.assert_not_called()
+
     def test_structured_argv_uses_only_pretrusted_root_and_closed_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "pretrusted-v1"
@@ -703,6 +818,44 @@ class SigstoreGoEvidenceVerifierTests(unittest.TestCase):
                 )
 
 class OfflineOrchestrationTests(unittest.TestCase):
+    def test_persistent_state_migrates_only_across_verified_profile_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current = _profile()
+            successor = _successor(current)
+            state_path = root / "offline-authority.json"
+            state_path.write_bytes(
+                canonical_json_bytes(OfflineAuthorityState.initial(current).as_record())
+            )
+            inner = mock.Mock()
+            verifier = PersistentOfflineReleaseVerifier(
+                inner=inner,
+                profile=successor,
+                state_path=state_path,
+                profile_lineage=frozenset({current.identity, successor.identity}),
+            )
+
+            migrated = verifier._load_state()
+
+            self.assertEqual(migrated.active_profile_identity, successor.identity)
+            self.assertEqual(migrated.active_profile_version, successor.profile_version)
+            self.assertEqual(
+                json.loads(state_path.read_text())["activeProfileIdentity"],
+                successor.identity,
+            )
+
+            unrelated = PersistentOfflineReleaseVerifier(
+                inner=inner,
+                profile=successor,
+                state_path=state_path,
+                profile_lineage=frozenset({successor.identity}),
+            )
+            state_path.write_bytes(
+                canonical_json_bytes(OfflineAuthorityState.initial(current).as_record())
+            )
+            with self.assertRaisesRegex(RequestRejected, "profile 不一致"):
+                unrelated._load_state()
+
     def test_verified_official_claims_flow_through_common_authority_and_oci_seams(
         self,
     ) -> None:

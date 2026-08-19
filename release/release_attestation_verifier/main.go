@@ -24,6 +24,7 @@ import (
 	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/verify"
+	"github.com/theupdateframework/go-tuf/v2/metadata/trustedmetadata"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -42,6 +43,7 @@ const (
 
 var (
 	sha256Identity = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	keyIDIdentity  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	commitIdentity = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	tagIdentity    = regexp.MustCompile(
 		`^v[0-9]+\.[0-9]+\.[0-9]+(?:-(?:beta|rc)\.[1-9][0-9]*)?$`,
@@ -72,6 +74,59 @@ type actionsRequest struct {
 	Subject       expectedSubject `json:"subject"`
 	Workflow      string          `json:"workflow"`
 	SourceCommit  string          `json:"sourceCommit"`
+}
+
+type tufTrackPackage struct {
+	RootChain   [][]byte `json:"rootChain"`
+	Timestamp   []byte   `json:"timestamp"`
+	Snapshot    []byte   `json:"snapshot"`
+	Targets     []byte   `json:"targets"`
+	TrustedRoot []byte   `json:"trustedRoot"`
+}
+
+type trustUpdatePackage struct {
+	SchemaVersion       int             `json:"schemaVersion"`
+	AuthorityRole       string          `json:"authorityRole"`
+	FromProfileIdentity string          `json:"fromProfileIdentity"`
+	GitHub              tufTrackPackage `json:"github"`
+	Sigstore            tufTrackPackage `json:"sigstore"`
+}
+
+type tufCurrentState struct {
+	TUFRootSHA256     string `json:"tufRootSha256"`
+	TUFRootVersion    int64  `json:"tufRootVersion"`
+	TimestampVersion  int64  `json:"timestampVersion"`
+	SnapshotVersion   int64  `json:"snapshotVersion"`
+	TargetsVersion    int64  `json:"targetsVersion"`
+	TrustedRootSHA256 string `json:"trustedRootSha256"`
+}
+
+type trustUpdateRequest struct {
+	SchemaVersion       int             `json:"schemaVersion"`
+	Mode                string          `json:"mode"`
+	AuthorityRole       string          `json:"authorityRole"`
+	FromProfileIdentity string          `json:"fromProfileIdentity"`
+	GitHub              tufCurrentState `json:"github"`
+	Sigstore            tufCurrentState `json:"sigstore"`
+}
+
+type tufUpdateClaim struct {
+	TUFRootSHA256                string   `json:"tufRootSha256"`
+	TUFRootVersion               int64    `json:"tufRootVersion"`
+	TimestampVersion             int64    `json:"timestampVersion"`
+	SnapshotVersion              int64    `json:"snapshotVersion"`
+	TargetsVersion               int64    `json:"targetsVersion"`
+	TrustedRootSHA256            string   `json:"trustedRootSha256"`
+	SupersededMaterialIdentities []string `json:"supersededMaterialIdentities"`
+	RevokedSignerKeyIDs          []string `json:"revokedSignerKeyIds"`
+}
+
+type trustUpdateClaim struct {
+	SchemaVersion       int            `json:"schemaVersion"`
+	AuthorityRole       string         `json:"authorityRole"`
+	FromProfileIdentity string         `json:"fromProfileIdentity"`
+	GitHub              tufUpdateClaim `json:"github"`
+	Sigstore            tufUpdateClaim `json:"sigstore"`
 }
 
 type statementSubject struct {
@@ -572,6 +627,191 @@ func verifyActions(bundlePath, trustedRootPath, requestPath string) (actionsClai
 	return closeActionsStatement(request, statement)
 }
 
+func verifyTUFTrack(
+	track tufTrackPackage,
+	currentRootPath string,
+	current tufCurrentState,
+	initial bool,
+) (tufUpdateClaim, error) {
+	var claim tufUpdateClaim
+	if !sha256Identity.MatchString(current.TUFRootSHA256) ||
+		!sha256Identity.MatchString(current.TrustedRootSHA256) ||
+		current.TUFRootVersion < 1 ||
+		(!initial && (current.TimestampVersion < 1 ||
+			current.SnapshotVersion < 1 || current.TargetsVersion < 1)) ||
+		(initial && (current.TimestampVersion != 0 ||
+			current.SnapshotVersion != 0 || current.TargetsVersion != 0 ||
+			current.TrustedRootSHA256 != current.TUFRootSHA256)) ||
+		len(track.RootChain) > 32 || len(track.Timestamp) == 0 ||
+		len(track.Snapshot) == 0 || len(track.Targets) == 0 ||
+		len(track.TrustedRoot) == 0 {
+		return claim, errors.New("TUF 当前状态或更新包无效")
+	}
+	currentRoot, err := os.ReadFile(currentRootPath)
+	if err != nil || buildIdentity(currentRoot) != current.TUFRootSHA256 {
+		return claim, errors.New("TUF 当前 root 身份无效")
+	}
+	trusted, err := trustedmetadata.New(currentRoot)
+	if err != nil || trusted.Root.Signed.Version != current.TUFRootVersion {
+		return claim, errors.New("TUF 当前 root 不可验证")
+	}
+	previousSignerKeyIDs := map[string]bool{}
+	for _, role := range trusted.Root.Signed.Roles {
+		for _, keyID := range role.KeyIDs {
+			previousSignerKeyIDs[keyID] = true
+		}
+	}
+	finalRoot := currentRoot
+	for _, candidate := range track.RootChain {
+		if len(candidate) == 0 || len(candidate) > 16*1024*1024 {
+			return claim, errors.New("TUF root chain 无效")
+		}
+		updated, updateErr := trusted.UpdateRoot(candidate)
+		if updateErr != nil {
+			return claim, fmt.Errorf("TUF root successor 无效: %w", updateErr)
+		}
+		finalRoot = candidate
+		if updated.Signed.Version > current.TUFRootVersion+32 {
+			return claim, errors.New("TUF root chain 超出边界")
+		}
+	}
+	timestamp, err := trusted.UpdateTimestamp(track.Timestamp)
+	if err != nil {
+		return claim, fmt.Errorf("TUF timestamp 无效: %w", err)
+	}
+	snapshot, err := trusted.UpdateSnapshot(track.Snapshot, false)
+	if err != nil {
+		return claim, fmt.Errorf("TUF snapshot 无效: %w", err)
+	}
+	targets, err := trusted.UpdateTargets(track.Targets)
+	if err != nil {
+		return claim, fmt.Errorf("TUF targets 无效: %w", err)
+	}
+	target, ok := targets.Signed.Targets["trusted_root.json"]
+	if !ok {
+		return claim, errors.New("TUF targets 未授权 trusted_root.json")
+	}
+	if err := target.VerifyLengthHashes(track.TrustedRoot); err != nil {
+		return claim, fmt.Errorf("TUF trusted_root target 身份无效: %w", err)
+	}
+	if timestamp.Signed.Version <= current.TimestampVersion ||
+		snapshot.Signed.Version <= current.SnapshotVersion ||
+		targets.Signed.Version <= current.TargetsVersion {
+		return claim, errors.New("TUF metadata rollback 或 replay")
+	}
+	claim = tufUpdateClaim{
+		TUFRootSHA256:                buildIdentity(finalRoot),
+		TUFRootVersion:               trusted.Root.Signed.Version,
+		TimestampVersion:             timestamp.Signed.Version,
+		SnapshotVersion:              snapshot.Signed.Version,
+		TargetsVersion:               targets.Signed.Version,
+		TrustedRootSHA256:            buildIdentity(track.TrustedRoot),
+		SupersededMaterialIdentities: []string{},
+		RevokedSignerKeyIDs:          []string{},
+	}
+	if !initial && claim.TUFRootSHA256 != current.TUFRootSHA256 {
+		claim.SupersededMaterialIdentities = append(
+			claim.SupersededMaterialIdentities,
+			current.TUFRootSHA256,
+		)
+	}
+	if !initial && claim.TrustedRootSHA256 != current.TrustedRootSHA256 {
+		claim.SupersededMaterialIdentities = append(
+			claim.SupersededMaterialIdentities,
+			current.TrustedRootSHA256,
+		)
+	}
+	if !initial {
+		currentSignerKeyIDs := map[string]bool{}
+		for _, role := range trusted.Root.Signed.Roles {
+			for _, keyID := range role.KeyIDs {
+				currentSignerKeyIDs[keyID] = true
+			}
+		}
+		for keyID := range previousSignerKeyIDs {
+			if !currentSignerKeyIDs[keyID] {
+				if !keyIDIdentity.MatchString(keyID) {
+					return claim, errors.New("TUF 被移除 signer key id 无效")
+				}
+				claim.RevokedSignerKeyIDs = append(claim.RevokedSignerKeyIDs, keyID)
+			}
+		}
+	}
+	sort.Strings(claim.SupersededMaterialIdentities)
+	sort.Strings(claim.RevokedSignerKeyIDs)
+	return claim, nil
+}
+
+func verifyTrustBootstrap(packagePath, githubRootPath, sigstoreRootPath, requestPath string) (trustUpdateClaim, error) {
+	var claim trustUpdateClaim
+	var request trustUpdateRequest
+	var update trustUpdatePackage
+	if err := decodeClosedJSON(requestPath, &request); err != nil {
+		return claim, fmt.Errorf("TUF bootstrap 请求不可解析: %w", err)
+	}
+	if err := decodeClosedJSON(packagePath, &update); err != nil {
+		return claim, fmt.Errorf("TUF bootstrap 包不可解析: %w", err)
+	}
+	if request.SchemaVersion != 1 || request.Mode != "tuf-trust-bootstrap" ||
+		request.AuthorityRole != "TRUST_METADATA_ONLY" ||
+		!sha256Identity.MatchString(request.FromProfileIdentity) ||
+		update.SchemaVersion != 1 ||
+		update.AuthorityRole != "TRUST_METADATA_ONLY" ||
+		update.FromProfileIdentity != request.FromProfileIdentity {
+		return claim, errors.New("TUF bootstrap authority binding 无效")
+	}
+	github, err := verifyTUFTrack(update.GitHub, githubRootPath, request.GitHub, true)
+	if err != nil {
+		return claim, fmt.Errorf("GitHub TUF bootstrap 失败: %w", err)
+	}
+	sigstore, err := verifyTUFTrack(update.Sigstore, sigstoreRootPath, request.Sigstore, true)
+	if err != nil {
+		return claim, fmt.Errorf("Sigstore TUF bootstrap 失败: %w", err)
+	}
+	return trustUpdateClaim{
+		SchemaVersion:       1,
+		AuthorityRole:       "TRUST_METADATA_ONLY",
+		FromProfileIdentity: request.FromProfileIdentity,
+		GitHub:              github,
+		Sigstore:            sigstore,
+	}, nil
+}
+
+func verifyTrustUpdate(packagePath, githubRootPath, sigstoreRootPath, requestPath string) (trustUpdateClaim, error) {
+	var claim trustUpdateClaim
+	var request trustUpdateRequest
+	var update trustUpdatePackage
+	if err := decodeClosedJSON(requestPath, &request); err != nil {
+		return claim, fmt.Errorf("TUF 更新请求不可解析: %w", err)
+	}
+	if err := decodeClosedJSON(packagePath, &update); err != nil {
+		return claim, fmt.Errorf("TUF 更新包不可解析: %w", err)
+	}
+	if request.SchemaVersion != 1 || request.Mode != "tuf-trust-update" ||
+		request.AuthorityRole != "TRUST_METADATA_ONLY" ||
+		!sha256Identity.MatchString(request.FromProfileIdentity) ||
+		update.SchemaVersion != 1 ||
+		update.AuthorityRole != "TRUST_METADATA_ONLY" ||
+		update.FromProfileIdentity != request.FromProfileIdentity {
+		return claim, errors.New("TUF 更新 authority binding 无效")
+	}
+	github, err := verifyTUFTrack(update.GitHub, githubRootPath, request.GitHub, false)
+	if err != nil {
+		return claim, fmt.Errorf("GitHub TUF 更新失败: %w", err)
+	}
+	sigstore, err := verifyTUFTrack(update.Sigstore, sigstoreRootPath, request.Sigstore, false)
+	if err != nil {
+		return claim, fmt.Errorf("Sigstore TUF 更新失败: %w", err)
+	}
+	return trustUpdateClaim{
+		SchemaVersion:       1,
+		AuthorityRole:       "TRUST_METADATA_ONLY",
+		FromProfileIdentity: request.FromProfileIdentity,
+		GitHub:              github,
+		Sigstore:            sigstore,
+	}, nil
+}
+
 func canonicalJSON(value any) ([]byte, error) {
 	encoded, err := json.Marshal(value)
 	if err != nil {
@@ -588,6 +828,9 @@ func canonicalJSON(value any) ([]byte, error) {
 func main() {
 	bundlePath := flag.String("bundle", "", "本地 Sigstore bundle JSON")
 	trustedRootPath := flag.String("trusted-root", "", "预置 GitHub trusted_root.json")
+	trustUpdatePath := flag.String("trust-update", "", "本地 TUF trust update JSON")
+	githubTUFRootPath := flag.String("github-tuf-root", "", "当前 GitHub TUF root.json")
+	sigstoreTUFRootPath := flag.String("sigstore-tuf-root", "", "当前 Sigstore TUF root.json")
 	requestPath := flag.String("request", "", "关闭的验证请求 JSON")
 	showVersion := flag.Bool("version", false, "输出验证器版本")
 	flag.Parse()
@@ -595,7 +838,7 @@ func main() {
 		fmt.Println(verifierVersion)
 		return
 	}
-	if *bundlePath == "" || *trustedRootPath == "" || *requestPath == "" || flag.NArg() != 0 {
+	if *requestPath == "" || flag.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "验证器参数未关闭")
 		os.Exit(2)
 	}
@@ -614,9 +857,43 @@ func main() {
 	var claim any
 	switch mode.Mode {
 	case "github-release":
+		if *bundlePath == "" || *trustedRootPath == "" ||
+			*trustUpdatePath != "" || *githubTUFRootPath != "" || *sigstoreTUFRootPath != "" {
+			err = errors.New("GitHub Release 验证器参数未关闭")
+			break
+		}
 		claim, err = verifyRelease(*bundlePath, *trustedRootPath, *requestPath)
 	case "actions-provenance":
+		if *bundlePath == "" || *trustedRootPath == "" ||
+			*trustUpdatePath != "" || *githubTUFRootPath != "" || *sigstoreTUFRootPath != "" {
+			err = errors.New("Actions 验证器参数未关闭")
+			break
+		}
 		claim, err = verifyActions(*bundlePath, *trustedRootPath, *requestPath)
+	case "tuf-trust-update":
+		if *bundlePath != "" || *trustedRootPath != "" ||
+			*trustUpdatePath == "" || *githubTUFRootPath == "" || *sigstoreTUFRootPath == "" {
+			err = errors.New("TUF 更新验证器参数未关闭")
+			break
+		}
+		claim, err = verifyTrustUpdate(
+			*trustUpdatePath,
+			*githubTUFRootPath,
+			*sigstoreTUFRootPath,
+			*requestPath,
+		)
+	case "tuf-trust-bootstrap":
+		if *bundlePath != "" || *trustedRootPath != "" ||
+			*trustUpdatePath == "" || *githubTUFRootPath == "" || *sigstoreTUFRootPath == "" {
+			err = errors.New("TUF bootstrap 验证器参数未关闭")
+			break
+		}
+		claim, err = verifyTrustBootstrap(
+			*trustUpdatePath,
+			*githubTUFRootPath,
+			*sigstoreTUFRootPath,
+			*requestPath,
+		)
 	default:
 		err = errors.New("验证模式未关闭")
 	}

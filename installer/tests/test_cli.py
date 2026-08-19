@@ -30,6 +30,7 @@ def digest(character: str) -> str:
 class _Runtime:
     def __init__(self) -> None:
         from installer.tests.test_runtime import (
+            BootstrapGateFake,
             CompatibilityFake,
             ConfigurationFake,
             FreshFake,
@@ -49,10 +50,46 @@ class _Runtime:
             operations=OperationFake(),
             fresh=FreshFake(),
             restore=RestoreFake(),
+            bootstrap_privilege_gate=BootstrapGateFake(),
         )
 
 
 class InstallerCliTests(unittest.TestCase):
+    def test_production_online_execution_authorizes_stage0_before_runtime(self) -> None:
+        holder = _Runtime()
+        output = io.StringIO()
+        with (
+            mock.patch(
+                "installer.production.build_runtime",
+                return_value=holder.runtime,
+            ),
+            mock.patch("installer.bootstrap.authorize_online_stage0") as authorize,
+            redirect_stdout(output),
+        ):
+            code = main(
+                [
+                    "install",
+                    "--channel",
+                    "rc",
+                    "--public-origin",
+                    "https://anime.example",
+                    "--non-interactive",
+                    "--accept",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        authorize.assert_called_once()
+        self.assertEqual(
+            authorize.call_args.kwargs["tag"],
+            holder.runtime._releases.evidence.version,
+        )
+        self.assertEqual(
+            authorize.call_args.kwargs["release_commit"],
+            holder.runtime._releases.evidence.commit,
+        )
+
     def test_release_source_has_no_auto_url_or_fallback_value(self) -> None:
         for source in (
             "auto",

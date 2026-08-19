@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
+
 ROOT = Path(__file__).resolve().parents[2]
 COMMIT = "b" * 40
 API_DIGEST = "sha256:" + "3" * 64
@@ -55,11 +57,13 @@ class ReleaseCliTests(unittest.TestCase):
                 b"qualified wheel bytes"
             )
             checksums = root / "checksums.txt"
+            trust_kit = create_test_initial_trust_kit(root)
             self.run_cli(
                 "build-installer-materials",
                 "--root", ROOT,
                 "--wheelhouse", wheelhouse,
                 "--output", installer_materials,
+                "--initial-trust-kit", trust_kit,
             )
             self.run_cli(
                 "generate-deployment-contract",
@@ -123,9 +127,11 @@ class ReleaseCliTests(unittest.TestCase):
                 b"qualified wheel bytes"
             )
             installer_materials = root / "installer-materials.tar"
+            trust_kit = create_test_initial_trust_kit(root)
             self.run_cli(
                 "build-installer-materials", "--root", ROOT,
                 "--wheelhouse", wheelhouse, "--output", installer_materials,
+                "--initial-trust-kit", trust_kit,
             )
             self.run_cli(
                 "generate-deployment-contract", "--root", source_root,
