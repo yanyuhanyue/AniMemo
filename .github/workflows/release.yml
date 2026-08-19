@@ -67,7 +67,7 @@ jobs:
       created_at: ${{ steps.identity.outputs.created_at }}
       candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -110,12 +110,12 @@ jobs:
           git rev-parse --verify "$UPGRADE_BASE_SHA^{commit}"
           git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$candidate_sha"
           echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           ref: ${{ steps.candidate.outputs.candidate_sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -216,12 +216,12 @@ jobs:
       ANIMEMO_TEST_DATABASE_URL: postgresql://qualification:qualification-only@127.0.0.1:55432/qualification_source
       ANIMEMO_RESTORE_TEST_DATABASE_URL: postgresql://qualification:qualification-only@127.0.0.1:55432/qualification_target
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           ref: ${{ needs.preflight.outputs.candidate_sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
       - name: Prove the exact hosted qualification candidate
@@ -358,7 +358,7 @@ jobs:
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --workflow-path .github/workflows/release.yml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: platform-qualification-${{ github.run_id }}
           path: platform-qualification/platform-qualification.json
@@ -380,18 +380,18 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: ${{ inputs.operation == 'qualify' }}
         with:
           persist-credentials: false
           ref: ${{ needs.preflight.outputs.candidate_sha }}
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: ${{ inputs.operation == 'publish' }}
         with:
           persist-credentials: false
           ref: main
           fetch-depth: 0
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -536,7 +536,7 @@ jobs:
           install -m 0600 \
             "$RUNNER_TEMP/qualification/release-qualification-$QUALIFICATION_RUN_ID.json" \
             validated-release-input/release-qualification.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ inputs.operation == 'publish' }}
         with:
           name: validated-platform-qualification-${{ github.run_id }}
@@ -553,7 +553,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           ref: ${{ needs.preflight.outputs.candidate_sha }}
@@ -566,7 +566,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -598,7 +598,7 @@ jobs:
             --output-input release-output/release-notes-input.json \
             --output-json release-output/release-notes.json \
             --output-markdown release-output/release-notes.md
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: platform-qualification-${{ github.run_id }}
           path: platform-qualification-input
@@ -615,10 +615,10 @@ jobs:
           install -m 0644 \
             platform-qualification-input/platform-qualification.json \
             release/platform-qualification.json
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Build API OCI artifact without publishing
         id: api
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/backend.Dockerfile
@@ -632,7 +632,7 @@ jobs:
             ANIMEMO_CHANNEL=${{ inputs.channel }}
       - name: Build Web OCI artifact without publishing
         id: web
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/frontend.Dockerfile
@@ -726,7 +726,7 @@ jobs:
             test "$(jq -cS '.artifacts.deploymentContract' release-output/release-manifest.json)" = \
               "$(jq -cS '.artifacts.deploymentContract' release-output/stable-manifest.dry-run.json)"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-dry-run-${{ needs.preflight.outputs.release_tag }}
           path: release-output/
@@ -741,20 +741,20 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           ref: ${{ needs.preflight.outputs.candidate_sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: platform-qualification-${{ github.run_id }}
           path: platform-qualification-input
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-dry-run-${{ needs.preflight.outputs.release_tag }}
           path: release-dry-run-input
@@ -798,7 +798,7 @@ jobs:
             release-qualification/release-notes.json
           cp release-dry-run-input/release-notes.md \
             release-qualification/release-notes.md
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-qualification-${{ github.run_id }}
           path: release-qualification/
@@ -817,12 +817,12 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: true
           ref: main
           fetch-depth: 0
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -830,7 +830,7 @@ jobs:
           go-version: '1.25.8'
           cache-dependency-path: release/release_attestation_verifier/go.sum
       - run: python -m pip install -r release/requirements.txt
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: validated-platform-qualification-${{ github.run_id }}
           path: validated-platform-qualification-input
@@ -870,8 +870,8 @@ jobs:
           test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = "true"
           ! git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1
           ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -897,7 +897,7 @@ jobs:
           done
       - name: Build API image once without publishing
         id: api
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/backend.Dockerfile
@@ -913,7 +913,7 @@ jobs:
             ANIMEMO_CHANNEL=${{ inputs.channel }}
       - name: Build Web image once without publishing
         id: web
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/frontend.Dockerfile
@@ -967,14 +967,14 @@ jobs:
           echo "api_digest=$api_digest" >> "$GITHUB_OUTPUT"
           echo "web_digest=$web_digest" >> "$GITHUB_OUTPUT"
       - name: Attest API image provenance
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-name: ${{ env.API_REPOSITORY }}
           subject-digest: ${{ steps.published.outputs.api_digest }}
           push-to-registry: true
           create-storage-record: false
       - name: Attest Web image provenance
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-name: ${{ env.WEB_REPOSITORY }}
           subject-digest: ${{ steps.published.outputs.web_digest }}
@@ -1066,7 +1066,7 @@ jobs:
             --image "redis=$redis_repository@$redis_digest" \
             > release-output/portable-build-receipt.json
       - name: Attest release manifest provenance
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-checksums: release-output/checksums.txt
       - name: Verify published OCI and file attestations
@@ -1244,7 +1244,7 @@ jobs:
             --actions-subject "web-image=oci://$WEB_REPOSITORY@$WEB_DIGEST" \
             --output "release-output/animemo-$RELEASE_TAG-release-attestation.json" \
             > release-output/release-attestation-acquisition-receipt.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-publication-metadata-${{ needs.preflight.outputs.release_tag }}
           path: |

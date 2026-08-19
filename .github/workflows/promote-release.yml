@@ -38,12 +38,12 @@ jobs:
       web_digest: ${{ steps.identity.outputs.web_digest }}
       previous_stable: ${{ steps.identity.outputs.previous_stable }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
@@ -121,7 +121,7 @@ jobs:
           test -f "$acceptance_path"
           test "$(git ls-files --error-unmatch "$acceptance_path")" = "$acceptance_path"
           cp "$acceptance_path" "$RUNNER_TEMP/rc-live-acceptance.json"
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -245,7 +245,7 @@ jobs:
           echo "api_digest=$api_digest" >> "$GITHUB_OUTPUT"
           echo "web_repository=$web_repository" >> "$GITHUB_OUTPUT"
           echo "web_digest=$web_digest" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stable-promotion-${{ steps.identity.outputs.stable_tag }}
           path: promotion-output/
@@ -260,15 +260,15 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: stable-promotion-${{ needs.plan.outputs.stable_tag }}
           path: promotion-output
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -289,16 +289,16 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: true
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: stable-promotion-${{ needs.plan.outputs.stable_tag }}
           path: promotion-output
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
@@ -347,7 +347,7 @@ jobs:
           test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = "true"
           ! git ls-remote --exit-code --tags origin "refs/tags/$STABLE_TAG" >/dev/null 2>&1
           ! gh release view "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -368,7 +368,7 @@ jobs:
           test "$(crane digest "$API_REPOSITORY:$STABLE_TAG")" = "$API_DIGEST"
           test "$(crane digest "$WEB_REPOSITORY:$STABLE_TAG")" = "$WEB_DIGEST"
       - name: Attest the promoted Stable manifest
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-checksums: promotion-output/checksums.txt
       - name: Verify Stable release contract attestations
@@ -522,7 +522,7 @@ jobs:
             --actions-source-commit installer-materials=$GITHUB_SHA \
             --output "promotion-output/animemo-$STABLE_TAG-release-attestation.json" \
             > promotion-output/release-attestation-acquisition-receipt.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stable-release-attestation-${{ needs.plan.outputs.stable_tag }}
           path: |

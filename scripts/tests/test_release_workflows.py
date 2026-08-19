@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -17,6 +18,12 @@ HARDENED_WORKFLOWS = (
     "release-gate.yml",
     "release.yml",
 )
+
+PINNED_RELEASE_ACTIONS = {
+    "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "actions/setup-python": "5fda3b95a4ea91299a34e894583c3862153e4b97",
+    "actions/download-artifact": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+}
 
 
 class UniqueKeyLoader(yaml.BaseLoader):
@@ -53,6 +60,20 @@ def workflow(name):
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
+    def test_release_workflows_pin_every_external_action_to_a_commit(self):
+        for name in ("release.yml", "promote-release.yml"):
+            source = (ROOT / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            references = re.findall(
+                r"uses:\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([^\s#]+)",
+                source,
+            )
+            self.assertTrue(references)
+            for action, reference in references:
+                with self.subTest(workflow=name, action=action):
+                    self.assertRegex(reference, r"^[0-9a-f]{40}$")
+
     def test_core_github_actions_are_v7_and_checkout_credentials_are_explicit(self):
         credentialed_checkouts = set()
         checkout_count = 0
@@ -64,7 +85,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     action = step.get("uses", "")
                     if action.startswith("actions/checkout@"):
                         checkout_count += 1
-                        self.assertEqual(action, "actions/checkout@v7")
+                        expected = (
+                            f"actions/checkout@{PINNED_RELEASE_ACTIONS['actions/checkout']}"
+                            if name in {"release.yml", "promote-release.yml"}
+                            else "actions/checkout@v7"
+                        )
+                        self.assertEqual(action, expected)
                         settings = step.get("with", {})
                         self.assertIn("persist-credentials", settings)
                         if settings["persist-credentials"] == "true":
@@ -74,7 +100,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     elif action.startswith("actions/setup-node@"):
                         self.assertEqual(action, "actions/setup-node@v7")
                     elif action.startswith("actions/setup-python@"):
-                        self.assertEqual(action, "actions/setup-python@v7")
+                        expected = (
+                            f"actions/setup-python@{PINNED_RELEASE_ACTIONS['actions/setup-python']}"
+                            if name in {"release.yml", "promote-release.yml"}
+                            else "actions/setup-python@v7"
+                        )
+                        self.assertEqual(action, expected)
 
         self.assertGreater(checkout_count, 0)
         self.assertEqual(
@@ -781,9 +812,17 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_stable_promotion_dry_run_checks_out_before_downloading_artifact(self):
         promotion = workflow("promote-release.yml")
         steps = promotion["jobs"]["dry-run"]["steps"]
-        checkout = next(index for index, step in enumerate(steps) if step.get("uses") == "actions/checkout@v7")
+        checkout = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("uses")
+            == f"actions/checkout@{PINNED_RELEASE_ACTIONS['actions/checkout']}"
+        )
         download = next(
-            index for index, step in enumerate(steps) if step.get("uses") == "actions/download-artifact@v4"
+            index
+            for index, step in enumerate(steps)
+            if step.get("uses")
+            == f"actions/download-artifact@{PINNED_RELEASE_ACTIONS['actions/download-artifact']}"
         )
 
         self.assertLess(checkout, download)
