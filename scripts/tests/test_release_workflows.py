@@ -460,7 +460,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         authority_source = source[source.index("  release-authority:\n") : source.index("  dry-run:\n")]
         self.assertIn("toJSON(needs)", authority_source)
         self.assertIn("ref: ${{ needs.preflight.outputs.candidate_sha }}", authority_source)
-        self.assertIn("python scripts/release_authority.py", authority_source)
+        self.assertIn("python -m scripts.release_authority", authority_source)
+        self.assertNotIn("python scripts/release_authority.py", source)
         self.assertEqual(
             release["jobs"]["dry-run"]["needs"],
             ["preflight", "release-authority", "platform-qualification"],

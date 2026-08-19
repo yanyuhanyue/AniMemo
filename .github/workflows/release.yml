@@ -428,7 +428,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$PLATFORM_QUALIFICATION_RESULT" = "success"
-          python scripts/release_authority.py
+          python -m scripts.release_authority
       - name: Download and verify Phase A qualification evidence
         if: ${{ inputs.operation == 'publish' }}
         env:
@@ -536,7 +536,7 @@ jobs:
           export QUALIFICATION_WORKFLOW_SHA="$(cat "$RUNNER_TEMP/qualification-workflow-sha.txt")"
           export RELEASE_NOTES_IDENTITY="$(jq -r '.identity' "$RUNNER_TEMP/qualification/release-notes.json")"
           export RELEASE_NOTES_MARKDOWN_SHA256="sha256:$(sha256sum "$RUNNER_TEMP/qualification/release-notes.md" | awk '{print $1}')"
-          python scripts/release_authority.py
+          python -m scripts.release_authority
       - name: Stage the validated platform and Release Notes for Phase B production
         if: ${{ inputs.operation == 'publish' }}
         env:
@@ -826,7 +826,7 @@ jobs:
           export RELEASE_NOTES_IDENTITY="$(jq -r '.identity // empty' "$RELEASE_NOTES_IDENTITY_FILE")"
           export RELEASE_NOTES_MARKDOWN_SHA256="sha256:$(sha256sum "$RELEASE_NOTES_MARKDOWN_FILE" | awk '{print $1}')"
           [[ "$RELEASE_NOTES_IDENTITY" =~ ^sha256:[0-9a-f]{64}$ ]]
-          python scripts/release_authority.py
+          python -m scripts.release_authority
           mkdir -p release-qualification
           cp "$RUNNER_TEMP/release-qualification-${GITHUB_RUN_ID}.json" \
             "release-qualification/release-qualification-${GITHUB_RUN_ID}.json"
@@ -1188,7 +1188,7 @@ jobs:
           OPERATION=portable \
           PUBLICATION_PLAN_PATH=release-output/publication-plan.json \
           PORTABLE_BUILD_RECEIPT_PATH=release-output/portable-build-receipt.json \
-            python scripts/release_authority.py \
+            python -m scripts.release_authority \
             > release-output/portable-pipeline-authority.json
           test "$(jq -r '.external_mutation_mode' release-output/publication-plan.json)" = "PLAN_ONLY"
       - name: Create the immutable annotated RC tag
