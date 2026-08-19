@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
+import shutil
 import stat
+import tarfile
+import tempfile
 import unicodedata
+import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -18,7 +23,16 @@ OCI_IMAGE_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 OCI_IMAGE_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json"
 OCI_LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar"
+OCI_LAYER_GZIP_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar+gzip"
+OCI_LAYER_MEDIA_TYPES = frozenset(
+    {
+        OCI_LAYER_MEDIA_TYPE,
+        OCI_LAYER_GZIP_MEDIA_TYPE,
+    }
+)
 OCI_PLATFORM = "linux/amd64"
+OCI_REF_NAME_ANNOTATION = "org.opencontainers.image.ref.name"
+DERIVED_IMPORT_TAG_PREFIX = "animemo-offline-"
 OCI_STREAM_CHUNK_BYTES = 1024 * 1024
 MAX_OCI_METADATA_BYTES = 16 * 1024 * 1024
 MAX_OCI_BLOB_BYTES = 4 * 1024 * 1024 * 1024
@@ -26,6 +40,8 @@ MAX_OCI_LAYERS = 256
 MAX_OCI_LAYOUT_FILES = MAX_OCI_LAYERS + 4
 MAX_OCI_LAYOUT_DIRECTORIES = 4
 MAX_OCI_LAYOUT_TOTAL_BYTES = 16 * 1024 * 1024 * 1024
+MAX_OCI_LAYER_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
+MAX_OCI_IMAGE_UNCOMPRESSED_LAYER_BYTES = 16 * 1024 * 1024 * 1024
 MAX_OCI_PATH_BYTES = 1024
 MAX_OCI_PATH_DEPTH = 8
 MAX_OCI_PATH_COMPONENT_BYTES = 255
@@ -47,6 +63,10 @@ REQUIRED_IMAGE_REPOSITORIES = {
     "postgres": "docker.io/library/postgres",
     "redis": "docker.io/library/redis",
     "web": "ghcr.io/yanyuhanyue/animemo-web",
+}
+DOCKER_DAEMON_OFFICIAL_LIBRARY_DISPLAY_REPOSITORIES = {
+    ("postgres", "docker.io/library/postgres"): "postgres",
+    ("redis", "docker.io/library/redis"): "redis",
 }
 
 
@@ -97,6 +117,124 @@ class VerifiedLocalImageImportReceipt:
     images: tuple[str, ...]
 
 
+class DockerOCIImporter:
+    """Load an already verified OCI layout into the local Docker daemon."""
+
+    def __init__(
+        self,
+        *,
+        runner=None,
+        environment: dict[str, str] | None = None,
+        staging_parent: Path | None = None,
+    ) -> None:
+        self.runner = runner or CommandRunner()
+        self.environment = (
+            dict(environment)
+            if environment is not None
+            else {
+                name: os.environ[name]
+                for name in OCI_PROCESS_ENV_ALLOWLIST
+                if name in os.environ
+            }
+        )
+        self.staging_parent = (
+            Path(staging_parent)
+            if staging_parent is not None
+            else Path(tempfile.gettempdir())
+        )
+
+    def import_verified_image(self, image: VerifiedOCIImage) -> str:
+        if type(image) is not VerifiedOCIImage:
+            raise OCIContractError("OCI_IMAGE_NOT_VERIFIED")
+        if (
+            image.role not in REQUIRED_IMAGE_REPOSITORIES
+            or image.repository != REQUIRED_IMAGE_REPOSITORIES[image.role]
+            or image.platform != OCI_PLATFORM
+        ):
+            raise OCIContractError("OCI_IMAGE_NOT_VERIFIED")
+        refreshed = verify_oci_image(
+            image.layout,
+            OCIImageExpectation(
+                role=image.role,
+                repository=image.repository,
+                digest=image.digest,
+                platform=image.platform,
+                layout_path=f"oci/{image.role}",
+            ),
+        )
+        if refreshed != image:
+            raise OCIContractError("OCI_IMAGE_NOT_VERIFIED")
+        try:
+            parent_metadata = self.staging_parent.lstat()
+        except OSError as error:
+            raise OCIContractError("OCI_IMPORT_STAGE_UNAVAILABLE") from error
+        if _is_link_like(self.staging_parent) or not stat.S_ISDIR(
+            parent_metadata.st_mode
+        ):
+            raise OCIContractError("OCI_IMPORT_STAGE_INVALID")
+        stage = Path(
+            tempfile.mkdtemp(prefix=".animemo-oci-import-", dir=self.staging_parent)
+        )
+        os.chmod(stage, 0o700)
+        archive = stage / f"{image.role}.tar"
+        expected = f"{image.repository}@{image.digest}"
+        try:
+            _write_verified_oci_archive(refreshed, archive)
+            try:
+                self.runner.run(
+                    [
+                        "/usr/bin/docker",
+                        "image",
+                        "load",
+                        "--input",
+                        str(archive),
+                    ],
+                    env=self.environment,
+                    timeout=600,
+                )
+            except CommandFailed as error:
+                raise OCIContractError("OCI_DOCKER_LOCAL_LOAD_FAILED") from error
+            try:
+                inspection = self.runner.run(
+                    [
+                        "/usr/bin/docker",
+                        "image",
+                        "inspect",
+                        "--format",
+                        "{{json .RepoDigests}}",
+                        expected,
+                    ],
+                    env=self.environment,
+                    timeout=60,
+                )
+            except CommandFailed as error:
+                raise OCIContractError("OCI_DOCKER_POST_IMPORT_INSPECT_FAILED") from error
+            try:
+                observed = json.loads(inspection.stdout)
+            except (AttributeError, TypeError, json.JSONDecodeError) as error:
+                raise OCIContractError("OCI_DOCKER_POST_IMPORT_IDENTITY_INVALID") from error
+            if (
+                not isinstance(observed, list)
+                or any(type(item) is not str for item in observed)
+            ):
+                raise OCIContractError("OCI_DOCKER_POST_IMPORT_DIGEST_MISMATCH")
+            accepted_readbacks = {expected}
+            display_repository = (
+                DOCKER_DAEMON_OFFICIAL_LIBRARY_DISPLAY_REPOSITORIES.get(
+                    (image.role, image.repository)
+                )
+            )
+            if display_repository is not None:
+                accepted_readbacks.add(
+                    f"{display_repository}@{image.digest}"
+                )
+            if not accepted_readbacks.intersection(observed):
+                raise OCIContractError("OCI_DOCKER_POST_IMPORT_DIGEST_MISMATCH")
+            return expected
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+
+
 @dataclass(frozen=True)
 class LocalImageAcquisitionEntry:
     role: str
@@ -134,7 +272,11 @@ class ImageAcquirer:
     """
 
     def __init__(
-        self, *, runner=None, environment: dict[str, str] | None = None
+        self,
+        *,
+        runner=None,
+        environment: dict[str, str] | None = None,
+        local_importer: VerifiedOCIImageImporter | None = None,
     ) -> None:
         self.runner = runner or CommandRunner()
         self.environment = (
@@ -145,6 +287,80 @@ class ImageAcquirer:
                 for name in OCI_PROCESS_ENV_ALLOWLIST
                 if name in os.environ
             }
+        )
+        self.local_importer = local_importer
+
+    def acquire_local(
+        self,
+        materials: VerifiedReleaseMaterials,
+        verified: VerifiedOCIImageSet,
+        policy,
+    ) -> ImageAcquisitionReceipt:
+        """Import a locally verified four-image set without registry access."""
+
+        from .local_bundle import LocalBundleTransportPolicy
+
+        if type(materials) is not VerifiedReleaseMaterials:
+            raise OCIContractError("OCI_RELEASE_MATERIALS_NOT_VERIFIED")
+        if type(verified) is not VerifiedOCIImageSet:
+            raise OCIContractError("OCI_IMAGE_SET_NOT_VERIFIED")
+        if type(policy) is not LocalBundleTransportPolicy:
+            raise OCIContractError("OCI_LOCAL_TRANSPORT_POLICY_INVALID")
+        if policy.source != "local-bundle" or policy.fallback_allowed:
+            raise OCIContractError("OCI_LOCAL_TRANSPORT_POLICY_INVALID")
+        try:
+            _validate_digest(materials.identity_digest)
+        except OCIContractError as error:
+            raise OCIContractError("OCI_RELEASE_IDENTITY_INVALID") from error
+        for image in verified.images:
+            expected = f"{image.repository}@{image.digest}"
+            try:
+                authoritative = materials.image(image.role)
+            except Exception as error:
+                raise OCIContractError("OCI_RELEASE_IMAGE_IDENTITY_INVALID") from error
+            if authoritative != expected:
+                raise OCIContractError("OCI_RELEASE_IMAGE_IDENTITY_MISMATCH")
+        importer = self.local_importer or DockerOCIImporter(
+            runner=self.runner,
+            environment=self.environment,
+        )
+        imported = import_verified_oci_image_set(verified, importer)
+        acquired = tuple(
+            AcquiredRuntimeImage(
+                role=image.role,
+                canonical_reference=reference,
+                observed_reference=reference,
+            )
+            for image, reference in zip(
+                verified.images, imported.images, strict=True
+            )
+        )
+        identity_document = {
+            "images": [
+                {
+                    "canonical_reference": item.canonical_reference,
+                    "observed_reference": item.observed_reference,
+                    "role": item.role,
+                }
+                for item in acquired
+            ],
+            "receipt_version": 1,
+            "transport_policy_identity": policy.identity,
+            "verified_release_identity": materials.identity_digest,
+        }
+        identity = hashlib.sha256(
+            json.dumps(
+                identity_document,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        ).hexdigest()
+        return ImageAcquisitionReceipt(
+            verified_release_identity=materials.identity_digest,
+            transport_policy_identity=policy.identity,
+            images=acquired,
+            identity=identity,
         )
 
     def acquire(
@@ -445,6 +661,99 @@ def _blob(
     return bytes(captured) if captured is not None else None
 
 
+def _layer_descriptor(value: Any) -> tuple[str, int, str]:
+    if not isinstance(value, dict):
+        raise OCIContractError("OCI_DESCRIPTOR_INVALID")
+    media_type = value.get("mediaType")
+    if type(media_type) is not str or media_type not in OCI_LAYER_MEDIA_TYPES:
+        raise OCIContractError("OCI_DESCRIPTOR_MEDIA_TYPE_INVALID")
+    digest, size = _descriptor(
+        value,
+        media_type=media_type,
+        with_platform=False,
+    )
+    return digest, size, media_type
+
+
+def _verify_layer_blob(
+    layout: Path,
+    *,
+    digest: str,
+    size: int,
+    media_type: str,
+    diff_id: str,
+    remaining_image_bytes: int,
+) -> int:
+    digest = _validate_digest(digest)
+    diff_id = _validate_digest(diff_id)
+    if size > MAX_OCI_BLOB_BYTES:
+        raise OCIContractError("OCI_BLOB_SIZE_LIMIT")
+    target = layout / "blobs" / "sha256" / digest[7:]
+    stream, expected_size = _open_regular_file(target, max_bytes=MAX_OCI_BLOB_BYTES)
+    if expected_size != size:
+        stream.close()
+        raise OCIContractError("OCI_DESCRIPTOR_SIZE_MISMATCH")
+    stored_hasher = hashlib.sha256()
+    diff_hasher = hashlib.sha256()
+    stored_bytes = 0
+    uncompressed_bytes = 0
+    decoder = (
+        zlib.decompressobj(16 + zlib.MAX_WBITS)
+        if media_type == OCI_LAYER_GZIP_MEDIA_TYPE
+        else None
+    )
+
+    def consume_uncompressed(value: bytes) -> None:
+        nonlocal uncompressed_bytes
+        uncompressed_bytes += len(value)
+        if uncompressed_bytes > MAX_OCI_LAYER_UNCOMPRESSED_BYTES:
+            raise OCIContractError("OCI_LAYER_UNCOMPRESSED_SIZE_LIMIT")
+        if uncompressed_bytes > remaining_image_bytes:
+            raise OCIContractError("OCI_LAYERS_UNCOMPRESSED_SIZE_LIMIT")
+        diff_hasher.update(value)
+
+    with stream:
+        while True:
+            chunk = stream.read(OCI_STREAM_CHUNK_BYTES)
+            if not chunk:
+                break
+            stored_bytes += len(chunk)
+            if stored_bytes > size:
+                raise OCIContractError("OCI_DESCRIPTOR_SIZE_MISMATCH")
+            stored_hasher.update(chunk)
+            if decoder is None:
+                consume_uncompressed(chunk)
+                continue
+            pending = chunk
+            while pending:
+                previous_size = len(pending)
+                try:
+                    uncompressed = decoder.decompress(
+                        pending,
+                        OCI_STREAM_CHUNK_BYTES,
+                    )
+                except zlib.error as error:
+                    raise OCIContractError("OCI_LAYER_GZIP_INVALID") from error
+                pending = decoder.unconsumed_tail
+                consume_uncompressed(uncompressed)
+                if decoder.eof:
+                    if decoder.unused_data or pending or stored_bytes != size:
+                        raise OCIContractError("OCI_LAYER_GZIP_TRAILING_DATA")
+                    break
+                if pending and len(pending) == previous_size and not uncompressed:
+                    raise OCIContractError("OCI_LAYER_GZIP_INVALID")
+        after = os.fstat(stream.fileno())
+    if stored_bytes != size or after.st_size != size:
+        raise OCIContractError("OCI_DESCRIPTOR_SIZE_MISMATCH")
+    if "sha256:" + stored_hasher.hexdigest() != digest:
+        raise OCIContractError("OCI_DESCRIPTOR_DIGEST_MISMATCH")
+    if decoder is not None and not decoder.eof:
+        raise OCIContractError("OCI_LAYER_GZIP_INVALID")
+    if "sha256:" + diff_hasher.hexdigest() != diff_id:
+        raise OCIContractError("OCI_LAYER_DIFF_ID_MISMATCH")
+    return uncompressed_bytes
+
+
 def _closed_layout(layout: Path) -> tuple[set[str], set[str]]:
     try:
         root_stat = layout.lstat()
@@ -488,6 +797,139 @@ def _closed_layout(layout: Path) -> tuple[set[str], set[str]]:
             if total_size > MAX_OCI_LAYOUT_TOTAL_BYTES:
                 raise OCIContractError("OCI_LAYOUT_TOTAL_SIZE_LIMIT")
     return result, directories_seen
+
+
+class _HashingReader:
+    def __init__(self, stream, *, capture: bool) -> None:
+        self.stream = stream
+        self.hasher = hashlib.sha256()
+        self.consumed = 0
+        self.captured = bytearray() if capture else None
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self.stream.read(size)
+        self.consumed += len(chunk)
+        self.hasher.update(chunk)
+        if self.captured is not None:
+            if self.consumed > MAX_OCI_METADATA_BYTES:
+                raise OCIContractError("OCI_METADATA_SIZE_LIMIT")
+            self.captured.extend(chunk)
+        return chunk
+
+
+def _oci_tar_info(path: str, size: int) -> tarfile.TarInfo:
+    member = tarfile.TarInfo(path)
+    member.size = size
+    member.mode = 0o644
+    member.uid = 0
+    member.gid = 0
+    member.uname = ""
+    member.gname = ""
+    member.mtime = 0
+    member.type = tarfile.REGTYPE
+    return member
+
+
+def _write_verified_oci_archive(image: VerifiedOCIImage, archive: Path) -> None:
+    frozen_index = _parse_json(
+        _read_regular_file(image.layout / "index.json")
+    )
+    _expect_keys(
+        frozen_index,
+        {"manifests", "mediaType", "schemaVersion"},
+        "OCI_IMPORT_INDEX_FIELDS_INVALID",
+    )
+    if (
+        frozen_index["schemaVersion"] != 2
+        or frozen_index["mediaType"] != OCI_IMAGE_INDEX_MEDIA_TYPE
+    ):
+        raise OCIContractError("OCI_IMPORT_INDEX_IDENTITY_INVALID")
+    manifests = frozen_index["manifests"]
+    if not isinstance(manifests, list) or len(manifests) != 1:
+        raise OCIContractError("OCI_IMPORT_INDEX_MANIFEST_COUNT_INVALID")
+    manifest_digest, _ = _descriptor(
+        manifests[0],
+        media_type=OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+        with_platform=True,
+    )
+    if manifest_digest != image.digest:
+        raise OCIContractError("OCI_IMPORT_INDEX_DIGEST_MISMATCH")
+    derived_reference = (
+        f"{image.repository}:{DERIVED_IMPORT_TAG_PREFIX}{image.digest[7:]}"
+    )
+    derived_descriptor = dict(manifests[0])
+    derived_descriptor["annotations"] = {
+        OCI_REF_NAME_ANNOTATION: derived_reference,
+    }
+    derived_index = json.dumps(
+        {
+            "manifests": [derived_descriptor],
+            "mediaType": OCI_IMAGE_INDEX_MEDIA_TYPE,
+            "schemaVersion": 2,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    blob_paths = {
+        f"blobs/sha256/{image.digest[7:]}",
+        f"blobs/sha256/{image.config_digest[7:]}",
+        *(f"blobs/sha256/{digest[7:]}" for digest in image.layer_digests),
+    }
+    paths = ["index.json", "oci-layout"] + sorted(blob_paths)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(archive, flags, 0o600)
+    except OSError as error:
+        raise OCIContractError("OCI_IMPORT_ARCHIVE_CREATE_FAILED") from error
+    metadata: dict[str, bytes] = {}
+    try:
+        os.chmod(archive, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as output:
+            descriptor = -1
+            with tarfile.open(
+                fileobj=output, mode="w:", format=tarfile.USTAR_FORMAT
+            ) as handle:
+                for relative in paths:
+                    if relative == "index.json":
+                        stream, size = io.BytesIO(derived_index), len(derived_index)
+                    else:
+                        source = image.layout.joinpath(*PurePosixPath(relative).parts)
+                        stream, size = _open_regular_file(
+                            source, max_bytes=MAX_OCI_BLOB_BYTES
+                        )
+                    with stream:
+                        reader = _HashingReader(
+                            stream, capture=relative == "oci-layout"
+                        )
+                        handle.addfile(_oci_tar_info(relative, size), fileobj=reader)
+                        if reader.consumed != size:
+                            raise OCIContractError("OCI_IMPORT_ARCHIVE_SIZE_MISMATCH")
+                        if relative.startswith("blobs/sha256/"):
+                            expected = "sha256:" + relative.rsplit("/", 1)[1]
+                            if "sha256:" + reader.hasher.hexdigest() != expected:
+                                raise OCIContractError(
+                                    "OCI_IMPORT_ARCHIVE_DIGEST_MISMATCH"
+                                )
+                        elif relative == "oci-layout":
+                            assert reader.captured is not None
+                            metadata[relative] = bytes(reader.captured)
+            output.flush()
+            os.fsync(output.fileno())
+        if _parse_json(metadata["oci-layout"]) != {"imageLayoutVersion": "1.0.0"}:
+            raise OCIContractError("OCI_IMPORT_LAYOUT_VERSION_INVALID")
+    except BaseException:
+        archive.unlink(missing_ok=True)
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _expectation(value: Any) -> OCIImageExpectation:
@@ -565,14 +1007,32 @@ def verify_oci_image(
     layers = manifest["layers"]
     if not isinstance(layers, list) or len(layers) > MAX_OCI_LAYERS:
         raise OCIContractError("OCI_LAYERS_INVALID")
+    rootfs = config.get("rootfs")
+    if not isinstance(rootfs, dict) or rootfs.get("type") != "layers":
+        raise OCIContractError("OCI_ROOTFS_INVALID")
+    diff_ids = rootfs.get("diff_ids")
+    if not isinstance(diff_ids, list) or len(diff_ids) != len(layers):
+        raise OCIContractError("OCI_ROOTFS_DIFF_IDS_INVALID")
+    try:
+        validated_diff_ids = tuple(_validate_digest(value) for value in diff_ids)
+    except OCIContractError as error:
+        raise OCIContractError("OCI_ROOTFS_DIFF_IDS_INVALID") from error
     layer_digests: list[str] = []
-    for layer in layers:
-        layer_digest, layer_size = _descriptor(
-            layer, media_type=OCI_LAYER_MEDIA_TYPE, with_platform=False
-        )
+    uncompressed_layer_bytes = 0
+    for layer, diff_id in zip(layers, validated_diff_ids, strict=True):
+        layer_digest, layer_size, layer_media_type = _layer_descriptor(layer)
         if layer_digest in layer_digests:
             raise OCIContractError("OCI_LAYER_DUPLICATE")
-        _blob(layout, layer_digest, layer_size)
+        uncompressed_layer_bytes += _verify_layer_blob(
+            layout,
+            digest=layer_digest,
+            size=layer_size,
+            media_type=layer_media_type,
+            diff_id=diff_id,
+            remaining_image_bytes=(
+                MAX_OCI_IMAGE_UNCOMPRESSED_LAYER_BYTES - uncompressed_layer_bytes
+            ),
+        )
         layer_digests.append(layer_digest)
     expected_files = {
         "index.json",
@@ -655,7 +1115,7 @@ def import_verified_oci_image_set(
     operation = getattr(importer, "import_verified_image", None)
     if not callable(operation):
         raise OCIContractError("OCI_LOCAL_IMPORTER_INVALID")
-    observed: list[str] = []
+    refreshed_images: list[VerifiedOCIImage] = []
     for image in verified.images:
         if (
             image.repository != REQUIRED_IMAGE_REPOSITORIES[image.role]
@@ -674,6 +1134,10 @@ def import_verified_oci_image_set(
         )
         if refreshed != image:
             raise OCIContractError("OCI_IMAGE_SET_NOT_VERIFIED")
+        refreshed_images.append(refreshed)
+
+    observed: list[str] = []
+    for refreshed in refreshed_images:
         expected = f"{refreshed.repository}@{refreshed.digest}"
         try:
             result = operation(refreshed)

@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import tarfile
@@ -14,12 +15,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 BLOCKED_PORTABLE_PUBLICATION_AUTHORITY = "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY"
-MAX_PORTABLE_FILES = 4096
-MAX_PORTABLE_FILE_BYTES = 4 * 1024 * 1024 * 1024
-MAX_PORTABLE_TOTAL_BYTES = 16 * 1024 * 1024 * 1024
-MAX_PORTABLE_INDEX_BYTES = 16 * 1024 * 1024
-MAX_PORTABLE_PATH_LENGTH = 1024
-MAX_PORTABLE_PATH_DEPTH = 16
+MAX_PORTABLE_FILES = 16384
+MAX_PORTABLE_FILE_BYTES = 8 * 1024 * 1024 * 1024
+MAX_PORTABLE_TOTAL_BYTES = 32 * 1024 * 1024 * 1024
+MAX_PORTABLE_INDEX_BYTES = 4 * 1024 * 1024
+MAX_PORTABLE_PATH_LENGTH = 240
+MAX_PORTABLE_PATH_DEPTH = 6
 MAX_PORTABLE_PATH_COMPONENT_BYTES = 255
 MAX_PORTABLE_DIRECTORIES = MAX_PORTABLE_FILES * MAX_PORTABLE_PATH_DEPTH
 PORTABLE_STREAM_CHUNK_BYTES = 1024 * 1024
@@ -35,6 +36,17 @@ PORTABLE_IMAGE_REPOSITORIES = {
     "redis": "docker.io/library/redis",
     "web": "ghcr.io/yanyuhanyue/animemo-web",
 }
+_RELEASE_TAG = re.compile(
+    r"v[0-9]+\.[0-9]+\.[0-9]+(?:-(?:beta|rc)\.(?:[1-9][0-9]*|TEST))?"
+)
+
+
+def portable_release_asset_name(tag: str) -> str:
+    """Return the single deterministic GitHub Release transport asset name."""
+
+    if not isinstance(tag, str) or not _RELEASE_TAG.fullmatch(tag):
+        raise PortableBundleError("PORTABLE_RELEASE_TAG_INVALID")
+    return f"animemo-{tag}-portable.tar"
 
 
 class PortableBundleError(ValueError):
@@ -801,3 +813,93 @@ def portable_publication_authority_gate(
     if trust_root is not None or public_key is not None:
         raise PortableAuthorityError("PORTABLE_SELF_DECLARED_AUTHORITY_FORBIDDEN")
     return BLOCKED_PORTABLE_PUBLICATION_AUTHORITY
+
+
+def _copy_verified_regular_file(source: Path, destination: Path) -> None:
+    stream, size = _open_single_link_regular_file(
+        source, max_bytes=MAX_PORTABLE_FILE_BYTES
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(destination, flags, 0o600)
+    except OSError as error:
+        stream.close()
+        raise PortableBundleError("PORTABLE_PROMOTION_COPY_FAILED") from error
+    consumed = 0
+    try:
+        with stream, os.fdopen(descriptor, "wb", closefd=True) as output:
+            while chunk := stream.read(PORTABLE_STREAM_CHUNK_BYTES):
+                consumed += len(chunk)
+                if consumed > size:
+                    raise PortableBundleError("PORTABLE_PROMOTION_SOURCE_CHANGED")
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+    except OSError as error:
+        raise PortableBundleError("PORTABLE_PROMOTION_COPY_FAILED") from error
+    if consumed != size:
+        raise PortableBundleError("PORTABLE_PROMOTION_SOURCE_CHANGED")
+
+
+def promote_portable_payload(
+    rc_archive: Path,
+    *,
+    authority_directory: Path,
+    archive: Path,
+) -> PortableArchiveInspection:
+    """Re-envelope accepted RC OCI bytes with the Stable canonical four.
+
+    This does not rebuild, pull, or import any image and never copies a
+    post-publish attestation sidecar into the deterministic payload.
+    """
+
+    rc_archive = Path(rc_archive)
+    authority_directory = Path(authority_directory)
+    archive = Path(archive)
+    try:
+        authority_metadata = authority_directory.lstat()
+        archive_parent_metadata = archive.parent.lstat()
+    except OSError as error:
+        raise PortableBundleError("PORTABLE_PROMOTION_PATH_UNAVAILABLE") from error
+    if (
+        _is_link_like(authority_directory)
+        or not stat.S_ISDIR(authority_metadata.st_mode)
+        or _is_link_like(archive.parent)
+        or not stat.S_ISDIR(archive_parent_metadata.st_mode)
+    ):
+        raise PortableBundleError("PORTABLE_PROMOTION_PATH_INVALID")
+    source = Path(
+        tempfile.mkdtemp(prefix=".animemo-portable-promotion-", dir=archive.parent)
+    )
+    staged: PortableBundle | None = None
+    try:
+        staged = stage_portable_payload(rc_archive, archive.parent)
+        for relative in CANONICAL_RELEASE_ASSET_PATHS:
+            name = PurePosixPath(relative).name
+            _copy_verified_regular_file(
+                authority_directory / name,
+                source.joinpath(*PurePosixPath(relative).parts),
+            )
+        for identity in staged.files:
+            if not identity.path.startswith("oci/"):
+                continue
+            _copy_verified_regular_file(
+                staged.file(identity.path),
+                source.joinpath(*PurePosixPath(identity.path).parts),
+            )
+        return build_portable_payload(
+            source,
+            archive,
+            staged.index["ociImages"],
+        )
+    finally:
+        shutil.rmtree(source, ignore_errors=True)
+        if staged is not None:
+            shutil.rmtree(staged.root, ignore_errors=True)

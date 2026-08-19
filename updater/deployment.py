@@ -635,6 +635,24 @@ class ImmutableComposeDeployment:
             runner=self.runner,
             environment=self._environment(materials.manifest),
         ).acquire(materials, policy)
+        self._record_image_acquisition_receipt(receipt)
+
+    def import_local_verified(self, source, materials, policy) -> None:
+        acquire_images = getattr(source, "acquire_images", None)
+        if not callable(acquire_images):
+            raise StateError("Verified local OCI source is unavailable")
+        receipt = acquire_images(
+            materials,
+            ImageAcquirer(
+                runner=self.runner,
+                environment=self._environment(materials.manifest),
+            ),
+        )
+        if receipt.transport_policy_identity != policy.identity:
+            raise StateError("Local OCI receipt transport binding is invalid")
+        self._record_image_acquisition_receipt(receipt)
+
+    def _record_image_acquisition_receipt(self, receipt) -> None:
         _atomic_json(
             self.paths.state_root / "distribution" / "image-acquisition-receipt.json",
             {

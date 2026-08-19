@@ -14,9 +14,9 @@ REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_IMPORT_ROOT))
 
-from release.notes import CANONICAL_RELEASE_ASSETS
 from release.publication import (
     PublicationError,
+    declared_publication_assets,
     validate_publication_plan,
     verify_asset_readback,
     verify_post_publish,
@@ -30,13 +30,16 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _read_assets(directory: Path) -> dict[str, bytes]:
+def _read_assets(
+    directory: Path, plan: Mapping[str, Any]
+) -> dict[str, Path]:
     if not directory.is_dir():
         raise PublicationError("release readback directory is missing")
     observed = {path.name for path in directory.iterdir() if path.is_file()}
-    if observed != set(CANONICAL_RELEASE_ASSETS):
+    expected = declared_publication_assets(plan)
+    if observed != set(expected):
         raise PublicationError("release readback directory has missing or extra assets")
-    return {name: (directory / name).read_bytes() for name in CANONICAL_RELEASE_ASSETS}
+    return {name: directory / name for name in expected}
 
 
 def _validate_metadata(
@@ -68,7 +71,7 @@ def _validate_metadata(
             raise PublicationError("GitHub release asset name is invalid or duplicated")
         digest = item["digest"]
         if digest is None:
-            digest = plan["assets"].get(name, {}).get("sha256")
+            digest = declared_publication_assets(plan).get(name, {}).get("sha256")
         projected[name] = {"sha256": digest, "size": item["size"]}
     body_sha = "sha256:" + hashlib.sha256(metadata["body"].encode("utf-8")).hexdigest()
     return projected, body_sha
@@ -78,7 +81,7 @@ def _verify_draft(args: argparse.Namespace) -> dict[str, Any]:
     plan = validate_publication_plan(_read_json(args.plan))
     metadata = _read_json(args.metadata)
     remote, body_sha = _validate_metadata(plan, metadata, draft=True)
-    downloaded = _read_assets(args.download_directory)
+    downloaded = _read_assets(args.download_directory, plan)
     verify_asset_readback(plan, remote_assets=remote, downloaded_assets=downloaded)
     notes_sha = "sha256:" + hashlib.sha256(args.notes_file.read_bytes()).hexdigest()
     if notes_sha != plan["release_notes_markdown_sha256"] or body_sha != notes_sha:
@@ -97,7 +100,7 @@ def _verify_public(args: argparse.Namespace) -> dict[str, Any]:
     plan = validate_publication_plan(_read_json(args.plan))
     metadata = _read_json(args.metadata)
     remote, body_sha = _validate_metadata(plan, metadata, draft=False)
-    downloaded = _read_assets(args.download_directory)
+    downloaded = _read_assets(args.download_directory, plan)
     return verify_post_publish(
         plan,
         release={

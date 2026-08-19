@@ -25,10 +25,21 @@ from updater.oci import VerifiedOCIImage, VerifiedOCIImageSet
 MAX_LOCAL_PAYLOAD_BYTES = 32 * 1024 * 1024 * 1024
 MAX_RELEASE_ATTESTATION_BYTES = 64 * 1024 * 1024
 _COPY_CHUNK_BYTES = 1024 * 1024
+_TRANSPORT_RECEIPT_NAME = "transport-receipt.json"
+_MAX_TRANSPORT_RECEIPT_BYTES = 64 * 1024
 
 
 class LocalBundleError(ValueError):
     """The local transport or its immutable authority proof is invalid."""
+
+
+def _closed_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    document: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in document:
+            raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID")
+        document[key] = value
+    return document
 
 
 def _policy_identity() -> str:
@@ -90,6 +101,176 @@ class AcquiredLocalBundle:
         if size != receipt.size or digest != receipt.sha256:
             raise LocalBundleError("LOCAL_BUNDLE_PRIVATE_COPY_CHANGED")
         return target
+
+
+def _receipt_identity_document(
+    payload: LocalBundleObjectReceipt,
+    release_attestation: LocalBundleObjectReceipt,
+) -> dict[str, object]:
+    return {
+        "objects": [
+            {
+                "logicalName": item.logical_name,
+                "relativePath": item.relative_path,
+                "sha256": item.sha256,
+                "size": item.size,
+            }
+            for item in (payload, release_attestation)
+        ],
+        "policyIdentity": LOCAL_BUNDLE_POLICY_IDENTITY,
+        "receiptVersion": 1,
+    }
+
+
+def _receipt_identity(document: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            document,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    ).hexdigest()
+
+
+def _write_transport_receipt(root: Path, receipt: LocalBundleReceipt) -> None:
+    document = {
+        "schema": "animemo.local-bundle-transport-receipt/v1",
+        "identity": receipt.identity,
+        **_receipt_identity_document(receipt.payload, receipt.release_attestation),
+    }
+    encoded = json.dumps(
+        document,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    if len(encoded) > _MAX_TRANSPORT_RECEIPT_BYTES:
+        raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID")
+    target = root / _TRANSPORT_RECEIPT_NAME
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(target, flags, 0o600)
+    try:
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_WRITE_FAILED")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _read_transport_receipt(
+    root: Path,
+    *,
+    expected_identity: str,
+) -> LocalBundleReceipt:
+    root = _direct_private_directory(Path(root), create=False)
+    expected_names = {
+        "portable-payload.tar",
+        "release-attestation.sigstore.json",
+        _TRANSPORT_RECEIPT_NAME,
+    }
+    try:
+        entries = list(root.iterdir())
+    except OSError as error:
+        raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID") from error
+    if {entry.name for entry in entries} != expected_names:
+        raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID")
+    for entry in entries:
+        try:
+            metadata = entry.lstat()
+        except OSError as error:
+            raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID") from error
+        if (
+            entry.is_symlink()
+            or bool(getattr(entry, "is_junction", lambda: False)())
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+        ):
+            raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID")
+    receipt_path = root / _TRANSPORT_RECEIPT_NAME
+    descriptor, metadata = _open_regular_source(
+        receipt_path,
+        max_bytes=_MAX_TRANSPORT_RECEIPT_BYTES,
+    )
+    try:
+        encoded = os.read(descriptor, metadata.st_size + 1)
+    finally:
+        os.close(descriptor)
+    try:
+        document = json.loads(
+            encoded.decode("ascii"),
+            object_pairs_hook=_closed_json_object,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, LocalBundleError) as error:
+        raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID") from error
+    if (
+        not isinstance(document, dict)
+        or set(document)
+        != {
+            "schema",
+            "identity",
+            "objects",
+            "policyIdentity",
+            "receiptVersion",
+        }
+        or document.get("schema")
+        != "animemo.local-bundle-transport-receipt/v1"
+        or document.get("identity") != expected_identity
+    ):
+        raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID")
+    identity_document = {
+        "objects": document.get("objects"),
+        "policyIdentity": document.get("policyIdentity"),
+        "receiptVersion": document.get("receiptVersion"),
+    }
+    if _receipt_identity(identity_document) != expected_identity:
+        raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID")
+    objects = document.get("objects")
+    if not isinstance(objects, list) or len(objects) != 2:
+        raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID")
+    expected_objects = (
+        ("portable-payload", "portable-payload.tar", MAX_LOCAL_PAYLOAD_BYTES),
+        (
+            "release-attestation",
+            "release-attestation.sigstore.json",
+            MAX_RELEASE_ATTESTATION_BYTES,
+        ),
+    )
+    receipts: list[LocalBundleObjectReceipt] = []
+    for value, (logical_name, relative_path, maximum) in zip(
+        objects, expected_objects, strict=True
+    ):
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"logicalName", "relativePath", "sha256", "size"}
+            or value.get("logicalName") != logical_name
+            or value.get("relativePath") != relative_path
+            or type(value.get("size")) is not int
+            or not 0 < value["size"] <= maximum
+            or type(value.get("sha256")) is not str
+            or len(value["sha256"]) != 71
+            or not value["sha256"].startswith("sha256:")
+        ):
+            raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID")
+        receipt = LocalBundleObjectReceipt(
+            logical_name=logical_name,
+            relative_path=relative_path,
+            sha256=value["sha256"],
+            size=value["size"],
+        )
+        size, digest = _regular_file_identity(root / relative_path, max_bytes=maximum)
+        if size != receipt.size or digest != receipt.sha256:
+            raise LocalBundleError("LOCAL_BUNDLE_PRIVATE_COPY_CHANGED")
+        receipts.append(receipt)
+    return LocalBundleReceipt(
+        payload=receipts[0],
+        release_attestation=receipts[1],
+        identity=expected_identity,
+    )
 
 
 def _direct_private_directory(path: Path, *, create: bool) -> Path:
@@ -259,27 +440,16 @@ class LocalBundleTransport:
                 sha256=sidecar_receipt.sha256,
                 size=sidecar_receipt.size,
             )
-            identity_document = {
-                "objects": [
-                    {
-                        "logicalName": item.logical_name,
-                        "relativePath": item.relative_path,
-                        "sha256": item.sha256,
-                        "size": item.size,
-                    }
-                    for item in (payload_receipt, sidecar_receipt)
-                ],
-                "policyIdentity": self.policy.identity,
-                "receiptVersion": 1,
-            }
-            identity = hashlib.sha256(
-                json.dumps(
-                    identity_document,
-                    ensure_ascii=True,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode("ascii")
-            ).hexdigest()
+            identity_document = _receipt_identity_document(
+                payload_receipt, sidecar_receipt
+            )
+            identity = _receipt_identity(identity_document)
+            receipt = LocalBundleReceipt(
+                payload=payload_receipt,
+                release_attestation=sidecar_receipt,
+                identity=identity,
+            )
+            _write_transport_receipt(pending, receipt)
             final = staging / f"acquired-{identity[:24]}"
             if final.exists() or final.is_symlink():
                 raise LocalBundleError("LOCAL_BUNDLE_STAGING_COLLISION")
@@ -287,11 +457,7 @@ class LocalBundleTransport:
             committed = True
             return AcquiredLocalBundle(
                 root=final,
-                receipt=LocalBundleReceipt(
-                    payload=payload_receipt,
-                    release_attestation=sidecar_receipt,
-                    identity=identity,
-                ),
+                receipt=receipt,
             )
         finally:
             if not committed:
@@ -386,6 +552,36 @@ class LocalBundleReleaseSource:
             verification_destination=cache / "verified-materials",
         )
 
+    @classmethod
+    def from_staged(
+        cls,
+        *,
+        cache_root: Path,
+        transport_identity: str,
+        verifier: Any,
+        updater_version: str,
+    ) -> LocalBundleReleaseSource:
+        if (
+            type(transport_identity) is not str
+            or len(transport_identity) != 71
+            or not transport_identity.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in transport_identity[7:]
+            )
+        ):
+            raise LocalBundleError("LOCAL_BUNDLE_RECEIPT_INVALID")
+        cache = _direct_private_directory(Path(cache_root), create=False)
+        identity = transport_identity[7:]
+        root = cache / "transport" / f"acquired-{identity[:24]}"
+        receipt = _read_transport_receipt(root, expected_identity=identity)
+        return cls(
+            acquired=AcquiredLocalBundle(root=root, receipt=receipt),
+            verifier=verifier,
+            updater_version=updater_version,
+            verification_destination=cache / "verified-materials",
+        )
+
     def _verify(self) -> Any:
         verified = self._verifier.verify(
             payload=self._acquired.material("portable-payload"),
@@ -398,6 +594,63 @@ class LocalBundleReleaseSource:
     @property
     def receipt(self) -> LocalBundleReceipt:
         return self._acquired.receipt
+
+    def release_binding(self, version: str) -> dict[str, object]:
+        materials = self.fetch_verified_materials(
+            version,
+            updater_version=self._updater_version,
+        )
+        manifest = materials.manifest
+        release_attestation_identity = getattr(
+            self._verified, "release_attestation_identity", None
+        )
+        trust_profile_version = getattr(
+            self._verified, "trust_profile_version", None
+        )
+        trust_profile_identity = getattr(
+            self._verified, "trust_profile_identity", None
+        )
+        payload_identity = getattr(self._verified, "payload_sha256", None)
+        if (
+            release_attestation_identity
+            != self._acquired.receipt.release_attestation.sha256
+            or payload_identity != self._acquired.receipt.payload.sha256
+            or type(trust_profile_version) is not int
+            or trust_profile_version < 1
+            or type(trust_profile_identity) is not str
+            or len(trust_profile_identity) != 71
+            or not trust_profile_identity.startswith("sha256:")
+        ):
+            raise LocalBundleError("LOCAL_BUNDLE_AUTHORITY_BINDING_INVALID")
+        manifest_identity = "sha256:" + hashlib.sha256(
+            json.dumps(
+                manifest,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        try:
+            return {
+                "source": "local-bundle",
+                "transportPolicyIdentity": self.transport_policy.identity,
+                "verifiedReleaseIdentity": materials.identity_digest,
+                "transportIdentity": "sha256:" + self._acquired.receipt.identity,
+                "payloadIdentity": payload_identity,
+                "releaseAttestationIdentity": release_attestation_identity,
+                "trustProfileVersion": trust_profile_version,
+                "trustProfileIdentity": trust_profile_identity,
+                "manifestIdentity": manifest_identity,
+                "deploymentContractIdentity": manifest["deployment"][
+                    "contractSha256"
+                ],
+                "apiDigest": manifest["images"]["api"]["digest"],
+                "webDigest": manifest["images"]["web"]["digest"],
+                "postgresDigest": manifest["images"]["postgres"]["digest"],
+                "redisDigest": manifest["images"]["redis"]["digest"],
+            }
+        except (KeyError, TypeError) as error:
+            raise LocalBundleError("LOCAL_BUNDLE_AUTHORITY_BINDING_INVALID") from error
 
     def list_releases(
         self,

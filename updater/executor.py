@@ -4,6 +4,7 @@ from contextlib import nullcontext
 
 from .compatibility import DeploymentContext, plan_switch
 from .errors import CompatibilityError, StateError
+from .local_bundle import LocalBundleTransportPolicy
 from .state import UpdateLock
 
 
@@ -104,6 +105,14 @@ class UpdateExecutor:
             self.deployment.pull(manifest)
             return
         policy = getattr(self.release_source, "transport_policy", None)
+        if type(policy) is LocalBundleTransportPolicy:
+            import_local = getattr(self.deployment, "import_local_verified", None)
+            if not callable(import_local):
+                raise CompatibilityError(
+                    "Verified local OCI import is unavailable for the bound transport policy"
+                )
+            import_local(self.release_source, materials, policy)
+            return
         pull_verified = getattr(self.deployment, "pull_verified", None)
         if policy is None or not callable(pull_verified):
             raise CompatibilityError(

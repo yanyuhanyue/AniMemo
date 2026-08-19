@@ -5,14 +5,22 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
+import stat
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from .notes import CANONICAL_RELEASE_ASSETS
+from .portable import (
+    MAX_PORTABLE_TOTAL_BYTES,
+    PORTABLE_STREAM_CHUNK_BYTES,
+    portable_release_asset_name,
+)
 
-
-SCHEMA = "animemo.release-publication-plan/v1"
+LEGACY_SCHEMA = "animemo.release-publication-plan/v1"
+SCHEMA = "animemo.release-publication-plan/v2"
 STATES = (
     "NOT_STARTED",
     "TAG_CREATED",
@@ -27,6 +35,9 @@ _COMMIT = re.compile(r"[0-9a-f]{40}")
 _TAG = re.compile(
     r"v[0-9]+\.[0-9]+\.[0-9]+(?:-(?:beta|rc)\.(?:[1-9][0-9]*|TEST))?"
 )
+_MAX_METADATA_ASSET_BYTES = 4 * 1024 * 1024
+_MAX_INSTALLER_MATERIALS_BYTES = 256 * 1024 * 1024
+_MAX_PORTABLE_ARCHIVE_BYTES = MAX_PORTABLE_TOTAL_BYTES + (16 * 1024 * 1024)
 
 
 class PublicationError(ValueError):
@@ -59,13 +70,134 @@ def _normalize_assets(value: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(item, Mapping) or set(item) != {"sha256", "size"}:
             raise PublicationError(f"publication asset identity is not closed: {name}")
         size = item["size"]
-        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        if (
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
+            or size > _asset_size_ceiling(name)
+        ):
             raise PublicationError(f"publication asset size is invalid: {name}")
         normalized[name] = {
             "sha256": _digest(item["sha256"], f"{name}.sha256"),
             "size": size,
         }
     return normalized
+
+
+def _normalize_transport_assets(
+    value: Any, *, tag: str
+) -> dict[str, dict[str, Any]]:
+    expected_name = portable_release_asset_name(tag)
+    if not isinstance(value, Mapping) or set(value) != {expected_name}:
+        raise PublicationError(
+            "publication transport asset inventory is not the declared portable set"
+        )
+    item = value[expected_name]
+    if not isinstance(item, Mapping) or set(item) != {"role", "sha256", "size"}:
+        raise PublicationError("publication transport asset identity is not closed")
+    size = item["size"]
+    if (
+        isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 1
+        or size > _MAX_PORTABLE_ARCHIVE_BYTES
+    ):
+        raise PublicationError("publication transport asset size is invalid")
+    if item["role"] != "PORTABLE_RELEASE_BUNDLE":
+        raise PublicationError("publication transport asset role is invalid")
+    return {
+        expected_name: {
+            "role": "PORTABLE_RELEASE_BUNDLE",
+            "sha256": _digest(item["sha256"], f"{expected_name}.sha256"),
+            "size": size,
+        }
+    }
+
+
+def _asset_size_ceiling(name: str) -> int:
+    if name == "installer-materials.tar":
+        return _MAX_INSTALLER_MATERIALS_BYTES
+    if name in CANONICAL_RELEASE_ASSETS:
+        return _MAX_METADATA_ASSET_BYTES
+    return _MAX_PORTABLE_ARCHIVE_BYTES
+
+
+def _stream_file_identity(path: Path, *, maximum: int) -> dict[str, Any]:
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise PublicationError("draft asset readback is unavailable") from error
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size < 0
+        or before.st_size > maximum
+    ):
+        raise PublicationError("draft asset readback file boundary is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_size != before.st_size
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            os.close(descriptor)
+            raise PublicationError("draft asset readback changed before open")
+    except PublicationError:
+        raise
+    except OSError as error:
+        raise PublicationError("draft asset readback is unreadable") from error
+    hasher = hashlib.sha256()
+    consumed = 0
+    try:
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            while chunk := stream.read(PORTABLE_STREAM_CHUNK_BYTES):
+                consumed += len(chunk)
+                if consumed > maximum:
+                    raise PublicationError("draft asset readback exceeds resource limits")
+                hasher.update(chunk)
+            after = os.fstat(stream.fileno())
+    except OSError as error:
+        raise PublicationError("draft asset readback is unreadable") from error
+    if consumed != before.st_size or after.st_size != before.st_size:
+        raise PublicationError("draft asset readback changed while streaming")
+    return {"sha256": "sha256:" + hasher.hexdigest(), "size": consumed}
+
+
+def _readback_identity(value: bytes | Path, *, name: str) -> dict[str, Any]:
+    maximum = _asset_size_ceiling(name)
+    if isinstance(value, bytes):
+        if len(value) > maximum:
+            raise PublicationError("draft asset readback exceeds resource limits")
+        return {
+            "sha256": "sha256:" + hashlib.sha256(value).hexdigest(),
+            "size": len(value),
+        }
+    if isinstance(value, Path):
+        return _stream_file_identity(value, maximum=maximum)
+    raise PublicationError(f"draft asset readback is not bytes or a file: {name}")
+
+
+def declared_publication_assets(plan: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Project a validated plan into the exact GitHub Release asset inventory."""
+
+    canonical = _normalize_assets(plan.get("assets"))
+    transport = (
+        _normalize_transport_assets(plan.get("transport_assets"), tag=plan.get("tag"))
+        if "transport_assets" in plan
+        else {}
+    )
+    return {
+        **canonical,
+        **{
+            name: {"sha256": item["sha256"], "size": item["size"]}
+            for name, item in transport.items()
+        },
+    }
 
 
 def build_publication_plan(
@@ -80,6 +212,7 @@ def build_publication_plan(
     assets: Mapping[str, Mapping[str, Any]],
     api_digest: str,
     web_digest: str,
+    transport_assets: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build commands and identities without executing any external mutation."""
 
@@ -97,6 +230,11 @@ def build_publication_plan(
     if not isinstance(commit, str) or not _COMMIT.fullmatch(commit):
         raise PublicationError("publication commit is invalid")
     normalized_assets = _normalize_assets(assets)
+    normalized_transport_assets = (
+        _normalize_transport_assets(transport_assets, tag=tag)
+        if transport_assets is not None
+        else {}
+    )
     prerelease = channel != "stable"
     title = f"AniMemo {tag}"
     tag_command = ["git", "tag", "--annotate", tag, commit, "--message", title]
@@ -133,13 +271,14 @@ def build_publication_plan(
             "upload",
             tag,
             *(f"release-output/{name}" for name in CANONICAL_RELEASE_ASSETS),
+            *(f"release-output/{name}" for name in normalized_transport_assets),
             "--repo",
             repository,
         ],
         "publish": publish,
     }
     unsigned: dict[str, Any] = {
-        "schema": SCHEMA,
+        "schema": SCHEMA if transport_assets is not None else LEGACY_SCHEMA,
         "repository": repository,
         "channel": channel,
         "tag": tag,
@@ -158,12 +297,17 @@ def build_publication_plan(
         "external_mutation_mode": "PLAN_ONLY",
         "commands": commands,
     }
+    if transport_assets is not None:
+        unsigned["transport_assets"] = normalized_transport_assets
     return {**unsigned, "identity": _identity(unsigned)}
 
 
 def validate_publication_plan(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise PublicationError("publication plan is missing")
+    schema = value.get("schema")
+    if schema not in {LEGACY_SCHEMA, SCHEMA}:
+        raise PublicationError("publication plan schema is unsupported")
     required = {
         "schema",
         "identity",
@@ -183,7 +327,9 @@ def validate_publication_plan(value: Any) -> dict[str, Any]:
         "external_mutation_mode",
         "commands",
     }
-    if set(value) != required or value.get("schema") != SCHEMA:
+    if schema == SCHEMA:
+        required.add("transport_assets")
+    if set(value) != required:
         raise PublicationError("publication plan has unknown or missing fields")
     rebuilt = build_publication_plan(
         repository=value["repository"],
@@ -194,6 +340,7 @@ def validate_publication_plan(value: Any) -> dict[str, Any]:
         release_notes_identity=value["release_notes_identity"],
         release_notes_markdown_sha256=value["release_notes_markdown_sha256"],
         assets=value["assets"],
+        transport_assets=value.get("transport_assets"),
         api_digest=value["api_digest"],
         web_digest=value["web_digest"],
     )
@@ -206,25 +353,34 @@ def verify_asset_readback(
     plan: Mapping[str, Any],
     *,
     remote_assets: Mapping[str, Mapping[str, Any]],
-    downloaded_assets: Mapping[str, bytes],
+    downloaded_assets: Mapping[str, bytes | Path],
 ) -> None:
     validated = validate_publication_plan(plan)
-    remote = _normalize_assets(remote_assets)
-    if remote != validated["assets"]:
-        raise PublicationError("draft asset metadata differs from qualified publication set")
-    if not isinstance(downloaded_assets, Mapping) or set(downloaded_assets) != set(
-        CANONICAL_RELEASE_ASSETS
-    ):
-        raise PublicationError("draft asset readback inventory is incomplete or has extras")
-    for name in CANONICAL_RELEASE_ASSETS:
-        content = downloaded_assets[name]
-        if not isinstance(content, bytes):
-            raise PublicationError(f"draft asset readback is not bytes: {name}")
-        actual = {
-            "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
-            "size": len(content),
+    expected = declared_publication_assets(validated)
+    if not isinstance(remote_assets, Mapping) or set(remote_assets) != set(expected):
+        raise PublicationError(
+            "draft asset metadata inventory is incomplete or has extras"
+        )
+    remote: dict[str, dict[str, Any]] = {}
+    for name in expected:
+        item = remote_assets[name]
+        if not isinstance(item, Mapping) or set(item) != {"sha256", "size"}:
+            raise PublicationError(f"draft asset metadata is not closed: {name}")
+        size = item["size"]
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise PublicationError(f"draft asset metadata size is invalid: {name}")
+        remote[name] = {
+            "sha256": _digest(item["sha256"], f"{name}.sha256"),
+            "size": size,
         }
-        if actual != validated["assets"][name]:
+    if remote != expected:
+        raise PublicationError("draft asset metadata differs from qualified publication set")
+    if not isinstance(downloaded_assets, Mapping) or set(downloaded_assets) != set(expected):
+        raise PublicationError("draft asset readback inventory is incomplete or has extras")
+    for name in expected:
+        content = downloaded_assets[name]
+        actual = _readback_identity(content, name=name)
+        if actual != expected[name]:
             raise PublicationError(f"draft asset readback identity mismatch: {name}")
 
 
@@ -272,9 +428,8 @@ class PublicationTransaction:
 
     def record_assets_uploaded(self, asset_names: list[str]) -> None:
         self._require("DRAFT_CREATED")
-        if len(asset_names) != len(set(asset_names)) or set(asset_names) != set(
-            CANONICAL_RELEASE_ASSETS
-        ):
+        expected = set(declared_publication_assets(self.plan))
+        if len(asset_names) != len(set(asset_names)) or set(asset_names) != expected:
             raise PublicationError("uploaded draft asset inventory is incomplete or ambiguous")
         self._move("ASSETS_UPLOADED")
 
@@ -282,7 +437,7 @@ class PublicationTransaction:
         self,
         *,
         remote_assets: Mapping[str, Mapping[str, Any]],
-        downloaded_assets: Mapping[str, bytes],
+        downloaded_assets: Mapping[str, bytes | Path],
         notes_body_sha256: str,
     ) -> None:
         self._require("ASSETS_UPLOADED")
@@ -294,7 +449,7 @@ class PublicationTransaction:
             )
             if notes_body_sha256 != self.plan["release_notes_markdown_sha256"]:
                 raise PublicationError("draft release notes body identity mismatch")
-        except Exception as error:
+        except (KeyError, PublicationError, TypeError) as error:
             self._fail_partial(error)
         self._move("DRAFT_VERIFIED")
 
@@ -314,7 +469,7 @@ def verify_post_publish(
     *,
     release: Mapping[str, Any],
     remote_assets: Mapping[str, Mapping[str, Any]],
-    downloaded_assets: Mapping[str, bytes],
+    downloaded_assets: Mapping[str, bytes | Path],
     api_digest: str,
     web_digest: str,
     attestations_verified: bool,

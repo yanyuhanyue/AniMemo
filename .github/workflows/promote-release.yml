@@ -59,9 +59,11 @@ jobs:
           mkdir -p rc-assets promotion-output
           test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC_TAG" --jq '.draft')" = "false"
           test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC_TAG" --jq '.prerelease')" = "true"
+          RC_PORTABLE_ASSET="animemo-$RC_TAG-portable.tar"
           gh release download "$RC_TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern release-manifest.json --pattern deployment-contract.json \
-            --pattern installer-materials.tar --pattern checksums.txt --dir rc-assets
+            --pattern installer-materials.tar --pattern checksums.txt \
+            --pattern "$RC_PORTABLE_ASSET" --dir rc-assets
           (cd rc-assets && sha256sum --check checksums.txt)
           python -m release.cli validate-manifest --manifest rc-assets/release-manifest.json --updater-version 1.0.0
           python -m release.cli validate-deployment-contract \
@@ -106,6 +108,9 @@ jobs:
           test -f "$RUNNER_TEMP/rc-publication/release-notes.md"
           test "$(jq -r '.tag' "$RUNNER_TEMP/rc-publication/publication-plan.json")" = "$RC_TAG"
           test "$(jq -r '.status' "$RUNNER_TEMP/rc-publication/post-publish-verification.json")" = "PASS"
+          python -m release.cli verify-declared-portable \
+            --plan "$RUNNER_TEMP/rc-publication/publication-plan.json" \
+            --payload "rc-assets/animemo-$RC_TAG-portable.tar"
       - name: Require a reviewed Git-tracked RC live acceptance record
         env:
           RC_TAG: ${{ inputs.rc_tag }}
@@ -173,6 +178,13 @@ jobs:
             promotion-output/installer-materials.tar
           (cd promotion-output && sha256sum --check checksums.txt)
           stable_tag="$(jq -r '.release.version' promotion-output/release-manifest.json)"
+          RC_PORTABLE_ASSET="animemo-$RC_TAG-portable.tar"
+          STABLE_PORTABLE_ASSET="animemo-$stable_tag-portable.tar"
+          python -m release.cli promote-portable \
+            --rc-payload "rc-assets/$RC_PORTABLE_ASSET" \
+            --authority-directory promotion-output \
+            --output "promotion-output/$STABLE_PORTABLE_ASSET" \
+            > promotion-output/portable-promotion-receipt.json
           python -m release.cli previous-stable \
             --tags-file "$RUNNER_TEMP/tags.txt" --target "$stable_tag" \
             --github-output "$GITHUB_OUTPUT"
@@ -218,7 +230,13 @@ jobs:
             --stable-notes promotion-output/release-notes.json \
             --stable-notes-markdown promotion-output/release-notes.md \
             --asset-directory promotion-output \
+            --portable "promotion-output/$STABLE_PORTABLE_ASSET" \
             --output promotion-output/publication-plan.json
+          OPERATION=portable \
+          PUBLICATION_PLAN_PATH=promotion-output/publication-plan.json \
+          PORTABLE_BUILD_RECEIPT_PATH=promotion-output/portable-promotion-receipt.json \
+            python scripts/release_authority.py \
+            > promotion-output/portable-pipeline-authority.json
           ! git ls-remote --exit-code --tags origin "refs/tags/$stable_tag" >/dev/null 2>&1
           ! gh release view "$stable_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
           echo "stable_tag=$stable_tag" >> "$GITHUB_OUTPUT"
@@ -316,6 +334,7 @@ jobs:
             --stable-notes promotion-output/release-notes.json \
             --stable-notes-markdown promotion-output/release-notes.md \
             --asset-directory promotion-output \
+            --portable "promotion-output/animemo-$STABLE_TAG-portable.tar" \
             --output "$RUNNER_TEMP/revalidated-stable-publication-plan.json"
           cmp "$RUNNER_TEMP/revalidated-stable-publication-plan.json" \
             promotion-output/publication-plan.json
@@ -325,6 +344,7 @@ jobs:
           # first external mutation. Once publication starts, a later main push
           # must not abort this immutable RC transaction halfway through.
           test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = "true"
           ! git ls-remote --exit-code --tags origin "refs/tags/$STABLE_TAG" >/dev/null 2>&1
           ! gh release view "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
       - uses: docker/login-action@v3
@@ -397,15 +417,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          STABLE_PORTABLE_ASSET="animemo-$STABLE_TAG-portable.tar"
           gh release upload "$STABLE_TAG" \
             promotion-output/release-manifest.json promotion-output/deployment-contract.json \
             promotion-output/installer-materials.tar promotion-output/checksums.txt \
+            "promotion-output/$STABLE_PORTABLE_ASSET" \
             --repo "$GITHUB_REPOSITORY"
           rm -rf "$RUNNER_TEMP/stable-draft-readback"
           mkdir -p "$RUNNER_TEMP/stable-draft-readback"
           gh release download "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern release-manifest.json --pattern deployment-contract.json \
             --pattern installer-materials.tar --pattern checksums.txt \
+            --pattern "$STABLE_PORTABLE_ASSET" \
             --dir "$RUNNER_TEMP/stable-draft-readback"
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$STABLE_TAG" \
             | jq --arg target "$RC_COMMIT" \
@@ -423,6 +446,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          STABLE_PORTABLE_ASSET="animemo-$STABLE_TAG-portable.tar"
           gh release edit "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" \
             --draft=false --prerelease=false --latest
       - name: Verify the public Stable release without authenticated asset transport
@@ -435,6 +459,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          STABLE_PORTABLE_ASSET="animemo-$STABLE_TAG-portable.tar"
           rm -rf "$RUNNER_TEMP/stable-public-readback"
           mkdir -p "$RUNNER_TEMP/stable-public-readback"
           public_api="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$STABLE_TAG"
@@ -445,13 +470,16 @@ jobs:
             '{id,tag:.tag_name,target:$target,draft,prerelease,body,assets:[.assets[]|{name,size,digest}]}' \
             "$RUNNER_TEMP/stable-public-release.json" \
             > "$RUNNER_TEMP/stable-public-metadata.json"
-          for name in release-manifest.json deployment-contract.json installer-materials.tar checksums.txt; do
+          for name in release-manifest.json deployment-contract.json installer-materials.tar checksums.txt "$STABLE_PORTABLE_ASSET"; do
             url="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .browser_download_url' \
               "$RUNNER_TEMP/stable-public-release.json")"
             test -n "$url"
             env -u GH_TOKEN curl --fail --location --silent --show-error \
               "$url" -o "$RUNNER_TEMP/stable-public-readback/$name"
           done
+          python -m release.cli verify-declared-portable \
+            --plan promotion-output/publication-plan.json \
+            --payload "$RUNNER_TEMP/stable-public-readback/$STABLE_PORTABLE_ASSET"
           for subject in release-manifest.json deployment-contract.json installer-materials.tar; do
             gh attestation verify "promotion-output/$subject" \
               --repo "$GITHUB_REPOSITORY" \
@@ -464,3 +492,41 @@ jobs:
             --download-directory "$RUNNER_TEMP/stable-public-readback" \
             --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
             --public-unauthenticated-assets --attestations-verified
+      - name: Acquire and export the Stable immutable Release attestation sidecar
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+          API_REPOSITORY: ${{ needs.plan.outputs.api_repository }}
+          API_DIGEST: ${{ needs.plan.outputs.api_digest }}
+          WEB_REPOSITORY: ${{ needs.plan.outputs.web_repository }}
+          WEB_DIGEST: ${{ needs.plan.outputs.web_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STABLE_PORTABLE_ASSET="animemo-$STABLE_TAG-portable.tar"
+          python scripts/acquire_release_attestation.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$STABLE_TAG" --commit "$RC_COMMIT" \
+            --workflow .github/workflows/promote-release.yml \
+            --payload "promotion-output/$STABLE_PORTABLE_ASSET" \
+            --actions-subject "release-manifest=promotion-output/release-manifest.json" \
+            --actions-subject "deployment-contract=promotion-output/deployment-contract.json" \
+            --actions-subject "installer-materials=promotion-output/installer-materials.tar" \
+            --actions-subject "api-image=oci://$API_REPOSITORY@$API_DIGEST" \
+            --actions-subject "web-image=oci://$WEB_REPOSITORY@$WEB_DIGEST" \
+            --actions-workflow api-image=.github/workflows/release.yml \
+            --actions-workflow web-image=.github/workflows/release.yml \
+            --actions-source-commit release-manifest=$GITHUB_SHA \
+            --actions-source-commit deployment-contract=$GITHUB_SHA \
+            --actions-source-commit installer-materials=$GITHUB_SHA \
+            --output "promotion-output/animemo-$STABLE_TAG-release-attestation.json" \
+            > promotion-output/release-attestation-acquisition-receipt.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stable-release-attestation-${{ needs.plan.outputs.stable_tag }}
+          path: |
+            promotion-output/release-attestation-acquisition-receipt.json
+            promotion-output/animemo-${{ needs.plan.outputs.stable_tag }}-release-attestation.json
+          if-no-files-found: error
+          retention-days: 90

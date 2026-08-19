@@ -1,0 +1,52 @@
+{
+  "build": {
+    "command": [
+      "go",
+      "build",
+      "-mod=readonly",
+      "-trimpath",
+      "-o",
+      "offline-release-verifier",
+      "."
+    ],
+    "minimumGoVersion": "1.25.8",
+    "networkDuringBuild": "FORBIDDEN_USE_PREPOPULATED_AUDITED_MODULE_CACHE",
+    "networkDuringRuntime": "FORBIDDEN"
+  },
+  "files": [
+    {
+      "mode": "0644",
+      "path": "/usr/share/animemo/offline-trust/v1/trust-profile.json",
+      "role": "CLOSED_PRETRUSTED_PROFILE"
+    },
+    {
+      "mode": "0644",
+      "path": "/usr/share/animemo/offline-trust/v1/github-trusted-root.jsonl",
+      "role": "GITHUB_PRIVATE_TUF_TRUSTED_ROOT_SINGLE_JSON"
+    },
+    {
+      "mode": "0644",
+      "path": "/usr/share/animemo/offline-trust/v1/sigstore-trusted-root.jsonl",
+      "role": "SIGSTORE_PUBLIC_GOOD_TUF_TRUSTED_ROOT_SINGLE_JSON"
+    },
+    {
+      "mode": "0755",
+      "path": "/usr/share/animemo/offline-trust/v1/offline-release-verifier",
+      "role": "PINNED_SIGSTORE_GO_VERIFIER"
+    }
+  ],
+  "owner": "root:root",
+  "profileHashBindings": [
+    "githubRootIdentity",
+    "sigstoreRootIdentity",
+    "verifierIdentity"
+  ],
+  "runtimeDiscovery": "FIXED_ABSOLUTE_PATH_ONLY",
+  "schemaVersion": 1,
+  "state": {
+    "mode": "0600",
+    "path": "/var/lib/animemo/offline-authority-state.json",
+    "writePolicy": "LOCKED_ATOMIC_REPLACE_AND_DIRECTORY_FSYNC"
+  },
+  "verifierVersion": "2.97.0+animemo.1"
+}

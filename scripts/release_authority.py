@@ -8,13 +8,22 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from release.notes import CANONICAL_RELEASE_ASSETS
+from release.portable import BLOCKED_PORTABLE_PUBLICATION_AUTHORITY
+from release.publication import (
+    SCHEMA as PORTABLE_PUBLICATION_SCHEMA,
+)
+from release.publication import (
+    PublicationError,
+    validate_publication_plan,
+)
+
 try:
     from scripts.release_qualification import (
-    QualificationError,
-    build_qualification_evidence,
-    read_qualification_evidence,
-    resolve_qualification_evidence,
-    validate_qualification_evidence,
+        QualificationError,
+        build_qualification_evidence,
+        read_qualification_evidence,
+        resolve_qualification_evidence,
     )
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from release_qualification import (
@@ -22,12 +31,66 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         build_qualification_evidence,
         read_qualification_evidence,
         resolve_qualification_evidence,
-        validate_qualification_evidence,
     )
 
 
 class ReleaseAuthorityError(ValueError):
     pass
+
+
+def validate_portable_pipeline_authority(
+    publication_plan: Mapping[str, Any],
+    portable_build_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind one derived transport asset to a v2 plan without granting authority."""
+
+    try:
+        plan = validate_publication_plan(publication_plan)
+    except PublicationError as error:
+        raise ReleaseAuthorityError(str(error)) from error
+    required_receipt = {
+        "archive",
+        "sha256",
+        "files",
+        "imageRoles",
+        "authorityState",
+    }
+    if (
+        plan.get("schema") != PORTABLE_PUBLICATION_SCHEMA
+        or set(plan.get("assets", {})) != set(CANONICAL_RELEASE_ASSETS)
+        or not isinstance(plan.get("transport_assets"), Mapping)
+        or len(plan["transport_assets"]) != 1
+        or not isinstance(portable_build_receipt, Mapping)
+        or set(portable_build_receipt) != required_receipt
+    ):
+        raise ReleaseAuthorityError("portable publication authority inputs are not closed")
+    name, declared = next(iter(plan["transport_assets"].items()))
+    archive = portable_build_receipt["archive"]
+    files = portable_build_receipt["files"]
+    if (
+        not isinstance(archive, str)
+        or Path(archive).name != name
+        or portable_build_receipt["sha256"] != declared["sha256"]
+        or isinstance(files, bool)
+        or not isinstance(files, int)
+        or files < 1
+        or portable_build_receipt["imageRoles"]
+        != ["api", "postgres", "redis", "web"]
+        or portable_build_receipt["authorityState"]
+        != BLOCKED_PORTABLE_PUBLICATION_AUTHORITY
+    ):
+        raise ReleaseAuthorityError("portable build receipt differs from publication plan")
+    return {
+        "schema": "animemo.portable-pipeline-authority/v1",
+        "status": "PASS",
+        "publication_plan_identity": plan["identity"],
+        "portable_sha256": declared["sha256"],
+        "canonical_authority_asset_count": 4,
+        "declared_transport_asset_count": 1,
+        "portable_authority": "FORBIDDEN",
+        "build_once": "PASS",
+        "image_materialization": "COPY_EXACT_OCI_LAYOUTS_ONLY",
+    }
 
 
 def validate_release_authority(channel: str, needs: Mapping[str, Any]) -> dict[str, str]:
@@ -169,6 +232,22 @@ def validate_operation(
 
 def main(argv: Sequence[str] | None = None) -> int:
     del argv
+    operation = os.getenv("OPERATION", "qualify").strip().lower()
+    if operation == "portable":
+        plan_path = os.getenv("PUBLICATION_PLAN_PATH", "")
+        receipt_path = os.getenv("PORTABLE_BUILD_RECEIPT_PATH", "")
+        if not plan_path or not receipt_path:
+            raise ReleaseAuthorityError(
+                "PUBLICATION_PLAN_PATH and PORTABLE_BUILD_RECEIPT_PATH are required"
+            )
+        try:
+            plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
+            receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ReleaseAuthorityError("portable authority input is unreadable") from error
+        result = validate_portable_pipeline_authority(plan, receipt)
+        print(json.dumps(result, sort_keys=True))
+        return 0
     channel = os.getenv("CHANNEL", "")
     raw_needs = os.getenv("NEEDS_JSON", "")
     try:
@@ -177,7 +256,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ReleaseAuthorityError(f"invalid NEEDS_JSON: {error}") from error
     if not isinstance(needs, dict):
         raise ReleaseAuthorityError("NEEDS_JSON must be an object")
-    operation = os.getenv("OPERATION", "qualify").strip().lower()
     if operation == "qualify":
         identity = {
             "workflow_ref": os.getenv("WORKFLOW_REF", ""),

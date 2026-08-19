@@ -6,6 +6,9 @@ import json
 import sys
 from pathlib import Path
 
+from updater.oci import OCIContractError, verify_oci_image_set
+
+from .acceptance import AcceptanceError, validate_rc_live_acceptance
 from .contract import (
     ReleaseContractError,
     build_deployment_contract,
@@ -19,7 +22,11 @@ from .contract import (
     validate_manifest,
 )
 from .materials import build_installer_materials
-from .acceptance import AcceptanceError, validate_rc_live_acceptance
+from .mirror import (
+    MirrorError,
+    build_offline_pair_mirror_plan_from_files,
+    replicate_offline_pair_files,
+)
 from .notes import (
     CANONICAL_RELEASE_ASSETS,
     ReleaseNotesError,
@@ -28,7 +35,19 @@ from .notes import (
     render_release_notes,
     validate_release_notes,
 )
-from .publication import PublicationError, build_publication_plan
+from .portable import (
+    PORTABLE_IMAGE_REPOSITORIES,
+    PortableBundleError,
+    build_portable_payload,
+    inspect_portable_archive,
+    portable_release_asset_name,
+    promote_portable_payload,
+)
+from .publication import (
+    PublicationError,
+    build_publication_plan,
+    validate_publication_plan,
+)
 
 
 def _read_tags(path: Path) -> list[str]:
@@ -213,6 +232,110 @@ def _write_checksums(args) -> dict[str, object]:
     return {"checksums": str(args.output), "files": len(lines)}
 
 
+def _portable_images(values: list[str]) -> list[dict[str, object]]:
+    parsed: dict[str, dict[str, object]] = {}
+    for value in values:
+        role, separator, reference = value.partition("=")
+        repository, at, digest = reference.rpartition("@")
+        if (
+            not separator
+            or not at
+            or role in parsed
+            or role not in PORTABLE_IMAGE_REPOSITORIES
+            or repository != PORTABLE_IMAGE_REPOSITORIES[role]
+            or len(digest) != 71
+            or not digest.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in digest[7:])
+        ):
+            raise PortableBundleError("PORTABLE_IMAGE_REFERENCE_INVALID")
+        parsed[role] = {
+            "digest": digest,
+            "layoutPath": f"oci/{role}",
+            "platform": "linux/amd64",
+            "repository": repository,
+            "role": role,
+        }
+    if set(parsed) != set(PORTABLE_IMAGE_REPOSITORIES):
+        raise PortableBundleError("PORTABLE_OCI_ROLES_INCOMPLETE_OR_UNORDERED")
+    return [parsed[role] for role in sorted(parsed)]
+
+
+def _build_portable(args) -> dict[str, object]:
+    images = _portable_images(args.image)
+    verify_oci_image_set(args.source_root, images)
+    inspection = build_portable_payload(args.source_root, args.output, images)
+    return {
+        "archive": str(args.output),
+        "sha256": inspection.archive_sha256,
+        "files": len(inspection.files),
+        "imageRoles": [item["role"] for item in images],
+        "authorityState": inspection.index["authorityState"],
+    }
+
+
+def _promote_portable(args) -> dict[str, object]:
+    inspection = promote_portable_payload(
+        args.rc_payload,
+        authority_directory=args.authority_directory,
+        archive=args.output,
+    )
+    return {
+        "archive": str(args.output),
+        "sha256": inspection.archive_sha256,
+        "files": len(inspection.files),
+        "imageRoles": [item["role"] for item in inspection.index["ociImages"]],
+        "authorityState": inspection.index["authorityState"],
+    }
+
+
+def _plan_offline_mirror(args) -> dict[str, object]:
+    plan = build_offline_pair_mirror_plan_from_files(
+        authority="GITHUB_RELEASE",
+        repository=args.repository,
+        tag=args.tag,
+        commit=args.commit,
+        release_identity=args.release_identity,
+        payload=args.payload,
+        release_attestation=args.release_attestation,
+    )
+    _write_json(args.output, plan)
+    return plan
+
+
+def _replicate_offline_mirror(args) -> dict[str, object]:
+    receipt = replicate_offline_pair_files(
+        _read_json(args.plan),
+        source_directory=args.source_directory,
+        destination_directory=args.destination_directory,
+    )
+    _write_json(args.output, receipt)
+    return receipt
+
+
+def _verify_declared_portable(args) -> dict[str, object]:
+    plan = validate_publication_plan(_read_json(args.plan))
+    transport = plan.get("transport_assets")
+    if not isinstance(transport, dict) or len(transport) != 1:
+        raise PublicationError("publication plan has no single declared portable asset")
+    name, identity = next(iter(transport.items()))
+    if args.payload.name != name:
+        raise PublicationError("portable payload name differs from publication plan")
+    inspection = inspect_portable_archive(args.payload)
+    if (
+        inspection.archive_sha256 != identity["sha256"]
+        or args.payload.stat().st_size != identity["size"]
+    ):
+        raise PublicationError("portable payload identity differs from publication plan")
+    return {
+        "status": "PASS",
+        "publicationPlanIdentity": plan["identity"],
+        "name": name,
+        "sha256": inspection.archive_sha256,
+        "size": identity["size"],
+        "authorityRole": "TRANSPORT_ONLY",
+    }
+
+
 def _generate_release_notes(args) -> dict[str, object]:
     source = _read_json(args.input)
     if set(source) != {"context", "pulls"}:
@@ -236,10 +359,11 @@ def _plan_publication(args) -> dict[str, object]:
         "release_notes_identity",
         "release_notes_markdown_sha256",
         "assets",
+        "transport_assets",
         "api_digest",
         "web_digest",
     }
-    if set(source) != expected:
+    if set(source) not in {frozenset(expected), frozenset(expected - {"transport_assets"})}:
         raise PublicationError("publication plan input has unknown or missing fields")
     plan = build_publication_plan(**source)
     _write_json(args.output, plan)
@@ -276,6 +400,17 @@ def _plan_publication_files(args) -> dict[str, object]:
             "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
             "size": len(content),
         }
+    portable_name = portable_release_asset_name(args.tag)
+    if args.portable.name != portable_name:
+        raise PublicationError("portable transport asset name does not match release tag")
+    portable_inspection = inspect_portable_archive(args.portable)
+    transport_assets = {
+        portable_name: {
+            "role": "PORTABLE_RELEASE_BUNDLE",
+            "sha256": portable_inspection.archive_sha256,
+            "size": args.portable.stat().st_size,
+        }
+    }
     plan = build_publication_plan(
         repository=args.repository,
         channel=args.channel,
@@ -285,6 +420,7 @@ def _plan_publication_files(args) -> dict[str, object]:
         release_notes_identity=notes["identity"],
         release_notes_markdown_sha256=markdown_sha256,
         assets=assets,
+        transport_assets=transport_assets,
         api_digest=args.api_digest,
         web_digest=args.web_digest,
     )
@@ -316,6 +452,17 @@ def _plan_stable_publication_files(args) -> dict[str, object]:
             "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
             "size": len(content),
         }
+    portable_name = portable_release_asset_name(args.tag)
+    if args.portable.name != portable_name:
+        raise PublicationError("portable transport asset name does not match release tag")
+    portable_inspection = inspect_portable_archive(args.portable)
+    transport_assets = {
+        portable_name: {
+            "role": "PORTABLE_RELEASE_BUNDLE",
+            "sha256": portable_inspection.archive_sha256,
+            "size": args.portable.stat().st_size,
+        }
+    }
     plan = build_publication_plan(
         repository=args.repository,
         channel="stable",
@@ -325,6 +472,7 @@ def _plan_stable_publication_files(args) -> dict[str, object]:
         release_notes_identity=stable_notes["identity"],
         release_notes_markdown_sha256=markdown_sha256,
         assets=assets,
+        transport_assets=transport_assets,
         api_digest=acceptance["api_digest"],
         web_digest=acceptance["web_digest"],
     )
@@ -408,6 +556,40 @@ def _parser() -> argparse.ArgumentParser:
     checksums.add_argument("files", type=Path, nargs="+")
     checksums.set_defaults(handler=_write_checksums)
 
+    portable = subparsers.add_parser("build-portable")
+    portable.add_argument("--source-root", type=Path, required=True)
+    portable.add_argument("--output", type=Path, required=True)
+    portable.add_argument("--image", action="append", default=[], required=True)
+    portable.set_defaults(handler=_build_portable)
+
+    portable_promotion = subparsers.add_parser("promote-portable")
+    portable_promotion.add_argument("--rc-payload", type=Path, required=True)
+    portable_promotion.add_argument("--authority-directory", type=Path, required=True)
+    portable_promotion.add_argument("--output", type=Path, required=True)
+    portable_promotion.set_defaults(handler=_promote_portable)
+
+    mirror_plan = subparsers.add_parser("plan-offline-mirror")
+    mirror_plan.add_argument("--repository", required=True)
+    mirror_plan.add_argument("--tag", required=True)
+    mirror_plan.add_argument("--commit", required=True)
+    mirror_plan.add_argument("--release-identity", required=True)
+    mirror_plan.add_argument("--payload", type=Path, required=True)
+    mirror_plan.add_argument("--release-attestation", type=Path, required=True)
+    mirror_plan.add_argument("--output", type=Path, required=True)
+    mirror_plan.set_defaults(handler=_plan_offline_mirror)
+
+    mirror_copy = subparsers.add_parser("replicate-offline-mirror")
+    mirror_copy.add_argument("--plan", type=Path, required=True)
+    mirror_copy.add_argument("--source-directory", type=Path, required=True)
+    mirror_copy.add_argument("--destination-directory", type=Path, required=True)
+    mirror_copy.add_argument("--output", type=Path, required=True)
+    mirror_copy.set_defaults(handler=_replicate_offline_mirror)
+
+    portable_verify = subparsers.add_parser("verify-declared-portable")
+    portable_verify.add_argument("--plan", type=Path, required=True)
+    portable_verify.add_argument("--payload", type=Path, required=True)
+    portable_verify.set_defaults(handler=_verify_declared_portable)
+
     notes = subparsers.add_parser("generate-release-notes")
     notes.add_argument("--input", type=Path, required=True)
     notes.add_argument("--output-json", type=Path, required=True)
@@ -428,6 +610,7 @@ def _parser() -> argparse.ArgumentParser:
     publication_files.add_argument("--release-notes", type=Path, required=True)
     publication_files.add_argument("--release-notes-markdown", type=Path, required=True)
     publication_files.add_argument("--asset-directory", type=Path, required=True)
+    publication_files.add_argument("--portable", type=Path, required=True)
     publication_files.add_argument("--api-digest", required=True)
     publication_files.add_argument("--web-digest", required=True)
     publication_files.add_argument("--output", type=Path, required=True)
@@ -448,6 +631,7 @@ def _parser() -> argparse.ArgumentParser:
     stable_publication.add_argument("--stable-notes", type=Path, required=True)
     stable_publication.add_argument("--stable-notes-markdown", type=Path, required=True)
     stable_publication.add_argument("--asset-directory", type=Path, required=True)
+    stable_publication.add_argument("--portable", type=Path, required=True)
     stable_publication.add_argument("--output", type=Path, required=True)
     stable_publication.set_defaults(handler=_plan_stable_publication_files)
     return parser
@@ -462,6 +646,9 @@ def main(argv: list[str] | None = None) -> int:
         AcceptanceError,
         ReleaseNotesError,
         PublicationError,
+        PortableBundleError,
+        OCIContractError,
+        MirrorError,
         KeyError,
         TypeError,
         OSError,

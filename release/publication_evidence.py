@@ -65,6 +65,15 @@ class ReleasePublicationAsset:
 
 
 @dataclass(frozen=True)
+class ReleaseTransportAsset:
+    name: str
+    sha256: str
+    size: int
+    role: str
+    authority_role: str
+
+
+@dataclass(frozen=True)
 class GitHubReleasePublication:
     tag: str
     tag_commit: str
@@ -72,6 +81,7 @@ class GitHubReleasePublication:
     prerelease: bool
     signed_at: str
     assets: tuple[ReleasePublicationAsset, ...]
+    transport_assets: tuple[ReleaseTransportAsset, ...]
 
     @property
     def identity(self) -> str:
@@ -80,6 +90,16 @@ class GitHubReleasePublication:
                 "assets": [
                     {"name": item.name, "sha256": item.sha256, "size": item.size}
                     for item in self.assets
+                ],
+                "transportAssets": [
+                    {
+                        "authorityRole": item.authority_role,
+                        "name": item.name,
+                        "role": item.role,
+                        "sha256": item.sha256,
+                        "size": item.size,
+                    }
+                    for item in self.transport_assets
                 ],
                 "certificateIdentity": GITHUB_RELEASE_CERTIFICATE_IDENTITY,
                 "draft": self.draft,
@@ -155,6 +175,24 @@ def close_github_release_publication(
             )
             for item in payload["assets"]  # type: ignore[union-attr]
         )
+        transport_assets = tuple(
+            ReleaseTransportAsset(
+                name=item["name"],
+                sha256=item["sha256"],
+                size=item["size"],
+                role=item["role"],
+                authority_role=item["authorityRole"],
+            )
+            for item in payload["transportAssets"]  # type: ignore[union-attr]
+        )
+        expected_transport_name = f"animemo-{tag}-portable.tar"
+        if (
+            len(transport_assets) != 1
+            or transport_assets[0].name != expected_transport_name
+        ):
+            raise PublicationEvidenceError(
+                "GitHub Release transport asset 与 release tag 不一致"
+            )
         return GitHubReleasePublication(
             tag=tag,  # type: ignore[arg-type]
             tag_commit=payload["tagCommit"],  # type: ignore[arg-type]
@@ -162,6 +200,7 @@ def close_github_release_publication(
             prerelease=prerelease,  # type: ignore[arg-type]
             signed_at=payload["signedAt"],  # type: ignore[arg-type]
             assets=assets,
+            transport_assets=transport_assets,
         )
     except (KeyError, TypeError) as error:
         raise PublicationEvidenceError("GitHub Release claim 结构无效") from error

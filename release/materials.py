@@ -18,6 +18,9 @@ MAX_MATERIAL_FILE_BYTES = 64 * 1024 * 1024
 MAX_MATERIAL_TOTAL_BYTES = 256 * 1024 * 1024
 INSTALLER_MATERIALS_NAME = "installer-materials.tar"
 PLATFORM_QUALIFICATION_MATERIAL = "release/platform-qualification.json"
+OFFLINE_RELEASE_VERIFIER_MATERIAL = (
+    "release/release_attestation_verifier/offline-release-verifier"
+)
 
 _FIXED_DEPLOYMENT_FILES = (
     "deploy/docker-compose.yml",
@@ -222,6 +225,7 @@ def _mode_for(relative: str) -> int:
         0o755
         if relative.endswith(".sh")
         or relative == "deploy/updater/animemo-updater"
+        or relative == OFFLINE_RELEASE_VERIFIER_MATERIAL
         else 0o644
     )
 

@@ -28,6 +28,7 @@ from .binding import CanonicalRuntimeBinding
 from .deployment import HostPaths, ImmutableComposeDeployment
 from .errors import StateError
 from .executor import UpdateExecutor
+from .local_bundle import LocalBundleReleaseSource
 from .plans import PlanStore
 from .runtime_state import RuntimeState
 from .server import UnixRpcServer
@@ -141,6 +142,7 @@ class HostAgentRuntime:
         background: bool = True,
         release_resolver=None,
         resolver_factory=None,
+        local_bundle_resolver_factory=None,
         transport_policy: ExplicitTransportPolicy | None = None,
     ) -> HostAgentRuntime:
         state_root = paths.state_root
@@ -156,6 +158,49 @@ class HostAgentRuntime:
             return ReleaseResolver(cache_root, policy=policy)
 
         configured_factory = resolver_factory or default_resolver_factory
+
+        def default_local_bundle_resolver_factory(
+            *,
+            payload=None,
+            release_attestation=None,
+            binding=None,
+        ):
+            from .offline import production_offline_release_verifier
+
+            verifier = production_offline_release_verifier()
+            local_cache = state_root / "cache" / "local-bundles"
+            if binding is not None:
+                if (
+                    payload is not None
+                    or release_attestation is not None
+                    or not isinstance(binding, dict)
+                ):
+                    raise StateError("Local bundle resolver binding is invalid")
+                transport_identity = binding.get("transportIdentity")
+                if not isinstance(transport_identity, str):
+                    raise StateError("Local bundle transport binding is invalid")
+                return LocalBundleReleaseSource.from_staged(
+                    cache_root=local_cache,
+                    transport_identity=transport_identity,
+                    verifier=verifier,
+                    updater_version=__version__,
+                )
+            if not isinstance(payload, Path) or not isinstance(
+                release_attestation, Path
+            ):
+                raise StateError("Local bundle media pair is required")
+            return LocalBundleReleaseSource.from_media(
+                payload=payload,
+                release_attestation=release_attestation,
+                cache_root=local_cache,
+                verifier=verifier,
+                updater_version=__version__,
+            )
+
+        configured_local_factory = (
+            local_bundle_resolver_factory
+            or default_local_bundle_resolver_factory
+        )
         source = release_resolver or configured_factory(selected_policy)
         source_policy = getattr(source, "transport_policy", None)
         if (
@@ -196,6 +241,7 @@ class HostAgentRuntime:
             background=background,
             resolver_factory=configured_factory,
             transport_policy=selected_policy,
+            local_bundle_resolver_factory=configured_local_factory,
         )
         server = UnixRpcServer(socket_path, agent)
         return cls(
@@ -254,6 +300,7 @@ class HostAgentRuntime:
         background: bool = False,
         release_resolver=None,
         resolver_factory=None,
+        local_bundle_resolver_factory=None,
         transport_policy: ExplicitTransportPolicy | None = None,
     ) -> HostAgentRuntime:
         return cls._build(
@@ -263,6 +310,7 @@ class HostAgentRuntime:
             background=background,
             release_resolver=release_resolver,
             resolver_factory=resolver_factory,
+            local_bundle_resolver_factory=local_bundle_resolver_factory,
             transport_policy=transport_policy,
         )
 

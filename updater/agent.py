@@ -1,22 +1,30 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
+from pathlib import Path
 
 from . import __version__
 from .compatibility import DeploymentContext, plan_switch
 from .errors import RequestRejected, StateError
+from .local_bundle import LocalBundleTransportPolicy
 from .protocol import validate_request
 from .redaction import redact
 from .state import PRE_SWITCH_RECOVERY, TERMINAL_STATES
 from .transport import ExplicitTransportPolicy, TransportSourceId
 
 
-def _policy_for_source(source: str) -> ExplicitTransportPolicy:
+def _policy_for_source(
+    source: str,
+) -> ExplicitTransportPolicy | LocalBundleTransportPolicy:
     if source == TransportSourceId.GITHUB.value:
         return ExplicitTransportPolicy.github()
     if source == TransportSourceId.OFFICIAL_MIRROR.value:
         return ExplicitTransportPolicy.official_mirror()
+    if source == "local-bundle":
+        return LocalBundleTransportPolicy()
     raise RequestRejected("Release transport source is invalid")
 
 
@@ -49,7 +57,7 @@ class _BoundReleaseResolver:
         *,
         manifest: dict[str, object],
         verified_release_identity: str,
-        transport_policy: ExplicitTransportPolicy,
+        transport_policy: ExplicitTransportPolicy | LocalBundleTransportPolicy,
     ) -> None:
         self._resolver = resolver
         self._manifest = manifest
@@ -91,6 +99,20 @@ class _BoundReleaseResolver:
             refresh=refresh,
         ).manifest
 
+    def acquire_images(self, materials, image_acquirer):
+        if (
+            getattr(materials, "identity_digest", None)
+            != self._verified_release_identity
+            or getattr(materials, "manifest", None) != self._manifest
+        ):
+            raise StateError(
+                "Release differs from the operation-bound verified identity"
+            )
+        acquire = getattr(self._resolver, "acquire_images", None)
+        if not callable(acquire):
+            raise StateError("Bound local release cannot import verified images")
+        return acquire(materials, image_acquirer)
+
 
 class UpdateAgent:
     def __init__(
@@ -106,6 +128,7 @@ class UpdateAgent:
         runtime_refresh_seconds: int = 30,
         resolver_factory=None,
         transport_policy: ExplicitTransportPolicy | None = None,
+        local_bundle_resolver_factory=None,
     ):
         self.source = source
         self.operations = operations
@@ -129,7 +152,9 @@ class UpdateAgent:
         ):
             raise StateError("Release Resolver and transport policy differ")
         self.resolver_factory = resolver_factory
+        self.local_bundle_resolver_factory = local_bundle_resolver_factory
         self._resolvers = {self.transport_policy.identity: source}
+        self._local_resolvers = {}
         self._runtime_refreshed_at = 0.0
 
     def _resolver_for(self, policy: ExplicitTransportPolicy):
@@ -150,7 +175,15 @@ class UpdateAgent:
         return resolver
 
     @staticmethod
-    def _release_binding(materials, policy: ExplicitTransportPolicy):
+    def _release_binding(resolver, materials, policy):
+        if type(policy) is LocalBundleTransportPolicy:
+            binding = getattr(resolver, "release_binding", None)
+            if not callable(binding):
+                raise StateError("Local bundle resolver authority binding is unavailable")
+            result = binding(materials.manifest["release"]["version"])
+            if not isinstance(result, dict):
+                raise StateError("Local bundle resolver authority binding is invalid")
+            return result
         return {
             "source": policy.source.value,
             "transportPolicyIdentity": policy.identity,
@@ -175,15 +208,41 @@ class UpdateAgent:
             or any(character not in "0123456789abcdef" for character in identity[7:])
         ):
             raise StateError("Operation verified release identity is invalid")
+        if type(policy) is LocalBundleTransportPolicy:
+            transport_identity = binding.get("transportIdentity")
+            resolver = self._local_resolvers.get(transport_identity)
+            if resolver is None:
+                if self.local_bundle_resolver_factory is None:
+                    raise RequestRejected("Planned local bundle is unavailable")
+                resolver = self.local_bundle_resolver_factory(binding=dict(binding))
+            resolver_policy = getattr(resolver, "transport_policy", None)
+            if (
+                type(resolver_policy) is not LocalBundleTransportPolicy
+                or resolver_policy.identity != policy.identity
+            ):
+                raise StateError("Local bundle Resolver policy is invalid")
+            observed_binding = self._release_binding(
+                resolver,
+                _verified_materials(
+                    resolver,
+                    manifest["release"]["version"],
+                ),
+                policy,
+            )
+            if observed_binding != binding:
+                raise StateError("Local bundle authority differs from the planned binding")
+            self._local_resolvers[transport_identity] = resolver
+        else:
+            resolver = self._resolver_for(policy)
         return _BoundReleaseResolver(
-            self._resolver_for(policy),
+            resolver,
             manifest=manifest,
             verified_release_identity=identity,
             transport_policy=policy,
         )
 
     @staticmethod
-    def _policy_from_binding(binding: object) -> ExplicitTransportPolicy:
+    def _policy_from_binding(binding: object):
         if not isinstance(binding, dict):
             raise StateError(
                 "Release transport binding is unavailable; explicit migration is required"
@@ -204,7 +263,23 @@ class UpdateAgent:
             raise StateError("Release verified identity binding is invalid")
         return policy
 
-    def _current_release_policy(self, current: dict[str, object]):
+    @staticmethod
+    def _context_identity(context: DeploymentContext) -> str:
+        payload = {
+            "currentManifest": context.current_manifest,
+            "databaseContract": context.database_contract,
+            "configurationContract": context.configuration_contract,
+            "enabledPluginApis": sorted(context.enabled_plugin_apis),
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+    def _current_release_binding(self, current: dict[str, object]):
         current_version = current["release"]["version"]
         candidates = sorted(
             self.operations.list(),
@@ -219,7 +294,9 @@ class UpdateAgent:
                 or metadata.get("version") != current_version
             ):
                 continue
-            return self._policy_from_binding(metadata.get("releaseBinding"))
+            binding = metadata.get("releaseBinding")
+            self._policy_from_binding(binding)
+            return dict(binding)
         raise StateError(
             "CURRENT release transport binding is unavailable; "
             "explicit migration is required"
@@ -378,14 +455,37 @@ class UpdateAgent:
         self.operations.require_recovery_clear()
         version = params["version"]
         policy = _policy_for_source(params.get("source", "github"))
-        materials = _verified_materials(self._resolver_for(policy), version)
+        if type(policy) is LocalBundleTransportPolicy:
+            if self.local_bundle_resolver_factory is None:
+                raise RequestRejected("Local bundle Resolver is unavailable")
+            resolver = self.local_bundle_resolver_factory(
+                payload=Path(params["bundlePayload"]),
+                release_attestation=Path(params["releaseAttestation"]),
+                binding=None,
+            )
+            resolver_policy = getattr(resolver, "transport_policy", None)
+            if (
+                type(resolver_policy) is not LocalBundleTransportPolicy
+                or resolver_policy.identity != policy.identity
+            ):
+                raise StateError("Local bundle Resolver policy is invalid")
+        else:
+            resolver = self._resolver_for(policy)
+        materials = _verified_materials(resolver, version)
         manifest = materials.manifest
-        switch = plan_switch(self._context(), manifest, updater_version=__version__)
-        binding = self._release_binding(materials, policy)
+        context = self._context()
+        switch = plan_switch(context, manifest, updater_version=__version__)
+        binding = self._release_binding(resolver, materials, policy)
+        if type(policy) is LocalBundleTransportPolicy:
+            transport_identity = binding.get("transportIdentity")
+            if not isinstance(transport_identity, str):
+                raise StateError("Local bundle transport identity is invalid")
+            self._local_resolvers[transport_identity] = resolver
         stored = self.plans.create(
             manifest,
             switch.as_dict(),
             release_binding=binding,
+            planning_context_identity=self._context_identity(context),
         )
         current = self.slots.read()["current"]
         return {
@@ -399,6 +499,20 @@ class UpdateAgent:
             "source": binding["source"],
             "transportPolicyIdentity": binding["transportPolicyIdentity"],
             "verifiedReleaseIdentity": binding["verifiedReleaseIdentity"],
+            **(
+                {
+                    key: value
+                    for key, value in binding.items()
+                    if key
+                    not in {
+                        "source",
+                        "transportPolicyIdentity",
+                        "verifiedReleaseIdentity",
+                    }
+                }
+                if binding["source"] == "local-bundle"
+                else {}
+            ),
         }
 
     def _run_apply(self, operation_id, manifest, lock_lease):
@@ -433,6 +547,10 @@ class UpdateAgent:
             raise RequestRejected("Update confirmation does not match the planned release")
         if not stored["plan"]["allowed"]:
             raise RequestRejected("Blocked update plans cannot be applied")
+        if stored.get("planningContextIdentity") != self._context_identity(
+            self._context()
+        ):
+            raise RequestRejected("Update plan compatibility context is stale")
         bound_resolver = self._bound_resolver(
             stored.get("releaseBinding"),
             stored["manifest"],
@@ -466,7 +584,7 @@ class UpdateAgent:
             if not handed_off:
                 lock_lease.__exit__(None, None, None)
 
-    def _rollback_previous(self):
+    def _rollback_previous(self, params):
         lock_lease = self.executor.acquire_lock()
         handed_off = False
         try:
@@ -478,9 +596,32 @@ class UpdateAgent:
             switch = plan_switch(self._context(), previous, updater_version=__version__)
             if not switch.allowed:
                 raise RequestRejected("PREVIOUS release is incompatible with the live runtime contracts")
-            policy = self._current_release_policy(slots["current"])
+            explicit_source = params.get("source")
+            if explicit_source == "local-bundle":
+                policy = LocalBundleTransportPolicy()
+                if self.local_bundle_resolver_factory is None:
+                    raise RequestRejected("Local bundle Resolver is unavailable")
+                resolver = self.local_bundle_resolver_factory(
+                    payload=Path(params["bundlePayload"]),
+                    release_attestation=Path(params["releaseAttestation"]),
+                    binding=None,
+                )
+                resolver_policy = getattr(resolver, "transport_policy", None)
+                if (
+                    type(resolver_policy) is not LocalBundleTransportPolicy
+                    or resolver_policy.identity != policy.identity
+                ):
+                    raise StateError("Local bundle Resolver policy is invalid")
+            else:
+                current_binding = self._current_release_binding(slots["current"])
+                policy = self._policy_from_binding(current_binding)
+                if type(policy) is LocalBundleTransportPolicy:
+                    raise RequestRejected(
+                        "Manual offline rollback requires an explicit PREVIOUS local bundle"
+                    )
+                resolver = self._resolver_for(policy)
             materials = _verified_materials(
-                self._resolver_for(policy),
+                resolver,
                 previous["release"]["version"],
                 refresh=True,
             )
@@ -488,7 +629,9 @@ class UpdateAgent:
                 raise StateError(
                     "PREVIOUS differs from the verified immutable release"
                 )
-            binding = self._release_binding(materials, policy)
+            binding = self._release_binding(resolver, materials, policy)
+            if type(policy) is LocalBundleTransportPolicy:
+                self._local_resolvers[binding["transportIdentity"]] = resolver
             self.executor.release_source = self._bound_resolver(binding, previous)
             operation = self.operations.create(
                 "rollback_previous",
@@ -530,7 +673,7 @@ class UpdateAgent:
         if operation == "apply_update":
             return self._apply(params)
         if operation == "rollback_previous":
-            return self._rollback_previous()
+            return self._rollback_previous(params)
         if operation == "get_operation":
             return self.operations.get(params["operationId"])
         if operation == "get_logs":
