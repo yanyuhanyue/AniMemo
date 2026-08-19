@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -70,10 +71,11 @@ class InstallBootstrapRetirementTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
     def test_remote_script_cannot_download_mutate_or_execute(self) -> None:
-        if not GIT_SH.is_file():
-            self.skipTest("Git for Windows POSIX shell is unavailable")
+        shell = GIT_SH if os.name == "nt" else Path("/bin/sh")
+        if not shell.is_file():
+            self.skipTest("POSIX shell is unavailable")
         result = subprocess.run(
-            [str(GIT_SH), str(BOOTSTRAP)],
+            [str(shell), str(BOOTSTRAP)],
             text=True,
             capture_output=True,
             stdin=subprocess.DEVNULL,
