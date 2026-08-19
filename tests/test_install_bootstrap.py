@@ -21,7 +21,13 @@ class InstallBootstrapTests(unittest.TestCase):
         resolved = path.resolve()
         return f"/{resolved.drive[0].lower()}{resolved.as_posix()[2:]}"
 
-    def _run(self, *arguments: str, curl_body: str | None = None, chmod_fails: bool = False):
+    def _run(
+        self,
+        *arguments: str,
+        curl_body: str | None = None,
+        curl_fails: bool = False,
+        chmod_fails: bool = False,
+    ):
         workspace = tempfile.TemporaryDirectory()
         root = Path(workspace.name)
         tmp = root / "tmp"
@@ -35,6 +41,7 @@ python3() { return 97; }
 tar() { return 97; }
 sha256sum() { return 97; }
 curl() {
+if [ "$ANIMEMO_TEST_CURL_FAILS" = '1' ]; then return 1; fi
 destination=''
 while [ "$#" -gt 0 ]; do
   if [ "$1" = '--output' ]; then destination=$2; shift 2; else shift; fi
@@ -48,6 +55,7 @@ printf '%s' "$ANIMEMO_TEST_CURL_BODY" >"$destination"
         environment = {
             "TMPDIR": self._posix(tmp),
             "ANIMEMO_TEST_CURL_BODY": curl_body or "",
+            "ANIMEMO_TEST_CURL_FAILS": "1" if curl_fails else "0",
         }
         result = subprocess.run(
             [str(GIT_SH), "-c", harness, "bootstrap-test", str(BOOTSTRAP), *arguments],
@@ -98,11 +106,22 @@ printf '%s' "$ANIMEMO_TEST_CURL_BODY" >"$destination"
             "v1.1.0",
             "--public-origin",
             "https://animemo.example",
+            curl_fails=True,
         )
         self.addCleanup(workspace.cleanup)
         self.assertEqual(result.returncode, 69)
         self.assertIn("GitHub transport failed", result.stderr)
         self.assertEqual(list(tmp.iterdir()), [])
+
+    def test_public_github_asset_transport_does_not_require_cli_login(self):
+        source = BOOTSTRAP.read_text(encoding="utf-8")
+        self.assertNotIn("gh release download", source)
+        self.assertIn(
+            '"https://github.com/$REPOSITORY/releases/download/$VERSION/$name"',
+            source,
+        )
+        self.assertIn("--proto-redir '=https'", source)
+        self.assertIn("--max-redirs 3", source)
 
     def test_mirror_empty_response_is_never_promoted_and_is_cleaned(self):
         workspace, tmp, result = self._run(

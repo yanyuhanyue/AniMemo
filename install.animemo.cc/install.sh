@@ -136,8 +136,12 @@ for name in release-manifest.json deployment-contract.json installer-materials.t
   destination="$STAGING/$name"
   case "$SOURCE" in
     github)
-      gh release download "$VERSION" --repo "$REPOSITORY" --pattern "$name" --dir "$STAGING" --clobber >/dev/null \
+      curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-redirs 3 \
+        --output "$destination.part" \
+        "https://github.com/$REPOSITORY/releases/download/$VERSION/$name" \
         || fail "GitHub transport failed: $name" 69
+      [ -s "$destination.part" ] || fail "GitHub returned an empty object: $name" 69
+      mv "$destination.part" "$destination"
       ;;
     official-mirror)
       curl -fL --proto '=https' --tlsv1.2 --max-redirs 0 --output "$destination.part" \
