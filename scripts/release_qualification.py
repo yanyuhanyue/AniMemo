@@ -16,7 +16,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-
 QUALIFICATION_SCHEMA = "animemo.release-qualification/v1"
 QUALIFICATION_SCHEMA_V2 = "animemo.release-qualification/v2"
 RELEASE_WORKFLOW_PATH = ".github/workflows/release.yml"

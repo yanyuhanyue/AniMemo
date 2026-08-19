@@ -22,7 +22,7 @@ from release.contract import (
     validate_deployment_contract,
     validate_manifest,
 )
-from .commands import CommandRunner
+
 from .authority import (
     AttestationEvidence,
     AuthorityEvidence,
@@ -30,6 +30,7 @@ from .authority import (
     ReleaseAuthorityVerifier,
     VerifiedReleaseMaterials,
 )
+from .commands import CommandRunner
 from .errors import CommandFailed, RequestRejected, StateError
 from .protocol import CHANNELS, RELEASE_VERSION
 from .state import _absolute, _ensure_private_directory

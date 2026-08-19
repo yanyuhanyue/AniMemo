@@ -21,7 +21,6 @@ from updater.tests.test_source import (
     stable_manifest,
 )
 
-
 EXPECTED_IDENTITY = (
     "sha256:692640e41ceb2c77276d75eb84c317b8344552a3f841ee4ede34f6125216f295"
 )
@@ -42,7 +41,7 @@ def _fixture() -> tuple[dict[str, bytes], AuthorityEvidence]:
         f"{hashlib.sha256(manifest_bytes).hexdigest()}  release-manifest.json\n"
         f"{hashlib.sha256(deployment_bytes).hexdigest()}  deployment-contract.json\n"
         f"{hashlib.sha256(FAKE_MATERIAL_ARCHIVE).hexdigest()}  installer-materials.tar\n"
-    ).encode("utf-8")
+    ).encode()
     assets = {
         "release-manifest.json": manifest_bytes,
         "deployment-contract.json": deployment_bytes,
@@ -212,14 +211,16 @@ class ReleaseAuthorityVerifierTests(unittest.TestCase):
             _json_bytes(manifest),
         )
 
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(RequestRejected):
-                ReleaseAuthorityVerifier().verify(
-                    assets=assets,
-                    authority=authority,
-                    destination=Path(temporary) / "materials",
-                    updater_version="1.0.0",
-                )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            self.assertRaises(RequestRejected),
+        ):
+            ReleaseAuthorityVerifier().verify(
+                assets=assets,
+                authority=authority,
+                destination=Path(temporary) / "materials",
+                updater_version="1.0.0",
+            )
 
     def test_authority_evidence_is_an_exact_closed_binding(self) -> None:
         assets, authority = _fixture()

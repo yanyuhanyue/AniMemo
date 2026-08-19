@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 
 from updater.authority import VerifiedReleaseMaterials
-from updater.oci import OCIContractError, ImageAcquirer
+from updater.oci import ImageAcquirer, OCIContractError
 from updater.transport import ExplicitTransportPolicy
 
 

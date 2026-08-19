@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import unittest
 import json
+import unittest
 from pathlib import Path
 
 import jsonschema
@@ -27,7 +27,6 @@ from release.vm_qualification import (
     classify_legacy_release,
     validate_pre_publish_qualification,
 )
-
 
 COMMIT = "b" * 40
 API = "sha256:" + "1" * 64

@@ -9,7 +9,6 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-
 SCHEMA = "animemo.rc-live-acceptance/v1"
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _COMMIT = re.compile(r"[0-9a-f]{40}")

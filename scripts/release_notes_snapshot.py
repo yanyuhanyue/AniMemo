@@ -22,7 +22,6 @@ from release.notes import (
     render_release_notes,
 )
 
-
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 
 

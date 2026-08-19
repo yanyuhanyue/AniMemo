@@ -55,7 +55,6 @@ _READ_CHUNK_BYTES = 1024 * 1024
 class _RejectRedirects(HTTPRedirectHandler):
     def redirect_request(self, request, file_pointer, code, message, headers, new_url):
         del request, file_pointer, code, message, headers, new_url
-        return None
 
 
 class TransportError(RequestRejected):
@@ -127,7 +126,7 @@ class ExplicitTransportPolicy:
         selection_origin: TransportSelectionOrigin = (
             TransportSelectionOrigin.EXPLICIT_ADMIN_INPUT
         ),
-    ) -> "ExplicitTransportPolicy":
+    ) -> ExplicitTransportPolicy:
         return cls(
             source=TransportSourceId.GITHUB,
             selection_origin=selection_origin,
@@ -140,7 +139,7 @@ class ExplicitTransportPolicy:
         selection_origin: TransportSelectionOrigin = (
             TransportSelectionOrigin.EXPLICIT_ADMIN_INPUT
         ),
-    ) -> "ExplicitTransportPolicy":
+    ) -> ExplicitTransportPolicy:
         return cls(
             source=TransportSourceId.OFFICIAL_MIRROR,
             selection_origin=selection_origin,
@@ -195,7 +194,7 @@ class TransportRequest:
         *,
         max_object_bytes: int = 512 * 1024 * 1024,
         max_total_bytes: int = 1024 * 1024 * 1024,
-    ) -> "TransportRequest":
+    ) -> TransportRequest:
         return cls(
             kind=TransportRequestKind.RELEASE_BUNDLE,
             exact_version=exact_version,

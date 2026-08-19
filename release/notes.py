@@ -9,7 +9,6 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-
 SCHEMA = "animemo.release-notes/v1"
 CONFIG_SCHEMA = "animemo.release-notes.configuration/v1"
 CANONICAL_RELEASE_ASSETS = (

@@ -11,7 +11,6 @@ from release.notes import (
     validate_release_notes,
 )
 
-
 COMMIT = "b" * 40
 BASE = "a" * 40
 

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.release_authority import ReleaseAuthorityError, validate_phase_b_authority
 from scripts.release_qualification import (
     REQUIRED_GATES,
     QualificationError,
@@ -13,17 +14,13 @@ from scripts.release_qualification import (
     resolve_qualification_evidence,
     validate_qualification_evidence,
 )
-from scripts.release_authority import ReleaseAuthorityError, validate_phase_b_authority
 
 
 class QualificationContractTests(unittest.TestCase):
     def setUp(self):
         self.candidate = "a" * 40
         self.base = "b" * 40
-        self.needs = {
-            name: {"result": "success" if name != "performance" else "success"}
-            for name in REQUIRED_GATES
-        }
+        self.needs = {name: {"result": "success"} for name in REQUIRED_GATES}
         self.needs.update(
             {
                 "release-authority": {"result": "success"},

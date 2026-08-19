@@ -18,8 +18,8 @@ from durability.compatibility import (
     ReasonCode,
 )
 from durability.doctor import (
-    DOCTOR_CHECK_IDS,
     DISTRIBUTION_CHECK_IDS,
+    DOCTOR_CHECK_IDS,
     CompatibilityEvidence,
     DoctorRunner,
     DoctorStatus,

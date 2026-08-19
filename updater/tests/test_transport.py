@@ -10,10 +10,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
 from updater.transport import (
+    RELEASE_BUNDLE_OBJECTS,
     ExplicitTransportPolicy,
     GitHubTransportSource,
     OfficialMirrorTransportSource,
-    RELEASE_BUNDLE_OBJECTS,
     TransportError,
     TransportRequest,
     TransportSourceId,
@@ -282,17 +282,19 @@ class TransportSourceTests(unittest.TestCase):
         )
 
         for opener, expected_code in cases:
-            with self.subTest(expected_code=expected_code):
-                with tempfile.TemporaryDirectory() as temporary:
-                    staging = Path(temporary).resolve() / "private"
-                    staging.mkdir(mode=0o700)
-                    with self.assertRaises(TransportError) as raised:
-                        GitHubTransportSource(opener=opener).acquire(
-                            request,
-                            staging,
-                        )
-                    self.assertEqual(raised.exception.code, expected_code)
-                    self.assertEqual(list(staging.iterdir()), [])
+            with (
+                self.subTest(expected_code=expected_code),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                staging = Path(temporary).resolve() / "private"
+                staging.mkdir(mode=0o700)
+                with self.assertRaises(TransportError) as raised:
+                    GitHubTransportSource(opener=opener).acquire(
+                        request,
+                        staging,
+                    )
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertEqual(list(staging.iterdir()), [])
 
     def test_interrupted_transaction_removes_every_partial_object(self):
         bodies = {

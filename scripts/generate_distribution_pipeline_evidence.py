@@ -48,7 +48,6 @@ from release.vm_qualification import (
 )
 from scripts.release_qualification import REQUIRED_GATES, build_qualification_evidence
 
-
 TASK = "V1_1_DISTRIBUTION_VM_QUALIFICATION_AND_AUTOMATED_RELEASE_PIPELINE_V1_CONVERGENCE"
 REPOSITORY = "yanyuhanyue/AniMemo"
 BASE_SHA = "5c0589bce2ff5498eacf0a85d8c5f254e3b9f495"

@@ -15,9 +15,9 @@ from updater.tests.test_source import (
     stable_manifest,
 )
 from updater.transport import (
+    RELEASE_BUNDLE_OBJECTS,
     AcquiredTransportSet,
     ExplicitTransportPolicy,
-    RELEASE_BUNDLE_OBJECTS,
     TransportError,
     TransportObjectReceipt,
     TransportReceipt,

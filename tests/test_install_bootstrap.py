@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP = ROOT / "install.animemo.cc" / "install.sh"
 GIT_SH = Path(r"C:\Program Files\Git\bin\sh.exe")

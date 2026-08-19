@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.release_notes_snapshot import SnapshotCollectionError, collect_pull_metadata
+from scripts.release_notes_snapshot import (
+    SnapshotCollectionError,
+    collect_pull_metadata,
+)
 
 
 class ReleaseNotesSnapshotCollectionTests(unittest.TestCase):
