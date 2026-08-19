@@ -244,7 +244,7 @@ jobs:
           OPERATION=portable \
           PUBLICATION_PLAN_PATH=promotion-output/publication-plan.json \
           PORTABLE_BUILD_RECEIPT_PATH=promotion-output/portable-promotion-receipt.json \
-            python scripts/release_authority.py \
+            python -m scripts.release_authority \
             > promotion-output/portable-pipeline-authority.json
           ! git ls-remote --exit-code --tags origin "refs/tags/$stable_tag" >/dev/null 2>&1
           ! gh release view "$stable_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1

@@ -445,6 +445,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
 
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        promote_source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
         authority = release["jobs"]["release-authority"]
         self.assertEqual(
             authority["needs"],
@@ -461,7 +462,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("toJSON(needs)", authority_source)
         self.assertIn("ref: ${{ needs.preflight.outputs.candidate_sha }}", authority_source)
         self.assertIn("python -m scripts.release_authority", authority_source)
+        self.assertEqual(source.count("python -m scripts.release_authority"), 4)
         self.assertNotIn("python scripts/release_authority.py", source)
+        self.assertEqual(promote_source.count("python -m scripts.release_authority"), 1)
+        self.assertNotIn("python scripts/release_authority.py", promote_source)
         self.assertEqual(
             release["jobs"]["dry-run"]["needs"],
             ["preflight", "release-authority", "platform-qualification"],
