@@ -532,6 +532,13 @@ RULES = (
         _is_release_core,
     ),
     RiskRule(
+        "install-portal-bootstrap",
+        "CRITICAL",
+        "install.animemo.cc bootstrap transport or installation UX changed.",
+        ("release", "tooling"),
+        lambda path: path.startswith("install.animemo.cc/"),
+    ),
+    RiskRule(
         "installer-runtime",
         "CRITICAL",
         "Installer planning, mutation, Restore, or acceptance behavior changed.",
