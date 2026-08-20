@@ -102,10 +102,10 @@
             <p>从固定仓库取得 Release metadata、assets、tag 与 provenance。失败时不会自动调用镜像。</p>
           </button>
           <button class="source-card is-blocked" type="button" data-transport="official-mirror" aria-pressed="false" aria-disabled="true" disabled>
-            <span class="source-index">UNAVAILABLE</span>
+            <span class="source-index" data-mirror-availability>UNAVAILABLE</span>
             <strong>AniMemo Official Mirror</strong>
             <small>Transport only</small>
-            <p>当前没有已资格认证的官方镜像。未来镜像只运输精确字节；GitHub authority 仍负责 release 身份与发布证明。</p>
+            <p data-mirror-description>当前没有已资格认证的官方镜像。未来镜像只运输精确字节；GitHub authority 仍负责 release 身份与发布证明。</p>
           </button>
           <button class="source-card is-blocked" type="button" data-transport="local-bundle" aria-pressed="false" aria-disabled="true" disabled>
             <span class="source-index">QUALIFYING</span>

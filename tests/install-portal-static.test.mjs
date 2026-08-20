@@ -25,7 +25,7 @@ function digest(character) {
 
 function verifiedReleaseState() {
   return {
-    authorityReceiptSha256: digest("a"),
+    authorityReceiptSha256: digest("b"),
     officialMirror: {
       baseUrl: "https://mirror.invalid.example/animemo/releases/",
       installerPath: "qualified/v9.9.9-rc.1/installer-materials.tar",
@@ -33,11 +33,11 @@ function verifiedReleaseState() {
     },
     release: {
       assets: {
-        attestation: { name: "release-attestation.json", sha256: digest("b") },
-        checksums: { name: "SHA256SUMS", sha256: digest("c") },
+        attestation: { name: "animemo-v9.9.9-rc.1-release-attestation.json", sha256: digest("b") },
+        checksums: { name: "checksums.txt", sha256: digest("c") },
         deploymentContract: { name: "deployment-contract.json", sha256: digest("d") },
         installer: { name: "installer-materials.tar", sha256: digest("e") },
-        manifest: { name: "manifest.json", sha256: digest("f") },
+        manifest: { name: "release-manifest.json", sha256: digest("f") },
       },
       commitSha: "1".repeat(40),
       draft: false,
@@ -85,6 +85,14 @@ test("闭合 schema 对缺字段、额外字段、draft 与非 immutable Release
   const mutable = verifiedReleaseState();
   mutable.release.immutable = false;
   assert.throws(() => validateReleaseState(mutable), /must be immutable/);
+
+  const wrongAssetName = verifiedReleaseState();
+  wrongAssetName.release.assets.manifest.name = "manifest.json";
+  assert.throws(() => validateReleaseState(wrongAssetName), /not canonical/);
+
+  const unboundReceipt = verifiedReleaseState();
+  unboundReceipt.authorityReceiptSha256 = digest("0");
+  assert.throws(() => validateReleaseState(unboundReceipt), /not bound/);
 });
 
 test("GitHub 与已资格镜像 acquisition 确实不同但验证命令和 authority 完全相同", () => {
@@ -127,6 +135,9 @@ test("页面来源选择显式且没有 runtime latest、隐式切换或外部 f
   assert.match(combined, /data-transport="local-bundle"/);
   assert.doesNotMatch(combined, /geolocation|country detection|fastest mirror|自动最快|自动切换/i);
   assert.doesNotMatch(script, /fetch\s*\(|XMLHttpRequest|WebSocket|EventSource|releases\/latest/i);
+  assert.match(script, /removeAttribute\("aria-disabled"\)/);
+  assert.match(script, /data-mirror-availability/);
+  assert.match(script, /data-mirror-description/);
 });
 
 test("页面依赖均为同源静态资源并提供无障碍反馈", async () => {

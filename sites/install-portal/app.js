@@ -64,6 +64,12 @@ function validateAsset(asset, label) {
   requireString(asset.sha256, SHA256_PATTERN, `${label}.sha256`);
 }
 
+function requireAssetName(asset, expected, label) {
+  if (asset.name !== expected) {
+    throw new TypeError(`${label}.name is not canonical`);
+  }
+}
+
 function validateRelease(release) {
   requireExactKeys(release, RELEASE_KEYS, "release");
   if (!Number.isSafeInteger(release.githubReleaseId) || release.githubReleaseId <= 0) {
@@ -85,6 +91,19 @@ function validateRelease(release) {
   }
   requireExactKeys(release.assets, ASSET_SET_KEYS, "release.assets");
   for (const key of ASSET_SET_KEYS) validateAsset(release.assets[key], `release.assets.${key}`);
+  requireAssetName(release.assets.checksums, "checksums.txt", "release.assets.checksums");
+  requireAssetName(
+    release.assets.deploymentContract,
+    "deployment-contract.json",
+    "release.assets.deploymentContract",
+  );
+  requireAssetName(release.assets.installer, "installer-materials.tar", "release.assets.installer");
+  requireAssetName(release.assets.manifest, "release-manifest.json", "release.assets.manifest");
+  requireAssetName(
+    release.assets.attestation,
+    `animemo-${release.tag}-release-attestation.json`,
+    "release.assets.attestation",
+  );
   const assetNames = ASSET_SET_KEYS.map((key) => release.assets[key].name);
   if (new Set(assetNames).size !== assetNames.length) {
     throw new TypeError("release asset names must be unique");
@@ -130,6 +149,9 @@ export function validateReleaseState(candidate) {
   if (candidate.state !== "REAL_VERIFIED_RELEASE") throw new TypeError("release state is fail-closed");
   requireString(candidate.authorityReceiptSha256, SHA256_PATTERN, "authorityReceiptSha256");
   validateRelease(candidate.release);
+  if (candidate.authorityReceiptSha256 !== candidate.release.assets.attestation.sha256) {
+    throw new TypeError("authorityReceiptSha256 is not bound to the release attestation");
+  }
   validateMirror(candidate.officialMirror, candidate.release);
   return Object.freeze({ ...candidate });
 }
@@ -255,6 +277,15 @@ function renderPortal() {
     const mirrorButton = document.querySelector('[data-transport="official-mirror"]');
     githubButton.disabled = false;
     mirrorButton.disabled = state.officialMirror === null;
+    mirrorButton.classList.toggle("is-blocked", state.officialMirror === null);
+    if (state.officialMirror === null) {
+      mirrorButton.setAttribute("aria-disabled", "true");
+    } else {
+      mirrorButton.removeAttribute("aria-disabled");
+      mirrorButton.querySelector("[data-mirror-availability]").textContent = "EXPLICIT";
+      mirrorButton.querySelector("[data-mirror-description]").textContent =
+        "已资格镜像只运输精确字节；GitHub authority 仍负责 Release 身份与发布证明。";
+    }
     sourceStatus.textContent = "当前选择：GitHub。不会自动回退到其他运输来源。";
     setCopyCommands(githubPlan);
   }
