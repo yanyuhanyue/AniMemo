@@ -25,6 +25,12 @@ class Command(BaseCommand):
     def _new_secret():
         return secrets.token_urlsafe(32)
 
+    def _require_interactive_secret_output(self):
+        if not self.stdout.isatty():
+            raise CommandError(
+                "共享密钥只能写入交互式终端；已拒绝可能被日志或管道捕获的输出。"
+            )
+
     def handle(self, *args, **options):
         if options["action"] == "create":
             return self._create(options)
@@ -36,6 +42,7 @@ class Command(BaseCommand):
         name = str(options.get("name") or "").strip()
         if not provider or not instance_id or not name:
             raise CommandError("create 需要 --provider、--instance-id 和 --name。")
+        self._require_interactive_secret_output()
         secret = self._new_secret()
         connection = IntegrationConnection(
             provider=provider,
@@ -62,6 +69,7 @@ class Command(BaseCommand):
             connection = IntegrationConnection.objects.get(pk=connection_id)
         except (ValueError, IntegrationConnection.DoesNotExist) as error:
             raise CommandError("集成连接不存在。") from error
+        self._require_interactive_secret_output()
         secret = self._new_secret()
         connection.key_id = self._new_key_id()
         connection.set_secret(secret)

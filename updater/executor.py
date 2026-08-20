@@ -4,6 +4,7 @@ from contextlib import nullcontext
 
 from .compatibility import DeploymentContext, plan_switch
 from .errors import CompatibilityError, StateError
+from .local_bundle import LocalBundleTransportPolicy
 from .state import UpdateLock
 
 
@@ -74,6 +75,51 @@ class UpdateExecutor:
             self._context(current), current, updater_version=self.updater_version
         ).allowed
 
+    def _fetch_verified_release(self, version: str, *, refresh: bool):
+        fetch_materials = getattr(
+            self.release_source, "fetch_verified_materials", None
+        )
+        if callable(fetch_materials):
+            materials = fetch_materials(
+                version,
+                updater_version=self.updater_version,
+                refresh=refresh,
+            )
+            manifest = getattr(materials, "manifest", None)
+            if not isinstance(manifest, dict):
+                raise CompatibilityError(
+                    "Verified release materials do not contain a manifest"
+                )
+            return manifest, materials
+        return (
+            self.release_source.fetch_verified(
+                version,
+                updater_version=self.updater_version,
+                refresh=refresh,
+            ),
+            None,
+        )
+
+    def _pull_verified_release(self, manifest, materials) -> None:
+        if materials is None:
+            self.deployment.pull(manifest)
+            return
+        policy = getattr(self.release_source, "transport_policy", None)
+        if type(policy) is LocalBundleTransportPolicy:
+            import_local = getattr(self.deployment, "import_local_verified", None)
+            if not callable(import_local):
+                raise CompatibilityError(
+                    "Verified local OCI import is unavailable for the bound transport policy"
+                )
+            import_local(self.release_source, materials, policy)
+            return
+        pull_verified = getattr(self.deployment, "pull_verified", None)
+        if policy is None or not callable(pull_verified):
+            raise CompatibilityError(
+                "Verified image acquisition is unavailable for the bound transport policy"
+            )
+        pull_verified(materials, policy)
+
     def _resolve_uncertain_contracts(
         self,
         operation_id: str,
@@ -103,17 +149,13 @@ class UpdateExecutor:
         version = release.get("version")
         if not isinstance(version, str) or metadata.get("version") != version:
             raise StateError("Recovery target differs from the operation")
-        verified = self.release_source.fetch_verified(
-            version,
-            updater_version=self.updater_version,
-            refresh=True,
-        )
+        verified, materials = self._fetch_verified_release(version, refresh=True)
         if verified != target:
             raise CompatibilityError(
                 "Recovery target differs from the verified immutable release"
             )
         self._require_same_datastore_images(current, target)
-        self.deployment.pull(target)
+        self._pull_verified_release(target, materials)
 
         database = pending.get("database")
         if database is not None:
@@ -311,11 +353,10 @@ class UpdateExecutor:
                 self.store.transition(
                     operation_id,
                     "fetching",
-                    detail="loading exact GitHub release assets",
+                    detail="loading exact release assets under the bound transport policy",
                 )
-                verified_manifest = self.release_source.fetch_verified(
+                verified_manifest, verified_materials = self._fetch_verified_release(
                     target_manifest["release"]["version"],
-                    updater_version=self.updater_version,
                     refresh=True,
                 )
                 self.store.transition(
@@ -358,7 +399,7 @@ class UpdateExecutor:
                     "pulling",
                     detail="pulling exact API and Web image digests",
                 )
-                self.deployment.pull(target_manifest)
+                self._pull_verified_release(target_manifest, verified_materials)
                 if plan.migration_required:
                     runtime = self.runtime_state.read()
                     self.store.mark_contract_transition_pending(
@@ -494,9 +535,8 @@ class UpdateExecutor:
                     "fetching",
                     detail="loading PREVIOUS immutable release",
                 )
-                verified_manifest = self.release_source.fetch_verified(
+                verified_manifest, verified_materials = self._fetch_verified_release(
                     previous_manifest["release"]["version"],
-                    updater_version=self.updater_version,
                     refresh=True,
                 )
                 self.store.transition(
@@ -527,7 +567,7 @@ class UpdateExecutor:
                     "pulling",
                     detail="pulling PREVIOUS API and Web image digests",
                 )
-                self.deployment.pull(previous_manifest)
+                self._pull_verified_release(previous_manifest, verified_materials)
                 self.store.transition(
                     operation_id,
                     "switching",

@@ -16,8 +16,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-
 QUALIFICATION_SCHEMA = "animemo.release-qualification/v1"
+QUALIFICATION_SCHEMA_V2 = "animemo.release-qualification/v2"
 RELEASE_WORKFLOW_PATH = ".github/workflows/release.yml"
 RELEASE_WORKFLOW_NAME = "Release Producer"
 RELEASE_GRAPH_CONTRACT = "animemo.release-gate.jobs/v2"
@@ -35,6 +35,7 @@ REQUIRED_QUALIFICATION_RESULTS = (
 )
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+-(?:beta|rc)\.[1-9][0-9]*$")
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class QualificationError(ValueError):
@@ -157,11 +158,16 @@ def build_qualification_evidence(
     status: str = "completed",
     conclusion: str = "success",
     release_graph_contract: str = RELEASE_GRAPH_CONTRACT,
+    release_notes_identity: str | None = None,
+    release_notes_markdown_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Build and validate a canonical Phase A qualification document."""
 
+    if (release_notes_identity is None) != (release_notes_markdown_sha256 is None):
+        raise QualificationError("release note qualification binding must be complete")
+    schema = QUALIFICATION_SCHEMA_V2 if release_notes_identity is not None else QUALIFICATION_SCHEMA
     payload: dict[str, Any] = {
-        "schema": QUALIFICATION_SCHEMA,
+        "schema": schema,
         "repository": _text(repository, "repository"),
         "workflow": {
             "name": _text(workflow_name, "workflow.name"),
@@ -186,6 +192,15 @@ def build_qualification_evidence(
         "created_at": _text(created_at, "created_at"),
         "qualification_results": _normalize_qualification_results(needs, channel, qualification_results),
     }
+    if release_notes_identity is not None:
+        if not _DIGEST.fullmatch(release_notes_identity) or not _DIGEST.fullmatch(
+            release_notes_markdown_sha256 or ""
+        ):
+            raise QualificationError("release note qualification identities are invalid")
+        payload["release_notes"] = {
+            "snapshot_identity": release_notes_identity,
+            "markdown_sha256": release_notes_markdown_sha256,
+        }
     return finalize_qualification_evidence(payload)
 
 
@@ -228,14 +243,17 @@ def validate_qualification_evidence(
     if not isinstance(payload, Mapping):
         raise QualificationError("qualification evidence must be an object")
     keys = set(payload)
+    schema = payload.get("schema")
+    if schema == QUALIFICATION_SCHEMA_V2:
+        required = required | {"release_notes"}
+    elif schema != QUALIFICATION_SCHEMA:
+        raise QualificationError("unsupported qualification schema")
     if require_checksum:
         if keys != required:
             raise QualificationError("qualification evidence has unknown or missing fields")
     elif keys - (required - {"artifact_sha256"}):
         raise QualificationError("qualification evidence has unknown fields")
 
-    if payload.get("schema") != QUALIFICATION_SCHEMA:
-        raise QualificationError("unsupported qualification schema")
     if payload.get("repository") != REPOSITORY:
         raise QualificationError("qualification repository mismatch")
     workflow = _require_exact_keys(payload.get("workflow"), {"name", "path", "ref", "sha"}, "workflow")
@@ -297,6 +315,17 @@ def validate_qualification_evidence(
         if result != expected_result:
             raise QualificationError(f"qualification result {name} did not succeed")
 
+    if schema == QUALIFICATION_SCHEMA_V2:
+        notes = _require_exact_keys(
+            payload.get("release_notes"),
+            {"snapshot_identity", "markdown_sha256"},
+            "release_notes",
+        )
+        if not _DIGEST.fullmatch(str(notes["snapshot_identity"])):
+            raise QualificationError("release note snapshot identity is invalid")
+        if not _DIGEST.fullmatch(str(notes["markdown_sha256"])):
+            raise QualificationError("release note markdown identity is invalid")
+
     if require_checksum:
         checksum = payload.get("artifact_sha256")
         if not isinstance(checksum, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", checksum):
@@ -324,6 +353,18 @@ def validate_qualification_evidence(
             raise QualificationError("qualification workflow ref mismatch")
         if "workflow_sha" in expected and workflow["sha"] != expected["workflow_sha"]:
             raise QualificationError("qualification workflow sha mismatch")
+        if "release_notes_identity" in expected:
+            notes = payload.get("release_notes")
+            if not isinstance(notes, Mapping) or notes.get("snapshot_identity") != expected[
+                "release_notes_identity"
+            ]:
+                raise QualificationError("qualification release notes snapshot mismatch")
+        if "release_notes_markdown_sha256" in expected:
+            notes = payload.get("release_notes")
+            if not isinstance(notes, Mapping) or notes.get("markdown_sha256") != expected[
+                "release_notes_markdown_sha256"
+            ]:
+                raise QualificationError("qualification release notes markdown mismatch")
     return dict(payload)
 
 

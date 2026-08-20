@@ -146,6 +146,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
 
     def test_release_source_uses_public_rest_and_local_attestation_bundles(self):
         source = (ROOT / "updater/source.py").read_text(encoding="utf-8")
+        transport = (ROOT / "updater/transport.py").read_text(encoding="utf-8")
         requirements = (ROOT / "release/requirements.txt").read_text(encoding="utf-8")
 
         self.assertIn('GITHUB_API_ROOT = "https://api.github.com"', source)
@@ -179,13 +180,20 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             '"--predicate-type"',
         ):
             self.assertIn(required_option, source)
-        for credential in (
-            '"GH_TOKEN"',
-            '"GITHUB_TOKEN"',
+        for isolated_environment_key in (
+            '"HOME"',
+            '"TMPDIR"',
             '"GH_CONFIG_DIR"',
             '"DOCKER_CONFIG"',
+            '"GH_PROMPT_DISABLED"',
         ):
-            self.assertIn(credential, source)
+            self.assertIn(isolated_environment_key, source)
+        self.assertIn('authenticated["GH_TOKEN"] = token', transport)
+        self.assertIn("credential_provider=getattr", source)
+        self.assertNotIn('"GITHUB_TOKEN"', source)
+        self.assertNotIn('"GITHUB_TOKEN"', transport)
+        self.assertNotIn("os.environ.copy()", source)
+        self.assertNotIn("os.environ.copy()", transport)
 
     def test_agent_switch_is_scoped_and_plugin_compatibility_uses_live_state(self):
         deployment = (ROOT / "updater/deployment.py").read_text(encoding="utf-8")

@@ -82,7 +82,8 @@ test("edit workflow exposes bind, refresh, explicit metadata source choices, sou
   assert.match(identityPanel, /仅设为来源/);
   assert.match(identityPanel, /设为来源并应用/);
   assert.match(identityPanel, /解除后不会删除你的番剧记录、评分、评论或观看记录/);
-  assert.match(identityPanel, /href=\{identity\.canonical_url\}/);
+  assert.match(identityPanel, /normalizeHttpUrl\(identity\?\.canonical_url\)/);
+  assert.match(identityPanel, /href=\{canonicalUrl\}/);
   assert.match(identityPanel, /result\.episodes \? `\$\{result\.episodes\} 话` : "集数未定"/);
   assert.doesNotMatch(identityPanel, /JSON\.stringify/);
 });

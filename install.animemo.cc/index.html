@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ff6b6b" />
+    <meta
+      name="description"
+      content="AniMemo v1.1 自托管安装入口：明确选择运输来源，验证 GitHub Release 权威，再完成安装或升级。"
+    />
+    <title>AniMemo 安装入口</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到安装命令</a>
+    <header class="site-header">
+      <a class="brand" href="#main" aria-label="AniMemo 安装入口首页">
+        <span aria-hidden="true"></span>
+        <strong>AniMemo</strong>
+        <small>INSTALL / v1.1</small>
+      </a>
+      <nav aria-label="安装页面导航">
+        <a href="#install">安装</a>
+        <a href="#sources">运输来源</a>
+        <a href="#upgrade">升级</a>
+        <a href="#help">诊断与恢复</a>
+      </nav>
+      <p class="authority-chip">Release Authority · GitHub</p>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="install" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">SELF-HOSTED / EXPLICIT / FAIL-CLOSED</p>
+          <h1 id="hero-title">先验证，再执行。<br /><span>权威不随下载线路改变。</span></h1>
+          <p class="lede">
+            这是 AniMemo 的公共安装与帮助入口。默认从 GitHub 运输发布材料；你也可以明确选择 AniMemo Official Mirror。所有在线路径仍由同一个 GitHub Release Authority 校验。
+          </p>
+
+          <div class="quick-install" aria-labelledby="quick-title">
+            <div class="block-heading">
+              <span>推荐安装</span>
+              <strong id="quick-title">独立 Stage‑0 验证</strong>
+            </div>
+            <div class="command-row">
+              <code id="release-command">gh release verify &lt;EXACT_TAG&gt; --repo yanyuhanyue/AniMemo</code>
+              <button type="button" data-copy-target="release-command">复制</button>
+            </div>
+            <div class="command-row">
+              <code id="download-command">gh release download &lt;EXACT_TAG&gt; --repo yanyuhanyue/AniMemo --pattern installer-materials.tar --dir ./animemo-stage0</code>
+              <button type="button" data-copy-target="download-command">复制</button>
+            </div>
+            <div class="command-row">
+              <code id="run-command">gh release verify-asset &lt;EXACT_TAG&gt; ./animemo-stage0/installer-materials.tar --repo yanyuhanyue/AniMemo</code>
+              <button type="button" data-copy-target="run-command">复制</button>
+            </div>
+            <p class="command-note">先从 GitHub 官方签名 APT 仓库安装并固定 gh 2.97.0。三步必须全部通过；随后按项目文档用系统工具把同一 tar 复制并解包到固定 root-only staging，再从该受保护目录以闭合环境启动 canonical Installer。Installer 会把所有已载入的核心模块逐字节绑定回已验证 tar，随后先预置信任状态，再开始系统安装。本站不再提供可直接 sudo 的远程脚本。</p>
+          </div>
+        </div>
+
+        <aside class="authority-rail" aria-labelledby="rail-title">
+          <div class="rail-heading">
+            <span>AUTHORITY RAIL</span>
+            <h2 id="rail-title">字节可以换线路，权威只有一条</h2>
+          </div>
+          <ol>
+            <li class="rail-transport">
+              <span>01</span>
+              <div><strong>Install Portal</strong><small>只提供 UX 与运输说明，不提供 sudo 脚本</small></div>
+            </li>
+            <li class="rail-transport is-selected" id="rail-transport">
+              <span>02</span>
+              <div><strong id="rail-transport-name">GitHub transport</strong><small>取得精确材料</small></div>
+            </li>
+            <li class="rail-authority">
+              <span>03</span>
+              <div><strong>GitHub Release</strong><small>metadata · tag → commit · provenance</small></div>
+            </li>
+            <li class="rail-authority">
+              <span>04</span>
+              <div><strong>Canonical OCI digest</strong><small>repository@sha256，拒绝 tag fallback</small></div>
+            </li>
+          </ol>
+          <p>Official Mirror 不会移动第 03、04 站，也不会成为第二个 Release Authority。</p>
+        </aside>
+      </section>
+
+      <section class="source-section" id="sources" aria-labelledby="source-title">
+        <div class="section-heading">
+          <p class="eyebrow">TRANSPORT POLICY</p>
+          <h2 id="source-title">明确选择运输来源</h2>
+          <p>没有地区识别、延迟竞速或失败后的静默切换。改变来源会形成新的显式策略。</p>
+        </div>
+        <div class="source-grid">
+          <button class="source-card is-active" type="button" data-transport="github" aria-pressed="true">
+            <span class="source-index">DEFAULT</span>
+            <strong>GitHub</strong>
+            <small>Canonical transport</small>
+            <p>从固定仓库取得 Release metadata、assets、tag 与 provenance。失败时不会自动调用镜像。</p>
+          </button>
+          <button class="source-card" type="button" data-transport="official-mirror" aria-pressed="false">
+            <span class="source-index">EXPLICIT</span>
+            <strong>AniMemo Official Mirror</strong>
+            <small>Transport only</small>
+            <p>镜像运输精确字节；在线 GitHub authority 仍负责 release 身份与发布证明。</p>
+          </button>
+          <button class="source-card is-blocked" type="button" data-transport="local-bundle" aria-pressed="false">
+            <span class="source-index">QUALIFYING</span>
+            <strong>Portable / Offline Bundle</strong>
+            <small>Independent pretrust required</small>
+            <p>离线安装必须先由 operator 或可信镜像独立预置 Linux verifier、GitHub/Sigstore roots 与 closed TrustProfile；Portable 自身不能建立首信任。</p>
+          </button>
+        </div>
+        <p class="source-status" id="source-status" aria-live="polite">当前选择：GitHub。不会自动回退到其他运输来源。</p>
+      </section>
+
+      <section class="install-grid" aria-label="安装与升级说明">
+        <article>
+          <p class="eyebrow">FRESH</p>
+          <h2>全新安装</h2>
+          <p>适用于受支持的干净 Linux 主机。Installer 会先形成只读计划，验证平台、Release、配置与持久化路径；接受 exact plan 后才执行。</p>
+          <ul>
+            <li>默认监听 <code>127.0.0.1:8088</code></li>
+            <li>持久数据位于 <code>/data/animemo</code></li>
+            <li>公网域名与监听地址分别配置</li>
+            <li>安装结束必须通过 Doctor</li>
+          </ul>
+          <a href="#install">返回推荐命令 <span aria-hidden="true">↑</span></a>
+        </article>
+        <article id="upgrade">
+          <p class="eyebrow">UPGRADE</p>
+          <h2>升级现有安装</h2>
+          <p>使用实例内的 canonical Updater。传输来源不会绕过 Compatibility Matrix，也不会把“版本更高”解释为可直接覆盖。</p>
+          <div class="mini-flow" aria-label="升级顺序">
+            <span>验证 Release</span><b>→</b><span>兼容性决策</span><b>→</b><span>备份 / 迁移</span><b>→</b><span>Safe Switch</span>
+          </div>
+          <p class="quiet">数据库、配置、Plugin SDK、minimumUpdaterVersion、rollback capability 任一不满足都会 fail closed。</p>
+        </article>
+      </section>
+
+      <section class="verification" aria-labelledby="verify-title">
+        <div>
+          <p class="eyebrow">VERIFY BEFORE MUTATE</p>
+          <h2 id="verify-title">安装页面不是 Release Authority</h2>
+        </div>
+        <dl>
+          <div><dt>唯一发布权威</dt><dd>GitHub Release + GitHub Actions / Sigstore provenance</dd></div>
+          <div><dt>精确运行身份</dt><dd>Canonical OCI repository@sha256:digest</dd></div>
+          <div><dt>运输收据</dt><dd>只能说明从哪里取得哪些字节，不能声明发布可信</dd></div>
+          <div><dt>Portable 首信任</dt><dd>必须来自 independently pretrusted verifier；bundle 内 root 永远先按不可信输入处理</dd></div>
+        </dl>
+      </section>
+
+      <section class="help" id="help" aria-labelledby="help-title">
+        <div class="section-heading">
+          <p class="eyebrow">OPERATE WITH EVIDENCE</p>
+          <h2 id="help-title">Doctor、备份与恢复</h2>
+        </div>
+        <div class="help-grid">
+          <article><span>DOCTOR</span><h3>先看本地证据</h3><p>Doctor Basic 只读检查实例、transport policy、最近收据、Release 与 OCI identity；它不会联网、下载或切换来源。</p></article>
+          <article><span>BACKUP</span><h3>升级前保留恢复点</h3><p>需要迁移的更新必须遵循 Compatibility Decision 和 Update Safety Backup。运输成功并不代表可以跳过备份。</p></article>
+          <article><span>RESTORE</span><h3>恢复到新实例</h3><p>Restore-to-new 会重新验证 Backup、目标平台和 exact Release，并在 Doctor 完成后发布 Instance Locator。</p></article>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <strong>AniMemo v1.1 Distribution</strong>
+      <p>Bootstrap transports bytes. GitHub Release authorizes releases.</p>
+    </footer>
+    <div class="copy-status" id="copy-status" aria-live="polite" aria-atomic="true"></div>
+    <script src="./app.js" defer></script>
+  </body>
+</html>

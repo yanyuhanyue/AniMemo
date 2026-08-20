@@ -11,10 +11,10 @@ Run `python scripts/check_license_docs.py` to verify this snapshot without chang
 | Repository input | SHA-256 | Coverage |
 |---|---|---|
 | `package-lock.json` | `c0aaa71bff7997dcaf6047f565e0764d3b98e2f072a77bb1d1a246f46259a1e2` | Exact Node dependency graph, versions, package license metadata, and registry tarballs |
-| `backend/requirements.txt` | `db0c4cfeeea40f0b8a7d4d7f392b8d493caedf0f467ea8d1a6a8358c506b5a90` | 44 exact Python production pins |
+| `backend/requirements.txt` | `31206537e99d46777c1a73152fe7514bb88036219814cdc11cae6f1719724c8a` | 44 exact Python production pins |
 | `release/requirements.txt` | `dc33c76807b0f3672bd53d14a3916350ba5a876cced309d009caed2c630853fd` | Release updater Python pins |
 | `bridges/astrbot_plugin_animemo_bridge/requirements.txt` | `9d25b578e8e7489ee686d0eabaf1b2b2444b3b0761ac3d55548f9e00c99fb2de` | AstrBot bridge constraint |
-| `scripts/requirements-tools.txt` | `b33d39fc69d850a919bda957bce5fc19f49d66ec3097346001c4b5e4633d002c` | Dependency-maintenance tooling |
+| `scripts/requirements-tools.txt` | `2e917dd15d56e2b6f7b32550e7a8a592c7f2e6c2cd69d3942b688511980ddfb2` | Dependency-maintenance tooling |
 
 License identifiers below come from the exact npm/PyPI package metadata or the license files shipped in the corresponding source distribution. Repository paths and exact versions are the primary reproducibility evidence.
 
@@ -114,11 +114,11 @@ All 44 entries below are exact pins from `backend/requirements.txt`. License met
 |---|---:|---|---|
 | `asgiref` | `3.12.1` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/asgiref/3.12.1/) |
 | `attrs` | `26.1.0` | `MIT` | [PyPI](https://pypi.org/project/attrs/26.1.0/) |
-| `boto3` | `1.43.67` | `Apache-2.0` | [PyPI](https://pypi.org/project/boto3/1.43.67/) |
-| `botocore` | `1.43.67` | `Apache-2.0` | [PyPI](https://pypi.org/project/botocore/1.43.67/) |
+| `boto3` | `1.43.75` | `Apache-2.0` | [PyPI](https://pypi.org/project/boto3/1.43.75/) |
+| `botocore` | `1.43.75` | `Apache-2.0` | [PyPI](https://pypi.org/project/botocore/1.43.75/) |
 | `certifi` | `2026.7.22` | `MPL-2.0` | [PyPI](https://pypi.org/project/certifi/2026.7.22/) |
 | `cffi` | `2.1.1` | `MIT-0` | [PyPI](https://pypi.org/project/cffi/2.1.1/) |
-| `charset-normalizer` | `3.4.9` | `MIT` | [PyPI](https://pypi.org/project/charset-normalizer/3.4.9/) |
+| `charset-normalizer` | `3.5.1` | `MIT` | [PyPI](https://pypi.org/project/charset-normalizer/3.5.1/) |
 | `cryptography` | `50.0.0` | `Apache-2.0 OR BSD-3-Clause` | [PyPI](https://pypi.org/project/cryptography/50.0.0/) |
 | `dj-database-url` | `2.3.0` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/dj-database-url/2.3.0/) |
 | `django` | `5.2.17` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/django/5.2.17/) |
@@ -130,7 +130,7 @@ All 44 entries below are exact pins from `backend/requirements.txt`. License met
 | `drf-spectacular` | `0.30.0` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/drf-spectacular/0.30.0/) |
 | `drf-spectacular-sidecar` | `2026.8.1` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/drf-spectacular-sidecar/2026.8.1/) |
 | `gunicorn` | `23.0.0` | `MIT` | [PyPI](https://pypi.org/project/gunicorn/23.0.0/) |
-| `idna` | `3.18` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/idna/3.18/) |
+| `idna` | `3.19` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/idna/3.19/) |
 | `inflection` | `0.5.1` | `MIT` | [PyPI](https://pypi.org/project/inflection/0.5.1/) |
 | `jmespath` | `1.1.0` | `MIT` | [PyPI](https://pypi.org/project/jmespath/1.1.0/) |
 | `jsonschema` | `4.26.0` | `MIT` | [PyPI](https://pypi.org/project/jsonschema/4.26.0/) |
@@ -142,7 +142,7 @@ All 44 entries below are exact pins from `backend/requirements.txt`. License met
 | `pycparser` | `3.0` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/pycparser/3.0/) |
 | `pyjwt` | `2.13.0` | `MIT` | [PyPI](https://pypi.org/project/pyjwt/2.13.0/) |
 | `python-dateutil` | `2.9.0.post0` | `BSD-3-Clause; portions also Apache-2.0` | [PyPI](https://pypi.org/project/python-dateutil/2.9.0.post0/) |
-| `python-dotenv` | `1.2.2` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/python-dotenv/1.2.2/) |
+| `python-dotenv` | `1.2.3` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/python-dotenv/1.2.3/) |
 | `pyyaml` | `6.0.3` | `MIT` | [PyPI](https://pypi.org/project/pyyaml/6.0.3/) |
 | `redis` | `8.1.0` | `MIT` | [PyPI](https://pypi.org/project/redis/8.1.0/) |
 | `referencing` | `0.37.0` | `MIT` | [PyPI](https://pypi.org/project/referencing/0.37.0/) |
@@ -150,7 +150,7 @@ All 44 entries below are exact pins from `backend/requirements.txt`. License met
 | `rpds-py` | `2026.6.3` | `MIT` | [PyPI](https://pypi.org/project/rpds-py/2026.6.3/) |
 | `s3transfer` | `0.19.2` | `Apache-2.0` | [PyPI](https://pypi.org/project/s3transfer/0.19.2/) |
 | `six` | `1.17.0` | `MIT` | [PyPI](https://pypi.org/project/six/1.17.0/) |
-| `sqlparse` | `0.5.5` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/sqlparse/0.5.5/) |
+| `sqlparse` | `0.6.0` | `BSD-3-Clause` | [PyPI](https://pypi.org/project/sqlparse/0.6.0/) |
 | `typing-extensions` | `4.16.0` | `PSF-2.0` | [PyPI](https://pypi.org/project/typing-extensions/4.16.0/) |
 | `tzdata` | `2026.3` | `Apache-2.0` | [PyPI](https://pypi.org/project/tzdata/2026.3/) |
 | `uritemplate` | `4.2.0` | `Apache-2.0 OR BSD-3-Clause` | [PyPI](https://pypi.org/project/uritemplate/4.2.0/) |
@@ -167,8 +167,8 @@ All 44 entries below are exact pins from `backend/requirements.txt`. License met
 | Release updater | `packaging==25.0` | `Apache-2.0 OR BSD-2-Clause` | Exact pin; also present in the backend lock |
 | Release updater | `pyyaml==6.0.3` | `MIT` | Exact pin; also present in the backend lock |
 | AstrBot bridge | `httpx>=0.27,<1` | `BSD-3-Clause` | Range only; the exact installed version and transitives are environment-dependent because this file is not locked |
-| Dependency tooling | `pip<26` | `MIT` | Range only |
-| Dependency tooling | `pip-tools==7.6.0` | `BSD-3-Clause` | Exact pin |
+| Dependency tooling | `pip==26.2.1` | `MIT` | Exact pin |
+| Dependency tooling | `pip-tools==7.6.1` | `BSD-3-Clause` | Exact pin |
 | Dependency tooling | `ruff==0.16.2` | `MIT` | Exact pin |
 
 ## AniMemo source and external-material boundaries

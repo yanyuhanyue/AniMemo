@@ -18,11 +18,11 @@ Bridge 是独立可导出的 `astrbot_plugin_animemo_bridge`，由 `httpx.AsyncC
 python manage.py integration_connection create --provider astrbot --instance-id <stable-instance-id> --name <name>
 ```
 
-输出 connection id、key id 与只显示一次的 secret。secret 不写入仓库、日志或状态页；轮换使用 `rotate-secret <connection-id>` 后更新 AstrBot 配置并 reload。
+输出 connection id、key id 与只显示一次的 secret。该命令必须直接运行于交互式终端；重定向、管道和非交互式 stdout 会在数据库写入前被拒绝。secret 不写入仓库、自动化日志或状态页；轮换使用 `rotate-secret <connection-id>` 后更新 AstrBot 配置并 reload。
 
 ## Configure and install
 
-从仓库根目录执行 `python scripts/package-astrbot-bridge.py`，将输出 ZIP 安装到 AstrBot。填写 `animemo_base_url`、`key_id`、`secret`；也支持环境变量 `ANIMEMO_BASE_URL`、`ANIMEMO_INTEGRATION_KEY_ID`、`ANIMEMO_INTEGRATION_SECRET` 覆盖配置。默认 `verify_tls=true`、`poll_events=true`、`poll_wait_seconds=20`、`request_timeout_seconds=35`、`allow_group_commands=false`。
+从仓库根目录执行 `python scripts/package-astrbot-bridge.py`，将输出 ZIP 安装到 AstrBot。填写 `animemo_base_url`、`key_id`、`secret`；也支持环境变量 `ANIMEMO_BASE_URL`、`ANIMEMO_INTEGRATION_KEY_ID`、`ANIMEMO_INTEGRATION_SECRET` 覆盖配置。`animemo_base_url` 是 canonical HTTPS 服务源，只允许 scheme、host 与可选 port；禁止 URL userinfo、非根路径、查询参数和片段。TLS 证书验证强制使用系统信任存储，不提供关闭选项。默认 `poll_events=true`、`poll_wait_seconds=20`、`request_timeout_seconds=35`、`allow_group_commands=false`。
 
 AstrBot `4.27.2` 没有独立的 `password` schema 类型。Bridge 将 `secret` 声明为受支持的 `string` 并设置 `invisible: true`，Dashboard 会隐藏该字段，但配置文件本身不是加密凭证库。生产环境优先使用 `ANIMEMO_INTEGRATION_SECRET`，并继续避免把 secret 写入仓库、日志、状态页、`routes.json` 或 `state.json`。运行时会自行解析布尔值并校验 `0 <= poll_wait_seconds <= 25`、`5 <= request_timeout_seconds <= 120` 以及 `request_timeout_seconds > poll_wait_seconds`，不把 Dashboard 的 `min/max` 元数据当作唯一安全边界。
 

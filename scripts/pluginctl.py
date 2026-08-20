@@ -9,8 +9,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -63,6 +65,38 @@ INTEGRATION_EXTENSIONS = {
 CORE_CAPABILITIES = {"journal", "watch_history", "analytics"}
 
 
+def _is_link(path: Path) -> bool:
+    return path.is_symlink() or (
+        hasattr(path, "is_junction") and path.is_junction()
+    )
+
+
+def _validate_source_tree(root: Path) -> None:
+    root = Path(root)
+    try:
+        root_metadata = root.lstat()
+    except OSError as error:
+        raise SystemExit("Plugin source root is unavailable") from error
+    if _is_link(root) or not stat.S_ISDIR(root_metadata.st_mode):
+        raise SystemExit("Plugin source root must be a real directory")
+
+    for current_root, directory_names, file_names in os.walk(
+        root,
+        followlinks=False,
+    ):
+        current = Path(current_root)
+        for name in directory_names:
+            candidate = current / name
+            metadata = candidate.lstat()
+            if _is_link(candidate) or not stat.S_ISDIR(metadata.st_mode):
+                raise SystemExit("Plugin source tree must not contain links or special files")
+        for name in file_names:
+            candidate = current / name
+            metadata = candidate.lstat()
+            if _is_link(candidate) or not stat.S_ISREG(metadata.st_mode):
+                raise SystemExit("Plugin source tree must not contain links or special files")
+
+
 def _boundary_error(detail=""):
     suffix = f" {detail}" if detail else ""
     raise SystemExit(
@@ -103,6 +137,7 @@ def _validate_shared_import(module, clause, source_path):
 
 
 def _validate_source_imports(root: Path) -> None:
+    _validate_source_tree(root)
     package_root = root.resolve()
     frontend_root = (root / "frontend").resolve()
     for source_path in sorted(frontend_root.rglob("*")):
@@ -137,6 +172,7 @@ def _validate_metafile(meta_path: Path, plugin_root: Path) -> None:
 
 
 def _runtime_files(root: Path) -> list[Path]:
+    _validate_source_tree(root)
     files: list[Path] = []
     for path in root.rglob("*"):
         if not path.is_file() or path.is_symlink():
@@ -168,7 +204,9 @@ def validate_plugin_slug(value: str) -> str:
 
 def read_manifest(slug: str) -> dict:
     slug = validate_plugin_slug(slug)
-    path = PLUGINS / slug / "manifest.json"
+    root = PLUGINS / slug
+    _validate_source_tree(root)
+    path = root / "manifest.json"
     if not path.is_file():
         raise SystemExit(f"manifest.json not found for {slug}")
     manifest = json.loads(path.read_text(encoding="utf-8"))

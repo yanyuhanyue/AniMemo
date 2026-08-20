@@ -6,7 +6,6 @@ import os
 import re
 import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -23,17 +22,25 @@ from release.contract import (
     validate_deployment_contract,
     validate_manifest,
 )
-from release.materials import (
-    MaterialContractError,
-    MaterialFileIdentity,
-    VerifiedMaterialSet,
-    extract_installer_materials,
-)
 
+from .authority import (
+    AttestationEvidence,
+    AuthorityEvidence,
+    ReleaseAssetEvidence,
+    ReleaseAuthorityVerifier,
+    VerifiedReleaseMaterials,
+)
 from .commands import CommandRunner
 from .errors import CommandFailed, RequestRejected, StateError
 from .protocol import CHANNELS, RELEASE_VERSION
 from .state import _absolute, _ensure_private_directory
+from .transport import (
+    ExplicitTransportPolicy,
+    GitHubTransportSource,
+    OfficialMirrorTransportSource,
+    TransportRequest,
+    TransportSourceId,
+)
 
 GITHUB_API_ROOT = "https://api.github.com"
 GITHUB_API_VERSION = "2026-03-10"
@@ -45,6 +52,13 @@ EXPECTED_RELEASE_ASSETS = {
     "installer-materials.tar",
     "release-manifest.json",
 }
+
+
+def _expected_release_asset_names(version: str) -> set[str]:
+    expected = set(EXPECTED_RELEASE_ASSETS)
+    if Version(version.removeprefix("v")).release >= (1, 1, 0):
+        expected.add(f"animemo-{version}-portable.tar")
+    return expected
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 ATTESTATION_BUNDLE_PATH = re.compile(
     r"^/attestations/(?P<repository_id>[1-9][0-9]*)/"
@@ -211,64 +225,56 @@ class GitHubPublicRest:
                 ) from authenticated_error
 
 
-@dataclass(frozen=True)
-class VerifiedReleaseMaterials:
-    manifest: dict[str, object]
-    deployment_contract: dict[str, object]
-    verified: VerifiedMaterialSet
-    identity_digest: str
-
-    @property
-    def root(self) -> Path:
-        return self.verified.root
-
-    @property
-    def profile(self) -> str:
-        return str(self.deployment_contract["profile"])
-
-    def material(self, relative: str) -> Path:
-        return self.verified.material(relative)
-
-    def image(self, role: str) -> str:
-        images = self.manifest["images"]
-        if role not in {"api", "web", "postgres", "redis"}:
-            raise RequestRejected("Release image role is invalid")
-        image = images[role]
-        return f"{image['repository']}@{image['digest']}"
-
-
 class GitHubReleaseSource:
     def __init__(
-        self, cache_root: Path, *, runner=None, rest=None, cache_seconds: int = 300
+        self,
+        cache_root: Path,
+        *,
+        runner=None,
+        rest=None,
+        cache_seconds: int = 300,
+        policy: ExplicitTransportPolicy | None = None,
+        transports: dict[TransportSourceId, object] | None = None,
     ):
         self.cache_root = _absolute(cache_root)
         self.runner = runner or CommandRunner()
         self.rest = rest or GitHubPublicRest(runner=self.runner)
+        self.transport_policy = policy or ExplicitTransportPolicy.github()
+        if type(self.transport_policy) is not ExplicitTransportPolicy:
+            raise RequestRejected("Release transport policy is invalid")
+        available = transports or {
+            TransportSourceId.GITHUB: GitHubTransportSource(
+                runner=self.runner,
+                credential_provider=getattr(self.rest, "configured_token", None),
+            ),
+            TransportSourceId.OFFICIAL_MIRROR: OfficialMirrorTransportSource(),
+        }
+        selected = available.get(self.transport_policy.source)
+        if selected is None or getattr(selected, "transport_id", None) is not self.transport_policy.source:
+            raise RequestRejected("Selected release transport is unavailable")
+        self.transport_source = selected
         self.cache_seconds = cache_seconds
         self._release_cache: tuple[float, list[dict[str, object]]] | None = None
         self._verified_cache: dict[str, tuple[float, VerifiedReleaseMaterials]] = {}
 
     @staticmethod
     def _anonymous_gh_environment(root: Path) -> dict[str, str]:
-        environment = os.environ.copy()
-        for name in (
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-            "GH_ENTERPRISE_TOKEN",
-            "GITHUB_ENTERPRISE_TOKEN",
-            "GH_HOST",
-            "DOCKER_AUTH_CONFIG",
-            "REGISTRY_AUTH_FILE",
-        ):
-            environment.pop(name, None)
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        home = root / "home"
+        temporary = root / "tmp"
         gh_config = root / "gh"
         docker_config = root / "docker"
-        gh_config.mkdir(mode=0o700)
-        docker_config.mkdir(mode=0o700)
-        environment["GH_CONFIG_DIR"] = str(gh_config)
-        environment["DOCKER_CONFIG"] = str(docker_config)
-        environment["GH_PROMPT_DISABLED"] = "1"
-        return environment
+        for directory in (home, temporary, gh_config, docker_config):
+            directory.mkdir(mode=0o700)
+        return {
+            "HOME": str(home),
+            "TMPDIR": str(temporary),
+            "GH_CONFIG_DIR": str(gh_config),
+            "DOCKER_CONFIG": str(docker_config),
+            "GH_PROMPT_DISABLED": "1",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        }
 
     def _list_all(self, *, refresh: bool) -> list[dict[str, object]]:
         now = time.monotonic()
@@ -537,38 +543,17 @@ class GitHubReleaseSource:
         with tempfile.TemporaryDirectory(
             prefix=f".{version}.", dir=self.cache_root
         ) as temporary:
-            destination = Path(temporary)
-            environment = self._anonymous_gh_environment(destination)
-            download = [
-                "/usr/bin/gh",
-                "release",
-                "download",
-                version,
-                "--repo",
-                REPOSITORY,
-                "--pattern",
-                "release-manifest.json",
-                "--pattern",
-                "deployment-contract.json",
-                "--pattern",
-                "installer-materials.tar",
-                "--pattern",
-                "checksums.txt",
-                "--dir",
-                str(destination),
-            ]
-            try:
-                self.runner.run(download, env=environment, timeout=60)
-            except CommandFailed:
-                token_provider = getattr(self.rest, "configured_token", None)
-                token = token_provider() if callable(token_provider) else None
-                if not token:
-                    raise
-                for name in EXPECTED_RELEASE_ASSETS:
-                    (destination / name).unlink(missing_ok=True)
-                authenticated_environment = environment.copy()
-                authenticated_environment["GH_TOKEN"] = token
-                self.runner.run(download, env=authenticated_environment, timeout=60)
+            staging = Path(temporary)
+            acquired = self.transport_source.acquire(
+                TransportRequest.release_bundle(version.removeprefix("v")),
+                staging,
+            )
+            if acquired.receipt.transport_id is not self.transport_policy.source:
+                raise RequestRejected("Release transport receipt and policy differ")
+            destination = acquired.root
+            for name in EXPECTED_RELEASE_ASSETS:
+                acquired.material(name)
+            environment = self._anonymous_gh_environment(staging / ".authority-runtime")
             self._verify_checksum(destination)
             assets = [
                 destination / name
@@ -637,10 +622,11 @@ class GitHubReleaseSource:
                     "GitHub release assets differ from the release contract"
                 )
             asset_names = [item["name"] for item in release_assets]
+            expected_release_assets = _expected_release_asset_names(version)
             if (
-                len(asset_names) != len(EXPECTED_RELEASE_ASSETS)
+                len(asset_names) != len(expected_release_assets)
                 or len(asset_names) != len(set(asset_names))
-                or set(asset_names) != EXPECTED_RELEASE_ASSETS
+                or set(asset_names) != expected_release_assets
             ):
                 raise RequestRejected(
                     "GitHub release assets differ from the release contract"
@@ -694,6 +680,7 @@ class GitHubReleaseSource:
                     provenance_commit,
                 ),
             ]
+            attestation_evidence: list[AttestationEvidence] = []
             for index, (
                 subject,
                 expected_name,
@@ -732,6 +719,23 @@ class GitHubReleaseSource:
                     timeout=60,
                 )
                 self._verify_attestation_result(result.stdout, expected_name, digest)
+                attestation_evidence.append(
+                    AttestationEvidence(
+                        subject_name=expected_name,
+                        subject_digest=digest,
+                        repository=REPOSITORY,
+                        workflow=workflow,
+                        certificate_identity=(
+                            f"https://github.com/{REPOSITORY}/{workflow}"
+                            "@refs/heads/main"
+                        ),
+                        oidc_issuer="https://token.actions.githubusercontent.com",
+                        source_commit=source_commit,
+                        source_ref="refs/heads/main",
+                        signer_digest=source_commit,
+                        predicate_type="https://slsa.dev/provenance/v1",
+                    )
+                )
             material_cache = self.cache_root / "verified-materials"
             try:
                 _ensure_private_directory(self.cache_root, material_cache)
@@ -742,76 +746,32 @@ class GitHubReleaseSource:
                         "sha256"
                     ].removeprefix("sha256:")
                 )
-                material_files = tuple(
-                    MaterialFileIdentity(
-                        path=item["path"],
-                        sha256=item["sha256"],
-                        size=item["size"],
-                        mode=int(item["mode"], 8),
-                    )
-                    for item in deployment_contract["materials"]
+                authority = AuthorityEvidence(
+                    repository=REPOSITORY,
+                    version=version,
+                    draft=False,
+                    prerelease=metadata["prerelease"],
+                    tag_commit=commit,
+                    assets=tuple(
+                        ReleaseAssetEvidence(
+                            name=item["name"],
+                            state=item["state"],
+                        )
+                        for item in release_assets
+                        if item["name"] in EXPECTED_RELEASE_ASSETS
+                    ),
+                    attestations=tuple(attestation_evidence),
                 )
-                if final_root.exists():
-                    verified_set = VerifiedMaterialSet(
-                        root=final_root,
-                        archive_sha256=deployment_contract["archive"]["sha256"],
-                        files=material_files,
-                    )
-                    for identity in material_files:
-                        verified_set.material(identity.path)
-                else:
-                    staging_parent = Path(
-                        tempfile.mkdtemp(prefix=".materials.", dir=material_cache)
-                    )
-                    staging_root = staging_parent / "root"
-                    try:
-                        verified_set = extract_installer_materials(
-                            destination / "installer-materials.tar",
-                            {
-                                "schemaVersion": deployment_contract["schemaVersion"],
-                                "profile": deployment_contract["profile"],
-                                "platform": deployment_contract["platform"],
-                                "archive": deployment_contract["archive"],
-                                "materials": deployment_contract["materials"],
-                            },
-                            staging_root,
-                        )
-                        os.replace(staging_root, final_root)
-                        verified_set = VerifiedMaterialSet(
-                            root=final_root,
-                            archive_sha256=verified_set.archive_sha256,
-                            files=verified_set.files,
-                        )
-                    finally:
-                        try:
-                            staging_parent.rmdir()
-                        except OSError:
-                            pass
-            except (OSError, StateError, MaterialContractError) as error:
+                verified = ReleaseAuthorityVerifier().verify(
+                    assets={name: (destination / name).read_bytes() for name in EXPECTED_RELEASE_ASSETS},
+                    authority=authority,
+                    destination=final_root,
+                    updater_version=updater_version,
+                )
+            except (OSError, StateError, RequestRejected) as error:
                 raise RequestRejected(
                     "Verified installer materials cannot be published"
                 ) from error
-            identity_payload = {
-                "manifest": manifest,
-                "deploymentContract": deployment_contract,
-            }
-            identity_digest = (
-                "sha256:"
-                + hashlib.sha256(
-                    json.dumps(
-                        identity_payload,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest()
-            )
-            verified = VerifiedReleaseMaterials(
-                manifest=manifest,
-                deployment_contract=deployment_contract,
-                verified=verified_set,
-                identity_digest=identity_digest,
-            )
         self._verified_cache[version] = (time.monotonic(), verified)
         return verified
 
@@ -827,3 +787,7 @@ class GitHubReleaseSource:
             updater_version=updater_version,
             refresh=refresh,
         ).manifest
+
+
+# Compatibility name for callers migrating from the former GitHub-specific source.
+ReleaseResolver = GitHubReleaseSource

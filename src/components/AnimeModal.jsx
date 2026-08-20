@@ -5,6 +5,7 @@ import { RatingDisplay } from "./RatingDisplay.jsx";
 import { TagChip } from "./TagChip.jsx";
 import { EditAnimeRecordContent } from "./dashboard/EditAnimeRecordContent.jsx";
 import { validateTrustedPosterUrl } from "../lib/posterSources.js";
+import { normalizeHttpUrl } from "../lib/safeUrl.js";
 import { buildPresetColorMap, resolveTagColors } from "../lib/tagPresets.js";
 
 const statusOptions = [
@@ -302,7 +303,8 @@ export function AnimeModal({ record, returnFocus, onClose, editable = false, onS
   }, [record, requestClose]);
 
   if (!record || !draft) return null;
-  const posterUrl = draft.posterOriginal || draft.poster;
+  const posterUrl = normalizeHttpUrl(draft.posterOriginal || draft.poster, window.location.origin);
+  const baikeUrl = normalizeHttpUrl(draft.baikeUrl);
   const update = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
   const save = async () => {
     setBusy(true);
@@ -385,7 +387,7 @@ export function AnimeModal({ record, returnFocus, onClose, editable = false, onS
               </div>
               <p className="source-label">当前海报来源 · {editable ? "R2 / URL" : "本地样例"}</p>
               {editable ? <input className="brutal-input small" value={draft.poster} onChange={(event) => update("poster", event.target.value)} aria-label="海报地址" /> : <div className="source-url">{draft.poster}</div>}
-              <a className="external-card" href={draft.baikeUrl} target="_blank" rel="noreferrer"><span><Icon name="book" /> 前往萌娘百科查看完整信息</span><strong>点击跳转 <Icon name="arrow-right" /></strong></a>
+              {baikeUrl ? <a className="external-card" href={baikeUrl} target="_blank" rel="noreferrer"><span><Icon name="book" /> 前往萌娘百科查看完整信息</span><strong>点击跳转 <Icon name="arrow-right" /></strong></a> : <span className="external-card" aria-disabled="true"><span><Icon name="warning" /> 外部资料地址不可用</span></span>}
             </aside>
 
             <div className="anime-modal__details">

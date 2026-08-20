@@ -24,6 +24,7 @@ from installer.runtime import (
     InstallOutcome,
     InstallPhase,
     InstallRequest,
+    InstallTransportSource,
     ListenRequest,
     PlatformEvidence,
     ReleaseEvidence,
@@ -34,6 +35,8 @@ from installer.runtime import (
     TargetClass,
     TargetEvidence,
 )
+from updater.local_bundle import LOCAL_BUNDLE_POLICY_IDENTITY
+from updater.transport import ExplicitTransportPolicy
 
 
 def digest(character: str) -> str:
@@ -61,6 +64,18 @@ class ReleaseFake:
     def resolve(self, selector, *, refresh: bool):
         self.calls.append(refresh)
         return self.evidence
+
+
+class BootstrapGateFake:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.fail = False
+
+    def consume(self, *, version: str, release_commit: str) -> object:
+        self.calls.append((version, release_commit))
+        if self.fail:
+            raise RuntimeError("bootstrap authority unavailable")
+        return object()
 
 
 class TargetFake:
@@ -296,10 +311,67 @@ class InstallerRuntimeTests(unittest.TestCase):
             "v01.1.0",
             "v1.1.0-rc.0",
         ):
-            with self.subTest(version=version), self.assertRaisesRegex(
-                InstallerError, "INSTALL_RELEASE_VERSION_INVALID"
+            with (
+                self.subTest(version=version),
+                self.assertRaisesRegex(
+                    InstallerError, "INSTALL_RELEASE_VERSION_INVALID"
+                ),
             ):
                 ReleaseSelector(version=version)
+
+    def test_local_bundle_requires_exact_version_payload_and_release_attestation(
+        self,
+    ) -> None:
+        offline_root = Path(tempfile.gettempdir()).resolve() / "animemo-offline"
+        payload = offline_root / "payload.tar"
+        sidecar = offline_root / "release-attestation.sigstore.json"
+        request = InstallRequest(
+            mode=InstallerMode.FRESH,
+            selector=ReleaseSelector(version="v1.1.0"),
+            public_origin="https://anime.example",
+            transport_source=InstallTransportSource.LOCAL_BUNDLE,
+            local_bundle_payload=payload,
+            local_bundle_release_attestation=sidecar,
+        )
+
+        self.assertEqual(request.local_bundle_payload, payload)
+        self.assertEqual(request.local_bundle_release_attestation, sidecar)
+        self.assertEqual(
+            request.transport_policy_identity,
+            LOCAL_BUNDLE_POLICY_IDENTITY,
+        )
+        for selector, candidate_payload, candidate_sidecar in (
+            (ReleaseSelector(channel="rc"), payload, sidecar),
+            (ReleaseSelector(version="v1.1.0"), None, sidecar),
+            (ReleaseSelector(version="v1.1.0"), payload, None),
+        ):
+            with (
+                self.subTest(selector=selector),
+                self.assertRaisesRegex(
+                    InstallerError,
+                    "INSTALL_LOCAL_BUNDLE_INPUT_REQUIRED",
+                ),
+            ):
+                InstallRequest(
+                    mode=InstallerMode.FRESH,
+                    selector=selector,
+                    public_origin="https://anime.example",
+                    transport_source=InstallTransportSource.LOCAL_BUNDLE,
+                    local_bundle_payload=candidate_payload,
+                    local_bundle_release_attestation=candidate_sidecar,
+                )
+
+        with self.assertRaisesRegex(
+            InstallerError,
+            "INSTALL_LOCAL_BUNDLE_INPUT_FORBIDDEN",
+        ):
+            InstallRequest(
+                mode=InstallerMode.FRESH,
+                selector=ReleaseSelector(version="v1.1.0"),
+                public_origin="https://anime.example",
+                local_bundle_payload=payload,
+                local_bundle_release_attestation=sidecar,
+            )
 
     def setUp(self) -> None:
         self.releases = ReleaseFake()
@@ -310,6 +382,7 @@ class InstallerRuntimeTests(unittest.TestCase):
         self.operations = OperationFake()
         self.fresh = FreshFake()
         self.restore = RestoreFake()
+        self.bootstrap_gate = BootstrapGateFake()
         self.runtime = Installer(
             releases=self.releases,
             target=self.target,
@@ -319,6 +392,7 @@ class InstallerRuntimeTests(unittest.TestCase):
             operations=self.operations,
             fresh=self.fresh,
             restore=self.restore,
+            bootstrap_privilege_gate=self.bootstrap_gate,
         )
 
     def request(self, **changes) -> InstallRequest:
@@ -342,6 +416,63 @@ class InstallerRuntimeTests(unittest.TestCase):
         self.assertNotIn('"credentials"', rendered.casefold())
         self.assertNotIn('"password"', rendered.casefold())
 
+    def test_bootstrap_privilege_gate_blocks_before_first_mutation(self) -> None:
+        plan = self.runtime.plan(self.request())
+        self.bootstrap_gate.fail = True
+
+        with self.assertRaisesRegex(
+            InstallerError,
+            "INSTALL_BOOTSTRAP_AUTHORITY_REQUIRED",
+        ):
+            self.runtime.execute(plan, accepted_plan_digest=plan.plan_digest)
+
+        self.assertEqual(self.fresh.calls, [])
+        self.assertEqual(self.operations.events, [])
+
+    def test_plan_binds_one_explicit_transport_policy_through_execution(self) -> None:
+        policy = ExplicitTransportPolicy.official_mirror()
+        self.releases.evidence = replace(
+            self.releases.evidence,
+            transport_source=InstallTransportSource.OFFICIAL_MIRROR,
+            transport_policy_identity=policy.identity,
+        )
+        plan = self.runtime.plan(
+            self.request(
+                transport_source=InstallTransportSource.OFFICIAL_MIRROR,
+            )
+        )
+
+        self.assertIs(
+            plan.transport_source,
+            InstallTransportSource.OFFICIAL_MIRROR,
+        )
+        self.assertEqual(plan.transport_policy_identity, policy.identity)
+        self.assertEqual(plan.body()["transportSource"], "official-mirror")
+        self.assertEqual(plan.body()["transportPolicyIdentity"], policy.identity)
+
+        self.runtime.execute(plan, accepted_plan_digest=plan.plan_digest)
+        self.assertEqual(self.releases.calls, [False, True, True])
+
+    def test_release_transport_policy_mismatch_stops_before_target_inspection(
+        self,
+    ) -> None:
+        policy = ExplicitTransportPolicy.official_mirror()
+        self.releases.evidence = replace(
+            self.releases.evidence,
+            transport_source=InstallTransportSource.OFFICIAL_MIRROR,
+            transport_policy_identity=policy.identity,
+        )
+
+        with self.assertRaisesRegex(
+            InstallerError,
+            "INSTALL_RELEASE_TRANSPORT_POLICY_MISMATCH",
+        ):
+            self.runtime.plan(self.request())
+
+        self.assertEqual(self.target.calls, 0)
+        self.assertEqual(self.operations.events, [])
+        self.assertEqual(self.fresh.calls, [])
+
     def test_fresh_execute_reverifies_and_adoption_publishes_before_doctor(
         self,
     ) -> None:
@@ -364,7 +495,9 @@ class InstallerRuntimeTests(unittest.TestCase):
                 "doctor",
             ],
         )
-        self.assertLess(self.fresh.calls.index("adopt"), self.fresh.calls.index("doctor"))
+        self.assertLess(
+            self.fresh.calls.index("adopt"), self.fresh.calls.index("doctor")
+        )
         migration_markers = [
             event
             for event in self.operations.events

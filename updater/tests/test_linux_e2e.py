@@ -6,6 +6,7 @@ import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from release.contract import build_manifest
@@ -13,10 +14,12 @@ from updater.agent import UpdateAgent
 from updater.client import UnixAgentClient
 from updater.executor import UpdateExecutor
 from updater.plans import PlanStore
+from updater.runtime import HostAgentRuntime
 from updater.runtime_state import RuntimeState
 from updater.server import UnixRpcServer
 from updater.slots import ReleaseSlots
 from updater.state import OperationStore
+from updater.transport import ExplicitTransportPolicy
 
 
 def manifest(
@@ -35,6 +38,7 @@ def manifest(
         api_digest="sha256:" + digit * 64,
         web_digest="sha256:" + digit * 64,
         deployment_contract_sha256="sha256:0be5fdf5f87275755e06a2e2b6523c24e16d6aa1db48d8d58e8cfea969b674df",
+        installer_materials_sha256="sha256:" + "f" * 64,
         deployment_files=[
             {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
             {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
@@ -52,9 +56,10 @@ def manifest(
 
 
 class LocalReleaseSource:
-    def __init__(self, manifests):
+    def __init__(self, manifests, *, policy=None, verified=None):
         self.manifests = manifests
-        self.verified = []
+        self.transport_policy = policy or ExplicitTransportPolicy.github()
+        self.verified = verified if verified is not None else []
 
     def list_releases(self, channel, *, refresh=False):
         return [
@@ -67,8 +72,28 @@ class LocalReleaseSource:
         ]
 
     def fetch_verified(self, version, *, updater_version="1.0.0", refresh=False):
-        self.verified.append((version, refresh))
-        return self.manifests[version]
+        return self.fetch_verified_materials(
+            version,
+            updater_version=updater_version,
+            refresh=refresh,
+        ).manifest
+
+    def fetch_verified_materials(
+        self,
+        version,
+        *,
+        updater_version="1.0.0",
+        refresh=False,
+    ):
+        del updater_version
+        self.verified.append(
+            (self.transport_policy.source.value, version, refresh)
+        )
+        manifest_value = self.manifests[version]
+        return SimpleNamespace(
+            manifest=manifest_value,
+            identity_digest=manifest_value["images"]["api"]["digest"],
+        )
 
 
 class IsolatedDeployment:
@@ -84,6 +109,9 @@ class IsolatedDeployment:
     def verify_recent_backup(self): self._call("verify_recent_backup")
     def backup_database(self, operation_id): self.calls.append(("backup_database", operation_id)); return "isolated.sql.gz"
     def pull(self, manifest): self._call("pull", manifest)
+    def pull_verified(self, materials, policy):
+        del policy
+        self._call("pull", materials.manifest)
     def migrate(self, manifest): self._call("migrate", manifest)
     def bootstrap(self, manifest): self._call("bootstrap", manifest)
     def inspect_enabled_plugin_apis(self, manifest): self._call("inspect_enabled_plugin_apis", manifest); return {2}
@@ -121,6 +149,11 @@ class LinuxUpdaterE2ETests(unittest.TestCase):
                 first["release"]["version"]: first,
                 second["release"]["version"]: second,
             })
+            resolver_factory = lambda policy: LocalReleaseSource(
+                source.manifests,
+                policy=policy,
+                verified=source.verified,
+            )
             slots = ReleaseSlots(root / "releases")
             slots.import_current(first)
             runtime_state = RuntimeState(root / "state")
@@ -147,6 +180,8 @@ class LinuxUpdaterE2ETests(unittest.TestCase):
                 runtime_state=runtime_state,
                 executor=executor,
                 background=False,
+                resolver_factory=resolver_factory,
+                transport_policy=source.transport_policy,
             )
             socket_path = root / "run" / "updater.sock"
             server = UnixRpcServer(socket_path, agent)
@@ -164,7 +199,10 @@ class LinuxUpdaterE2ETests(unittest.TestCase):
 
             initial = request("get_status")
             self.assertEqual(initial["current"]["version"], "v1.0.0-rc.1")
-            plan = request("plan_update", {"version": "v1.1.0-rc.1"})
+            plan = request(
+                "plan_update",
+                {"version": "v1.1.0-rc.1", "source": "official-mirror"},
+            )
             applied = request(
                 "apply_update",
                 {"planId": plan["planId"], "confirmation": "APPLY v1.1.0-rc.1"},
@@ -188,8 +226,37 @@ class LinuxUpdaterE2ETests(unittest.TestCase):
             self.assertEqual([call[0] for call in deployment.calls].count("migrate"), 1)
             self.assertEqual(
                 source.verified[-2:],
-                [("v1.1.0-rc.1", True), ("v1.0.0-rc.1", True)],
+                [
+                    ("official-mirror", "v1.0.0-rc.1", True),
+                    ("official-mirror", "v1.0.0-rc.1", True),
+                ],
             )
+
+
+class RuntimeCompositionTests(unittest.TestCase):
+    def test_testing_runtime_accepts_an_exact_resolver_and_transport_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = ExplicitTransportPolicy.official_mirror()
+            resolver = LocalReleaseSource({}, policy=policy)
+
+            runtime = HostAgentRuntime.testing(
+                app_root=root / "app",
+                data_root=root / "data",
+                state_root=root / "state",
+                socket_path=root / "run" / "updater.sock",
+                bootstrap_manifest=root / "bootstrap" / "manifest.json",
+                release_resolver=resolver,
+                resolver_factory=lambda selected: LocalReleaseSource(
+                    {},
+                    policy=selected,
+                ),
+                transport_policy=policy,
+            )
+
+            self.assertIs(runtime.agent.source, resolver)
+            self.assertEqual(runtime.transport_policy.identity, policy.identity)
+            self.assertIs(runtime.agent.executor.release_source, resolver)
 
 
 if __name__ == "__main__":

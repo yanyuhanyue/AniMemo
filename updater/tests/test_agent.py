@@ -1,21 +1,26 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import threading
 import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from release.contract import build_manifest
 from updater.agent import UpdateAgent
-from updater.errors import RecoveryRequired, RequestRejected
+from updater.errors import RecoveryRequired, RequestRejected, StateError
 from updater.executor import UpdateExecutor
+from updater.local_bundle import LocalBundleTransportPolicy
 from updater.plans import PlanStore
 from updater.runtime_state import RuntimeState
 from updater.slots import ReleaseSlots
 from updater.state import OperationStore
+from updater.transport import ExplicitTransportPolicy
 
 
 def manifest(version: str, digit: str):
@@ -28,6 +33,7 @@ def manifest(version: str, digit: str):
         api_digest="sha256:" + digit * 64,
         web_digest="sha256:" + digit * 64,
         deployment_contract_sha256="sha256:0be5fdf5f87275755e06a2e2b6523c24e16d6aa1db48d8d58e8cfea969b674df",
+        installer_materials_sha256="sha256:" + "f" * 64,
         deployment_files=[
             {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
             {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
@@ -46,8 +52,14 @@ def manifest(version: str, digit: str):
 
 
 class FakeSource:
-    def __init__(self, manifests):
-        self.manifests = {item["release"]["version"]: item for item in manifests}
+    def __init__(self, manifests, *, policy=None, events=None):
+        self.manifests = (
+            manifests
+            if isinstance(manifests, dict)
+            else {item["release"]["version"]: item for item in manifests}
+        )
+        self.transport_policy = policy or ExplicitTransportPolicy.github()
+        self.events = events if events is not None else []
 
     def list_releases(self, channel, refresh=False):
         accepted = {"stable"} if channel == "stable" else {"stable", "rc"}
@@ -59,7 +71,59 @@ class FakeSource:
         ]
 
     def fetch_verified(self, version, updater_version="1.0.0", refresh=False):
-        return self.manifests[version]
+        return self.fetch_verified_materials(
+            version,
+            updater_version=updater_version,
+            refresh=refresh,
+        ).manifest
+
+    def fetch_verified_materials(
+        self,
+        version,
+        updater_version="1.0.0",
+        refresh=False,
+    ):
+        del updater_version
+        source = self.transport_policy.source
+        self.events.append((getattr(source, "value", source), version, refresh))
+        manifest_value = self.manifests[version]
+        return SimpleNamespace(
+            manifest=manifest_value,
+            identity_digest=manifest_value["images"]["api"]["digest"],
+        )
+
+
+class FakeLocalBundleSource(FakeSource):
+    def __init__(self, manifests, *, transport_identity="sha256:" + "7" * 64):
+        super().__init__(manifests)
+        self.transport_policy = LocalBundleTransportPolicy()
+        self.transport_identity = transport_identity
+        self.expected_rollback_version = None
+
+    def release_binding(self, version):
+        item = self.manifests[version]
+        encoded = json.dumps(
+            item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        result = {
+            "source": "local-bundle",
+            "transportPolicyIdentity": self.transport_policy.identity,
+            "verifiedReleaseIdentity": item["images"]["api"]["digest"],
+            "transportIdentity": self.transport_identity,
+            "payloadIdentity": "sha256:" + "6" * 64,
+            "releaseAttestationIdentity": "sha256:" + "5" * 64,
+            "trustProfileVersion": 1,
+            "trustProfileIdentity": "sha256:" + "4" * 64,
+            "manifestIdentity": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+            "deploymentContractIdentity": item["deployment"]["contractSha256"],
+            "apiDigest": item["images"]["api"]["digest"],
+            "webDigest": item["images"]["web"]["digest"],
+            "postgresDigest": item["images"]["postgres"]["digest"],
+            "redisDigest": item["images"]["redis"]["digest"],
+        }
+        if self.expected_rollback_version is not None:
+            result["expectedRollbackVersion"] = self.expected_rollback_version
+        return result
 
 
 class FakeDeployment:
@@ -70,6 +134,12 @@ class FakeDeployment:
     def verify_recent_backup(self): self.calls.append("backup_check")
     def backup_database(self, operation_id): self.calls.append("backup")
     def pull(self, item): self.calls.append("pull")
+    def pull_verified(self, materials, policy):
+        del materials, policy
+        self.calls.append("pull")
+    def import_local_verified(self, source, materials, policy):
+        del source, materials, policy
+        self.calls.append("local_import")
     def migrate(self, item): self.calls.append("migrate")
     def bootstrap(self, item): self.calls.append("bootstrap")
     def inspect_enabled_plugin_apis(self, item):
@@ -80,7 +150,13 @@ class FakeDeployment:
 
 
 class UpdateAgentTests(unittest.TestCase):
-    def make_agent(self, directory, *, runtime_refresh_seconds=30):
+    def make_agent(
+        self,
+        directory,
+        *,
+        runtime_refresh_seconds=30,
+        local_bundle_resolver_factory=None,
+    ):
         current = manifest("v1.0.0", "1")
         target = manifest("v1.0.1", "2")
         root = Path(directory)
@@ -90,6 +166,11 @@ class UpdateAgentTests(unittest.TestCase):
         runtime.initialize_from_manifest(current, enabled_plugin_apis={2})
         operations = OperationStore(root / "state")
         source = FakeSource([current, target])
+        resolver_factory = lambda policy: FakeSource(
+            source.manifests,
+            policy=policy,
+            events=source.events,
+        )
         deployment = FakeDeployment()
         runtime_binding = mock.Mock()
         executor = UpdateExecutor(
@@ -111,8 +192,203 @@ class UpdateAgentTests(unittest.TestCase):
             executor=executor,
             background=False,
             runtime_refresh_seconds=runtime_refresh_seconds,
+            resolver_factory=resolver_factory,
+            transport_policy=source.transport_policy,
+            local_bundle_resolver_factory=local_bundle_resolver_factory,
         )
         return agent, deployment
+
+    def test_local_bundle_plan_and_apply_bind_exact_authority_without_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls = []
+            local_source = FakeLocalBundleSource(
+                [manifest("v1.0.0", "1"), manifest("v1.0.1", "2")]
+            )
+
+            def local_factory(*, payload=None, release_attestation=None, binding=None):
+                calls.append((payload, release_attestation, binding))
+                if binding is not None:
+                    self.assertEqual(
+                        binding["transportIdentity"],
+                        local_source.transport_identity,
+                    )
+                return local_source
+
+            agent, deployment = self.make_agent(
+                directory,
+                local_bundle_resolver_factory=local_factory,
+            )
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "local-bundle",
+                        "bundlePayload": "/media/portable.tar",
+                        "releaseAttestation": "/media/release-attestation.json",
+                    },
+                }
+            )
+            stored = agent.plans.get(plan["planId"])
+            agent._local_resolvers.clear()
+            result = agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+
+            self.assertEqual(plan["source"], "local-bundle")
+            self.assertEqual(
+                plan["releaseAttestationIdentity"], "sha256:" + "5" * 64
+            )
+            self.assertEqual(
+                stored["releaseBinding"], local_source.release_binding("v1.0.1")
+            )
+            self.assertTrue(stored["planningContextIdentity"].startswith("sha256:"))
+            self.assertEqual(result["operation"]["status"], "succeeded")
+            self.assertIn("switch:v1.0.1", deployment.calls)
+            self.assertIn("local_import", deployment.calls)
+            self.assertNotIn("pull", deployment.calls)
+            self.assertEqual(len(calls), 2)
+            self.assertIsNotNone(calls[-1][2])
+
+    def test_local_bundle_attestation_substitution_is_rejected_before_switch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            local_source = FakeLocalBundleSource(
+                [manifest("v1.0.0", "1"), manifest("v1.0.1", "2")]
+            )
+            agent, deployment = self.make_agent(
+                directory,
+                local_bundle_resolver_factory=lambda **_kwargs: local_source,
+            )
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "local-bundle",
+                        "bundlePayload": "/media/portable.tar",
+                        "releaseAttestation": "/media/release-attestation.json",
+                    },
+                }
+            )
+            path = agent.plans.root / f"{plan['planId']}.json"
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            stored["releaseBinding"]["releaseAttestationIdentity"] = (
+                "sha256:" + "8" * 64
+            )
+            path.write_text(
+                json.dumps(stored, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(StateError):
+                agent.dispatch(
+                    {
+                        "operation": "apply_update",
+                        "params": {
+                            "planId": plan["planId"],
+                            "confirmation": "APPLY v1.0.1",
+                        },
+                    }
+                )
+            self.assertNotIn("switch:v1.0.1", deployment.calls)
+
+    def test_local_bundle_manual_rollback_requires_and_uses_exact_previous_bundle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current_source = FakeLocalBundleSource(
+                [manifest("v1.0.0", "1"), manifest("v1.0.1", "2")],
+                transport_identity="sha256:" + "7" * 64,
+            )
+            previous_source = FakeLocalBundleSource(
+                [manifest("v1.0.0", "1")],
+                transport_identity="sha256:" + "8" * 64,
+            )
+            created = []
+
+            rollback_versions = []
+
+            def local_factory(
+                *,
+                payload=None,
+                release_attestation=None,
+                binding=None,
+                expected_rollback_version=None,
+            ):
+                del release_attestation
+                rollback_versions.append(expected_rollback_version)
+                if binding is not None:
+                    return (
+                        current_source
+                        if binding["transportIdentity"]
+                        == current_source.transport_identity
+                        else previous_source
+                    )
+                created.append(payload)
+                selected = (
+                    previous_source if "previous" in str(payload) else current_source
+                )
+                selected.expected_rollback_version = expected_rollback_version
+                return selected
+
+            agent, deployment = self.make_agent(
+                directory,
+                local_bundle_resolver_factory=local_factory,
+            )
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "local-bundle",
+                        "bundlePayload": "/media/current-portable.tar",
+                        "releaseAttestation": "/media/current-proof.json",
+                    },
+                }
+            )
+            agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+
+            with self.assertRaises(RequestRejected):
+                agent.dispatch(
+                    {
+                        "operation": "rollback_previous",
+                        "params": {"confirmation": "ROLLBACK PREVIOUS"},
+                    }
+                )
+            rolled_back = agent.dispatch(
+                {
+                    "operation": "rollback_previous",
+                    "params": {
+                        "confirmation": "ROLLBACK PREVIOUS",
+                        "source": "local-bundle",
+                        "bundlePayload": "/media/previous-portable.tar",
+                        "releaseAttestation": "/media/previous-proof.json",
+                    },
+                }
+            )
+
+            self.assertEqual(rolled_back["operation"]["status"], "rolled_back")
+            self.assertEqual(
+                rolled_back["operation"]["metadata"]["releaseBinding"][
+                    "expectedRollbackVersion"
+                ],
+                "v1.0.0",
+            )
+            self.assertIn(Path("/media/previous-portable.tar"), created)
+            self.assertIn("v1.0.0", rollback_versions)
+            self.assertGreaterEqual(deployment.calls.count("local_import"), 2)
 
     @staticmethod
     def enter_manual_recovery(agent):
@@ -164,9 +440,265 @@ class UpdateAgentTests(unittest.TestCase):
                 "params": {"planId": plan["planId"], "confirmation": "APPLY v1.0.1"},
             })
 
+            self.assertEqual(plan["source"], "github")
+            self.assertEqual(
+                plan["transportPolicyIdentity"],
+                ExplicitTransportPolicy.github().identity,
+            )
             self.assertEqual(result["operation"]["status"], "succeeded")
             self.assertIn("switch:v1.0.1", deployment.calls)
             self.assertEqual(agent.dispatch({"operation": "get_status", "params": {}})["current"]["version"], "v1.0.1")
+
+    def test_plan_persists_explicit_mirror_policy_and_apply_reuses_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "official-mirror",
+                    },
+                }
+            )
+            stored = agent.plans.get(plan["planId"])
+            result = agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+
+            policy = ExplicitTransportPolicy.official_mirror()
+            self.assertEqual(plan["source"], "official-mirror")
+            self.assertEqual(plan["transportPolicyIdentity"], policy.identity)
+            self.assertEqual(plan["verifiedReleaseIdentity"], "sha256:" + "2" * 64)
+            self.assertEqual(
+                stored["releaseBinding"],
+                {
+                    "source": "official-mirror",
+                    "transportPolicyIdentity": policy.identity,
+                    "verifiedReleaseIdentity": "sha256:" + "2" * 64,
+                },
+            )
+            self.assertEqual(
+                result["operation"]["metadata"]["releaseBinding"],
+                stored["releaseBinding"],
+            )
+            target_fetches = [
+                event for event in agent.source.events if event[1] == "v1.0.1"
+            ]
+            self.assertTrue(target_fetches)
+            self.assertEqual(
+                {event[0] for event in target_fetches},
+                {"official-mirror"},
+            )
+
+    def test_failed_explicit_mirror_selection_never_falls_back_to_github(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            selected = []
+
+            def unavailable(policy):
+                selected.append(policy.source.value)
+                raise StateError("selected mirror unavailable")
+
+            agent.resolver_factory = unavailable
+            with self.assertRaisesRegex(StateError, "mirror unavailable"):
+                agent.dispatch(
+                    {
+                        "operation": "plan_update",
+                        "params": {
+                            "version": "v1.0.1",
+                            "source": "official-mirror",
+                        },
+                    }
+                )
+
+            self.assertEqual(selected, ["official-mirror"])
+            self.assertEqual(agent.source.events, [])
+
+    def test_restarted_agent_applies_the_plan_with_its_persisted_mirror_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_agent, _ = self.make_agent(directory)
+            plan = first_agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "official-mirror",
+                    },
+                }
+            )
+            root = Path(directory)
+            restarted_source = FakeSource(first_agent.source.manifests)
+            deployment = FakeDeployment()
+            executor = UpdateExecutor(
+                store=first_agent.operations,
+                slots=first_agent.slots,
+                release_source=restarted_source,
+                deployment=deployment,
+                runtime_state=first_agent.runtime_state,
+                runtime_binding=mock.Mock(),
+                lock_path=root / "state" / "update.lock",
+                updater_version="1.0.0",
+            )
+            restarted = UpdateAgent(
+                source=restarted_source,
+                operations=first_agent.operations,
+                plans=PlanStore(root / "state"),
+                slots=first_agent.slots,
+                runtime_state=first_agent.runtime_state,
+                executor=executor,
+                background=False,
+                resolver_factory=lambda policy: FakeSource(
+                    restarted_source.manifests,
+                    policy=policy,
+                    events=restarted_source.events,
+                ),
+                transport_policy=restarted_source.transport_policy,
+            )
+
+            result = restarted.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+
+            self.assertEqual(result["operation"]["status"], "succeeded")
+            self.assertTrue(restarted_source.events)
+            self.assertEqual(
+                {event[0] for event in restarted_source.events},
+                {"official-mirror"},
+            )
+
+    def test_rollback_binds_previous_release_to_the_current_operation_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "official-mirror",
+                    },
+                }
+            )
+            agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+            agent.source.events.clear()
+
+            result = agent.dispatch(
+                {
+                    "operation": "rollback_previous",
+                    "params": {"confirmation": "ROLLBACK PREVIOUS"},
+                }
+            )
+
+            self.assertEqual(result["operation"]["status"], "rolled_back")
+            self.assertEqual(
+                result["operation"]["metadata"]["releaseBinding"],
+                {
+                    "source": "official-mirror",
+                    "transportPolicyIdentity": (
+                        ExplicitTransportPolicy.official_mirror().identity
+                    ),
+                    "verifiedReleaseIdentity": "sha256:" + "1" * 64,
+                },
+            )
+            self.assertTrue(agent.source.events)
+            self.assertEqual(
+                {event[0] for event in agent.source.events},
+                {"official-mirror"},
+            )
+
+    def test_apply_rejects_verified_release_identity_drift_without_switching(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, deployment = self.make_agent(directory)
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {"version": "v1.0.1", "source": "github"},
+                }
+            )
+            path = agent.plans.root / f"{plan['planId']}.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["releaseBinding"]["verifiedReleaseIdentity"] = "sha256:" + "9" * 64
+            path.write_text(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            result = agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+
+            self.assertEqual(result["operation"]["status"], "failed_pre_switch")
+            self.assertNotIn("switch:v1.0.1", deployment.calls)
+
+    def test_operation_recovery_rebinds_the_persisted_policy_without_redetection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            plan = agent.dispatch(
+                {
+                    "operation": "plan_update",
+                    "params": {
+                        "version": "v1.0.1",
+                        "source": "official-mirror",
+                    },
+                }
+            )
+            applied = agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+            operation = agent.operations.get(applied["operation"]["id"])
+            agent.executor.release_source = agent.source
+
+            agent.bind_operation_resolver(operation)
+
+            self.assertEqual(
+                agent.executor.release_source.transport_policy.source.value,
+                "official-mirror",
+            )
+
+    def test_incomplete_legacy_operation_without_policy_binding_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            operation = agent.operations.create(
+                "apply_update",
+                {"version": "v1.0.1", "planId": "a" * 32},
+            )
+            agent.operations.transition(operation["id"], "preflight")
+
+            with self.assertRaisesRegex(StateError, "explicit migration"):
+                agent.recover()
 
     def test_wrong_confirmation_and_reused_plan_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

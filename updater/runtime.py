@@ -28,12 +28,14 @@ from .binding import CanonicalRuntimeBinding
 from .deployment import HostPaths, ImmutableComposeDeployment
 from .errors import StateError
 from .executor import UpdateExecutor
+from .local_bundle import LocalBundleReleaseSource
 from .plans import PlanStore
 from .runtime_state import RuntimeState
 from .server import UnixRpcServer
 from .slots import ReleaseSlots
-from .source import GitHubReleaseSource
+from .source import ReleaseResolver
 from .state import OperationStore
+from .transport import ExplicitTransportPolicy
 
 PRODUCTION_SOCKET_PATH = Path("/run/animemo-updater/updater.sock")
 PRODUCTION_BOOTSTRAP_MANIFEST = Path(
@@ -124,6 +126,7 @@ class HostAgentRuntime:
     deployment: ImmutableComposeDeployment
     agent: UpdateAgent
     server: UnixRpcServer
+    transport_policy: ExplicitTransportPolicy
     registry: CanonicalInstanceRegistry | None = None
     locator_store: LocalLocatorStore | None = None
 
@@ -137,12 +140,83 @@ class HostAgentRuntime:
         registry: CanonicalInstanceRegistry | None = None,
         managed_environment: dict[str, str] | None = None,
         background: bool = True,
+        release_resolver=None,
+        resolver_factory=None,
+        local_bundle_resolver_factory=None,
+        transport_policy: ExplicitTransportPolicy | None = None,
     ) -> HostAgentRuntime:
         state_root = paths.state_root
         slots = ReleaseSlots(state_root / "releases")
         runtime_state = RuntimeState(state_root)
         operations = OperationStore(state_root)
-        source = GitHubReleaseSource(state_root / "cache" / "github-releases")
+        selected_policy = transport_policy or ExplicitTransportPolicy.github()
+        if type(selected_policy) is not ExplicitTransportPolicy:
+            raise StateError("Updater transport policy is invalid")
+        cache_root = state_root / "cache" / "releases"
+
+        def default_resolver_factory(policy):
+            return ReleaseResolver(cache_root, policy=policy)
+
+        configured_factory = resolver_factory or default_resolver_factory
+
+        def default_local_bundle_resolver_factory(
+            *,
+            payload=None,
+            release_attestation=None,
+            binding=None,
+            expected_rollback_version=None,
+        ):
+            from .offline import production_offline_release_verifier
+
+            verifier = production_offline_release_verifier()
+            local_cache = state_root / "cache" / "local-bundles"
+            if binding is not None:
+                if (
+                    payload is not None
+                    or release_attestation is not None
+                    or expected_rollback_version is not None
+                    or not isinstance(binding, dict)
+                ):
+                    raise StateError("Local bundle resolver binding is invalid")
+                transport_identity = binding.get("transportIdentity")
+                bound_rollback_version = binding.get("expectedRollbackVersion")
+                if not isinstance(transport_identity, str):
+                    raise StateError("Local bundle transport binding is invalid")
+                if bound_rollback_version is not None and not isinstance(
+                    bound_rollback_version, str
+                ):
+                    raise StateError("Local bundle rollback binding is invalid")
+                return LocalBundleReleaseSource.from_staged(
+                    cache_root=local_cache,
+                    transport_identity=transport_identity,
+                    verifier=verifier,
+                    updater_version=__version__,
+                    expected_rollback_version=bound_rollback_version,
+                )
+            if not isinstance(payload, Path) or not isinstance(
+                release_attestation, Path
+            ):
+                raise StateError("Local bundle media pair is required")
+            return LocalBundleReleaseSource.from_media(
+                payload=payload,
+                release_attestation=release_attestation,
+                cache_root=local_cache,
+                verifier=verifier,
+                updater_version=__version__,
+                expected_rollback_version=expected_rollback_version,
+            )
+
+        configured_local_factory = (
+            local_bundle_resolver_factory
+            or default_local_bundle_resolver_factory
+        )
+        source = release_resolver or configured_factory(selected_policy)
+        source_policy = getattr(source, "transport_policy", None)
+        if (
+            type(source_policy) is not ExplicitTransportPolicy
+            or source_policy.identity != selected_policy.identity
+        ):
+            raise StateError("Release Resolver and transport policy differ")
         deployment = ImmutableComposeDeployment(
             paths,
             managed_environment=managed_environment,
@@ -174,6 +248,9 @@ class HostAgentRuntime:
             runtime_state=runtime_state,
             executor=executor,
             background=background,
+            resolver_factory=configured_factory,
+            transport_policy=selected_policy,
+            local_bundle_resolver_factory=configured_local_factory,
         )
         server = UnixRpcServer(socket_path, agent)
         return cls(
@@ -185,6 +262,7 @@ class HostAgentRuntime:
             deployment=deployment,
             agent=agent,
             server=server,
+            transport_policy=selected_policy,
             registry=registry,
             locator_store=(
                 registry.store
@@ -229,12 +307,20 @@ class HostAgentRuntime:
         socket_path: Path,
         bootstrap_manifest: Path,
         background: bool = False,
+        release_resolver=None,
+        resolver_factory=None,
+        local_bundle_resolver_factory=None,
+        transport_policy: ExplicitTransportPolicy | None = None,
     ) -> HostAgentRuntime:
         return cls._build(
             paths=HostPaths.testing(app=app_root, data=data_root, state=state_root),
             socket_path=socket_path.resolve(),
             bootstrap_manifest=bootstrap_manifest.resolve(),
             background=background,
+            release_resolver=release_resolver,
+            resolver_factory=resolver_factory,
+            local_bundle_resolver_factory=local_bundle_resolver_factory,
+            transport_policy=transport_policy,
         )
 
     @staticmethod
@@ -423,6 +509,7 @@ class HostAgentRuntime:
         operation = self.agent.operations.get(operation_id)
         if operation.get("kind") == "initial_adoption":
             return self._reconcile_initial_adoption(operation)
+        self.agent.bind_operation_resolver(operation)
         return self.agent.executor.reconcile(operation_id)
 
     def _reconcile_initial_adoption(

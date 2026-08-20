@@ -77,14 +77,15 @@ def request_pending_registration(*, request, email):
     with transaction.atomic():
         if User.objects.filter(email__iexact=normalized).exists():
             return None, None, False
-        pending = PendingRegistration.objects.select_for_update().filter(email=normalized).first()
+        pending, created = PendingRegistration.objects.select_for_update().get_or_create(
+            email=normalized,
+            defaults={"resend_count": 0, **values},
+        )
         # Re-check after taking the pending row lock so a concurrent completion
         # cannot leave a fresh pending row behind for an already-created user.
         if User.objects.filter(email__iexact=normalized).exists():
             return None, None, False
-        if pending is None:
-            pending = PendingRegistration.objects.create(email=normalized, resend_count=0, **values)
-        else:
+        if not created:
             values["resend_count"] = pending.resend_count + 1
             for key, value in values.items():
                 setattr(pending, key, value)

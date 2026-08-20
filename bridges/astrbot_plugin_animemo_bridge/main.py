@@ -6,7 +6,11 @@ import os
 from uuid import uuid4
 
 if __package__:
-    from .animemo_bridge.client import AsyncAniMemoClient, BridgeConfig
+    from .animemo_bridge.client import (
+        AsyncAniMemoClient,
+        BridgeConfig,
+        canonical_service_origin,
+    )
     from .animemo_bridge.errors import AniMemoBridgeError, PairingResultUnknown
     from .animemo_bridge.events import EventPoller
     from .animemo_bridge.identity import extract_identity
@@ -15,7 +19,11 @@ if __package__:
     from .animemo_bridge.state import EventState
     from .animemo_bridge.time_display import format_status_timestamp
 else:
-    from animemo_bridge.client import AsyncAniMemoClient, BridgeConfig
+    from animemo_bridge.client import (
+        AsyncAniMemoClient,
+        BridgeConfig,
+        canonical_service_origin,
+    )
     from animemo_bridge.errors import AniMemoBridgeError, PairingResultUnknown
     from animemo_bridge.events import EventPoller
     from animemo_bridge.identity import extract_identity
@@ -40,7 +48,6 @@ DEFAULT_CONFIG = {
     "request_timeout_seconds": 35,
     "allow_group_commands": False,
     "developer_commands": False,
-    "verify_tls": True,
 }
 
 DISPLAY_STATUSES = {
@@ -106,6 +113,13 @@ def _config_value(config, key):
     elif key == "secret":
         value = os.getenv("ANIMEMO_INTEGRATION_SECRET", value)
     return value
+
+
+def _display_server(config):
+    try:
+        return canonical_service_origin(_config_value(config, "animemo_base_url"))
+    except ValueError:
+        return "配置无效"
 
 
 def _config_bool(config, key):
@@ -232,15 +246,11 @@ class AniMemoBridge(Star):
             return
         try:
             poll_wait, request_timeout = _validated_timing(self.config)
-            verify_tls = _config_bool(self.config, "verify_tls")
-            if not verify_tls:
-                logger.warning("AniMemo Bridge TLS verification is disabled; use this only for local development")
             bridge_config = BridgeConfig.from_values(
                 _config_value(self.config, "animemo_base_url"),
                 _config_value(self.config, "key_id"),
                 _config_value(self.config, "secret"),
                 timeout_seconds=request_timeout,
-                verify_tls=verify_tls,
             )
         except ValueError as error:
             message = str(error)
@@ -274,7 +284,7 @@ class AniMemoBridge(Star):
         return {
             "enabled": bool(self.client),
             "configured": bool(self.client and self.client.configured),
-            "server": _config_value(self.config, "animemo_base_url"),
+            "server": _display_server(self.config),
             "key_id": self._masked_key_id(),
             "poller": self.poller.status if self.poller else "STOPPED",
             "route_count": self.routes.count(),
@@ -456,7 +466,7 @@ class AniMemoBridge(Star):
         poll = self.poller.status if self.poller else "STOPPED"
         return "\n".join((
             "AniMemo Bridge：已启用" if self.client else "AniMemo Bridge：未启用",
-            f"服务地址：{_config_value(self.config, 'animemo_base_url')}",
+            f"服务地址：{_display_server(self.config)}",
             f"Key ID：{self._masked_key_id()}",
             f"事件轮询器：{_display_status(poll)}",
             f"当前路由：{'已绑定本地投递路由' if self.routes.count() else '暂无私聊路由'}",

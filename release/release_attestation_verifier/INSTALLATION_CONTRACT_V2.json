@@ -1,0 +1,108 @@
+{
+  "authorityModel": "GITHUB_IMMUTABLE_RELEASE_SIGSTORE_TUF_SINGLE_AUTHORITY",
+  "contract": {
+    "document": "docs/installer-contract-v2.md",
+    "freezeStatus": "FROZEN_FOR_V1_1_P1_SECURITY_REPAIR",
+    "predecessorBlob": "a6307b42928423cea3a2cf04db7836887fc818a0",
+    "predecessorDocument": "docs/installer-contract-v1.md",
+    "relationship": "INHERIT_FULL_V1_REPLACE_BOOTSTRAP_AND_TRUST_LIFECYCLE_ONLY"
+  },
+  "bootstrap": {
+    "archivePrefix": "release/release_attestation_verifier/pretrust-v2",
+    "authorization": "VERIFIED_BOOTSTRAP_CAPABILITY_ONLY",
+    "bundleSelfAuthorization": "FORBIDDEN"
+  },
+  "build": {
+    "command": [
+      "go",
+      "build",
+      "-mod=readonly",
+      "-trimpath",
+      "-o",
+      "offline-release-verifier",
+      "."
+    ],
+    "minimumGoVersion": "1.26.6",
+    "networkDuringBuild": "FORBIDDEN_AFTER_PREPOPULATED_AUDITED_MODULE_CACHE",
+    "networkDuringRuntime": "FORBIDDEN"
+  },
+  "generationFiles": [
+    {
+      "mode": "0644",
+      "name": "github-trusted-root.jsonl",
+      "role": "GITHUB_PRIVATE_TUF_TRUSTED_ROOT"
+    },
+    {
+      "mode": "0644",
+      "name": "github-tuf-root.json",
+      "role": "GITHUB_TUF_CURRENT_ROOT"
+    },
+    {
+      "mode": "0755",
+      "name": "offline-release-verifier",
+      "role": "PINNED_SIGSTORE_GO_VERIFIER"
+    },
+    {
+      "mode": "0644",
+      "name": "sigstore-trusted-root.jsonl",
+      "role": "SIGSTORE_PUBLIC_GOOD_TUF_TRUSTED_ROOT"
+    },
+    {
+      "mode": "0644",
+      "name": "sigstore-tuf-root.json",
+      "role": "SIGSTORE_TUF_CURRENT_ROOT"
+    },
+    {
+      "mode": "0644",
+      "name": "trust-profile.json",
+      "role": "CLOSED_PRETRUSTED_PROFILE"
+    }
+  ],
+  "owner": "root:root",
+  "inputTrustClasses": {
+    "bundleContainedRoots": "UNTRUSTED_TRANSPORT_INPUT",
+    "officialTufSuccessor": "UNTRUSTED_UNTIL_CURRENT_ROOT_VERIFIES",
+    "operatorPretrustedKit": "TRUSTED_ONLY_AFTER_INDEPENDENT_STAGE0",
+    "portablePayload": "UNTRUSTED_TRANSPORT_INPUT",
+    "protectedReleaseMaterials": "TRUSTED_AFTER_EXACT_GITHUB_RELEASE_VERIFICATION"
+  },
+  "profileHashBindings": [
+    "githubRootIdentity",
+    "githubTufRootIdentity",
+    "sigstoreRootIdentity",
+    "sigstoreTufRootIdentity",
+    "verifierIdentity"
+  ],
+  "runtimeDiscovery": "FIXED_ABSOLUTE_PATH_ONLY",
+  "schemaVersion": 2,
+  "failurePolicy": {
+    "credentialOutput": "FORBIDDEN",
+    "firstFailureWins": true,
+    "productionBypass": "FORBIDDEN",
+    "stablePrefixes": [
+      "BOOTSTRAP_",
+      "TRUST_"
+    ]
+  },
+  "state": {
+    "activeRecord": "/var/lib/animemo/offline-trust/v2/active-state.json",
+    "generationRoot": "/var/lib/animemo/offline-trust/v2/generations",
+    "mode": "ROOT_OWNED_NON_WORLD_WRITABLE",
+    "crashPolicy": "PRE_REPLACE_PREDECESSOR_REMAINS_ACTIVE_POST_REPLACE_COMPLETE_SUCCESSOR_READBACK_REQUIRED",
+    "rollbackPolicy": "MONOTONIC_ONLY_DISASTER_RECOVERY_OUTSIDE_THIS_CONTRACT",
+    "writePolicy": "IMMUTABLE_GENERATION_THEN_LOCKED_ATOMIC_ACTIVE_REPLACE_AND_DIRECTORY_FSYNC"
+  },
+  "testProductionSeparation": {
+    "fixtureAuthorityProductionAcceptance": "FORBIDDEN",
+    "productionRoots": "OFFICIAL_GITHUB_AND_SIGSTORE_TUF_ONLY",
+    "testIdentity": "EXPLICIT_TEST_ONLY"
+  },
+  "trustUpdate": {
+    "authorityRole": "TRUST_METADATA_ONLY",
+    "network": "OPTIONAL_TRANSPORT_ONLY",
+    "revocationRule": "ONLY_EXPLICIT_SIGNER_DEAUTHORIZATION_FROM_VERIFIED_TUF_ROOT_SUCCESSOR",
+    "supersessionIsRevocation": false,
+    "transition": "CURRENT_PROFILE_N_TO_EXACT_SUCCESSOR_N_PLUS_1"
+  },
+  "verifierVersion": "2.97.0+animemo.1"
+}

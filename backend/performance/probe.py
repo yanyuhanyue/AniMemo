@@ -24,7 +24,7 @@ from journal.auth_tokens import issue_token_pair
 from journal.models import JournalEntry
 
 from .contract import API_MEASURED_RUNS, API_WARMUP_RUNS, DEEP_DASHBOARD_PAGE, summarize_samples
-from .seed import ADMIN_USERNAME, INTEGRATION_SECRET, OWNER_USERNAME, SeedResult
+from .seed import ADMIN_USERNAME, OWNER_USERNAME, SeedResult
 
 
 NUMBER_RE = re.compile(r"(?<![A-Za-z_])\d+(?:\.\d+)?")
@@ -137,7 +137,7 @@ def _signed_events_request(client, integration):
     timestamp = str(int(time.time()))
     nonce = uuid4().hex
     signature = sign_hmac_request(
-        INTEGRATION_SECRET,
+        integration.get_secret(),
         timestamp,
         nonce,
         "GET",

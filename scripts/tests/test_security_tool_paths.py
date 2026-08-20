@@ -100,6 +100,28 @@ class SecurityToolPathTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "output directory must not be a symbolic link"):
                 output_target()
 
+    def test_bridge_packager_rejects_a_symlinked_source_entry(self):
+        namespace = run_path(str(ROOT / "scripts" / "package-astrbot-bridge.py"))
+        validate_source_tree = namespace["validate_source_tree"]
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "bridge"
+            source.mkdir()
+            outside = Path(directory) / "outside.py"
+            outside.write_text("private runner material\n", encoding="utf-8")
+            linked = source / "main.py"
+            try:
+                linked.symlink_to(outside)
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314:
+                    self.skipTest("symlink creation is unavailable on this Windows host")
+                raise
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Bridge source tree must contain only regular files",
+            ):
+                validate_source_tree(source)
+
     def test_astrbot_runtime_smoke_ignores_external_root_and_cleans_its_temp_root(self):
         namespace = run_path(str(ROOT / "scripts" / "smoke-astrbot-bridge-runtime.py"))
         isolated_root = namespace["isolated_astrbot_root"]

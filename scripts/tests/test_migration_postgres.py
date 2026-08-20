@@ -266,7 +266,7 @@ class IsolatedPostgreSQLMigrationTests(unittest.TestCase):
         external_key = OneTimeKey.from_bytes(b"E" * 32)
         bundle_id = uuid.UUID("12345678-1234-4678-9234-567812345678")
         release_identity = {
-            "version": "1.1.0",
+            "version": "v1.1.0",
             "channel": "stable",
             "commit": "a" * 40,
             "manifestDigest": "sha256:" + "1" * 64,

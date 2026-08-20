@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from release.contract import build_manifest
@@ -12,6 +13,7 @@ from updater.executor import UpdateExecutor
 from updater.runtime_state import RuntimeState
 from updater.slots import ReleaseSlots
 from updater.state import OperationStore
+from updater.transport import ExplicitTransportPolicy
 
 
 def manifest(
@@ -34,6 +36,7 @@ def manifest(
         api_digest="sha256:" + digit * 64,
         web_digest="sha256:" + digit * 64,
         deployment_contract_sha256="sha256:0be5fdf5f87275755e06a2e2b6523c24e16d6aa1db48d8d58e8cfea969b674df",
+        installer_materials_sha256="sha256:" + "f" * 64,
         deployment_files=[
             {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
             {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},
@@ -403,6 +406,45 @@ class UpdateExecutorTests(unittest.TestCase):
                     "enabledPluginApis": [2],
                 },
             )
+
+    def test_modern_release_source_binds_verified_materials_and_policy_to_image_acquisition(self):
+        class ModernSource:
+            def __init__(self, target):
+                self.target = target
+                self.transport_policy = ExplicitTransportPolicy.official_mirror()
+
+            def fetch_verified_materials(self, version, updater_version="1.0.0", refresh=False):
+                del version, updater_version, refresh
+                return SimpleNamespace(manifest=self.target)
+
+        class ModernDeployment(FakeDeployment):
+            def pull(self, manifest):
+                raise AssertionError("legacy manifest-only pull must not run")
+
+            def pull_verified(self, materials, policy):
+                self._call(
+                    "pull_verified",
+                    materials.manifest["release"]["version"],
+                    policy.identity,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            current = manifest("v1.0.0", "1")
+            target = manifest("v1.0.1", "2")
+            deployment = ModernDeployment()
+            executor, store, _ = self.setup_executor(
+                directory, current, target, deployment
+            )
+            executor.release_source = ModernSource(target)
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+
+            executor.apply(operation["id"], target)
+
+            self.assertEqual(store.get(operation["id"])["status"], "succeeded")
+            self.assertEqual(
+                [call[0] for call in deployment.calls].count("pull_verified"), 1
+            )
+            self.assertNotIn("pull", [call[0] for call in deployment.calls])
 
     def test_backup_failure_prevents_migration_and_switch(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -13,14 +13,9 @@ from scripts.ci_gate_authority import (
     CI_JOB_GATES,
     CLASSIFIER_OUTPUT_NAMES,
     CURRENT_RELEASE_GRAPH_CONTRACT,
-    LEGACY_RELEASE_GRAPH_CONTRACT,
-    LEGACY_RELEASE_JOB_GATES,
     PRODUCT_GATE_NAMES,
     RELEASE_JOB_GATES,
     SCHEMA_VERSION,
-    TRUSTED_LEGACY_WORKFLOW_SHA,
-    TRUSTED_PRE_MERGE_WORKFLOW_REF,
-    TRUSTED_REPOSITORY,
     GateAuthorityError,
     main,
     validate_gate_authority,
@@ -79,13 +74,11 @@ def release_needs(
     document: dict[str, object],
     *,
     event_name: str = "pull_request",
-    legacy: bool = False,
 ) -> dict[str, object]:
     gates = document["gates"]
     assert isinstance(gates, dict)
-    jobs = LEGACY_RELEASE_JOB_GATES if legacy else RELEASE_JOB_GATES
     needs: dict[str, object] = {"classify": classify_job(document)}
-    for job, gate in jobs.items():
+    for job, gate in RELEASE_JOB_GATES.items():
         selected = (
             event_name == "push"
             if gate is None
@@ -219,49 +212,25 @@ class CiGateAuthorityTests(unittest.TestCase):
 
         self.assertEqual(result["selected_jobs"], ["post-merge-sanity"])
 
-    def test_current_and_authenticated_legacy_release_graphs_are_fail_closed(self):
+    def test_release_graph_requires_the_single_current_contract(self):
         document = classification(["README.md"], force_full=True)
         current = release_needs(document, event_name="workflow_dispatch")
-        legacy = release_needs(
-            document, event_name="workflow_dispatch", legacy=True
-        )
 
         current_result = validate_current_release(
             current, event_name="workflow_dispatch"
-        )
-        legacy_result = validate_gate_authority(
-            legacy,
-            workflow="release",
-            event_name="workflow_dispatch",
-            workflow_ref=TRUSTED_PRE_MERGE_WORKFLOW_REF,
-            workflow_sha=TRUSTED_LEGACY_WORKFLOW_SHA,
-            repository=TRUSTED_REPOSITORY,
-            caller_sha=TRUSTED_LEGACY_WORKFLOW_SHA,
         )
 
         self.assertEqual(
             current_result["release_graph_contract"], CURRENT_RELEASE_GRAPH_CONTRACT
         )
-        self.assertEqual(
-            legacy_result["release_graph_contract"], LEGACY_RELEASE_GRAPH_CONTRACT
-        )
-        self.assertNotIn("dr-rehearsal", legacy_result["selected_jobs"])
 
         self.assert_rejected(
             "release graph contract",
             lambda: validate_gate_authority(
-                legacy,
+                current,
                 workflow="release",
                 event_name="workflow_dispatch",
-                workflow_ref=TRUSTED_PRE_MERGE_WORKFLOW_REF,
-                workflow_sha="0" * 40,
-                repository=TRUSTED_REPOSITORY,
-                caller_sha=TRUSTED_LEGACY_WORKFLOW_SHA,
             ),
-        )
-        self.assert_rejected(
-            "missing keys: dr-rehearsal",
-            lambda: validate_current_release(legacy, event_name="workflow_dispatch"),
         )
         self.assert_rejected(
             "unsupported release graph contract",

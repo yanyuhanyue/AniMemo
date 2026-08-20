@@ -5,6 +5,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -26,21 +27,43 @@ ACTION_REQUEST_MAX_BYTES = 256 * 1024
 ACK_REQUEST_MAX_BYTES = 16 * 1024
 
 
+def canonical_service_origin(value: str | None) -> str:
+    base_url = (value or "").strip()
+    if not base_url:
+        raise ValueError("AniMemo base URL 不能为空。")
+    if any(character.isspace() or ord(character) < 32 for character in base_url):
+        raise ValueError("AniMemo base URL 包含非法字符。")
+
+    parsed = urlsplit(base_url)
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise ValueError("AniMemo base URL 必须是有效的 HTTPS 地址。")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("AniMemo base URL 禁止包含 URL 凭证。")
+    try:
+        _ = parsed.port
+    except ValueError as error:
+        raise ValueError("AniMemo base URL 端口无效。") from error
+    if parsed.path not in {"", "/"} or "?" in base_url or "#" in base_url:
+        raise ValueError("AniMemo base URL 必须是无路径、查询参数和片段的 HTTPS 服务源。")
+
+    return f"https://{parsed.netloc}"
+
+
 @dataclass(frozen=True)
 class BridgeConfig:
     base_url: str
     key_id: str
     secret: str
     timeout_seconds: float = 35.0
-    verify_tls: bool = True
 
     @classmethod
     def from_values(cls, base_url: str | None, key_id: str | None, secret: str | None, **kwargs):
-        base_url = os.getenv("ANIMEMO_BASE_URL", base_url or "").strip().rstrip("/")
+        base_url = os.getenv("ANIMEMO_BASE_URL", base_url or "")
         key_id = os.getenv("ANIMEMO_INTEGRATION_KEY_ID", key_id or "").strip()
         secret = os.getenv("ANIMEMO_INTEGRATION_SECRET", secret or "").strip()
         if not base_url or not key_id or not secret:
             raise ValueError("AniMemo base URL、key id 和 secret 均为必填。")
+        base_url = canonical_service_origin(base_url)
         return cls(base_url, key_id, secret, **kwargs)
 
 
@@ -55,7 +78,6 @@ class AsyncAniMemoClient:
             httpx.AsyncClient(
                 base_url=config.base_url,
                 timeout=httpx.Timeout(config.timeout_seconds),
-                verify=config.verify_tls,
                 headers={"Accept": "application/json"},
                 transport=transport,
             )

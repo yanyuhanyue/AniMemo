@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-alpine@sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31
 
 ARG ANIMEMO_VERSION=0.0.0
 ARG ANIMEMO_COMMIT=unknown
@@ -19,20 +19,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ANIMEMO_COMMIT=${ANIMEMO_COMMIT} \
     ANIMEMO_RELEASE_CHANNEL=${ANIMEMO_CHANNEL}
 
-RUN DEBIAN_FRONTEND=noninteractive apt-get update \
-    && apt-get install -y --no-install-recommends tzdata \
+RUN apk upgrade --no-cache \
+    && apk add --no-cache tzdata \
     && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
-    && echo "Asia/Shanghai" > /etc/timezone \
-    && rm -rf /var/lib/apt/lists/*
+    && echo "Asia/Shanghai" > /etc/timezone
 
 WORKDIR /app
 
 COPY backend/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1
+RUN python -m pip install --no-cache-dir -r /app/requirements.txt
+RUN python -m pip uninstall --yes pip
 
 COPY backend /app/backend
 COPY plugins /app/plugins
-RUN useradd --create-home --uid 10001 animemo \
+RUN adduser -D -u 10001 -h /home/animemo animemo \
     && mkdir -p /app/runtime/plugins /app/logs \
     && chown -R animemo:animemo /app/runtime /app/logs /app/backend /app/plugins \
     && ANIMEMO_BUILD_STATIC=1 python /app/backend/manage.py collectstatic --noinput \

@@ -12,6 +12,24 @@ SPEC.loader.exec_module(pluginctl)
 
 
 class PluginCtlBoundaryTests(SimpleTestCase):
+    def test_runtime_files_reject_a_linked_source_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "demo-plugin"
+            root.mkdir()
+            outside = Path(directory) / "outside"
+            outside.mkdir()
+            (outside / "plugin.py").write_text("SECRET = True\n", encoding="utf-8")
+            linked = root / "backend"
+            try:
+                linked.symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314:
+                    self.skipTest("symlink creation is unavailable on this Windows host")
+                raise
+
+            with self.assertRaisesRegex(SystemExit, "must not contain links"):
+                pluginctl._runtime_files(root)
+
     def test_source_import_cannot_escape_plugin_package(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "demo-plugin"

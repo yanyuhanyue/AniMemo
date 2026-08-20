@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -44,7 +45,6 @@ LOAD_ENTRIES_PER_USER = 50
 PLUGIN_PREFIX = f"{NAMESPACE}-plugin-"
 PLUGIN_STORAGE_PREFIX = f"{NAMESPACE}/packages/"
 INTEGRATION_PROVIDER = NAMESPACE
-INTEGRATION_SECRET = "perf-v1-ephemeral-secret"
 
 
 @dataclass(frozen=True)
@@ -463,9 +463,9 @@ def seed_backend_performance_data(dataset, *, reset=True):
             provider=INTEGRATION_PROVIDER,
             instance_id=f"instance-{index}",
             name=f"Performance Integration {index}",
-            key_id=f"{NAMESPACE}-key-{index}",
+            key_id=f"{NAMESPACE}-key-{secrets.token_hex(12)}",
         )
-        connection.set_secret(INTEGRATION_SECRET)
+        connection.set_secret(secrets.token_urlsafe(32))
         connections.append(connection)
     IntegrationConnection.objects.bulk_create(connections)
     connections = list(

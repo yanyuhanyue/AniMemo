@@ -1,9 +1,10 @@
+import json
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -36,7 +37,6 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
 
     def test_runtime_config_parses_bool_strings_and_rejects_invalid_timing(self):
         self.assertFalse(_config_bool({"enabled": "false"}, "enabled"))
-        self.assertFalse(_config_bool({"verify_tls": "0"}, "verify_tls"))
         self.assertFalse(_config_bool({"allow_group_commands": 2}, "allow_group_commands"))
         self.assertTrue(_config_bool({"poll_events": "yes"}, "poll_events"))
         self.assertEqual(
@@ -54,6 +54,11 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(config=config), self.assertRaises(ValueError):
                 _validated_timing(config)
+
+    def test_management_schema_exposes_no_tls_verification_bypass(self):
+        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        self.assertNotIn("verify_tls", schema)
 
     async def test_environment_secret_override_stays_out_of_status_and_state(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(
@@ -86,6 +91,30 @@ class CommandsTests(unittest.IsolatedAsyncioTestCase):
                 content = path.read_text(encoding="utf-8")
                 self.assertNotIn("environment-only-test-secret", content)
                 self.assertNotIn("config-test-secret", content)
+
+    async def test_invalid_service_url_is_never_reflected_in_status(self):
+        with tempfile.TemporaryDirectory() as temp:
+            sensitive_url = "https://operator:password@animemo.example"
+            bridge = self._bridge(
+                temp,
+                {
+                    "enabled": True,
+                    "animemo_base_url": sensitive_url,
+                    "key_id": "key",
+                    "secret": "secret",
+                    "poll_events": False,
+                },
+                SimpleNamespace(register_web_api=lambda *_args: None),
+            )
+            await bridge.initialize()
+            self.assertIsNone(bridge.client)
+            web_status = str(await bridge._web_status())
+            command_status = await bridge._status_text()
+            self.assertNotIn(sensitive_url, web_status)
+            self.assertNotIn(sensitive_url, command_status)
+            self.assertNotIn("password", web_status)
+            self.assertNotIn("password", command_status)
+            self.assertIn("配置无效", command_status)
 
     async def test_group_pair_is_rejected_without_client(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -7,6 +7,5 @@
   "poll_wait_seconds": {"type": "int", "default": 20, "min": 0, "max": 25, "description": "事件长轮询等待秒数。"},
   "request_timeout_seconds": {"type": "int", "default": 35, "min": 5, "max": 120, "description": "HTTP 请求超时，必须大于长轮询等待时间。"},
   "allow_group_commands": {"type": "bool", "default": false, "description": "是否允许已绑定用户在群聊调用动作。配对始终只允许私聊。"},
-  "developer_commands": {"type": "bool", "default": false, "description": "是否启用 debug 命令和事件字段预览。"},
-  "verify_tls": {"type": "bool", "default": true, "description": "是否校验 AniMemo HTTPS 证书。"}
+  "developer_commands": {"type": "bool", "default": false, "description": "是否启用 debug 命令和事件字段预览。"}
 }

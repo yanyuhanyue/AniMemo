@@ -10,22 +10,24 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path, PurePosixPath
-from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
-
-from packaging.version import InvalidVersion, Version
 
 from ci_refs import RefResolutionError, resolve_refs
-
+from packaging.version import InvalidVersion, Version
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from backend.plugin_host.official_packages import (
+    build_official_content_descriptor,
+    build_official_package,
+    canonical_content_digest_from_descriptor,
+)
+
 OFFICIAL_MODULE_PATH = "backend/plugin_host/official_packages.py"
-LEGACY_SYNC_PATH = "backend/plugin_host/management/commands/sync_official_plugins.py"
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$")
 OFFICIAL_SLUG_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
-ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
-CONTENT_IDENTITY_VERSION = 1
 
 
 class GateInputError(RuntimeError):
@@ -108,116 +110,28 @@ def _official_slugs_from_source(source, source_path):
 
 
 def _official_slugs_at_ref(repo, ref):
-    for path in (OFFICIAL_MODULE_PATH, LEGACY_SYNC_PATH):
-        source = _file_at_ref(repo, ref, path)
-        if source is not None:
-            return _official_slugs_from_source(source, path)
-    raise GateInputError(f"Official plugin registry is unavailable at {ref}.")
+    source = _file_at_ref(repo, ref, OFFICIAL_MODULE_PATH)
+    if source is None:
+        raise GateInputError(
+            f"Canonical official plugin registry is unavailable at {ref}."
+        )
+    return _official_slugs_from_source(source, OFFICIAL_MODULE_PATH)
 
 
 def _official_slugs_in_worktree(root):
-    for path in (OFFICIAL_MODULE_PATH, LEGACY_SYNC_PATH):
-        candidate = root / path
-        if candidate.is_file():
-            return _official_slugs_from_source(candidate.read_bytes(), path)
-    raise GateInputError(f"Official plugin registry is unavailable in {root}.")
-
-
-def _zip_info(name):
-    info = ZipInfo(name, date_time=ZIP_TIMESTAMP)
-    info.compress_type = ZIP_DEFLATED
-    info.create_system = 3
-    info.external_attr = 0o100644 << 16
-    return info
-
-
-def _legacy_collect_official_package_files(source_root):
-    source_root = Path(source_root)
-    paths = [source_root / "manifest.json"]
-    frontend = source_root / "frontend"
-    for name in ("plugin.js", "plugin.css"):
-        if (frontend / name).is_file():
-            paths.append(frontend / name)
-    assets = frontend / "assets"
-    if assets.is_dir():
-        paths.extend(path for path in assets.rglob("*") if path.is_file() and not path.is_symlink())
-    backend = source_root / "backend"
-    if backend.is_dir():
-        paths.extend(
-            path
-            for path in backend.rglob("*.py")
-            if path.is_file() and not path.is_symlink() and "__pycache__" not in path.parts and "tests" not in path.parts
-        )
-    paths = sorted(set(paths), key=lambda path: path.relative_to(source_root).as_posix())
-    return tuple((path.relative_to(source_root).as_posix(), path.read_bytes()) for path in paths)
-
-
-def _legacy_build_official_content_descriptor(source_root):
-    return [
-        {"path": path, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
-        for path, payload in _legacy_collect_official_package_files(source_root)
-    ]
-
-
-def _legacy_build_official_package(source_root):
-    files = _legacy_collect_official_package_files(source_root)
-    manifest = json.loads(dict(files)["manifest.json"].decode("utf-8"))
-    descriptor = [
-        {"path": path, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
-        for path, payload in files
-    ]
-    package_index = {
-        "packageVersion": 1,
-        "pluginId": manifest["id"],
-        "slug": manifest["slug"],
-        "version": manifest["version"],
-        "files": descriptor,
-    }
-    output = BytesIO()
-    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
-        for path, payload in files:
-            archive.writestr(_zip_info(path), payload)
-        archive.writestr(
-            _zip_info("package-index.json"),
-            json.dumps(package_index, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8"),
-        )
-    return output.getvalue()
-
-
-def _official_api_from_source(source, source_path):
-    namespace = {"__name__": "official_packages_gate_ref"}
-    try:
-        exec(compile(source, source_path, "exec"), namespace)
-    except Exception as error:
-        raise GateInputError(f"Unable to load official package builder from {source_path}: {error}") from error
-    builder = namespace.get("build_official_package")
-    if not callable(builder):
-        raise GateInputError(f"build_official_package is missing from {source_path}.")
-    descriptor_builder = namespace.get("build_official_content_descriptor")
-    if descriptor_builder is not None and not callable(descriptor_builder):
-        raise GateInputError(f"build_official_content_descriptor is invalid in {source_path}.")
-    digest_builder = namespace.get("canonical_content_digest_from_descriptor")
-    if digest_builder is not None and not callable(digest_builder):
-        raise GateInputError(f"canonical_content_digest_from_descriptor is invalid in {source_path}.")
-    return (
-        builder,
-        descriptor_builder or _legacy_build_official_content_descriptor,
-        digest_builder or _canonical_content_digest,
-    )
-
-
-def _official_api_at_ref(repo, ref):
-    source = _file_at_ref(repo, ref, OFFICIAL_MODULE_PATH)
-    if source is None:
-        return _legacy_build_official_package, _legacy_build_official_content_descriptor, _canonical_content_digest
-    return _official_api_from_source(source.decode("utf-8"), f"{ref}:{OFFICIAL_MODULE_PATH}")
-
-
-def _official_api_in_worktree(root):
     candidate = root / OFFICIAL_MODULE_PATH
     if not candidate.is_file():
-        return _legacy_build_official_package, _legacy_build_official_content_descriptor, _canonical_content_digest
-    return _official_api_from_source(candidate.read_text(encoding="utf-8"), str(candidate))
+        raise GateInputError(
+            f"Canonical official plugin registry is unavailable in {root}."
+        )
+    return _official_slugs_from_source(candidate.read_bytes(), OFFICIAL_MODULE_PATH)
+
+
+OFFICIAL_PACKAGE_API = (
+    build_official_package,
+    build_official_content_descriptor,
+    canonical_content_digest_from_descriptor,
+)
 
 
 def _extract_plugin(repo, ref, slug, destination):
@@ -271,20 +185,6 @@ def _parse_semver(value, slug):
         raise GateInputError(f"{slug}: version {value!r} is invalid SemVer.") from error
 
 
-def _canonical_content_digest(files):
-    descriptor = sorted(
-        ({"path": item["path"], "size": item["size"], "sha256": item["sha256"]} for item in files),
-        key=lambda item: item["path"],
-    )
-    canonical_json = json.dumps(
-        {"contentIdentityVersion": CONTENT_IDENTITY_VERSION, "files": descriptor},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(canonical_json).hexdigest()
-
-
 def _identity(source_root, official_api, slug):
     builder, descriptor_builder, digest_builder = official_api
     try:
@@ -307,15 +207,14 @@ def _ref_identity(repo, ref, slug, temporary_root):
     plugin_root = _extract_plugin(repo, ref, slug, temporary_root)
     if plugin_root is None:
         return None
-    return _identity(plugin_root, _official_api_at_ref(repo, ref), slug)
+    return _identity(plugin_root, OFFICIAL_PACKAGE_API, slug)
 
 
 def _worktree_identity(repo, ref, root, slug):
     plugin_root = root / "plugins" / slug
     if not (plugin_root / "manifest.json").is_file():
         return None
-    official_api = _official_api_in_worktree(root)
-    builder, descriptor_builder, digest_builder = official_api
+    builder, descriptor_builder, digest_builder = OFFICIAL_PACKAGE_API
     try:
         manifest = json.loads((plugin_root / "manifest.json").read_text(encoding="utf-8"))
         version = manifest["version"]

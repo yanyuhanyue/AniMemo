@@ -38,7 +38,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
           ref: main
@@ -46,25 +46,27 @@ jobs:
       - name: Read current PR and main identity
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
         shell: bash
         run: |
           set -euo pipefail
           git fetch --force origin main
           current_main_sha="$(git rev-parse origin/main)"
           test "$GITHUB_SHA" = "$current_main_sha"
-          gh api "repos/$GITHUB_REPOSITORY/pulls/${{ inputs.pr_number }}" > "$RUNNER_TEMP/pr.json"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
           echo "CURRENT_MAIN_SHA=$current_main_sha" >> "$GITHUB_ENV"
       - name: Bind the authority run to the exact PR, head, and current main
         id: snapshot
         env:
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          PR_NUMBER: ${{ inputs.pr_number }}
         shell: bash
         run: |
           set -euo pipefail
           git fetch --force origin "+$EXPECTED_HEAD_SHA:refs/remotes/origin/pre-merge-candidate"
           python scripts/ci_premerge.py \
             --pr-json "$RUNNER_TEMP/pr.json" \
-            --pr-number "${{ inputs.pr_number }}" \
+            --pr-number "$PR_NUMBER" \
             --expected-head-sha "$EXPECTED_HEAD_SHA" \
             --current-main-sha "$CURRENT_MAIN_SHA" \
             --repository "$GITHUB_REPOSITORY" \
@@ -73,12 +75,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.snapshot.outputs.pr_number }}
         shell: bash
         run: |
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
             -f state=pending \
             -f context=pre-merge-authority \
-            -f description="Full regression and release gate running for PR #${{ inputs.pr_number }}" \
+            -f description="Full regression and release gate running for PR #$PR_NUMBER" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   full-regression:
@@ -111,7 +114,7 @@ jobs:
       pull-requests: read
       statuses: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
           ref: main
@@ -122,6 +125,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
           FULL_REGRESSION_RESULT: ${{ needs.full-regression.result }}
           FULL_RELEASE_GATE_RESULT: ${{ needs.full-release-gate.result }}
         shell: bash
@@ -130,11 +134,11 @@ jobs:
           test "$FULL_REGRESSION_RESULT" = "success"
           test "$FULL_RELEASE_GATE_RESULT" = "success"
           git fetch --force origin main "+$HEAD_SHA:refs/remotes/origin/pre-merge-candidate"
-          gh api "repos/$GITHUB_REPOSITORY/pulls/${{ needs.preflight.outputs.pr_number }}" > "$RUNNER_TEMP/pr.json"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
           current_main_sha="$(git rev-parse origin/main)"
           python scripts/ci_premerge.py \
             --pr-json "$RUNNER_TEMP/pr.json" \
-            --pr-number "${{ needs.preflight.outputs.pr_number }}" \
+            --pr-number "$PR_NUMBER" \
             --expected-head-sha "$HEAD_SHA" \
             --current-main-sha "$current_main_sha" \
             --repository "$GITHUB_REPOSITORY" \

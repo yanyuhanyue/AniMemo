@@ -15,7 +15,7 @@ import re
 import uuid
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -30,6 +30,11 @@ from durability.compatibility import (
     DimensionAssessment,
     evaluate_compatibility,
 )
+from updater.local_bundle import (
+    LOCAL_BUNDLE_POLICY_IDENTITY,
+    LocalBundleTransportPolicy,
+)
+from updater.transport import ExplicitTransportPolicy
 
 INSTALL_PLAN_IDENTITY = "animemo.install-plan/v1"
 INSTALL_RESULT_IDENTITY = "animemo.install-result/v1"
@@ -45,11 +50,43 @@ class InstallerMode(StrEnum):
     RESTORE_TO_NEW = "restore-to-new"
 
 
+class InstallTransportSource(StrEnum):
+    GITHUB = "github"
+    OFFICIAL_MIRROR = "official-mirror"
+    LOCAL_BUNDLE = "local-bundle"
+
+
+def explicit_transport_policy(
+    source: InstallTransportSource,
+) -> ExplicitTransportPolicy | LocalBundleTransportPolicy:
+    if source is InstallTransportSource.GITHUB:
+        return ExplicitTransportPolicy.github()
+    if source is InstallTransportSource.OFFICIAL_MIRROR:
+        return ExplicitTransportPolicy.official_mirror()
+    if source is InstallTransportSource.LOCAL_BUNDLE:
+        return LocalBundleTransportPolicy()
+    raise InstallerError(
+        "INSTALL_TRANSPORT_SOURCE_INVALID",
+        outcome=InstallOutcome.VALIDATION_FAILED,
+    )
+
+
+def transport_policy_identity(source: InstallTransportSource) -> str:
+    policy = explicit_transport_policy(source)
+    if source is InstallTransportSource.LOCAL_BUNDLE:
+        return LOCAL_BUNDLE_POLICY_IDENTITY
+    return policy.identity
+
+
 class RestoreProtectionKind(StrEnum):
     NONE = "none"
     ONE_TIME_KEY_FILE = "one-time-key-file"
     PASSPHRASE_FILE = "passphrase-file"
     PASSPHRASE_FD = "passphrase-fd"
+
+
+class BootstrapPrivilegeGatePort(Protocol):
+    def consume(self, *, version: str, release_commit: str) -> object: ...
 
 
 class TargetClass(StrEnum):
@@ -254,13 +291,47 @@ class InstallRequest:
     mode: InstallerMode
     selector: ReleaseSelector
     public_origin: str
+    transport_source: InstallTransportSource = InstallTransportSource.GITHUB
+    local_bundle_payload: Path | None = None
+    local_bundle_release_attestation: Path | None = None
     listen: ListenRequest = ListenRequest()
     backup_root: Path | None = None
     restore_protection: RestoreProtectionRequest | None = None
     non_interactive: bool = False
     insecure_http_accepted: bool = False
+    transport_policy_identity: str = field(init=False)
 
     def __post_init__(self) -> None:
+        if type(self.transport_source) is not InstallTransportSource:
+            raise InstallerError(
+                "INSTALL_TRANSPORT_SOURCE_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        object.__setattr__(
+            self,
+            "transport_policy_identity",
+            transport_policy_identity(self.transport_source),
+        )
+        if self.transport_source is InstallTransportSource.LOCAL_BUNDLE:
+            if (
+                self.selector.version is None
+                or not isinstance(self.local_bundle_payload, Path)
+                or not self.local_bundle_payload.is_absolute()
+                or not isinstance(self.local_bundle_release_attestation, Path)
+                or not self.local_bundle_release_attestation.is_absolute()
+            ):
+                raise InstallerError(
+                    "INSTALL_LOCAL_BUNDLE_INPUT_REQUIRED",
+                    outcome=InstallOutcome.VALIDATION_FAILED,
+                )
+        elif (
+            self.local_bundle_payload is not None
+            or self.local_bundle_release_attestation is not None
+        ):
+            raise InstallerError(
+                "INSTALL_LOCAL_BUNDLE_INPUT_FORBIDDEN",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
         if self.mode is InstallerMode.FRESH and (
             self.backup_root is not None or self.restore_protection is not None
         ):
@@ -311,8 +382,21 @@ class ReleaseEvidence:
     deployment_identity_digest: str
     deployment_profile: str
     platform_profile: str
+    transport_source: InstallTransportSource = InstallTransportSource.GITHUB
+    transport_policy_identity: str = field(
+        default_factory=lambda: ExplicitTransportPolicy.github().identity
+    )
 
     def __post_init__(self) -> None:
+        if (
+            type(self.transport_source) is not InstallTransportSource
+            or self.transport_policy_identity
+            != transport_policy_identity(self.transport_source)
+        ):
+            raise InstallerError(
+                "INSTALL_RELEASE_TRANSPORT_POLICY_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
         if self.deployment_profile != STANDARD_DEPLOYMENT_PROFILE:
             raise InstallerError(
                 "INSTALL_DEPLOYMENT_PROFILE_UNSUPPORTED",
@@ -350,6 +434,8 @@ class ReleaseEvidence:
             "deploymentIdentityDigest": self.deployment_identity_digest,
             "deploymentProfile": self.deployment_profile,
             "platformProfile": self.platform_profile,
+            "transportSource": self.transport_source.value,
+            "transportPolicyIdentity": self.transport_policy_identity,
         }
 
 
@@ -522,6 +608,8 @@ class InstallPlan:
     mode: InstallerMode
     action: InstallAction
     selector: ReleaseSelector
+    transport_source: InstallTransportSource
+    transport_policy_identity: str
     release: ReleaseEvidence
     target: TargetEvidence
     platform: PlatformEvidence
@@ -539,6 +627,8 @@ class InstallPlan:
             "mode": self.mode.value,
             "action": self.action.value,
             "selector": self.selector.as_dict(),
+            "transportSource": self.transport_source.value,
+            "transportPolicyIdentity": self.transport_policy_identity,
             "release": self.release.as_dict(),
             "target": self.target.as_dict(),
             "platform": self.platform.as_dict(),
@@ -727,6 +817,7 @@ class Installer:
         operations: OperationPort,
         fresh: FreshInstallPort,
         restore: RestoreRuntimePort,
+        bootstrap_privilege_gate: BootstrapPrivilegeGatePort,
     ) -> None:
         self._releases = releases
         self._target = target
@@ -736,11 +827,17 @@ class Installer:
         self._operations = operations
         self._fresh = fresh
         self._restore = restore
+        self._bootstrap_privilege_gate = bootstrap_privilege_gate
 
     def plan(self, request: InstallRequest) -> InstallPlan:
         """Build a read-only, exact, secret-free operation plan."""
 
-        release = self._resolve(request.selector, refresh=False)
+        release = self._resolve(
+            request.selector,
+            transport_source=request.transport_source,
+            transport_policy_identity=request.transport_policy_identity,
+            refresh=False,
+        )
         platform = self._assess_platform(release.platform_profile)
         if not platform.compatible:
             raise InstallerError(
@@ -806,9 +903,7 @@ class Installer:
         )
         if restore is not None:
             try:
-                configuration = self._restore.bind_configuration(
-                    restore, configuration
-                )
+                configuration = self._restore.bind_configuration(restore, configuration)
             except InstallerError:
                 raise
             except Exception:  # noqa: BLE001 - Restore Adapter is redacted
@@ -845,6 +940,8 @@ class Installer:
             "mode": request.mode.value,
             "action": action.value,
             "selector": request.selector.as_dict(),
+            "transportSource": request.transport_source.value,
+            "transportPolicyIdentity": request.transport_policy_identity,
             "release": release.as_dict(),
             "target": target.as_dict(),
             "platform": platform.as_dict(),
@@ -859,6 +956,8 @@ class Installer:
             mode=request.mode,
             action=action,
             selector=request.selector,
+            transport_source=request.transport_source,
+            transport_policy_identity=request.transport_policy_identity,
             release=release,
             target=target,
             platform=platform,
@@ -895,6 +994,16 @@ class Installer:
                 state="active",
                 reason_code="INSTALL_USE_UPDATER",
             )
+        try:
+            self._bootstrap_privilege_gate.consume(
+                version=plan.release.version,
+                release_commit=plan.release.commit,
+            )
+        except Exception:  # noqa: BLE001 - privilege boundary is redacted
+            raise InstallerError(
+                "INSTALL_BOOTSTRAP_AUTHORITY_REQUIRED",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            ) from None
         if plan.action is InstallAction.RESTORE_TO_NEW:
             assert plan.restore is not None
             try:
@@ -1061,7 +1170,12 @@ class Installer:
         )
 
     def _revalidate(self, plan: InstallPlan) -> None:
-        refreshed_release = self._resolve(plan.selector, refresh=True)
+        refreshed_release = self._resolve(
+            plan.selector,
+            transport_source=plan.transport_source,
+            transport_policy_identity=plan.transport_policy_identity,
+            refresh=True,
+        )
         if refreshed_release.as_dict() != plan.release.as_dict():
             raise InstallerError(
                 "INSTALL_RELEASE_CHANGED",
@@ -1129,7 +1243,14 @@ class Installer:
             outcome=InstallOutcome.VALIDATION_FAILED,
         )
 
-    def _resolve(self, selector: ReleaseSelector, *, refresh: bool) -> ReleaseEvidence:
+    def _resolve(
+        self,
+        selector: ReleaseSelector,
+        *,
+        transport_source: InstallTransportSource,
+        transport_policy_identity: str,
+        refresh: bool,
+    ) -> ReleaseEvidence:
         try:
             evidence = self._releases.resolve(selector, refresh=refresh)
         except InstallerError:
@@ -1142,6 +1263,14 @@ class Installer:
         if not isinstance(evidence, ReleaseEvidence):
             raise InstallerError(
                 "INSTALL_RELEASE_EVIDENCE_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        if evidence.transport_source is not transport_source or not hmac.compare_digest(
+            evidence.transport_policy_identity,
+            transport_policy_identity,
+        ):
+            raise InstallerError(
+                "INSTALL_RELEASE_TRANSPORT_POLICY_MISMATCH",
                 outcome=InstallOutcome.VALIDATION_FAILED,
             )
         return evidence

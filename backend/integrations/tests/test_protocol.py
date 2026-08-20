@@ -9,6 +9,7 @@ from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from django.core.cache import cache
+from django.core.management.base import CommandError
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -28,6 +29,11 @@ from plugin_host.models import PluginDeployment, PluginProject, PluginVersion
 from plugin_host.runtime import runtime_registry
 from plugin_host.services import install_for_user, upload_plugin_version
 from integrations.services import IntegrationDispatchError
+
+
+class InteractiveStringIO(StringIO):
+    def isatty(self):
+        return True
 
 
 def make_integration_package(slug, version="1.0.0"):
@@ -314,7 +320,23 @@ class IntegrationAPITestCase(TestCase):
         )
         self.assertEqual(anonymous.status_code, 401)
 
-        output = StringIO()
+        noninteractive = StringIO()
+        with self.assertRaisesMessage(CommandError, "交互式终端"):
+            call_command(
+                "integration_connection",
+                "create",
+                provider="provider",
+                instance_id="noninteractive",
+                name="Noninteractive",
+                stdout=noninteractive,
+            )
+        self.assertFalse(
+            IntegrationConnection.objects.filter(
+                provider="provider", instance_id="noninteractive"
+            ).exists()
+        )
+
+        output = InteractiveStringIO()
         call_command(
             "integration_connection",
             "create",
@@ -329,7 +351,7 @@ class IntegrationAPITestCase(TestCase):
         self.assertIn("secret:", output.getvalue())
         old_key_id = created.key_id
 
-        rotated_output = StringIO()
+        rotated_output = InteractiveStringIO()
         call_command(
             "integration_connection",
             "rotate-secret",

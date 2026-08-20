@@ -30,7 +30,6 @@ POSTGRES_DIGEST = (
 REDIS_DIGEST = "sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf"
 DEPLOYMENT_PROFILE = "v1.1-standard"
 INSTALLER_MATERIALS_NAME = "installer-materials.tar"
-_DEFAULT_MATERIALS_DIGEST = "sha256:" + "0" * 64
 DEPLOYMENT_CONTRACT_PATHS = (
     "deploy/docker-compose.yml",
     "updater/docker-compose.runtime.yml",
@@ -371,11 +370,17 @@ def build_manifest(
     configuration_contract: str,
     configuration_accepts: list[str],
     plugin_sdk_apis: list[int],
-    installer_materials_sha256: str = _DEFAULT_MATERIALS_DIGEST,
+    installer_materials_sha256: str,
     promoted_from: str | None = None,
     provenance_workflow: str | None = None,
     provenance_source_commit: str | None = None,
 ) -> dict[str, object]:
+    materials_digest = _digest_hex(
+        installer_materials_sha256,
+        label="installer materials",
+    )
+    if materials_digest == "0" * 64:
+        raise ReleaseContractError("Installer materials digest must not be the zero digest")
     source_commit = provenance_source_commit or commit
     workflow = provenance_workflow or (
         ".github/workflows/promote-release.yml"
@@ -419,7 +424,7 @@ def build_manifest(
             "files": copy.deepcopy(deployment_files),
             "installerMaterials": {
                 "name": INSTALLER_MATERIALS_NAME,
-                "sha256": installer_materials_sha256,
+                "sha256": f"sha256:{materials_digest}",
                 "format": "tar",
             },
         },

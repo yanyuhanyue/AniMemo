@@ -6,6 +6,13 @@ import json
 import sys
 from pathlib import Path
 
+from updater.oci import OCIContractError, verify_oci_image_set
+
+from .acceptance import (
+    AcceptanceError,
+    validate_rc_live_acceptance,
+    validate_stable_promotion_acceptance,
+)
 from .contract import (
     ReleaseContractError,
     build_deployment_contract,
@@ -19,6 +26,33 @@ from .contract import (
     validate_manifest,
 )
 from .materials import build_installer_materials
+from .mirror import (
+    MirrorError,
+    build_offline_pair_mirror_plan_from_files,
+    replicate_offline_pair_files,
+)
+from .notes import (
+    CANONICAL_RELEASE_ASSETS,
+    ReleaseNotesError,
+    build_release_notes,
+    promote_release_notes,
+    render_release_notes,
+    validate_release_notes,
+)
+from .portable import (
+    PORTABLE_IMAGE_REPOSITORIES,
+    PortableBundleError,
+    build_portable_payload,
+    inspect_portable_archive,
+    portable_release_asset_name,
+    promote_portable_payload,
+)
+from .publication import (
+    PublicationError,
+    build_publication_plan,
+    validate_publication_plan,
+)
+from .trust_bootstrap import TrustBootstrapError, build_initial_trust_kit
 
 
 def _read_tags(path: Path) -> list[str]:
@@ -124,7 +158,10 @@ def _generate_deployment_contract(args) -> dict[str, object]:
 
 def _build_installer_materials(args) -> dict[str, object]:
     identity = build_installer_materials(
-        args.root, wheelhouse=args.wheelhouse, output=args.output
+        args.root,
+        wheelhouse=args.wheelhouse,
+        output=args.output,
+        initial_trust_kit=args.initial_trust_kit,
     )
     return {
         "archive": str(args.output),
@@ -203,6 +240,312 @@ def _write_checksums(args) -> dict[str, object]:
     return {"checksums": str(args.output), "files": len(lines)}
 
 
+def _portable_images(values: list[str]) -> list[dict[str, object]]:
+    parsed: dict[str, dict[str, object]] = {}
+    for value in values:
+        role, separator, reference = value.partition("=")
+        repository, at, digest = reference.rpartition("@")
+        if (
+            not separator
+            or not at
+            or role in parsed
+            or role not in PORTABLE_IMAGE_REPOSITORIES
+            or repository != PORTABLE_IMAGE_REPOSITORIES[role]
+            or len(digest) != 71
+            or not digest.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in digest[7:])
+        ):
+            raise PortableBundleError("PORTABLE_IMAGE_REFERENCE_INVALID")
+        parsed[role] = {
+            "digest": digest,
+            "layoutPath": f"oci/{role}",
+            "platform": "linux/amd64",
+            "repository": repository,
+            "role": role,
+        }
+    if set(parsed) != set(PORTABLE_IMAGE_REPOSITORIES):
+        raise PortableBundleError("PORTABLE_OCI_ROLES_INCOMPLETE_OR_UNORDERED")
+    return [parsed[role] for role in sorted(parsed)]
+
+
+def _build_portable(args) -> dict[str, object]:
+    images = _portable_images(args.image)
+    verify_oci_image_set(args.source_root, images)
+    inspection = build_portable_payload(args.source_root, args.output, images)
+    return {
+        "archive": str(args.output),
+        "sha256": inspection.archive_sha256,
+        "files": len(inspection.files),
+        "imageRoles": [item["role"] for item in images],
+        "authorityState": inspection.index["authorityState"],
+    }
+
+
+def _build_initial_trust_kit(args) -> dict[str, object]:
+    return build_initial_trust_kit(
+        verifier=args.verifier,
+        output=args.output,
+    )
+
+
+def _promote_portable(args) -> dict[str, object]:
+    inspection = promote_portable_payload(
+        args.rc_payload,
+        authority_directory=args.authority_directory,
+        archive=args.output,
+    )
+    return {
+        "archive": str(args.output),
+        "sha256": inspection.archive_sha256,
+        "files": len(inspection.files),
+        "imageRoles": [item["role"] for item in inspection.index["ociImages"]],
+        "authorityState": inspection.index["authorityState"],
+    }
+
+
+def _plan_offline_mirror(args) -> dict[str, object]:
+    plan = build_offline_pair_mirror_plan_from_files(
+        authority="GITHUB_RELEASE",
+        repository=args.repository,
+        tag=args.tag,
+        commit=args.commit,
+        release_identity=args.release_identity,
+        payload=args.payload,
+        release_attestation=args.release_attestation,
+    )
+    _write_json(args.output, plan)
+    return plan
+
+
+def _replicate_offline_mirror(args) -> dict[str, object]:
+    receipt = replicate_offline_pair_files(
+        _read_json(args.plan),
+        source_directory=args.source_directory,
+        destination_directory=args.destination_directory,
+    )
+    _write_json(args.output, receipt)
+    return receipt
+
+
+def _verify_declared_portable(args) -> dict[str, object]:
+    plan = validate_publication_plan(_read_json(args.plan))
+    transport = plan.get("transport_assets")
+    if not isinstance(transport, dict) or len(transport) != 1:
+        raise PublicationError("publication plan has no single declared portable asset")
+    name, identity = next(iter(transport.items()))
+    if args.payload.name != name:
+        raise PublicationError("portable payload name differs from publication plan")
+    inspection = inspect_portable_archive(args.payload)
+    if (
+        inspection.archive_sha256 != identity["sha256"]
+        or args.payload.stat().st_size != identity["size"]
+    ):
+        raise PublicationError("portable payload identity differs from publication plan")
+    return {
+        "status": "PASS",
+        "publicationPlanIdentity": plan["identity"],
+        "name": name,
+        "sha256": inspection.archive_sha256,
+        "size": identity["size"],
+        "authorityRole": "TRANSPORT_ONLY",
+    }
+
+
+def _generate_release_notes(args) -> dict[str, object]:
+    source = _read_json(args.input)
+    if set(source) != {"context", "pulls"}:
+        raise ReleaseNotesError("release note input has unknown or missing fields")
+    artifact = build_release_notes(context=source["context"], pulls=source["pulls"])
+    markdown = render_release_notes(artifact)
+    _write_json(args.output_json, artifact)
+    args.output_markdown.parent.mkdir(parents=True, exist_ok=True)
+    args.output_markdown.write_text(markdown, encoding="utf-8", newline="\n")
+    return artifact
+
+
+def _plan_publication(args) -> dict[str, object]:
+    source = _read_json(args.input)
+    expected = {
+        "repository",
+        "channel",
+        "tag",
+        "commit",
+        "qualification_identity",
+        "release_notes_identity",
+        "release_notes_markdown_sha256",
+        "assets",
+        "transport_assets",
+        "api_digest",
+        "web_digest",
+    }
+    if set(source) not in {frozenset(expected), frozenset(expected - {"transport_assets"})}:
+        raise PublicationError("publication plan input has unknown or missing fields")
+    plan = build_publication_plan(**source)
+    _write_json(args.output, plan)
+    return plan
+
+
+def _plan_publication_files(args) -> dict[str, object]:
+    qualification = _read_json(args.qualification)
+    notes = validate_release_notes(_read_json(args.release_notes))
+    markdown_sha256 = "sha256:" + hashlib.sha256(args.release_notes_markdown.read_bytes()).hexdigest()
+    binding = qualification.get("release_notes")
+    if not isinstance(binding, dict) or binding != {
+        "snapshot_identity": notes["identity"],
+        "markdown_sha256": markdown_sha256,
+    }:
+        raise PublicationError("qualification does not bind the supplied Release Notes")
+    if (
+        qualification.get("candidate_sha") != args.commit
+        or qualification.get("channel") != args.channel
+        or qualification.get("release_tag") != args.tag
+        or notes["context"]["candidate_sha"] != args.commit
+        or notes["context"]["channel"] != args.channel
+        or notes["context"]["release_tag"] != args.tag
+    ):
+        raise PublicationError(
+            "qualification, Release Notes, and publication identity tuple differ"
+        )
+    qualification_identity = qualification.get("artifact_sha256")
+    assets = {}
+    for name in CANONICAL_RELEASE_ASSETS:
+        path = args.asset_directory / name
+        content = path.read_bytes()
+        assets[name] = {
+            "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+        }
+    portable_name = portable_release_asset_name(args.tag)
+    if args.portable.name != portable_name:
+        raise PublicationError("portable transport asset name does not match release tag")
+    portable_inspection = inspect_portable_archive(args.portable)
+    transport_assets = {
+        portable_name: {
+            "role": "PORTABLE_RELEASE_BUNDLE",
+            "sha256": portable_inspection.archive_sha256,
+            "size": args.portable.stat().st_size,
+        }
+    }
+    plan = build_publication_plan(
+        repository=args.repository,
+        channel=args.channel,
+        tag=args.tag,
+        commit=args.commit,
+        qualification_identity=qualification_identity,
+        release_notes_identity=notes["identity"],
+        release_notes_markdown_sha256=markdown_sha256,
+        assets=assets,
+        transport_assets=transport_assets,
+        api_digest=args.api_digest,
+        web_digest=args.web_digest,
+    )
+    _write_json(args.output, plan)
+    return plan
+
+
+def _promote_release_notes(args) -> dict[str, object]:
+    snapshot = promote_release_notes(_read_json(args.rc_notes), stable_tag=args.stable_tag)
+    markdown = render_release_notes(snapshot)
+    _write_json(args.output_json, snapshot)
+    args.output_markdown.parent.mkdir(parents=True, exist_ok=True)
+    args.output_markdown.write_text(markdown, encoding="utf-8", newline="\n")
+    return snapshot
+
+
+def _validate_stable_publication_authority_inputs(
+    args,
+) -> tuple[dict[str, object], dict[str, object]]:
+    acceptance = validate_rc_live_acceptance(_read_json(args.acceptance))
+    promotion = validate_stable_promotion_acceptance(
+        _read_json(args.promotion_acceptance),
+        acceptance=acceptance,
+    )
+    rc_manifest_bytes = args.rc_manifest.read_bytes()
+    if (
+        "sha256:" + hashlib.sha256(rc_manifest_bytes).hexdigest()
+        != acceptance["release_manifest_identity"]
+    ):
+        raise PublicationError("RC manifest differs from the live acceptance record")
+    rc_manifest = json.loads(rc_manifest_bytes)
+    stable_manifest = _read_json(args.asset_directory / "release-manifest.json")
+    validate_manifest(rc_manifest)
+    validate_manifest(stable_manifest)
+    try:
+        expected_stable_manifest = promote_manifest(
+            rc_manifest,
+            existing_tags=[],
+            provenance_source_commit=stable_manifest["provenance"]["sourceCommit"],
+            created_at=stable_manifest["release"]["createdAt"],
+        )
+    except (KeyError, TypeError) as error:
+        raise PublicationError("Stable manifest authority fields are incomplete") from error
+    if stable_manifest != expected_stable_manifest or stable_manifest["release"]["version"] != args.tag:
+        raise PublicationError("Stable manifest does not derive exactly from the accepted RC")
+    if (
+        stable_manifest["release"]["commit"] != promotion["stable_commit"]
+        or stable_manifest["images"]["api"]["digest"]
+        != promotion["stable_api_digest"]
+        or stable_manifest["images"]["web"]["digest"]
+        != promotion["stable_web_digest"]
+    ):
+        raise PublicationError("Stable manifest differs from promotion acceptance")
+    for name, expected in (
+        ("deployment-contract.json", acceptance["deployment_contract_identity"]),
+        ("installer-materials.tar", acceptance["installer_materials_identity"]),
+    ):
+        actual = "sha256:" + hashlib.sha256(
+            (args.asset_directory / name).read_bytes()
+        ).hexdigest()
+        if actual != expected:
+            raise PublicationError(
+                "Stable immutable materials differ from the accepted RC"
+            )
+    return acceptance, promotion
+
+
+def _plan_stable_publication_files(args) -> dict[str, object]:
+    _acceptance, promotion = _validate_stable_publication_authority_inputs(args)
+    rc_notes = validate_release_notes(_read_json(args.rc_notes))
+    stable_notes = validate_release_notes(_read_json(args.stable_notes))
+    expected_stable = promote_release_notes(rc_notes, stable_tag=args.tag)
+    if stable_notes != expected_stable:
+        raise PublicationError("Stable Release Notes do not derive from the frozen RC population")
+    markdown_sha256 = "sha256:" + hashlib.sha256(args.stable_notes_markdown.read_bytes()).hexdigest()
+    assets = {}
+    for name in CANONICAL_RELEASE_ASSETS:
+        content = (args.asset_directory / name).read_bytes()
+        assets[name] = {
+            "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+        }
+    portable_name = portable_release_asset_name(args.tag)
+    if args.portable.name != portable_name:
+        raise PublicationError("portable transport asset name does not match release tag")
+    portable_inspection = inspect_portable_archive(args.portable)
+    transport_assets = {
+        portable_name: {
+            "role": "PORTABLE_RELEASE_BUNDLE",
+            "sha256": portable_inspection.archive_sha256,
+            "size": args.portable.stat().st_size,
+        }
+    }
+    plan = build_publication_plan(
+        repository=args.repository,
+        channel="stable",
+        tag=args.tag,
+        commit=promotion["stable_commit"],
+        qualification_identity=promotion["identity"],
+        release_notes_identity=stable_notes["identity"],
+        release_notes_markdown_sha256=markdown_sha256,
+        assets=assets,
+        transport_assets=transport_assets,
+        api_digest=promotion["stable_api_digest"],
+        web_digest=promotion["stable_web_digest"],
+    )
+    _write_json(args.output, plan)
+    return plan
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AniMemo release contract tooling")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -245,7 +588,13 @@ def _parser() -> argparse.ArgumentParser:
     materials.add_argument("--root", type=Path, required=True)
     materials.add_argument("--wheelhouse", type=Path, required=True)
     materials.add_argument("--output", type=Path, required=True)
+    materials.add_argument("--initial-trust-kit", type=Path, required=True)
     materials.set_defaults(handler=_build_installer_materials)
+
+    trust_bootstrap = subparsers.add_parser("build-initial-trust-kit")
+    trust_bootstrap.add_argument("--verifier", type=Path, required=True)
+    trust_bootstrap.add_argument("--output", type=Path, required=True)
+    trust_bootstrap.set_defaults(handler=_build_initial_trust_kit)
 
     validate = subparsers.add_parser("validate-manifest")
     validate.add_argument("--manifest", type=Path, required=True)
@@ -278,6 +627,89 @@ def _parser() -> argparse.ArgumentParser:
     checksums.add_argument("--output", type=Path, required=True)
     checksums.add_argument("files", type=Path, nargs="+")
     checksums.set_defaults(handler=_write_checksums)
+
+    portable = subparsers.add_parser("build-portable")
+    portable.add_argument("--source-root", type=Path, required=True)
+    portable.add_argument("--output", type=Path, required=True)
+    portable.add_argument("--image", action="append", default=[], required=True)
+    portable.set_defaults(handler=_build_portable)
+
+    portable_promotion = subparsers.add_parser("promote-portable")
+    portable_promotion.add_argument("--rc-payload", type=Path, required=True)
+    portable_promotion.add_argument("--authority-directory", type=Path, required=True)
+    portable_promotion.add_argument("--output", type=Path, required=True)
+    portable_promotion.set_defaults(handler=_promote_portable)
+
+    mirror_plan = subparsers.add_parser("plan-offline-mirror")
+    mirror_plan.add_argument("--repository", required=True)
+    mirror_plan.add_argument("--tag", required=True)
+    mirror_plan.add_argument("--commit", required=True)
+    mirror_plan.add_argument("--release-identity", required=True)
+    mirror_plan.add_argument("--payload", type=Path, required=True)
+    mirror_plan.add_argument("--release-attestation", type=Path, required=True)
+    mirror_plan.add_argument("--output", type=Path, required=True)
+    mirror_plan.set_defaults(handler=_plan_offline_mirror)
+
+    mirror_copy = subparsers.add_parser("replicate-offline-mirror")
+    mirror_copy.add_argument("--plan", type=Path, required=True)
+    mirror_copy.add_argument("--source-directory", type=Path, required=True)
+    mirror_copy.add_argument("--destination-directory", type=Path, required=True)
+    mirror_copy.add_argument("--output", type=Path, required=True)
+    mirror_copy.set_defaults(handler=_replicate_offline_mirror)
+
+    portable_verify = subparsers.add_parser("verify-declared-portable")
+    portable_verify.add_argument("--plan", type=Path, required=True)
+    portable_verify.add_argument("--payload", type=Path, required=True)
+    portable_verify.set_defaults(handler=_verify_declared_portable)
+
+    notes = subparsers.add_parser("generate-release-notes")
+    notes.add_argument("--input", type=Path, required=True)
+    notes.add_argument("--output-json", type=Path, required=True)
+    notes.add_argument("--output-markdown", type=Path, required=True)
+    notes.set_defaults(handler=_generate_release_notes)
+
+    publication = subparsers.add_parser("plan-publication")
+    publication.add_argument("--input", type=Path, required=True)
+    publication.add_argument("--output", type=Path, required=True)
+    publication.set_defaults(handler=_plan_publication)
+
+    publication_files = subparsers.add_parser("plan-publication-files")
+    publication_files.add_argument("--repository", required=True)
+    publication_files.add_argument("--channel", required=True)
+    publication_files.add_argument("--tag", required=True)
+    publication_files.add_argument("--commit", required=True)
+    publication_files.add_argument("--qualification", type=Path, required=True)
+    publication_files.add_argument("--release-notes", type=Path, required=True)
+    publication_files.add_argument("--release-notes-markdown", type=Path, required=True)
+    publication_files.add_argument("--asset-directory", type=Path, required=True)
+    publication_files.add_argument("--portable", type=Path, required=True)
+    publication_files.add_argument("--api-digest", required=True)
+    publication_files.add_argument("--web-digest", required=True)
+    publication_files.add_argument("--output", type=Path, required=True)
+    publication_files.set_defaults(handler=_plan_publication_files)
+
+    stable_notes = subparsers.add_parser("promote-release-notes")
+    stable_notes.add_argument("--rc-notes", type=Path, required=True)
+    stable_notes.add_argument("--stable-tag", required=True)
+    stable_notes.add_argument("--output-json", type=Path, required=True)
+    stable_notes.add_argument("--output-markdown", type=Path, required=True)
+    stable_notes.set_defaults(handler=_promote_release_notes)
+
+    stable_publication = subparsers.add_parser("plan-stable-publication-files")
+    stable_publication.add_argument("--repository", required=True)
+    stable_publication.add_argument("--tag", required=True)
+    stable_publication.add_argument("--acceptance", type=Path, required=True)
+    stable_publication.add_argument(
+        "--promotion-acceptance", type=Path, required=True
+    )
+    stable_publication.add_argument("--rc-manifest", type=Path, required=True)
+    stable_publication.add_argument("--rc-notes", type=Path, required=True)
+    stable_publication.add_argument("--stable-notes", type=Path, required=True)
+    stable_publication.add_argument("--stable-notes-markdown", type=Path, required=True)
+    stable_publication.add_argument("--asset-directory", type=Path, required=True)
+    stable_publication.add_argument("--portable", type=Path, required=True)
+    stable_publication.add_argument("--output", type=Path, required=True)
+    stable_publication.set_defaults(handler=_plan_stable_publication_files)
     return parser
 
 
@@ -287,6 +719,13 @@ def main(argv: list[str] | None = None) -> int:
         payload = args.handler(args)
     except (
         ReleaseContractError,
+        AcceptanceError,
+        ReleaseNotesError,
+        PublicationError,
+        PortableBundleError,
+        OCIContractError,
+        MirrorError,
+        TrustBootstrapError,
         KeyError,
         TypeError,
         OSError,

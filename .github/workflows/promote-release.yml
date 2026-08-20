@@ -7,10 +7,6 @@ on:
         description: Exact RC tag to promote (for example v1.0.0-rc.1)
         required: true
         type: string
-      acceptance_confirmation:
-        description: Enter PRODUCTION ACCEPTANCE PASSED after the RC acceptance record is complete
-        required: true
-        type: string
       dry_run:
         description: Verify and prepare the promotion without changing tags, packages, releases, or attestations
         required: true
@@ -24,11 +20,15 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  GH_REQUIRED_VERSION: 2.97.0
+
 jobs:
   plan:
     name: verify-exact-rc-and-plan-stable
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       packages: read
       attestations: read
@@ -41,22 +41,23 @@ jobs:
       web_digest: ${{ steps.identity.outputs.web_digest }}
       previous_stable: ${{ steps.identity.outputs.previous_stable }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v7
+      - name: Gate exact GitHub CLI security baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(gh --version | sed -nE 's/^gh version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1)"
+          test "$version" = "$GH_REQUIRED_VERSION"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: release/requirements.txt
       - run: python -m pip install -r release/requirements.txt
-      - name: Require explicit production acceptance record
-        env:
-          ACCEPTANCE_CONFIRMATION: ${{ inputs.acceptance_confirmation }}
-        shell: bash
-        run: test "$ACCEPTANCE_CONFIRMATION" = "PRODUCTION ACCEPTANCE PASSED"
       - name: Download exact RC release contract
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,15 +68,69 @@ jobs:
           mkdir -p rc-assets promotion-output
           test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC_TAG" --jq '.draft')" = "false"
           test "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC_TAG" --jq '.prerelease')" = "true"
+          RC_PORTABLE_ASSET="animemo-$RC_TAG-portable.tar"
           gh release download "$RC_TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern release-manifest.json --pattern deployment-contract.json \
-            --pattern installer-materials.tar --pattern checksums.txt --dir rc-assets
+            --pattern installer-materials.tar --pattern checksums.txt \
+            --pattern "$RC_PORTABLE_ASSET" --dir rc-assets
           (cd rc-assets && sha256sum --check checksums.txt)
           python -m release.cli validate-manifest --manifest rc-assets/release-manifest.json --updater-version 1.0.0
           python -m release.cli validate-deployment-contract \
             --contract rc-assets/deployment-contract.json \
             --installer-materials rc-assets/installer-materials.tar
-      - uses: docker/login-action@v3
+      - name: Resolve the exact successful RC publication metadata artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_TAG: ${{ inputs.rc_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_name="release-publication-metadata-$RC_TAG"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$artifact_name&per_page=100" \
+            > "$RUNNER_TEMP/rc-publication-artifacts.json"
+          count="$(jq --arg name "$artifact_name" \
+            '[.artifacts[] | select(.name == $name and .expired == false)] | length' \
+            "$RUNNER_TEMP/rc-publication-artifacts.json")"
+          test "$count" = "1"
+          jq -c --arg name "$artifact_name" \
+            '[.artifacts[] | select(.name == $name and .expired == false)][0]' \
+            "$RUNNER_TEMP/rc-publication-artifacts.json" \
+            > "$RUNNER_TEMP/rc-publication-artifact.json"
+          run_id="$(jq -r '.workflow_run.id' "$RUNNER_TEMP/rc-publication-artifact.json")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" \
+            > "$RUNNER_TEMP/rc-publication-run.json"
+          test "$(jq -r '.path' "$RUNNER_TEMP/rc-publication-run.json")" = ".github/workflows/release.yml"
+          test "$(jq -r '.name' "$RUNNER_TEMP/rc-publication-run.json")" = "Release Producer"
+          test "$(jq -r '.event' "$RUNNER_TEMP/rc-publication-run.json")" = "workflow_dispatch"
+          test "$(jq -r '.status' "$RUNNER_TEMP/rc-publication-run.json")" = "completed"
+          test "$(jq -r '.conclusion' "$RUNNER_TEMP/rc-publication-run.json")" = "success"
+          archive_url="$(jq -r '.archive_download_url' "$RUNNER_TEMP/rc-publication-artifact.json")"
+          metadata_digest="$(jq -r '.digest' "$RUNNER_TEMP/rc-publication-artifact.json")"
+          [[ "$metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/rc-publication"
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" "$archive_url" \
+            -o "$RUNNER_TEMP/rc-publication.zip"
+          test "sha256:$(sha256sum "$RUNNER_TEMP/rc-publication.zip" | awk '{print $1}')" = "$metadata_digest"
+          unzip -q "$RUNNER_TEMP/rc-publication.zip" -d "$RUNNER_TEMP/rc-publication"
+          test -f "$RUNNER_TEMP/rc-publication/release-notes.json"
+          test -f "$RUNNER_TEMP/rc-publication/release-notes.md"
+          test "$(jq -r '.tag' "$RUNNER_TEMP/rc-publication/publication-plan.json")" = "$RC_TAG"
+          test "$(jq -r '.status' "$RUNNER_TEMP/rc-publication/post-publish-verification.json")" = "PASS"
+          python -m release.cli verify-declared-portable \
+            --plan "$RUNNER_TEMP/rc-publication/publication-plan.json" \
+            --payload "rc-assets/animemo-$RC_TAG-portable.tar"
+      - name: Require a reviewed Git-tracked RC live acceptance record
+        env:
+          RC_TAG: ${{ inputs.rc_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          acceptance_path="release/acceptance-records/$RC_TAG.json"
+          test -f "$acceptance_path"
+          test "$(git ls-files --error-unmatch "$acceptance_path")" = "$acceptance_path"
+          cp "$acceptance_path" "$RUNNER_TEMP/rc-live-acceptance.json"
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -132,6 +187,13 @@ jobs:
             promotion-output/installer-materials.tar
           (cd promotion-output && sha256sum --check checksums.txt)
           stable_tag="$(jq -r '.release.version' promotion-output/release-manifest.json)"
+          RC_PORTABLE_ASSET="animemo-$RC_TAG-portable.tar"
+          STABLE_PORTABLE_ASSET="animemo-$stable_tag-portable.tar"
+          python -m release.cli promote-portable \
+            --rc-payload "rc-assets/$RC_PORTABLE_ASSET" \
+            --authority-directory promotion-output \
+            --output "promotion-output/$STABLE_PORTABLE_ASSET" \
+            > promotion-output/portable-promotion-receipt.json
           python -m release.cli previous-stable \
             --tags-file "$RUNNER_TEMP/tags.txt" --target "$stable_tag" \
             --github-output "$GITHUB_OUTPUT"
@@ -141,6 +203,51 @@ jobs:
           test "$rc_commit" = "$stable_commit" # RC_COMMIT == STABLE_COMMIT
           test "$api_digest" = "$stable_api_digest" # RC_API_DIGEST == STABLE_API_DIGEST
           test "$web_digest" = "$stable_web_digest" # RC_WEB_DIGEST == STABLE_WEB_DIGEST
+          test "$(jq -r '.head_sha' "$RUNNER_TEMP/rc-publication-run.json")" = "$rc_commit"
+          test "$(jq -r '.commit' "$RUNNER_TEMP/rc-publication/publication-plan.json")" = "$rc_commit"
+          test "$(jq -r '.api_digest' "$RUNNER_TEMP/rc-publication/publication-plan.json")" = "$api_digest"
+          test "$(jq -r '.web_digest' "$RUNNER_TEMP/rc-publication/publication-plan.json")" = "$web_digest"
+          jq -n \
+            --arg rc_tag "$RC_TAG" \
+            --arg rc_commit "$rc_commit" \
+            --arg manifest "sha256:$(sha256sum rc-assets/release-manifest.json | awk '{print $1}')" \
+            --arg deployment "sha256:$(sha256sum rc-assets/deployment-contract.json | awk '{print $1}')" \
+            --arg materials "sha256:$(sha256sum rc-assets/installer-materials.tar | awk '{print $1}')" \
+            --arg api "$api_digest" --arg web "$web_digest" \
+            '{rc_tag:$rc_tag,rc_commit:$rc_commit,release_manifest_identity:$manifest,deployment_contract_identity:$deployment,installer_materials_identity:$materials,api_digest:$api,web_digest:$web}' \
+            > "$RUNNER_TEMP/expected-rc-acceptance.json"
+          python scripts/rc_live_acceptance.py \
+            --record "$RUNNER_TEMP/rc-live-acceptance.json" \
+            --expected "$RUNNER_TEMP/expected-rc-acceptance.json" \
+            --stable-commit "$stable_commit" \
+            --stable-api-digest "$stable_api_digest" \
+            --stable-web-digest "$stable_web_digest" \
+            > promotion-output/stable-promotion-acceptance.json
+          cp "$RUNNER_TEMP/expected-rc-acceptance.json" \
+            promotion-output/expected-rc-acceptance.json
+          cp "$RUNNER_TEMP/rc-live-acceptance.json" promotion-output/rc-live-acceptance.json
+          cp "$RUNNER_TEMP/rc-publication/release-notes.json" promotion-output/rc-release-notes.json
+          python -m release.cli promote-release-notes \
+            --rc-notes promotion-output/rc-release-notes.json \
+            --stable-tag "$stable_tag" \
+            --output-json promotion-output/release-notes.json \
+            --output-markdown promotion-output/release-notes.md
+          python -m release.cli plan-stable-publication-files \
+            --repository "$GITHUB_REPOSITORY" --tag "$stable_tag" \
+            --acceptance promotion-output/rc-live-acceptance.json \
+            --promotion-acceptance promotion-output/stable-promotion-acceptance.json \
+            --rc-manifest rc-assets/release-manifest.json \
+            --rc-notes promotion-output/rc-release-notes.json \
+            --stable-notes promotion-output/release-notes.json \
+            --stable-notes-markdown promotion-output/release-notes.md \
+            --asset-directory promotion-output \
+            --portable "promotion-output/$STABLE_PORTABLE_ASSET" \
+            --output promotion-output/publication-plan.json
+          OPERATION=portable \
+          PUBLICATION_PLAN_PATH=promotion-output/publication-plan.json \
+          PORTABLE_BUILD_RECEIPT_PATH=promotion-output/portable-promotion-receipt.json \
+            python -m scripts.release_authority \
+            > promotion-output/portable-pipeline-authority.json
           ! git ls-remote --exit-code --tags origin "refs/tags/$stable_tag" >/dev/null 2>&1
           ! gh release view "$stable_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
           echo "stable_tag=$stable_tag" >> "$GITHUB_OUTPUT"
@@ -149,7 +256,7 @@ jobs:
           echo "api_digest=$api_digest" >> "$GITHUB_OUTPUT"
           echo "web_repository=$web_repository" >> "$GITHUB_OUTPUT"
           echo "web_digest=$web_digest" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stable-promotion-${{ steps.identity.outputs.stable_tag }}
           path: promotion-output/
@@ -164,15 +271,15 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: stable-promotion-${{ needs.plan.outputs.stable_tag }}
           path: promotion-output
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
@@ -193,16 +300,22 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: true
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - name: Gate exact GitHub CLI security baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(gh --version | sed -nE 's/^gh version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1)"
+          test "$version" = "$GH_REQUIRED_VERSION"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: stable-promotion-${{ needs.plan.outputs.stable_tag }}
           path: promotion-output
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
@@ -225,15 +338,33 @@ jobs:
           test "$(jq -r '.release.commit' promotion-output/release-manifest.json)" = "$RC_COMMIT"
           test "$(jq -r '.images.api.digest' promotion-output/release-manifest.json)" = "$API_DIGEST"
           test "$(jq -r '.images.web.digest' promotion-output/release-manifest.json)" = "$WEB_DIGEST"
+          python scripts/rc_live_acceptance.py \
+            --record promotion-output/rc-live-acceptance.json \
+            --expected promotion-output/expected-rc-acceptance.json \
+            --stable-commit "$RC_COMMIT" \
+            --stable-api-digest "$API_DIGEST" \
+            --stable-web-digest "$WEB_DIGEST"
+          python -m release.cli plan-stable-publication-files \
+            --repository "$GITHUB_REPOSITORY" --tag "$STABLE_TAG" \
+            --acceptance promotion-output/rc-live-acceptance.json \
+            --rc-notes promotion-output/rc-release-notes.json \
+            --stable-notes promotion-output/release-notes.json \
+            --stable-notes-markdown promotion-output/release-notes.md \
+            --asset-directory promotion-output \
+            --portable "promotion-output/animemo-$STABLE_TAG-portable.tar" \
+            --output "$RUNNER_TEMP/revalidated-stable-publication-plan.json"
+          cmp "$RUNNER_TEMP/revalidated-stable-publication-plan.json" \
+            promotion-output/publication-plan.json
           git fetch --force --tags origin main
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           # Capture the exact trusted workflow snapshot immediately before the
           # first external mutation. Once publication starts, a later main push
           # must not abort this immutable RC transaction halfway through.
           test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = "true"
           ! git ls-remote --exit-code --tags origin "refs/tags/$STABLE_TAG" >/dev/null 2>&1
           ! gh release view "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -254,7 +385,7 @@ jobs:
           test "$(crane digest "$API_REPOSITORY:$STABLE_TAG")" = "$API_DIGEST"
           test "$(crane digest "$WEB_REPOSITORY:$STABLE_TAG")" = "$WEB_DIGEST"
       - name: Attest the promoted Stable manifest
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-checksums: promotion-output/checksums.txt
       - name: Verify Stable release contract attestations
@@ -270,7 +401,7 @@ jobs:
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/promote-release.yml" \
               --source-digest "$GITHUB_SHA"
           done
-      - name: Create Stable tag at the accepted RC commit and publish GitHub Release
+      - name: Create Stable tag at the accepted RC commit
         env:
           GH_TOKEN: ${{ github.token }}
           STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
@@ -285,11 +416,134 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git tag --annotate "$STABLE_TAG" "$RC_COMMIT" --message "AniMemo $STABLE_TAG"
           git push origin "refs/tags/$STABLE_TAG"
-          release_args=(--repo "$GITHUB_REPOSITORY" --verify-tag --latest --generate-notes)
-          if [[ -n "$PREVIOUS_STABLE" ]]; then
-            release_args+=(--notes-start-tag "$PREVIOUS_STABLE")
-          fi
-          gh release create "$STABLE_TAG" \
+      - name: Create an unpublished Stable Draft Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --draft --latest=false --title "AniMemo $STABLE_TAG" \
+            --notes-file promotion-output/release-notes.md
+      - name: Upload and read back the complete Stable Draft asset set
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STABLE_PORTABLE_ASSET="animemo-$STABLE_TAG-portable.tar"
+          gh release upload "$STABLE_TAG" \
             promotion-output/release-manifest.json promotion-output/deployment-contract.json \
             promotion-output/installer-materials.tar promotion-output/checksums.txt \
-            "${release_args[@]}"
+            "promotion-output/$STABLE_PORTABLE_ASSET" \
+            --repo "$GITHUB_REPOSITORY"
+          rm -rf "$RUNNER_TEMP/stable-draft-readback"
+          mkdir -p "$RUNNER_TEMP/stable-draft-readback"
+          gh release download "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern release-manifest.json --pattern deployment-contract.json \
+            --pattern installer-materials.tar --pattern checksums.txt \
+            --pattern "$STABLE_PORTABLE_ASSET" \
+            --dir "$RUNNER_TEMP/stable-draft-readback"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$STABLE_TAG" \
+            | jq --arg target "$RC_COMMIT" \
+              '{id,tag:.tag_name,target:$target,draft,prerelease,body,assets:[.assets[]|{name,size,digest}]}' \
+              > "$RUNNER_TEMP/stable-draft-metadata.json"
+          python scripts/release_publication.py verify-draft \
+            --plan promotion-output/publication-plan.json \
+            --metadata "$RUNNER_TEMP/stable-draft-metadata.json" \
+            --download-directory "$RUNNER_TEMP/stable-draft-readback" \
+            --notes-file promotion-output/release-notes.md
+      - name: Publish only the fully verified Stable Draft as Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STABLE_PORTABLE_ASSET="animemo-$STABLE_TAG-portable.tar"
+          gh release edit "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --draft=false --prerelease=false --latest
+      - name: Verify the public Stable release without authenticated asset transport
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+          API_DIGEST: ${{ needs.plan.outputs.api_digest }}
+          WEB_DIGEST: ${{ needs.plan.outputs.web_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STABLE_PORTABLE_ASSET="animemo-$STABLE_TAG-portable.tar"
+          rm -rf "$RUNNER_TEMP/stable-public-readback"
+          mkdir -p "$RUNNER_TEMP/stable-public-readback"
+          public_api="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$STABLE_TAG"
+          env -u GH_TOKEN curl --fail --location --silent --show-error \
+            -H 'Accept: application/vnd.github+json' "$public_api" \
+            > "$RUNNER_TEMP/stable-public-release.json"
+          jq --arg target "$RC_COMMIT" \
+            '{id,tag:.tag_name,target:$target,draft,prerelease,body,assets:[.assets[]|{name,size,digest}]}' \
+            "$RUNNER_TEMP/stable-public-release.json" \
+            > "$RUNNER_TEMP/stable-public-metadata.json"
+          for name in release-manifest.json deployment-contract.json installer-materials.tar checksums.txt "$STABLE_PORTABLE_ASSET"; do
+            url="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .browser_download_url' \
+              "$RUNNER_TEMP/stable-public-release.json")"
+            test -n "$url"
+            env -u GH_TOKEN curl --fail --location --silent --show-error \
+              "$url" -o "$RUNNER_TEMP/stable-public-readback/$name"
+          done
+          python -m release.cli verify-declared-portable \
+            --plan promotion-output/publication-plan.json \
+            --payload "$RUNNER_TEMP/stable-public-readback/$STABLE_PORTABLE_ASSET"
+          for subject in release-manifest.json deployment-contract.json installer-materials.tar; do
+            gh attestation verify "promotion-output/$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/promote-release.yml" \
+              --source-digest "$GITHUB_SHA"
+          done
+          python scripts/release_publication.py verify-post-publish \
+            --plan promotion-output/publication-plan.json \
+            --metadata "$RUNNER_TEMP/stable-public-metadata.json" \
+            --download-directory "$RUNNER_TEMP/stable-public-readback" \
+            --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
+            --public-unauthenticated-assets --attestations-verified
+      - name: Acquire and export the Stable immutable Release attestation sidecar
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+          API_REPOSITORY: ${{ needs.plan.outputs.api_repository }}
+          API_DIGEST: ${{ needs.plan.outputs.api_digest }}
+          WEB_REPOSITORY: ${{ needs.plan.outputs.web_repository }}
+          WEB_DIGEST: ${{ needs.plan.outputs.web_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STABLE_PORTABLE_ASSET="animemo-$STABLE_TAG-portable.tar"
+          python scripts/acquire_release_attestation.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$STABLE_TAG" --commit "$RC_COMMIT" \
+            --workflow .github/workflows/promote-release.yml \
+            --payload "promotion-output/$STABLE_PORTABLE_ASSET" \
+            --actions-subject "release-manifest=promotion-output/release-manifest.json" \
+            --actions-subject "deployment-contract=promotion-output/deployment-contract.json" \
+            --actions-subject "installer-materials=promotion-output/installer-materials.tar" \
+            --actions-subject "api-image=oci://$API_REPOSITORY@$API_DIGEST" \
+            --actions-subject "web-image=oci://$WEB_REPOSITORY@$WEB_DIGEST" \
+            --actions-workflow api-image=.github/workflows/release.yml \
+            --actions-workflow web-image=.github/workflows/release.yml \
+            --actions-source-commit release-manifest=$GITHUB_SHA \
+            --actions-source-commit deployment-contract=$GITHUB_SHA \
+            --actions-source-commit installer-materials=$GITHUB_SHA \
+            --output "promotion-output/animemo-$STABLE_TAG-release-attestation.json" \
+            > promotion-output/release-attestation-acquisition-receipt.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stable-release-attestation-${{ needs.plan.outputs.stable_tag }}
+          path: |
+            promotion-output/release-attestation-acquisition-receipt.json
+            promotion-output/animemo-${{ needs.plan.outputs.stable_tag }}-release-attestation.json
+          if-no-files-found: error
+          retention-days: 90

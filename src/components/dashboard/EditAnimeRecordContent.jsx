@@ -6,6 +6,7 @@ import { normalizeTrustedPosterHosts, validateTrustedPosterUrl } from "../../lib
 import { deriveEntryStatistics, formatEpisodeRange, suggestNextEpisode } from "../../lib/journalExperience.js";
 import { ExternalMediaIdentityPanel } from "./ExternalMediaIdentityPanel.jsx";
 import { api, readableApiError } from "../../lib/api.js";
+import { isHttpUrl } from "../../lib/safeUrl.js";
 
 const STATUS_OPTIONS = [
   ["planned", "想看"],
@@ -80,15 +81,6 @@ function historySummary(records) {
     latestEpisodeStart: latest?.episode_start ?? null,
     latestEpisodeEnd: latest?.episode_end ?? null,
   };
-}
-
-function isHttpUrl(value) {
-  try {
-    const url = new URL(String(value || "").trim());
-    return url.protocol === "http:" || url.protocol === "https:";
-  } catch {
-    return false;
-  }
 }
 
 export function EditAnimeRecordContent({
