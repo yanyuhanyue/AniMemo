@@ -26,6 +26,8 @@ PINNED_RELEASE_ACTIONS = {
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
     "actions/setup-python": "5fda3b95a4ea91299a34e894583c3862153e4b97",
     "actions/download-artifact": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/setup-node": "820762786026740c76f36085b0efc47a31fe5020",
+    "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02",
 }
 
 
@@ -87,7 +89,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 with self.subTest(workflow=name, action=action):
                     self.assertRegex(reference, r"^[0-9a-f]{40}$")
 
-    def test_core_github_actions_are_v7_and_checkout_credentials_are_explicit(self):
+    def test_core_github_actions_are_exactly_pinned_and_checkout_credentials_are_explicit(self):
         credentialed_checkouts = set()
         checkout_count = 0
 
@@ -98,11 +100,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     action = step.get("uses", "")
                     if action.startswith("actions/checkout@"):
                         checkout_count += 1
-                        expected = (
-                            f"actions/checkout@{PINNED_RELEASE_ACTIONS['actions/checkout']}"
-                            if name in {"release.yml", "promote-release.yml"}
-                            else "actions/checkout@v7"
-                        )
+                        expected = f"actions/checkout@{PINNED_RELEASE_ACTIONS['actions/checkout']}"
                         self.assertEqual(action, expected)
                         settings = step.get("with", {})
                         self.assertIn("persist-credentials", settings)
@@ -111,13 +109,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                         else:
                             self.assertEqual(settings["persist-credentials"], "false")
                     elif action.startswith("actions/setup-node@"):
-                        self.assertEqual(action, "actions/setup-node@v7")
-                    elif action.startswith("actions/setup-python@"):
-                        expected = (
-                            f"actions/setup-python@{PINNED_RELEASE_ACTIONS['actions/setup-python']}"
-                            if name in {"release.yml", "promote-release.yml"}
-                            else "actions/setup-python@v7"
+                        self.assertEqual(
+                            action,
+                            f"actions/setup-node@{PINNED_RELEASE_ACTIONS['actions/setup-node']}",
                         )
+                    elif action.startswith("actions/setup-python@"):
+                        expected = f"actions/setup-python@{PINNED_RELEASE_ACTIONS['actions/setup-python']}"
                         self.assertEqual(action, expected)
 
         self.assertGreater(checkout_count, 0)
@@ -174,13 +171,20 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     for job in document["jobs"].values()
                     for step in job.get("steps", [])
                     if step.get("uses", "").startswith(
-                        ("actions/setup-node@", "actions/setup-python@")
+                        (
+                            "actions/setup-node@",
+                            "actions/setup-python@",
+                            "actions/setup-go@",
+                        )
                     )
                 ]
                 self.assertTrue(setup_steps)
                 for step in setup_steps:
                     settings = step.get("with", {})
-                    self.assertNotIn("cache", settings)
+                    if step["uses"].startswith("actions/setup-go@"):
+                        self.assertEqual(settings.get("cache"), "false")
+                    else:
+                        self.assertNotIn("cache", settings)
                     self.assertNotIn("cache-dependency-path", settings)
 
     def test_dr_rehearsal_has_no_cache_artifact_secret_or_write_authority(self):
@@ -402,7 +406,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("CSRF_COOKIE_SECURE=false", source)
         self.assertIn("REFRESH_COOKIE_SECURE=false", source)
         self.assertIn("ALLOW_INSECURE_PRODUCTION_COOKIES=true", source)
-        self.assertGreaterEqual(source.count("actions/upload-artifact@v4"), 4)
+        self.assertGreaterEqual(
+            source.count(
+                "actions/upload-artifact@"
+                f"{PINNED_RELEASE_ACTIONS['actions/upload-artifact']}"
+            ),
+            4,
+        )
         self.assertIn("scripts/perf/regression_gate.py", source)
         self.assertIn("Require every performance evidence producer to succeed", source)
         self.assertIn("toJSON(needs)", source)
@@ -593,10 +603,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             'test "$GITHUB_REF" = "refs/heads/main"',
             'test "$GITHUB_SHA" = "$main_sha"',
             'test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"',
-            '[[ "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]',
-            'git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$candidate_sha"',
+            '[[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]',
+            'git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$GITHUB_SHA"',
+            'echo "candidate_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"',
         ):
             self.assertIn(guard, preflight)
+        self.assertNotIn('candidate_sha="$REQUESTED_CANDIDATE_SHA"', preflight)
         self.assertNotIn("DRY_RUN", preflight)
         self.assertNotIn("ref", release["jobs"]["preflight"]["steps"][0]["with"])
         self.assertIn('ref: ${{ steps.candidate.outputs.candidate_sha }}', preflight)
@@ -713,7 +725,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("build-installer-materials", promotion)
         self.assertIn("POSTGRES_IMAGE: docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571", release)
         self.assertIn("REDIS_IMAGE: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf", release)
-        self.assertIn('test "$UPGRADE_BASE_SHA" != "$candidate_sha"', release)
+        self.assertIn('test "$UPGRADE_BASE_SHA" != "$GITHUB_SHA"', release)
         self.assertIn('if [[ "$BASE_SHA" == "$HEAD_SHA" ]]', gate)
         release_gate = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(
             encoding="utf-8"
@@ -731,10 +743,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             ),
             2,
         )
-        self.assertEqual(release.count("go-version: '1.25.8'"), 2)
-        self.assertEqual(
-            release.count("release/release_attestation_verifier/go.sum"), 2
-        )
+        self.assertEqual(release.count("go-version: '1.26.6'"), 2)
+        self.assertEqual(release.count("cache: false"), 2)
+        self.assertNotIn("cache-dependency-path", release)
         self.assertEqual(release.count("go mod download"), 2)
         self.assertEqual(release.count("GOPROXY=off GOSUMDB=off go mod verify"), 2)
         self.assertEqual(
@@ -1131,6 +1142,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("docker/build-push-action", source)
         self.assertNotIn("docker build", source)
         self.assertIn("plan-stable-publication-files", source)
+        self.assertIn(
+            "--promotion-acceptance promotion-output/stable-promotion-acceptance.json",
+            source,
+        )
+        self.assertIn("--rc-manifest rc-assets/release-manifest.json", source)
         self.assertNotIn(
             'test "$(git rev-parse origin/main)" = "$GITHUB_SHA"',
             publish_source[publish_source.index("crane tag") :],

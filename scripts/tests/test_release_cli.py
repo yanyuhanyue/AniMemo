@@ -6,8 +6,17 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+from release.acceptance import (
+    build_rc_live_acceptance,
+    verify_stable_promotion_acceptance,
+)
+from release.cli import _validate_stable_publication_authority_inputs
+from release.contract import build_manifest, promote_manifest
+from release.publication import PublicationError
 from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +53,129 @@ class ReleaseCliTests(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertEqual(payload["releaseTag"], "v1.0.1-beta.2")
             self.assertIn("release_tag=v1.0.1-beta.2", outputs.read_text(encoding="utf-8"))
+
+    def test_stable_planner_rebinds_the_receipt_and_exact_rc_materials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = root / "assets"
+            assets.mkdir()
+            deployment = b"accepted deployment contract\n"
+            materials = b"accepted installer materials"
+            deployment_identity = "sha256:" + hashlib.sha256(deployment).hexdigest()
+            materials_identity = "sha256:" + hashlib.sha256(materials).hexdigest()
+            rc_manifest = build_manifest(
+                version="v1.1.0-rc.1",
+                channel="rc",
+                commit=COMMIT,
+                created_at=datetime(2026, 8, 19, tzinfo=timezone.utc),
+                api_digest=API_DIGEST,
+                web_digest=WEB_DIGEST,
+                deployment_contract_sha256=deployment_identity,
+                deployment_files=[
+                    {
+                        "path": "deploy/docker-compose.yml",
+                        "sha256": "sha256:" + "d" * 64,
+                    },
+                    {
+                        "path": "updater/docker-compose.runtime.yml",
+                        "sha256": "sha256:" + "e" * 64,
+                    },
+                ],
+                installer_materials_sha256=materials_identity,
+                minimum_updater_version="1.0.0",
+                database_contract="animemo-db-v1",
+                database_accepts=["animemo-db-v1"],
+                migration_required=False,
+                migration_policy="none",
+                application_rollback="safe",
+                configuration_contract="animemo-config-v1",
+                configuration_accepts=["animemo-config-v1"],
+                plugin_sdk_apis=[2],
+            )
+            rc_manifest_path = root / "rc-manifest.json"
+            rc_manifest_path.write_text(
+                json.dumps(rc_manifest, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            stable_manifest = promote_manifest(
+                rc_manifest,
+                existing_tags=[],
+                provenance_source_commit="c" * 40,
+                created_at="2026-08-20T00:00:00Z",
+            )
+            (assets / "release-manifest.json").write_text(
+                json.dumps(stable_manifest, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            (assets / "deployment-contract.json").write_bytes(deployment)
+            (assets / "installer-materials.tar").write_bytes(materials)
+            acceptance = build_rc_live_acceptance(
+                rc_tag="v1.1.0-rc.1",
+                rc_commit=COMMIT,
+                release_manifest_identity=(
+                    "sha256:" + hashlib.sha256(rc_manifest_path.read_bytes()).hexdigest()
+                ),
+                deployment_contract_identity=deployment_identity,
+                installer_materials_identity=materials_identity,
+                api_digest=API_DIGEST,
+                web_digest=WEB_DIGEST,
+                fresh_base_identity="sha256:" + "6" * 64,
+                docker_base_identity="sha256:" + "7" * 64,
+                runtime_base_identity="sha256:" + "8" * 64,
+                install_path="github",
+                doctor_result="PASS",
+                upgrade_result="PASS",
+                accepted_at="2026-08-20T00:01:00Z",
+                operator_identity="github:maintainer-review/v1",
+                tool_identity="sha256:" + "9" * 64,
+            )
+            receipt = verify_stable_promotion_acceptance(
+                acceptance,
+                expected={
+                    key: acceptance[key]
+                    for key in {
+                        "rc_tag",
+                        "rc_commit",
+                        "release_manifest_identity",
+                        "deployment_contract_identity",
+                        "installer_materials_identity",
+                        "api_digest",
+                        "web_digest",
+                    }
+                },
+                stable_commit=COMMIT,
+                stable_api_digest=API_DIGEST,
+                stable_web_digest=WEB_DIGEST,
+            )
+            acceptance_path = root / "acceptance.json"
+            receipt_path = root / "promotion-acceptance.json"
+            for path, payload in ((acceptance_path, acceptance), (receipt_path, receipt)):
+                path.write_text(json.dumps(payload), encoding="utf-8")
+            arguments = SimpleNamespace(
+                acceptance=acceptance_path,
+                promotion_acceptance=receipt_path,
+                rc_manifest=rc_manifest_path,
+                asset_directory=assets,
+                tag="v1.1.0",
+            )
+
+            accepted, promotion = _validate_stable_publication_authority_inputs(
+                arguments
+            )
+            self.assertEqual(accepted["identity"], acceptance["identity"])
+            self.assertEqual(promotion["identity"], receipt["identity"])
+
+            rc_manifest_path.write_bytes(rc_manifest_path.read_bytes() + b" ")
+            with self.assertRaisesRegex(PublicationError, "RC manifest"):
+                _validate_stable_publication_authority_inputs(arguments)
+            rc_manifest_path.write_bytes(rc_manifest_path.read_bytes()[:-1])
+            (assets / "installer-materials.tar").write_bytes(b"tampered")
+            with self.assertRaisesRegex(PublicationError, "immutable materials"):
+                _validate_stable_publication_authority_inputs(arguments)
 
     def test_generate_validate_and_checksum_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

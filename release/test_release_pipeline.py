@@ -12,6 +12,7 @@ from release.acceptance import (
     AcceptanceError,
     build_rc_live_acceptance,
     validate_rc_live_acceptance,
+    validate_stable_promotion_acceptance,
     verify_stable_promotion_acceptance,
 )
 from release.mirror import MirrorError, build_mirror_plan, replicate_exact_bytes
@@ -67,7 +68,7 @@ def publication_plan(channel="rc", tag="v1.1.0-rc.TEST"):
 
 def acceptance_record(**changes):
     fields = {
-        "rc_tag": "v1.1.0-rc.TEST",
+        "rc_tag": "v1.1.0-rc.1",
         "rc_commit": COMMIT,
         "release_manifest_identity": asset_identities()["release-manifest.json"]["sha256"],
         "deployment_contract_identity": asset_identities()["deployment-contract.json"]["sha256"],
@@ -209,7 +210,7 @@ class AcceptanceAndPromotionTests(unittest.TestCase):
         result = verify_stable_promotion_acceptance(
             record,
             expected={
-                "rc_tag": "v1.1.0-rc.TEST",
+                "rc_tag": "v1.1.0-rc.1",
                 "rc_commit": COMMIT,
                 "release_manifest_identity": asset_identities()["release-manifest.json"]["sha256"],
                 "deployment_contract_identity": asset_identities()["deployment-contract.json"]["sha256"],
@@ -231,10 +232,53 @@ class AcceptanceAndPromotionTests(unittest.TestCase):
         jsonschema.Draft202012Validator.check_schema(schema)
         jsonschema.validate(record, schema)
 
+    def test_acceptance_rejects_test_only_and_noncanonical_rc_tags(self):
+        for rc_tag in (
+            "v1.1.0-rc.TEST",
+            "v01.1.0-rc.1",
+            "v1.01.0-rc.1",
+            "v1.1.00-rc.1",
+            "v1.1.0-rc.01",
+            "v1.1.0-rc.0",
+        ):
+            with self.subTest(rc_tag=rc_tag), self.assertRaises(AcceptanceError):
+                acceptance_record(rc_tag=rc_tag)
+
+    def test_stable_promotion_receipt_is_closed_and_bound_to_live_acceptance(self):
+        record = acceptance_record()
+        receipt = verify_stable_promotion_acceptance(
+            record,
+            expected={
+                "rc_tag": record["rc_tag"],
+                "rc_commit": record["rc_commit"],
+                "release_manifest_identity": record["release_manifest_identity"],
+                "deployment_contract_identity": record["deployment_contract_identity"],
+                "installer_materials_identity": record["installer_materials_identity"],
+                "api_digest": record["api_digest"],
+                "web_digest": record["web_digest"],
+            },
+            stable_commit=record["rc_commit"],
+            stable_api_digest=record["api_digest"],
+            stable_web_digest=record["web_digest"],
+        )
+        self.assertEqual(
+            validate_stable_promotion_acceptance(receipt, acceptance=record),
+            receipt,
+        )
+        for mutate in (
+            lambda value: value.__setitem__("status", "AUTHORIZED_BYPASS"),
+            lambda value: value.__setitem__("stable_commit", "a" * 40),
+            lambda value: value.__setitem__("unexpected", True),
+        ):
+            tampered = copy.deepcopy(receipt)
+            mutate(tampered)
+            with self.subTest(tampered=tampered), self.assertRaises(AcceptanceError):
+                validate_stable_promotion_acceptance(tampered, acceptance=record)
+
     def test_wrong_rc_digest_tamper_and_missing_acceptance_are_rejected(self):
         record = acceptance_record()
         expected = {
-            "rc_tag": "v1.1.0-rc.TEST",
+            "rc_tag": "v1.1.0-rc.1",
             "rc_commit": COMMIT,
             "release_manifest_identity": asset_identities()["release-manifest.json"]["sha256"],
             "deployment_contract_identity": asset_identities()["deployment-contract.json"]["sha256"],

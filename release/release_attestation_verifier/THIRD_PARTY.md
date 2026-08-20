@@ -6,9 +6,9 @@
 已缓存的 module 内容构建静态二进制，运行时禁止下载 module、TUF metadata 或任何
 网络资源。
 
-Go 语言版本下限固定为 `1.25.8`，这是 `sigstore-go v1.2.2` 自身 `go.mod`
-声明的最小版本；本地资格认证使用官方 Go `1.26.5` 构建，不把临时 toolchain
-写入仓库。
+`sigstore-go v1.2.2` 自身 `go.mod` 声明的最低版本是 `1.25.8`；AniMemo 为排除
+Go 标准库已知漏洞，将生产构建下限进一步固定为官方 Go `1.26.6`。临时
+toolchain 不写入仓库，资格认证必须记录实际构建器身份。
 
 GitHub Immutable Release 策略与 GitHub CLI v2.97.0 对齐：Release service SAN
 必须是 `https://dotcom.releases.github.com`，issuer matcher 不增加 OIDC 限制，

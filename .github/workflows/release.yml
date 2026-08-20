@@ -87,7 +87,6 @@ jobs:
           test -z "$(git status --porcelain --untracked-files=no)"
           main_sha="$(git rev-parse origin/main^{commit})"
           test "$INTENDED_MAIN_SHA" = "$main_sha"
-          candidate_sha="$GITHUB_SHA"
           if [[ "$OPERATION" = "publish" ]]; then
             test -z "$REQUESTED_CANDIDATE_SHA"
             test "$GITHUB_REF" = "refs/heads/main"
@@ -97,20 +96,19 @@ jobs:
             [[ "$REQUESTED_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
             test "$REQUESTED_CANDIDATE_SHA" = "$GITHUB_SHA"
             test "$(git rev-parse HEAD)" = "$REQUESTED_CANDIDATE_SHA"
-            candidate_sha="$REQUESTED_CANDIDATE_SHA"
           else
             test -z "$REQUESTED_CANDIDATE_SHA"
             test "$GITHUB_REF" = "refs/heads/main"
             test "$GITHUB_SHA" = "$main_sha"
             test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"
           fi
-          [[ "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]
-          git fetch --force origin "+$candidate_sha:refs/remotes/origin/release-candidate"
-          test "$(git rev-parse refs/remotes/origin/release-candidate^{commit})" = "$candidate_sha"
-          test "$UPGRADE_BASE_SHA" != "$candidate_sha"
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --force origin "+$GITHUB_SHA:refs/remotes/origin/release-candidate"
+          test "$(git rev-parse refs/remotes/origin/release-candidate^{commit})" = "$GITHUB_SHA"
+          test "$UPGRADE_BASE_SHA" != "$GITHUB_SHA"
           git rev-parse --verify "$UPGRADE_BASE_SHA^{commit}"
-          git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$candidate_sha"
-          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          git merge-base --is-ancestor "$UPGRADE_BASE_SHA" "$GITHUB_SHA"
+          echo "candidate_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
@@ -595,8 +593,8 @@ jobs:
           python-version: "3.12"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.25.8'
-          cache-dependency-path: release/release_attestation_verifier/go.sum
+          go-version: '1.26.6'
+          cache: false
       - run: python -m pip install -r release/requirements.txt
       - name: Freeze deterministic PR metadata and render qualified Release Notes
         env:
@@ -884,8 +882,8 @@ jobs:
           python-version: "3.12"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.25.8'
-          cache-dependency-path: release/release_attestation_verifier/go.sum
+          go-version: '1.26.6'
+          cache: false
       - run: python -m pip install -r release/requirements.txt
       - name: Build and close pretrust materials before any external publication
         shell: bash
@@ -1190,10 +1188,7 @@ jobs:
             --portable "release-output/$PORTABLE_ASSET" \
             --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
             --output release-output/publication-plan.json
-          OPERATION=portable \
-          PUBLICATION_PLAN_PATH=release-output/publication-plan.json \
-          PORTABLE_BUILD_RECEIPT_PATH=release-output/portable-build-receipt.json \
-            python -m scripts.release_authority \
+          OPERATION=portable python -m scripts.release_authority \
             > release-output/portable-pipeline-authority.json
           test "$(jq -r '.external_mutation_mode' release-output/publication-plan.json)" = "PLAN_ONLY"
       - name: Create the immutable annotated RC tag

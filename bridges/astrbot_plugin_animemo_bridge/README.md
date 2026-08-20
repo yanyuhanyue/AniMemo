@@ -14,7 +14,7 @@ AstrBot 运行时、httpx 及其传递依赖仍适用各自条款，不因 Bridg
 
 ## 快速开始
 
-1. AniMemo 管理员执行 `python manage.py integration_connection create --provider astrbot --instance-id <stable-id> --name <name>`，保存一次性输出的 key id/secret。
+1. AniMemo 管理员在未启用终端录制的交互式终端执行 `python manage.py integration_connection create --provider astrbot --instance-id <stable-id> --name <name>`，保存一次性输出的 key id/secret；重定向、管道和非交互式 stdout 会被拒绝。
 2. 将本目录复制到 `AstrBot/data/plugins/astrbot_plugin_animemo_bridge/`，或使用仓库脚本导出 ZIP。
 3. 在 AstrBot 配置中填写服务地址、key id，并通过插件配置或优先使用 `ANIMEMO_INTEGRATION_SECRET` 提供 secret，然后 reload 插件。
 4. AniMemo 用户登录后生成 pairing code，在私聊发送 `/animemo pair CODE`。

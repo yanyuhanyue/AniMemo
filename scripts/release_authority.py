@@ -18,6 +18,9 @@ from release.publication import (
     validate_publication_plan,
 )
 
+_PORTABLE_PUBLICATION_PLAN = Path("release-output/publication-plan.json")
+_PORTABLE_BUILD_RECEIPT = Path("release-output/portable-build-receipt.json")
+
 try:
     from scripts.release_qualification import (
         QualificationError,
@@ -234,15 +237,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     del argv
     operation = os.getenv("OPERATION", "qualify").strip().lower()
     if operation == "portable":
-        plan_path = os.getenv("PUBLICATION_PLAN_PATH", "")
-        receipt_path = os.getenv("PORTABLE_BUILD_RECEIPT_PATH", "")
-        if not plan_path or not receipt_path:
-            raise ReleaseAuthorityError(
-                "PUBLICATION_PLAN_PATH and PORTABLE_BUILD_RECEIPT_PATH are required"
-            )
         try:
-            plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
-            receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
+            plan = json.loads(_PORTABLE_PUBLICATION_PLAN.read_text(encoding="utf-8"))
+            receipt = json.loads(_PORTABLE_BUILD_RECEIPT.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ReleaseAuthorityError("portable authority input is unreadable") from error
         result = validate_portable_pipeline_authority(plan, receipt)

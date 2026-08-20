@@ -8,7 +8,11 @@ from pathlib import Path
 
 from updater.oci import OCIContractError, verify_oci_image_set
 
-from .acceptance import AcceptanceError, validate_rc_live_acceptance
+from .acceptance import (
+    AcceptanceError,
+    validate_rc_live_acceptance,
+    validate_stable_promotion_acceptance,
+)
 from .contract import (
     ReleaseContractError,
     build_deployment_contract,
@@ -448,8 +452,59 @@ def _promote_release_notes(args) -> dict[str, object]:
     return snapshot
 
 
-def _plan_stable_publication_files(args) -> dict[str, object]:
+def _validate_stable_publication_authority_inputs(
+    args,
+) -> tuple[dict[str, object], dict[str, object]]:
     acceptance = validate_rc_live_acceptance(_read_json(args.acceptance))
+    promotion = validate_stable_promotion_acceptance(
+        _read_json(args.promotion_acceptance),
+        acceptance=acceptance,
+    )
+    rc_manifest_bytes = args.rc_manifest.read_bytes()
+    if (
+        "sha256:" + hashlib.sha256(rc_manifest_bytes).hexdigest()
+        != acceptance["release_manifest_identity"]
+    ):
+        raise PublicationError("RC manifest differs from the live acceptance record")
+    rc_manifest = json.loads(rc_manifest_bytes)
+    stable_manifest = _read_json(args.asset_directory / "release-manifest.json")
+    validate_manifest(rc_manifest)
+    validate_manifest(stable_manifest)
+    try:
+        expected_stable_manifest = promote_manifest(
+            rc_manifest,
+            existing_tags=[],
+            provenance_source_commit=stable_manifest["provenance"]["sourceCommit"],
+            created_at=stable_manifest["release"]["createdAt"],
+        )
+    except (KeyError, TypeError) as error:
+        raise PublicationError("Stable manifest authority fields are incomplete") from error
+    if stable_manifest != expected_stable_manifest or stable_manifest["release"]["version"] != args.tag:
+        raise PublicationError("Stable manifest does not derive exactly from the accepted RC")
+    if (
+        stable_manifest["release"]["commit"] != promotion["stable_commit"]
+        or stable_manifest["images"]["api"]["digest"]
+        != promotion["stable_api_digest"]
+        or stable_manifest["images"]["web"]["digest"]
+        != promotion["stable_web_digest"]
+    ):
+        raise PublicationError("Stable manifest differs from promotion acceptance")
+    for name, expected in (
+        ("deployment-contract.json", acceptance["deployment_contract_identity"]),
+        ("installer-materials.tar", acceptance["installer_materials_identity"]),
+    ):
+        actual = "sha256:" + hashlib.sha256(
+            (args.asset_directory / name).read_bytes()
+        ).hexdigest()
+        if actual != expected:
+            raise PublicationError(
+                "Stable immutable materials differ from the accepted RC"
+            )
+    return acceptance, promotion
+
+
+def _plan_stable_publication_files(args) -> dict[str, object]:
+    _acceptance, promotion = _validate_stable_publication_authority_inputs(args)
     rc_notes = validate_release_notes(_read_json(args.rc_notes))
     stable_notes = validate_release_notes(_read_json(args.stable_notes))
     expected_stable = promote_release_notes(rc_notes, stable_tag=args.tag)
@@ -478,14 +533,14 @@ def _plan_stable_publication_files(args) -> dict[str, object]:
         repository=args.repository,
         channel="stable",
         tag=args.tag,
-        commit=acceptance["rc_commit"],
-        qualification_identity=acceptance["identity"],
+        commit=promotion["stable_commit"],
+        qualification_identity=promotion["identity"],
         release_notes_identity=stable_notes["identity"],
         release_notes_markdown_sha256=markdown_sha256,
         assets=assets,
         transport_assets=transport_assets,
-        api_digest=acceptance["api_digest"],
-        web_digest=acceptance["web_digest"],
+        api_digest=promotion["stable_api_digest"],
+        web_digest=promotion["stable_web_digest"],
     )
     _write_json(args.output, plan)
     return plan
@@ -644,6 +699,10 @@ def _parser() -> argparse.ArgumentParser:
     stable_publication.add_argument("--repository", required=True)
     stable_publication.add_argument("--tag", required=True)
     stable_publication.add_argument("--acceptance", type=Path, required=True)
+    stable_publication.add_argument(
+        "--promotion-acceptance", type=Path, required=True
+    )
+    stable_publication.add_argument("--rc-manifest", type=Path, required=True)
     stable_publication.add_argument("--rc-notes", type=Path, required=True)
     stable_publication.add_argument("--stable-notes", type=Path, required=True)
     stable_publication.add_argument("--stable-notes-markdown", type=Path, required=True)

@@ -91,8 +91,20 @@ class ReleaseDrafterConfigurationTests(unittest.TestCase):
             self.assertTrue(set(rule) & {"files", "branch", "title", "body"})
 
     def test_workflow_is_draft_only_and_has_minimal_permissions(self) -> None:
-        self.assertIn("release-drafter/release-drafter@v7", self.workflow)
-        self.assertIn("release-drafter/release-drafter/autolabeler@v7", self.workflow)
+        approved_release_drafter_commit = "34d80673e067bdc0c24568d3af899c216adcfaa9"
+        self.assertIn(
+            f"release-drafter/release-drafter@{approved_release_drafter_commit}",
+            self.workflow,
+        )
+        self.assertIn(
+            "release-drafter/release-drafter/autolabeler@"
+            f"{approved_release_drafter_commit}",
+            self.workflow,
+        )
+        self.assertNotIn("release-drafter/release-drafter@v7", self.workflow)
+        self.assertNotIn(
+            "release-drafter/release-drafter/autolabeler@v7", self.workflow
+        )
         self.assertNotIn("actions/checkout", self.workflow)
         self.assertNotIn("release create", self.workflow)
         self.assertNotIn("gh release", self.workflow)

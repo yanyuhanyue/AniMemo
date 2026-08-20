@@ -22,7 +22,7 @@
       "offline-release-verifier",
       "."
     ],
-    "minimumGoVersion": "1.25.8",
+    "minimumGoVersion": "1.26.6",
     "networkDuringBuild": "FORBIDDEN_AFTER_PREPOPULATED_AUDITED_MODULE_CACHE",
     "networkDuringRuntime": "FORBIDDEN"
   },

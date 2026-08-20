@@ -235,6 +235,8 @@ jobs:
           python -m release.cli plan-stable-publication-files \
             --repository "$GITHUB_REPOSITORY" --tag "$stable_tag" \
             --acceptance promotion-output/rc-live-acceptance.json \
+            --promotion-acceptance promotion-output/stable-promotion-acceptance.json \
+            --rc-manifest rc-assets/release-manifest.json \
             --rc-notes promotion-output/rc-release-notes.json \
             --stable-notes promotion-output/release-notes.json \
             --stable-notes-markdown promotion-output/release-notes.md \

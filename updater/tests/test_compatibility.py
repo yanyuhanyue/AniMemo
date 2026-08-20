@@ -33,6 +33,7 @@ def manifest(
         api_digest=DIGEST_A,
         web_digest=DIGEST_B,
         deployment_contract_sha256="sha256:0be5fdf5f87275755e06a2e2b6523c24e16d6aa1db48d8d58e8cfea969b674df",
+        installer_materials_sha256="sha256:" + "f" * 64,
         deployment_files=[
             {"path": "deploy/docker-compose.yml", "sha256": "sha256:" + "d" * 64},
             {"path": "updater/docker-compose.runtime.yml", "sha256": "sha256:" + "e" * 64},

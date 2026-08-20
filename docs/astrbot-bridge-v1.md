@@ -18,7 +18,7 @@ Bridge 是独立可导出的 `astrbot_plugin_animemo_bridge`，由 `httpx.AsyncC
 python manage.py integration_connection create --provider astrbot --instance-id <stable-instance-id> --name <name>
 ```
 
-输出 connection id、key id 与只显示一次的 secret。secret 不写入仓库、日志或状态页；轮换使用 `rotate-secret <connection-id>` 后更新 AstrBot 配置并 reload。
+输出 connection id、key id 与只显示一次的 secret。该命令必须直接运行于交互式终端；重定向、管道和非交互式 stdout 会在数据库写入前被拒绝。secret 不写入仓库、自动化日志或状态页；轮换使用 `rotate-secret <connection-id>` 后更新 AstrBot 配置并 reload。
 
 ## Configure and install
 

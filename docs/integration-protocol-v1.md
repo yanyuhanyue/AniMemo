@@ -13,6 +13,8 @@ python manage.py integration_connection rotate-secret <connection-id>
 
 数据库只保存 `CREDENTIAL_ENCRYPTION_KEY` 保护的 Fernet 密文。`provider` 是配置数据，协议核心不包含任何具体平台行为。
 
+命令只允许在交互式终端显示一次性密钥；重定向、管道和其他非交互式 stdout 会在数据库写入前被拒绝，避免密钥进入自动化日志。操作员仍须关闭终端录制，并立即把凭证转移到目标系统的受保护配置中。
+
 ## HMAC
 
 请求使用以下请求头：

@@ -1,6 +1,9 @@
-FROM node:20-alpine AS builder
+FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS builder
 
 WORKDIR /app
+
+RUN apk upgrade --no-cache
+RUN npm install --global npm@12.0.2
 
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -22,7 +25,7 @@ ENV VITE_ANIMEMO_CHANNEL=${ANIMEMO_CHANNEL}
 
 RUN npm exec vite build
 
-FROM nginx:1.27-alpine
+FROM nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
 
 ARG ANIMEMO_VERSION=0.0.0
 ARG ANIMEMO_COMMIT=unknown
@@ -34,7 +37,8 @@ LABEL org.opencontainers.image.version=${ANIMEMO_VERSION} \
 
 ENV TZ=Asia/Shanghai
 
-RUN apk add --no-cache tzdata \
+RUN apk upgrade --no-cache \
+    && apk add --no-cache tzdata \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo "Asia/Shanghai" > /etc/timezone
 

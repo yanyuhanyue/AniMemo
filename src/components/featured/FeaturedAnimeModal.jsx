@@ -6,6 +6,7 @@ import { TagChip } from "../TagChip.jsx";
 import { FeaturedModalScore } from "./FeaturedModalScore.jsx";
 import { useModalViewportSize } from "./useModalViewportSize.js";
 import { WatchHistoryList } from "../WatchHistoryList.jsx";
+import { normalizeHttpUrl } from "../../lib/safeUrl.js";
 
 function displayPeriod(period = "") {
   if (!period || period === "未定档") return "未定档";
@@ -113,13 +114,9 @@ export function FeaturedAnimeModal({ column, onClosed }) {
 
   const posterUrl = useMemo(() => {
     const source = anime?.posterOriginal || anime?.poster;
-    if (!source) return "";
-    try {
-      return new URL(source, window.location.origin).href;
-    } catch {
-      return source;
-    }
+    return normalizeHttpUrl(source, window.location.origin);
   }, [anime?.poster, anime?.posterOriginal]);
+  const externalUrl = normalizeHttpUrl(anime?.externalUrl);
 
   const finishClose = useCallback(() => {
     if (closedRef.current) return;
@@ -322,8 +319,8 @@ export function FeaturedAnimeModal({ column, onClosed }) {
                   <p>当前海报来源 · {posterUrl ? "本地原图" : "暂无原图"}</p>
                   <div className="featured-anime-modal__source-url" title={posterUrl || undefined}>{posterUrl || "未提供原图地址"}</div>
                 </div>
-                {anime.externalUrl && (
-                  <a className="featured-anime-modal__external" href={anime.externalUrl} target="_blank" rel="noreferrer" data-featured-modal-piece>
+                {externalUrl && (
+                  <a className="featured-anime-modal__external" href={externalUrl} target="_blank" rel="noreferrer" data-featured-modal-piece>
                     <strong><Icon name="book" /> 前往{anime.externalSource || "资料站"}查看完整信息</strong>
                     <span>点击跳转 <Icon name="arrow-up-right" /></span>
                   </a>

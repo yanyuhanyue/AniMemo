@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import json
+import os
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from release.portable import BLOCKED_PORTABLE_PUBLICATION_AUTHORITY
 from release.publication import build_publication_plan
 from scripts.release_authority import (
     ReleaseAuthorityError,
+    main,
     validate_portable_pipeline_authority,
     validate_release_authority,
 )
@@ -73,6 +80,88 @@ class ReleaseAuthorityTests(unittest.TestCase):
         changed["sha256"] = "sha256:" + "f" * 64
         with self.assertRaises(ReleaseAuthorityError):
             validate_portable_pipeline_authority(plan, changed)
+
+    def test_portable_operation_reads_only_the_closed_release_output_inputs(self):
+        def inputs(payload: bytes, tag: str) -> tuple[dict, dict]:
+            name = f"animemo-{tag}-portable.tar"
+            plan = build_publication_plan(
+                repository="yanyuhanyue/AniMemo",
+                channel="rc",
+                tag=tag,
+                commit="a" * 40,
+                qualification_identity="sha256:" + "1" * 64,
+                release_notes_identity="sha256:" + "2" * 64,
+                release_notes_markdown_sha256="sha256:" + "3" * 64,
+                assets={
+                    asset: {"sha256": "sha256:" + str(index) * 64, "size": index}
+                    for index, asset in enumerate(
+                        (
+                            "checksums.txt",
+                            "deployment-contract.json",
+                            "installer-materials.tar",
+                            "release-manifest.json",
+                        ),
+                        1,
+                    )
+                },
+                api_digest="sha256:" + "5" * 64,
+                web_digest="sha256:" + "6" * 64,
+                transport_assets={
+                    name: {
+                        "role": "PORTABLE_RELEASE_BUNDLE",
+                        "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                        "size": len(payload),
+                    }
+                },
+            )
+            receipt = {
+                "archive": f"release-output/{name}",
+                "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                "files": 12,
+                "imageRoles": ["api", "postgres", "redis", "web"],
+                "authorityState": BLOCKED_PORTABLE_PUBLICATION_AUTHORITY,
+            }
+            return plan, receipt
+
+        canonical_plan, canonical_receipt = inputs(b"canonical", "v1.1.0-rc.1")
+        attacker_plan, attacker_receipt = inputs(b"attacker", "v1.1.0-rc.2")
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            release_output = root_path / "release-output"
+            release_output.mkdir()
+            (release_output / "publication-plan.json").write_text(
+                json.dumps(canonical_plan), encoding="utf-8"
+            )
+            (release_output / "portable-build-receipt.json").write_text(
+                json.dumps(canonical_receipt), encoding="utf-8"
+            )
+            attacker_root = root_path / "attacker"
+            attacker_root.mkdir()
+            attacker_plan_path = attacker_root / "publication-plan.json"
+            attacker_receipt_path = attacker_root / "portable-build-receipt.json"
+            attacker_plan_path.write_text(json.dumps(attacker_plan), encoding="utf-8")
+            attacker_receipt_path.write_text(json.dumps(attacker_receipt), encoding="utf-8")
+
+            previous_cwd = Path.cwd()
+            output = io.StringIO()
+            try:
+                os.chdir(root_path)
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "OPERATION": "portable",
+                        "PUBLICATION_PLAN_PATH": str(attacker_plan_path),
+                        "PORTABLE_BUILD_RECEIPT_PATH": str(attacker_receipt_path),
+                    },
+                    clear=False,
+                ), redirect_stdout(output):
+                    self.assertEqual(main(), 0)
+            finally:
+                os.chdir(previous_cwd)
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["portable_sha256"], canonical_receipt["sha256"])
+
     def test_release_workflow_builds_one_declared_portable_before_draft_and_exports_sidecar_after_publish(self):
         workflow = (
             Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"

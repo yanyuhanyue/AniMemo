@@ -29,7 +29,7 @@
     "identity": {"$ref": "#/$defs/sha256"},
     "rc_tag": {
       "type": "string",
-      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+-rc\\.(?:[1-9][0-9]*|TEST)$"
+      "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"
     },
     "rc_commit": {"$ref": "#/$defs/gitSha"},
     "release_manifest_identity": {"$ref": "#/$defs/sha256"},

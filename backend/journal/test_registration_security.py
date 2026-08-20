@@ -8,12 +8,14 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.management import call_command
 from django.test import override_settings
+from django.test.client import RequestFactory
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
 from .emails import EmailDeliveryError
+from .registration import request_pending_registration
 from accounts.models import PendingRegistration, UserSecurityProfile
 from site_config.models import InstallationState, SiteSettings
 from .models import JournalEntry
@@ -53,7 +55,13 @@ class RegistrationFlowSecurityTests(APITestCase):
             sent.update(kwargs)
             return {"id": "test"}
 
-        with patch("journal.auth_views.send_transactional_email", side_effect=capture):
+        with (
+            patch("journal.auth_views.send_transactional_email", side_effect=capture),
+            patch(
+                "journal.auth_views._submit_email_task",
+                side_effect=lambda delivery: delivery(),
+            ),
+        ):
             with self.captureOnCommitCallbacks(execute=True):
                 response = self.client.post(reverse("register-request"), {"email": email}, format="json")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -82,6 +90,26 @@ class RegistrationFlowSecurityTests(APITestCase):
         self.assertEqual(old_response.status_code, status.HTTP_400_BAD_REQUEST)
         new_response = self.client.post(reverse("register-verify"), {"token": new_token}, format="json")
         self.assertEqual(new_response.status_code, status.HTTP_200_OK)
+
+    def test_pending_request_uses_locked_get_or_create_for_absent_row_races(self):
+        pending = PendingRegistration.objects.create(
+            email="race@example.com",
+            token_hash="a" * 64,
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        locked = patch("journal.registration.PendingRegistration.objects.select_for_update")
+        with locked as select_for_update:
+            queryset = select_for_update.return_value
+            queryset.get_or_create.return_value = (pending, False)
+            request = RequestFactory().post("/register", REMOTE_ADDR="198.51.100.50")
+            result, raw_token, should_send = request_pending_registration(
+                request=request,
+                email="race@example.com",
+            )
+        queryset.get_or_create.assert_called_once()
+        self.assertEqual(result.pk, pending.pk)
+        self.assertTrue(raw_token)
+        self.assertTrue(should_send)
 
     def test_verify_then_complete_is_the_only_path_that_creates_user(self):
         sent, pending = self._request_registration()
@@ -147,8 +175,14 @@ class RegistrationFlowSecurityTests(APITestCase):
         no_csrf = csrf_client.post(reverse("register-request"), {"email": "csrf@example.com"}, format="json")
         self.assertEqual(no_csrf.status_code, status.HTTP_403_FORBIDDEN)
 
+    @patch(
+        "journal.auth_views._submit_email_task",
+        side_effect=lambda delivery: delivery(),
+    )
     @patch("journal.auth_views.send_transactional_email", side_effect=EmailDeliveryError("provider down"))
-    def test_email_failure_does_not_rollback_pending_or_create_user(self, _send):
+    def test_email_failure_does_not_rollback_pending_or_create_user(
+        self, _send, _submit
+    ):
         with self.captureOnCommitCallbacks(execute=True):
             response = self.client.post(reverse("register-request"), {"email": "mail-failure@example.com"}, format="json")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)

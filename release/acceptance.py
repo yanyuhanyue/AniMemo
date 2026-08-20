@@ -12,7 +12,10 @@ from typing import Any
 SCHEMA = "animemo.rc-live-acceptance/v1"
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
-_RC_TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-rc\.(?:[1-9][0-9]*|TEST)")
+_RC_TAG = re.compile(
+    r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*)-rc\.[1-9][0-9]*"
+)
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _FIELDS = {
     "schema",
@@ -33,6 +36,17 @@ _FIELDS = {
     "accepted_at",
     "operator_identity",
     "tool_identity",
+}
+_STABLE_PROMOTION_FIELDS = {
+    "schema",
+    "identity",
+    "acceptance_identity",
+    "rc_tag",
+    "stable_commit",
+    "stable_api_digest",
+    "stable_web_digest",
+    "rebuild_allowed",
+    "status",
 }
 
 
@@ -179,3 +193,36 @@ def verify_stable_promotion_acceptance(
         "status": "AUTHORIZED",
     }
     return {**unsigned, "identity": _identity(unsigned)}
+
+
+def validate_stable_promotion_acceptance(
+    value: Mapping[str, Any] | None,
+    *,
+    acceptance: Mapping[str, Any],
+) -> dict[str, Any]:
+    accepted = validate_rc_live_acceptance(acceptance)
+    if not isinstance(value, Mapping) or set(value) != _STABLE_PROMOTION_FIELDS:
+        raise AcceptanceError(
+            "Stable promotion acceptance has unknown or missing fields"
+        )
+    expected = verify_stable_promotion_acceptance(
+        accepted,
+        expected={
+            field: accepted[field]
+            for field in {
+                "rc_tag",
+                "rc_commit",
+                "release_manifest_identity",
+                "deployment_contract_identity",
+                "installer_materials_identity",
+                "api_digest",
+                "web_digest",
+            }
+        },
+        stable_commit=value.get("stable_commit"),
+        stable_api_digest=value.get("stable_api_digest"),
+        stable_web_digest=value.get("stable_web_digest"),
+    )
+    if dict(value) != expected:
+        raise AcceptanceError("Stable promotion acceptance identity mismatch")
+    return copy.deepcopy(expected)

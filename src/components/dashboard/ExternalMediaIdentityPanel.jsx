@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { Icon } from "../Icon.jsx";
 import { api, readableApiError } from "../../lib/api.js";
 import { ExternalCollectionSyncPanel } from "./ExternalCollectionSyncPanel.jsx";
+import { normalizeHttpUrl } from "../../lib/safeUrl.js";
 import {
   bangumiIdentityFromResult,
   externalMediaResultFromApi,
@@ -160,6 +161,8 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
     commit(Array.isArray(externalIdentities) ? externalIdentities : identities, entryPatch);
   };
 
+  const canonicalUrl = normalizeHttpUrl(identity?.canonical_url);
+
   if (identity) {
     return (
       <div className="external-media-panel">
@@ -170,12 +173,12 @@ export function ExternalMediaIdentityPanel({ draft, setDraft, onIdentityChange, 
         <dl className="external-media-panel__facts">
           <div><dt>资料标题</dt><dd>{identity.provider_title || identity.metadata?.title || "未提供"}</dd></div>
           <div><dt>条目 ID</dt><dd>{identity.external_id}</dd></div>
-          <div><dt>提供方地址</dt><dd>{identity.canonical_url ? "Bangumi 详情页" : "未提供"}</dd></div>
+          <div><dt>提供方地址</dt><dd>{canonicalUrl ? "Bangumi 详情页" : "未提供"}</dd></div>
           <div><dt>站点评分</dt><dd>{score}</dd></div>
           <div><dt>最近同步</dt><dd>{formatFetchedAt(identity.metadata_fetched_at)}</dd></div>
         </dl>
         <div className="external-media-panel__actions">
-          <a href={identity.canonical_url} target="_blank" rel="noreferrer"><Icon name="arrow-up-right" /> 查看 Bangumi</a>
+          {canonicalUrl && <a href={canonicalUrl} target="_blank" rel="noreferrer"><Icon name="arrow-up-right" /> 查看 Bangumi</a>}
           <button type="button" onClick={refresh} disabled={Boolean(action) || isDemo}><Icon name="reset" /> {action === "refresh" ? "同步中..." : "刷新资料"}</button>
           {!identity.is_metadata_source && <>
             <button type="button" onClick={() => selectMetadataSource(false)} disabled={Boolean(action) || isDemo}><Icon name="check" /> {action === "source-only" ? "切换中..." : "仅设为来源"}</button>

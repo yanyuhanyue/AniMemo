@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import io
 import json
 import tarfile
@@ -164,6 +165,14 @@ class VersionResolutionTests(unittest.TestCase):
 
 
 class ManifestContractTests(unittest.TestCase):
+    def test_installer_materials_identity_is_explicit_and_cannot_be_zero(self):
+        parameter = inspect.signature(build_manifest).parameters[
+            "installer_materials_sha256"
+        ]
+        self.assertIs(parameter.default, inspect.Parameter.empty)
+        with self.assertRaises(ReleaseContractError):
+            manifest(installer_materials_sha256="sha256:" + "0" * 64)
+
     def test_deployment_contract_is_canonical_complete_and_bound_to_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

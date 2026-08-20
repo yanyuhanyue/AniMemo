@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from django.conf import settings
 from django.contrib.auth import get_user_model, login as session_login, logout as session_logout
@@ -68,6 +69,17 @@ from .openapi_serializers import (
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+_EMAIL_DELIVERY_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="animemo-email",
+)
+
+
+def _submit_email_task(delivery):
+    try:
+        _EMAIL_DELIVERY_EXECUTOR.submit(delivery)
+    except RuntimeError:
+        logger.error("Transactional email executor is unavailable.")
 
 
 class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -335,7 +347,9 @@ class RegisterView(RegistrationThrottleAuditMixin, APIView):
                 except EmailDeliveryError as error:
                     logger.error("Registration email delivery failed for pending_id=%s: %s", pending.pk, error.__class__.__name__)
 
-            transaction.on_commit(deliver_registration_email)
+            transaction.on_commit(lambda: _submit_email_task(deliver_registration_email))
+        else:
+            transaction.on_commit(lambda: _submit_email_task(lambda: None))
         return Response({"detail": "如果该邮箱可以注册，我们已经发送验证邮件。"}, status=status.HTTP_201_CREATED)
 
 
@@ -407,6 +421,7 @@ class CompleteRegistrationView(RegistrationThrottleAuditMixin, APIView):
         return Response({"detail": "注册完成，请使用新账号登录。"}, status=status.HTTP_201_CREATED)
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class PasswordResetView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_scope = "password_reset"
@@ -420,10 +435,14 @@ class PasswordResetView(APIView):
             return turnstile_response
         email = serializers.EmailField().run_validation(request.data.get("email", ""))
         user = User.objects.filter(email__iexact=email, is_active=True).first()
-        if user:
+        def deliver_password_reset():
+            if user is None:
+                return
             uid = urlsafe_base64_encode(force_bytes(user.pk))
             token = default_token_generator.make_token(user)
-            reset_url = f"{settings.FRONTEND_URL}/login?reset_uid={uid}&reset_token={token}"
+            reset_url = (
+                f"{settings.FRONTEND_URL}/login?reset_uid={uid}&reset_token={token}"
+            )
             try:
                 send_transactional_email(
                     to=user.email,
@@ -433,9 +452,11 @@ class PasswordResetView(APIView):
                 )
             except EmailDeliveryError:
                 pass
+        _submit_email_task(deliver_password_reset)
         return Response({"detail": "如果邮箱存在，重置邮件已发送。"})
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class PasswordResetConfirmView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_scope = "password_reset"

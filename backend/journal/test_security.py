@@ -1174,8 +1174,13 @@ class ThrottleSecurityTests(APITestCase):
             }, format="json") for _index in range(3)]
             self.assertEqual(responses[-1].status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
+    @patch("journal.auth_views._submit_email_task")
     @patch("journal.auth_views.send_transactional_email")
-    def test_password_reset_is_throttled_without_disclosing_account_existence(self, send_email):
+    def test_password_reset_is_throttled_without_disclosing_account_existence(
+        self, send_email, submit_email
+    ):
+        queued = []
+        submit_email.side_effect = queued.append
         with patch.dict(SimpleRateThrottle.THROTTLE_RATES, self.rates, clear=True):
             client = APIClient()
             existing = client.post(reverse("password-reset"), {"email": self.user.email}, format="json")
@@ -1185,7 +1190,25 @@ class ThrottleSecurityTests(APITestCase):
         self.assertEqual(missing.status_code, status.HTTP_200_OK)
         self.assertEqual(existing.data, missing.data)
         self.assertEqual(limited.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertEqual(len(queued), 2)
+        for delivery in queued:
+            delivery()
         self.assertEqual(send_email.call_count, 1)
+
+    def test_password_reset_and_confirmation_require_csrf(self):
+        client = APIClient(enforce_csrf_checks=True)
+        requested = client.post(
+            reverse("password-reset"),
+            {"email": self.user.email},
+            format="json",
+        )
+        confirmed = client.post(
+            reverse("password-reset-confirm"),
+            {"uid": "invalid", "token": "invalid"},
+            format="json",
+        )
+        self.assertEqual(requested.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(confirmed.status_code, status.HTTP_403_FORBIDDEN)
 
     @patch("journal.external_media.views.get_provider")
     def test_external_search_and_import_have_independent_scopes(self, get_provider):
@@ -1585,8 +1608,14 @@ class RegistrationThrottleSecurityTests(APITestCase):
         unrelated = self.register("other@example.com", ip="198.51.100.21")
         self.assertEqual(unrelated.status_code, status.HTTP_201_CREATED)
 
+    @patch(
+        "journal.auth_views._submit_email_task",
+        side_effect=lambda delivery: delivery(),
+    )
     @patch("journal.auth_views.send_transactional_email", side_effect=EmailDeliveryError("provider unavailable"))
-    def test_email_failure_after_commit_keeps_pending_without_user(self, _send_email):
+    def test_email_failure_after_commit_keeps_pending_without_user(
+        self, _send_email, _submit_email
+    ):
         with self.captureOnCommitCallbacks(execute=True):
             response = self.register("mail-failure@example.com", ip="198.51.100.30")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
