@@ -112,7 +112,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-          ref: ${{ steps.candidate.outputs.candidate_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Gate exact GitHub CLI security baseline
         shell: bash
@@ -224,7 +224,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-          ref: ${{ needs.preflight.outputs.candidate_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
@@ -389,7 +389,7 @@ jobs:
         if: ${{ inputs.operation == 'qualify' }}
         with:
           persist-credentials: false
-          ref: ${{ needs.preflight.outputs.candidate_sha }}
+          ref: ${{ github.sha }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: ${{ inputs.operation == 'publish' }}
         with:
@@ -578,7 +578,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-          ref: ${{ needs.preflight.outputs.candidate_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Prove exact read-only candidate identity
         env:
@@ -785,7 +785,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-          ref: ${{ needs.preflight.outputs.candidate_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Gate exact GitHub CLI security baseline
         shell: bash

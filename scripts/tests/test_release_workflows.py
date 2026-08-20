@@ -504,7 +504,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(authority["if"], "${{ always() }}")
         authority_source = source[source.index("  release-authority:\n") : source.index("  dry-run:\n")]
         self.assertIn("toJSON(needs)", authority_source)
-        self.assertIn("ref: ${{ needs.preflight.outputs.candidate_sha }}", authority_source)
+        self.assertNotIn("ref: ${{ needs.preflight.outputs.candidate_sha }}", authority_source)
+        self.assertIn("ref: ${{ github.sha }}", authority_source)
         self.assertIn("python -m scripts.release_authority", authority_source)
         self.assertEqual(source.count("python -m scripts.release_authority"), 4)
         self.assertNotIn("python scripts/release_authority.py", source)
@@ -611,7 +612,16 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn('candidate_sha="$REQUESTED_CANDIDATE_SHA"', preflight)
         self.assertNotIn("DRY_RUN", preflight)
         self.assertNotIn("ref", release["jobs"]["preflight"]["steps"][0]["with"])
-        self.assertIn('ref: ${{ steps.candidate.outputs.candidate_sha }}', preflight)
+        self.assertNotIn('ref: ${{ steps.candidate.outputs.candidate_sha }}', preflight)
+        self.assertIn('ref: ${{ github.sha }}', preflight)
+        self.assertNotIn(
+            "ref: ${{ needs.preflight.outputs.candidate_sha }}",
+            source,
+        )
+        self.assertNotIn(
+            "ref: ${{ steps.candidate.outputs.candidate_sha }}",
+            source,
+        )
         for job_name in ("full-ci", "full-release-gate", "performance"):
             uses = release["jobs"][job_name]["uses"]
             self.assertTrue(uses.startswith("./.github/workflows/"))
@@ -625,7 +635,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         dry_run = source[source.index("  dry-run:\n") : source.index("  publish:\n")]
 
-        self.assertIn("ref: ${{ needs.preflight.outputs.candidate_sha }}", dry_run)
+        self.assertNotIn("ref: ${{ needs.preflight.outputs.candidate_sha }}", dry_run)
+        self.assertIn("ref: ${{ github.sha }}", dry_run)
         self.assertIn('test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"', dry_run)
         self.assertEqual(dry_run.count("ANIMEMO_COMMIT=${{ needs.preflight.outputs.candidate_sha }}"), 2)
         self.assertNotIn("ANIMEMO_COMMIT=${{ github.sha }}", dry_run)

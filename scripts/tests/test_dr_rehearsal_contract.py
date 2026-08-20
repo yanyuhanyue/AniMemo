@@ -133,6 +133,12 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
             with self.subTest(block=index):
                 compile(block, f"dr-rehearsal-inline-{index}.py", "exec")
 
+    def test_runtime_release_fixture_binds_installer_materials_identity(self):
+        self.assertIn(
+            'installer_materials_sha256="sha256:" + "f" * 64',
+            self.script,
+        )
+
     def test_cleanup_is_compose_project_scoped_and_non_production(self):
         self.assertIn("docker.compose.project=$PROJECT_A", self.script)
         self.assertNotIn("docker system prune", self.script)
