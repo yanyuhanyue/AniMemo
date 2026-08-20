@@ -73,9 +73,6 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
             "DR_ACCESS_TOKEN_ISSUANCE_MARGIN_SECONDS = 5 * 60",
             "original_access_token_lifetime = AccessToken.lifetime",
             "AccessToken.lifetime = original_access_token_lifetime",
-            "remaining_seconds = (",
-            'int(access_token["exp"])',
-            "int(timezone.now().timestamp())",
             "remaining_seconds >= DR_ACCESS_TOKEN_MIN_REMAINING_SECONDS",
             'old_access_token = AccessToken(old_access)',
             'int(old_access_token["exp"]) > int(time()) + 300',
@@ -131,6 +128,12 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
             self.script,
             r"seconds=\(\s*DR_ACCESS_TOKEN_MIN_REMAINING_SECONDS\s*"
             r"\+\s*DR_ACCESS_TOKEN_ISSUANCE_MARGIN_SECONDS\s*\)",
+        )
+        self.assertRegex(
+            self.script,
+            r"remaining_seconds\s*=\s*\(\s*"
+            r'int\(access_token\["exp"\]\)\s*-\s*'
+            r"int\(timezone\.now\(\)\.timestamp\(\)\)\s*\)",
         )
         self.assertIn(
             "finally:\n    AccessToken.lifetime = original_access_token_lifetime",
