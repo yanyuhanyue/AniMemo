@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from release.contract import build_manifest, deployment_contract_digest
+from scripts.tests.trust_kit_fixture import contract_only_test_pretrust_bytes
 from updater.deployment import HostPaths, ImmutableComposeDeployment
 from updater.errors import StateError
 
@@ -39,14 +40,22 @@ DEPLOYMENT_DIGEST = deployment_contract_digest(
             "format": "tar",
         },
         "files": DEPLOYMENT_FILES,
-        "materials": [
+        "materials": sorted([
             {
                 "path": "updater/__init__.py",
                 "sha256": "sha256:" + "d" * 64,
                 "size": 1,
                 "mode": "0644",
             }
-        ],
+        ] + [
+            {
+                "path": path,
+                "sha256": "sha256:" + hashlib.sha256(value).hexdigest(),
+                "size": len(value),
+                "mode": "0755" if path.endswith("/offline-release-verifier") else "0644",
+            }
+            for path, value in contract_only_test_pretrust_bytes().items()
+        ], key=lambda item: item["path"]),
     }
 )
 

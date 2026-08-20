@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://animemo.example/schemas/portable-bundle-v1.json",
+  "title": "AniMemo authority-independent portable bundle index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "profile",
+    "authorityState",
+    "files",
+    "ociImages"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "profile": {
+      "const": "animemo-portable-bundle-v1"
+    },
+    "authorityState": {
+      "const": "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4096,
+      "uniqueItems": true,
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "authority/checksums.txt"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "authority/deployment-contract.json"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "authority/installer-materials.tar"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "authority/release-manifest.json"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ],
+      "items": {
+        "$ref": "#/$defs/fileIdentity"
+      }
+    },
+    "ociImages": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/imageIdentity"
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000]+$"
+    },
+    "payloadPath": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/relativePath"
+        },
+        {
+          "anyOf": [
+            {
+              "enum": [
+                "authority/checksums.txt",
+                "authority/deployment-contract.json",
+                "authority/installer-materials.tar",
+                "authority/release-manifest.json"
+              ]
+            },
+            {
+              "pattern": "^oci/(?:api|postgres|redis|web)/.+$"
+            }
+          ]
+        }
+      ]
+    },
+    "fileIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "size"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/payloadPath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967296
+        }
+      }
+    },
+    "imageBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "repository",
+        "digest",
+        "platform",
+        "layoutPath"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "api",
+            "postgres",
+            "redis",
+            "web"
+          ]
+        },
+        "repository": {
+          "enum": [
+            "ghcr.io/yanyuhanyue/animemo-api",
+            "docker.io/library/postgres",
+            "docker.io/library/redis",
+            "ghcr.io/yanyuhanyue/animemo-web"
+          ]
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "platform": {
+          "const": "linux/amd64"
+        },
+        "layoutPath": {
+          "enum": [
+            "oci/api",
+            "oci/postgres",
+            "oci/redis",
+            "oci/web"
+          ]
+        }
+      }
+    },
+    "imageIdentity": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/imageBase"
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "role": {
+                  "const": "api"
+                },
+                "repository": {
+                  "const": "ghcr.io/yanyuhanyue/animemo-api"
+                },
+                "layoutPath": {
+                  "const": "oci/api"
+                }
+              }
+            },
+            {
+              "properties": {
+                "role": {
+                  "const": "postgres"
+                },
+                "repository": {
+                  "const": "docker.io/library/postgres"
+                },
+                "layoutPath": {
+                  "const": "oci/postgres"
+                }
+              }
+            },
+            {
+              "properties": {
+                "role": {
+                  "const": "redis"
+                },
+                "repository": {
+                  "const": "docker.io/library/redis"
+                },
+                "layoutPath": {
+                  "const": "oci/redis"
+                }
+              }
+            },
+            {
+              "properties": {
+                "role": {
+                  "const": "web"
+                },
+                "repository": {
+                  "const": "ghcr.io/yanyuhanyue/animemo-web"
+                },
+                "layoutPath": {
+                  "const": "oci/web"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

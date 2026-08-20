@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -17,6 +21,22 @@ HARDENED_WORKFLOWS = (
     "release-gate.yml",
     "release.yml",
 )
+
+PINNED_RELEASE_ACTIONS = {
+    "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "actions/setup-python": "5fda3b95a4ea91299a34e894583c3862153e4b97",
+    "actions/download-artifact": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+}
+
+
+def _bash_path() -> str | None:
+    if os.name == "nt":
+        candidates = (
+            Path(r"C:\Program Files\Git\bin\bash.exe"),
+            Path(r"C:\Program Files\Git\usr\bin\bash.exe"),
+        )
+        return next((str(path) for path in candidates if path.is_file()), None)
+    return shutil.which("bash")
 
 
 class UniqueKeyLoader(yaml.BaseLoader):
@@ -53,6 +73,20 @@ def workflow(name):
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
+    def test_release_workflows_pin_every_external_action_to_a_commit(self):
+        for name in ("release.yml", "promote-release.yml"):
+            source = (ROOT / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            references = re.findall(
+                r"uses:\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([^\s#]+)",
+                source,
+            )
+            self.assertTrue(references)
+            for action, reference in references:
+                with self.subTest(workflow=name, action=action):
+                    self.assertRegex(reference, r"^[0-9a-f]{40}$")
+
     def test_core_github_actions_are_v7_and_checkout_credentials_are_explicit(self):
         credentialed_checkouts = set()
         checkout_count = 0
@@ -64,7 +98,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     action = step.get("uses", "")
                     if action.startswith("actions/checkout@"):
                         checkout_count += 1
-                        self.assertEqual(action, "actions/checkout@v7")
+                        expected = (
+                            f"actions/checkout@{PINNED_RELEASE_ACTIONS['actions/checkout']}"
+                            if name in {"release.yml", "promote-release.yml"}
+                            else "actions/checkout@v7"
+                        )
+                        self.assertEqual(action, expected)
                         settings = step.get("with", {})
                         self.assertIn("persist-credentials", settings)
                         if settings["persist-credentials"] == "true":
@@ -74,7 +113,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     elif action.startswith("actions/setup-node@"):
                         self.assertEqual(action, "actions/setup-node@v7")
                     elif action.startswith("actions/setup-python@"):
-                        self.assertEqual(action, "actions/setup-python@v7")
+                        expected = (
+                            f"actions/setup-python@{PINNED_RELEASE_ACTIONS['actions/setup-python']}"
+                            if name in {"release.yml", "promote-release.yml"}
+                            else "actions/setup-python@v7"
+                        )
+                        self.assertEqual(action, expected)
 
         self.assertGreater(checkout_count, 0)
         self.assertEqual(
@@ -173,7 +217,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         publish = source[
             source.index("      - name: Download and verify Phase A qualification evidence") :
-            source.index("      - name: Stage the validated platform qualification")
+            source.index("      - name: Stage the validated platform and Release Notes")
+        ]
+        stage = source[
+            source.index("      - name: Stage the validated platform and Release Notes") :
+            source.index("      - uses: actions/upload-artifact@", source.index("      - name: Stage the validated platform and Release Notes"))
         ]
 
         run_id_guard = '[[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]'
@@ -184,6 +232,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         authority_path = (
             "QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/qualification/"
             "release-qualification-${{ inputs.qualification_run_id }}.json"
+        )
+        self.assertIn(
+            "QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}",
+            stage,
         )
         self.assertIn(run_id_guard, publish)
         self.assertIn(evidence_path, publish)
@@ -378,6 +430,27 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("name: performance-long-operation-capacity", source)
         self.assertIn("path: artifacts/capacity", source)
 
+    def test_hosted_browser_gates_avoid_apt_and_launch_the_downloaded_chromium(self):
+        for name in ("ci.yml", "performance.yml"):
+            with self.subTest(workflow=name):
+                source = (ROOT / ".github" / "workflows" / name).read_text(
+                    encoding="utf-8"
+                )
+                self.assertNotIn("playwright install-deps", source)
+                self.assertNotIn("--with-deps", source)
+                self.assertIn("playwright install chromium", source)
+                self.assertIn("chromium.launch", source)
+                self.assertIn("browser.close()", source)
+                self.assertIn("BROWSER_RUNTIME_VERIFICATION", source)
+                self.assertLess(
+                    source.index("playwright install chromium"),
+                    source.index("chromium.launch"),
+                )
+                self.assertLess(
+                    source.index("chromium.launch"),
+                    source.index("browser.close()"),
+                )
+
     def test_fresh_docker_gates_complete_the_real_one_time_setup_api(self):
         release_gate = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8")
         performance = (ROOT / ".github" / "workflows" / "performance.yml").read_text(encoding="utf-8")
@@ -406,6 +479,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
 
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        promote_source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
         authority = release["jobs"]["release-authority"]
         self.assertEqual(
             authority["needs"],
@@ -421,7 +495,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         authority_source = source[source.index("  release-authority:\n") : source.index("  dry-run:\n")]
         self.assertIn("toJSON(needs)", authority_source)
         self.assertIn("ref: ${{ needs.preflight.outputs.candidate_sha }}", authority_source)
-        self.assertIn("python scripts/release_authority.py", authority_source)
+        self.assertIn("python -m scripts.release_authority", authority_source)
+        self.assertEqual(source.count("python -m scripts.release_authority"), 4)
+        self.assertNotIn("python scripts/release_authority.py", source)
+        self.assertEqual(promote_source.count("python -m scripts.release_authority"), 1)
+        self.assertNotIn("python scripts/release_authority.py", promote_source)
         self.assertEqual(
             release["jobs"]["dry-run"]["needs"],
             ["preflight", "release-authority", "platform-qualification"],
@@ -489,7 +567,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_dry_run_is_read_only_and_publish_permissions_are_minimal(self):
         release = workflow("release.yml")
         dry_permissions = release["jobs"]["dry-run"]["permissions"]
-        self.assertEqual(dry_permissions, {"contents": "read"})
+        self.assertEqual(
+            dry_permissions, {"contents": "read", "pull-requests": "read"}
+        )
         publish_permissions = release["jobs"]["publish"]["permissions"]
         self.assertEqual(publish_permissions["contents"], "write")
         self.assertEqual(publish_permissions["packages"], "write")
@@ -553,6 +633,27 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ):
             self.assertNotIn(mutation, dry_run)
 
+    def test_release_notes_start_at_previous_stable_or_the_bootstrap_baseline(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        dry_run = source[source.index("  dry-run:\n") : source.index("  publish:\n")]
+
+        self.assertIn("UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}", dry_run)
+        self.assertIn('release_notes_base="$UPGRADE_BASE_SHA"', dry_run)
+        self.assertIn('if [[ -n "$PREVIOUS_STABLE" ]]', dry_run)
+        self.assertIn(
+            'release_notes_base="$(git rev-parse "$PREVIOUS_STABLE^{commit}")"',
+            dry_run,
+        )
+        self.assertIn(
+            'git merge-base --is-ancestor "$release_notes_base" "$CANDIDATE_SHA"',
+            dry_run,
+        )
+        self.assertIn('--range-start "$release_notes_base"', dry_run)
+        self.assertNotIn('--range-start "$UPGRADE_BASE_SHA"', dry_run)
+        self.assertNotIn('test -n "$PREVIOUS_STABLE"', dry_run)
+
     def test_release_images_receive_the_same_runtime_identity_as_the_manifest(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         self.assertGreaterEqual(source.count("ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}"), 4)
@@ -569,6 +670,29 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         publish = source.index("Publish only the already rehearsed images", publish_section)
         self.assertLess(rehearse, publish)
         self.assertNotIn("push: true", source[publish_section:publish])
+
+    def test_immutable_release_setting_is_checked_before_any_rc_publication(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = source[source.index("  publish:\n") :]
+        setting_gate = (
+            'test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" '
+            '--jq \'.enabled\')" = "true"'
+        )
+
+        self.assertIn(setting_gate, publish)
+        self.assertLess(publish.index(setting_gate), publish.index("docker/login-action"))
+        self.assertLess(publish.index(setting_gate), publish.index("docker push"))
+        self.assertLess(publish.index(setting_gate), publish.index("git push origin"))
+        self.assertLess(
+            publish.index("build-initial-trust-kit"),
+            publish.index("docker/login-action"),
+        )
+        self.assertLess(
+            publish.index("build-initial-trust-kit"),
+            publish.index("docker push"),
+        )
 
     def test_release_contract_assets_and_real_upgrade_delta_are_fail_closed(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -596,6 +720,90 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("timeout-minutes: 40", release_gate)
         self.assertIn('merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"', gate)
+
+    def test_release_verifier_is_built_offline_from_a_pinned_go_toolchain(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            release.count(
+                "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16"
+            ),
+            2,
+        )
+        self.assertEqual(release.count("go-version: '1.25.8'"), 2)
+        self.assertEqual(
+            release.count("release/release_attestation_verifier/go.sum"), 2
+        )
+        self.assertEqual(release.count("go mod download"), 2)
+        self.assertEqual(release.count("GOPROXY=off GOSUMDB=off go mod verify"), 2)
+        self.assertEqual(
+            release.count("GOPROXY=off GOSUMDB=off go test ./..."), 2
+        )
+        self.assertEqual(
+            release.count(
+                "CGO_ENABLED=0 GOPROXY=off GOSUMDB=off go build "
+                "-mod=readonly -trimpath -o offline-release-verifier ."
+            ),
+            2,
+        )
+        self.assertEqual(
+            release.count(
+                "test -x release/release_attestation_verifier/offline-release-verifier"
+            ),
+            2,
+        )
+        self.assertEqual(release.count("build-initial-trust-kit"), 2)
+        self.assertNotIn(
+            "--output release/release_attestation_verifier/pretrust-v2",
+            release,
+        )
+        self.assertGreaterEqual(release.count("$RUNNER_TEMP/animemo-pretrust-v2"), 8)
+        self.assertEqual(
+            release.count(
+                '--initial-trust-kit "$RUNNER_TEMP/animemo-pretrust-v2"'
+            ),
+            2,
+        )
+
+    def test_publish_rebinds_exact_qualified_prepublication_materials(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        dry_run_identity = release.index(
+            "> release-output/prepublication-materials.json"
+        )
+        qualification_copy = release.index(
+            "cp release-dry-run-input/prepublication-materials.json"
+        )
+        publish_rebuild = release.index(
+            "Rebuild and bind exact qualified prepublication materials before mutation"
+        )
+        immutable_recheck = release.index(
+            "Recheck immutable release identity immediately before publishing"
+        )
+        docker_login = release.index("docker/login-action@", publish_rebuild)
+        self.assertLess(dry_run_identity, qualification_copy)
+        self.assertLess(publish_rebuild, immutable_recheck)
+        self.assertLess(publish_rebuild, docker_login)
+        self.assertIn("initialTrustBootstrapSha256", release)
+        self.assertIn("installerMaterialsSha256", release)
+        self.assertIn('test "$actual_trust" =', release)
+        self.assertIn('test "$actual_materials" =', release)
+
+    def test_every_github_authority_job_gates_the_exact_cli_security_version(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        promotion = (
+            ROOT / ".github" / "workflows" / "promote-release.yml"
+        ).read_text(encoding="utf-8")
+        gate = "Gate exact GitHub CLI security baseline"
+
+        self.assertIn("GH_REQUIRED_VERSION: 2.97.0", release)
+        self.assertIn("GH_REQUIRED_VERSION: 2.97.0", promotion)
+        self.assertEqual(release.count(gate), 4)
+        self.assertEqual(promotion.count(gate), 2)
 
     def test_platform_qualification_is_hosted_scoped_and_injected_exactly(self):
         release = workflow("release.yml")
@@ -692,6 +900,126 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn('docker system prune', source)
         self.assertNotIn('docker builder prune', source)
 
+    def test_exact_image_rehearsal_closes_the_required_configuration_revision(self):
+        source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(
+            encoding="utf-8"
+        )
+        revision = "33333333-3333-4333-8333-333333333333"
+
+        self.assertEqual(source.count("ANIMEMO_CONFIG_REVISION"), 2)
+        self.assertIn(f"ANIMEMO_CONFIG_REVISION={revision}", source)
+        self.assertIn('export ANIMEMO_CONFIG_REVISION="33333333-3333-4333-8333-333333333333"', source)
+        self.assertLess(
+            source.index(f"ANIMEMO_CONFIG_REVISION={revision}"),
+            source.index('"${COMPOSE[@]}" config --quiet'),
+        )
+
+    def test_exact_image_rehearsal_closes_every_required_compose_variable(self):
+        source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(
+            encoding="utf-8"
+        )
+        compose_sources = (
+            ROOT / "deploy" / "docker-compose.yml",
+            ROOT / "updater" / "docker-compose.runtime.yml",
+            ROOT / "deploy" / "docker-compose.upgrade-gate.yml",
+        )
+        required = set()
+        for path in compose_sources:
+            path_required = set(
+                re.findall(
+                    r"\$\{([A-Z0-9_]+):\?[^}]+\}",
+                    path.read_text(encoding="utf-8"),
+                )
+            )
+            self.assertTrue(path_required, path)
+            required.update(path_required)
+        env_file = re.search(
+            r'cat > "\$ENV_FILE" <<EOF\n(?P<body>.*?)\nEOF',
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(env_file)
+        bindings = set(
+            re.findall(r"^([A-Z0-9_]+)=", env_file.group("body"), re.MULTILINE)
+        )
+
+        self.assertSetEqual(required - bindings, set())
+        self.assertLess(
+            env_file.end(),
+            source.index('"${COMPOSE[@]}" config --quiet'),
+        )
+
+    def test_exact_image_rehearsal_rejects_mutable_dependency_images_before_work(self):
+        bash = _bash_path()
+        if bash is None:
+            self.skipTest("Git Bash or bash is required for the rehearsal CLI gate.")
+
+        script = (ROOT / "scripts" / "rehearse-release-images.sh").as_posix()
+        valid_postgres = "docker.io/library/postgres@sha256:" + "a" * 64
+        valid_redis = "docker.io/library/redis@sha256:" + "b" * 64
+        invalid_pairs = (
+            ("", valid_redis),
+            (valid_postgres, ""),
+            ("docker.io/library/postgres:16", valid_redis),
+            ("registry.example/postgres@sha256:" + "a" * 64, valid_redis),
+            ("docker.io/library/postgres@sha256:" + "a" * 63, valid_redis),
+            ("docker.io/library/postgres@sha256:" + "A" * 64, valid_redis),
+            (valid_postgres, "docker.io/library/redis:7"),
+            (valid_postgres, "registry.example/redis@sha256:" + "b" * 64),
+            (valid_postgres, "docker.io/library/redis@sha256:" + "b" * 63),
+            (valid_postgres, "docker.io/library/redis@sha256:" + "B" * 64),
+        )
+
+        def run(postgres: str, redis: str) -> subprocess.CompletedProcess[str]:
+            environment = os.environ.copy()
+            environment["GITHUB_ACTIONS"] = "true"
+            environment.pop("RUNNER_TEMP", None)
+            if postgres:
+                environment["ANIMEMO_POSTGRES_IMAGE"] = postgres
+            else:
+                environment.pop("ANIMEMO_POSTGRES_IMAGE", None)
+            if redis:
+                environment["ANIMEMO_REDIS_IMAGE"] = redis
+            else:
+                environment.pop("ANIMEMO_REDIS_IMAGE", None)
+            return subprocess.run(
+                [
+                    bash,
+                    script,
+                    "--api-image",
+                    "api@sha256:test",
+                    "--web-image",
+                    "web@sha256:test",
+                    "--version",
+                    "v1.1.0-rc.1",
+                    "--commit",
+                    "c" * 40,
+                    "--channel",
+                    "rc",
+                    "--confirm-isolated",
+                ],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        for postgres, redis in invalid_pairs:
+            with self.subTest(postgres=postgres, redis=redis):
+                completed = run(postgres, redis)
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn(
+                    "Exact immutable PostgreSQL and Redis image identities are required.",
+                    completed.stderr,
+                )
+                self.assertNotIn("RUNNER_TEMP must be", completed.stderr)
+
+        completed = run(valid_postgres, valid_redis)
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("RUNNER_TEMP must be an absolute isolated runner path.", completed.stderr)
+        self.assertNotIn("Exact immutable PostgreSQL", completed.stderr)
+
     def test_exact_image_rehearsal_trusts_only_the_runtime_web_proxy(self):
         source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(encoding="utf-8")
 
@@ -704,18 +1032,24 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("recorded_ip == proxy_ip", source)
         self.assertNotIn("TRUSTED_PROXY_IPS=172.16.0.0/12", source)
 
-    def test_stable_notes_start_at_previous_stable_when_one_exists(self):
+    def test_stable_notes_derive_from_the_frozen_rc_snapshot(self):
         source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
         self.assertIn("previous-stable", source)
-        self.assertIn("--notes-start-tag", source)
+        self.assertIn("promote-release-notes", source)
+        self.assertIn("--rc-notes promotion-output/rc-release-notes.json", source)
+        self.assertIn("--notes-file promotion-output/release-notes.md", source)
+        self.assertNotIn("--generate-notes", source)
 
     def test_stable_promotion_has_no_image_build_and_requires_acceptance(self):
         promotion_path = ROOT / ".github" / "workflows" / "promote-release.yml"
         source = promotion_path.read_text(encoding="utf-8")
         promotion = yaml.load(source, Loader=yaml.BaseLoader)
         self.assertEqual(set(promotion["on"]), {"workflow_dispatch"})
-        self.assertIn("acceptance_confirmation", promotion["on"]["workflow_dispatch"]["inputs"])
+        self.assertNotIn("acceptance_confirmation", promotion["on"]["workflow_dispatch"]["inputs"])
         self.assertIn("dry_run", promotion["on"]["workflow_dispatch"]["inputs"])
+        self.assertIn('acceptance_path="release/acceptance-records/$RC_TAG.json"', source)
+        self.assertIn("git ls-files --error-unmatch", source)
+        self.assertIn("scripts/rc_live_acceptance.py", source)
         self.assertNotIn("docker/build-push-action", source)
         self.assertNotIn("docker build", source)
         self.assertIn("RC_COMMIT == STABLE_COMMIT", source)
@@ -725,9 +1059,17 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_stable_promotion_dry_run_checks_out_before_downloading_artifact(self):
         promotion = workflow("promote-release.yml")
         steps = promotion["jobs"]["dry-run"]["steps"]
-        checkout = next(index for index, step in enumerate(steps) if step.get("uses") == "actions/checkout@v7")
+        checkout = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("uses")
+            == f"actions/checkout@{PINNED_RELEASE_ACTIONS['actions/checkout']}"
+        )
         download = next(
-            index for index, step in enumerate(steps) if step.get("uses") == "actions/download-artifact@v4"
+            index
+            for index, step in enumerate(steps)
+            if step.get("uses")
+            == f"actions/download-artifact@{PINNED_RELEASE_ACTIONS['actions/download-artifact']}"
         )
 
         self.assertLess(checkout, download)
@@ -746,6 +1088,49 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             '! gh release view "$STABLE_TAG" --repo "$GITHUB_REPOSITORY"',
         ):
             self.assertIn(guard, before_first_mutation)
+
+    def test_rc_publication_is_draft_upload_verify_publish_with_qualified_notes(self):
+        release = workflow("release.yml")
+        names = [step.get("name", "") for step in release["jobs"]["publish"]["steps"]]
+        expected = (
+            "Generate the closed publication plan without mutation",
+            "Create the immutable annotated RC tag",
+            "Create an unpublished GitHub Draft Pre-release",
+            "Upload and read back the complete Draft asset set",
+            "Publish only the fully verified Draft Pre-release",
+            "Verify the public RC without authenticated asset transport",
+        )
+        indices = [names.index(name) for name in expected]
+        self.assertEqual(indices, sorted(indices))
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("--generate-notes", source)
+        self.assertIn("release_notes.snapshot_identity", source)
+        self.assertIn("RELEASE_NOTES_MARKDOWN_SHA256", source)
+        self.assertIn("release-notes.md", source)
+        self.assertIn("env -u GH_TOKEN curl", source)
+        self.assertLess(
+            source.index('gh release create "$RELEASE_TAG"'),
+            source.index('gh release upload "$RELEASE_TAG"'),
+        )
+        self.assertLess(
+            source.index('gh release upload "$RELEASE_TAG"'),
+            source.index('gh release edit "$RELEASE_TAG"'),
+        )
+
+    def test_stable_publication_uses_the_same_draft_transaction_and_never_rebuilds(self):
+        source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish_source = source[source.index("  publish:\n") :]
+        self.assertIn("Create an unpublished Stable Draft Release", source)
+        self.assertIn("Upload and read back the complete Stable Draft asset set", source)
+        self.assertIn("Publish only the fully verified Stable Draft as Latest", source)
+        self.assertIn("Verify the public Stable release without authenticated asset transport", source)
+        self.assertNotIn("docker/build-push-action", source)
+        self.assertNotIn("docker build", source)
+        self.assertIn("plan-stable-publication-files", source)
         self.assertNotIn(
             'test "$(git rev-parse origin/main)" = "$GITHUB_SHA"',
             publish_source[publish_source.index("crane tag") :],

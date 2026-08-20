@@ -4,8 +4,12 @@ changelog:
       - duplicate
       - invalid
       - skip-changelog
+      - release/internal
       - wontfix
   categories:
+    - title: "⚠️ Breaking Changes"
+      labels:
+        - release/breaking
     - title: "🔒 安全与稳定性"
       labels:
         - release/security

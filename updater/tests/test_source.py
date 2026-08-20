@@ -17,6 +17,7 @@ from urllib.error import HTTPError
 from cramjam import snappy
 
 from release.contract import build_manifest, deployment_contract_digest
+from scripts.tests.trust_kit_fixture import contract_only_test_pretrust_bytes
 from updater.errors import CommandFailed, RequestRejected
 from updater.source import (
     MAX_GITHUB_JSON_BYTES,
@@ -43,17 +44,18 @@ def _fake_material_archive() -> bytes:
     output = io.BytesIO()
     value = b"qualified wheel bytes"
     with tarfile.open(fileobj=output, mode="w:", format=tarfile.USTAR_FORMAT) as archive:
-        member = tarfile.TarInfo(
-            "wheelhouse/qualified_dependency-1.0-py3-none-any.whl"
-        )
-        member.size = len(value)
-        member.mode = 0o644
-        member.mtime = 0
-        member.uid = 0
-        member.gid = 0
-        member.uname = ""
-        member.gname = ""
-        archive.addfile(member, io.BytesIO(value))
+        values = dict(contract_only_test_pretrust_bytes())
+        values["wheelhouse/qualified_dependency-1.0-py3-none-any.whl"] = value
+        for relative, material in sorted(values.items()):
+            member = tarfile.TarInfo(relative)
+            member.size = len(material)
+            member.mode = 0o755 if relative.endswith("/offline-release-verifier") else 0o644
+            member.mtime = 0
+            member.uid = 0
+            member.gid = 0
+            member.uname = ""
+            member.gname = ""
+            archive.addfile(member, io.BytesIO(material))
     return output.getvalue()
 
 
@@ -73,14 +75,22 @@ FAKE_DEPLOYMENT_CONTRACT = {
         "format": "tar",
     },
     "files": FAKE_DEPLOYMENT_FILES,
-    "materials": [
+    "materials": sorted([
         {
             "path": "wheelhouse/qualified_dependency-1.0-py3-none-any.whl",
             "sha256": "sha256:" + hashlib.sha256(b"qualified wheel bytes").hexdigest(),
             "size": len(b"qualified wheel bytes"),
             "mode": "0644",
         }
-    ],
+    ] + [
+        {
+            "path": path,
+            "sha256": "sha256:" + hashlib.sha256(value).hexdigest(),
+            "size": len(value),
+            "mode": "0755" if path.endswith("/offline-release-verifier") else "0644",
+        }
+        for path, value in contract_only_test_pretrust_bytes().items()
+    ], key=lambda item: item["path"]),
 }
 
 
@@ -777,6 +787,53 @@ class GitHubReleaseSourceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RequestRejected, "assets differ"):
                 source.fetch_verified("v1.0.0")
+
+    def test_v1_1_release_accepts_exact_portable_transport_asset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = stable_manifest()
+            manifest["release"]["version"] = "v1.1.0"
+            manifest["release"]["promotedFrom"] = "v1.1.0-rc.1"
+            manifest["releaseNotes"]["tag"] = "v1.1.0"
+            metadata = dict(FakePublicRest(manifest).exact_release)
+            metadata["assets"] = [
+                *metadata["assets"],
+                {
+                    "name": "animemo-v1.1.0-portable.tar",
+                    "state": "uploaded",
+                },
+            ]
+            source = GitHubReleaseSource(
+                Path(directory),
+                runner=FakeRunner(manifest),
+                rest=FakePublicRest(manifest, exact_release=metadata),
+            )
+
+            verified = source.fetch_verified_materials("v1.1.0")
+
+            self.assertEqual(verified.manifest["release"]["version"], "v1.1.0")
+
+    def test_v1_1_release_rejects_portable_transport_asset_lookalike(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = stable_manifest()
+            manifest["release"]["version"] = "v1.1.0"
+            manifest["release"]["promotedFrom"] = "v1.1.0-rc.1"
+            manifest["releaseNotes"]["tag"] = "v1.1.0"
+            metadata = dict(FakePublicRest(manifest).exact_release)
+            metadata["assets"] = [
+                *metadata["assets"],
+                {
+                    "name": "animemo-v1.1.0-lookalike-portable.tar",
+                    "state": "uploaded",
+                },
+            ]
+            source = GitHubReleaseSource(
+                Path(directory),
+                runner=FakeRunner(manifest),
+                rest=FakePublicRest(manifest, exact_release=metadata),
+            )
+
+            with self.assertRaisesRegex(RequestRejected, "assets differ"):
+                source.fetch_verified_materials("v1.1.0")
 
     def test_release_asset_metadata_must_be_a_unique_uploaded_object_list(self):
         manifest = stable_manifest()

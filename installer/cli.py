@@ -7,17 +7,21 @@ import ipaddress
 import json
 import sys
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
+from .bootstrap import BootstrapAuthorityError
 from .runtime import (
     Installer,
     InstallerError,
     InstallerMode,
     InstallRequest,
+    InstallTransportSource,
     ListenRequest,
     ReleaseSelector,
     RestoreProtectionKind,
     RestoreProtectionRequest,
+    explicit_transport_policy,
 )
 
 EXIT_SUCCESS = 0
@@ -70,6 +74,13 @@ def _parser() -> argparse.ArgumentParser:
         selector = child.add_mutually_exclusive_group(required=True)
         selector.add_argument("--channel", choices=("stable", "rc"))
         selector.add_argument("--version")
+        child.add_argument(
+            "--source",
+            choices=tuple(source.value for source in InstallTransportSource),
+            default=InstallTransportSource.GITHUB.value,
+        )
+        child.add_argument("--bundle-payload", type=Path)
+        child.add_argument("--release-attestation", type=Path)
         child.add_argument("--public-origin", required=True)
         child.add_argument("--listen", type=_listen, default=ListenRequest())
         child.add_argument("--accept-direct-exposure", action="store_true")
@@ -96,9 +107,7 @@ def _request(args: argparse.Namespace) -> InstallRequest:
     restore_protection = None
     if args.mode is InstallerMode.RESTORE_TO_NEW:
         if args.protection_none:
-            restore_protection = RestoreProtectionRequest(
-                RestoreProtectionKind.NONE
-            )
+            restore_protection = RestoreProtectionRequest(RestoreProtectionKind.NONE)
         elif args.one_time_key_file is not None:
             restore_protection = RestoreProtectionRequest(
                 RestoreProtectionKind.ONE_TIME_KEY_FILE,
@@ -118,6 +127,15 @@ def _request(args: argparse.Namespace) -> InstallRequest:
         mode=args.mode,
         selector=ReleaseSelector(channel=args.channel, version=args.version),
         public_origin=args.public_origin,
+        transport_source=InstallTransportSource(args.source),
+        local_bundle_payload=(
+            args.bundle_payload.absolute() if args.bundle_payload is not None else None
+        ),
+        local_bundle_release_attestation=(
+            args.release_attestation.absolute()
+            if args.release_attestation is not None
+            else None
+        ),
         listen=replace(
             args.listen,
             direct_exposure_accepted=args.accept_direct_exposure,
@@ -151,12 +169,20 @@ def _write(value: object, *, json_output: bool) -> None:
 
 def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> int:
     args = _parser().parse_args(argv)
+    production_composition = runtime is None
     try:
         request = _request(args)
         if runtime is None:
             from .production import build_runtime
 
-            runtime = build_runtime()
+            runtime = build_runtime(
+                transport_source=request.transport_source,
+                transport_policy=explicit_transport_policy(request.transport_source),
+                local_bundle_payload=request.local_bundle_payload,
+                local_bundle_release_attestation=(
+                    request.local_bundle_release_attestation
+                ),
+            )
         plan = runtime.plan(request)
         if args.dry_run:
             _write(plan.as_dict(), json_output=args.json_output)
@@ -184,6 +210,20 @@ def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> 
                     json_output=args.json_output,
                 )
                 return EXIT_VALIDATION
+        if (
+            production_composition
+            and request.transport_source is not InstallTransportSource.LOCAL_BUNDLE
+            and plan.action.value not in {"NO_CHANGE", "UPDATER_HANDOFF"}
+        ):
+            from .bootstrap import authorize_online_stage0
+
+            authorize_online_stage0(
+                tag=plan.release.version,
+                release_commit=plan.release.commit,
+                verified_at=datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+            )
         result = runtime.execute(plan, accepted_plan_digest=plan.plan_digest)
         _write(result.as_dict(), json_output=args.json_output)
         if result.outcome.value in {"SUCCEEDED", "NO_CHANGE"}:
@@ -199,6 +239,15 @@ def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> 
             json_output=bool(getattr(args, "json_output", False)),
         )
         return _exit_code(error)
+    except BootstrapAuthorityError:
+        _write(
+            {
+                "outcome": "VALIDATION_FAILED",
+                "reasonCode": "INSTALL_BOOTSTRAP_STAGE0_FAILED",
+            },
+            json_output=bool(getattr(args, "json_output", False)),
+        )
+        return EXIT_VALIDATION
     except (OSError, EOFError, KeyboardInterrupt):
         _write(
             {"outcome": "ENVIRONMENT_FAILED", "reasonCode": "INSTALL_INPUT_FAILED"},

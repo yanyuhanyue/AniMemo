@@ -35,6 +35,7 @@ from release.contract import (
 
 from .commands import CommandRunner
 from .errors import CommandFailed, StateError
+from .oci import ImageAcquirer
 from .state import _atomic_json, _atomic_text, _read_private_text
 
 MAX_BACKUP_AGE = timedelta(hours=24)
@@ -628,6 +629,49 @@ class ImmutableComposeDeployment:
             env["ANIMEMO_REDIS_IMAGE"],
         ]:
             self.runner.run(["/usr/bin/docker", "pull", image], env=env, timeout=600)
+
+    def pull_verified(self, materials, policy) -> None:
+        receipt = ImageAcquirer(
+            runner=self.runner,
+            environment=self._environment(materials.manifest),
+        ).acquire(materials, policy)
+        self._record_image_acquisition_receipt(receipt)
+
+    def import_local_verified(self, source, materials, policy) -> None:
+        acquire_images = getattr(source, "acquire_images", None)
+        if not callable(acquire_images):
+            raise StateError("Verified local OCI source is unavailable")
+        receipt = acquire_images(
+            materials,
+            ImageAcquirer(
+                runner=self.runner,
+                environment=self._environment(materials.manifest),
+            ),
+        )
+        if receipt.transport_policy_identity != policy.identity:
+            raise StateError("Local OCI receipt transport binding is invalid")
+        self._record_image_acquisition_receipt(receipt)
+
+    def _record_image_acquisition_receipt(self, receipt) -> None:
+        _atomic_json(
+            self.paths.state_root / "distribution" / "image-acquisition-receipt.json",
+            {
+                "format": "animemo-image-acquisition-receipt",
+                "version": 1,
+                "identity": receipt.identity,
+                "verifiedReleaseIdentity": receipt.verified_release_identity,
+                "transportPolicyIdentity": receipt.transport_policy_identity,
+                "images": [
+                    {
+                        "role": image.role,
+                        "canonicalReference": image.canonical_reference,
+                        "observedReference": image.observed_reference,
+                    }
+                    for image in receipt.images
+                ],
+            },
+            root=self.paths.state_root,
+        )
 
     def start_datastores(self, manifest: dict[str, object]) -> None:
         self._compose(

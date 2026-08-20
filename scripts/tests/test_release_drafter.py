@@ -23,8 +23,11 @@ class ReleaseDrafterConfigurationTests(unittest.TestCase):
         categories = self.config["categories"]
         self.assertEqual(categories[0]["type"], "pre-exclude")
         self.assertEqual(categories[0]["when"], {"label": "skip-changelog"})
+        self.assertEqual(categories[1]["type"], "pre-exclude")
+        self.assertEqual(categories[1]["when"], {"label": "release/internal"})
 
         expected = [
+            ("⚠️ Breaking Changes", {"release/breaking"}),
             ("🔒 安全与稳定性", {"release/security"}),
             ("✨ 新增功能", {"release/feature"}),
             ("🐛 Bug 修复", {"release/fix"}),
@@ -37,7 +40,7 @@ class ReleaseDrafterConfigurationTests(unittest.TestCase):
             ("📝 文档", {"release/docs"}),
         ]
         actual = []
-        for category in categories[1:-1]:
+        for category in categories[2:-1]:
             when = category["when"]
             labels = set(when.get("labels", [when.get("label")]))
             actual.append((category["title"], labels))
@@ -49,6 +52,7 @@ class ReleaseDrafterConfigurationTests(unittest.TestCase):
     def test_native_release_notes_fallback_has_the_same_category_contract(self) -> None:
         changelog = self.native_config["changelog"]
         self.assertIn("skip-changelog", changelog["exclude"]["labels"])
+        self.assertIn("release/internal", changelog["exclude"]["labels"])
 
         drafter_categories = [
             category
@@ -77,7 +81,12 @@ class ReleaseDrafterConfigurationTests(unittest.TestCase):
         }
         rules = self.config["autolabeler"]
         self.assertEqual(len(rules), len({rule["label"] for rule in rules}))
-        self.assertEqual({rule["label"] for rule in rules}, category_labels)
+        automatic_labels = {rule["label"] for rule in rules}
+        self.assertTrue(automatic_labels < category_labels)
+        self.assertEqual(
+            category_labels - automatic_labels,
+            {"release/breaking", "release/internal"},
+        )
         for rule in rules:
             self.assertTrue(set(rule) & {"files", "branch", "title", "body"})
 

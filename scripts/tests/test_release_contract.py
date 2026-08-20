@@ -27,6 +27,7 @@ from release.contract import (
     validate_deployment_contract,
     validate_manifest,
 )
+from scripts.tests.trust_kit_fixture import contract_only_test_pretrust_bytes
 
 COMMIT = "a" * 40
 API_DIGEST = "sha256:" + "1" * 64
@@ -38,14 +39,22 @@ DEPLOYMENT_FILES = [
 MATERIAL_BYTES = b"qualified wheel bytes"
 MATERIAL_PATH = "wheelhouse/qualified_dependency-1.0-py3-none-any.whl"
 MATERIAL_DIGEST = "sha256:" + "f" * 64
-MATERIAL_FILES = [
+MATERIAL_FILES = sorted([
     {
         "path": MATERIAL_PATH,
         "sha256": "sha256:" + hashlib.sha256(MATERIAL_BYTES).hexdigest(),
         "size": len(MATERIAL_BYTES),
         "mode": "0644",
     }
-]
+] + [
+    {
+        "path": path,
+        "sha256": "sha256:" + hashlib.sha256(value).hexdigest(),
+        "size": len(value),
+        "mode": "0755" if path.endswith("/offline-release-verifier") else "0644",
+    }
+    for path, value in contract_only_test_pretrust_bytes().items()
+], key=lambda item: item["path"])
 DEPLOYMENT_CONTRACT = {
     "schemaVersion": 2,
     "profile": "v1.1-standard",
@@ -66,15 +75,18 @@ DEPLOYMENT_DIGEST = deployment_contract_digest(
 
 def write_material_archive(path: Path) -> None:
     with tarfile.open(path, mode="w:", format=tarfile.USTAR_FORMAT) as archive:
-        member = tarfile.TarInfo(MATERIAL_PATH)
-        member.size = len(MATERIAL_BYTES)
-        member.mode = 0o644
-        member.mtime = 0
-        member.uid = 0
-        member.gid = 0
-        member.uname = ""
-        member.gname = ""
-        archive.addfile(member, io.BytesIO(MATERIAL_BYTES))
+        values = dict(contract_only_test_pretrust_bytes())
+        values[MATERIAL_PATH] = MATERIAL_BYTES
+        for relative, material in sorted(values.items()):
+            member = tarfile.TarInfo(relative)
+            member.size = len(material)
+            member.mode = 0o755 if relative.endswith("/offline-release-verifier") else 0o644
+            member.mtime = 0
+            member.uid = 0
+            member.gid = 0
+            member.uname = ""
+            member.gname = ""
+            archive.addfile(member, io.BytesIO(material))
 
 
 def manifest(**overrides):

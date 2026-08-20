@@ -9,6 +9,16 @@ categories:
     when:
       label: skip-changelog
 
+  - type: pre-exclude
+    when:
+      label: release/internal
+
+  - title: "⚠️ Breaking Changes"
+    exclusive: true
+    semver-increment: major
+    when:
+      label: release/breaking
+
   - title: "🔒 安全与稳定性"
     exclusive: true
     when:

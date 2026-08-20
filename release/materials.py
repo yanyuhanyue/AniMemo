@@ -18,6 +18,21 @@ MAX_MATERIAL_FILE_BYTES = 64 * 1024 * 1024
 MAX_MATERIAL_TOTAL_BYTES = 256 * 1024 * 1024
 INSTALLER_MATERIALS_NAME = "installer-materials.tar"
 PLATFORM_QUALIFICATION_MATERIAL = "release/platform-qualification.json"
+OFFLINE_RELEASE_VERIFIER_MATERIAL = (
+    "release/release_attestation_verifier/offline-release-verifier"
+)
+INITIAL_TRUST_KIT_PREFIX = "release/release_attestation_verifier/pretrust-v2"
+INITIAL_TRUST_KIT_FILES = frozenset(
+    {
+        "github-trusted-root.jsonl",
+        "github-tuf-root.json",
+        "initial-trust-bootstrap.json",
+        "offline-release-verifier",
+        "sigstore-trusted-root.jsonl",
+        "sigstore-tuf-root.json",
+        "trust-profile.json",
+    }
+)
 
 _FIXED_DEPLOYMENT_FILES = (
     "deploy/docker-compose.yml",
@@ -185,7 +200,11 @@ def _direct_source_bytes(source: Path, relative: str) -> bytes:
     return value
 
 
-def _profile_paths(root: Path, wheelhouse: Path) -> list[tuple[str, Path]]:
+def _profile_paths(
+    root: Path,
+    wheelhouse: Path,
+    initial_trust_kit: Path,
+) -> list[tuple[str, Path]]:
     result = [(relative, root) for relative in _FIXED_DEPLOYMENT_FILES]
     for package in ("durability", "release", "updater", "installer"):
         package_root = root / package
@@ -209,6 +228,20 @@ def _profile_paths(root: Path, wheelhouse: Path) -> list[tuple[str, Path]]:
         raise MaterialContractError("Offline wheelhouse must contain only wheel files")
     result.extend((f"wheelhouse/{wheel.name}", wheel) for wheel in wheels)
 
+    from release.trust_bootstrap import validate_initial_trust_kit
+
+    try:
+        validate_initial_trust_kit(initial_trust_kit)
+    except ValueError as error:
+        raise MaterialContractError("Initial pretrust kit is invalid") from error
+    result.extend(
+        (
+            f"{INITIAL_TRUST_KIT_PREFIX}/{name}",
+            initial_trust_kit / name,
+        )
+        for name in sorted(INITIAL_TRUST_KIT_FILES)
+    )
+
     paths = [relative for relative, _ in result]
     if len(paths) > MAX_MATERIAL_FILES or len(paths) != len(set(paths)):
         raise MaterialContractError(
@@ -222,6 +255,7 @@ def _mode_for(relative: str) -> int:
         0o755
         if relative.endswith(".sh")
         or relative == "deploy/updater/animemo-updater"
+        or relative == OFFLINE_RELEASE_VERIFIER_MATERIAL
         else 0o644
     )
 
@@ -231,10 +265,14 @@ def build_installer_materials(
     *,
     wheelhouse: Path,
     output: Path,
+    initial_trust_kit: Path | None = None,
 ) -> MaterialArchiveIdentity:
     root = root.resolve()
     wheelhouse = wheelhouse.resolve()
     output = output.resolve()
+    if initial_trust_kit is None:
+        raise MaterialContractError("Initial pretrust kit is required")
+    initial_trust_kit = initial_trust_kit.resolve()
     files: list[MaterialFileIdentity] = []
     total_bytes = 0
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -245,7 +283,11 @@ def build_installer_materials(
     temporary = Path(temporary_name)
     try:
         with tarfile.open(temporary, mode="w:", format=tarfile.USTAR_FORMAT) as archive:
-            for relative, source_root in _profile_paths(root, wheelhouse):
+            for relative, source_root in _profile_paths(
+                root,
+                wheelhouse,
+                initial_trust_kit,
+            ):
                 value = (
                     _direct_source_bytes(source_root, relative)
                     if source_root.is_file()
@@ -443,6 +485,11 @@ def _parse_material_contract(
         raise MaterialContractError(
             "Installer material file list is duplicate or unordered"
         )
+    required_pretrust = {
+        f"{INITIAL_TRUST_KIT_PREFIX}/{name}" for name in INITIAL_TRUST_KIT_FILES
+    }
+    if not required_pretrust.issubset(paths):
+        raise MaterialContractError("Installer material profile lacks initial pretrust")
     return archive, tuple(materials)
 
 

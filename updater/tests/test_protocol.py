@@ -15,6 +15,15 @@ class ProtocolAllowlistTests(unittest.TestCase):
             {"operation": "plan_update", "params": {"version": "v1.2.0-rc.3"}},
             {"operation": "apply_update", "params": {"planId": "a" * 32, "confirmation": "APPLY v1.2.0-rc.3"}},
             {"operation": "rollback_previous", "params": {"confirmation": "ROLLBACK PREVIOUS"}},
+            {
+                "operation": "rollback_previous",
+                "params": {
+                    "confirmation": "ROLLBACK PREVIOUS",
+                    "source": "local-bundle",
+                    "bundlePayload": "/media/previous-portable.tar",
+                    "releaseAttestation": "/media/previous-release-attestation.json",
+                },
+            },
             {"operation": "get_operation", "params": {"operationId": "b" * 32}},
             {"operation": "get_logs", "params": {"operationId": "b" * 32, "limit": 100}},
         ]
@@ -50,6 +59,63 @@ class ProtocolAllowlistTests(unittest.TestCase):
         ]:
             with self.subTest(request=request), self.assertRaises(RequestRejected):
                 validate_request(request)
+
+    def test_plan_update_source_is_closed_and_local_bundle_requires_explicit_pair(self):
+        accepted = (
+            {"operation": "plan_update", "params": {"version": "v1.0.0"}},
+            {
+                "operation": "plan_update",
+                "params": {"version": "v1.0.0", "source": "github"},
+            },
+            {
+                "operation": "plan_update",
+                "params": {
+                    "version": "v1.0.0",
+                    "source": "official-mirror",
+                },
+            },
+        )
+        for request in accepted:
+            with self.subTest(request=request):
+                self.assertEqual(validate_request(request), request)
+
+        local = {
+            "operation": "plan_update",
+            "params": {
+                "version": "v1.0.0",
+                "source": "local-bundle",
+                "bundlePayload": "/media/animemo-v1.0.0-portable.tar",
+                "releaseAttestation": "/media/animemo-v1.0.0-release-attestation.json",
+            },
+        }
+        self.assertEqual(validate_request(local), local)
+
+        for params in (
+            {"version": "v1.0.0", "source": "local-bundle"},
+            {
+                "version": "v1.0.0",
+                "source": "local-bundle",
+                "bundlePayload": "relative.tar",
+                "releaseAttestation": "/media/proof.json",
+            },
+            {
+                "version": "v1.0.0",
+                "source": "github",
+                "bundlePayload": "/media/payload.tar",
+                "releaseAttestation": "/media/proof.json",
+            },
+        ):
+            with self.subTest(params=params), self.assertRaises(RequestRejected):
+                validate_request({"operation": "plan_update", "params": params})
+
+        for source in ("auto", "geo", "https://attacker.invalid/release"):
+            with self.subTest(source=source), self.assertRaises(RequestRejected):
+                validate_request(
+                    {
+                        "operation": "plan_update",
+                        "params": {"version": "v1.0.0", "source": source},
+                    }
+                )
 
 
 if __name__ == "__main__":
