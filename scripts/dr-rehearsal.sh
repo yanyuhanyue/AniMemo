@@ -440,32 +440,51 @@ user.set_password("DrRestorePass123!")
 user.save(update_fields=["password"])
 # Keep the real HTTP-issued access token fresh through the intentionally slow
 # backup/restore flow so its later rejection proves epoch rotation, not expiry.
-AccessToken.lifetime = timedelta(hours=2)
-login_client = APIClient(enforce_csrf_checks=True)
-csrf_response = login_client.get(
-    "/api/v1/auth/csrf/",
-    secure=True,
-    HTTP_HOST="dr.example.test",
+DR_ACCESS_TOKEN_MIN_REMAINING_SECONDS = 2 * 60 * 60
+DR_ACCESS_TOKEN_ISSUANCE_MARGIN_SECONDS = 5 * 60
+original_access_token_lifetime = AccessToken.lifetime
+try:
+    AccessToken.lifetime = timedelta(
+        seconds=(
+            DR_ACCESS_TOKEN_MIN_REMAINING_SECONDS
+            + DR_ACCESS_TOKEN_ISSUANCE_MARGIN_SECONDS
+        )
+    )
+    login_client = APIClient(enforce_csrf_checks=True)
+    csrf_response = login_client.get(
+        "/api/v1/auth/csrf/",
+        secure=True,
+        HTTP_HOST="dr.example.test",
+    )
+    csrf_payload = csrf_response.json()
+    assert csrf_response.status_code == 200, csrf_payload
+    login_response = login_client.post(
+        "/api/v1/token/",
+        {"username": user.username, "password": "DrRestorePass123!"},
+        format="json",
+        secure=True,
+        HTTP_HOST="dr.example.test",
+        HTTP_ORIGIN="https://dr.example.test",
+        HTTP_REFERER="https://dr.example.test/",
+        HTTP_X_CSRFTOKEN=csrf_payload["csrf_token"],
+    )
+    login_payload = login_response.json()
+    assert login_response.status_code == 200, login_payload
+    assert "refresh" not in login_payload
+    access = login_payload["access"]
+    refresh = login_response.cookies[django_settings.REFRESH_COOKIE_NAME].value
+    access_token = AccessToken(access)
+finally:
+    AccessToken.lifetime = original_access_token_lifetime
+
+remaining_seconds = (
+    int(access_token["exp"])
+    - int(timezone.now().timestamp())
 )
-csrf_payload = csrf_response.json()
-assert csrf_response.status_code == 200, csrf_payload
-login_response = login_client.post(
-    "/api/v1/token/",
-    {"username": user.username, "password": "DrRestorePass123!"},
-    format="json",
-    secure=True,
-    HTTP_HOST="dr.example.test",
-    HTTP_ORIGIN="https://dr.example.test",
-    HTTP_REFERER="https://dr.example.test/",
-    HTTP_X_CSRFTOKEN=csrf_payload["csrf_token"],
+assert remaining_seconds >= DR_ACCESS_TOKEN_MIN_REMAINING_SECONDS, (
+    f"remaining_seconds={remaining_seconds}, "
+    f"minimum_seconds={DR_ACCESS_TOKEN_MIN_REMAINING_SECONDS}"
 )
-login_payload = login_response.json()
-assert login_response.status_code == 200, login_payload
-assert "refresh" not in login_payload
-access = login_payload["access"]
-refresh = login_response.cookies[django_settings.REFRESH_COOKIE_NAME].value
-access_token = AccessToken(access)
-assert int(access_token["exp"]) - int(access_token["iat"]) >= 2 * 60 * 60
 Session.objects.update_or_create(
     session_key="drrehearsalsession",
     defaults={"session_data": "e30=", "expire_date": timezone.now() + timedelta(days=1)},

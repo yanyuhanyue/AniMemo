@@ -69,8 +69,14 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
             "refresh_payload = refresh_response.json()",
             'HTTP_ORIGIN="https://dr.example.test"',
             'HTTP_REFERER="https://dr.example.test/"',
-            "AccessToken.lifetime = timedelta(hours=2)",
-            'int(access_token["exp"]) - int(access_token["iat"]) >= 2 * 60 * 60',
+            "DR_ACCESS_TOKEN_MIN_REMAINING_SECONDS = 2 * 60 * 60",
+            "DR_ACCESS_TOKEN_ISSUANCE_MARGIN_SECONDS = 5 * 60",
+            "original_access_token_lifetime = AccessToken.lifetime",
+            "AccessToken.lifetime = original_access_token_lifetime",
+            "remaining_seconds = (",
+            'int(access_token["exp"])',
+            "int(timezone.now().timestamp())",
+            "remaining_seconds >= DR_ACCESS_TOKEN_MIN_REMAINING_SECONDS",
             'old_access_token = AccessToken(old_access)',
             'int(old_access_token["exp"]) > int(time()) + 300',
             "old access token expired before epoch rejection proof",
@@ -94,6 +100,42 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
         )
         self.assertNotIn("issue_token_pair", self.script)
         self.assertNotIn("response.data", self.script)
+        self.assertNotIn(
+            'int(access_token["exp"]) - int(access_token["iat"]) >= 2 * 60 * 60',
+            self.script,
+        )
+
+    def test_access_token_fixture_restores_lifetime_and_asserts_remaining_validity(self):
+        original_lifetime = self.script.index(
+            "original_access_token_lifetime = AccessToken.lifetime"
+        )
+        override_lifetime = self.script.index(
+            "AccessToken.lifetime = timedelta(", original_lifetime
+        )
+        login = self.script.index('"/api/v1/token/"', override_lifetime)
+        restore_lifetime = self.script.index(
+            "AccessToken.lifetime = original_access_token_lifetime", login
+        )
+        remaining_validity = self.script.index("remaining_seconds = (", restore_lifetime)
+        remaining_assertion = self.script.index(
+            "remaining_seconds >= DR_ACCESS_TOKEN_MIN_REMAINING_SECONDS",
+            remaining_validity,
+        )
+
+        self.assertLess(original_lifetime, override_lifetime)
+        self.assertLess(override_lifetime, login)
+        self.assertLess(login, restore_lifetime)
+        self.assertLess(restore_lifetime, remaining_validity)
+        self.assertLess(remaining_validity, remaining_assertion)
+        self.assertRegex(
+            self.script,
+            r"seconds=\(\s*DR_ACCESS_TOKEN_MIN_REMAINING_SECONDS\s*"
+            r"\+\s*DR_ACCESS_TOKEN_ISSUANCE_MARGIN_SECONDS\s*\)",
+        )
+        self.assertIn(
+            "finally:\n    AccessToken.lifetime = original_access_token_lifetime",
+            self.script,
+        )
 
     def test_destructive_paths_are_canonical_direct_children_and_revalidated(self):
         for marker in (
