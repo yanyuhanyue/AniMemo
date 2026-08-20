@@ -534,9 +534,11 @@ RULES = (
     RiskRule(
         "install-portal-bootstrap",
         "CRITICAL",
-        "install.animemo.cc bootstrap transport or installation UX changed.",
+        "Install portal bootstrap transport or installation UX changed.",
         ("release", "tooling"),
-        lambda path: path.startswith("install.animemo.cc/"),
+        lambda path: path.startswith(
+            ("sites/install-portal/", "install.animemo.cc/")
+        ),
     ),
     RiskRule(
         "installer-runtime",
