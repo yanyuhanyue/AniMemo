@@ -161,12 +161,15 @@ test("Cloudflare Pages headers 建立最小同源静态安全合同", async () =
     "base-uri 'none'",
     "frame-ancestors 'none'",
     "form-action 'none'",
+    "X-Frame-Options: DENY",
     "X-Content-Type-Options: nosniff",
     "Referrer-Policy: no-referrer",
     "Permissions-Policy:",
     "Cross-Origin-Opener-Policy: same-origin",
     "Cache-Control: no-store",
   ]) assert.match(headers, new RegExp(directive.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal((headers.match(/^ {2}X-Frame-Options: DENY$/gm) ?? []).length, 1);
+  assert.doesNotMatch(headers, /^\s*X-Frame-Options:\s*(?:SAMEORIGIN|ALLOW-FROM\b.*)$/gim);
   assert.doesNotMatch(headers, /unsafe-eval|script-src[^\n]*https:|style-src[^\n]*https:|connect-src[^\n]*\*/);
 });
 
