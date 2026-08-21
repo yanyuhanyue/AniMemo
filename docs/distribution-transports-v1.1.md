@@ -41,7 +41,7 @@ bundle 内自带 checksum、公钥或自声明 trust root 不构成 Release Auth
 
 ## 安装入口
 
-公共入口源代码位于 `install.animemo.cc/`。页面不是 Release Authority，也不得提供在权威验证前执行的 AniMemo 脚本。历史 `install.sh` 已退役并固定 fail closed。在线 Stage‑0 必须先从 GitHub 官方签名 APT 仓库安装固定版本的 GitHub CLI，再对 exact tag 与本地资产执行 GitHub Immutable Release 验证；离线 Stage‑0 必须由 operator 或可信镜像独立预置信任材料。
+公共入口组件源代码位于与域名无关的 `sites/install-portal/`。当前公开入口仍为 `https://install.animemo.cc`。页面不是 Release Authority，也不得提供在权威验证前执行的 AniMemo 脚本。历史 `install.sh` 已退役并固定 fail closed。在线 Stage‑0 必须先从 GitHub 官方签名 APT 仓库安装固定版本的 GitHub CLI，再对 exact tag 与本地资产执行 GitHub Immutable Release 验证；离线 Stage‑0 必须由 operator 或可信镜像独立预置信任材料。
 
 本安全边界由 `docs/installer-contract-v2.md` 冻结；原 `docs/installer-contract-v1.md` 保持其历史冻结字节不变。
 

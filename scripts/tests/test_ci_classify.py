@@ -66,6 +66,21 @@ class CiClassificationTests(unittest.TestCase):
         for name in names:
             self.assertEqual(result[name], "true", name)
 
+    def test_install_portal_current_and_retired_paths_remain_critical(self):
+        for path in (
+            "sites/install-portal/index.html",
+            "sites/install-portal/release-state.mjs",
+            "sites/install-portal/_headers",
+            "install.animemo.cc/index.html",
+        ):
+            with self.subTest(path=path):
+                result = self.assert_risk("CRITICAL", path)
+                document = parsed(result)
+                matched = document["paths"][0]
+                self.assertIn("install-portal-bootstrap", matched["rules"])
+                self.assertEqual(result["execution_profile"], "TARGETED")
+                self.assert_true(result, "release", "tooling", "critical_gate")
+
     def test_machine_readable_schema_v2_is_consistent(self):
         result = classify_paths(["backend/journal/services.py"])
         document = parsed(result)

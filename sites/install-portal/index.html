@@ -25,7 +25,7 @@
         <a href="#upgrade">升级</a>
         <a href="#help">诊断与恢复</a>
       </nav>
-      <p class="authority-chip">Release Authority · GitHub</p>
+      <p class="authority-chip">Release Authority · GitHub Immutable Release</p>
     </header>
 
     <main id="main">
@@ -39,20 +39,23 @@
 
           <div class="quick-install" aria-labelledby="quick-title">
             <div class="block-heading">
-              <span>推荐安装</span>
-              <strong id="quick-title">独立 Stage‑0 验证</strong>
+              <span>正式 Release 状态</span>
+              <strong id="quick-title">安装命令仅在权威验证后启用</strong>
+            </div>
+            <p class="release-state is-unavailable" id="release-state" aria-live="polite">
+              暂无可安装的正式 Release
+            </p>
+            <div class="command-row">
+              <code id="release-command">发布身份尚未获得资格认证。</code>
+              <button type="button" data-copy-target="release-command" disabled>复制</button>
             </div>
             <div class="command-row">
-              <code id="release-command">gh release verify &lt;EXACT_TAG&gt; --repo yanyuhanyue/AniMemo</code>
-              <button type="button" data-copy-target="release-command">复制</button>
+              <code id="download-command">没有可下载的正式安装材料。</code>
+              <button type="button" data-copy-target="download-command" disabled>复制</button>
             </div>
             <div class="command-row">
-              <code id="download-command">gh release download &lt;EXACT_TAG&gt; --repo yanyuhanyue/AniMemo --pattern installer-materials.tar --dir ./animemo-stage0</code>
-              <button type="button" data-copy-target="download-command">复制</button>
-            </div>
-            <div class="command-row">
-              <code id="run-command">gh release verify-asset &lt;EXACT_TAG&gt; ./animemo-stage0/installer-materials.tar --repo yanyuhanyue/AniMemo</code>
-              <button type="button" data-copy-target="run-command">复制</button>
+              <code id="run-command">验证命令将在正式 Release 获得完整证明后生成。</code>
+              <button type="button" data-copy-target="run-command" disabled>复制</button>
             </div>
             <p class="command-note">先从 GitHub 官方签名 APT 仓库安装并固定 gh 2.97.0。三步必须全部通过；随后按项目文档用系统工具把同一 tar 复制并解包到固定 root-only staging，再从该受保护目录以闭合环境启动 canonical Installer。Installer 会把所有已载入的核心模块逐字节绑定回已验证 tar，随后先预置信任状态，再开始系统安装。本站不再提供可直接 sudo 的远程脚本。</p>
           </div>
@@ -74,7 +77,7 @@
             </li>
             <li class="rail-authority">
               <span>03</span>
-              <div><strong>GitHub Release</strong><small>metadata · tag → commit · provenance</small></div>
+              <div><strong>GitHub Immutable Release</strong><small>metadata · tag → commit · provenance</small></div>
             </li>
             <li class="rail-authority">
               <span>04</span>
@@ -92,26 +95,26 @@
           <p>没有地区识别、延迟竞速或失败后的静默切换。改变来源会形成新的显式策略。</p>
         </div>
         <div class="source-grid">
-          <button class="source-card is-active" type="button" data-transport="github" aria-pressed="true">
+          <button class="source-card is-active" type="button" data-transport="github" aria-pressed="true" disabled>
             <span class="source-index">DEFAULT</span>
             <strong>GitHub</strong>
             <small>Canonical transport</small>
             <p>从固定仓库取得 Release metadata、assets、tag 与 provenance。失败时不会自动调用镜像。</p>
           </button>
-          <button class="source-card" type="button" data-transport="official-mirror" aria-pressed="false">
-            <span class="source-index">EXPLICIT</span>
+          <button class="source-card is-blocked" type="button" data-transport="official-mirror" aria-pressed="false" aria-disabled="true" disabled>
+            <span class="source-index" data-mirror-availability>UNAVAILABLE</span>
             <strong>AniMemo Official Mirror</strong>
             <small>Transport only</small>
-            <p>镜像运输精确字节；在线 GitHub authority 仍负责 release 身份与发布证明。</p>
+            <p data-mirror-description>当前没有已资格认证的官方镜像。未来镜像只运输精确字节；GitHub authority 仍负责 release 身份与发布证明。</p>
           </button>
-          <button class="source-card is-blocked" type="button" data-transport="local-bundle" aria-pressed="false">
+          <button class="source-card is-blocked" type="button" data-transport="local-bundle" aria-pressed="false" aria-disabled="true" disabled>
             <span class="source-index">QUALIFYING</span>
             <strong>Portable / Offline Bundle</strong>
             <small>Independent pretrust required</small>
             <p>离线安装必须先由 operator 或可信镜像独立预置 Linux verifier、GitHub/Sigstore roots 与 closed TrustProfile；Portable 自身不能建立首信任。</p>
           </button>
         </div>
-        <p class="source-status" id="source-status" aria-live="polite">当前选择：GitHub。不会自动回退到其他运输来源。</p>
+        <p class="source-status" id="source-status" aria-live="polite">暂无正式 Release；所有运输来源均保持不可用，且不会自动回退。</p>
       </section>
 
       <section class="install-grid" aria-label="安装与升级说明">
@@ -169,6 +172,6 @@
       <p>Bootstrap transports bytes. GitHub Release authorizes releases.</p>
     </footer>
     <div class="copy-status" id="copy-status" aria-live="polite" aria-atomic="true"></div>
-    <script src="./app.js" defer></script>
+    <script type="module" src="./app.js"></script>
   </body>
 </html>

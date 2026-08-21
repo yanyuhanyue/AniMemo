@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BOOTSTRAP = ROOT / "install.animemo.cc" / "install.sh"
+BOOTSTRAP = ROOT / "sites" / "install-portal" / "install.sh"
 TRANSPORT_DOC = ROOT / "docs" / "distribution-transports-v1.1.md"
 GIT_SH = Path(r"C:\Program Files\Git\bin\sh.exe")
 
