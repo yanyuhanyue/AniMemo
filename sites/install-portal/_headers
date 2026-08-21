@@ -1,4 +1,5 @@
 /*
+  ! Access-Control-Allow-Origin
   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
   X-Frame-Options: DENY
   X-Content-Type-Options: nosniff
