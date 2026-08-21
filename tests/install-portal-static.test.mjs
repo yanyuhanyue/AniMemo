@@ -153,6 +153,7 @@ test("页面依赖均为同源静态资源并提供无障碍反馈", async () =>
 test("Cloudflare Pages headers 建立最小同源静态安全合同", async () => {
   const headers = await source("_headers");
   for (const directive of [
+    "! Access-Control-Allow-Origin",
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self'",
@@ -168,6 +169,9 @@ test("Cloudflare Pages headers 建立最小同源静态安全合同", async () =
     "Cross-Origin-Opener-Policy: same-origin",
     "Cache-Control: no-store",
   ]) assert.match(headers, new RegExp(directive.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal((headers.match(/^ {2}! Access-Control-Allow-Origin$/gm) ?? []).length, 1);
+  assert.doesNotMatch(headers, /^\s*Access-Control-Allow-Origin:\s*\*\s*$/gim);
+  assert.doesNotMatch(headers, /^\s*Access-Control-Allow-Origin\s*:/gim);
   assert.equal((headers.match(/^ {2}X-Frame-Options: DENY$/gm) ?? []).length, 1);
   assert.doesNotMatch(headers, /^\s*X-Frame-Options:\s*(?:SAMEORIGIN|ALLOW-FROM\b.*)$/gim);
   assert.doesNotMatch(headers, /unsafe-eval|script-src[^\n]*https:|style-src[^\n]*https:|connect-src[^\n]*\*/);
