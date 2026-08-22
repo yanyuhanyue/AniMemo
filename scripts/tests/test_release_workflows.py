@@ -124,7 +124,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(
-                json.loads(completed.stdout)["releaseTag"], "v1.1.0-rc.5"
+                json.loads(completed.stdout)["releaseTag"], "v1.1.0-rc.6"
             )
             missing = subprocess.run(
                 [
@@ -1095,7 +1095,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertLess(publish.index(final_name), publish.index("docker/login-action"))
         self.assertLess(publish.index(final_name), publish.index("docker push"))
         self.assertLess(publish.index(final_name), publish.index("git push origin"))
-        self.assertLess(publish.index(final_name), publish.index("gh release create"))
+        self.assertLess(
+            publish.index(final_name),
+            publish.index('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"'),
+        )
         self.assertNotIn("build-initial-trust-kit", publish)
         self.assertLess(
             publish.index("verify-prepublication-materials"),
@@ -1584,7 +1587,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("release-notes.md", source)
         self.assertIn("env -u GH_TOKEN curl", source)
         self.assertLess(
-            source.index('gh release create "$RELEASE_TAG"'),
+            source.index('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"'),
             source.index('gh release upload "$RELEASE_TAG"'),
         )
         self.assertLess(
@@ -1593,6 +1596,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("id: draft_release", source)
         self.assertIn('release_id=$release_id', source)
+        draft_step = source[
+            source.index("Create an unpublished GitHub Draft Pre-release") :
+            source.index("Upload and read back the complete Draft asset set")
+        ]
+        self.assertIn('--input "$RUNNER_TEMP/draft-create-request.json"', draft_step)
+        self.assertNotIn("releases?per_page=100", draft_step)
         self.assertIn('gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"', source)
         self.assertNotIn(
             'gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"',
