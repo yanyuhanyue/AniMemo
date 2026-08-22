@@ -31,7 +31,9 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
         destroy_a = self.script.index("== Destroy isolated instance A only ==")
         restore = self.script.index('dr_backup.py" restore')
         fresh_database = self.script.index("SELECT count(*) FROM pg_tables")
-        postgres_restore = self.script.index('gzip -dc "$DATA_B/database.sql.gz"')
+        postgres_restore = self.script.index(
+            'as_root gzip -dc -- "$DATA_B/database.sql.gz"'
+        )
         self.assertLess(dump, backup)
         self.assertLess(backup, destroy_a)
         self.assertLess(destroy_a, restore)
@@ -75,6 +77,36 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
             if "$DATA_B/private" in line and "chmod" in line:
                 with self.subTest(permission_line=line):
                     self.assertNotRegex(line, r"\b(?:0644|0755|0777)\b|a\+r")
+
+    def test_restored_database_dump_is_privileged_only_at_local_read_boundary(self):
+        restore = self.script.index('dr_backup.py" restore')
+        privileged_read = (
+            'as_root gzip -dc -- "$DATA_B/database.sql.gz" | '
+            'compose b exec -T postgres psql --set ON_ERROR_STOP=1 '
+            '-U animemo -d animemo'
+        )
+        database_reads = [
+            line.strip()
+            for line in self.script.splitlines()
+            if 'gzip -dc' in line and '$DATA_B/database.sql.gz' in line
+        ]
+
+        self.assertEqual(database_reads, [privileged_read])
+        privileged_read_index = self.script.index(privileged_read)
+        migration = self.script.index(
+            "compose b run --rm --no-deps migration", privileged_read_index
+        )
+        self.assertLess(restore, privileged_read_index)
+        self.assertLess(privileged_read_index, migration)
+        self.assertTrue(
+            "pipefail" in self.script.splitlines()[1],
+            "shell strict mode no longer includes pipefail",
+        )
+        self.assertNotIn("as_root compose b exec", self.script)
+        for line in self.script.splitlines():
+            if "$DATA_B/database.sql.gz" in line:
+                with self.subTest(database_dump_line=line):
+                    self.assertNotRegex(line, r"\b(?:chmod|chown)\b|\b0644\b|a\+r")
 
     def test_rehearsal_covers_authoritative_state_and_restore_security_actions(self):
         required = (

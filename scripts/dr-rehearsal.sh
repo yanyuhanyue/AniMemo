@@ -594,7 +594,7 @@ test "$(compose b exec -T postgres psql -At -U animemo -d animemo -c "SELECT cou
 test "$(compose b exec -T redis redis-cli --raw DBSIZE | tr -d '\r')" = "0"
 
 echo "== Restore PostgreSQL, migrate/bootstrap, and rotate authentication epoch on B =="
-gzip -dc "$DATA_B/database.sql.gz" | compose b exec -T postgres psql --set ON_ERROR_STOP=1 -U animemo -d animemo
+as_root gzip -dc -- "$DATA_B/database.sql.gz" | compose b exec -T postgres psql --set ON_ERROR_STOP=1 -U animemo -d animemo
 compose b run --rm --no-deps migration
 compose b run --rm --no-deps bootstrap
 compose b run --rm --no-deps api python manage.py rotate_authentication_epoch --confirm-restore
