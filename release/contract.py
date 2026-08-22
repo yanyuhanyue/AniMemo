@@ -41,6 +41,30 @@ STABLE_TAG = re.compile(
 PRERELEASE_TAG = re.compile(
     r"^v(?P<base>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))-(?P<channel>beta|rc)\.(?P<sequence>[1-9][0-9]*)$"
 )
+PUBLICATION_RESERVATION_SCHEMA_VERSION = 1
+PUBLICATION_RESERVATION_STATUSES = frozenset(
+    {"ABORTED_PARTIAL_GHCR_TRANSACTION"}
+)
+_PUBLICATION_RESERVATION_FIELDS = {
+    "releaseTag",
+    "status",
+    "reusable",
+    "candidateSha",
+    "candidateTreeSha",
+    "qualificationRunId",
+    "publishRunId",
+    "api",
+    "web",
+    "gitTagCreated",
+    "githubReleaseCreated",
+    "releaseAssetCount",
+}
+_PUBLICATION_RESERVATION_IMAGE_FIELDS = {
+    "repository",
+    "digest",
+    "tags",
+    "attestationVerified",
+}
 
 
 class ReleaseContractError(ValueError):
@@ -214,12 +238,163 @@ def previous_stable_tag(tags: list[str], *, target: str) -> str | None:
     return candidates[-1][1] if candidates else None
 
 
+def _validate_publication_reservation_image(
+    payload: object,
+    *,
+    role: str,
+    release_tag: str,
+    candidate_sha: str,
+) -> None:
+    if not isinstance(payload, dict) or set(payload) != (
+        _PUBLICATION_RESERVATION_IMAGE_FIELDS
+    ):
+        raise ReleaseContractError(
+            f"Publication reservation {role} image has an invalid shape"
+        )
+    expected_repository = API_REPOSITORY if role == "api" else WEB_REPOSITORY
+    if payload["repository"] != expected_repository:
+        raise ReleaseContractError(
+            f"Publication reservation {role} repository is invalid"
+        )
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload["digest"])):
+        raise ReleaseContractError(
+            f"Publication reservation {role} digest is invalid"
+        )
+    expected_tags = {release_tag, f"sha-{candidate_sha}"}
+    tags = payload["tags"]
+    if (
+        not isinstance(tags, list)
+        or any(not isinstance(tag, str) for tag in tags)
+        or len(tags) != 2
+        or set(tags) != expected_tags
+    ):
+        raise ReleaseContractError(
+            f"Publication reservation {role} tags are invalid"
+        )
+    if payload["attestationVerified"] is not True:
+        raise ReleaseContractError(
+            f"Publication reservation {role} attestation must be verified"
+        )
+
+
+def validate_publication_reservations(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict) or set(payload) != {
+        "schemaVersion",
+        "reservations",
+    }:
+        raise ReleaseContractError("Publication reservations have an invalid shape")
+    if (
+        not isinstance(payload["schemaVersion"], int)
+        or isinstance(payload["schemaVersion"], bool)
+        or payload["schemaVersion"] != PUBLICATION_RESERVATION_SCHEMA_VERSION
+    ):
+        raise ReleaseContractError(
+            "Publication reservations have an unsupported schemaVersion"
+        )
+    reservations = payload["reservations"]
+    if not isinstance(reservations, list):
+        raise ReleaseContractError("Publication reservations must be a list")
+
+    seen_release_tags: set[str] = set()
+    for reservation in reservations:
+        if not isinstance(reservation, dict) or set(reservation) != (
+            _PUBLICATION_RESERVATION_FIELDS
+        ):
+            raise ReleaseContractError(
+                "Publication reservation has an invalid shape"
+            )
+        release_tag = reservation["releaseTag"]
+        if not isinstance(release_tag, str) or not PRERELEASE_TAG.fullmatch(
+            release_tag
+        ):
+            raise ReleaseContractError(
+                "Publication reservation releaseTag must be a beta or rc prerelease"
+            )
+        if release_tag in seen_release_tags:
+            raise ReleaseContractError(
+                f"Duplicate publication reservation releaseTag: {release_tag}"
+            )
+        seen_release_tags.add(release_tag)
+        if (
+            not isinstance(reservation["status"], str)
+            or reservation["status"] not in PUBLICATION_RESERVATION_STATUSES
+        ):
+            raise ReleaseContractError("Publication reservation status is invalid")
+        if reservation["reusable"] is not False:
+            raise ReleaseContractError(
+                "Publication reservation reusable must be false"
+            )
+        candidate_sha = reservation["candidateSha"]
+        if not isinstance(candidate_sha, str) or not re.fullmatch(
+            r"[0-9a-f]{40}", candidate_sha
+        ):
+            raise ReleaseContractError(
+                "Publication reservation candidateSha is invalid"
+            )
+        candidate_tree_sha = reservation["candidateTreeSha"]
+        if not isinstance(candidate_tree_sha, str) or not re.fullmatch(
+            r"[0-9a-f]{40}", candidate_tree_sha
+        ):
+            raise ReleaseContractError(
+                "Publication reservation candidateTreeSha is invalid"
+            )
+        for field in ("qualificationRunId", "publishRunId"):
+            value = reservation[field]
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value <= 0
+            ):
+                raise ReleaseContractError(
+                    f"Publication reservation {field} must be a positive integer"
+                )
+        _validate_publication_reservation_image(
+            reservation["api"],
+            role="api",
+            release_tag=release_tag,
+            candidate_sha=candidate_sha,
+        )
+        _validate_publication_reservation_image(
+            reservation["web"],
+            role="web",
+            release_tag=release_tag,
+            candidate_sha=candidate_sha,
+        )
+        for field in ("gitTagCreated", "githubReleaseCreated"):
+            if not isinstance(reservation[field], bool):
+                raise ReleaseContractError(
+                    f"Publication reservation {field} must be boolean"
+                )
+        asset_count = reservation["releaseAssetCount"]
+        if (
+            not isinstance(asset_count, int)
+            or isinstance(asset_count, bool)
+            or asset_count < 0
+        ):
+            raise ReleaseContractError(
+                "Publication reservation releaseAssetCount must be non-negative"
+            )
+        if (
+            reservation["status"] == "ABORTED_PARTIAL_GHCR_TRANSACTION"
+            and (
+                reservation["gitTagCreated"]
+                or reservation["githubReleaseCreated"]
+                or asset_count != 0
+            )
+        ):
+            raise ReleaseContractError(
+                "Aborted partial GHCR reservation has inconsistent Release state"
+            )
+    return payload
+
+
 def resolve_prerelease(
     *,
     tags: list[str],
     bump: str,
     channel: str,
     target_version_override: str = "",
+    publication_reservations: object | None = None,
 ) -> dict[str, object]:
     if bump not in {"patch", "minor", "major"}:
         raise ReleaseContractError(f"Invalid version bump: {bump!r}")
@@ -253,16 +428,26 @@ def resolve_prerelease(
             )
         base = match.group("base")
 
+    occupied_prerelease_tags = set(tags)
+    if publication_reservations is not None:
+        validated_reservations = validate_publication_reservations(
+            publication_reservations
+        )
+        occupied_prerelease_tags.update(
+            reservation["releaseTag"]
+            for reservation in validated_reservations["reservations"]
+        )
+
     sequences = [
         int(match.group("sequence"))
-        for tag in tags
+        for tag in occupied_prerelease_tags
         if (match := PRERELEASE_TAG.fullmatch(tag))
         and match.group("base") == base
         and match.group("channel") == channel
     ]
     sequence = max(sequences, default=0) + 1
     release_tag = f"v{base}-{channel}.{sequence}"
-    assert_tag_absent(release_tag, tags)
+    assert_tag_absent(release_tag, list(occupied_prerelease_tags))
     return {
         "targetVersion": f"v{base}",
         "releaseTag": release_tag,

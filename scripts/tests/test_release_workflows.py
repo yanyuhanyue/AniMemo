@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -76,6 +77,247 @@ def workflow(name):
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
+    def test_release_resolver_requires_the_candidate_bound_reservation_ledger(self):
+        release = workflow("release.yml")
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        preflight_steps = release["jobs"]["preflight"]["steps"]
+        resolver = next(
+            step
+            for step in preflight_steps
+            if step.get("name") == "Resolve deterministic pre-release version"
+        )
+        ledger_argument = (
+            "--publication-reservations-file "
+            "release/publication-reservations.json"
+        )
+        self.assertEqual(source.count(ledger_argument), 1)
+        self.assertIn(ledger_argument, resolver["run"])
+        self.assertNotIn("if", resolver)
+        self.assertTrue((ROOT / "release" / "publication-reservations.json").is_file())
+        self.assertIn("--publication-reservations-file", source)
+        self.assertNotIn("publication-reservations.json ||", source)
+
+        with tempfile.TemporaryDirectory() as directory:
+            tags = Path(directory) / "tags.txt"
+            tags.write_text("v1.0.0\n", encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    os.sys.executable,
+                    "-m",
+                    "release.cli",
+                    "resolve-version",
+                    "--tags-file",
+                    str(tags),
+                    "--publication-reservations-file",
+                    str(ROOT / "release" / "publication-reservations.json"),
+                    "--bump",
+                    "minor",
+                    "--channel",
+                    "rc",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                json.loads(completed.stdout)["releaseTag"], "v1.1.0-rc.2"
+            )
+            missing = subprocess.run(
+                [
+                    os.sys.executable,
+                    "-m",
+                    "release.cli",
+                    "resolve-version",
+                    "--tags-file",
+                    str(tags),
+                    "--publication-reservations-file",
+                    str(Path(directory) / "missing-reservations.json"),
+                    "--bump",
+                    "minor",
+                    "--channel",
+                    "rc",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(missing.returncode, 2)
+            self.assertEqual(
+                json.loads(missing.stderr)["code"], "release_contract_invalid"
+            )
+
+    def test_oci_layout_function_has_no_same_command_local_dependency(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        dependencies = []
+        for line_number, line in enumerate(source.splitlines(), start=1):
+            match = re.match(r"^\s*local\s+(.+)$", line)
+            if not match:
+                continue
+            assigned = []
+            for assignment in re.finditer(
+                r"\b([A-Za-z_][A-Za-z0-9_]*)=(\"[^\"]*\"|'[^']*'|\S+)",
+                match.group(1),
+            ):
+                value = assignment.group(2)
+                referenced = [
+                    name
+                    for name in assigned
+                    if f"${name}" in value or f"${{{name}}}" in value
+                ]
+                if referenced:
+                    dependencies.append((line_number, assignment.group(1), referenced))
+                assigned.append(assignment.group(1))
+        self.assertEqual(dependencies, [])
+        for declaration in ("local role", "local reference", "local archive"):
+            self.assertIn(declaration, source)
+        self.assertIn('archive="$RUNNER_TEMP/${role}-oci.tar"', source)
+
+    def test_oci_layout_function_runs_under_bash_nounset_for_every_role(self):
+        bash = _bash_path()
+        self.assertIsNotNone(
+            bash,
+            "Bash is required for the fail-closed OCI layout runtime regression",
+        )
+        release = workflow("release.yml")
+        materialize = next(
+            step
+            for step in release["jobs"]["publish"]["steps"]
+            if step.get("name")
+            == "Materialize exact OCI layouts without rebuilding"
+        )["run"]
+        function = re.search(
+            r"(?ms)^export_layout\(\) \{\n.*?^\}", materialize
+        )
+        self.assertIsNotNone(function)
+        function_source = function.group(0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner_temp = root / "runner"
+            portable_source = root / "portable"
+            runner_temp.mkdir()
+            trace = root / "trace.txt"
+            references = {
+                "api": "ghcr.io/yanyuhanyue/animemo-api@sha256:"
+                "3331277a905902388afe430b92370f55b6d0425c663a2ae7470b6d678e579a5a",
+                "web": "ghcr.io/yanyuhanyue/animemo-web@sha256:"
+                "86b99658c1ea71c0a407ef4cddbd5349d8c159195ebedcb3055d9c3c34d5824a",
+                "postgres": "docker.io/library/postgres@sha256:"
+                "075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571",
+                "redis": "docker.io/library/redis@sha256:"
+                "9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf",
+            }
+            calls = "".join(
+                f'export_layout {role} "{reference}"\n'
+                for role, reference in references.items()
+            )
+            stubs = (
+                "install() {\n"
+                "  test \"$1\" = -d\n"
+                "  test \"$2\" = -m\n"
+                "  test \"$3\" = 0700\n"
+                "  mkdir -p \"$4\"\n"
+                "  printf 'install|%s\\n' \"$4\" >> \"$TRACE\"\n"
+                "}\n"
+                "crane() {\n"
+                "  test \"$1\" = pull\n"
+                "  test \"$4\" = --format=oci\n"
+                "  printf 'crane|%s|%s\\n' \"$2\" \"$3\" >> \"$TRACE\"\n"
+                "  : > \"$3\"\n"
+                "}\n"
+                "tar() {\n"
+                "  test \"$1\" = --extract\n"
+                "  test \"$2\" = --file\n"
+                "  test -f \"$3\"\n"
+                "  test \"$4\" = --directory\n"
+                "  test -d \"$5\"\n"
+                "  printf 'tar|%s|%s\\n' \"$3\" \"$5\" >> \"$TRACE\"\n"
+                "}\n"
+            )
+            script = (
+                "set -euo pipefail\n"
+                'portable_source="$PORTABLE_SOURCE"\n'
+                + stubs
+                + function_source
+                + "\n"
+                + calls
+            )
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "RUNNER_TEMP": str(runner_temp),
+                    "PORTABLE_SOURCE": str(portable_source),
+                    "TRACE": str(trace),
+                }
+            )
+            syntax = subprocess.run(
+                [bash, "-n"],
+                input=script,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(syntax.returncode, 0, syntax.stderr)
+            completed = subprocess.run(
+                [bash],
+                input=script,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            trace_text = trace.read_text(encoding="utf-8").replace("\\", "/")
+            for role in ("api", "web", "postgres", "redis"):
+                self.assertIn(references[role], trace_text)
+                self.assertIn(
+                    (runner_temp / f"{role}-oci.tar").as_posix(), trace_text
+                )
+                self.assertIn(
+                    (portable_source / "oci" / role).as_posix(), trace_text
+                )
+            for arguments in ("", "api"):
+                missing = subprocess.run(
+                    [bash],
+                    input=(
+                        "set -euo pipefail\n"
+                        'portable_source="$PORTABLE_SOURCE"\n'
+                        + function_source
+                        + f"\nexport_layout {arguments}\n"
+                    ),
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    capture_output=True,
+                    env=environment,
+                    check=False,
+                )
+                self.assertNotEqual(missing.returncode, 0)
+
+    def test_partial_rc_is_never_deleted_overwritten_or_hardcoded_for_push(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        for forbidden in (
+            "crane delete",
+            "docker manifest rm",
+            "git tag --force",
+            "git push --force",
+            "docker push ghcr.io/yanyuhanyue/animemo-api:v1.1.0-rc.1",
+            "docker push ghcr.io/yanyuhanyue/animemo-web:v1.1.0-rc.1",
+        ):
+            self.assertNotIn(forbidden, source)
+
     def test_release_workflows_pin_every_external_action_to_a_commit(self):
         for name in ("release.yml", "promote-release.yml"):
             source = (ROOT / ".github" / "workflows" / name).read_text(

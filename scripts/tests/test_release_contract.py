@@ -27,6 +27,7 @@ from release.contract import (
     resolve_prerelease,
     validate_deployment_contract,
     validate_manifest,
+    validate_publication_reservations,
 )
 from scripts.tests.trust_kit_fixture import contract_only_test_pretrust_bytes
 
@@ -88,6 +89,38 @@ def write_material_archive(path: Path) -> None:
             member.uname = ""
             member.gname = ""
             archive.addfile(member, io.BytesIO(material))
+
+
+def publication_reservation(
+    *,
+    release_tag: str = "v1.1.0-rc.1",
+    candidate_sha: str = "a" * 40,
+) -> dict[str, object]:
+    sha_tag = f"sha-{candidate_sha}"
+    return {
+        "releaseTag": release_tag,
+        "status": "ABORTED_PARTIAL_GHCR_TRANSACTION",
+        "reusable": False,
+        "candidateSha": candidate_sha,
+        "candidateTreeSha": "b" * 40,
+        "qualificationRunId": 1,
+        "publishRunId": 2,
+        "api": {
+            "repository": "ghcr.io/yanyuhanyue/animemo-api",
+            "digest": "sha256:" + "1" * 64,
+            "tags": [release_tag, sha_tag],
+            "attestationVerified": True,
+        },
+        "web": {
+            "repository": "ghcr.io/yanyuhanyue/animemo-web",
+            "digest": "sha256:" + "2" * 64,
+            "tags": [release_tag, sha_tag],
+            "attestationVerified": True,
+        },
+        "gitTagCreated": False,
+        "githubReleaseCreated": False,
+        "releaseAssetCount": 0,
+    }
 
 
 def manifest(**overrides):
@@ -162,6 +195,149 @@ class VersionResolutionTests(unittest.TestCase):
             "v1.1.0",
         )
         self.assertIsNone(previous_stable_tag(["v1.0.0-rc.1"], target="v1.0.0"))
+
+    def test_resolver_unions_actual_tags_and_non_reusable_reservations(self):
+        empty = {"schemaVersion": 1, "reservations": []}
+        self.assertEqual(
+            resolve_prerelease(
+                tags=["v1.0.0"],
+                bump="minor",
+                channel="rc",
+                publication_reservations=empty,
+            )["releaseTag"],
+            "v1.1.0-rc.1",
+        )
+        rc1 = {
+            "schemaVersion": 1,
+            "reservations": [publication_reservation()],
+        }
+        plan = resolve_prerelease(
+            tags=["v1.0.0"],
+            bump="minor",
+            channel="rc",
+            publication_reservations=rc1,
+        )
+        self.assertEqual(
+            plan,
+            {"targetVersion": "v1.1.0", "releaseTag": "v1.1.0-rc.2", "sequence": 2},
+        )
+        deduplicated = resolve_prerelease(
+            tags=["v1.0.0", "v1.1.0-rc.1"],
+            bump="minor",
+            channel="rc",
+            publication_reservations=rc1,
+        )
+        self.assertEqual(deduplicated["sequence"], 2)
+        self.assertEqual(
+            resolve_prerelease(
+                tags=["v1.0.0"],
+                bump="minor",
+                channel="beta",
+                publication_reservations=rc1,
+            )["sequence"],
+            1,
+        )
+
+        beta1 = {
+            "schemaVersion": 1,
+            "reservations": [
+                publication_reservation(release_tag="v1.1.0-beta.1")
+            ],
+        }
+        self.assertEqual(
+            resolve_prerelease(
+                tags=["v1.0.0"],
+                bump="minor",
+                channel="rc",
+                publication_reservations=beta1,
+            )["sequence"],
+            1,
+        )
+        other_target = {
+            "schemaVersion": 1,
+            "reservations": [
+                publication_reservation(release_tag="v2.0.0-rc.1")
+            ],
+        }
+        self.assertEqual(
+            resolve_prerelease(
+                tags=["v1.0.0"],
+                bump="minor",
+                channel="rc",
+                publication_reservations=other_target,
+            )["sequence"],
+            1,
+        )
+
+    def test_current_incident_reservation_is_valid_and_stable_baseline_is_actual(self):
+        root = Path(__file__).parents[2]
+        payload = json.loads(
+            (root / "release" / "publication-reservations.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertIs(validate_publication_reservations(payload), payload)
+        plan = resolve_prerelease(
+            tags=["v1.0.0"],
+            bump="minor",
+            channel="rc",
+            publication_reservations=payload,
+        )
+        self.assertEqual(plan["targetVersion"], "v1.1.0")
+        self.assertEqual(previous_stable_tag(["v1.0.0"], target="v1.1.0"), "v1.0.0")
+
+    def test_publication_reservation_validation_fails_closed(self):
+        valid = {
+            "schemaVersion": 1,
+            "reservations": [publication_reservation()],
+        }
+
+        def mutation(path, value):
+            payload = copy.deepcopy(valid)
+            target = payload
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            return payload
+
+        invalid = {
+            "unknown top-level field": {**copy.deepcopy(valid), "extra": True},
+            "unknown reservation field": mutation(
+                ["reservations", 0, "extra"], True
+            ),
+            "stable releaseTag": mutation(
+                ["reservations", 0, "releaseTag"], "v1.1.0"
+            ),
+            "reusable reservation": mutation(
+                ["reservations", 0, "reusable"], True
+            ),
+            "unknown status": mutation(
+                ["reservations", 0, "status"], "UNKNOWN"
+            ),
+            "malformed candidate SHA": mutation(
+                ["reservations", 0, "candidateSha"], "A" * 40
+            ),
+            "malformed tree SHA": mutation(
+                ["reservations", 0, "candidateTreeSha"], "bad"
+            ),
+            "malformed digest": mutation(
+                ["reservations", 0, "api", "digest"], "sha256:bad"
+            ),
+            "mismatched sha tag": mutation(
+                ["reservations", 0, "api", "tags"],
+                ["v1.1.0-rc.1", "sha-" + "c" * 40],
+            ),
+            "wrong repository": mutation(
+                ["reservations", 0, "web", "repository"],
+                "ghcr.io/yanyuhanyue/other",
+            ),
+        }
+        duplicate = copy.deepcopy(valid)
+        duplicate["reservations"].append(copy.deepcopy(duplicate["reservations"][0]))
+        invalid["duplicate releaseTag"] = duplicate
+        for label, payload in invalid.items():
+            with self.subTest(label=label), self.assertRaises(ReleaseContractError):
+                validate_publication_reservations(payload)
 
 
 class ManifestContractTests(unittest.TestCase):
