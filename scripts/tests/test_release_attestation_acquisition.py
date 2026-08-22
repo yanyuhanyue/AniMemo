@@ -6,13 +6,16 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from release import acquisition as acquisition_module
 from release.acquisition import (
     REQUIRED_ACTIONS_EVIDENCE,
     AttestationAcquisitionError,
     GitHubAttestationAcquirer,
     validate_attestation_sidecar,
 )
+from release.materials import bound_release_directory_io_available
 from release.portable import portable_release_asset_name
 
 REPOSITORY = "yanyuhanyue/AniMemo"
@@ -22,6 +25,45 @@ WORKFLOW = ".github/workflows/release.yml"
 
 
 class ReleaseAttestationAcquisitionTests(unittest.TestCase):
+    @unittest.skipUnless(
+        bound_release_directory_io_available(),
+        "descriptor-relative directory binding unavailable",
+    )
+    def test_exclusive_export_rejects_parent_path_rebind_without_off_tree_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "bound" / "output"
+            parent.mkdir(parents=True)
+            detached = root / "detached"
+            outside = root / "outside"
+            outside.mkdir()
+            sentinel = outside / "sentinel"
+            sentinel.write_bytes(b"unchanged")
+            real_open_bound_directory = acquisition_module.open_bound_release_directory
+
+            def rebind_after_open(path):
+                descriptor = real_open_bound_directory(path)
+                parent.rename(detached)
+                parent.symlink_to(outside, target_is_directory=True)
+                return descriptor
+
+            with (
+                mock.patch.object(
+                    acquisition_module,
+                    "open_bound_release_directory",
+                    side_effect=rebind_after_open,
+                ),
+                self.assertRaisesRegex(
+                    AttestationAcquisitionError,
+                    "SIDECAR_DESTINATION_REBOUND",
+                ),
+            ):
+                acquisition_module._write_exclusive(parent / "sidecar.json", b"value")
+
+            self.assertEqual(sentinel.read_bytes(), b"unchanged")
+            self.assertFalse((outside / "sidecar.json").exists())
+            self.assertFalse((detached / "sidecar.json").exists())
+
     def _subjects(self, root: Path) -> dict[str, str]:
         values: dict[str, str] = {
             "api-image": "oci://ghcr.io/yanyuhanyue/animemo-api@sha256:"
@@ -35,6 +77,10 @@ class ReleaseAttestationAcquisitionTests(unittest.TestCase):
             values[name] = str(path)
         return values
 
+    @unittest.skipUnless(
+        bound_release_directory_io_available(),
+        "descriptor-relative directory binding unavailable",
+    )
     def test_exact_tag_acquisition_exports_deterministic_dual_input_sidecar(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -101,6 +147,20 @@ class ReleaseAttestationAcquisitionTests(unittest.TestCase):
                 AttestationAcquisitionError, "PAYLOAD_IDENTITY_MISMATCH"
             ):
                 validate_attestation_sidecar(first.read_bytes(), payload=payload)
+
+    @unittest.skipIf(
+        bound_release_directory_io_available(),
+        "descriptor-relative directory binding is available",
+    )
+    def test_export_fails_closed_without_descriptor_relative_io(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "sidecar.json"
+            with self.assertRaisesRegex(
+                AttestationAcquisitionError,
+                "SIDECAR_DESCRIPTOR_RELATIVE_IO_REQUIRED",
+            ):
+                acquisition_module._write_exclusive(destination, b"value")
+            self.assertFalse(destination.exists())
 
     def test_missing_actions_subject_is_rejected_before_external_acquisition(self):
         with tempfile.TemporaryDirectory() as directory:

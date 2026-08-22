@@ -13,11 +13,13 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import stat
 import sys
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO, Self
 
 SCHEMA_VERSION = 1
 MANIFEST_NAME = "dr-manifest.json"
@@ -39,58 +41,378 @@ class BackupError(ValueError):
     pass
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+    )
 
 
-def _safe_path(path: Path, *, label: str) -> Path:
-    path = path.expanduser()
-    if path.is_symlink():
-        raise BackupError(f"{label} must not be a symlink: {path}")
-    return path.resolve()
+def _stat_content_state(metadata: os.stat_result) -> tuple[int, int, int]:
+    return metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns
+
+
+def _absolute_path(path: Path) -> Path:
+    return Path(os.path.abspath(path.expanduser()))
+
+
+def _descriptor_relative_io_available() -> bool:
+    return (
+        os.open in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+        and bool(getattr(os, "O_DIRECTORY", 0))
+    )
+
+
+class BoundEvidenceTree:
+    """Bind a DR root and consume every descendant relative to its held handle."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        label: str,
+        create: bool = False,
+        require_empty: bool = False,
+    ) -> None:
+        self.original = _absolute_path(path)
+        self.label = label
+        self.create = create
+        self.require_empty = require_empty
+        self.descriptor = -1
+
+    def __enter__(self) -> Self:
+        if not _descriptor_relative_io_available():
+            raise BackupError("descriptor-relative DR I/O is required")
+        self.descriptor = self._open_root()
+        if self.require_empty and os.listdir(self.descriptor):
+            self.close()
+            raise BackupError(f"{self.label} must be empty: {self.original}")
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        try:
+            if exc_type is None:
+                self.assert_bound()
+        finally:
+            self.close()
+
+    def _open_root(self) -> int:
+        flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(self.original.anchor, flags)
+        try:
+            for component in self.original.parts[1:]:
+                try:
+                    child = os.open(component, flags, dir_fd=descriptor)
+                except FileNotFoundError:
+                    if not self.create:
+                        raise BackupError(
+                            f"{self.label} must be a directory: {self.original}"
+                        ) from None
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                    child = os.open(component, flags, dir_fd=descriptor)
+                except OSError as error:
+                    raise BackupError(
+                        f"{self.label} must be a directory: {self.original}"
+                    ) from error
+                opened = os.fstat(child)
+                if not stat.S_ISDIR(opened.st_mode):
+                    os.close(child)
+                    raise BackupError(
+                        f"{self.label} must be a directory: {self.original}"
+                    )
+                os.close(descriptor)
+                descriptor = child
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+    def assert_bound(self) -> None:
+        try:
+            current = self.original.lstat()
+        except OSError as error:
+            raise BackupError(f"{self.label} root changed during use") from error
+        opened = os.fstat(self.descriptor)
+        matches = (
+            not stat.S_ISLNK(current.st_mode)
+            and stat.S_ISDIR(current.st_mode)
+            and _stat_identity(current) == _stat_identity(opened)
+        )
+        if not matches:
+            raise BackupError(f"{self.label} root changed during use")
+
+    def _open_directory(
+        self,
+        relative: tuple[str, ...],
+        *,
+        create: bool = False,
+    ) -> int:
+        descriptor = os.dup(self.descriptor)
+        flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            for component in relative:
+                try:
+                    child = os.open(component, flags, dir_fd=descriptor)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                    child = os.open(component, flags, dir_fd=descriptor)
+                opened = os.fstat(child)
+                if not stat.S_ISDIR(opened.st_mode):
+                    os.close(child)
+                    raise BackupError(f"{self.label} contains an unsafe directory")
+                os.close(descriptor)
+                descriptor = child
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def make_directory(self, relative: tuple[str, ...]) -> None:
+        self.assert_bound()
+        parent = self._open_directory(relative[:-1], create=True)
+        try:
+            os.mkdir(relative[-1], 0o700, dir_fd=parent)
+        except OSError as error:
+            raise BackupError(f"destination directory cannot be created: {relative}") from error
+        finally:
+            os.close(parent)
+
+    def open_new_file(self, relative: tuple[str, ...]) -> BinaryIO:
+        self.assert_bound()
+        parent = self._open_directory(relative[:-1], create=True)
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(relative[-1], flags, 0o600, dir_fd=parent)
+        except OSError as error:
+            raise BackupError(f"destination file cannot be created: {relative}") from error
+        finally:
+            os.close(parent)
+        return os.fdopen(descriptor, "wb", closefd=True)
+
+    @contextmanager
+    def open_regular_file(
+        self,
+        relative: tuple[str, ...],
+    ) -> Iterator[BinaryIO]:
+        parent = self._open_directory(relative[:-1])
+        try:
+            before = os.stat(
+                relative[-1],
+                dir_fd=parent,
+                follow_symlinks=False,
+            )
+            descriptor = os.open(
+                relative[-1],
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent,
+            )
+        except OSError as error:
+            raise BackupError(f"{self.label} file is unreadable") from error
+        finally:
+            os.close(parent)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or _stat_identity(opened) != _stat_identity(before)
+            or _stat_content_state(opened) != _stat_content_state(before)
+        ):
+            os.close(descriptor)
+            raise BackupError(f"{self.label} file changed while opening")
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            yield stream
+            after = os.fstat(stream.fileno())
+        if (
+            _stat_identity(after) != _stat_identity(opened)
+            or _stat_content_state(after) != _stat_content_state(opened)
+        ):
+            raise BackupError(f"{self.label} file changed while reading")
+
+    def read_regular_file(
+        self,
+        relative: tuple[str, ...],
+        *,
+        maximum: int,
+    ) -> bytes:
+        with self.open_regular_file(relative) as stream:
+            opened = os.fstat(stream.fileno())
+            value = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+        if (
+            len(value) > maximum
+            or len(value) != opened.st_size
+            or _stat_identity(after) != _stat_identity(opened)
+            or _stat_content_state(after) != _stat_content_state(opened)
+        ):
+            raise BackupError(f"{self.label} file changed while reading")
+        return value
+
+    def walk(
+        self,
+        relative: tuple[str, ...] = (),
+    ) -> Iterator[tuple[tuple[str, ...], str, BinaryIO | None]]:
+        root_descriptor = self._open_directory(relative)
+        try:
+            yield from self._walk_descriptor(root_descriptor, relative)
+        finally:
+            os.close(root_descriptor)
+
+    def _walk_descriptor(
+        self,
+        descriptor: int,
+        prefix: tuple[str, ...],
+    ) -> Iterator[tuple[tuple[str, ...], str, BinaryIO | None]]:
+        before_directory = os.fstat(descriptor)
+        for name in sorted(os.listdir(descriptor)):
+            relative = (*prefix, name)
+            metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(metadata.st_mode):
+                flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+                child = os.open(name, flags, dir_fd=descriptor)
+                opened = os.fstat(child)
+                if (
+                    _stat_identity(opened) != _stat_identity(metadata)
+                    or _stat_content_state(opened) != _stat_content_state(metadata)
+                ):
+                    os.close(child)
+                    raise BackupError(f"{self.label} directory changed while opening")
+                yield relative, "directory", None
+                try:
+                    yield from self._walk_descriptor(child, relative)
+                    after = os.fstat(child)
+                finally:
+                    os.close(child)
+                if (
+                    _stat_identity(after) != _stat_identity(opened)
+                    or _stat_content_state(after) != _stat_content_state(opened)
+                ):
+                    raise BackupError(f"{self.label} directory changed while reading")
+            elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                child = os.open(name, flags, dir_fd=descriptor)
+                opened = os.fstat(child)
+                if (
+                    _stat_identity(opened) != _stat_identity(metadata)
+                    or _stat_content_state(opened) != _stat_content_state(metadata)
+                ):
+                    os.close(child)
+                    raise BackupError(f"{self.label} file changed while opening")
+                with os.fdopen(child, "rb", closefd=True) as stream:
+                    yield relative, "file", stream
+                    after = os.fstat(stream.fileno())
+                if (
+                    _stat_identity(after) != _stat_identity(opened)
+                    or _stat_content_state(after) != _stat_content_state(opened)
+                ):
+                    raise BackupError(f"{self.label} file changed while reading")
+            else:
+                raise BackupError(f"{self.label} contains a link or special file")
+        after_directory = os.fstat(descriptor)
+        if (
+            _stat_identity(after_directory) != _stat_identity(before_directory)
+            or _stat_content_state(after_directory)
+            != _stat_content_state(before_directory)
+        ):
+            raise BackupError(f"{self.label} directory changed while walking")
 
 
 def _paths_overlap(first: Path, second: Path) -> bool:
     return first == second or first.is_relative_to(second) or second.is_relative_to(first)
 
 
-def _copy_tree(source: Path, destination: Path, *, label: str) -> int:
-    source = _safe_path(source, label=label)
-    if not source.is_dir():
-        raise BackupError(f"{label} must be a directory: {source}")
+def _copy_bound_file(
+    source: BinaryIO,
+    destination: BinaryIO,
+) -> tuple[str, int]:
+    opened = os.fstat(source.fileno())
+    digest = hashlib.sha256()
+    size = 0
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        destination.write(chunk)
+        digest.update(chunk)
+        size += len(chunk)
+    destination.flush()
+    os.fsync(destination.fileno())
+    after = os.fstat(source.fileno())
+    if (
+        size != opened.st_size
+        or _stat_identity(after) != _stat_identity(opened)
+        or _stat_content_state(after) != _stat_content_state(opened)
+    ):
+        raise BackupError("source file changed while copying")
+    return digest.hexdigest(), size
+
+
+def _copy_bound_tree(
+    source: BoundEvidenceTree,
+    destination: BoundEvidenceTree,
+    *,
+    source_prefix: tuple[str, ...] = (),
+    target_prefix: tuple[str, ...],
+) -> int:
+    source.assert_bound()
+    destination.assert_bound()
+    if target_prefix:
+        destination.make_directory(target_prefix)
     count = 0
-    destination.mkdir(parents=True, exist_ok=False)
-    for item in sorted(source.rglob("*")):
-        relative = item.relative_to(source)
-        target = destination / relative
-        if item.is_symlink():
-            raise BackupError(f"{label} contains a symlink: {item}")
-        if item.is_dir():
-            target.mkdir()
-            continue
-        if not item.is_file():
-            raise BackupError(f"{label} contains a non-regular file: {item}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(item, target)
-        count += 1
+    for relative, kind, stream in source.walk(source_prefix):
+        target = (*target_prefix, *relative[len(source_prefix) :])
+        if kind == "directory":
+            destination.make_directory(target)
+        else:
+            assert stream is not None
+            with destination.open_new_file(target) as output:
+                _copy_bound_file(stream, output)
+            count += 1
+    source.assert_bound()
+    destination.assert_bound()
     return count
 
 
-def _assert_empty_directory(path: Path, *, label: str) -> Path:
-    path = path.expanduser()
-    if path.exists() and (path.is_symlink() or not path.is_dir()):
-        raise BackupError(f"{label} must be an empty directory: {path}")
-    if path.exists() and any(path.iterdir()):
-        raise BackupError(f"{label} must be empty: {path}")
-    path.mkdir(parents=True, exist_ok=True)
-    return path.resolve()
+def _copy_tree(source: Path, destination: Path, *, label: str) -> int:
+    with (
+        BoundEvidenceTree(source, label=label) as bound_source,
+        BoundEvidenceTree(
+            destination,
+            label="destination",
+            create=True,
+            require_empty=True,
+        ) as bound_destination,
+    ):
+        return _copy_bound_tree(
+            bound_source,
+            bound_destination,
+            target_prefix=(),
+        )
 
 
-def _write_manifest(root: Path, members: dict[str, dict[str, object]]) -> None:
+def _write_manifest(
+    root: BoundEvidenceTree,
+    members: dict[str, dict[str, object]],
+) -> None:
     payload = {
         "schema": SCHEMA_VERSION,
         "format": "animemo-disaster-recovery-set",
@@ -103,83 +425,128 @@ def _write_manifest(root: Path, members: dict[str, dict[str, object]]) -> None:
             "Run rotate_authentication_epoch --confirm-restore before serving the restored API.",
         ],
     }
-    path = root / MANIFEST_NAME
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    root.assert_bound()
+    with root.open_new_file((MANIFEST_NAME,)) as output:
+        output.write(
+            (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(
+                "utf-8"
+            )
+        )
+        output.flush()
+        os.fsync(output.fileno())
 
 
 def create(args: argparse.Namespace) -> int:
-    raw_output = Path(args.output).expanduser()
-    if raw_output.is_symlink():
-        raise BackupError(f"output must not be a symlink: {raw_output}")
-    output = raw_output.resolve()
-    database = _safe_path(Path(args.database_dump), label="database dump")
-    if not database.is_file():
-        raise BackupError(f"database dump must be a regular file: {database}")
-    sources: dict[str, Path] = {}
+    output_path = _absolute_path(Path(args.output))
+    database_path = _absolute_path(Path(args.database_dump))
+    source_paths: dict[str, Path] = {}
     for key in ("plugins", "media", "private", "updater_state"):
         source_arg = getattr(args, key)
         if not source_arg:
             raise BackupError(f"--{key.replace('_', '-')} is required")
-        source = _safe_path(Path(source_arg), label=key)
-        if not source.is_dir():
-            raise BackupError(f"{key} must be a directory: {source}")
-        sources[key] = source
-    for label, source in {"database dump": database, **sources}.items():
-        if _paths_overlap(output, source):
+        source_paths[key] = _absolute_path(Path(source_arg))
+    for label, source in {
+        "database dump": database_path,
+        **source_paths,
+    }.items():
+        if _paths_overlap(output_path, source):
             raise BackupError(f"output must not overlap {label}: {source}")
-    output = _assert_empty_directory(raw_output, label="output")
-    shutil.copy2(database, output / MEMBERS["database"])
-    members: dict[str, dict[str, object]] = {
-        "database": {
-            "path": MEMBERS["database"],
-            "sha256": _sha256(output / MEMBERS["database"]),
-            "size_bytes": (output / MEMBERS["database"]).stat().st_size,
+
+    with ExitStack() as stack:
+        database_parent = stack.enter_context(
+            BoundEvidenceTree(database_path.parent, label="database dump parent")
+        )
+        sources = {
+            key: stack.enter_context(BoundEvidenceTree(path, label=key))
+            for key, path in source_paths.items()
         }
-    }
-    for key in ("plugins", "media", "private", "updater_state"):
-        target = output / MEMBERS[key]
-        count = _copy_tree(sources[key], target, label=key)
-        members[key] = {
-            "path": MEMBERS[key],
-            "file_count": count,
-            "tree_sha256": tree_digest(target),
+        database_parent.assert_bound()
+        for source in sources.values():
+            source.assert_bound()
+        output = stack.enter_context(
+            BoundEvidenceTree(
+                output_path,
+                label="output",
+                create=True,
+                require_empty=True,
+            )
+        )
+        output.assert_bound()
+        with (
+            database_parent.open_regular_file((database_path.name,)) as source,
+            output.open_new_file((MEMBERS["database"],)) as destination,
+        ):
+            database_digest, database_size = _copy_bound_file(source, destination)
+        members: dict[str, dict[str, object]] = {
+            "database": {
+                "path": MEMBERS["database"],
+                "sha256": database_digest,
+                "size_bytes": database_size,
+            }
         }
-    _write_manifest(output, members)
-    verify_manifest(output)
-    print(json.dumps({"status": "PASS", "backup_set": str(output), "members": members}, ensure_ascii=False))
+        for key in ("plugins", "media", "private", "updater_state"):
+            count = _copy_bound_tree(
+                sources[key],
+                output,
+                target_prefix=(MEMBERS[key],),
+            )
+            digest, _file_count = _tree_summary(output, (MEMBERS[key],))
+            members[key] = {
+                "path": MEMBERS[key],
+                "file_count": count,
+                "tree_sha256": digest,
+            }
+        _write_manifest(output, members)
+        _verify_manifest_bound(output)
+        output.assert_bound()
+    print(
+        json.dumps(
+            {
+                "status": "PASS",
+                "backup_set": str(output_path),
+                "members": members,
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
-def tree_digest(root: Path) -> str:
-    root = _safe_path(root, label="backup member")
-    if not root.is_dir():
-        raise BackupError(f"tree member is not a directory: {root}")
+def _tree_summary(
+    root: BoundEvidenceTree,
+    relative: tuple[str, ...] = (),
+) -> tuple[str, int]:
     digest = hashlib.sha256()
-    for item in sorted(root.rglob("*")):
-        relative = item.relative_to(root).as_posix().encode("utf-8")
-        if item.is_symlink():
-            raise BackupError(f"tree contains a symlink: {item}")
-        if item.is_dir():
-            digest.update(b"D\0" + relative + b"\0")
-        elif item.is_file():
-            digest.update(b"F\0" + relative + b"\0" + str(item.stat().st_size).encode() + b"\0")
-            with item.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
+    file_count = 0
+    for path, kind, stream in root.walk(relative):
+        local = path[len(relative) :]
+        encoded = Path(*local).as_posix().encode("utf-8")
+        if kind == "directory":
+            digest.update(b"D\0" + encoded + b"\0")
         else:
-            raise BackupError(f"tree contains a non-regular file: {item}")
-    return digest.hexdigest()
+            assert stream is not None
+            opened = os.fstat(stream.fileno())
+            digest.update(
+                b"F\0"
+                + encoded
+                + b"\0"
+                + str(opened.st_size).encode()
+                + b"\0"
+            )
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+            file_count += 1
+    return digest.hexdigest(), file_count
 
 
-def _load_manifest(root: Path) -> dict[str, object]:
-    root = _safe_path(root, label="backup set")
-    manifest_path = root / MANIFEST_NAME
-    if manifest_path.is_symlink() or not manifest_path.is_file():
-        raise BackupError("backup manifest is not a regular file")
+def _load_manifest_bound(root: BoundEvidenceTree) -> dict[str, object]:
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        manifest = root.read_regular_file(
+            (MANIFEST_NAME,),
+            maximum=1024 * 1024,
+        )
+        payload = json.loads(manifest.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise BackupError("backup manifest is unreadable") from error
     if (
         not isinstance(payload, dict)
@@ -198,45 +565,106 @@ def _load_manifest(root: Path) -> dict[str, object]:
     return payload
 
 
-def verify_manifest(root: Path) -> None:
-    payload = _load_manifest(root)
+def _verify_manifest_member(
+    root: BoundEvidenceTree,
+    key: str,
+    expected: object,
+    *,
+    restored: bool = False,
+) -> None:
+    relative = expected.get("path") if isinstance(expected, dict) else None
+    if (
+        relative != MEMBERS[key]
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+    ):
+        raise BackupError(f"invalid backup member path for {key}")
+    member = (relative,)
+    prefix = "restored " if restored else ""
+    if key == "database":
+        with root.open_regular_file(member) as stream:
+            digest = hashlib.sha256()
+            size = 0
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        if size != expected.get("size_bytes") or digest.hexdigest() != expected.get(
+            "sha256"
+        ):
+            raise BackupError(
+                f"{prefix}database backup member failed integrity verification"
+            )
+        return
+    try:
+        digest, file_count = _tree_summary(root, member)
+    except (BackupError, FileNotFoundError):
+        digest = None
+        file_count = None
+    if (
+        digest != expected.get("tree_sha256")
+        or file_count != expected.get("file_count")
+    ):
+        raise BackupError(
+            f"{prefix}backup member failed integrity verification: {key}"
+        )
+
+
+def _verify_manifest_bound(root: BoundEvidenceTree) -> dict[str, object]:
+    payload = _load_manifest_bound(root)
     for key, expected in payload["members"].items():
-        relative = expected.get("path") if isinstance(expected, dict) else None
-        if relative != MEMBERS[key] or Path(relative).is_absolute() or ".." in Path(relative).parts:
-            raise BackupError(f"invalid backup member path for {key}")
-        member = root / relative
-        if key == "database":
-            if (
-                not member.is_file()
-                or member.is_symlink()
-                or member.stat().st_size != expected.get("size_bytes")
-                or _sha256(member) != expected.get("sha256")
-            ):
-                raise BackupError("database backup member failed integrity verification")
-        else:
-            digest = tree_digest(member) if member.is_dir() else None
-            file_count = sum(1 for item in member.rglob("*") if item.is_file()) if member.is_dir() else None
-            if digest != expected.get("tree_sha256") or file_count != expected.get("file_count"):
-                raise BackupError(f"backup member failed integrity verification: {key}")
+        _verify_manifest_member(root, key, expected)
+    return payload
+
+
+def verify_manifest(root: Path) -> dict[str, object]:
+    with BoundEvidenceTree(root, label="backup set") as bound:
+        return _verify_manifest_bound(bound)
 
 
 def restore(args: argparse.Namespace) -> int:
-    source = _safe_path(Path(args.backup_set), label="backup set")
-    verify_manifest(source)
-    raw_target = Path(args.target_root).expanduser()
-    if raw_target.is_symlink():
-        raise BackupError(f"restore target must not be a symlink: {raw_target}")
-    target = raw_target.resolve()
-    if _paths_overlap(source, target):
+    source_path = _absolute_path(Path(args.backup_set))
+    target_path = _absolute_path(Path(args.target_root))
+    if _paths_overlap(source_path, target_path):
         raise BackupError("restore target must not overlap the backup set")
-    target = _assert_empty_directory(raw_target, label="restore target")
-    for key in ("plugins", "media", "private", "updater_state"):
-        _copy_tree(source / MEMBERS[key], target / MEMBERS[key], label=f"restore {key}")
-    shutil.copy2(source / MEMBERS["database"], target / MEMBERS["database"])
-    # Verify the copied file as well as the source tree before reporting success.
-    if _sha256(target / MEMBERS["database"]) != _sha256(source / MEMBERS["database"]):
-        raise BackupError("restored database backup member failed integrity verification")
-    print(json.dumps({"status": "PASS", "restored_to": str(target), "requires_epoch_rotation": True}, ensure_ascii=False))
+    with (
+        BoundEvidenceTree(source_path, label="backup set") as source,
+        BoundEvidenceTree(
+            target_path,
+            label="restore target",
+            create=True,
+            require_empty=True,
+        ) as target,
+    ):
+        manifest = _verify_manifest_bound(source)
+        source.assert_bound()
+        target.assert_bound()
+        for key in ("plugins", "media", "private", "updater_state"):
+            _copy_bound_tree(
+                source,
+                target,
+                source_prefix=(MEMBERS[key],),
+                target_prefix=(MEMBERS[key],),
+            )
+        with (
+            source.open_regular_file((MEMBERS["database"],)) as database,
+            target.open_new_file((MEMBERS["database"],)) as output,
+        ):
+            _copy_bound_file(database, output)
+        # Bind every copied byte to the frozen manifest, not to mutable paths.
+        for key, expected in manifest["members"].items():
+            _verify_manifest_member(target, key, expected, restored=True)
+        source.assert_bound()
+        target.assert_bound()
+    print(
+        json.dumps(
+            {
+                "status": "PASS",
+                "restored_to": str(target_path),
+                "requires_epoch_rotation": True,
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 

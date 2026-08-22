@@ -13,7 +13,6 @@ from rest_framework.exceptions import AuthenticationFailed
 from .crypto import IntegrationSecretError
 from .models import IntegrationConnection
 
-
 SIGNATURE_RE = re.compile(r"^v1=([0-9a-f]{64})$")
 TIMESTAMP_RE = re.compile(r"^[0-9]{1,16}$")
 NONCE_RE = re.compile(r"^[A-Za-z0-9._~-]{8,128}$")
@@ -72,7 +71,7 @@ class IntegrationHMACAuthentication(BaseAuthentication):
         timestamp = int(timestamp_raw)
         tolerance = int(getattr(settings, "INTEGRATION_HMAC_TIMESTAMP_TOLERANCE_SECONDS", 300))
         if abs(int(time()) - timestamp) > tolerance:
-            raise AuthenticationFailed("集成请求时间戳已失效。")
+            raise AuthenticationFailed("集成请求认证失败。")
 
         try:
             secret = connection.get_secret()
@@ -93,7 +92,7 @@ class IntegrationHMACAuthentication(BaseAuthentication):
         nonce_key = f"integration:hmac:nonce:{connection.pk}:{nonce_digest}"
         nonce_ttl = int(getattr(settings, "INTEGRATION_HMAC_NONCE_TTL_SECONDS", 660))
         if not cache.add(nonce_key, "1", timeout=nonce_ttl):
-            raise AuthenticationFailed("集成请求 nonce 已被使用。")
+            raise AuthenticationFailed("集成请求认证失败。")
 
         now = timezone.now()
         IntegrationConnection.objects.filter(pk=connection.pk).update(last_seen_at=now)

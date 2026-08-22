@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 import secrets
@@ -101,10 +102,10 @@ def _safe_state_root(path: Path) -> Path:
     return path
 
 
-def _extract_initial_kit(archive: Path) -> dict[str, bytes]:
+def _extract_initial_kit(archive_bytes: bytes) -> dict[str, bytes]:
     observed: dict[str, bytes] = {}
     try:
-        with tarfile.open(archive, mode="r:") as bundle:
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as bundle:
             for member in bundle:
                 pure = PurePosixPath(member.name)
                 if pure.parent != _PREFIX:
@@ -482,7 +483,7 @@ class ProductionTrustLifecycle:
             _reject("TRUST_INITIAL_KIT_ARCHIVE_INVALID")
         if _digest(archive_bytes) != authorization.materials_sha256:
             _reject("TRUST_INITIAL_BOOTSTRAP_BINDING_INVALID")
-        files = _extract_initial_kit(archive)
+        files = _extract_initial_kit(archive_bytes)
         manifest = _load_canonical(
             files["initial-trust-bootstrap.json"],
             code="TRUST_INITIAL_MANIFEST_INVALID",

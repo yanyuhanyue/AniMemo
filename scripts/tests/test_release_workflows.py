@@ -221,11 +221,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         publish = source[
             source.index("      - name: Download and verify Phase A qualification evidence") :
-            source.index("      - name: Stage the validated platform and Release Notes")
+            source.index("      - name: Stage the validated release input")
         ]
         stage = source[
-            source.index("      - name: Stage the validated platform and Release Notes") :
-            source.index("      - uses: actions/upload-artifact@", source.index("      - name: Stage the validated platform and Release Notes"))
+            source.index("      - name: Stage the validated release input") :
+            source.index("      - uses: actions/upload-artifact@", source.index("      - name: Stage the validated release input"))
         ]
 
         run_id_guard = '[[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]'
@@ -708,13 +708,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertLess(publish.index(setting_gate), publish.index("docker/login-action"))
         self.assertLess(publish.index(setting_gate), publish.index("docker push"))
         self.assertLess(publish.index(setting_gate), publish.index("git push origin"))
+        self.assertNotIn("build-initial-trust-kit", publish)
         self.assertLess(
-            publish.index("build-initial-trust-kit"),
+            publish.index("verify-prepublication-materials"),
             publish.index("docker/login-action"),
-        )
-        self.assertLess(
-            publish.index("build-initial-trust-kit"),
-            publish.index("docker push"),
         )
 
     def test_release_contract_assets_and_real_upgrade_delta_are_fail_closed(self):
@@ -722,9 +719,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         promotion = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
         gate = (ROOT / "scripts" / "stateful-upgrade-gate.sh").read_text(encoding="utf-8")
 
-        self.assertEqual(release.count("generate-deployment-contract"), 2)
-        self.assertEqual(release.count("build-installer-materials"), 2)
-        self.assertGreaterEqual(release.count("-r durability/requirements.txt"), 2)
+        self.assertEqual(release.count("generate-deployment-contract"), 1)
+        self.assertEqual(release.count("build-installer-materials"), 1)
+        self.assertGreaterEqual(release.count("-r durability/requirements.txt"), 1)
         self.assertGreaterEqual(release.count("installer-materials.tar"), 10)
         self.assertGreaterEqual(release.count("deployment-contract.json"), 8)
         self.assertGreaterEqual(promotion.count("deployment-contract.json"), 7)
@@ -752,66 +749,132 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             release.count(
                 "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16"
             ),
-            2,
+            1,
         )
-        self.assertEqual(release.count("go-version: '1.26.6'"), 2)
-        self.assertEqual(release.count("cache: false"), 2)
+        self.assertEqual(release.count("go-version: '1.26.6'"), 1)
+        self.assertEqual(release.count("cache: false"), 1)
         self.assertNotIn("cache-dependency-path", release)
-        self.assertEqual(release.count("go mod download"), 2)
-        self.assertEqual(release.count("GOPROXY=off GOSUMDB=off go mod verify"), 2)
+        self.assertEqual(release.count("go mod download"), 1)
+        self.assertEqual(release.count("GOPROXY=off GOSUMDB=off go mod verify"), 1)
         self.assertEqual(
-            release.count("GOPROXY=off GOSUMDB=off go test ./..."), 2
+            release.count("GOPROXY=off GOSUMDB=off go test ./..."), 1
         )
         self.assertEqual(
             release.count(
                 "CGO_ENABLED=0 GOPROXY=off GOSUMDB=off go build "
                 "-mod=readonly -trimpath -o offline-release-verifier ."
             ),
-            2,
+            1,
         )
         self.assertEqual(
             release.count(
                 "test -x release/release_attestation_verifier/offline-release-verifier"
             ),
-            2,
+            1,
         )
-        self.assertEqual(release.count("build-initial-trust-kit"), 2)
+        self.assertEqual(release.count("build-initial-trust-kit"), 1)
         self.assertNotIn(
             "--output release/release_attestation_verifier/pretrust-v2",
             release,
         )
-        self.assertGreaterEqual(release.count("$RUNNER_TEMP/animemo-pretrust-v2"), 8)
+        self.assertGreaterEqual(release.count("$RUNNER_TEMP/animemo-pretrust-v2"), 4)
         self.assertEqual(
             release.count(
                 '--initial-trust-kit "$RUNNER_TEMP/animemo-pretrust-v2"'
             ),
-            2,
+            1,
         )
 
     def test_publish_rebinds_exact_qualified_prepublication_materials(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        dry_run_identity = release.index(
-            "> release-output/prepublication-materials.json"
-        )
+        dry_run_identity = release.index("build-prepublication-materials")
         qualification_copy = release.index(
-            "cp release-dry-run-input/prepublication-materials.json"
+            "install -m 0600 release-dry-run-input/prepublication-materials.json"
         )
-        publish_rebuild = release.index(
-            "Rebuild and bind exact qualified prepublication materials before mutation"
+        publish_verify = release.index(
+            "Verify and stage exact qualified prepublication materials before mutation"
         )
         immutable_recheck = release.index(
             "Recheck immutable release identity immediately before publishing"
         )
-        docker_login = release.index("docker/login-action@", publish_rebuild)
+        docker_login = release.index("docker/login-action@", publish_verify)
         self.assertLess(dry_run_identity, qualification_copy)
-        self.assertLess(publish_rebuild, immutable_recheck)
-        self.assertLess(publish_rebuild, docker_login)
-        self.assertIn("initialTrustBootstrapSha256", release)
-        self.assertIn("installerMaterialsSha256", release)
-        self.assertIn('test "$actual_trust" =', release)
-        self.assertIn('test "$actual_materials" =', release)
+        self.assertLess(publish_verify, immutable_recheck)
+        self.assertLess(publish_verify, docker_login)
+        self.assertIn("memberManifestSha256", (ROOT / "release" / "materials.py").read_text(encoding="utf-8"))
+        self.assertIn("candidateTreeSha", release)
+        self.assertIn("validated-release-input/installer-materials.tar", release)
+        self.assertIn("validated-release-input/deployment-contract.json", release)
+
+    def test_publish_consumes_only_frozen_phase_a_prepublication_bytes(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        dry_run = release[
+            release.index("  dry-run:\n") : release.index(
+                "  qualification-evidence:\n"
+            )
+        ]
+        publish = release[release.index("  publish:\n") :]
+
+        self.assertEqual(dry_run.count("build-installer-materials"), 1)
+        self.assertEqual(publish.count("build-installer-materials"), 0)
+        self.assertEqual(publish.count("build-initial-trust-kit"), 0)
+        self.assertEqual(publish.count("python -m pip download"), 0)
+        self.assertEqual(publish.count("generate-deployment-contract"), 0)
+        self.assertIn("verify-prepublication-materials", publish)
+        self.assertIn(
+            "Verify and stage exact qualified prepublication materials before mutation",
+            publish,
+        )
+
+    def test_frozen_material_transport_is_exact_and_authority_bound(self):
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        release_authority = release[
+            release.index("  release-authority:\n") : release.index("  dry-run:\n")
+        ]
+        qualification = release[
+            release.index("  qualification-evidence:\n") : release.index(
+                "  publish:\n"
+            )
+        ]
+        publish = release[release.index("  publish:\n") :]
+
+        for frozen_name in (
+            "installer-materials.tar",
+            "deployment-contract.json",
+            "prepublication-materials.json",
+        ):
+            self.assertIn(
+                f"release-qualification/{frozen_name}", qualification
+            )
+            self.assertIn(
+                f"validated-release-input/{frozen_name}", release_authority
+            )
+            self.assertIn(
+                f"validated-release-input/{frozen_name}", publish
+            )
+        self.assertIn("retention-days: 30", qualification)
+        self.assertIn("test \"$artifact_count\" = \"1\"", release_authority)
+        self.assertIn("test \"$artifact_expired\" = \"false\"", release_authority)
+        self.assertIn("actual_digest=\"sha256:$(sha256sum", release_authority)
+        self.assertIn("test \"$actual_digest\" = \"$metadata_digest\"", release_authority)
+        self.assertIn("test \"$run_head\" =", release_authority)
+        self.assertIn("qualification_workflow_ref", release_authority)
+        self.assertIn("QUALIFICATION_WORKFLOW_SHA", release_authority)
+        self.assertIn("extract-qualification-artifact", release_authority)
+        self.assertIn(
+            '--expected-sha256 "$metadata_digest"', release_authority
+        )
+        self.assertGreaterEqual(
+            release_authority.count("verify-prepublication-materials"), 1
+        )
+        self.assertGreaterEqual(qualification.count("verify-prepublication-materials"), 1)
+        self.assertGreaterEqual(publish.count("verify-prepublication-materials"), 3)
 
     def test_every_github_authority_job_gates_the_exact_cli_security_version(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -889,18 +952,18 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
         self.assertEqual(
             source.count("release/platform-qualification.json | cmp - release/platform-qualification.json"),
-            2,
+            1,
         )
         self.assertGreaterEqual(
             source.count("platform_qualification.py verify"), 4
         )
         self.assertIn("path: release-qualification/", source)
         self.assertIn(
-            "cp platform-qualification-input/platform-qualification.json", source
+            "install -m 0600 platform-qualification-input/platform-qualification.json", source
         )
         self.assertIn("release-qualification/platform-qualification.json", source)
         self.assertIn(
-            "validated-platform-qualification-${{ github.run_id }}", source
+            "validated-release-input-${{ github.run_id }}", source
         )
         self.assertIn(
             "cp --no-clobber rc-assets/installer-materials.tar promotion-output/installer-materials.tar",

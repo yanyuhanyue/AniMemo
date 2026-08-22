@@ -437,7 +437,7 @@ jobs:
           set -euo pipefail
           test -n "$QUALIFICATION_RUN_ID"
           [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          mkdir -p "$RUNNER_TEMP/qualification" "$RUNNER_TEMP/qualification-archive"
+          mkdir -p "$RUNNER_TEMP/qualification-archive"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID" \
             > "$RUNNER_TEMP/qualification-run.json"
           run_path="$(jq -r '.path // empty' "$RUNNER_TEMP/qualification-run.json")"
@@ -465,7 +465,7 @@ jobs:
           test "$qualification_workflow_ref" = "$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/$run_branch"
           printf '%s\n' "$qualification_workflow_ref" > "$RUNNER_TEMP/qualification-workflow-ref.txt"
           printf '%s\n' "$run_head" > "$RUNNER_TEMP/qualification-workflow-sha.txt"
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/artifacts?per_page=100" \
             > "$RUNNER_TEMP/qualification-artifacts.json"
           artifact_count="$(jq --arg id "$QUALIFICATION_RUN_ID" \
             '[.artifacts[] | select(.name == ("release-qualification-" + $id) and (.workflow_run.id|tostring) == $id)] | length' \
@@ -477,14 +477,22 @@ jobs:
             > "$RUNNER_TEMP/qualification-artifact.json"
           archive_url="$(jq -r '.archive_download_url // empty' "$RUNNER_TEMP/qualification-artifact.json")"
           metadata_digest="$(jq -r '.digest // empty' "$RUNNER_TEMP/qualification-artifact.json")"
+          artifact_expired="$(jq -r '.expired' "$RUNNER_TEMP/qualification-artifact.json")"
+          artifact_head="$(jq -r '.workflow_run.head_sha // empty' "$RUNNER_TEMP/qualification-artifact.json")"
           test -n "$archive_url"
           [[ "$metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$artifact_expired" = "false"
+          test "$artifact_head" = "${{ needs.preflight.outputs.candidate_sha }}"
           curl --fail --location --silent --show-error \
             -H "Authorization: Bearer $GH_TOKEN" \
             "$archive_url" -o "$RUNNER_TEMP/qualification-archive/evidence.zip"
           actual_digest="sha256:$(sha256sum "$RUNNER_TEMP/qualification-archive/evidence.zip" | awk '{print $1}')"
           test "$actual_digest" = "$metadata_digest"
-          unzip -q "$RUNNER_TEMP/qualification-archive/evidence.zip" -d "$RUNNER_TEMP/qualification"
+          python -m release.cli extract-qualification-artifact \
+            --archive "$RUNNER_TEMP/qualification-archive/evidence.zip" \
+            --destination "$RUNNER_TEMP/qualification" \
+            --qualification-run-id "$QUALIFICATION_RUN_ID" \
+            --expected-sha256 "$metadata_digest"
           evidence_file="$RUNNER_TEMP/qualification/release-qualification-$QUALIFICATION_RUN_ID.json"
           test -f "$evidence_file"
           platform_file="$RUNNER_TEMP/qualification/platform-qualification.json"
@@ -492,13 +500,23 @@ jobs:
           notes_file="$RUNNER_TEMP/qualification/release-notes.json"
           notes_markdown="$RUNNER_TEMP/qualification/release-notes.md"
           prepublication_file="$RUNNER_TEMP/qualification/prepublication-materials.json"
+          installer_materials="$RUNNER_TEMP/qualification/installer-materials.tar"
+          deployment_contract="$RUNNER_TEMP/qualification/deployment-contract.json"
           test -f "$notes_file"
           test -f "$notes_markdown"
           test -f "$prepublication_file"
-          test "$(jq -r '.schemaVersion' "$prepublication_file")" = "1"
+          test -f "$installer_materials"
+          test -f "$deployment_contract"
+          test "$(jq -r '.schemaVersion' "$prepublication_file")" = "2"
           test "$(jq -r '.candidateSha' "$prepublication_file")" = "${{ needs.preflight.outputs.candidate_sha }}"
-          [[ "$(jq -r '.initialTrustBootstrapSha256' "$prepublication_file")" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$(jq -r '.installerMaterialsSha256' "$prepublication_file")" =~ ^sha256:[0-9a-f]{64}$ ]]
+          candidate_tree="$(git rev-parse '${{ needs.preflight.outputs.candidate_sha }}^{tree}')"
+          test "$(jq -r '.candidateTreeSha' "$prepublication_file")" = "$candidate_tree"
+          python -m release.cli verify-prepublication-materials \
+            --prepublication "$prepublication_file" \
+            --installer-materials "$installer_materials" \
+            --deployment-contract "$deployment_contract" \
+            --expected-candidate-sha "${{ needs.preflight.outputs.candidate_sha }}" \
+            --expected-candidate-tree-sha "$candidate_tree"
           notes_identity="$(jq -r '.identity // empty' "$notes_file")"
           notes_markdown_sha256="sha256:$(sha256sum "$notes_markdown" | awk '{print $1}')"
           test "$(jq -r '.release_notes.snapshot_identity // empty' "$evidence_file")" = "$notes_identity"
@@ -535,7 +553,7 @@ jobs:
           export RELEASE_NOTES_IDENTITY="$(jq -r '.identity' "$RUNNER_TEMP/qualification/release-notes.json")"
           export RELEASE_NOTES_MARKDOWN_SHA256="sha256:$(sha256sum "$RUNNER_TEMP/qualification/release-notes.md" | awk '{print $1}')"
           python -m scripts.release_authority
-      - name: Stage the validated platform and Release Notes for Phase B production
+      - name: Stage the validated release input for Phase B production
         if: ${{ inputs.operation == 'publish' }}
         env:
           QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
@@ -558,10 +576,16 @@ jobs:
           install -m 0600 \
             "$RUNNER_TEMP/qualification/prepublication-materials.json" \
             validated-release-input/prepublication-materials.json
+          install -m 0600 \
+            "$RUNNER_TEMP/qualification/installer-materials.tar" \
+            validated-release-input/installer-materials.tar
+          install -m 0600 \
+            "$RUNNER_TEMP/qualification/deployment-contract.json" \
+            validated-release-input/deployment-contract.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ inputs.operation == 'publish' }}
         with:
-          name: validated-platform-qualification-${{ github.run_id }}
+          name: validated-release-input-${{ github.run_id }}
           path: validated-release-input/
           if-no-files-found: error
           retention-days: 1
@@ -723,6 +747,19 @@ jobs:
           python -m release.cli generate-deployment-contract \
             --root . --installer-materials release-output/installer-materials.tar \
             --output release-output/deployment-contract.json
+          candidate_tree="$(git rev-parse '${{ needs.preflight.outputs.candidate_sha }}^{tree}')"
+          python -m release.cli build-prepublication-materials \
+            --installer-materials release-output/installer-materials.tar \
+            --deployment-contract release-output/deployment-contract.json \
+            --candidate-sha "${{ needs.preflight.outputs.candidate_sha }}" \
+            --candidate-tree-sha "$candidate_tree" \
+            --output release-output/prepublication-materials.json
+          python -m release.cli verify-prepublication-materials \
+            --prepublication release-output/prepublication-materials.json \
+            --installer-materials release-output/installer-materials.tar \
+            --deployment-contract release-output/deployment-contract.json \
+            --expected-candidate-sha "${{ needs.preflight.outputs.candidate_sha }}" \
+            --expected-candidate-tree-sha "$candidate_tree"
           python -m release.cli generate-manifest \
             --version "$RELEASE_TAG" --channel "${{ inputs.channel }}" \
             --commit "${{ needs.preflight.outputs.candidate_sha }}" --created-at "$CREATED_AT" \
@@ -739,12 +776,6 @@ jobs:
             release-output/release-manifest.json release-output/deployment-contract.json \
             release-output/installer-materials.tar
           (cd release-output && sha256sum --check checksums.txt)
-          jq -n \
-            --arg candidateSha "${{ needs.preflight.outputs.candidate_sha }}" \
-            --arg initialTrustBootstrapSha256 "sha256:$(sha256sum release-output/initial-trust-bootstrap.json | awk '{print $1}')" \
-            --arg installerMaterialsSha256 "sha256:$(sha256sum release-output/installer-materials.tar | awk '{print $1}')" \
-            '{schemaVersion:1,candidateSha:$candidateSha,initialTrustBootstrapSha256:$initialTrustBootstrapSha256,installerMaterialsSha256:$installerMaterialsSha256}' \
-            > release-output/prepublication-materials.json
           python -m release.cli generate-provenance-plan \
             --version "$RELEASE_TAG" --commit "${{ needs.preflight.outputs.candidate_sha }}" --created-at "$CREATED_AT" \
             --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
@@ -829,9 +860,16 @@ jobs:
           export RELEASE_NOTES_IDENTITY="$(jq -r '.identity // empty' "$RELEASE_NOTES_IDENTITY_FILE")"
           export RELEASE_NOTES_MARKDOWN_SHA256="sha256:$(sha256sum "$RELEASE_NOTES_MARKDOWN_FILE" | awk '{print $1}')"
           [[ "$RELEASE_NOTES_IDENTITY" =~ ^sha256:[0-9a-f]{64}$ ]]
+          candidate_tree="$(git rev-parse "$CANDIDATE_SHA^{tree}")"
+          python -m release.cli verify-prepublication-materials \
+            --prepublication release-dry-run-input/prepublication-materials.json \
+            --installer-materials release-dry-run-input/installer-materials.tar \
+            --deployment-contract release-dry-run-input/deployment-contract.json \
+            --expected-candidate-sha "$CANDIDATE_SHA" \
+            --expected-candidate-tree-sha "$candidate_tree"
           python -m scripts.release_authority
           mkdir -p release-qualification
-          cp "$RUNNER_TEMP/release-qualification-${GITHUB_RUN_ID}.json" \
+          install -m 0600 "$RUNNER_TEMP/release-qualification-${GITHUB_RUN_ID}.json" \
             "release-qualification/release-qualification-${GITHUB_RUN_ID}.json"
           python scripts/platform_qualification.py verify \
             --input platform-qualification-input/platform-qualification.json \
@@ -839,14 +877,26 @@ jobs:
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --workflow-path .github/workflows/release.yml
-          cp platform-qualification-input/platform-qualification.json \
+          install -m 0600 platform-qualification-input/platform-qualification.json \
             release-qualification/platform-qualification.json
-          cp release-dry-run-input/release-notes.json \
+          install -m 0600 release-dry-run-input/release-notes.json \
             release-qualification/release-notes.json
-          cp release-dry-run-input/release-notes.md \
+          install -m 0600 release-dry-run-input/release-notes.md \
             release-qualification/release-notes.md
-          cp release-dry-run-input/prepublication-materials.json \
+          install -m 0600 release-dry-run-input/prepublication-materials.json \
             release-qualification/prepublication-materials.json
+          install -m 0600 release-dry-run-input/installer-materials.tar \
+            release-qualification/installer-materials.tar
+          install -m 0600 release-dry-run-input/deployment-contract.json \
+            release-qualification/deployment-contract.json
+          expected_files="$(printf '%s\n' \
+            "release-qualification-${GITHUB_RUN_ID}.json" \
+            deployment-contract.json installer-materials.tar \
+            platform-qualification.json prepublication-materials.json \
+            release-notes.json release-notes.md | LC_ALL=C sort)"
+          actual_files="$(find release-qualification -maxdepth 1 -type f \
+            -printf '%f\n' | LC_ALL=C sort)"
+          test "$actual_files" = "$expected_files"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-qualification-${{ github.run_id }}
@@ -880,73 +930,46 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: '1.26.6'
-          cache: false
       - run: python -m pip install -r release/requirements.txt
-      - name: Build and close pretrust materials before any external publication
-        shell: bash
-        run: |
-          set -euo pipefail
-          (
-            cd release/release_attestation_verifier
-            go mod download
-            GOPROXY=off GOSUMDB=off go mod verify
-            GOPROXY=off GOSUMDB=off go test ./...
-            CGO_ENABLED=0 GOPROXY=off GOSUMDB=off go build -mod=readonly -trimpath -o offline-release-verifier .
-          )
-          test -x release/release_attestation_verifier/offline-release-verifier
-          rm -rf "$RUNNER_TEMP/animemo-pretrust-v2"
-          python -m release.cli build-initial-trust-kit \
-            --verifier release/release_attestation_verifier/offline-release-verifier \
-            --output "$RUNNER_TEMP/animemo-pretrust-v2"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: validated-platform-qualification-${{ github.run_id }}
-          path: validated-platform-qualification-input
-      - name: Bind the validated Phase A platform evidence into Installer materials
+          name: validated-release-input-${{ github.run_id }}
+          path: validated-release-input
+      - name: Verify and stage exact qualified prepublication materials before mutation
         shell: bash
         run: |
           set -euo pipefail
+          expected_files="$(printf '%s\n' deployment-contract.json \
+            installer-materials.tar platform-qualification.json \
+            prepublication-materials.json release-notes.json \
+            release-notes.md release-qualification.json | LC_ALL=C sort)"
+          actual_files="$(find validated-release-input -maxdepth 1 -type f \
+            -printf '%f\n' | LC_ALL=C sort)"
+          test "$actual_files" = "$expected_files"
           python scripts/platform_qualification.py verify \
-            --input validated-platform-qualification-input/platform-qualification.json \
+            --input validated-release-input/platform-qualification.json \
             --candidate-sha "$GITHUB_SHA" \
             --workflow-path .github/workflows/release.yml
-          install -m 0644 \
-            validated-platform-qualification-input/platform-qualification.json \
-            release/platform-qualification.json
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m release.cli verify-prepublication-materials \
+            --prepublication validated-release-input/prepublication-materials.json \
+            --installer-materials validated-release-input/installer-materials.tar \
+            --deployment-contract validated-release-input/deployment-contract.json \
+            --expected-candidate-sha "$GITHUB_SHA" \
+            --expected-candidate-tree-sha "$candidate_tree"
           install -d -m 0700 release-output
-          install -m 0600 \
-            validated-platform-qualification-input/release-notes.json \
-            release-output/release-notes.json
-          install -m 0600 \
-            validated-platform-qualification-input/release-notes.md \
-            release-output/release-notes.md
-          install -m 0600 \
-            validated-platform-qualification-input/release-qualification.json \
-            release-output/release-qualification.json
-      - name: Rebuild and bind exact qualified prepublication materials before mutation
-        shell: bash
-        run: |
-          set -euo pipefail
-          qualified=validated-platform-qualification-input/prepublication-materials.json
-          test "$(jq -r '.schemaVersion' "$qualified")" = "1"
-          test "$(jq -r '.candidateSha' "$qualified")" = "$GITHUB_SHA"
-          rm -rf "$RUNNER_TEMP/release-wheelhouse"
-          python -m pip download --disable-pip-version-check --only-binary=:all: \
-            --dest "$RUNNER_TEMP/release-wheelhouse" \
-            -r release/requirements.txt -r durability/requirements.txt
-          python -m release.cli build-installer-materials \
-            --root . --wheelhouse "$RUNNER_TEMP/release-wheelhouse" \
-            --initial-trust-kit "$RUNNER_TEMP/animemo-pretrust-v2" \
-            --output release-output/installer-materials.tar
-          tar --extract --to-stdout --file release-output/installer-materials.tar \
-            release/platform-qualification.json | cmp - release/platform-qualification.json
-          actual_trust="sha256:$(sha256sum "$RUNNER_TEMP/animemo-pretrust-v2/initial-trust-bootstrap.json" | awk '{print $1}')"
-          actual_materials="sha256:$(sha256sum release-output/installer-materials.tar | awk '{print $1}')"
-          test "$actual_trust" = "$(jq -r '.initialTrustBootstrapSha256' "$qualified")"
-          test "$actual_materials" = "$(jq -r '.installerMaterialsSha256' "$qualified")"
+          for name in release-notes.json release-notes.md release-qualification.json \
+            prepublication-materials.json installer-materials.tar \
+            deployment-contract.json; do
+            install -m 0600 "validated-release-input/$name" "release-output/$name"
+            cmp "validated-release-input/$name" "release-output/$name"
+          done
+          python -m release.cli verify-prepublication-materials \
+            --prepublication release-output/prepublication-materials.json \
+            --installer-materials release-output/installer-materials.tar \
+            --deployment-contract release-output/deployment-contract.json \
+            --expected-candidate-sha "$GITHUB_SHA" \
+            --expected-candidate-tree-sha "$candidate_tree"
       - name: Recheck immutable release identity immediately before publishing
         env:
           GH_TOKEN: ${{ github.token }}
@@ -959,6 +982,13 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
           test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m release.cli verify-prepublication-materials \
+            --prepublication release-output/prepublication-materials.json \
+            --installer-materials release-output/installer-materials.tar \
+            --deployment-contract release-output/deployment-contract.json \
+            --expected-candidate-sha "$GITHUB_SHA" \
+            --expected-candidate-tree-sha "$candidate_tree"
           test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = "true"
           ! git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1
           ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
@@ -1083,9 +1113,16 @@ jobs:
           set -euo pipefail
           mkdir -p release-output
           test -f release-output/installer-materials.tar
-          python -m release.cli generate-deployment-contract \
-            --root . --installer-materials release-output/installer-materials.tar \
-            --output release-output/deployment-contract.json
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m release.cli verify-prepublication-materials \
+            --prepublication release-output/prepublication-materials.json \
+            --installer-materials release-output/installer-materials.tar \
+            --deployment-contract release-output/deployment-contract.json \
+            --expected-candidate-sha "$GITHUB_SHA" \
+            --expected-candidate-tree-sha "$candidate_tree"
+          python -m release.cli validate-deployment-contract \
+            --contract release-output/deployment-contract.json \
+            --installer-materials release-output/installer-materials.tar
           python -m release.cli generate-manifest \
             --version "$RELEASE_TAG" --channel "${{ inputs.channel }}" \
             --commit "$GITHUB_SHA" --created-at "$CREATED_AT" \

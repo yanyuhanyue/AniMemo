@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -9,13 +10,16 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
+from release import cli
 from release.acceptance import (
     build_rc_live_acceptance,
     verify_stable_promotion_acceptance,
 )
 from release.cli import _validate_stable_publication_authority_inputs
 from release.contract import build_manifest, promote_manifest
+from release.materials import MaterialContractError
 from release.publication import PublicationError
 from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
 
@@ -137,7 +141,7 @@ class ReleaseCliTests(unittest.TestCase):
                 acceptance,
                 expected={
                     key: acceptance[key]
-                    for key in {
+                    for key in (
                         "rc_tag",
                         "rc_commit",
                         "release_manifest_identity",
@@ -145,7 +149,7 @@ class ReleaseCliTests(unittest.TestCase):
                         "installer_materials_identity",
                         "api_digest",
                         "web_digest",
-                    }
+                    )
                 },
                 stable_commit=COMMIT,
                 stable_api_digest=API_DIGEST,
@@ -425,6 +429,76 @@ class ReleaseCliTests(unittest.TestCase):
             self.assertEqual(plan, json.loads(plan_output.read_text(encoding="utf-8")))
             self.assertEqual(plan["external_mutation_mode"], "PLAN_ONLY")
             self.assertNotIn("--generate-notes", plan["commands"]["create_draft"])
+
+    def test_authority_snapshot_reads_each_path_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "authority.json"
+            original = b'{"value":"original"}\n'
+            path.write_bytes(original)
+            snapshot = cli.PublicationInputSnapshot()
+
+            self.assertEqual(
+                snapshot.read(path, subject="test authority"),
+                original,
+            )
+            path.write_bytes(b'{"value":"replacement"}\n')
+
+            self.assertEqual(
+                snapshot.read(path, subject="test authority"),
+                original,
+            )
+
+    def test_json_and_checksum_authority_reads_do_not_use_path_read_helpers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            authority = root / "authority.json"
+            output = root / "checksums.txt"
+            authority.write_text('{"value":1}\n', encoding="utf-8")
+            args = SimpleNamespace(files=[authority], output=output)
+
+            with (
+                mock.patch.object(
+                    Path,
+                    "read_bytes",
+                    side_effect=AssertionError("Path.read_bytes bypass"),
+                ),
+                mock.patch.object(
+                    Path,
+                    "read_text",
+                    side_effect=AssertionError("Path.read_text bypass"),
+                ),
+            ):
+                self.assertEqual(cli._read_json(authority), {"value": 1})
+                result = cli._write_checksums(args)
+
+            self.assertEqual(result["files"], 1)
+            self.assertTrue(output.is_file())
+
+    def test_authority_snapshot_rejects_symlink_and_hardlink_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "original.json"
+            original.write_text(json.dumps({"value": 1}), encoding="utf-8")
+            aliases = []
+            hardlink = root / "hardlink.json"
+            os.link(original, hardlink)
+            aliases.append(hardlink)
+            symlink = root / "symlink.json"
+            try:
+                symlink.symlink_to(original)
+            except (OSError, NotImplementedError):
+                pass
+            else:
+                aliases.append(symlink)
+
+            for alias in aliases:
+                with self.subTest(alias=alias.name), self.assertRaises(
+                    MaterialContractError
+                ):
+                    cli.PublicationInputSnapshot().read(
+                        alias,
+                        subject="test authority",
+                    )
 
 
 if __name__ == "__main__":

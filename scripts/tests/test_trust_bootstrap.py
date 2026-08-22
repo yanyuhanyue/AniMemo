@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import tarfile
 import tempfile
@@ -23,6 +24,28 @@ def _digest(value: bytes) -> str:
 
 
 class InitialTrustBootstrapTests(unittest.TestCase):
+    def test_verifier_replacement_during_open_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            verifier = root / "offline-release-verifier"
+            replacement = root / "replacement-verifier"
+            verifier.write_bytes(b"qualified verifier")
+            replacement.write_bytes(b"malicious verifier")
+            real_open = os.open
+
+            with (
+                mock.patch.object(
+                    trust_bootstrap.os,
+                    "open",
+                    side_effect=lambda _path, flags: real_open(replacement, flags),
+                ),
+                self.assertRaisesRegex(
+                    trust_bootstrap.TrustBootstrapError,
+                    "读取期间发生变化",
+                ),
+            ):
+                trust_bootstrap._read_verifier(verifier)
+
     def test_versioned_installation_contract_closes_the_v2_lifecycle(self) -> None:
         contract_path = (
             Path(__file__).resolve().parents[2]
@@ -76,6 +99,7 @@ class InitialTrustBootstrapTests(unittest.TestCase):
             "https://tuf-repo-cdn.sigstore.dev": "sigstore",
         }
         requests: list[str] = []
+        runner_commands: list[tuple[str, ...]] = []
 
         def fetch(url: str, maximum: int) -> bytes:
             requests.append(url)
@@ -136,6 +160,7 @@ class InitialTrustBootstrapTests(unittest.TestCase):
             raise AssertionError(url)
 
         def run(command, **kwargs):
+            runner_commands.append(command)
             if command[1:] == ("--version",):
                 return subprocess.CompletedProcess(
                     command, 0, stdout=b"2.97.0+animemo.1\n", stderr=b""
@@ -212,6 +237,14 @@ class InitialTrustBootstrapTests(unittest.TestCase):
                 },
             )
             self.assertTrue(any("targets/" in url for url in requests))
+            self.assertTrue(runner_commands)
+            self.assertTrue(all(command[0] != str(verifier) for command in runner_commands))
+            with mock.patch.object(
+                Path,
+                "read_bytes",
+                side_effect=AssertionError("path-based trust-kit read is forbidden"),
+            ):
+                trust_bootstrap.validate_initial_trust_kit(kit)
 
             wheelhouse = root / "wheelhouse"
             wheelhouse.mkdir()

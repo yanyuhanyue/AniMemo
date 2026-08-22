@@ -35,6 +35,7 @@ from .resource_budget import (
     bounded_copy,
     preflight_copy_sizes,
 )
+from .safe_io import SafeReadError, SafeReadReason, read_single_link_regular_file
 
 FORMAT = "animemo-instance-backup"
 SCHEMA_VERSION = 1
@@ -2084,19 +2085,20 @@ def _resource_bounds_error(error: ResourceLimitExceeded) -> BackupError:
 
 
 def _read_regular_file(path: Path, *, maximum: int) -> bytes:
-    item_stat = path.lstat()
-    if (
-        not stat.S_ISREG(item_stat.st_mode)
-        or item_stat.st_nlink != 1
-        or _is_link_or_reparse(path)
-    ):
-        raise BackupError("BACKUP_UNSAFE_MEMBER", "member is not a safe regular file")
-    if item_stat.st_size > maximum:
+    try:
+        return read_single_link_regular_file(path, maximum=maximum)
+    except SafeReadError as error:
+        if error.reason is SafeReadReason.BOUNDS:
+            raise BackupError(
+                "BACKUP_BOUNDS_EXCEEDED", "bounded metadata member is too large"
+            ) from None
+        if error.reason is SafeReadReason.CHANGED:
+            raise BackupError(
+                "BACKUP_SOURCE_CHANGED", "bounded metadata member changed while reading"
+            ) from None
         raise BackupError(
-            "BACKUP_BOUNDS_EXCEEDED", "bounded metadata member is too large"
-        )
-    with path.open("rb") as stream:
-        return stream.read()
+            "BACKUP_UNSAFE_MEMBER", "member is not a safe regular file"
+        ) from None
 
 
 def _sha256_file(path: Path) -> str:

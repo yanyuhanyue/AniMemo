@@ -65,6 +65,11 @@ from durability.resource_budget import (
     bounded_copy,
     preflight_copy_sizes,
 )
+from durability.safe_io import (
+    SafeReadError,
+    SafeReadReason,
+    read_single_link_regular_file,
+)
 from durability.secret_envelope import (
     ENVELOPE_FORMAT,
     ENVELOPE_IDENTITY,
@@ -1595,22 +1600,17 @@ def _write_json(path: Path, value: object) -> None:
 
 def _read_regular_file(path: Path, *, maximum: int) -> bytes:
     try:
-        item_stat = path.lstat()
-        if (
-            not stat.S_ISREG(item_stat.st_mode)
-            or item_stat.st_nlink != 1
-            or _is_link_or_reparse(path)
-            or item_stat.st_size > maximum
-        ):
-            raise MigrationCorruptError("MIGRATION_MEMBER_UNSAFE")
-        with path.open("rb") as stream:
-            return stream.read(maximum + 1)
-    except MigrationError:
-        raise
-    except FileNotFoundError:
-        raise MigrationCorruptError("MIGRATION_MEMBER_MISSING") from None
-    except OSError:
-        raise MigrationOperationalError("MIGRATION_MEMBER_UNAVAILABLE") from None
+        return read_single_link_regular_file(path, maximum=maximum)
+    except SafeReadError as error:
+        if error.reason is SafeReadReason.MISSING:
+            raise MigrationCorruptError("MIGRATION_MEMBER_MISSING") from None
+        if error.reason is SafeReadReason.UNAVAILABLE:
+            raise MigrationOperationalError("MIGRATION_MEMBER_UNAVAILABLE") from None
+        if error.reason is SafeReadReason.BOUNDS:
+            raise MigrationCorruptError(
+                "MIGRATION_RESOURCE_BOUNDS_EXCEEDED"
+            ) from None
+        raise MigrationCorruptError("MIGRATION_MEMBER_UNSAFE") from None
 
 
 def _capture_database_references(

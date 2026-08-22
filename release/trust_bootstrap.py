@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 
 from release.publication_evidence import (
@@ -209,21 +210,116 @@ def _acquire_track(
 
 
 def _read_verifier(path: Path) -> bytes:
+    return _read_single_link_regular_file(
+        path,
+        maximum=_MAX_VERIFIER_BYTES,
+        label="离线验证器",
+    )
+
+
+def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+    )
+
+
+def _content_state(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_single_link_regular_file(
+    path: Path,
+    *,
+    maximum: int,
+    label: str,
+) -> bytes:
     try:
-        metadata = path.lstat()
+        before = path.lstat()
     except OSError as error:
-        raise TrustBootstrapError("离线验证器不可用") from error
+        raise TrustBootstrapError(f"{label}不可用") from error
     if (
         path.is_symlink()
-        or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_nlink != 1
-        or not 1 <= metadata.st_size <= _MAX_VERIFIER_BYTES
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or not 1 <= before.st_size <= maximum
     ):
-        raise TrustBootstrapError("离线验证器文件类型无效")
-    value = path.read_bytes()
-    if len(value) != metadata.st_size:
-        raise TrustBootstrapError("离线验证器读取期间发生变化")
-    return value
+        raise TrustBootstrapError(f"{label}文件类型无效")
+    descriptor = -1
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or _file_identity(opened) != _file_identity(before)
+            or opened.st_mtime_ns != before.st_mtime_ns
+        ):
+            raise TrustBootstrapError(f"{label}读取期间发生变化")
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = -1
+            value = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+        if (
+            len(value) != opened.st_size
+            or _file_identity(after) != _file_identity(opened)
+            or _content_state(after) != _content_state(opened)
+        ):
+            raise TrustBootstrapError(f"{label}读取期间发生变化")
+        return value
+    except TrustBootstrapError:
+        raise
+    except OSError as error:
+        raise TrustBootstrapError(f"{label}不可读") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+@contextmanager
+def _verified_verifier_copy(value: bytes, parent: Path):
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".pretrust-verifier-", dir=parent))
+    try:
+        staging.chmod(0o700)
+        target = staging / "offline-release-verifier"
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(target, flags, 0o700)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=True) as stream:
+                descriptor = -1
+                stream.write(value)
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        target.chmod(0o700)
+        if _read_verifier(target) != value:
+            raise TrustBootstrapError("离线验证器私有副本身份无效")
+        yield target
+        if _read_verifier(target) != value:
+            raise TrustBootstrapError("离线验证器私有副本执行期间发生变化")
+    except TrustBootstrapError:
+        raise
+    except OSError as error:
+        raise TrustBootstrapError("离线验证器私有副本不可用") from error
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def validate_initial_trust_kit(root: Path) -> TrustProfile:
@@ -240,20 +336,11 @@ def validate_initial_trust_kit(root: Path) -> TrustProfile:
     files: dict[str, bytes] = {}
     for name in sorted(INITIAL_TRUST_KIT_FILES):
         path = root / name
-        try:
-            item = path.lstat()
-        except OSError as error:
-            raise TrustBootstrapError("初始 pretrust kit 文件不可用") from error
-        if (
-            path.is_symlink()
-            or not stat.S_ISREG(item.st_mode)
-            or item.st_nlink != 1
-            or not 1 <= item.st_size <= _MAX_VERIFIER_BYTES
-        ):
-            raise TrustBootstrapError("初始 pretrust kit 文件类型无效")
-        files[name] = path.read_bytes()
-        if len(files[name]) != item.st_size:
-            raise TrustBootstrapError("初始 pretrust kit 文件读取期间变化")
+        files[name] = _read_single_link_regular_file(
+            path,
+            maximum=_MAX_VERIFIER_BYTES,
+            label="初始 pretrust kit 文件",
+        )
     try:
         profile_record = json.loads(files["trust-profile.json"].decode("utf-8"))
         manifest = json.loads(files["initial-trust-bootstrap.json"].decode("utf-8"))
@@ -385,7 +472,8 @@ def build_initial_trust_kit(
     if output.exists() or output.is_symlink():
         raise TrustBootstrapError("初始 pretrust 输出必须不存在")
     verifier_bytes = _read_verifier(verifier)
-    version_output = _run_verifier(runner, (str(verifier), "--version"))
+    with _verified_verifier_copy(verifier_bytes, output.parent) as verifier_copy:
+        version_output = _run_verifier(runner, (str(verifier_copy), "--version"))
     if version_output != (_VERIFIER_VERSION + "\n").encode("ascii"):
         raise TrustBootstrapError("离线验证器版本不合格")
 
@@ -453,20 +541,24 @@ def build_initial_trust_kit(
         request_path.write_bytes(_canonical_json_bytes(request))
         github_root_path.write_bytes(tracks["github"][0])
         sigstore_root_path.write_bytes(tracks["sigstore"][0])
-        claim_bytes = _run_verifier(
-            runner,
-            (
-                str(verifier),
-                "--trust-update",
-                str(package_path),
-                "--github-tuf-root",
-                str(github_root_path),
-                "--sigstore-tuf-root",
-                str(sigstore_root_path),
-                "--request",
-                str(request_path),
-            ),
-        )
+        with _verified_verifier_copy(
+            verifier_bytes,
+            output.parent,
+        ) as verifier_copy:
+            claim_bytes = _run_verifier(
+                runner,
+                (
+                    str(verifier_copy),
+                    "--trust-update",
+                    str(package_path),
+                    "--github-tuf-root",
+                    str(github_root_path),
+                    "--sigstore-tuf-root",
+                    str(sigstore_root_path),
+                    "--request",
+                    str(request_path),
+                ),
+            )
         try:
             claim_value = json.loads(claim_bytes.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:

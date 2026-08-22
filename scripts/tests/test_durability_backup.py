@@ -631,6 +631,29 @@ class BackupRuntimeTests(unittest.TestCase):
         ):
             backup.verify_backup(result.path)
 
+    def test_bounded_metadata_read_rejects_growth_after_size_check(self) -> None:
+        metadata = self.root / "bounded-metadata.json"
+        metadata.write_bytes(b"{}\n")
+
+        with (
+            mock.patch.object(os, "read", return_value=b"x" * 9),
+            self.assertRaisesRegex(backup.BackupError, "BACKUP_BOUNDS_EXCEEDED"),
+        ):
+            backup._read_regular_file(metadata, maximum=8)
+
+    def test_bounded_metadata_read_rejects_path_replacement_after_lstat(self) -> None:
+        metadata = self.root / "bounded-metadata.json"
+        replacement = self.root / "replacement.json"
+        metadata.write_bytes(b"{}\n")
+        replacement.write_bytes(b"[]\n")
+        replacement_descriptor = os.open(replacement, os.O_RDONLY)
+
+        with (
+            mock.patch.object(os, "open", return_value=replacement_descriptor),
+            self.assertRaisesRegex(backup.BackupError, "BACKUP_SOURCE_CHANGED"),
+        ):
+            backup._read_regular_file(metadata, maximum=8)
+
     def test_verify_rejects_database_bomb_while_streaming(self) -> None:
         result = self.create(runner=FakePgDump(bytes(range(256)) * 12_288))
         size_budget = DurabilityResourceBudget(

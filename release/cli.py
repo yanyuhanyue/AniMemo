@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -25,7 +26,17 @@ from .contract import (
     validate_deployment_contract,
     validate_manifest,
 )
-from .materials import build_installer_materials
+from .materials import (
+    MAX_MATERIAL_TOTAL_BYTES,
+    DuplicateJsonFieldError,
+    MaterialContractError,
+    build_installer_materials,
+    build_prepublication_material_identity,
+    extract_qualification_artifact,
+    read_bounded_release_file,
+    reject_duplicate_json_keys,
+    verify_prepublication_material_identity,
+)
 from .mirror import (
     MirrorError,
     build_offline_pair_mirror_plan_from_files,
@@ -55,19 +66,71 @@ from .publication import (
 from .trust_bootstrap import TrustBootstrapError, build_initial_trust_kit
 
 
-def _read_tags(path: Path) -> list[str]:
+class PublicationInputSnapshot:
+    """Freeze each release authority input the first time it is consumed."""
+
+    def __init__(self) -> None:
+        self._values: dict[Path, bytes] = {}
+
+    def read(self, path: Path, *, subject: str) -> bytes:
+        key = Path(os.path.abspath(path))
+        if key not in self._values:
+            self._values[key] = read_bounded_release_file(
+                key,
+                subject=subject,
+                maximum=MAX_MATERIAL_TOTAL_BYTES,
+            )
+        return self._values[key]
+
+
+def _authority_bytes(
+    path: Path,
+    *,
+    subject: str,
+    snapshot: PublicationInputSnapshot | None = None,
+) -> bytes:
+    return (snapshot or PublicationInputSnapshot()).read(path, subject=subject)
+
+
+def _read_tags(
+    path: Path,
+    *,
+    snapshot: PublicationInputSnapshot | None = None,
+) -> list[str]:
+    raw = _authority_bytes(path, subject="Release tag list", snapshot=snapshot)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ReleaseContractError("Release tag list is not UTF-8") from error
     return [
         line.strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
+        for line in text.splitlines()
         if line.strip()
     ]
 
 
-def _read_json(path: Path) -> dict[str, object]:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
+def _decode_json_object(value: bytes, path: Path) -> dict[str, object]:
+    try:
+        parsed = json.loads(
+            value.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_json_keys,
+        )
+    except (DuplicateJsonFieldError, UnicodeDecodeError) as error:
+        raise ReleaseContractError(str(error)) from error
+    if not isinstance(parsed, dict):
         raise ReleaseContractError(f"Expected a JSON object in {path}")
-    return value
+    return parsed
+
+
+def _read_json(
+    path: Path,
+    *,
+    snapshot: PublicationInputSnapshot | None = None,
+) -> dict[str, object]:
+    return _decode_json_object(
+        _authority_bytes(path, subject="Release JSON authority", snapshot=snapshot),
+        path,
+    )
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -171,6 +234,36 @@ def _build_installer_materials(args) -> dict[str, object]:
     }
 
 
+def _build_prepublication_materials(args) -> dict[str, object]:
+    payload = build_prepublication_material_identity(
+        installer_materials=args.installer_materials,
+        deployment_contract=args.deployment_contract,
+        candidate_sha=args.candidate_sha,
+        candidate_tree_sha=args.candidate_tree_sha,
+    )
+    _write_json(args.output, payload)
+    return payload
+
+
+def _verify_prepublication_materials(args) -> dict[str, object]:
+    return verify_prepublication_material_identity(
+        _read_json(args.prepublication),
+        installer_materials=args.installer_materials,
+        deployment_contract=args.deployment_contract,
+        expected_candidate_sha=args.expected_candidate_sha,
+        expected_candidate_tree_sha=args.expected_candidate_tree_sha,
+    )
+
+
+def _extract_qualification_artifact(args) -> dict[str, object]:
+    return extract_qualification_artifact(
+        args.archive,
+        args.destination,
+        qualification_run_id=args.qualification_run_id,
+        expected_sha256=args.expected_sha256,
+    )
+
+
 def _validate(args) -> dict[str, object]:
     payload = _read_json(args.manifest)
     validate_manifest(payload, updater_version=args.updater_version or None)
@@ -232,8 +325,10 @@ def _promote(args) -> dict[str, object]:
 
 def _write_checksums(args) -> dict[str, object]:
     lines = []
+    snapshot = PublicationInputSnapshot()
     for source in args.files:
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        content = snapshot.read(source, subject="Release checksum input")
+        digest = hashlib.sha256(content).hexdigest()
         lines.append(f"{digest}  {source.name}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
@@ -338,7 +433,7 @@ def _verify_declared_portable(args) -> dict[str, object]:
     inspection = inspect_portable_archive(args.payload)
     if (
         inspection.archive_sha256 != identity["sha256"]
-        or args.payload.stat().st_size != identity["size"]
+        or inspection.archive_size != identity["size"]
     ):
         raise PublicationError("portable payload identity differs from publication plan")
     return {
@@ -386,9 +481,14 @@ def _plan_publication(args) -> dict[str, object]:
 
 
 def _plan_publication_files(args) -> dict[str, object]:
-    qualification = _read_json(args.qualification)
-    notes = validate_release_notes(_read_json(args.release_notes))
-    markdown_sha256 = "sha256:" + hashlib.sha256(args.release_notes_markdown.read_bytes()).hexdigest()
+    snapshot = PublicationInputSnapshot()
+    qualification = _read_json(args.qualification, snapshot=snapshot)
+    notes = validate_release_notes(_read_json(args.release_notes, snapshot=snapshot))
+    markdown = snapshot.read(
+        args.release_notes_markdown,
+        subject="Release Notes markdown",
+    )
+    markdown_sha256 = "sha256:" + hashlib.sha256(markdown).hexdigest()
     binding = qualification.get("release_notes")
     if not isinstance(binding, dict) or binding != {
         "snapshot_identity": notes["identity"],
@@ -410,7 +510,7 @@ def _plan_publication_files(args) -> dict[str, object]:
     assets = {}
     for name in CANONICAL_RELEASE_ASSETS:
         path = args.asset_directory / name
-        content = path.read_bytes()
+        content = snapshot.read(path, subject=f"Canonical release asset {name}")
         assets[name] = {
             "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
             "size": len(content),
@@ -423,7 +523,7 @@ def _plan_publication_files(args) -> dict[str, object]:
         portable_name: {
             "role": "PORTABLE_RELEASE_BUNDLE",
             "sha256": portable_inspection.archive_sha256,
-            "size": args.portable.stat().st_size,
+            "size": portable_inspection.archive_size,
         }
     }
     plan = build_publication_plan(
@@ -454,20 +554,27 @@ def _promote_release_notes(args) -> dict[str, object]:
 
 def _validate_stable_publication_authority_inputs(
     args,
+    snapshot: PublicationInputSnapshot | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    acceptance = validate_rc_live_acceptance(_read_json(args.acceptance))
+    snapshot = snapshot or PublicationInputSnapshot()
+    acceptance = validate_rc_live_acceptance(
+        _read_json(args.acceptance, snapshot=snapshot)
+    )
     promotion = validate_stable_promotion_acceptance(
-        _read_json(args.promotion_acceptance),
+        _read_json(args.promotion_acceptance, snapshot=snapshot),
         acceptance=acceptance,
     )
-    rc_manifest_bytes = args.rc_manifest.read_bytes()
+    rc_manifest_bytes = snapshot.read(args.rc_manifest, subject="Accepted RC manifest")
     if (
         "sha256:" + hashlib.sha256(rc_manifest_bytes).hexdigest()
         != acceptance["release_manifest_identity"]
     ):
         raise PublicationError("RC manifest differs from the live acceptance record")
-    rc_manifest = json.loads(rc_manifest_bytes)
-    stable_manifest = _read_json(args.asset_directory / "release-manifest.json")
+    rc_manifest = _decode_json_object(rc_manifest_bytes, args.rc_manifest)
+    stable_manifest = _read_json(
+        args.asset_directory / "release-manifest.json",
+        snapshot=snapshot,
+    )
     validate_manifest(rc_manifest)
     validate_manifest(stable_manifest)
     try:
@@ -493,9 +600,11 @@ def _validate_stable_publication_authority_inputs(
         ("deployment-contract.json", acceptance["deployment_contract_identity"]),
         ("installer-materials.tar", acceptance["installer_materials_identity"]),
     ):
-        actual = "sha256:" + hashlib.sha256(
-            (args.asset_directory / name).read_bytes()
-        ).hexdigest()
+        content = snapshot.read(
+            args.asset_directory / name,
+            subject=f"Stable immutable material {name}",
+        )
+        actual = "sha256:" + hashlib.sha256(content).hexdigest()
         if actual != expected:
             raise PublicationError(
                 "Stable immutable materials differ from the accepted RC"
@@ -504,16 +613,29 @@ def _validate_stable_publication_authority_inputs(
 
 
 def _plan_stable_publication_files(args) -> dict[str, object]:
-    _acceptance, promotion = _validate_stable_publication_authority_inputs(args)
-    rc_notes = validate_release_notes(_read_json(args.rc_notes))
-    stable_notes = validate_release_notes(_read_json(args.stable_notes))
+    snapshot = PublicationInputSnapshot()
+    _acceptance, promotion = _validate_stable_publication_authority_inputs(
+        args,
+        snapshot,
+    )
+    rc_notes = validate_release_notes(_read_json(args.rc_notes, snapshot=snapshot))
+    stable_notes = validate_release_notes(
+        _read_json(args.stable_notes, snapshot=snapshot)
+    )
     expected_stable = promote_release_notes(rc_notes, stable_tag=args.tag)
     if stable_notes != expected_stable:
         raise PublicationError("Stable Release Notes do not derive from the frozen RC population")
-    markdown_sha256 = "sha256:" + hashlib.sha256(args.stable_notes_markdown.read_bytes()).hexdigest()
+    markdown = snapshot.read(
+        args.stable_notes_markdown,
+        subject="Stable Release Notes markdown",
+    )
+    markdown_sha256 = "sha256:" + hashlib.sha256(markdown).hexdigest()
     assets = {}
     for name in CANONICAL_RELEASE_ASSETS:
-        content = (args.asset_directory / name).read_bytes()
+        content = snapshot.read(
+            args.asset_directory / name,
+            subject=f"Canonical stable release asset {name}",
+        )
         assets[name] = {
             "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
             "size": len(content),
@@ -526,7 +648,7 @@ def _plan_stable_publication_files(args) -> dict[str, object]:
         portable_name: {
             "role": "PORTABLE_RELEASE_BUNDLE",
             "sha256": portable_inspection.archive_sha256,
-            "size": args.portable.stat().st_size,
+            "size": portable_inspection.archive_size,
         }
     }
     plan = build_publication_plan(
@@ -590,6 +712,41 @@ def _parser() -> argparse.ArgumentParser:
     materials.add_argument("--output", type=Path, required=True)
     materials.add_argument("--initial-trust-kit", type=Path, required=True)
     materials.set_defaults(handler=_build_installer_materials)
+
+    prepublication = subparsers.add_parser("build-prepublication-materials")
+    prepublication.add_argument("--installer-materials", type=Path, required=True)
+    prepublication.add_argument("--deployment-contract", type=Path, required=True)
+    prepublication.add_argument("--candidate-sha", required=True)
+    prepublication.add_argument("--candidate-tree-sha", required=True)
+    prepublication.add_argument("--output", type=Path, required=True)
+    prepublication.set_defaults(handler=_build_prepublication_materials)
+
+    verify_prepublication = subparsers.add_parser(
+        "verify-prepublication-materials"
+    )
+    verify_prepublication.add_argument("--prepublication", type=Path, required=True)
+    verify_prepublication.add_argument(
+        "--installer-materials", type=Path, required=True
+    )
+    verify_prepublication.add_argument(
+        "--deployment-contract", type=Path, required=True
+    )
+    verify_prepublication.add_argument("--expected-candidate-sha", required=True)
+    verify_prepublication.add_argument(
+        "--expected-candidate-tree-sha", required=True
+    )
+    verify_prepublication.set_defaults(handler=_verify_prepublication_materials)
+
+    qualification_artifact = subparsers.add_parser(
+        "extract-qualification-artifact"
+    )
+    qualification_artifact.add_argument("--archive", type=Path, required=True)
+    qualification_artifact.add_argument("--destination", type=Path, required=True)
+    qualification_artifact.add_argument(
+        "--qualification-run-id", type=int, required=True
+    )
+    qualification_artifact.add_argument("--expected-sha256", required=True)
+    qualification_artifact.set_defaults(handler=_extract_qualification_artifact)
 
     trust_bootstrap = subparsers.add_parser("build-initial-trust-kit")
     trust_bootstrap.add_argument("--verifier", type=Path, required=True)
@@ -726,6 +883,7 @@ def main(argv: list[str] | None = None) -> int:
         OCIContractError,
         MirrorError,
         TrustBootstrapError,
+        MaterialContractError,
         KeyError,
         TypeError,
         OSError,

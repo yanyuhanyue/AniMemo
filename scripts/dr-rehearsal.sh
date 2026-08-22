@@ -539,7 +539,7 @@ test ! -e "$DATA_B"
 as_root python3 "$CURRENT_ROOT/scripts/dr_backup.py" restore "$BACKUP_SET" --target-root "$DATA_B"
 test ! -e "$DATA_B/logs"
 test ! -e "$DATA_B/redis"
-test "$(cat "$DATA_B/private/dr-private.txt")" = "dr-private-state-v1"
+test "$(as_root cat "$DATA_B/private/dr-private.txt")" = "dr-private-state-v1"
 as_root mkdir -p "$DATA_B"/{logs,backups,postgres,redis}
 as_root chmod -R a+rwx "$DATA_B/plugins" "$DATA_B/media" "$DATA_B/logs" "$DATA_B/backups" "$DATA_B/postgres" "$DATA_B/redis"
 as_root chown -R 10001:10001 "$DATA_B/private"
@@ -594,7 +594,7 @@ test "$(compose b exec -T postgres psql -At -U animemo -d animemo -c "SELECT cou
 test "$(compose b exec -T redis redis-cli --raw DBSIZE | tr -d '\r')" = "0"
 
 echo "== Restore PostgreSQL, migrate/bootstrap, and rotate authentication epoch on B =="
-gzip -dc "$DATA_B/database.sql.gz" | compose b exec -T postgres psql --set ON_ERROR_STOP=1 -U animemo -d animemo
+as_root gzip -dc -- "$DATA_B/database.sql.gz" | compose b exec -T postgres psql --set ON_ERROR_STOP=1 -U animemo -d animemo
 compose b run --rm --no-deps migration
 compose b run --rm --no-deps bootstrap
 compose b run --rm --no-deps api python manage.py rotate_authentication_epoch --confirm-restore
