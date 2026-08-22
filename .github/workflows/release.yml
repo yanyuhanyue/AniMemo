@@ -1329,16 +1329,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --draft --prerelease --latest=false \
-            --title "AniMemo $RELEASE_TAG" --notes-file release-output/release-notes.md
-          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            | jq -s --arg tag "$RELEASE_TAG" \
-              '[.[][] | select(.tag_name == $tag)]
-               | if length == 1 then .[0] else error("expected one exact Draft Release") end' \
+          jq -n --arg tag "$RELEASE_TAG" --arg name "AniMemo $RELEASE_TAG" \
+            --rawfile body release-output/release-notes.md \
+            '{tag_name:$tag,name:$name,body:$body,
+              draft:true,prerelease:true,make_latest:"false"}' \
+            > "$RUNNER_TEMP/draft-create-request.json"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            --input "$RUNNER_TEMP/draft-create-request.json" \
             > "$RUNNER_TEMP/draft-release.json"
           jq -e --arg tag "$RELEASE_TAG" \
-            '.tag_name == $tag and .draft == true and .prerelease == true and .immutable == false' \
+            '.tag_name == $tag and .draft == true and .prerelease == true
+             and .immutable == false' \
             "$RUNNER_TEMP/draft-release.json" >/dev/null
           release_id="$(jq -r '.id' "$RUNNER_TEMP/draft-release.json")"
           [[ "$release_id" =~ ^[1-9][0-9]*$ ]]

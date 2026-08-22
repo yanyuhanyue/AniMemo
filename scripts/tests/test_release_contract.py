@@ -278,10 +278,16 @@ class VersionResolutionTests(unittest.TestCase):
         )
         self.assertIs(validate_publication_reservations(payload), payload)
         self.assertEqual(payload["schemaVersion"], 1)
-        self.assertEqual(len(payload["reservations"]), 4)
+        self.assertEqual(len(payload["reservations"]), 5)
         self.assertEqual(
             [item["releaseTag"] for item in payload["reservations"]],
-            ["v1.1.0-rc.1", "v1.1.0-rc.2", "v1.1.0-rc.3", "v1.1.0-rc.4"],
+            [
+                "v1.1.0-rc.1",
+                "v1.1.0-rc.2",
+                "v1.1.0-rc.3",
+                "v1.1.0-rc.4",
+                "v1.1.0-rc.5",
+            ],
         )
         self.assertTrue(
             all(
@@ -303,6 +309,23 @@ class VersionResolutionTests(unittest.TestCase):
                 partial_release["releaseAssetCount"],
             ),
             ("ABORTED_PARTIAL_RELEASE_TRANSACTION", False, True, True, 5),
+        )
+        partial_draft = payload["reservations"][4]
+        self.assertEqual(
+            (
+                partial_draft["status"],
+                partial_draft["reusable"],
+                partial_draft["gitTagCreated"],
+                partial_draft["githubReleaseCreated"],
+                partial_draft["releaseAssetCount"],
+            ),
+            (
+                "ABORTED_PARTIAL_DRAFT_RELEASE_TRANSACTION",
+                False,
+                True,
+                True,
+                0,
+            ),
         )
         identities = {
             item["releaseTag"]: {
@@ -384,6 +407,22 @@ class VersionResolutionTests(unittest.TestCase):
                         "sha-48f23bd51e7c68970fe54d309a5f15c989dc5b8d",
                     ],
                 },
+                "v1.1.0-rc.5": {
+                    "candidateSha": "db34a3fb0e44ff3143cce8c196e6f7d0ec6baa71",
+                    "candidateTreeSha": "7828eed68a83dd309c5b39ffa024c8df4a56782c",
+                    "qualificationRunId": 32586531664,
+                    "publishRunId": 32588261236,
+                    "apiDigest": "sha256:38c813bebd9d438f3b1cdcdf5893ed2a0db2b266c89785f43f063c9146fdca2c",
+                    "webDigest": "sha256:e38136993d85582ffb6c2755724000ff568fd312b7959c193772c8ed551590e9",
+                    "apiTags": [
+                        "v1.1.0-rc.5",
+                        "sha-db34a3fb0e44ff3143cce8c196e6f7d0ec6baa71",
+                    ],
+                    "webTags": [
+                        "v1.1.0-rc.5",
+                        "sha-db34a3fb0e44ff3143cce8c196e6f7d0ec6baa71",
+                    ],
+                },
             },
         )
         plan = resolve_prerelease(
@@ -394,7 +433,7 @@ class VersionResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             plan,
-            {"targetVersion": "v1.1.0", "releaseTag": "v1.1.0-rc.5", "sequence": 5},
+            {"targetVersion": "v1.1.0", "releaseTag": "v1.1.0-rc.6", "sequence": 6},
         )
         self.assertEqual(previous_stable_tag(["v1.0.0"], target="v1.1.0"), "v1.0.0")
 
@@ -467,6 +506,28 @@ class VersionResolutionTests(unittest.TestCase):
             ("gitTagCreated", False),
             ("githubReleaseCreated", False),
             ("releaseAssetCount", 0),
+        ):
+            invalid = copy.deepcopy(valid)
+            invalid["reservations"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ReleaseContractError):
+                validate_publication_reservations(invalid)
+
+    def test_partial_draft_release_reservation_requires_tag_release_and_zero_assets(self):
+        reservation = publication_reservation()
+        reservation.update(
+            {
+                "status": "ABORTED_PARTIAL_DRAFT_RELEASE_TRANSACTION",
+                "gitTagCreated": True,
+                "githubReleaseCreated": True,
+                "releaseAssetCount": 0,
+            }
+        )
+        valid = {"schemaVersion": 1, "reservations": [reservation]}
+        self.assertIs(validate_publication_reservations(valid), valid)
+        for field, value in (
+            ("gitTagCreated", False),
+            ("githubReleaseCreated", False),
+            ("releaseAssetCount", 1),
         ):
             invalid = copy.deepcopy(valid)
             invalid["reservations"][0][field] = value
