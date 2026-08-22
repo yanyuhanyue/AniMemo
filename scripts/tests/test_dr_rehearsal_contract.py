@@ -42,6 +42,40 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
         self.assertIn('test ! -e "$DATA_B"', self.script)
         self.assertIn('test "$(compose b exec -T redis redis-cli --raw DBSIZE', self.script)
 
+    def test_restored_private_bytes_are_verified_as_root_before_runtime_ownership(self):
+        backup_verify = self.script.index('dr_backup.py" verify')
+        restore = self.script.index('dr_backup.py" restore')
+        privileged_marker = (
+            'test "$(as_root cat "$DATA_B/private/dr-private.txt")" = '
+            '"dr-private-state-v1"'
+        )
+        self.assertTrue(
+            privileged_marker in self.script,
+            "privileged restored-private byte validation is absent",
+        )
+        privileged_validation = self.script.index(privileged_marker)
+        runtime_chown = self.script.index(
+            'chown -R 10001:10001 "$DATA_B/private"'
+        )
+        final_mode = self.script.index('chmod 0700 "$DATA_B/private"')
+
+        self.assertLess(backup_verify, restore)
+        self.assertLess(restore, privileged_validation)
+        self.assertLess(privileged_validation, runtime_chown)
+        self.assertLess(runtime_chown, final_mode)
+        self.assertNotIn(
+            'test "$(cat "$DATA_B/private/dr-private.txt")"',
+            self.script,
+        )
+        self.assertIn('as_root chmod 0700 "$DATA_B/private"', self.script)
+        self.assertIn(
+            'as_root chown -R 10001:10001 "$DATA_B/private"', self.script
+        )
+        for line in self.script.splitlines():
+            if "$DATA_B/private" in line and "chmod" in line:
+                with self.subTest(permission_line=line):
+                    self.assertNotRegex(line, r"\b(?:0644|0755|0777)\b|a\+r")
+
     def test_rehearsal_covers_authoritative_state_and_restore_security_actions(self):
         required = (
             "stateful_upgrade_fixture.py seed",
