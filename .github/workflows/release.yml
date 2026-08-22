@@ -383,7 +383,7 @@ jobs:
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --workflow-path .github/workflows/release.yml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: platform-qualification-${{ github.run_id }}
           path: platform-qualification/platform-qualification.json
@@ -602,7 +602,7 @@ jobs:
           install -m 0600 \
             "$RUNNER_TEMP/qualification/deployment-contract.json" \
             validated-release-input/deployment-contract.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ inputs.operation == 'publish' }}
         with:
           name: validated-release-input-${{ github.run_id }}
@@ -818,7 +818,7 @@ jobs:
             test "$(jq -cS '.artifacts.deploymentContract' release-output/release-manifest.json)" = \
               "$(jq -cS '.artifacts.deploymentContract' release-output/stable-manifest.dry-run.json)"
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-dry-run-${{ needs.preflight.outputs.release_tag }}
           path: release-output/
@@ -917,7 +917,7 @@ jobs:
           actual_files="$(find release-qualification -maxdepth 1 -type f \
             -printf '%f\n' | LC_ALL=C sort)"
           test "$actual_files" = "$expected_files"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-qualification-${{ github.run_id }}
           path: release-qualification/
@@ -1455,7 +1455,7 @@ jobs:
             --actions-subject "web-image=oci://$WEB_REPOSITORY@$WEB_DIGEST" \
             --output "release-output/animemo-$RELEASE_TAG-release-attestation.json" \
             > release-output/release-attestation-acquisition-receipt.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-publication-metadata-${{ needs.preflight.outputs.release_tag }}
           path: |
