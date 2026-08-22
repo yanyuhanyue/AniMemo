@@ -1,11 +1,19 @@
-from io import BytesIO
 import hashlib
 import json
+import tempfile
+from io import BytesIO
+from pathlib import Path
+from unittest import mock
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from django.test import SimpleTestCase, override_settings
 
-from plugin_host.package import PluginPackageError, inspect_package
+from plugin_host import package as package_module
+from plugin_host.package import (
+    LocalPluginPackageStorage,
+    PluginPackageError,
+    inspect_package,
+)
 
 
 def make_package(*members):
@@ -53,6 +61,35 @@ def indexed_package(*extra_members):
 
 
 class PackageSecurityTests(SimpleTestCase):
+    def test_rollback_extracts_the_same_verified_cas_bytes_after_path_swap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = LocalPluginPackageStorage(Path(directory) / "storage")
+            original = indexed_package(("frontend/assets/state.txt", "original"))
+            replacement = indexed_package(("frontend/assets/state.txt", "attacker"))
+            digest = hashlib.sha256(original).hexdigest()
+            source = storage.store_package(original, sha256=digest)
+            real_inspect = package_module.inspect_package
+
+            def replace_path_after_inspection(payload):
+                result = real_inspect(payload)
+                source.write_bytes(replacement)
+                return result
+
+            with mock.patch.object(
+                package_module,
+                "inspect_package",
+                side_effect=replace_path_after_inspection,
+            ):
+                destination = storage.rollback("demo", "1.0.0", digest)
+
+            self.assertEqual(source.read_bytes(), replacement)
+            self.assertEqual(
+                (destination / "frontend" / "assets" / "state.txt").read_text(
+                    encoding="utf-8"
+                ),
+                "original",
+            )
+
     def test_rejects_traversal(self):
         with self.assertRaises(PluginPackageError):
             inspect_package(make_package(("../escape", "x")))

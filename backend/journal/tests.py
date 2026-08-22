@@ -712,7 +712,7 @@ class StaffControlRoomTests(APITestCase):
 
         login_client = APIClient()
         required = login_client.post(reverse("staff-login"), {"username": "root-admin", "password": "StrongPass123!"}, format="json")
-        self.assertEqual(required.status_code, status.HTTP_428_PRECONDITION_REQUIRED)
+        self.assertEqual(required.status_code, status.HTTP_401_UNAUTHORIZED)
         accepted = login_client.post(reverse("staff-login"), {"username": "root-admin", "password": "StrongPass123!", "otp": _totp_at(begin.data["secret"], time.time())}, format="json")
         self.assertEqual(accepted.status_code, status.HTTP_200_OK)
 

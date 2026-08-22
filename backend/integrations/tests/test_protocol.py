@@ -8,14 +8,18 @@ from pathlib import Path
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from accounts.models import User
 from django.core.cache import cache
-from django.core.management.base import CommandError
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from plugin_host.installer import PluginPackageInstaller
+from plugin_host.models import PluginDeployment, PluginProject, PluginVersion
+from plugin_host.runtime import runtime_registry
+from plugin_host.services import install_for_user, upload_plugin_version
 from rest_framework.test import APIClient
 
-from accounts.models import User
 from integrations.authentication import sign_hmac_request
 from integrations.models import (
     ExternalIdentityBinding,
@@ -24,10 +28,6 @@ from integrations.models import (
     IntegrationEvent,
     IntegrationPairingCode,
 )
-from plugin_host.installer import PluginPackageInstaller
-from plugin_host.models import PluginDeployment, PluginProject, PluginVersion
-from plugin_host.runtime import runtime_registry
-from plugin_host.services import install_for_user, upload_plugin_version
 from integrations.services import IntegrationDispatchError
 
 
@@ -197,6 +197,7 @@ class IntegrationAPITestCase(TestCase):
             HTTP_X_ANIMEMO_SIGNATURE=sign_hmac_request(self.connection.get_secret(), stale_timestamp, "stale-nonce", "GET", path, b""),
         )
         self.assertEqual(stale.status_code, 401)
+        self.assertEqual(stale.data, unknown.data)
 
         future_timestamp = str(int(time.time()) + 301)
         future_nonce = uuid4().hex
@@ -214,6 +215,7 @@ class IntegrationAPITestCase(TestCase):
         replay = self.signed(APIClient(), "GET", path, {}, self.connection, nonce=nonce)
         self.assertEqual(first.status_code, 200)
         self.assertEqual(replay.status_code, 401)
+        self.assertEqual(replay.data, unknown.data)
 
         body_path = "/api/integrations/v1/pair/consume/"
         body_one = json.dumps({"code": "ABCDEFGH", "platform": "qq", "external_user_id": "1"}, separators=(",", ":")).encode()

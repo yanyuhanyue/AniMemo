@@ -16,6 +16,7 @@ from scripts.tests.trust_kit_fixture import (
     load_test_pretrusted_material,
     safe_test_state_root,
 )
+from updater import trust_lifecycle
 from updater.offline import OFFLINE_POLICY_IDENTITY, TrustProfile, _canonical_json_bytes
 from updater.trust_lifecycle import (
     ProductionTrustLifecycle,
@@ -456,6 +457,28 @@ class ProductionTrustLifecycleTests(unittest.TestCase):
                     "trust-profile.json",
                 },
             )
+
+    def test_initial_archive_verified_bytes_are_the_extraction_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            authority_root = root / "authority"
+            authority_root.mkdir()
+            archive = authority_root / "installer-materials.tar"
+            _kit(archive)
+            authorization = _authorization(authority_root, archive)
+            lifecycle = ProductionTrustLifecycle._for_test(root / "state")
+            extract = trust_lifecycle._extract_initial_kit
+
+            def require_verified_bytes(value):
+                self.assertIs(type(value), bytes)
+                return extract(value)
+
+            with mock.patch.object(
+                trust_lifecycle,
+                "_extract_initial_kit",
+                side_effect=require_verified_bytes,
+            ):
+                lifecycle.provision_initial(authorization)
 
     def test_bundle_root_without_authorized_capability_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

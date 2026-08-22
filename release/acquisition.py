@@ -18,6 +18,11 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from .materials import (
+    bound_release_directory_io_available,
+    bound_release_directory_matches,
+    open_bound_release_directory,
+)
 from .portable import (
     MAX_PORTABLE_TOTAL_BYTES,
     PORTABLE_STREAM_CHUNK_BYTES,
@@ -148,36 +153,73 @@ def _evidence_record(value: bytes) -> dict[str, Any]:
     }
 
 
+def _directory_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode
+
+
+def _cleanup_owned_file(parent_descriptor: int, name: str, created: os.stat_result) -> None:
+    try:
+        current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if _directory_identity(current) == _directory_identity(created):
+            os.unlink(name, dir_fd=parent_descriptor)
+    except OSError:
+        pass
+
+
 def _write_exclusive(destination: Path, value: bytes) -> None:
     destination = Path(destination)
-    try:
-        parent = destination.parent.lstat()
-    except OSError as error:
-        raise AttestationAcquisitionError("SIDECAR_DESTINATION_UNAVAILABLE") from error
-    if destination.parent.is_symlink() or not stat.S_ISDIR(parent.st_mode):
+    if not destination.name or destination.name in {".", ".."}:
         raise AttestationAcquisitionError("SIDECAR_DESTINATION_UNSAFE")
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    created = False
-    try:
-        descriptor = os.open(destination, flags, 0o600)
-        created = True
-        with os.fdopen(descriptor, "wb", closefd=True) as output:
-            output.write(value)
-            output.flush()
-            os.fsync(output.fileno())
-    except OSError as error:
-        if created:
-            try:
-                destination.unlink(missing_ok=True)
-            except OSError:
-                pass
-        raise AttestationAcquisitionError("SIDECAR_EXCLUSIVE_EXPORT_FAILED") from error
+    if bound_release_directory_io_available():
+        try:
+            parent_descriptor = open_bound_release_directory(destination.parent)
+        except AttestationAcquisitionError:
+            raise
+        except OSError as error:
+            raise AttestationAcquisitionError(
+                "SIDECAR_DESTINATION_UNAVAILABLE"
+            ) from error
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        created: os.stat_result | None = None
+        try:
+            descriptor = os.open(
+                destination.name,
+                flags,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            created = os.fstat(descriptor)
+            with os.fdopen(descriptor, "wb", closefd=True) as output:
+                output.write(value)
+                output.flush()
+                os.fsync(output.fileno())
+            if not bound_release_directory_matches(
+                destination.parent,
+                parent_descriptor,
+            ):
+                raise AttestationAcquisitionError("SIDECAR_DESTINATION_REBOUND")
+            os.fsync(parent_descriptor)
+            return
+        except AttestationAcquisitionError:
+            if created is not None:
+                _cleanup_owned_file(parent_descriptor, destination.name, created)
+            raise
+        except OSError as error:
+            if created is not None:
+                _cleanup_owned_file(parent_descriptor, destination.name, created)
+            raise AttestationAcquisitionError(
+                "SIDECAR_EXCLUSIVE_EXPORT_FAILED"
+            ) from error
+        finally:
+            os.close(parent_descriptor)
+
+    raise AttestationAcquisitionError("SIDECAR_DESCRIPTOR_RELATIVE_IO_REQUIRED")
 
 
 def export_attestation_sidecar(

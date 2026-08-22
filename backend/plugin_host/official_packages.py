@@ -6,7 +6,6 @@ from io import BytesIO
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-
 OFFICIAL_PLUGIN_SLUGS = ("watch-history-importer",)
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 CONTENT_IDENTITY_VERSION = 1
@@ -56,6 +55,66 @@ def _zip_info(name):
     return info
 
 
+def _file_identity(metadata):
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+    )
+
+
+def _content_state(metadata):
+    return (
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_source_file(path):
+    try:
+        before = path.lstat()
+        if _is_link(path) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise RuntimeError(
+                "Official plugin source must be a single-link regular file"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError("Official plugin source file is unavailable") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or _file_identity(opened) != _file_identity(before)
+            or opened.st_mtime_ns != before.st_mtime_ns
+        ):
+            raise RuntimeError("Official plugin source changed while opening")
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = -1
+            value = stream.read(opened.st_size + 1)
+            after = os.fstat(stream.fileno())
+        if (
+            len(value) != opened.st_size
+            or _file_identity(after) != _file_identity(opened)
+            or _content_state(after) != _content_state(opened)
+        ):
+            raise RuntimeError("Official plugin source changed while reading")
+        return value
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError("Official plugin source file is unreadable") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def collect_official_package_files(source_root):
     source_root = Path(source_root)
     _validate_source_tree(source_root)
@@ -75,7 +134,10 @@ def collect_official_package_files(source_root):
             if path.is_file() and not path.is_symlink() and "__pycache__" not in path.parts and "tests" not in path.parts
         )
     paths = sorted(set(paths), key=lambda path: path.relative_to(source_root).as_posix())
-    return tuple((path.relative_to(source_root).as_posix(), path.read_bytes()) for path in paths)
+    return tuple(
+        (path.relative_to(source_root).as_posix(), _read_source_file(path))
+        for path in paths
+    )
 
 
 def _content_descriptor(files):

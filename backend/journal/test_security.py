@@ -967,8 +967,53 @@ class TwoFactorSecurityTests(APITestCase):
             "username": self.admin.username,
             "password": self.password,
         }, format="json", HTTP_X_CSRFTOKEN=csrf)
-        self.assertEqual(staff_response.status_code, status.HTTP_428_PRECONDITION_REQUIRED)
+        self.assertEqual(staff_response.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertNotIn("access", staff_response.data)
+
+    def test_login_failures_do_not_reveal_that_password_validation_succeeded(self):
+        self.enable()
+        token_client = APIClient()
+        invalid_token = token_client.post(reverse("token_obtain_pair"), {
+            "username": self.admin.username,
+            "password": "wrong-password",
+        }, format="json")
+        second_factor_token = token_client.post(reverse("token_obtain_pair"), {
+            "username": self.admin.username,
+            "password": self.password,
+        }, format="json")
+        self.assertEqual(second_factor_token.status_code, invalid_token.status_code)
+        self.assertEqual(second_factor_token.data, invalid_token.data)
+
+        staff_client = APIClient(enforce_csrf_checks=True)
+        csrf = staff_client.get(reverse("csrf-token")).data["csrf_token"]
+        invalid_staff = staff_client.post(reverse("staff-login"), {
+            "username": self.admin.username,
+            "password": "wrong-password",
+        }, format="json", HTTP_X_CSRFTOKEN=csrf)
+        second_factor_staff = staff_client.post(reverse("staff-login"), {
+            "username": self.admin.username,
+            "password": self.password,
+        }, format="json", HTTP_X_CSRFTOKEN=csrf)
+        self.assertEqual(second_factor_staff.status_code, invalid_staff.status_code)
+        self.assertEqual(second_factor_staff.data, invalid_staff.data)
+
+        non_staff = User.objects.create_user(
+            username="ordinary-login-oracle",
+            email="ordinary-login-oracle@example.com",
+            password=self.password,
+        )
+        self.assertFalse(non_staff.is_staff)
+        correct_non_staff = staff_client.post(reverse("staff-login"), {
+            "username": non_staff.username,
+            "password": self.password,
+        }, format="json", HTTP_X_CSRFTOKEN=csrf)
+        wrong_non_staff = staff_client.post(reverse("staff-login"), {
+            "username": non_staff.username,
+            "password": "wrong-password",
+        }, format="json", HTTP_X_CSRFTOKEN=csrf)
+        self.assertEqual(correct_non_staff.status_code, wrong_non_staff.status_code)
+        self.assertEqual(correct_non_staff.data, wrong_non_staff.data)
+        self.assertEqual(correct_non_staff.data, invalid_staff.data)
 
     def test_first_bind_uses_pending_secret_and_standard_uri(self):
         begin = self.begin()

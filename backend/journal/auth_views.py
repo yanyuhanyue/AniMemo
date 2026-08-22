@@ -108,7 +108,7 @@ class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
             if request:
                 matched_user = User.objects.filter(email__iexact=account).first() if "@" in account else User.objects.filter(username__iexact=account).first()
                 record_login_event(request, event_type=LoginEvent.EventType.LOGIN_FAILED, success=False, user=matched_user, account=account)
-            raise
+            raise AuthenticationFailed("用户名、密码或验证码不正确。") from None
         refresh, access = issue_token_pair(result.user)
         if request:
             record_login_event(request, event_type=LoginEvent.EventType.LOGIN, success=True, user=result.user, account=account)
@@ -167,13 +167,17 @@ class StaffLoginView(APIView):
                 recovery_code=request.data.get("recovery_code", ""),
                 staff_only=True,
             )
-        except AuthenticationFailed as error:
+        except AuthenticationFailed:
             matched_user = User.objects.filter(email__iexact=account).first() if "@" in account else User.objects.filter(username__iexact=account).first()
             record_login_event(request, event_type=LoginEvent.EventType.LOGIN_FAILED, success=False, user=matched_user, account=account)
-            detail = error.detail.copy() if isinstance(error.detail, dict) else {"detail": str(error.detail)}
-            needs_second_factor = bool(detail.get("two_factor_required"))
-            detail.setdefault("code", "two_factor_required" if needs_second_factor else "invalid_credentials")
-            return Response(detail, status=status.HTTP_428_PRECONDITION_REQUIRED if needs_second_factor else status.HTTP_401_UNAUTHORIZED)
+            return Response(
+                {
+                    "code": "invalid_credentials",
+                    "detail": "用户名、密码或验证码不正确。",
+                    "two_factor_required": True,
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
 
         refresh, access = issue_token_pair(result.user)
         session_login(request, result.user)

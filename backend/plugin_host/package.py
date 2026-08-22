@@ -193,6 +193,90 @@ class LocalPluginPackageStorage:
         digest = self.package_path(sha256).stem
         return PackageHashLock(self.root, digest, timeout=timeout)
 
+    def _read_verified_cas_blob(self, sha256):
+        source = self.package_path(sha256)
+        maximum = package_policy()["max_package_bytes"]
+        try:
+            before = source.lstat()
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise PluginPackageError("CAS Package 无法读取") from error
+        if (
+            source.is_symlink()
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size < 1
+            or before.st_size > maximum
+        ):
+            raise PluginPackageError("CAS Package 不是受限单链接普通文件")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = -1
+        try:
+            descriptor = os.open(source, flags)
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_mode,
+                    opened.st_nlink,
+                    opened.st_size,
+                )
+                != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_mode,
+                    before.st_nlink,
+                    before.st_size,
+                )
+                or opened.st_mtime_ns != before.st_mtime_ns
+            ):
+                raise PluginPackageError("CAS Package 在打开期间发生变化")
+            with os.fdopen(descriptor, "rb", closefd=True) as stream:
+                descriptor = -1
+                raw = stream.read(maximum + 1)
+                after = os.fstat(stream.fileno())
+            if (
+                len(raw) != opened.st_size
+                or (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_mode,
+                    after.st_nlink,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+                != (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_mode,
+                    opened.st_nlink,
+                    opened.st_size,
+                    opened.st_mtime_ns,
+                    opened.st_ctime_ns,
+                )
+            ):
+                raise PluginPackageError("CAS Package 在读取期间发生变化")
+        except PluginPackageError:
+            raise
+        except OSError as error:
+            raise PluginPackageError("CAS Package 无法读取") from error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if hashlib.sha256(raw).hexdigest() != source.stem:
+            raise PluginPackageError("CAS Package SHA-256 校验失败")
+        inspect_package(raw)
+        return raw
+
     def store_package(self, payload: bytes, *, sha256=None, minimum_free_bytes=0):
         self.ensure()
         raw = payload.read() if hasattr(payload, "read") else bytes(payload)
@@ -257,16 +341,13 @@ class LocalPluginPackageStorage:
         return sorted((path.name for path in directory.iterdir() if path.is_dir() and not path.name.startswith(".")), key=self._version_key, reverse=True)
 
     def rollback(self, slug, version, package_sha256):
-        source = self.package_path(package_sha256)
-        if not source.is_file():
-            raise FileNotFoundError(source)
-        inspect_package(source.read_bytes())
+        raw = self._read_verified_cas_blob(package_sha256)
         destination = self.runtime / slug / version
         staging = self.staging / f"rollback-{slug}-{version}"
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True, exist_ok=False)
         try:
-            with ZipFile(source) as archive:
+            with ZipFile(BytesIO(raw)) as archive:
                 for info in archive.infolist():
                     if info.is_dir():
                         continue

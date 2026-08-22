@@ -4,10 +4,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts import dr_backup
 
 
+@unittest.skipUnless(
+    dr_backup._descriptor_relative_io_available(),
+    "descriptor-relative directory binding unavailable",
+)
 class DisasterRecoveryBackupTests(unittest.TestCase):
     def make_source(self, root: Path) -> tuple[Path, dict[str, Path]]:
         database = root / "database.sql.gz"
@@ -108,6 +113,116 @@ class DisasterRecoveryBackupTests(unittest.TestCase):
             with self.assertRaises(dr_backup.BackupError):
                 dr_backup.restore(restore_args)
 
+    def test_restore_rejects_member_changed_after_manifest_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database, sources = self.make_source(root)
+            backup = root / "backup"
+            target = root / "restored"
+            create_args = type(
+                "Args",
+                (),
+                {
+                    "output": str(backup),
+                    "database_dump": str(database),
+                    "plugins": str(sources["plugins"]),
+                    "media": str(sources["media"]),
+                    "private": str(sources["private"]),
+                    "updater_state": str(sources["updater_state"]),
+                },
+            )()
+            dr_backup.create(create_args)
+            real_verify = dr_backup._verify_manifest_bound
+
+            def verify_then_change_member(source):
+                manifest = real_verify(source)
+                (backup / "plugins" / "nested" / "plugins.txt").write_text(
+                    "tampered after verification",
+                    encoding="utf-8",
+                )
+                return manifest
+
+            restore_args = type(
+                "Args",
+                (),
+                {"backup_set": str(backup), "target_root": str(target)},
+            )()
+            with (
+                mock.patch.object(
+                    dr_backup,
+                    "_verify_manifest_bound",
+                    side_effect=verify_then_change_member,
+                ),
+                self.assertRaisesRegex(dr_backup.BackupError, "integrity verification"),
+            ):
+                dr_backup.restore(restore_args)
+
+    @unittest.skipUnless(
+        dr_backup._descriptor_relative_io_available(),
+        "descriptor-relative directory binding unavailable",
+    )
+    def test_create_rejects_source_and_output_root_rebinding_without_outside_write(self):
+        for rebound_label in ("plugins", "output"):
+            with self.subTest(rebound_label=rebound_label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                database, sources = self.make_source(root)
+                backup = root / "backup"
+                outside = root / "outside"
+                outside.mkdir()
+                sentinel = outside / "sentinel"
+                sentinel.write_bytes(b"unchanged")
+                detached = root / f"detached-{rebound_label}"
+                args = type(
+                    "Args",
+                    (),
+                    {
+                        "output": str(backup),
+                        "database_dump": str(database),
+                        "plugins": str(sources["plugins"]),
+                        "media": str(sources["media"]),
+                        "private": str(sources["private"]),
+                        "updater_state": str(sources["updater_state"]),
+                    },
+                )()
+                real_enter = dr_backup.BoundEvidenceTree.__enter__
+                rebound = False
+
+                def enter_then_rebind(
+                    bound,
+                    *,
+                    _real_enter=real_enter,
+                    _label=rebound_label,
+                    _detached=detached,
+                    _outside=outside,
+                ):
+                    nonlocal rebound
+                    result = _real_enter(bound)
+                    if not rebound and bound.label == _label:
+                        rebound = True
+                        bound.original.rename(_detached)
+                        bound.original.symlink_to(
+                            _outside,
+                            target_is_directory=True,
+                        )
+                    return result
+
+                with (
+                    mock.patch.object(
+                        dr_backup.BoundEvidenceTree,
+                        "__enter__",
+                        enter_then_rebind,
+                    ),
+                    self.assertRaisesRegex(dr_backup.BackupError, "root changed"),
+                ):
+                    dr_backup.create(args)
+
+                self.assertEqual(sentinel.read_bytes(), b"unchanged")
+                self.assertEqual(list(outside.iterdir()), [sentinel])
+                if rebound_label == "plugins":
+                    self.assertFalse(backup.exists())
+                else:
+                    self.assertEqual(list(detached.iterdir()), [])
+
     def test_create_and_restore_reject_overlapping_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -126,7 +241,6 @@ class DisasterRecoveryBackupTests(unittest.TestCase):
             )()
             with self.assertRaises(dr_backup.BackupError):
                 dr_backup.create(args)
-
             backup = root / "backup"
             args.output = str(backup)
             dr_backup.create(args)
@@ -188,6 +302,24 @@ class DisasterRecoveryBackupTests(unittest.TestCase):
             )()
             with self.assertRaises(dr_backup.BackupError):
                 dr_backup.create(args)
+
+
+class DisasterRecoveryPlatformGuardTests(unittest.TestCase):
+    @unittest.skipIf(
+        dr_backup._descriptor_relative_io_available(),
+        "descriptor-relative directory binding is available",
+    )
+    def test_operations_fail_closed_without_descriptor_relative_io(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                self.assertRaisesRegex(
+                    dr_backup.BackupError,
+                    "descriptor-relative DR I/O is required",
+                ),
+                dr_backup.BoundEvidenceTree(root, label="test"),
+            ):
+                pass
 
 
 if __name__ == "__main__":

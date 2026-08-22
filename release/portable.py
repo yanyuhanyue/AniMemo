@@ -10,9 +10,11 @@ import stat
 import tarfile
 import tempfile
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 BLOCKED_PORTABLE_PUBLICATION_AUTHORITY = "BLOCKED_PORTABLE_PUBLICATION_AUTHORITY"
 MAX_PORTABLE_FILES = 16384
@@ -91,6 +93,7 @@ class PortableArchiveInspection:
     index: dict[str, Any]
     files: tuple[PortableFileIdentity, ...]
     archive_sha256: str
+    archive_size: int
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -568,34 +571,55 @@ def validate_portable_bundle(
     return PortableBundle(root=root, index=index, files=files)
 
 
-def _hash_ustar_archive(path: Path, *, max_bytes: int) -> tuple[str, int]:
-    stream, expected_size = _open_single_link_regular_file(path, max_bytes=max_bytes)
+@contextmanager
+def _open_ustar_archive_snapshot(
+    stream,
+    *,
+    expected_size: int,
+    max_bytes: int,
+) -> Iterator[tuple[BinaryIO, str]]:
     hasher = hashlib.sha256()
     first = b""
     tail = b""
     consumed = 0
-    with stream:
-        while True:
-            chunk = stream.read(PORTABLE_STREAM_CHUNK_BYTES)
-            if not chunk:
-                break
-            if not first:
-                first = chunk[:512]
-            consumed += len(chunk)
-            hasher.update(chunk)
-            tail = (tail + chunk)[-1024:]
-        after = os.fstat(stream.fileno())
-    if consumed != expected_size or after.st_size != expected_size:
-        raise PortableBundleError("PORTABLE_FILE_CHANGED_DURING_READ")
-    if (
-        consumed < 1536
-        or consumed % 512 != 0
-        or len(first) < 512
-        or first[257:263] not in {b"ustar\x00", b"ustar "}
-        or tail != b"\x00" * 1024
-    ):
-        raise PortableBundleError("PORTABLE_USTAR_REQUIRED")
-    return "sha256:" + hasher.hexdigest(), consumed
+    try:
+        with tempfile.TemporaryFile(mode="w+b") as snapshot:
+            opened = os.fstat(stream.fileno())
+            with stream:
+                while True:
+                    chunk = stream.read(PORTABLE_STREAM_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    if not first:
+                        first = chunk[:512]
+                    consumed += len(chunk)
+                    if consumed > max_bytes:
+                        raise PortableBundleError("PORTABLE_FILE_SIZE_LIMIT")
+                    hasher.update(chunk)
+                    snapshot.write(chunk)
+                    tail = (tail + chunk)[-1024:]
+                after = os.fstat(stream.fileno())
+            if (
+                consumed != expected_size
+                or after.st_size != expected_size
+                or after.st_mtime_ns != opened.st_mtime_ns
+                or after.st_ctime_ns != opened.st_ctime_ns
+            ):
+                raise PortableBundleError("PORTABLE_FILE_CHANGED_DURING_READ")
+            if (
+                consumed < 1536
+                or consumed % 512 != 0
+                or len(first) < 512
+                or first[257:263] not in {b"ustar\x00", b"ustar "}
+                or tail != b"\x00" * 1024
+            ):
+                raise PortableBundleError("PORTABLE_USTAR_REQUIRED")
+            snapshot.flush()
+            snapshot.seek(0)
+            yield snapshot, "sha256:" + hasher.hexdigest()
+    finally:
+        if not stream.closed:
+            stream.close()
 
 
 def _open_private_stage_file(root: Path, relative: str):
@@ -620,32 +644,26 @@ def _open_private_stage_file(root: Path, relative: str):
     return os.fdopen(descriptor, "wb", closefd=True)
 
 
-def _consume_portable_archive(
+def _consume_portable_snapshot(
     archive: Path,
+    snapshot: BinaryIO,
+    archive_identity: str,
+    archive_size: int,
     *,
     stage_root: Path | None,
     max_files: int,
     max_file_bytes: int,
     max_total_bytes: int,
 ) -> PortableArchiveInspection:
-    archive_identity, _ = _hash_ustar_archive(
-        archive, max_bytes=max_total_bytes + (16 * 1024 * 1024)
-    )
-    stream, _ = _open_single_link_regular_file(
-        archive, max_bytes=max_total_bytes + (16 * 1024 * 1024)
-    )
     entries: dict[str, tuple[str, int]] = {}
     folded: set[str] = set()
     index: dict[str, Any] | None = None
     total = 0
     count = 0
     try:
-        with (
-            stream,
-            tarfile.open(
-                fileobj=stream, mode="r|", format=tarfile.USTAR_FORMAT
-            ) as handle,
-        ):
+        with tarfile.open(
+            fileobj=snapshot, mode="r|", format=tarfile.USTAR_FORMAT
+        ) as handle:
             for member in handle:
                 count += 1
                 if count > max_files + 1:
@@ -745,7 +763,37 @@ def _consume_portable_archive(
         index=index,
         files=files,
         archive_sha256=archive_identity,
+        archive_size=archive_size,
     )
+
+
+def _consume_portable_archive(
+    archive: Path,
+    *,
+    stage_root: Path | None,
+    max_files: int,
+    max_file_bytes: int,
+    max_total_bytes: int,
+) -> PortableArchiveInspection:
+    archive_maximum = max_total_bytes + (16 * 1024 * 1024)
+    stream, expected_size = _open_single_link_regular_file(
+        archive, max_bytes=archive_maximum
+    )
+    with _open_ustar_archive_snapshot(
+        stream,
+        expected_size=expected_size,
+        max_bytes=archive_maximum,
+    ) as (snapshot, archive_identity):
+        return _consume_portable_snapshot(
+            archive,
+            snapshot,
+            archive_identity,
+            expected_size,
+            stage_root=stage_root,
+            max_files=max_files,
+            max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes,
+        )
 
 
 def inspect_portable_archive(

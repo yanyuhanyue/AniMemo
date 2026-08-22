@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -11,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from unittest import mock
 
-from durability import migration
+from durability import migration, safe_io
 from durability.compatibility import (
     EVALUATION_ORDER,
     CompatibilityDecision,
@@ -765,6 +766,63 @@ class MigrationRuntimeTests(unittest.TestCase):
                 target=target,
             )
         self.assertEqual(target.events, [])
+
+    def test_bounded_member_read_rejects_identity_swap_after_validation(self) -> None:
+        member = self.root / "bounded-member.json"
+        victim = self.root / "outside.json"
+        member.write_bytes(b'{"trusted":true}')
+        victim.write_bytes(b'{"attacker":true}')
+
+        swapped = False
+
+        real_open = os.open
+
+        def swap_before_open(path: Path, flags: int) -> int:
+            nonlocal swapped
+            if path == member and not swapped:
+                member.unlink()
+                os.link(victim, member)
+                swapped = True
+            return real_open(path, flags)
+
+        with (
+            mock.patch.object(
+                safe_io.os,
+                "open",
+                side_effect=swap_before_open,
+            ),
+            self.assertRaises(migration.MigrationError),
+        ):
+            migration._read_regular_file(member, maximum=1024)
+
+    def test_bounded_member_read_classifies_nofollow_link_swap_as_corrupt(self) -> None:
+        member = self.root / "bounded-member.json"
+        victim = self.root / "outside.json"
+        member.write_bytes(b'{"trusted":true}')
+        victim.write_bytes(b'{"attacker":true}')
+
+        def replace_with_link_before_open(path: Path, flags: int) -> int:
+            del flags
+            if path == member:
+                member.unlink()
+                try:
+                    member.symlink_to(victim)
+                except OSError:
+                    pass
+            raise OSError(errno.ELOOP, "no-follow link replacement")
+
+        with (
+            mock.patch.object(
+                safe_io.os,
+                "open",
+                side_effect=replace_with_link_before_open,
+            ),
+            self.assertRaisesRegex(
+                migration.MigrationCorruptError,
+                "MIGRATION_MEMBER_UNSAFE",
+            ),
+        ):
+            migration._read_regular_file(member, maximum=1024)
 
     def test_configuration_mode_matrix_keeps_origin_and_listen_separate(self) -> None:
         modes = (

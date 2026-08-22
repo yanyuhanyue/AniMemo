@@ -16,6 +16,7 @@ from unittest import mock
 
 from jsonschema import Draft202012Validator
 
+import release.portable as portable_module
 from release.portable import (
     BLOCKED_PORTABLE_PUBLICATION_AUTHORITY,
     CANONICAL_RELEASE_ASSET_PATHS,
@@ -505,6 +506,125 @@ class PortableBundleTests(unittest.TestCase):
             self.assertEqual(inspected.index, built.index)
             self.assertEqual(inspected.archive_sha256, digest(archive.read_bytes()))
             self.assertEqual(list(temporary.glob(".animemo-portable-*")), [])
+
+    def test_archive_identity_and_content_use_one_open_descriptor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            original_source = temporary / "original"
+            original_source.mkdir()
+            original_images = write_complete_portable_source(original_source)
+            original_archive = temporary / "original.tar"
+            original = build_portable_payload(
+                original_source,
+                original_archive,
+                original_images,
+            )
+
+            replacement_source = temporary / "replacement"
+            replacement_source.mkdir()
+            replacement_images = write_complete_portable_source(replacement_source)
+            replacement_manifest = (
+                replacement_source / "authority" / "release-manifest.json"
+            )
+            replacement_manifest.write_bytes(b"replacement release manifest\n")
+            replacement_archive = temporary / "replacement.tar"
+            build_portable_payload(
+                replacement_source,
+                replacement_archive,
+                replacement_images,
+            )
+
+            real_open = portable_module._open_single_link_regular_file
+            opened = 0
+
+            def replace_on_second_open(path, *, max_bytes):
+                nonlocal opened
+                opened += 1
+                selected = replacement_archive if opened == 2 else path
+                return real_open(selected, max_bytes=max_bytes)
+
+            with mock.patch.object(
+                portable_module,
+                "_open_single_link_regular_file",
+                side_effect=replace_on_second_open,
+            ):
+                inspected = inspect_portable_archive(original_archive)
+
+            self.assertEqual(opened, 1)
+            self.assertEqual(inspected.archive_sha256, digest(original_archive.read_bytes()))
+            self.assertEqual(inspected.index, original.index)
+
+    def test_invalid_archive_closes_descriptor_before_tar_parsing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "invalid.tar"
+            archive.write_bytes(b"not a ustar archive")
+            real_open = portable_module._open_single_link_regular_file
+            opened_streams = []
+
+            def record_open(path, *, max_bytes):
+                stream, expected_size = real_open(path, max_bytes=max_bytes)
+                opened_streams.append(stream)
+                return stream, expected_size
+
+            with (
+                mock.patch.object(
+                    portable_module,
+                    "_open_single_link_regular_file",
+                    side_effect=record_open,
+                ),
+                self.assertRaisesRegex(PortableBundleError, "USTAR_REQUIRED"),
+            ):
+                inspect_portable_archive(archive)
+
+            self.assertEqual(len(opened_streams), 1)
+            self.assertTrue(opened_streams[0].closed)
+
+    def test_archive_hash_and_content_share_private_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            original_source = temporary / "original"
+            original_source.mkdir()
+            original_images = write_complete_portable_source(original_source)
+            original_archive = temporary / "portable.tar"
+            original = build_portable_payload(
+                original_source,
+                original_archive,
+                original_images,
+            )
+            original_bytes = original_archive.read_bytes()
+
+            replacement_source = temporary / "replacement"
+            replacement_source.mkdir()
+            replacement_images = write_complete_portable_source(replacement_source)
+            replacement_manifest = (
+                replacement_source / "authority" / "release-manifest.json"
+            )
+            replacement_manifest.write_bytes(b"replacement release manifest\n")
+            replacement_archive = temporary / "replacement.tar"
+            replacement = build_portable_payload(
+                replacement_source,
+                replacement_archive,
+                replacement_images,
+            )
+            replacement_bytes = replacement_archive.read_bytes()
+            self.assertEqual(len(replacement_bytes), len(original_bytes))
+            real_tar_open = portable_module.tarfile.open
+
+            def rewrite_source_before_parse(*args, **kwargs):
+                original_archive.write_bytes(replacement_bytes)
+                return real_tar_open(*args, **kwargs)
+
+            with mock.patch.object(
+                portable_module.tarfile,
+                "open",
+                side_effect=rewrite_source_before_parse,
+            ):
+                inspected = inspect_portable_archive(original_archive)
+
+            self.assertEqual(original_archive.read_bytes(), replacement_bytes)
+            self.assertEqual(inspected.archive_sha256, digest(original_bytes))
+            self.assertEqual(inspected.index, original.index)
+            self.assertNotEqual(inspected.index, replacement.index)
 
     def test_bundle_is_closed_and_rejects_traversal_duplicates_and_limits(self):
         cases = (

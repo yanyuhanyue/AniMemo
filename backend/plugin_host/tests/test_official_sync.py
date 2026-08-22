@@ -92,6 +92,26 @@ class OfficialPluginSyncTests(TestCase):
             with self.assertRaisesRegex(RuntimeError, "must not contain links"):
                 build_official_package(source)
 
+    def test_official_package_rejects_file_replacement_during_open(self):
+        source = Path(__file__).resolve().parents[3] / "plugins" / "watch-history-importer"
+        with tempfile.TemporaryDirectory() as directory:
+            replacement = Path(directory) / "replacement.json"
+            replacement.write_bytes((source / "manifest.json").read_bytes())
+            real_open = os.open
+
+            def replace_manifest(path, flags, *args):
+                selected = replacement if Path(path).name == "manifest.json" else path
+                return real_open(selected, flags, *args)
+
+            with (
+                patch(
+                    "plugin_host.official_packages.os.open",
+                    side_effect=replace_manifest,
+                ),
+                self.assertRaisesRegex(RuntimeError, "changed while opening"),
+            ):
+                build_official_package(source)
+
     def test_canonical_content_identity_is_independent_of_archive_compression(self):
         source = Path(__file__).resolve().parents[3] / "plugins" / "watch-history-importer"
         archive_a = build_official_package(source)
