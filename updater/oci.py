@@ -30,6 +30,56 @@ OCI_LAYER_MEDIA_TYPES = frozenset(
         OCI_LAYER_GZIP_MEDIA_TYPE,
     }
 )
+DOCKER_SCHEMA2_MANIFEST_MEDIA_TYPE = (
+    "application/vnd.docker.distribution.manifest.v2+json"
+)
+DOCKER_SCHEMA2_CONFIG_MEDIA_TYPE = "application/vnd.docker.container.image.v1+json"
+DOCKER_SCHEMA2_LAYER_GZIP_MEDIA_TYPE = (
+    "application/vnd.docker.image.rootfs.diff.tar.gzip"
+)
+SUPPORTED_MANIFEST_MEDIA_TYPES = frozenset(
+    {OCI_IMAGE_MANIFEST_MEDIA_TYPE, DOCKER_SCHEMA2_MANIFEST_MEDIA_TYPE}
+)
+OBSERVED_OCI_ANNOTATION_KEYS = frozenset(
+    {
+        "com.docker.official-images.bashbrew.arch",
+        "org.opencontainers.image.base.digest",
+        "org.opencontainers.image.base.name",
+        "org.opencontainers.image.created",
+        "org.opencontainers.image.revision",
+        "org.opencontainers.image.source",
+        "org.opencontainers.image.url",
+        "org.opencontainers.image.version",
+    }
+)
+OBSERVED_CRANE_OCI_ANNOTATIONS = {
+    "postgres": {
+        "com.docker.official-images.bashbrew.arch": "amd64",
+        "org.opencontainers.image.base.digest": "sha256:79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f",
+        "org.opencontainers.image.base.name": "alpine:3.24",
+        "org.opencontainers.image.created": "2026-08-13T19:16:04Z",
+        "org.opencontainers.image.revision": "9d15534160ade17f2b6c455a39ee967c49b1937d",
+        "org.opencontainers.image.source": "https://github.com/docker-library/postgres.git#9d15534160ade17f2b6c455a39ee967c49b1937d:16/alpine3.24",
+        "org.opencontainers.image.url": "https://hub.docker.com/_/postgres",
+        "org.opencontainers.image.version": "16.15-alpine3.24",
+    },
+    "redis": {
+        "com.docker.official-images.bashbrew.arch": "amd64",
+        "org.opencontainers.image.base.digest": "sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339",
+        "org.opencontainers.image.base.name": "alpine:3.21",
+        "org.opencontainers.image.created": "2026-07-26T04:41:11Z",
+        "org.opencontainers.image.revision": "31c68732e7311d95e4c833b8fa50aa561ced577f",
+        "org.opencontainers.image.source": "https://github.com/redis/docker-library-redis.git#31c68732e7311d95e4c833b8fa50aa561ced577f:alpine",
+        "org.opencontainers.image.url": "https://hub.docker.com/_/redis",
+        "org.opencontainers.image.version": "7.4.10-alpine",
+    },
+}
+OBSERVED_CRANE_PROFILE_BY_ROLE = {
+    "api": "docker-schema2",
+    "postgres": "oci-v1",
+    "redis": "oci-v1",
+    "web": "docker-schema2",
+}
 OCI_PLATFORM = "linux/amd64"
 OCI_REF_NAME_ANNOTATION = "org.opencontainers.image.ref.name"
 DERIVED_IMPORT_TAG_PREFIX = "animemo-offline-"
@@ -622,6 +672,65 @@ def _descriptor(
     return _validate_digest(value["digest"]), _validate_size(value["size"])
 
 
+def _closed_oci_annotations(value: Any, *, role: str) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != OBSERVED_OCI_ANNOTATION_KEYS:
+        raise OCIContractError("OCI_ANNOTATION_FIELDS_INVALID")
+    for item in value.values():
+        if (
+            type(item) is not str
+            or not item
+            or any(ord(character) < 32 for character in item)
+        ):
+            raise OCIContractError("OCI_ANNOTATION_VALUE_INVALID")
+        try:
+            encoded = item.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise OCIContractError("OCI_ANNOTATION_VALUE_INVALID") from error
+        if len(encoded) > 4096:
+            raise OCIContractError("OCI_ANNOTATION_VALUE_INVALID")
+    if value["com.docker.official-images.bashbrew.arch"] != "amd64":
+        raise OCIContractError("OCI_ANNOTATION_VALUE_INVALID")
+    try:
+        _validate_digest(value["org.opencontainers.image.base.digest"])
+    except OCIContractError as error:
+        raise OCIContractError("OCI_ANNOTATION_VALUE_INVALID") from error
+    for name in ("org.opencontainers.image.source", "org.opencontainers.image.url"):
+        if not value[name].startswith("https://") or any(
+            character.isspace() for character in value[name]
+        ):
+            raise OCIContractError("OCI_ANNOTATION_VALUE_INVALID")
+    if value != OBSERVED_CRANE_OCI_ANNOTATIONS.get(role):
+        raise OCIContractError("OCI_ANNOTATION_VALUE_INVALID")
+    return value
+
+
+def _manifest_profile(
+    manifest: dict[str, Any], *, role: str
+) -> tuple[str, str, frozenset[str]]:
+    base_fields = {"config", "layers", "mediaType", "schemaVersion"}
+    fields = set(manifest)
+    media_type = manifest.get("mediaType")
+    if media_type == OCI_IMAGE_MANIFEST_MEDIA_TYPE:
+        if fields not in (base_fields, base_fields | {"annotations"}):
+            raise OCIContractError("OCI_MANIFEST_FIELDS_INVALID")
+        if "annotations" in manifest:
+            _closed_oci_annotations(manifest["annotations"], role=role)
+        config_media_type = OCI_CONFIG_MEDIA_TYPE
+        layer_media_types = OCI_LAYER_MEDIA_TYPES
+        profile = "oci-v1"
+    elif media_type == DOCKER_SCHEMA2_MANIFEST_MEDIA_TYPE:
+        if fields != base_fields:
+            raise OCIContractError("OCI_MANIFEST_FIELDS_INVALID")
+        config_media_type = DOCKER_SCHEMA2_CONFIG_MEDIA_TYPE
+        layer_media_types = frozenset({DOCKER_SCHEMA2_LAYER_GZIP_MEDIA_TYPE})
+        profile = "docker-schema2"
+    else:
+        raise OCIContractError("OCI_MANIFEST_IDENTITY_INVALID")
+    if manifest.get("schemaVersion") != 2:
+        raise OCIContractError("OCI_MANIFEST_IDENTITY_INVALID")
+    return profile, config_media_type, layer_media_types
+
+
 def _blob(
     layout: Path,
     digest: str,
@@ -661,11 +770,13 @@ def _blob(
     return bytes(captured) if captured is not None else None
 
 
-def _layer_descriptor(value: Any) -> tuple[str, int, str]:
+def _layer_descriptor(
+    value: Any, *, allowed_media_types: frozenset[str] = OCI_LAYER_MEDIA_TYPES
+) -> tuple[str, int, str]:
     if not isinstance(value, dict):
         raise OCIContractError("OCI_DESCRIPTOR_INVALID")
     media_type = value.get("mediaType")
-    if type(media_type) is not str or media_type not in OCI_LAYER_MEDIA_TYPES:
+    if type(media_type) is not str or media_type not in allowed_media_types:
         raise OCIContractError("OCI_DESCRIPTOR_MEDIA_TYPE_INVALID")
     digest, size = _descriptor(
         value,
@@ -697,11 +808,12 @@ def _verify_layer_blob(
     diff_hasher = hashlib.sha256()
     stored_bytes = 0
     uncompressed_bytes = 0
-    decoder = (
-        zlib.decompressobj(16 + zlib.MAX_WBITS)
-        if media_type == OCI_LAYER_GZIP_MEDIA_TYPE
-        else None
-    )
+    decoder = None
+    if media_type in {
+        OCI_LAYER_GZIP_MEDIA_TYPE,
+        DOCKER_SCHEMA2_LAYER_GZIP_MEDIA_TYPE,
+    }:
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
 
     def consume_uncompressed(value: bytes) -> None:
         nonlocal uncompressed_bytes
@@ -847,9 +959,14 @@ def _write_verified_oci_archive(image: VerifiedOCIImage, archive: Path) -> None:
     manifests = frozen_index["manifests"]
     if not isinstance(manifests, list) or len(manifests) != 1:
         raise OCIContractError("OCI_IMPORT_INDEX_MANIFEST_COUNT_INVALID")
+    manifest_media_type = (
+        manifests[0].get("mediaType") if isinstance(manifests[0], dict) else None
+    )
+    if manifest_media_type not in SUPPORTED_MANIFEST_MEDIA_TYPES:
+        raise OCIContractError("OCI_IMPORT_INDEX_IDENTITY_INVALID")
     manifest_digest, _ = _descriptor(
         manifests[0],
-        media_type=OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+        media_type=manifest_media_type,
         with_platform=True,
     )
     if manifest_digest != image.digest:
@@ -959,15 +1076,99 @@ def _expectation(value: Any) -> OCIImageExpectation:
     )
 
 
-def verify_oci_image(
-    layout: Path, expectation: OCIImageExpectation
-) -> VerifiedOCIImage:
+def _validated_expectation(value: OCIImageExpectation) -> OCIImageExpectation:
+    if type(value) is not OCIImageExpectation:
+        raise OCIContractError("OCI_IMAGE_EXPECTATION_INVALID")
+    validated = _expectation(
+        {
+            "digest": value.digest,
+            "layoutPath": value.layout_path,
+            "platform": value.platform,
+            "repository": value.repository,
+            "role": value.role,
+        }
+    )
+    if validated != value:
+        raise OCIContractError("OCI_IMAGE_EXPECTATION_INVALID")
+    return validated
+
+
+def _atomic_replace_index(path: Path, original: bytes, replacement: bytes) -> None:
+    if _read_regular_file(path) != original:
+        raise OCIContractError("OCI_INDEX_CHANGED_DURING_NORMALIZATION")
+    descriptor = -1
+    temporary: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".animemo-index-normalize-", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        os.chmod(temporary, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = -1
+            stream.write(replacement)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if _read_regular_file(path) != original:
+            raise OCIContractError("OCI_INDEX_CHANGED_DURING_NORMALIZATION")
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _bound_crane_layout(
+    source_root: Path, layout: Path, expectation: OCIImageExpectation
+) -> Path:
+    source_root = Path(source_root)
     layout = Path(layout)
+    try:
+        source_metadata = source_root.lstat()
+    except OSError as error:
+        raise OCIContractError("OCI_SOURCE_ROOT_UNAVAILABLE") from error
+    if _is_link_like(source_root) or not stat.S_ISDIR(source_metadata.st_mode):
+        raise OCIContractError("OCI_SOURCE_ROOT_INVALID")
+    expected = source_root.joinpath(*PurePosixPath(expectation.layout_path).parts)
+    if os.path.normcase(os.path.abspath(layout)) != os.path.normcase(
+        os.path.abspath(expected)
+    ):
+        raise OCIContractError("OCI_LAYOUT_PATH_MISMATCH")
+    oci_root = source_root / "oci"
+    try:
+        oci_metadata = oci_root.lstat()
+    except OSError as error:
+        raise OCIContractError("OCI_LAYOUT_PARENT_UNAVAILABLE") from error
+    if _is_link_like(oci_root) or not stat.S_ISDIR(oci_metadata.st_mode):
+        raise OCIContractError("OCI_LAYOUT_PARENT_INVALID")
+    return layout
+
+
+def normalize_crane_oci_layout(
+    layout: Path,
+    expectation: OCIImageExpectation,
+    *,
+    source_root: Path,
+) -> dict[str, object]:
+    """Canonicalize only crane's observed root descriptor wrapper.
+
+    The manifest, config, layers, and authoritative manifest digest remain byte-for-byte
+    bound. Both supported whole-image profiles are closed; media types are never
+    translated between Docker schema2 and OCI v1.
+    """
+
+    expectation = _validated_expectation(expectation)
+    layout = _bound_crane_layout(source_root, layout, expectation)
     actual_files, actual_directories = _closed_layout(layout)
-    layout_document = _parse_json(_read_regular_file(layout / "oci-layout"))
-    if layout_document != {"imageLayoutVersion": "1.0.0"}:
+    if _parse_json(_read_regular_file(layout / "oci-layout")) != {
+        "imageLayoutVersion": "1.0.0"
+    }:
         raise OCIContractError("OCI_LAYOUT_VERSION_INVALID")
-    index = _parse_json(_read_regular_file(layout / "index.json"))
+    index_path = layout / "index.json"
+    original = _read_regular_file(index_path)
+    index = _parse_json(original)
     _expect_keys(
         index,
         {"manifests", "mediaType", "schemaVersion"},
@@ -978,26 +1179,155 @@ def verify_oci_image(
     manifests = index["manifests"]
     if not isinstance(manifests, list) or len(manifests) != 1:
         raise OCIContractError("OCI_INDEX_MANIFEST_COUNT_INVALID")
+    descriptor_value = manifests[0]
+    if not isinstance(descriptor_value, dict):
+        raise OCIContractError("OCI_DESCRIPTOR_INVALID")
+    fields_before = set(descriptor_value)
+    canonical_fields = {"digest", "mediaType", "platform", "size"}
+    raw_fields = {"artifactType", "digest", "mediaType", "size"}
+    raw_annotated_fields = raw_fields | {"annotations"}
+    if fields_before == canonical_fields:
+        verified, profile = _verify_oci_image_index(
+            layout,
+            expectation,
+            index,
+            actual_files=actual_files,
+            actual_directories=actual_directories,
+        )
+        if verified.digest != expectation.digest:
+            raise OCIContractError("OCI_EXPECTED_MANIFEST_DIGEST_MISMATCH")
+        return {
+            "authoritativeDigestRewritten": False,
+            "changed": False,
+            "digest": expectation.digest,
+            "profile": profile,
+            "role": expectation.role,
+            "rootFieldsAfter": sorted(canonical_fields),
+            "rootFieldsBefore": sorted(canonical_fields),
+        }
+    if fields_before not in (raw_fields, raw_annotated_fields):
+        raise OCIContractError("OCI_CRANE_DESCRIPTOR_FIELDS_INVALID")
+    media_type = descriptor_value.get("mediaType")
+    if media_type not in SUPPORTED_MANIFEST_MEDIA_TYPES:
+        raise OCIContractError("OCI_DESCRIPTOR_MEDIA_TYPE_INVALID")
+    manifest_digest = _validate_digest(descriptor_value.get("digest"))
+    manifest_size = _validate_size(descriptor_value.get("size"))
+    if manifest_digest != expectation.digest:
+        raise OCIContractError("OCI_EXPECTED_MANIFEST_DIGEST_MISMATCH")
+    manifest_bytes = _blob(layout, manifest_digest, manifest_size, capture=True)
+    assert manifest_bytes is not None
+    manifest = _parse_json(manifest_bytes)
+    profile, config_media_type, _ = _manifest_profile(manifest, role=expectation.role)
+    if profile != OBSERVED_CRANE_PROFILE_BY_ROLE[expectation.role]:
+        raise OCIContractError("OCI_CRANE_ROLE_PROFILE_INVALID")
+    if manifest["mediaType"] != media_type:
+        raise OCIContractError("OCI_IMAGE_PROFILE_INVALID")
+    config_descriptor = manifest.get("config")
+    if (
+        not isinstance(config_descriptor, dict)
+        or config_descriptor.get("mediaType") != config_media_type
+    ):
+        raise OCIContractError("OCI_IMAGE_PROFILE_INVALID")
+    if descriptor_value.get("artifactType") != config_media_type:
+        raise OCIContractError("OCI_CRANE_ARTIFACT_TYPE_INVALID")
+    if profile == "docker-schema2":
+        if fields_before != raw_fields:
+            raise OCIContractError("OCI_CRANE_DESCRIPTOR_FIELDS_INVALID")
+    else:
+        if fields_before != raw_annotated_fields:
+            raise OCIContractError("OCI_CRANE_DESCRIPTOR_FIELDS_INVALID")
+        root_annotations = _closed_oci_annotations(
+            descriptor_value["annotations"], role=expectation.role
+        )
+        if manifest.get("annotations") != root_annotations:
+            raise OCIContractError("OCI_ANNOTATION_BINDING_MISMATCH")
+    config_digest, config_size = _descriptor(
+        config_descriptor, media_type=config_media_type, with_platform=False
+    )
+    config_bytes = _blob(layout, config_digest, config_size, capture=True)
+    assert config_bytes is not None
+    config = _parse_json(config_bytes)
+    if config.get("os") != "linux" or config.get("architecture") != "amd64":
+        raise OCIContractError("OCI_CONFIG_PLATFORM_MISMATCH")
+    canonical_descriptor = {
+        "digest": manifest_digest,
+        "mediaType": media_type,
+        "platform": {"architecture": "amd64", "os": "linux"},
+        "size": manifest_size,
+    }
+    normalized_index = dict(index)
+    normalized_index["manifests"] = [canonical_descriptor]
+    _verify_oci_image_index(
+        layout,
+        expectation,
+        normalized_index,
+        actual_files=actual_files,
+        actual_directories=actual_directories,
+    )
+    replacement = json.dumps(
+        normalized_index,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    _atomic_replace_index(index_path, original, replacement)
+    verify_oci_image(layout, expectation)
+    return {
+        "authoritativeDigestRewritten": False,
+        "changed": True,
+        "digest": expectation.digest,
+        "profile": profile,
+        "role": expectation.role,
+        "rootFieldsAfter": sorted(canonical_fields),
+        "rootFieldsBefore": sorted(fields_before),
+    }
+
+
+def _verify_oci_image_index(
+    layout: Path,
+    expectation: OCIImageExpectation,
+    index: dict[str, Any],
+    *,
+    actual_files: set[str],
+    actual_directories: set[str],
+) -> tuple[VerifiedOCIImage, str]:
+    _expect_keys(
+        index,
+        {"manifests", "mediaType", "schemaVersion"},
+        "OCI_INDEX_FIELDS_INVALID",
+    )
+    if index["schemaVersion"] != 2 or index["mediaType"] != OCI_IMAGE_INDEX_MEDIA_TYPE:
+        raise OCIContractError("OCI_INDEX_IDENTITY_INVALID")
+    manifests = index["manifests"]
+    if not isinstance(manifests, list) or len(manifests) != 1:
+        raise OCIContractError("OCI_INDEX_MANIFEST_COUNT_INVALID")
+    root_descriptor = manifests[0]
+    root_media_type = (
+        root_descriptor.get("mediaType") if isinstance(root_descriptor, dict) else None
+    )
+    if root_media_type not in SUPPORTED_MANIFEST_MEDIA_TYPES:
+        raise OCIContractError("OCI_DESCRIPTOR_MEDIA_TYPE_INVALID")
     manifest_digest, manifest_size = _descriptor(
-        manifests[0], media_type=OCI_IMAGE_MANIFEST_MEDIA_TYPE, with_platform=True
+        root_descriptor, media_type=root_media_type, with_platform=True
     )
     if manifest_digest != expectation.digest:
         raise OCIContractError("OCI_EXPECTED_MANIFEST_DIGEST_MISMATCH")
     manifest_bytes = _blob(layout, manifest_digest, manifest_size, capture=True)
     assert manifest_bytes is not None
     manifest = _parse_json(manifest_bytes)
-    _expect_keys(
-        manifest,
-        {"config", "layers", "mediaType", "schemaVersion"},
-        "OCI_MANIFEST_FIELDS_INVALID",
+    profile, config_media_type, layer_media_types = _manifest_profile(
+        manifest, role=expectation.role
     )
+    if manifest["mediaType"] != root_media_type:
+        raise OCIContractError("OCI_IMAGE_PROFILE_INVALID")
+    config_descriptor = manifest.get("config")
     if (
-        manifest["schemaVersion"] != 2
-        or manifest["mediaType"] != OCI_IMAGE_MANIFEST_MEDIA_TYPE
+        not isinstance(config_descriptor, dict)
+        or config_descriptor.get("mediaType") != config_media_type
     ):
-        raise OCIContractError("OCI_MANIFEST_IDENTITY_INVALID")
+        raise OCIContractError("OCI_IMAGE_PROFILE_INVALID")
     config_digest, config_size = _descriptor(
-        manifest["config"], media_type=OCI_CONFIG_MEDIA_TYPE, with_platform=False
+        config_descriptor, media_type=config_media_type, with_platform=False
     )
     config_bytes = _blob(layout, config_digest, config_size, capture=True)
     assert config_bytes is not None
@@ -1020,7 +1350,9 @@ def verify_oci_image(
     layer_digests: list[str] = []
     uncompressed_layer_bytes = 0
     for layer, diff_id in zip(layers, validated_diff_ids, strict=True):
-        layer_digest, layer_size, layer_media_type = _layer_descriptor(layer)
+        layer_digest, layer_size, layer_media_type = _layer_descriptor(
+            layer, allowed_media_types=layer_media_types
+        )
         if layer_digest in layer_digests:
             raise OCIContractError("OCI_LAYER_DUPLICATE")
         uncompressed_layer_bytes += _verify_layer_blob(
@@ -1046,15 +1378,37 @@ def verify_oci_image(
         "blobs/sha256",
     }:
         raise OCIContractError("OCI_LAYOUT_DAG_NOT_CLOSED")
-    return VerifiedOCIImage(
-        role=expectation.role,
-        repository=expectation.repository,
-        digest=expectation.digest,
-        platform=expectation.platform,
-        layout=layout,
-        config_digest=config_digest,
-        layer_digests=tuple(layer_digests),
+    return (
+        VerifiedOCIImage(
+            role=expectation.role,
+            repository=expectation.repository,
+            digest=expectation.digest,
+            platform=expectation.platform,
+            layout=layout,
+            config_digest=config_digest,
+            layer_digests=tuple(layer_digests),
+        ),
+        profile,
     )
+
+
+def verify_oci_image(
+    layout: Path, expectation: OCIImageExpectation
+) -> VerifiedOCIImage:
+    layout = Path(layout)
+    actual_files, actual_directories = _closed_layout(layout)
+    layout_document = _parse_json(_read_regular_file(layout / "oci-layout"))
+    if layout_document != {"imageLayoutVersion": "1.0.0"}:
+        raise OCIContractError("OCI_LAYOUT_VERSION_INVALID")
+    index = _parse_json(_read_regular_file(layout / "index.json"))
+    verified, _ = _verify_oci_image_index(
+        layout,
+        expectation,
+        index,
+        actual_files=actual_files,
+        actual_directories=actual_directories,
+    )
+    return verified
 
 
 def verify_oci_image_set(root: Path, images: Any) -> VerifiedOCIImageSet:

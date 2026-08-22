@@ -124,7 +124,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(
-                json.loads(completed.stdout)["releaseTag"], "v1.1.0-rc.3"
+                json.loads(completed.stdout)["releaseTag"], "v1.1.0-rc.4"
             )
             missing = subprocess.run(
                 [
@@ -150,6 +150,57 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(missing.stderr)["code"], "release_contract_invalid"
             )
+
+    def test_release_crane_is_exactly_pinned_asserted_and_normalized_before_packaging(
+        self,
+    ):
+        release = workflow("release.yml")
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish_steps = release["jobs"]["publish"]["steps"]
+        setup_steps = [
+            step
+            for step in publish_steps
+            if str(step.get("uses", "")).startswith("imjasonh/setup-crane@")
+        ]
+        self.assertEqual(len(setup_steps), 1)
+        self.assertEqual(setup_steps[0].get("with"), {"version": "v0.21.9"})
+        self.assertNotIn("latest-release", source)
+        self.assertEqual(release["env"].get("CRANE_REQUIRED_VERSION"), "0.21.9")
+        assertion = next(
+            step
+            for step in publish_steps
+            if step.get("name") == "Assert exact crane version"
+        )
+        self.assertIn(
+            'test "$(crane version)" = "$CRANE_REQUIRED_VERSION"', assertion["run"]
+        )
+        materialize = next(
+            step
+            for step in publish_steps
+            if step.get("name") == "Materialize exact OCI layouts without rebuilding"
+        )["run"]
+        self.assertEqual(
+            materialize.count("python -m release.cli normalize-oci-layout"), 1
+        )
+        self.assertLess(
+            materialize.index('crane pull "$reference" "$layout" --format=oci'),
+            materialize.index("python -m release.cli normalize-oci-layout"),
+        )
+        self.assertLess(
+            materialize.index("python -m release.cli normalize-oci-layout"),
+            materialize.index("python -m release.cli build-portable"),
+        )
+        for argument in (
+            '--source-root "$portable_source"',
+            '--layout "$layout"',
+            '--role "$role"',
+            '--repository "${reference%@*}"',
+            '--expected-digest "${reference#*@}"',
+            "--expected-platform linux/amd64",
+        ):
+            self.assertIn(argument, materialize)
 
     def test_oci_layout_function_has_no_same_command_local_dependency(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -237,6 +288,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 "    mkdir -p \"$3/blobs\"\n"
                 "  fi\n"
                 "}\n"
+                "python() {\n"
+                "  test \"$1\" = -m\n"
+                "  test \"$2\" = release.cli\n"
+                "  test \"$3\" = normalize-oci-layout\n"
+                "  printf 'normalize|%s\\n' \"$*\" >> \"$TRACE\"\n"
+                "  if [[ \"$CRANE_MODE\" = normalize-fail ]]; then return 23; fi\n"
+                "}\n"
             )
             environment = os.environ.copy()
             environment.update(
@@ -296,6 +354,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 self.assertTrue((layout / "index.json").is_file())
                 self.assertTrue((layout / "blobs").is_dir())
                 self.assertIn(layout.as_posix(), trace_text)
+                self.assertIn(f"--role {role}", trace_text)
+                self.assertIn(
+                    f"--expected-digest {references[role].split('@', 1)[1]}", trace_text
+                )
             self.assertEqual(len(set(layout_paths)), 4)
             self.assertNotIn("tar --extract", function_source)
 
@@ -306,6 +368,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 ("empty reference", 'api ""', "valid"),
                 ("mutable reference", "api ghcr.io/example/image:latest", "valid"),
                 ("crane failure", f'api "{references["api"]}"', "fail"),
+                (
+                    "normalize failure",
+                    f'api "{references["api"]}"',
+                    "normalize-fail",
+                ),
                 (
                     "missing oci-layout",
                     f'api "{references["api"]}"',

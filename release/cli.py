@@ -7,7 +7,12 @@ import os
 import sys
 from pathlib import Path
 
-from updater.oci import OCIContractError, verify_oci_image_set
+from updater.oci import (
+    OCIContractError,
+    OCIImageExpectation,
+    normalize_crane_oci_layout,
+    verify_oci_image_set,
+)
 
 from .acceptance import (
     AcceptanceError,
@@ -377,6 +382,20 @@ def _build_portable(args) -> dict[str, object]:
         "imageRoles": [item["role"] for item in images],
         "authorityState": inspection.index["authorityState"],
     }
+
+
+def _normalize_oci_layout(args) -> dict[str, object]:
+    return normalize_crane_oci_layout(
+        args.layout,
+        OCIImageExpectation(
+            role=args.role,
+            repository=args.repository,
+            digest=args.expected_digest,
+            platform=args.expected_platform,
+            layout_path=f"oci/{args.role}",
+        ),
+        source_root=args.source_root,
+    )
 
 
 def _build_initial_trust_kit(args) -> dict[str, object]:
@@ -796,6 +815,15 @@ def _parser() -> argparse.ArgumentParser:
     portable.add_argument("--output", type=Path, required=True)
     portable.add_argument("--image", action="append", default=[], required=True)
     portable.set_defaults(handler=_build_portable)
+
+    normalize_oci = subparsers.add_parser("normalize-oci-layout")
+    normalize_oci.add_argument("--source-root", type=Path, required=True)
+    normalize_oci.add_argument("--layout", type=Path, required=True)
+    normalize_oci.add_argument("--role", required=True)
+    normalize_oci.add_argument("--repository", required=True)
+    normalize_oci.add_argument("--expected-digest", required=True)
+    normalize_oci.add_argument("--expected-platform", required=True)
+    normalize_oci.set_defaults(handler=_normalize_oci_layout)
 
     portable_promotion = subparsers.add_parser("promote-portable")
     portable_promotion.add_argument("--rc-payload", type=Path, required=True)

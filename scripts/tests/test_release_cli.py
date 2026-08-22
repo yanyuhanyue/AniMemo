@@ -41,6 +41,25 @@ class ReleaseCliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, expected, completed.stderr or completed.stdout)
         return completed
 
+    def test_normalize_oci_layout_cli_exposes_only_exact_identity_inputs(self):
+        completed = self.run_cli("normalize-oci-layout", "--help")
+        for argument in (
+            "--source-root",
+            "--layout",
+            "--role",
+            "--repository",
+            "--expected-digest",
+            "--expected-platform",
+        ):
+            self.assertIn(argument, completed.stdout)
+        for forbidden in (
+            "--tag",
+            "--source-index",
+            "--allow-unknown",
+            "--rewrite-digest",
+        ):
+            self.assertNotIn(forbidden, completed.stdout)
+
     def test_resolve_version_emits_json_and_github_outputs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -343,8 +362,8 @@ class ReleaseCliTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(completed.stdout),
                 {
-                    "releaseTag": "v1.1.0-rc.3",
-                    "sequence": 3,
+                    "releaseTag": "v1.1.0-rc.4",
+                    "sequence": 4,
                     "targetVersion": "v1.1.0",
                 },
             )

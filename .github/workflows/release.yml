@@ -52,6 +52,7 @@ permissions:
 
 env:
   GH_REQUIRED_VERSION: 2.97.0
+  CRANE_REQUIRED_VERSION: 0.21.9
   API_REPOSITORY: ghcr.io/yanyuhanyue/animemo-api
   WEB_REPOSITORY: ghcr.io/yanyuhanyue/animemo-web
   POSTGRES_IMAGE: docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
@@ -1034,6 +1035,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+        with:
+          version: v0.21.9
+      - name: Assert exact crane version
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(crane version)" = "$CRANE_REQUIRED_VERSION"
       - name: Reject existing immutable image manifests before building
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
@@ -1231,6 +1239,13 @@ jobs:
             test ! -L "$layout/index.json"
             test -d "$layout/blobs"
             test ! -L "$layout/blobs"
+            python -m release.cli normalize-oci-layout \
+              --source-root "$portable_source" \
+              --layout "$layout" \
+              --role "$role" \
+              --repository "${reference%@*}" \
+              --expected-digest "${reference#*@}" \
+              --expected-platform linux/amd64
           }
           export_layout api "$API_REPOSITORY@$API_DIGEST"
           export_layout web "$WEB_REPOSITORY@$WEB_DIGEST"

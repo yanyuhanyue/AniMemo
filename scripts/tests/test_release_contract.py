@@ -278,10 +278,10 @@ class VersionResolutionTests(unittest.TestCase):
         )
         self.assertIs(validate_publication_reservations(payload), payload)
         self.assertEqual(payload["schemaVersion"], 1)
-        self.assertEqual(len(payload["reservations"]), 2)
+        self.assertEqual(len(payload["reservations"]), 3)
         self.assertEqual(
             [item["releaseTag"] for item in payload["reservations"]],
-            ["v1.1.0-rc.1", "v1.1.0-rc.2"],
+            ["v1.1.0-rc.1", "v1.1.0-rc.2", "v1.1.0-rc.3"],
         )
         self.assertTrue(
             all(
@@ -341,6 +341,22 @@ class VersionResolutionTests(unittest.TestCase):
                         "sha-548cb47fac2d8c9e8e9b457084486df4cb8e5d26",
                     ],
                 },
+                "v1.1.0-rc.3": {
+                    "candidateSha": "33eae910d38494e358d8d6ab0f196ab2c6399a6e",
+                    "candidateTreeSha": "13fe7a99d314e56af33eea2362fd52a50514cc0a",
+                    "qualificationRunId": 32572123477,
+                    "publishRunId": 32574129439,
+                    "apiDigest": "sha256:1b7c3e0bcac28628f25c6419961e5ec37aaaac7eb0ff6d26c7bc8b70c6ccea61",
+                    "webDigest": "sha256:cad63b93e3c88ad6430101342679c76c25767a229ed704f989dd1b251cf53dd8",
+                    "apiTags": [
+                        "v1.1.0-rc.3",
+                        "sha-33eae910d38494e358d8d6ab0f196ab2c6399a6e",
+                    ],
+                    "webTags": [
+                        "v1.1.0-rc.3",
+                        "sha-33eae910d38494e358d8d6ab0f196ab2c6399a6e",
+                    ],
+                },
             },
         )
         plan = resolve_prerelease(
@@ -351,7 +367,7 @@ class VersionResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             plan,
-            {"targetVersion": "v1.1.0", "releaseTag": "v1.1.0-rc.3", "sequence": 3},
+            {"targetVersion": "v1.1.0", "releaseTag": "v1.1.0-rc.4", "sequence": 4},
         )
         self.assertEqual(previous_stable_tag(["v1.0.0"], target="v1.1.0"), "v1.0.0")
 
