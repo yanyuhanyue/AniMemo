@@ -120,6 +120,24 @@ jobs:
           set -euo pipefail
           version="$(gh --version | sed -nE 's/^gh version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1)"
           test "$version" = "$GH_REQUIRED_VERSION"
+      - name: Verify immutable-release administration-read credential
+        if: ${{ inputs.operation == 'publish' }}
+        env:
+          GH_TOKEN: ${{ secrets.ANIMEMO_RELEASE_ADMIN_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GH_TOKEN:-}"
+          response="$RUNNER_TEMP/immutable-releases-early.json"
+          gh api --method GET "repos/$GITHUB_REPOSITORY/immutable-releases" > "$response"
+          jq -e '
+            type == "object" and
+            (.enabled | type) == "boolean" and
+            (.enforced_by_owner | type) == "boolean" and
+            .enabled == true
+          ' "$response" >/dev/null
+          enforced_by_owner="$(jq -r '.enforced_by_owner' "$response")"
+          printf 'Immutable Releases enabled=true enforced_by_owner=%s\n' "$enforced_by_owner"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
@@ -989,9 +1007,25 @@ jobs:
             --deployment-contract release-output/deployment-contract.json \
             --expected-candidate-sha "$GITHUB_SHA" \
             --expected-candidate-tree-sha "$candidate_tree"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = "true"
           ! git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1
           ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
+      - name: Recheck immutable release setting immediately before publishing
+        env:
+          GH_TOKEN: ${{ secrets.ANIMEMO_RELEASE_ADMIN_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GH_TOKEN:-}"
+          response="$RUNNER_TEMP/immutable-releases-final.json"
+          gh api --method GET "repos/$GITHUB_REPOSITORY/immutable-releases" > "$response"
+          jq -e '
+            type == "object" and
+            (.enabled | type) == "boolean" and
+            (.enforced_by_owner | type) == "boolean" and
+            .enabled == true
+          ' "$response" >/dev/null
+          enforced_by_owner="$(jq -r '.enforced_by_owner' "$response")"
+          printf 'Immutable Releases enabled=true enforced_by_owner=%s\n' "$enforced_by_owner"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -1246,7 +1280,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = "true"
           gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" --verify-tag --draft --prerelease --latest=false \
             --title "AniMemo $RELEASE_TAG" --notes-file release-output/release-notes.md
