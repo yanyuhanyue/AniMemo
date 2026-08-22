@@ -343,8 +343,8 @@ class ReleaseCliTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(completed.stdout),
                 {
-                    "releaseTag": "v1.1.0-rc.2",
-                    "sequence": 2,
+                    "releaseTag": "v1.1.0-rc.3",
+                    "sequence": 3,
                     "targetVersion": "v1.1.0",
                 },
             )

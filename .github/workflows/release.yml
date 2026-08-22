@@ -1182,6 +1182,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
           portable_source="$RUNNER_TEMP/portable-source"
           rm -rf "$portable_source"
           install -d -m 0700 "$portable_source/authority" "$portable_source/oci"
@@ -1195,15 +1196,41 @@ jobs:
           export_layout() {
             local role
             local reference
-            local archive
+            local layout
             role="$1"
             reference="$2"
-            archive="$RUNNER_TEMP/${role}-oci.tar"
-            rm -f "$archive"
-            rm -rf "$portable_source/oci/$role"
-            install -d -m 0700 "$portable_source/oci/$role"
-            crane pull "$reference" "$archive" --format=oci
-            tar --extract --file "$archive" --directory "$portable_source/oci/$role"
+            case "$role" in
+              api)
+                layout="$portable_source/oci/api"
+                ;;
+              web)
+                layout="$portable_source/oci/web"
+                ;;
+              postgres)
+                layout="$portable_source/oci/postgres"
+                ;;
+              redis)
+                layout="$portable_source/oci/redis"
+                ;;
+              *)
+                echo "Unsupported OCI layout role: $role" >&2
+                return 2
+                ;;
+            esac
+            if [[ ! "$reference" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+              echo "OCI layout reference must use an exact sha256 digest" >&2
+              return 2
+            fi
+            rm -rf -- "$layout"
+            crane pull "$reference" "$layout" --format=oci
+            test -d "$layout"
+            test ! -L "$layout"
+            test -f "$layout/oci-layout"
+            test ! -L "$layout/oci-layout"
+            test -f "$layout/index.json"
+            test ! -L "$layout/index.json"
+            test -d "$layout/blobs"
+            test ! -L "$layout/blobs"
           }
           export_layout api "$API_REPOSITORY@$API_DIGEST"
           export_layout web "$WEB_REPOSITORY@$WEB_DIGEST"

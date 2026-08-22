@@ -169,6 +169,17 @@ Authoritative `resolve-version` calls must provide the canonical ledger through
 `--publication-reservations-file`; a missing, duplicate-key, or invalid ledger
 fails closed instead of falling back to Git tags alone.
 
+The ledger currently closes both `v1.1.0-rc.1` and `v1.1.0-rc.2` as
+`ABORTED_PARTIAL_GHCR_TRANSACTION`; neither identity is reusable. With Stable
+`v1.0.0` as the actual baseline, `bump=minor`, and `channel=rc`, the next
+candidate is therefore `v1.1.0-rc.3`.
+
+For portable publication, `crane pull --format=oci` writes an OCI image-layout
+directory, not a tar archive. The Release Producer maps only the closed role
+set `api`, `web`, `postgres`, and `redis` to fixed directories, requires exact
+digest references, and validates `oci-layout`, `index.json`, and `blobs/`
+before `build-portable` consumes those directories directly.
+
 工具入口为 `python -m release.cli`：
 
 ```text

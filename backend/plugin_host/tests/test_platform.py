@@ -417,10 +417,38 @@ class PluginPlatformApiTests(APITestCase):
         admin_client.force_authenticate(self.admin)
         sentinel = Path(self.root.name) / "outside-sentinel.txt"
         sentinel.write_text("keep\n", encoding="utf-8")
+        attack_paths = (
+            "/api/staff/plugins/../rollback/",
+            "/api/staff/plugins/%2e%2e/rollback/",
+            "/api/staff/plugins/%252e%252e/rollback/",
+            "/api/staff/plugins/a%2fb/rollback/",
+            "/api/staff/plugins/a%5cb/rollback/",
+            "/api/staff/plugins/C:%5cWindows/rollback/",
+            "/api/staff/plugins/.hidden/rollback/",
+            "/api/staff/plugins/demo.plugin/rollback/",
+        )
 
-        response = admin_client.post("/api/staff/plugins/%2e%2e/rollback/")
+        with patch("plugin_host.views.PluginPackageInstaller.rollback") as rollback, patch(
+            "plugin_host.views.get_plugin", return_value={"slug": "demo-plugin"}
+        ):
+            rollback.return_value = {
+                "slug": "demo-plugin",
+                "version": "1.0.0",
+                "previous_version": "2.0.0",
+            }
+            valid = admin_client.post(
+                "/api/staff/plugins/demo-plugin/rollback/"
+            )
+            self.assertEqual(valid.status_code, 200, valid.data)
+            rollback.assert_called_once_with("demo-plugin", actor=self.admin)
+            rollback.reset_mock()
 
-        self.assertEqual(response.status_code, 404)
+            for attack_path in attack_paths:
+                with self.subTest(attack_path=attack_path):
+                    response = admin_client.post(attack_path)
+                    self.assertEqual(response.status_code, 404)
+
+            rollback.assert_not_called()
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep\n")
 
     def test_uninstall_retains_only_current_users_data_by_default(self):
