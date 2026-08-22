@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -694,20 +695,66 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertLess(rehearse, publish)
         self.assertNotIn("push: true", source[publish_section:publish])
 
-    def test_immutable_release_setting_is_checked_before_any_rc_publication(self):
+    def test_immutable_release_admin_read_credential_is_isolated_and_fail_closed(self):
+        release = workflow("release.yml")
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
+        preflight = source[source.index("  preflight:\n") : source.index("  full-ci:\n")]
         publish = source[source.index("  publish:\n") :]
-        setting_gate = (
-            'test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" '
-            '--jq \'.enabled\')" = "true"'
+        endpoint = 'repos/$GITHUB_REPOSITORY/immutable-releases'
+        secret = "${{ secrets.ANIMEMO_RELEASE_ADMIN_READ_TOKEN }}"
+        early_name = "Verify immutable-release administration-read credential"
+        final_name = "Recheck immutable release setting immediately before publishing"
+
+        self.assertEqual(source.count(endpoint), 2)
+        self.assertEqual(source.count(secret), 2)
+        self.assertIn(early_name, preflight)
+        self.assertIn(final_name, publish)
+
+        preflight_steps = release["jobs"]["preflight"]["steps"]
+        publish_steps = release["jobs"]["publish"]["steps"]
+        early = next(step for step in preflight_steps if step.get("name") == early_name)
+        final = next(step for step in publish_steps if step.get("name") == final_name)
+        self.assertEqual(early["if"], "${{ inputs.operation == 'publish' }}")
+        self.assertEqual(early["env"], {"GH_TOKEN": secret})
+        self.assertEqual(final["env"], {"GH_TOKEN": secret})
+        self.assertEqual(early["run"].count(endpoint), 1)
+        self.assertEqual(final["run"].count(endpoint), 1)
+        for step in (early, final):
+            self.assertIn('test -n "${GH_TOKEN:-}"', step["run"])
+            self.assertIn("gh api --method GET", step["run"])
+            self.assertIn('type == "object"', step["run"])
+            self.assertIn('.enabled == true', step["run"])
+            self.assertIn(".enforced_by_owner", step["run"])
+            self.assertNotIn("github.token", step["run"])
+
+        for job in release["jobs"].values():
+            self.assertNotIn("ANIMEMO_RELEASE_ADMIN_READ_TOKEN", str(job.get("env", {})))
+
+        permission_text = json.dumps(
+            {name: job.get("permissions", {}) for name, job in release["jobs"].items()},
+            sort_keys=True,
+        )
+        self.assertNotIn("administration", permission_text)
+        self.assertEqual(release["permissions"], {"contents": "read"})
+        self.assertEqual(
+            release["jobs"]["publish"]["permissions"],
+            {
+                "actions": "read",
+                "contents": "write",
+                "packages": "write",
+                "id-token": "write",
+                "attestations": "write",
+            },
         )
 
-        self.assertIn(setting_gate, publish)
-        self.assertLess(publish.index(setting_gate), publish.index("docker/login-action"))
-        self.assertLess(publish.index(setting_gate), publish.index("docker push"))
-        self.assertLess(publish.index(setting_gate), publish.index("git push origin"))
+        self.assertLess(source.index(early_name), source.index("Download and verify Phase A qualification evidence"))
+        self.assertLess(source.index(early_name), source.index("docker/login-action"))
+        self.assertLess(publish.index(final_name), publish.index("docker/login-action"))
+        self.assertLess(publish.index(final_name), publish.index("docker push"))
+        self.assertLess(publish.index(final_name), publish.index("git push origin"))
+        self.assertLess(publish.index(final_name), publish.index("gh release create"))
         self.assertNotIn("build-initial-trust-kit", publish)
         self.assertLess(
             publish.index("verify-prepublication-materials"),
