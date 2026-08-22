@@ -43,7 +43,10 @@ PRERELEASE_TAG = re.compile(
 )
 PUBLICATION_RESERVATION_SCHEMA_VERSION = 1
 PUBLICATION_RESERVATION_STATUSES = frozenset(
-    {"ABORTED_PARTIAL_GHCR_TRANSACTION"}
+    {
+        "ABORTED_PARTIAL_GHCR_TRANSACTION",
+        "ABORTED_PARTIAL_RELEASE_TRANSACTION",
+    }
 )
 _PUBLICATION_RESERVATION_FIELDS = {
     "releaseTag",
@@ -384,6 +387,17 @@ def validate_publication_reservations(payload: object) -> dict[str, object]:
         ):
             raise ReleaseContractError(
                 "Aborted partial GHCR reservation has inconsistent Release state"
+            )
+        if (
+            reservation["status"] == "ABORTED_PARTIAL_RELEASE_TRANSACTION"
+            and (
+                not reservation["gitTagCreated"]
+                or not reservation["githubReleaseCreated"]
+                or asset_count <= 0
+            )
+        ):
+            raise ReleaseContractError(
+                "Aborted partial Release reservation has inconsistent Release state"
             )
     return payload
 
