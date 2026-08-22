@@ -124,7 +124,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(
-                json.loads(completed.stdout)["releaseTag"], "v1.1.0-rc.4"
+                json.loads(completed.stdout)["releaseTag"], "v1.1.0-rc.5"
             )
             missing = subprocess.run(
                 [
@@ -1589,7 +1589,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertLess(
             source.index('gh release upload "$RELEASE_TAG"'),
-            source.index('gh release edit "$RELEASE_TAG"'),
+            source.index('gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"'),
+        )
+        self.assertIn("id: draft_release", source)
+        self.assertIn('release_id=$release_id', source)
+        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"', source)
+        self.assertNotIn(
+            'gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"',
+            source[: source.index("Verify the public RC without authenticated asset transport")],
         )
 
     def test_stable_publication_uses_the_same_draft_transaction_and_never_rebuilds(self):

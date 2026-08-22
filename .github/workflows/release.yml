@@ -1322,6 +1322,7 @@ jobs:
           git tag --annotate "$RELEASE_TAG" "$GITHUB_SHA" --message "AniMemo $RELEASE_TAG"
           git push origin "refs/tags/$RELEASE_TAG"
       - name: Create an unpublished GitHub Draft Pre-release
+        id: draft_release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
@@ -1331,10 +1332,22 @@ jobs:
           gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" --verify-tag --draft --prerelease --latest=false \
             --title "AniMemo $RELEASE_TAG" --notes-file release-output/release-notes.md
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -s --arg tag "$RELEASE_TAG" \
+              '[.[][] | select(.tag_name == $tag)]
+               | if length == 1 then .[0] else error("expected one exact Draft Release") end' \
+            > "$RUNNER_TEMP/draft-release.json"
+          jq -e --arg tag "$RELEASE_TAG" \
+            '.tag_name == $tag and .draft == true and .prerelease == true and .immutable == false' \
+            "$RUNNER_TEMP/draft-release.json" >/dev/null
+          release_id="$(jq -r '.id' "$RUNNER_TEMP/draft-release.json")"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
       - name: Upload and read back the complete Draft asset set
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          RELEASE_ID: ${{ steps.draft_release.outputs.release_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1352,7 +1365,7 @@ jobs:
             --pattern "$PORTABLE_ASSET" \
             --dir "$RUNNER_TEMP/draft-readback"
           target="$(git rev-list -n 1 "$RELEASE_TAG")"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             | jq --arg target "$target" \
               '{id,tag:.tag_name,target:$target,draft,prerelease,body,assets:[.assets[]|{name,size,digest}]}' \
               > "$RUNNER_TEMP/draft-metadata.json"
@@ -1365,11 +1378,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          RELEASE_ID: ${{ steps.draft_release.outputs.release_id }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --draft=false --prerelease --latest=false
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -F prerelease=true -f make_latest=false \
+            > "$RUNNER_TEMP/published-release.json"
+          jq -e --arg tag "$RELEASE_TAG" --arg id "$RELEASE_ID" \
+            '.id == ($id | tonumber) and .tag_name == $tag and .draft == false
+             and .prerelease == true and .immutable == true' \
+            "$RUNNER_TEMP/published-release.json" >/dev/null
       - name: Verify the public RC without authenticated asset transport
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}

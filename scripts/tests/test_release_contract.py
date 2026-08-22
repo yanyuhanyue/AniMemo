@@ -278,10 +278,10 @@ class VersionResolutionTests(unittest.TestCase):
         )
         self.assertIs(validate_publication_reservations(payload), payload)
         self.assertEqual(payload["schemaVersion"], 1)
-        self.assertEqual(len(payload["reservations"]), 3)
+        self.assertEqual(len(payload["reservations"]), 4)
         self.assertEqual(
             [item["releaseTag"] for item in payload["reservations"]],
-            ["v1.1.0-rc.1", "v1.1.0-rc.2", "v1.1.0-rc.3"],
+            ["v1.1.0-rc.1", "v1.1.0-rc.2", "v1.1.0-rc.3", "v1.1.0-rc.4"],
         )
         self.assertTrue(
             all(
@@ -290,8 +290,19 @@ class VersionResolutionTests(unittest.TestCase):
                 and item["gitTagCreated"] is False
                 and item["githubReleaseCreated"] is False
                 and item["releaseAssetCount"] == 0
-                for item in payload["reservations"]
+                for item in payload["reservations"][:3]
             )
+        )
+        partial_release = payload["reservations"][3]
+        self.assertEqual(
+            (
+                partial_release["status"],
+                partial_release["reusable"],
+                partial_release["gitTagCreated"],
+                partial_release["githubReleaseCreated"],
+                partial_release["releaseAssetCount"],
+            ),
+            ("ABORTED_PARTIAL_RELEASE_TRANSACTION", False, True, True, 5),
         )
         identities = {
             item["releaseTag"]: {
@@ -357,6 +368,22 @@ class VersionResolutionTests(unittest.TestCase):
                         "sha-33eae910d38494e358d8d6ab0f196ab2c6399a6e",
                     ],
                 },
+                "v1.1.0-rc.4": {
+                    "candidateSha": "48f23bd51e7c68970fe54d309a5f15c989dc5b8d",
+                    "candidateTreeSha": "190e845a39780f926179038dc1ceadd525e6d8d9",
+                    "qualificationRunId": 32582830554,
+                    "publishRunId": 32584743079,
+                    "apiDigest": "sha256:5787ddcd248d883827811a30c0b417c44b45ca03439e16fdd178d3edffc7a652",
+                    "webDigest": "sha256:21a170dc1485051e67bfa53981d6a8f09703f1bcab326311a3acb2ff377fe483",
+                    "apiTags": [
+                        "v1.1.0-rc.4",
+                        "sha-48f23bd51e7c68970fe54d309a5f15c989dc5b8d",
+                    ],
+                    "webTags": [
+                        "v1.1.0-rc.4",
+                        "sha-48f23bd51e7c68970fe54d309a5f15c989dc5b8d",
+                    ],
+                },
             },
         )
         plan = resolve_prerelease(
@@ -367,7 +394,7 @@ class VersionResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             plan,
-            {"targetVersion": "v1.1.0", "releaseTag": "v1.1.0-rc.4", "sequence": 4},
+            {"targetVersion": "v1.1.0", "releaseTag": "v1.1.0-rc.5", "sequence": 5},
         )
         self.assertEqual(previous_stable_tag(["v1.0.0"], target="v1.1.0"), "v1.0.0")
 
@@ -423,6 +450,28 @@ class VersionResolutionTests(unittest.TestCase):
         for label, payload in invalid.items():
             with self.subTest(label=label), self.assertRaises(ReleaseContractError):
                 validate_publication_reservations(payload)
+
+    def test_partial_release_reservation_requires_tag_release_and_assets(self):
+        reservation = publication_reservation()
+        reservation.update(
+            {
+                "status": "ABORTED_PARTIAL_RELEASE_TRANSACTION",
+                "gitTagCreated": True,
+                "githubReleaseCreated": True,
+                "releaseAssetCount": 5,
+            }
+        )
+        valid = {"schemaVersion": 1, "reservations": [reservation]}
+        self.assertIs(validate_publication_reservations(valid), valid)
+        for field, value in (
+            ("gitTagCreated", False),
+            ("githubReleaseCreated", False),
+            ("releaseAssetCount", 0),
+        ):
+            invalid = copy.deepcopy(valid)
+            invalid["reservations"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ReleaseContractError):
+                validate_publication_reservations(invalid)
 
 
 class ManifestContractTests(unittest.TestCase):
