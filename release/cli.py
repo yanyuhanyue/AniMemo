@@ -162,6 +162,9 @@ def _resolve(args) -> dict[str, object]:
         bump=args.bump,
         channel=args.channel,
         target_version_override=args.target_version_override,
+        publication_reservations=_read_json(
+            args.publication_reservations_file
+        ),
     )
     _write_outputs(args.github_output, payload)
     return payload
@@ -674,6 +677,9 @@ def _parser() -> argparse.ArgumentParser:
 
     resolve = subparsers.add_parser("resolve-version")
     resolve.add_argument("--tags-file", type=Path, required=True)
+    resolve.add_argument(
+        "--publication-reservations-file", type=Path, required=True
+    )
     resolve.add_argument("--bump", required=True)
     resolve.add_argument("--channel", required=True)
     resolve.add_argument("--target-version-override", default="")

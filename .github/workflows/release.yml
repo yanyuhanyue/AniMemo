@@ -162,6 +162,7 @@ jobs:
           git tag --list 'v*' --sort=version:refname > "$RUNNER_TEMP/tags.txt"
           python -m release.cli resolve-version \
             --tags-file "$RUNNER_TEMP/tags.txt" \
+            --publication-reservations-file release/publication-reservations.json \
             --bump "$VERSION_BUMP" \
             --channel "$RELEASE_CHANNEL" \
             --target-version-override "$TARGET_VERSION_OVERRIDE" \
@@ -1192,7 +1193,12 @@ jobs:
           redis_repository="${REDIS_IMAGE%@*}"
           redis_digest="${REDIS_IMAGE#*@}"
           export_layout() {
-            local role="$1" reference="$2" archive="$RUNNER_TEMP/$role-oci.tar"
+            local role
+            local reference
+            local archive
+            role="$1"
+            reference="$2"
+            archive="$RUNNER_TEMP/${role}-oci.tar"
             rm -f "$archive"
             rm -rf "$portable_source/oci/$role"
             install -d -m 0700 "$portable_source/oci/$role"

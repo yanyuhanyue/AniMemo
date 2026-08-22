@@ -150,6 +150,25 @@ identities. It does not rebuild application or Installer material bytes.
 Schema-v1/three-asset Releases are not accepted by the v1.1 Installer and no
 dual reader exists.
 
+### Partial prerelease sequence reservations
+
+Once a prerelease sequence has produced public or immutable external material,
+including GHCR image tags or provenance attestations, that sequence is consumed
+even if the Release Producer stops before creating a Git tag or GitHub Release.
+The partial material must not be deleted, overwritten, or relabeled to reuse the
+sequence. `release/publication-reservations.json` records these non-reusable
+identities, and version resolution selects the next sequence from the union of
+actual prerelease Git tags and non-reusable reservations.
+
+The reservation ledger is only a source-controlled version-sequence guard. It
+is not a Git tag, Manifest, installable release, deployment authority, or
+Release Authority. The next candidate uses the next sequence, while the Stable
+baseline and previous-Stable boundary continue to derive only from actual
+Stable Git tags. Stable promotion remains limited to a complete immutable RC.
+Authoritative `resolve-version` calls must provide the canonical ledger through
+`--publication-reservations-file`; a missing, duplicate-key, or invalid ledger
+fails closed instead of falling back to Git tags alone.
+
 工具入口为 `python -m release.cli`：
 
 ```text

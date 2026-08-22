@@ -45,11 +45,16 @@ class ReleaseCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             tags = root / "tags.txt"
+            reservations = root / "publication-reservations.json"
             outputs = root / "github-output.txt"
             tags.write_text("v1.0.0\nv1.0.1-beta.1\n", encoding="utf-8")
+            reservations.write_text(
+                '{"schemaVersion":1,"reservations":[]}\n', encoding="utf-8"
+            )
             completed = self.run_cli(
                 "resolve-version",
                 "--tags-file", tags,
+                "--publication-reservations-file", reservations,
                 "--bump", "patch",
                 "--channel", "beta",
                 "--github-output", outputs,
@@ -323,10 +328,53 @@ class ReleaseCliTests(unittest.TestCase):
             self.assertEqual(json.loads(completed.stdout), {"previousStable": "v1.1.0"})
             self.assertIn("previous_stable=v1.1.0", outputs.read_text(encoding="utf-8"))
 
+    def test_resolve_version_consumes_the_canonical_incident_reservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tags = Path(directory) / "tags.txt"
+            tags.write_text("v1.0.0\n", encoding="utf-8")
+            completed = self.run_cli(
+                "resolve-version",
+                "--tags-file", tags,
+                "--publication-reservations-file",
+                ROOT / "release" / "publication-reservations.json",
+                "--bump", "minor",
+                "--channel", "rc",
+            )
+            self.assertEqual(
+                json.loads(completed.stdout),
+                {
+                    "releaseTag": "v1.1.0-rc.2",
+                    "sequence": 2,
+                    "targetVersion": "v1.1.0",
+                },
+            )
+
+    def test_resolve_version_rejects_duplicate_ledger_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tags = root / "tags.txt"
+            reservations = root / "publication-reservations.json"
+            tags.write_text("v1.0.0\n", encoding="utf-8")
+            reservations.write_text(
+                '{"schemaVersion":1,"schemaVersion":1,"reservations":[]}\n',
+                encoding="utf-8",
+            )
+            completed = self.run_cli(
+                "resolve-version",
+                "--tags-file", tags,
+                "--publication-reservations-file", reservations,
+                "--bump", "minor",
+                "--channel", "rc",
+                expected=2,
+            )
+            self.assertIn("Duplicate JSON field", completed.stderr)
+
     def test_cli_errors_are_machine_readable_and_nonzero(self):
         completed = self.run_cli(
             "resolve-version",
             "--tags-file", ROOT / "release" / "missing-tags.txt",
+            "--publication-reservations-file",
+            ROOT / "release" / "publication-reservations.json",
             "--bump", "patch",
             "--channel", "stable",
             expected=2,
