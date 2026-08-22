@@ -124,7 +124,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(
-                json.loads(completed.stdout)["releaseTag"], "v1.1.0-rc.2"
+                json.loads(completed.stdout)["releaseTag"], "v1.1.0-rc.3"
             )
             missing = subprocess.run(
                 [
@@ -175,9 +175,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     dependencies.append((line_number, assignment.group(1), referenced))
                 assigned.append(assignment.group(1))
         self.assertEqual(dependencies, [])
-        for declaration in ("local role", "local reference", "local archive"):
+        for declaration in ("local role", "local reference", "local layout"):
             self.assertIn(declaration, source)
-        self.assertIn('archive="$RUNNER_TEMP/${role}-oci.tar"', source)
+        self.assertNotIn('archive="$RUNNER_TEMP/${role}-oci.tar"', source)
+        self.assertNotIn('"$portable_source/oci/$role"', source)
+        for role in ("api", "web", "postgres", "redis"):
+            self.assertIn(f'layout="$portable_source/oci/{role}"', source)
 
     def test_oci_layout_function_runs_under_bash_nounset_for_every_role(self):
         bash = _bash_path()
@@ -199,10 +202,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         function_source = function.group(0)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            runner_temp = root / "runner"
             portable_source = root / "portable"
-            runner_temp.mkdir()
             trace = root / "trace.txt"
+            symlink_target = root / "symlink-target"
+            symlink_target.mkdir()
             references = {
                 "api": "ghcr.io/yanyuhanyue/animemo-api@sha256:"
                 "3331277a905902388afe430b92370f55b6d0425c663a2ae7470b6d678e579a5a",
@@ -213,49 +216,55 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 "redis": "docker.io/library/redis@sha256:"
                 "9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf",
             }
-            calls = "".join(
-                f'export_layout {role} "{reference}"\n'
-                for role, reference in references.items()
-            )
             stubs = (
-                "install() {\n"
-                "  test \"$1\" = -d\n"
-                "  test \"$2\" = -m\n"
-                "  test \"$3\" = 0700\n"
-                "  mkdir -p \"$4\"\n"
-                "  printf 'install|%s\\n' \"$4\" >> \"$TRACE\"\n"
-                "}\n"
                 "crane() {\n"
                 "  test \"$1\" = pull\n"
                 "  test \"$4\" = --format=oci\n"
                 "  printf 'crane|%s|%s\\n' \"$2\" \"$3\" >> \"$TRACE\"\n"
-                "  : > \"$3\"\n"
+                "  if [[ \"$CRANE_MODE\" = fail ]]; then return 17; fi\n"
+                "  if [[ \"$CRANE_MODE\" = symlink ]]; then\n"
+                "    ln -s \"$SYMLINK_TARGET\" \"$3\"\n"
+                "    return\n"
+                "  fi\n"
+                "  mkdir -p \"$3\"\n"
+                "  if [[ \"$CRANE_MODE\" != missing-oci-layout ]]; then\n"
+                "    printf '{\"imageLayoutVersion\":\"1.0.0\"}\\n' > \"$3/oci-layout\"\n"
+                "  fi\n"
+                "  if [[ \"$CRANE_MODE\" != missing-index ]]; then\n"
+                "    printf '{\"schemaVersion\":2,\"manifests\":[]}\\n' > \"$3/index.json\"\n"
+                "  fi\n"
+                "  if [[ \"$CRANE_MODE\" != missing-blobs ]]; then\n"
+                "    mkdir -p \"$3/blobs\"\n"
+                "  fi\n"
                 "}\n"
-                "tar() {\n"
-                "  test \"$1\" = --extract\n"
-                "  test \"$2\" = --file\n"
-                "  test -f \"$3\"\n"
-                "  test \"$4\" = --directory\n"
-                "  test -d \"$5\"\n"
-                "  printf 'tar|%s|%s\\n' \"$3\" \"$5\" >> \"$TRACE\"\n"
-                "}\n"
-            )
-            script = (
-                "set -euo pipefail\n"
-                'portable_source="$PORTABLE_SOURCE"\n'
-                + stubs
-                + function_source
-                + "\n"
-                + calls
             )
             environment = os.environ.copy()
             environment.update(
                 {
-                    "RUNNER_TEMP": str(runner_temp),
                     "PORTABLE_SOURCE": str(portable_source),
                     "TRACE": str(trace),
+                    "SYMLINK_TARGET": str(symlink_target),
+                    "CRANE_MODE": "valid",
                 }
             )
+
+            def script_for(calls):
+                return (
+                    "set -euo pipefail\n"
+                    "umask 077\n"
+                    'portable_source="$PORTABLE_SOURCE"\n'
+                    'mkdir -p "$portable_source/oci"\n'
+                    + stubs
+                    + function_source
+                    + "\n"
+                    + calls
+                )
+
+            calls = "".join(
+                f'export_layout {role} "{reference}"\n'
+                for role, reference in references.items()
+            )
+            script = script_for(calls)
             syntax = subprocess.run(
                 [bash, "-n"],
                 input=script,
@@ -278,31 +287,52 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             trace_text = trace.read_text(encoding="utf-8").replace("\\", "/")
+            layout_paths = []
             for role in ("api", "web", "postgres", "redis"):
                 self.assertIn(references[role], trace_text)
-                self.assertIn(
-                    (runner_temp / f"{role}-oci.tar").as_posix(), trace_text
-                )
-                self.assertIn(
-                    (portable_source / "oci" / role).as_posix(), trace_text
-                )
-            for arguments in ("", "api"):
-                missing = subprocess.run(
+                layout = portable_source / "oci" / role
+                layout_paths.append(layout.resolve())
+                self.assertTrue((layout / "oci-layout").is_file())
+                self.assertTrue((layout / "index.json").is_file())
+                self.assertTrue((layout / "blobs").is_dir())
+                self.assertIn(layout.as_posix(), trace_text)
+            self.assertEqual(len(set(layout_paths)), 4)
+            self.assertNotIn("tar --extract", function_source)
+
+            failures = (
+                ("unknown role", f'unknown "{references["api"]}"', "valid"),
+                ("empty role", f'"" "{references["api"]}"', "valid"),
+                ("missing reference", "api", "valid"),
+                ("empty reference", 'api ""', "valid"),
+                ("mutable reference", "api ghcr.io/example/image:latest", "valid"),
+                ("crane failure", f'api "{references["api"]}"', "fail"),
+                (
+                    "missing oci-layout",
+                    f'api "{references["api"]}"',
+                    "missing-oci-layout",
+                ),
+                ("missing index.json", f'api "{references["api"]}"', "missing-index"),
+                ("missing blobs", f'api "{references["api"]}"', "missing-blobs"),
+                ("symlink layout", f'api "{references["api"]}"', "symlink"),
+            )
+            for label, arguments, crane_mode in failures:
+                case_environment = environment.copy()
+                case_environment["CRANE_MODE"] = crane_mode
+                failed = subprocess.run(
                     [bash],
-                    input=(
-                        "set -euo pipefail\n"
-                        'portable_source="$PORTABLE_SOURCE"\n'
-                        + function_source
-                        + f"\nexport_layout {arguments}\n"
-                    ),
+                    input=script_for(f"export_layout {arguments}\n"),
                     text=True,
                     encoding="utf-8",
                     errors="replace",
                     capture_output=True,
-                    env=environment,
+                    env=case_environment,
                     check=False,
                 )
-                self.assertNotEqual(missing.returncode, 0)
+                self.assertNotEqual(
+                    failed.returncode,
+                    0,
+                    f"{label} unexpectedly passed: {failed.stdout}",
+                )
 
     def test_partial_rc_is_never_deleted_overwritten_or_hardcoded_for_push(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -315,6 +345,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "git push --force",
             "docker push ghcr.io/yanyuhanyue/animemo-api:v1.1.0-rc.1",
             "docker push ghcr.io/yanyuhanyue/animemo-web:v1.1.0-rc.1",
+            "docker push ghcr.io/yanyuhanyue/animemo-api:v1.1.0-rc.2",
+            "docker push ghcr.io/yanyuhanyue/animemo-web:v1.1.0-rc.2",
         ):
             self.assertNotIn(forbidden, source)
 

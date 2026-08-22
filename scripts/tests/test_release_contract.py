@@ -277,13 +277,82 @@ class VersionResolutionTests(unittest.TestCase):
             )
         )
         self.assertIs(validate_publication_reservations(payload), payload)
+        self.assertEqual(payload["schemaVersion"], 1)
+        self.assertEqual(len(payload["reservations"]), 2)
+        self.assertEqual(
+            [item["releaseTag"] for item in payload["reservations"]],
+            ["v1.1.0-rc.1", "v1.1.0-rc.2"],
+        )
+        self.assertTrue(
+            all(
+                item["status"] == "ABORTED_PARTIAL_GHCR_TRANSACTION"
+                and item["reusable"] is False
+                and item["gitTagCreated"] is False
+                and item["githubReleaseCreated"] is False
+                and item["releaseAssetCount"] == 0
+                for item in payload["reservations"]
+            )
+        )
+        identities = {
+            item["releaseTag"]: {
+                "candidateSha": item["candidateSha"],
+                "candidateTreeSha": item["candidateTreeSha"],
+                "qualificationRunId": item["qualificationRunId"],
+                "publishRunId": item["publishRunId"],
+                "apiDigest": item["api"]["digest"],
+                "webDigest": item["web"]["digest"],
+                "apiTags": item["api"]["tags"],
+                "webTags": item["web"]["tags"],
+            }
+            for item in payload["reservations"]
+        }
+        self.assertEqual(
+            identities,
+            {
+                "v1.1.0-rc.1": {
+                    "candidateSha": "ebe1763271a0e367ac2ce1c64d1b94beef36aaf7",
+                    "candidateTreeSha": "fe4e718667d5799d71ea21a52749863da971a501",
+                    "qualificationRunId": 32554141297,
+                    "publishRunId": 32555774478,
+                    "apiDigest": "sha256:3331277a905902388afe430b92370f55b6d0425c663a2ae7470b6d678e579a5a",
+                    "webDigest": "sha256:86b99658c1ea71c0a407ef4cddbd5349d8c159195ebedcb3055d9c3c34d5824a",
+                    "apiTags": [
+                        "v1.1.0-rc.1",
+                        "sha-ebe1763271a0e367ac2ce1c64d1b94beef36aaf7",
+                    ],
+                    "webTags": [
+                        "v1.1.0-rc.1",
+                        "sha-ebe1763271a0e367ac2ce1c64d1b94beef36aaf7",
+                    ],
+                },
+                "v1.1.0-rc.2": {
+                    "candidateSha": "548cb47fac2d8c9e8e9b457084486df4cb8e5d26",
+                    "candidateTreeSha": "0fd798d2835f8b5d6ce275db1c8990823c52b9b0",
+                    "qualificationRunId": 32561512396,
+                    "publishRunId": 32563131412,
+                    "apiDigest": "sha256:1d0b3a521c341a4ea4fb7cf0887b35fbdddffc202caaa7cb7eaac877befec765",
+                    "webDigest": "sha256:6695edab18801f02ed64700af1a361af6abd65fa11fc35a5cf92281258b164cc",
+                    "apiTags": [
+                        "v1.1.0-rc.2",
+                        "sha-548cb47fac2d8c9e8e9b457084486df4cb8e5d26",
+                    ],
+                    "webTags": [
+                        "v1.1.0-rc.2",
+                        "sha-548cb47fac2d8c9e8e9b457084486df4cb8e5d26",
+                    ],
+                },
+            },
+        )
         plan = resolve_prerelease(
             tags=["v1.0.0"],
             bump="minor",
             channel="rc",
             publication_reservations=payload,
         )
-        self.assertEqual(plan["targetVersion"], "v1.1.0")
+        self.assertEqual(
+            plan,
+            {"targetVersion": "v1.1.0", "releaseTag": "v1.1.0-rc.3", "sequence": 3},
+        )
         self.assertEqual(previous_stable_tag(["v1.0.0"], target="v1.1.0"), "v1.0.0")
 
     def test_publication_reservation_validation_fails_closed(self):
