@@ -169,16 +169,28 @@ Authoritative `resolve-version` calls must provide the canonical ledger through
 `--publication-reservations-file`; a missing, duplicate-key, or invalid ledger
 fails closed instead of falling back to Git tags alone.
 
-The ledger currently closes both `v1.1.0-rc.1` and `v1.1.0-rc.2` as
-`ABORTED_PARTIAL_GHCR_TRANSACTION`; neither identity is reusable. With Stable
+The ledger currently closes `v1.1.0-rc.1`, `v1.1.0-rc.2`, and
+`v1.1.0-rc.3` as `ABORTED_PARTIAL_GHCR_TRANSACTION`; none of these identities
+is reusable. With Stable
 `v1.0.0` as the actual baseline, `bump=minor`, and `channel=rc`, the next
-candidate is therefore `v1.1.0-rc.3`.
+candidate is therefore `v1.1.0-rc.4`.
 
-For portable publication, `crane pull --format=oci` writes an OCI image-layout
-directory, not a tar archive. The Release Producer maps only the closed role
-set `api`, `web`, `postgres`, and `redis` to fixed directories, requires exact
-digest references, and validates `oci-layout`, `index.json`, and `blobs/`
-before `build-portable` consumes those directories directly.
+For portable publication, the Release Producer pins crane to `v0.21.9` and
+asserts that runtime version before `crane pull --format=oci`. Crane's observed
+root descriptor wrapper is normalized to the closed OCI-layout index shape
+only after its exact manifest digest, size, artifact type, bound config
+platform, and the forensic-derived per-role annotation key/value set are
+verified. The referenced manifest, config, layers, media types, and digest are
+never rewritten.
+
+The verifier accepts exactly two whole-image profiles: OCI image manifest v1
+with OCI config/layers, or Docker schema2 manifest with Docker config and gzip
+layers. Mixed profiles, indexes in place of the authoritative manifest,
+schema1/foreign layers, arbitrary annotations, `urls`, `data`, `subject`, and
+unknown descriptor fields fail closed. Only the roles `api`, `web`,
+`postgres`, and `redis`, fixed role directories, exact digest references, and
+`linux/amd64` configs are accepted before `build-portable` consumes the
+directories directly.
 
 工具入口为 `python -m release.cli`：
 

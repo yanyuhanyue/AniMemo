@@ -60,6 +60,36 @@
           "sha-548cb47fac2d8c9e8e9b457084486df4cb8e5d26"
         ]
       }
+    },
+    {
+      "api": {
+        "attestationVerified": true,
+        "digest": "sha256:1b7c3e0bcac28628f25c6419961e5ec37aaaac7eb0ff6d26c7bc8b70c6ccea61",
+        "repository": "ghcr.io/yanyuhanyue/animemo-api",
+        "tags": [
+          "v1.1.0-rc.3",
+          "sha-33eae910d38494e358d8d6ab0f196ab2c6399a6e"
+        ]
+      },
+      "candidateSha": "33eae910d38494e358d8d6ab0f196ab2c6399a6e",
+      "candidateTreeSha": "13fe7a99d314e56af33eea2362fd52a50514cc0a",
+      "gitTagCreated": false,
+      "githubReleaseCreated": false,
+      "publishRunId": 32574129439,
+      "qualificationRunId": 32572123477,
+      "releaseAssetCount": 0,
+      "releaseTag": "v1.1.0-rc.3",
+      "reusable": false,
+      "status": "ABORTED_PARTIAL_GHCR_TRANSACTION",
+      "web": {
+        "attestationVerified": true,
+        "digest": "sha256:cad63b93e3c88ad6430101342679c76c25767a229ed704f989dd1b251cf53dd8",
+        "repository": "ghcr.io/yanyuhanyue/animemo-web",
+        "tags": [
+          "v1.1.0-rc.3",
+          "sha-33eae910d38494e358d8d6ab0f196ab2c6399a6e"
+        ]
+      }
     }
   ]
 }
