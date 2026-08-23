@@ -89,6 +89,10 @@ _SECRET_COVERAGE = (
     "REDIS_URL",
     "RESEND_API_KEY",
 )
+_REFERENCE_COVERAGE_DIGEST = sha256_identity(
+    canonical_json_bytes(list(_SECRET_COVERAGE))
+)
+_REFERENCE_FIELDS = frozenset({"provider", "version", "coverageDigest"})
 
 
 class ProductionBackupError(RuntimeError):
@@ -1762,12 +1766,16 @@ def _validate_reference_coverage(encoded: bytes) -> Mapping[str, Any]:
         ) from None
     if (
         not isinstance(payload, dict)
+        or set(payload) != _REFERENCE_FIELDS
         or canonical_json_bytes(payload) + b"\n" != encoded
         or not isinstance(payload.get("provider"), str)
         or not payload["provider"]
         or not isinstance(payload.get("version"), str)
         or not payload["version"]
-        or payload.get("coverage") != list(_SECRET_COVERAGE)
+        or not isinstance(payload.get("coverageDigest"), str)
+        or not hmac.compare_digest(
+            payload["coverageDigest"], _REFERENCE_COVERAGE_DIGEST
+        )
     ):
         raise ProductionBackupError("BACKUP_SECRET_REFERENCE_INVALID", "VALIDATION")
     return payload

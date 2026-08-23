@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from durability import backup
 from durability.backup_production import (
-    _SECRET_COVERAGE,
+    _REFERENCE_COVERAGE_DIGEST,
     MediaInventory,
     ProductionBackupError,
     ProductionBackupRuntime,
@@ -242,11 +242,10 @@ class ProductionBackupRuntimeTests(unittest.TestCase):
             {
                 "provider": "operator-secret-store",
                 "version": "v1",
-                "coverage": list(_SECRET_COVERAGE),
+                "coverageDigest": _REFERENCE_COVERAGE_DIGEST,
             }
         ) + b"\n"
-        # The serialized values are public environment-variable names, not secrets.
-        path.write_bytes(public_reference)  # codeql[py/clear-text-storage-sensitive-data]
+        path.write_bytes(public_reference)
         if os.name == "posix":
             os.chmod(path, 0o600)
         return ProtectionRequest("secret-reference", path=path)
@@ -511,6 +510,12 @@ class ProductionBackupRuntimeTests(unittest.TestCase):
 
     def test_reference_create_and_full_verify(self):
         protection = self.reference_protection()
+        reference = json.loads(protection.path.read_bytes())
+        self.assertEqual(
+            set(reference), {"provider", "version", "coverageDigest"}
+        )
+        self.assertRegex(reference["coverageDigest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertNotIn(b"POSTGRES_PASSWORD", protection.path.read_bytes())
         plan, receipt, _ = self.create(protection)
         self.assertEqual(plan.protection_mode, "reference")
         self.assertTrue(
