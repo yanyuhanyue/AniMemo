@@ -24,11 +24,35 @@ class InstallBootstrapRetirementTests(unittest.TestCase):
             "/var/lib/animemo/bootstrap-authority/v1/installer-materials.tar"
         )
         extracted = source.index("sudo /usr/bin/tar -xf")
-        python_started = source.index("/usr/bin/python3 -P -B -m installer")
+        runtime_created = source.index("/usr/bin/python3 -P -B -m venv")
+        dependencies_installed = source.index(
+            "/installer-runtime/bin/python -P -B -m pip install"
+        )
+        python_started = source.index(
+            "/installer-runtime/bin/python -P -B -m installer"
+        )
 
         self.assertLess(copied, protected_verification)
         self.assertLess(protected_verification, extracted)
-        self.assertLess(protected_verification, python_started)
+        self.assertLess(extracted, runtime_created)
+        self.assertLess(runtime_created, dependencies_installed)
+        self.assertLess(dependencies_installed, python_started)
+
+    def test_protected_runtime_uses_only_archive_bound_binary_wheels(self) -> None:
+        source = TRANSPORT_DOC.read_text(encoding="utf-8")
+
+        for required in (
+            "--no-cache-dir",
+            "--no-index",
+            "--only-binary=:all:",
+            "--find-links /var/lib/animemo/bootstrap-authority/v1/materials/wheelhouse",
+            "materials/release/requirements.txt",
+            "materials/durability/requirements.txt",
+        ):
+            self.assertIn(required, source)
+        self.assertNotIn(
+            "PYTHONSAFEPATH=1 /usr/bin/python3 -P -B -m installer", source
+        )
 
     def test_safe_path_prevents_cwd_installer_shadow_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -45,9 +45,11 @@ bundle 内自带 checksum、公钥或自声明 trust root 不构成 Release Auth
 
 本安全边界由 `docs/installer-contract-v2.md` 冻结；原 `docs/installer-contract-v1.md` 保持其历史冻结字节不变。
 
-推荐验证步骤不会使用 `curl | sudo sh`，并且精确选择 tag：
+推荐验证步骤不会使用 `curl | sudo sh`，并且精确选择 tag。Ubuntu 24.04 主机还必须先从发行版签名仓库安装 `python3-venv`，使后续已验证 wheelhouse 能在不访问 Python 包索引的条件下形成隔离 Installer 运行时：
 
 ```sh
+sudo /usr/bin/apt-get update
+sudo /usr/bin/apt-get install --yes --no-install-recommends python3-venv
 gh release verify <EXACT_TAG> --repo yanyuhanyue/AniMemo
 gh release download <EXACT_TAG> --repo yanyuhanyue/AniMemo \
   --pattern installer-materials.tar --dir ./animemo-stage0
@@ -72,14 +74,28 @@ sudo /usr/bin/tar -xf /var/lib/animemo/bootstrap-authority/v1/installer-material
   -C /var/lib/animemo/bootstrap-authority/v1/materials --no-same-owner
 sudo /usr/bin/chown -R root:root /var/lib/animemo/bootstrap-authority/v1/materials
 sudo /usr/bin/chmod -R go-w /var/lib/animemo/bootstrap-authority/v1/materials
+sudo /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/bin/python3 -P -B -m venv \
+  /var/lib/animemo/bootstrap-authority/v1/installer-runtime
+sudo /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  /var/lib/animemo/bootstrap-authority/v1/installer-runtime/bin/python -P -B -m pip install \
+  --disable-pip-version-check --no-cache-dir --no-index --only-binary=:all: \
+  --find-links /var/lib/animemo/bootstrap-authority/v1/materials/wheelhouse \
+  -r /var/lib/animemo/bootstrap-authority/v1/materials/release/requirements.txt \
+  -r /var/lib/animemo/bootstrap-authority/v1/materials/durability/requirements.txt
+sudo /usr/bin/chmod -R a+rX,go-w \
+  /var/lib/animemo/bootstrap-authority/v1/installer-runtime
 sudo /usr/bin/env -i -C /var/lib/animemo/bootstrap-authority/v1/materials \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
   LANG=C.UTF-8 LC_ALL=C.UTF-8 \
   PYTHONPATH=/var/lib/animemo/bootstrap-authority/v1/materials \
-  PYTHONSAFEPATH=1 /usr/bin/python3 -P -B -m installer <INSTALLER_ARGS>
+  PYTHONSAFEPATH=1 \
+  /var/lib/animemo/bootstrap-authority/v1/installer-runtime/bin/python -P -B -m installer \
+  <INSTALLER_ARGS>
 ```
 
-这段流程不从 install.animemo.cc 获取可执行脚本。用户目录中的首次验证只决定候选是否可复制；root-owned 副本必须由独立安装的固定 `/usr/bin/gh` 2.97.0 再次验证，且该验证必须发生在解包和执行任何 AniMemo Python byte 之前，从而关闭 verified-path 到 protected-path 的替换窗口。`env -C`、`PYTHONSAFEPATH=1` 与 Python `-P` 同时把当前目录移出模块搜索前缀，防止用户目录中的同名 `installer` 包抢先获得 root 执行。Installer 随后在任何 Docker、APT、systemd 或 AniMemo 持久化动作前再次验证受保护副本，并把当前已载入的 Installer、Updater、Release 与 durability 核心模块逐字节绑定回该 tar 后，才消费闭合的 `BOOTSTRAP_PRIVILEGE_GATE`；第一项受权 mutation 是原子安装 TrustProfile、两套 trusted root 和两套 TUF root。受保护目录中存在额外、缺失或已替换的运行模块时必须失败关闭。
+这段流程不从 install.animemo.cc 获取可执行脚本。用户目录中的首次验证只决定候选是否可复制；root-owned 副本必须由独立安装的固定 `/usr/bin/gh` 2.97.0 再次验证，且该验证必须发生在解包和执行任何 AniMemo Python byte 之前，从而关闭 verified-path 到 protected-path 的替换窗口。隔离运行时只从该副本绑定的 wheelhouse 安装两份固定 requirements，显式禁止索引、源码包与缓存，不继承系统或用户 site-packages。`env -C`、`PYTHONSAFEPATH=1` 与 Python `-P` 同时把当前目录移出模块搜索前缀，防止用户目录中的同名 `installer` 包抢先获得 root 执行。Installer 随后在任何 Docker、APT、systemd 或 AniMemo 持久化动作前再次验证受保护副本，并把当前已载入的 Installer、Updater、Release 与 durability 核心模块逐字节绑定回该 tar 后，才消费闭合的 `BOOTSTRAP_PRIVILEGE_GATE`；第一项受权 mutation 是原子安装 TrustProfile、两套 trusted root 和两套 TUF root。受保护目录中存在额外、缺失或已替换的运行模块时必须失败关闭。
 
 非交互执行必须显式提供 `--public-origin`。需要 Official Mirror 时，额外提供 `--source official-mirror`；失败不会自动调用 GitHub transport。Portable CTA 在 authority 冻结前不会提供绕过命令。
 
