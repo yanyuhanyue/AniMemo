@@ -6,20 +6,27 @@ import ipaddress
 import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import MappingProxyType
 from urllib.parse import quote, urlsplit
 from uuid import UUID
 
 from .canonical import canonical_json_bytes, sha256_identity
+from .instance import (
+    DEFAULT_INSTANCE_NAME,
+    InstanceName,
+    InstanceNamespace,
+    instance_namespace,
+)
 from .private_store import AtomicPrivateFile, PrivateStoreError
 
 MANAGED_CONFIG_SCHEMA = "animemo.managed-config/v1"
-MANAGED_CONFIG_PATH = PurePosixPath("/data/animemo/config/animemo.json")
+_DEFAULT_NAMESPACE = instance_namespace()
+MANAGED_CONFIG_PATH = _DEFAULT_NAMESPACE.managed_config_path
 MANAGED_CONFIG_ROOT = MANAGED_CONFIG_PATH.parent
-MANAGED_ENV_PATH = PurePosixPath("/run/animemo-updater/managed.env")
+MANAGED_ENV_PATH = _DEFAULT_NAMESPACE.managed_env_path
 MANAGED_ENV_ROOT = MANAGED_ENV_PATH.parent
-STANDARD_DEPLOYMENT_PROFILE = "v1.1-standard"
+STANDARD_DEPLOYMENT_PROFILE = "v1.1-instance-scoped"
 MAX_MANAGED_CONFIG_BYTES = 1024 * 1024
 MAX_MANAGED_ENV_BYTES = 1024 * 1024
 
@@ -58,9 +65,14 @@ NON_SECRET_FIELDS = frozenset(
 DERIVED_ENV_FIELDS = frozenset(
     {
         "ALLOWED_HOSTS",
+        "ANIMEMO_COMPOSE_PROJECT",
         "ANIMEMO_DATA_ROOT",
+        "ANIMEMO_INSTANCE_NAME",
         "ANIMEMO_LISTEN_HOST",
         "ANIMEMO_LISTEN_PORT",
+        "ANIMEMO_LOCATOR_DIGEST",
+        "ANIMEMO_MANAGED_ENV_PATH",
+        "ANIMEMO_UPDATER_RUNTIME_ROOT",
         "CORS_ALLOWED_ORIGINS",
         "CSRF_TRUSTED_ORIGINS",
         "DATABASE_URL",
@@ -632,7 +644,13 @@ def _dotenv_value(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def derive_runtime_environment(config: ManagedConfig) -> MappingProxyType[str, str]:
+def derive_runtime_environment(
+    config: ManagedConfig,
+    *,
+    namespace: InstanceNamespace | None = None,
+    locator_digest: str | None = None,
+) -> MappingProxyType[str, str]:
+    selected = namespace or _DEFAULT_NAMESPACE
     public_host = _origin_host(config.public_origin)
     allowed_hosts = tuple(
         dict.fromkeys((public_host, *config.trusted_origins.allowed_hosts))
@@ -652,13 +670,17 @@ def derive_runtime_environment(config: ManagedConfig) -> MappingProxyType[str, s
             config.direct_access.allow_http
         ).lower(),
         "ANIMEMO_CONFIG_REVISION": config.config_revision,
-        "ANIMEMO_DATA_ROOT": "/data/animemo",
+        "ANIMEMO_COMPOSE_PROJECT": selected.compose_project,
+        "ANIMEMO_DATA_ROOT": str(selected.data_root),
         "ANIMEMO_DEPLOYMENT_PROFILE": STANDARD_DEPLOYMENT_PROFILE,
+        "ANIMEMO_INSTANCE_NAME": str(selected.name),
         "ANIMEMO_INSTANCE_ID": config.instance_id,
         "ANIMEMO_LISTEN_HOST": config.listen.host,
         "ANIMEMO_LISTEN_PORT": str(config.listen.port),
+        "ANIMEMO_MANAGED_ENV_PATH": str(selected.managed_env_path),
         "ANIMEMO_MANAGED_CONFIG_SCHEMA": MANAGED_CONFIG_SCHEMA,
         "ANIMEMO_PUBLIC_ORIGIN": config.public_origin,
+        "ANIMEMO_UPDATER_RUNTIME_ROOT": str(selected.updater_runtime_root),
         "CORS_ALLOWED_ORIGINS": ",".join(cors),
         "CREDENTIAL_ENCRYPTION_KEY": config.application.credential_encryption_key,
         "CSRF_COOKIE_SECURE": str(secure_cookies).lower(),
@@ -667,7 +689,7 @@ def derive_runtime_environment(config: ManagedConfig) -> MappingProxyType[str, s
         "DATABASE_URL": database_url,
         "DEBUG": "false",
         "DJANGO_SECRET_KEY": config.application.django_secret_key,
-        "MEDIA_LOCAL_STORAGE_ROOT": "/data/animemo/media",
+        "MEDIA_LOCAL_STORAGE_ROOT": str(selected.data_root / "media"),
         "POSTGRES_DB": config.database.name,
         "POSTGRES_PASSWORD": config.database.password,
         "POSTGRES_USER": config.database.user,
@@ -676,6 +698,10 @@ def derive_runtime_environment(config: ManagedConfig) -> MappingProxyType[str, s
         "SESSION_COOKIE_SECURE": str(secure_cookies).lower(),
         "TRUSTED_PROXY_IPS": ",".join(config.application.trusted_proxy_ips),
     }
+    if locator_digest is not None:
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", locator_digest) is None:
+            _fail("CONFIG_LOCATOR_DIGEST_INVALID")
+        values["ANIMEMO_LOCATOR_DIGEST"] = locator_digest
     if config.application.media_public_origin is not None:
         values["ANIMEMO_MEDIA_PUBLIC_ORIGIN"] = config.application.media_public_origin
     if config.integrations.bangumi_oauth_client_id:
@@ -689,8 +715,15 @@ def derive_runtime_environment(config: ManagedConfig) -> MappingProxyType[str, s
     return MappingProxyType(dict(sorted(values.items())))
 
 
-def canonical_managed_env_bytes(config: ManagedConfig) -> bytes:
-    environment = derive_runtime_environment(config)
+def canonical_managed_env_bytes(
+    config: ManagedConfig,
+    *,
+    namespace: InstanceNamespace | None = None,
+    locator_digest: str | None = None,
+) -> bytes:
+    environment = derive_runtime_environment(
+        config, namespace=namespace, locator_digest=locator_digest
+    )
     payload = "".join(
         f"{key}={_dotenv_value(value)}\n" for key, value in environment.items()
     ).encode("utf-8")
@@ -769,14 +802,20 @@ class LocalManagedConfigStore:
     def __init__(
         self,
         *,
-        config_root: Path = Path(str(MANAGED_CONFIG_ROOT)),
-        runtime_root: Path = Path(str(MANAGED_ENV_ROOT)),
+        instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+        config_root: Path | None = None,
+        runtime_root: Path | None = None,
         create_runtime_root: bool = False,
     ) -> None:
-        self._authority = AtomicPrivateFile(config_root, MANAGED_CONFIG_PATH.name)
+        self.namespace = instance_namespace(instance_name)
+        selected_config_root = config_root or Path(str(self.namespace.managed_config_path.parent))
+        selected_runtime_root = runtime_root or Path(str(self.namespace.updater_runtime_root))
+        self._authority = AtomicPrivateFile(
+            selected_config_root, self.namespace.managed_config_path.name
+        )
         self._runtime = AtomicPrivateFile(
-            runtime_root,
-            MANAGED_ENV_PATH.name,
+            selected_runtime_root,
+            self.namespace.managed_env_path.name,
             create_parents=create_runtime_root,
             directory_mode=0o750,
         )
@@ -821,7 +860,12 @@ class LocalManagedConfigStore:
         except PrivateStoreError as error:
             raise ManagedConfigError(error.code) from None
 
-    def rebuild_runtime_env(self, *, expected_revision: str | None = None) -> Path:
+    def rebuild_runtime_env(
+        self,
+        *,
+        locator_digest: str,
+        expected_revision: str | None = None,
+    ) -> Path:
         config = self.read()
         if (
             expected_revision is not None
@@ -829,7 +873,13 @@ class LocalManagedConfigStore:
         ):
             _fail("CONFIG_STALE")
         try:
-            self._runtime.write(canonical_managed_env_bytes(config))
+            self._runtime.write(
+                canonical_managed_env_bytes(
+                    config,
+                    namespace=self.namespace,
+                    locator_digest=locator_digest,
+                )
+            )
         except PrivateStoreError as error:
             raise ManagedConfigError(error.code) from None
         return self.runtime_env_path

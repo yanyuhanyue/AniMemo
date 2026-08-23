@@ -14,6 +14,7 @@ from durability.compatibility import (
     DimensionAssessment,
     ReasonCode,
 )
+from durability.instance import instance_namespace
 from installer.runtime import (
     ConfigPlanEvidence,
     InstallAction,
@@ -56,7 +57,7 @@ class ReleaseFake:
             manifest_digest=digest("1"),
             material_identity_digest=digest("2"),
             deployment_identity_digest=digest("3"),
-            deployment_profile="v1.1-standard",
+            deployment_profile="v1.1-instance-scoped",
             platform_profile="v1.1-standard-linux-amd64",
         )
         self.calls: list[bool] = []
@@ -588,7 +589,9 @@ class InstallerRuntimeTests(unittest.TestCase):
                 self.assertEqual(self.operations.events, [])
                 self.assertEqual(self.fresh.calls, [])
 
-    def test_restore_to_new_preserves_identity_and_delegates(self) -> None:
+    def test_restore_to_new_mints_target_identity_and_preserves_source_provenance(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             plan = self.runtime.plan(
                 self.request(
@@ -602,12 +605,36 @@ class InstallerRuntimeTests(unittest.TestCase):
         result = self.runtime.execute(plan, accepted_plan_digest=plan.plan_digest)
 
         self.assertEqual(plan.action, InstallAction.RESTORE_TO_NEW)
-        self.assertEqual(plan.configuration.instance_id, INSTANCE_ID)
-        self.assertEqual(result.instance_id, INSTANCE_ID)
+        self.assertNotEqual(plan.configuration.instance_id, INSTANCE_ID)
+        self.assertEqual(plan.restore.instance_id, INSTANCE_ID)
+        self.assertEqual(result.instance_id, plan.configuration.instance_id)
         self.assertEqual(self.restore.prepared, 1)
         self.assertEqual(self.restore.bound, 1)
         self.assertEqual(self.restore.executed, 1)
         self.assertEqual(self.fresh.calls, [])
+
+    def test_two_instance_plans_bind_disjoint_namespaces(self) -> None:
+        default_plan = self.runtime.plan(self.request())
+        rc_runtime = Installer(
+            releases=ReleaseFake(),
+            target=TargetFake(),
+            platform=PlatformFake(),
+            compatibility=CompatibilityFake(),
+            configuration=ConfigurationFake(),
+            operations=OperationFake(),
+            fresh=FreshFake(),
+            restore=RestoreFake(),
+            bootstrap_privilege_gate=BootstrapGateFake(),
+            namespace=instance_namespace("v1-1-rc"),
+        )
+        rc_plan = rc_runtime.plan(
+            self.request(instance_name="v1-1-rc", listen=ListenRequest(port=18088))
+        )
+
+        self.assertEqual(default_plan.instance_name, "default")
+        self.assertEqual(rc_plan.instance_name, "v1-1-rc")
+        self.assertNotEqual(default_plan.configuration.instance_id, rc_plan.configuration.instance_id)
+        self.assertNotEqual(default_plan.plan_digest, rc_plan.plan_digest)
 
     def test_failure_after_irreversible_marker_requires_recovery(self) -> None:
         self.fresh.failure = "migration"

@@ -36,16 +36,15 @@ from durability.doctor import (
     ProbeResult,
 )
 from durability.instance import (
-    APP_ROOT,
-    DATA_ROOT,
-    INSTANCE_LOCATOR_PATH,
-    MANAGED_CONFIG_PATH,
-    UPDATER_APP_ROOT,
-    UPDATER_RUNTIME_ROOT,
-    UPDATER_STATE_ROOT,
+    DEFAULT_INSTANCE_NAME,
+    UPDATER_STATE_BASE,
     InstanceLocator,
+    InstanceName,
+    InstanceNamespace,
     ListenIdentity,
     LocatorError,
+    instance_locator_digest,
+    instance_namespace,
     load_instance_snapshot,
     release_identity_from_manifest,
 )
@@ -62,6 +61,11 @@ from durability.managed_config import (
     TrustedOriginsConfig,
     canonical_public_origin,
     derive_runtime_environment,
+)
+from durability.ownership import (
+    LocalOwnershipReceiptStore,
+    OwnershipReceipt,
+    create_ownership_receipt,
 )
 from durability.platform import (
     REQUIRED_CAPABILITIES,
@@ -124,72 +128,6 @@ from .runtime import (
     explicit_transport_policy,
 )
 
-_CANONICAL_ROOTS = tuple(
-    Path(str(path))
-    for path in (
-        APP_ROOT,
-        DATA_ROOT,
-        UPDATER_APP_ROOT,
-        UPDATER_STATE_ROOT,
-        UPDATER_RUNTIME_ROOT,
-    )
-)
-_CANONICAL_EXTERNAL_ARTIFACTS = tuple(
-    Path(path)
-    for path in (
-        "/usr/local/bin/animemo-updater",
-        "/etc/systemd/system/animemo-updater.service",
-        "/etc/systemd/system/multi-user.target.wants/animemo-updater.service",
-        "/usr/lib/sysusers.d/animemo-updater.conf",
-        "/usr/lib/tmpfiles.d/animemo-updater.conf",
-    )
-)
-_CANONICAL_RUNTIME_QUERIES = (
-    (
-        (
-            "/usr/bin/systemctl",
-            "show",
-            "animemo-updater.service",
-            "--property=LoadState",
-            "--value",
-        ),
-        frozenset({"", "not-found"}),
-    ),
-    (
-        (
-            "/usr/bin/docker",
-            "container",
-            "ls",
-            "--all",
-            "--quiet",
-            "--filter",
-            "label=com.docker.compose.project=animemo",
-        ),
-        frozenset({""}),
-    ),
-    (
-        (
-            "/usr/bin/docker",
-            "network",
-            "ls",
-            "--quiet",
-            "--filter",
-            "label=com.docker.compose.project=animemo",
-        ),
-        frozenset({""}),
-    ),
-    (
-        (
-            "/usr/bin/docker",
-            "volume",
-            "ls",
-            "--quiet",
-            "--filter",
-            "label=com.docker.compose.project=animemo",
-        ),
-        frozenset({""}),
-    ),
-)
 _PLATFORM_EVIDENCE_MATERIAL = "release/platform-qualification.json"
 
 
@@ -206,6 +144,12 @@ def _safe_adapter_error(code: str, *, mutation: bool, recovery: bool):
         code,
         mutation_occurred=mutation,
         recovery_required=recovery,
+    )
+
+
+def _linklike(path: Path) -> bool:
+    return path.is_symlink() or (
+        hasattr(path, "is_junction") and path.is_junction()
     )
 
 
@@ -522,7 +466,7 @@ class ProductionCompatibilityPort:
                 outcome=CompatibilityOutcome.COMPATIBLE,
                 reason_code=compatible_reasons[dimension],
                 source=source[dimension],
-                target={"profile": "v1.1-standard"},
+                target={"profile": "v1.1-instance-scoped"},
             )
             for dimension in Dimension
         )
@@ -684,18 +628,19 @@ class ProductionTargetPort:
         platform: ProductionPlatformPort | None = None,
         doctor: ProductionDoctorAcceptance | None = None,
         runner: CommandRunner | None = None,
+        namespace: InstanceNamespace | None = None,
     ) -> None:
         self.releases = releases
         self.platform = platform
         self.doctor = doctor
         self.runner = runner or CommandRunner()
+        self.namespace = namespace or instance_namespace()
 
-    @staticmethod
-    def _installed_material_exact(materials: VerifiedReleaseMaterials) -> bool:
+    def _installed_material_exact(self, materials: VerifiedReleaseMaterials) -> bool:
         try:
             for identity in materials.verified.files:
                 expected = materials.material(identity.path)
-                installed = Path(str(APP_ROOT)) / Path(identity.path)
+                installed = Path(str(self.namespace.app_root)) / Path(identity.path)
                 metadata = installed.lstat()
                 if (
                     installed.is_symlink()
@@ -712,27 +657,92 @@ class ProductionTargetPort:
         return True
 
     def _external_runtime_present(self) -> bool:
-        for path in _CANONICAL_EXTERNAL_ARTIFACTS:
+        service_links = (
+            Path("/etc/systemd/system/multi-user.target.wants")
+            / self.namespace.updater_service,
+        )
+        for path in service_links:
             try:
                 path.lstat()
             except FileNotFoundError:
                 continue
             return True
-        for argv, absent_values in _CANONICAL_RUNTIME_QUERIES:
+        queries = (
+            (
+                (
+                    "/usr/bin/systemctl",
+                    "show",
+                    self.namespace.updater_service,
+                    "--property=LoadState",
+                    "--value",
+                ),
+                frozenset({"", "not-found"}),
+            ),
+            *(
+                (
+                    (
+                        "/usr/bin/docker",
+                        kind,
+                        "ls",
+                        "--all" if kind == "container" else "--quiet",
+                        *(('--quiet',) if kind == "container" else ()),
+                        "--filter",
+                        f"label=com.docker.compose.project={self.namespace.compose_project}",
+                    ),
+                    frozenset({""}),
+                )
+                for kind in ("container", "network", "volume")
+            ),
+        )
+        for argv, absent_values in queries:
             result = self.runner.run(list(argv))
             if str(result.stdout or "").strip() not in absent_values:
                 return True
         return False
 
+    def _casefold_collision(self) -> bool:
+        for owned_root in self.namespace.owned_roots:
+            root = Path(str(owned_root))
+            parent = root.parent
+            try:
+                metadata = parent.lstat()
+            except FileNotFoundError:
+                continue
+            if _linklike(parent) or not stat.S_ISDIR(metadata.st_mode):
+                return True
+            try:
+                names = tuple(item.name for item in parent.iterdir())
+            except OSError:
+                return True
+            if any(
+                candidate != root.name
+                and candidate.casefold() == root.name.casefold()
+                for candidate in names
+            ):
+                return True
+        return False
+
     def inspect(self) -> TargetEvidence:
-        locator_path = Path(str(INSTANCE_LOCATOR_PATH))
+        if self._casefold_collision():
+            return TargetEvidence(
+                TargetClass.FOREIGN,
+                sha256_identity(b"canonical-instance-casefold-collision"),
+            )
+        locator_path = Path(str(self.namespace.locator_path))
         if locator_path.exists() or locator_path.is_symlink():
             try:
-                snapshot = load_instance_snapshot()
-                config = LocalManagedConfigStore().read()
+                snapshot = load_instance_snapshot(instance_name=self.namespace.name)
+                config = LocalManagedConfigStore(instance_name=self.namespace.name).read()
                 locator = snapshot.locator
+                receipt = LocalOwnershipReceiptStore(
+                    instance_name=self.namespace.name
+                ).read()
                 if (
-                    config.instance_id != locator.instance_id
+                    receipt.receipt_digest != locator.ownership_receipt_digest
+                    or receipt.instance_name != locator.instance_name
+                    or receipt.instance_id != locator.instance_id
+                    or receipt.compose_project != locator.compose_project
+                    or config.instance_id != locator.instance_id
                     or config.config_revision != locator.config_revision
                     or config.public_origin != locator.public_origin
                     or config.listen.host != locator.listen.host
@@ -768,7 +778,13 @@ class ProductionTargetPort:
                                 HostPaths.production(snapshot),
                                 runner=self.runner,
                                 managed_environment=dict(
-                                    derive_runtime_environment(config)
+                                    derive_runtime_environment(
+                                        config,
+                                        namespace=instance_namespace(
+                                            locator.instance_name
+                                        ),
+                                        locator_digest=snapshot.digest,
+                                    )
                                 ),
                             )
                             self.doctor.accept_existing(
@@ -804,7 +820,7 @@ class ProductionTargetPort:
                 )
 
         states: list[str] = []
-        for root in _CANONICAL_ROOTS:
+        for root in tuple(Path(str(path)) for path in self.namespace.owned_roots):
             try:
                 metadata = root.lstat()
             except FileNotFoundError:
@@ -815,7 +831,7 @@ class ProductionTargetPort:
                     TargetClass.CORRUPT,
                     sha256_identity(b"canonical-root-unreadable"),
                 )
-            if root.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+            if _linklike(root) or not stat.S_ISDIR(metadata.st_mode):
                 return TargetEvidence(
                     TargetClass.FOREIGN,
                     sha256_identity(b"canonical-root-foreign"),
@@ -850,10 +866,52 @@ class ProductionTargetPort:
 
 
 class ProductionManagedConfigurationPort:
-    def __init__(self, store: LocalManagedConfigStore | None = None) -> None:
-        self.store = store or LocalManagedConfigStore()
+    def __init__(
+        self,
+        store: LocalManagedConfigStore | None = None,
+        *,
+        namespace: InstanceNamespace | None = None,
+    ) -> None:
+        self.namespace = namespace or instance_namespace()
+        self.store = store or LocalManagedConfigStore(
+            instance_name=self.namespace.name
+        )
         self._planned: dict[str, ManagedConfig] = {}
         self._existing: dict[str, bool] = {}
+
+    def _assert_instance_id_unbound(self, instance_id: str) -> None:
+        base = Path(str(UPDATER_STATE_BASE))
+        try:
+            metadata = base.lstat()
+        except FileNotFoundError:
+            return
+        except OSError:
+            raise ManagedConfigError("CONFIG_INSTANCE_REGISTRY_UNAVAILABLE") from None
+        if _linklike(base) or not stat.S_ISDIR(metadata.st_mode):
+            raise ManagedConfigError("CONFIG_INSTANCE_REGISTRY_UNSAFE")
+        try:
+            entries = tuple(base.iterdir())
+        except OSError:
+            raise ManagedConfigError("CONFIG_INSTANCE_REGISTRY_UNAVAILABLE") from None
+        for entry in entries:
+            try:
+                entry_metadata = entry.lstat()
+                name = InstanceName(entry.name)
+            except (OSError, LocatorError):
+                raise ManagedConfigError("CONFIG_INSTANCE_REGISTRY_UNSAFE") from None
+            if _linklike(entry) or not stat.S_ISDIR(entry_metadata.st_mode):
+                raise ManagedConfigError("CONFIG_INSTANCE_REGISTRY_UNSAFE")
+            if name == self.namespace.name:
+                continue
+            locator_path = entry / "instance.json"
+            if not locator_path.exists() and not locator_path.is_symlink():
+                continue
+            try:
+                snapshot = load_instance_snapshot(instance_name=name)
+            except (LocatorError, OSError):
+                raise ManagedConfigError("CONFIG_INSTANCE_REGISTRY_UNSAFE") from None
+            if snapshot.locator.instance_id == instance_id:
+                raise ManagedConfigError("CONFIG_INSTANCE_ID_COLLISION")
 
     @staticmethod
     def _assert_listen_available(listen: ListenConfig) -> None:
@@ -919,6 +977,7 @@ class ProductionManagedConfigurationPort:
         listen: ListenRequest,
         insecure_http_accepted: bool,
     ) -> ConfigPlanEvidence:
+        self._assert_instance_id_unbound(instance_id)
         exists = (
             self.store.authority_path.exists() or self.store.authority_path.is_symlink()
         )
@@ -1035,10 +1094,15 @@ class ProductionOperationPort:
     def __init__(
         self,
         *,
-        state_root: Path = Path(str(UPDATER_STATE_ROOT)),
+        state_root: Path | None = None,
+        namespace: InstanceNamespace | None = None,
     ) -> None:
-        self.journal = FreshInstallOperationJournal(state_root)
-        self.lock_path = state_root / "update.lock"
+        self.namespace = namespace or instance_namespace()
+        selected_state_root = state_root or Path(
+            str(self.namespace.updater_state_root)
+        )
+        self.journal = FreshInstallOperationJournal(selected_state_root)
+        self.lock_path = selected_state_root / "update.lock"
         self.current: FreshInstallOperation | None = None
 
     def acquire_lock(self, operation_id: str) -> AbstractContextManager[None]:
@@ -1049,6 +1113,7 @@ class ProductionOperationPort:
         self.journal.require_recovery_clear()
         operation = create_fresh_install_operation(
             operation_id=plan.operation_id,
+            instance_name=plan.instance_name,
             instance_id=plan.configuration.instance_id,
             plan_digest=plan.plan_digest,
             release_identity_digest=plan.release.material_identity_digest,
@@ -1130,10 +1195,12 @@ class ProductionDoctorAcceptance:
         releases: ProductionReleasePort,
         compatibility: ProductionCompatibilityPort,
         runner: CommandRunner | None = None,
+        namespace: InstanceNamespace | None = None,
     ) -> None:
         self.releases = releases
         self.compatibility = compatibility
         self.runner = runner or CommandRunner()
+        self.namespace = namespace or instance_namespace()
 
     @staticmethod
     def _guarded(
@@ -1191,7 +1258,7 @@ class ProductionDoctorAcceptance:
     ) -> None:
         materials = self.releases.materials_for(release)
         manifest = materials.manifest
-        config_store = LocalManagedConfigStore()
+        config_store = LocalManagedConfigStore(instance_name=self.namespace.name)
 
         def config() -> ManagedConfig:
             return config_store.read()
@@ -1214,7 +1281,7 @@ class ProductionDoctorAcceptance:
             )
 
         def alignment() -> bool:
-            snapshot = load_instance_snapshot()
+            snapshot = load_instance_snapshot(instance_name=self.namespace.name)
             current = config()
             locator = snapshot.locator
             return (
@@ -1227,14 +1294,16 @@ class ProductionDoctorAcceptance:
 
         def systemd_allowlist() -> bool:
             expected = materials.material(
-                "deploy/updater/animemo-updater.service"
+                "deploy/updater/animemo-updater@.service"
             ).read_bytes()
-            installed = Path("/etc/systemd/system/animemo-updater.service").read_bytes()
+            installed = Path(
+                "/etc/systemd/system/animemo-updater@.service"
+            ).read_bytes()
             result = self.runner.run(
                 [
                     "/usr/bin/systemctl",
                     "is-active",
-                    "animemo-updater.service",
+                    self.namespace.updater_service,
                 ],
                 timeout=30,
             )
@@ -1255,7 +1324,7 @@ class ProductionDoctorAcceptance:
                 return True
 
         def updater_socket() -> bool:
-            path = Path(str(UPDATER_RUNTIME_ROOT / "updater.sock"))
+            path = Path(str(self.namespace.updater_socket_path))
             metadata = path.lstat()
             return (
                 stat.S_ISSOCK(metadata.st_mode)
@@ -1263,18 +1332,18 @@ class ProductionDoctorAcceptance:
             )
 
         def updater_state() -> bool:
-            state_root = Path(str(UPDATER_STATE_ROOT))
+            state_root = Path(str(self.namespace.updater_state_root))
             slots = ReleaseSlots(state_root / "releases").read()
             RuntimeState(state_root).read()
             OperationStore(state_root).require_recovery_clear()
             return slots["current"] == manifest
 
         def release_consistency() -> bool:
-            snapshot = load_instance_snapshot()
+            snapshot = load_instance_snapshot(instance_name=self.namespace.name)
             return (
                 dict(snapshot.locator.release_identity)
                 == dict(release_identity_from_manifest(manifest))
-                and ReleaseSlots(Path(str(UPDATER_STATE_ROOT / "releases"))).read()[
+                and ReleaseSlots(Path(str(self.namespace.release_slots_root))).read()[
                     "current"
                 ]
                 == manifest
@@ -1297,7 +1366,7 @@ class ProductionDoctorAcceptance:
             "filesystem.capacity": self._guarded(
                 "FILESYSTEM_CAPACITY_AVAILABLE",
                 "FILESYSTEM_CAPACITY_UNAVAILABLE",
-                lambda: shutil.disk_usage(Path(str(DATA_ROOT))).free > 0,
+                lambda: shutil.disk_usage(Path(str(self.namespace.data_root))).free > 0,
             ),
             "configuration.required": self._guarded(
                 "CONFIGURATION_REQUIRED_VALID",
@@ -1393,12 +1462,16 @@ class ProductionDoctorAcceptance:
             "media.integrity": self._guarded(
                 "MEDIA_INTEGRITY_VALID",
                 "MEDIA_INTEGRITY_INVALID",
-                lambda: safe_directory(Path(str(DATA_ROOT / "media")), 0o755),
+                lambda: safe_directory(
+                    Path(str(self.namespace.data_root / "media")), 0o755
+                ),
             ),
             "backup.readiness": self._guarded(
                 "BACKUP_READY",
                 "BACKUP_NOT_READY",
-                lambda: safe_directory(Path(str(DATA_ROOT / "backups")), 0o770),
+                lambda: safe_directory(
+                    Path(str(self.namespace.data_root / "backups")), 0o770
+                ),
             ),
         }
         artifact, dimensions = self.compatibility.collect(release, platform)
@@ -1426,31 +1499,57 @@ class ProductionFreshInstallPort:
         runner: CommandRunner | None = None,
         doctor_acceptor: Callable[[InstallPlan, ImmutableComposeDeployment], None]
         | None = None,
+        namespace: InstanceNamespace | None = None,
     ) -> None:
         self.releases = releases
         self.configuration = configuration
         self.runner = runner or CommandRunner()
         self.doctor_acceptor = doctor_acceptor
+        self.namespace = namespace or instance_namespace()
         self._deployment: ImmutableComposeDeployment | None = None
         self._created: set[Path] = set()
+        self._ownership: dict[str, OwnershipReceipt] = {}
 
     def _manifest(self, plan: InstallPlan) -> dict[str, object]:
         return self.releases.materials_for(plan.release).manifest
 
     def _locator(self, plan: InstallPlan) -> InstanceLocator:
         config = self.configuration.config_for(plan.configuration)
+        receipt = self._ownership_receipt(plan)
         return InstanceLocator(
-            schema_version=1,
+            schema_version=2,
+            instance_name=self.namespace.name,
             instance_id=config.instance_id,
-            app_root=APP_ROOT,
-            data_root=DATA_ROOT,
-            deployment_profile="v1.1-standard",
+            app_root=self.namespace.app_root,
+            data_root=self.namespace.data_root,
+            updater_state_root=self.namespace.updater_state_root,
+            updater_runtime_root=self.namespace.updater_runtime_root,
+            deployment_profile="v1.1-instance-scoped",
+            compose_project=self.namespace.compose_project,
+            updater_service=self.namespace.updater_service,
+            updater_socket_path=self.namespace.updater_socket_path,
             listen=ListenIdentity(config.listen.host, config.listen.port),
             public_origin=config.public_origin,
-            managed_config_path=MANAGED_CONFIG_PATH,
+            managed_config_path=self.namespace.managed_config_path,
             config_revision=config.config_revision,
             release_identity=release_identity_from_manifest(self._manifest(plan)),
+            ownership_receipt_digest=receipt.receipt_digest,
         )
+
+    def _ownership_receipt(self, plan: InstallPlan) -> OwnershipReceipt:
+        receipt = self._ownership.get(plan.operation_id)
+        if receipt is None:
+            config = self.configuration.config_for(plan.configuration)
+            receipt = create_ownership_receipt(
+                instance_name=self.namespace.name,
+                instance_id=config.instance_id,
+                listen_host=config.listen.host,
+                listen_port=config.listen.port,
+                release_identity=release_identity_from_manifest(self._manifest(plan)),
+                created_at=_utc_now(),
+            )
+            self._ownership[plan.operation_id] = receipt
+        return receipt
 
     def _compose(self, plan: InstallPlan) -> ImmutableComposeDeployment:
         if self._deployment is None:
@@ -1458,7 +1557,13 @@ class ProductionFreshInstallPort:
             self._deployment = ImmutableComposeDeployment(
                 HostPaths.initial_adoption(self._locator(plan)),
                 runner=self.runner,
-                managed_environment=dict(derive_runtime_environment(config)),
+                managed_environment=dict(
+                    derive_runtime_environment(
+                        config,
+                        namespace=self.namespace,
+                        locator_digest=instance_locator_digest(self._locator(plan)),
+                    )
+                ),
             )
         return self._deployment
 
@@ -1475,7 +1580,7 @@ class ProductionFreshInstallPort:
     def _mkdir(path: Path, mode: int) -> bool:
         if path.exists() or path.is_symlink():
             metadata = path.lstat()
-            if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+            if _linklike(path) or not stat.S_ISDIR(metadata.st_mode):
                 _safe_adapter_error(
                     "INSTALL_ROOT_UNSAFE", mutation=False, recovery=False
                 )
@@ -1483,19 +1588,51 @@ class ProductionFreshInstallPort:
         path.mkdir(mode=mode)
         return True
 
+    @staticmethod
+    def _mkdir_shared_base(path: Path, mode: int) -> bool:
+        if path.exists() or path.is_symlink():
+            metadata = path.lstat()
+            if _linklike(path) or not stat.S_ISDIR(metadata.st_mode):
+                _safe_adapter_error(
+                    "INSTALL_NAMESPACE_BASE_UNSAFE",
+                    mutation=False,
+                    recovery=False,
+                )
+            return False
+        parent = path.parent
+        metadata = parent.lstat()
+        if _linklike(parent) or not stat.S_ISDIR(metadata.st_mode):
+            _safe_adapter_error(
+                "INSTALL_NAMESPACE_BASE_UNSAFE",
+                mutation=False,
+                recovery=False,
+            )
+        path.mkdir(mode=mode)
+        return True
+
     def prepare_roots(self, plan: InstallPlan) -> None:
         del plan
         try:
+            for base, mode in (
+                (Path(str(self.namespace.app_root)).parent, 0o755),
+                (Path(str(self.namespace.data_root)).parent, 0o755),
+                (Path(str(self.namespace.updater_state_root)).parent, 0o700),
+                (Path(str(self.namespace.updater_runtime_root)).parent, 0o750),
+            ):
+                if self._mkdir_shared_base(base, mode):
+                    self._created.add(base)
             for path, mode in (
-                (Path(str(DATA_ROOT)), 0o755),
-                (Path(str(DATA_ROOT / "config")), 0o700),
-                (Path(str(DATA_ROOT / "postgres")), 0o700),
-                (Path(str(DATA_ROOT / "redis")), 0o700),
-                (Path(str(DATA_ROOT / "plugins")), 0o755),
-                (Path(str(DATA_ROOT / "media")), 0o755),
-                (Path(str(DATA_ROOT / "private")), 0o700),
-                (Path(str(DATA_ROOT / "backups")), 0o770),
-                (Path(str(DATA_ROOT / "logs")), 0o755),
+                (Path(str(self.namespace.data_root)), 0o755),
+                (Path(str(self.namespace.data_root / "config")), 0o700),
+                (Path(str(self.namespace.data_root / "postgres")), 0o700),
+                (Path(str(self.namespace.data_root / "redis")), 0o700),
+                (Path(str(self.namespace.data_root / "plugins")), 0o755),
+                (Path(str(self.namespace.data_root / "media")), 0o755),
+                (Path(str(self.namespace.data_root / "private")), 0o700),
+                (Path(str(self.namespace.data_root / "backups")), 0o770),
+                (Path(str(self.namespace.data_root / "logs")), 0o755),
+                (Path(str(self.namespace.updater_state_root)), 0o700),
+                (Path(str(self.namespace.updater_runtime_root)), 0o750),
             ):
                 if self._mkdir(path, mode):
                     self._created.add(path)
@@ -1517,7 +1654,7 @@ class ProductionFreshInstallPort:
 
     def stage_release(self, plan: InstallPlan) -> None:
         materials = self.releases.materials_for(plan.release)
-        target = Path(str(APP_ROOT))
+        target = Path(str(self.namespace.app_root))
         if target.exists() or target.is_symlink():
             _safe_adapter_error(
                 "INSTALL_APP_ROOT_EXISTS", mutation=False, recovery=False
@@ -1549,7 +1686,11 @@ class ProductionFreshInstallPort:
     def prepare_services(self, plan: InstallPlan) -> None:
         try:
             self.runner.run(
-                [str(Path(str(APP_ROOT)) / "deploy" / "install-updater.sh")],
+                [
+                    str(self.namespace.app_root / "deploy" / "install-updater.sh"),
+                    "--instance",
+                    str(self.namespace.name),
+                ],
                 timeout=600,
             )
             if os.name != "posix":
@@ -1559,17 +1700,18 @@ class ProductionFreshInstallPort:
 
             uid = pwd.getpwnam("animemo-updater").pw_uid
             gid = grp.getgrnam("animemo-api").gr_gid
-            os.chown(Path(str(DATA_ROOT / "config")), uid, gid)
+            os.chown(Path(str(self.namespace.data_root / "config")), uid, gid)
             os.chown(self.configuration.store.authority_path, uid, gid)
             self.configuration.store.rebuild_runtime_env(
+                locator_digest=instance_locator_digest(self._locator(plan)),
                 expected_revision=plan.configuration.config_revision
             )
             deployment = self._compose(plan)
             manifest = self._manifest(plan)
             self.releases.acquire_images(plan.release)
             for role, directory in (
-                ("postgres", Path(str(DATA_ROOT / "postgres"))),
-                ("redis", Path(str(DATA_ROOT / "redis"))),
+                ("postgres", Path(str(self.namespace.data_root / "postgres"))),
+                ("redis", Path(str(self.namespace.data_root / "redis"))),
             ):
                 image = deployment.image_environment(manifest)[
                     f"ANIMEMO_{role.upper()}_IMAGE"
@@ -1610,7 +1752,7 @@ class ProductionFreshInstallPort:
                 ("private", 0o700),
                 ("backups", 0o770),
             ):
-                path = Path(str(DATA_ROOT / relative))
+                path = Path(str(self.namespace.data_root / relative))
                 os.chown(path, 10001, 10001)
                 os.chmod(path, mode)
             deployment.start_datastores(manifest)
@@ -1653,6 +1795,21 @@ class ProductionFreshInstallPort:
 
     def adopt_updater(self, plan: InstallPlan) -> None:
         try:
+            receipt = self._ownership_receipt(plan)
+            receipt_store = LocalOwnershipReceiptStore(
+                instance_name=self.namespace.name
+            )
+            receipt_store.publish(receipt)
+            if os.name != "posix":
+                raise OSError("POSIX ownership is required")
+            import grp
+            import pwd
+
+            os.chown(
+                receipt_store.path,
+                pwd.getpwnam("animemo-updater").pw_uid,
+                grp.getgrnam("animemo-api").gr_gid,
+            )
             adopt_initial_release(
                 InitialAdoptionRequest(
                     locator=self._locator(plan),
@@ -1664,7 +1821,7 @@ class ProductionFreshInstallPort:
                     "/usr/bin/systemctl",
                     "enable",
                     "--now",
-                    "animemo-updater.service",
+                    self.namespace.updater_service,
                 ],
                 timeout=120,
             )
@@ -1705,6 +1862,7 @@ class ProductionFreshInstallPort:
 
 def build_runtime(
     *,
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
     transport_source: InstallTransportSource = InstallTransportSource.GITHUB,
     transport_policy: ExplicitTransportPolicy
     | LocalBundleTransportPolicy
@@ -1712,23 +1870,26 @@ def build_runtime(
     local_bundle_payload: Path | None = None,
     local_bundle_release_attestation: Path | None = None,
 ) -> Installer:
+    namespace = instance_namespace(instance_name)
     releases = ProductionReleasePort(
         transport_source=transport_source,
         transport_policy=transport_policy,
         local_bundle_payload=local_bundle_payload,
         local_bundle_release_attestation=local_bundle_release_attestation,
     )
-    configuration = ProductionManagedConfigurationPort()
+    configuration = ProductionManagedConfigurationPort(namespace=namespace)
     compatibility = ProductionCompatibilityPort(releases)
     platform = ProductionPlatformPort(releases)
     doctor = ProductionDoctorAcceptance(
         releases=releases,
         compatibility=compatibility,
+        namespace=namespace,
     )
     fresh = ProductionFreshInstallPort(
         releases=releases,
         configuration=configuration,
         doctor_acceptor=doctor,
+        namespace=namespace,
     )
     return Installer(
         releases=releases,
@@ -1736,11 +1897,12 @@ def build_runtime(
             releases=releases,
             platform=platform,
             doctor=doctor,
+            namespace=namespace,
         ),
         platform=platform,
         compatibility=compatibility,
         configuration=configuration,
-        operations=ProductionOperationPort(),
+        operations=ProductionOperationPort(namespace=namespace),
         fresh=fresh,
         restore=ProductionRestoreRuntimePort(
             releases=releases,
@@ -1748,6 +1910,7 @@ def build_runtime(
             fresh=fresh,
         ),
         bootstrap_privilege_gate=ProductionBootstrapPrivilegeGate(),
+        namespace=namespace,
     )
 
 
@@ -1781,11 +1944,18 @@ def production_configuration_doctor(
         )
     deployment = ImmutableComposeDeployment(
         HostPaths.production(snapshot),
-        managed_environment=dict(derive_runtime_environment(config)),
+        managed_environment=dict(
+            derive_runtime_environment(
+                config,
+                namespace=instance_namespace(snapshot.locator.instance_name),
+                locator_digest=snapshot.digest,
+            )
+        ),
     )
     ProductionDoctorAcceptance(
         releases=releases,
         compatibility=compatibility,
+        namespace=instance_namespace(snapshot.locator.instance_name),
     ).accept_existing(
         expected_instance_id=config.instance_id,
         release=release,

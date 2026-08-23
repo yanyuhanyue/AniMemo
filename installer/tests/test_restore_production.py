@@ -11,6 +11,7 @@ from unittest import mock
 
 from durability import backup, restore, secret_envelope
 from durability.canonical import canonical_json_bytes
+from durability.instance import instance_namespace
 from durability.managed_config import LocalManagedConfigStore
 from installer import restore_production
 from installer.operations import RestoreOperationJournal
@@ -60,7 +61,7 @@ class _Releases:
 
 
 class _Fresh:
-    pass
+    namespace = instance_namespace()
 
 
 class _LauncherMaterials:
@@ -84,6 +85,7 @@ class _LauncherReleases:
 class _LauncherFresh:
     def __init__(self, materials: _LauncherMaterials) -> None:
         self.releases = _LauncherReleases(materials)
+        self.namespace = instance_namespace()
 
 
 class ProductionRestoreUpdaterTests(unittest.TestCase):
@@ -126,11 +128,6 @@ class ProductionRestoreUpdaterTests(unittest.TestCase):
                         read=lambda: {"current": None, "previous": None}
                     ),
                 ),
-                mock.patch.object(
-                    restore_production,
-                    "UPDATER_STATE_ROOT",
-                    root / "updater-state",
-                ),
             ):
                 mutation.stage_updater()
 
@@ -159,7 +156,7 @@ class ProductionRestorePlanTests(unittest.TestCase):
             manifest_digest=digest("1"),
             material_identity_digest=digest("2"),
             deployment_identity_digest=digest("3"),
-            deployment_profile="v1.1-standard",
+            deployment_profile="v1.1-instance-scoped",
             platform_profile="v1.1-standard-linux-amd64",
         )
         self.release_manifest = {
@@ -265,7 +262,7 @@ class ProductionRestorePlanTests(unittest.TestCase):
             clock=lambda: next(moments),
         ).path
 
-    def test_none_protection_preserves_backup_instance_identity(self) -> None:
+    def test_none_protection_accepts_distinct_target_instance_identity(self) -> None:
         artifact = self._backup()
         evidence = self.port.prepare(
             operation_id="a" * 32,
@@ -275,8 +272,9 @@ class ProductionRestorePlanTests(unittest.TestCase):
             platform=self.platform,
             protection=RestoreProtectionRequest(RestoreProtectionKind.NONE),
         )
+        target_instance_id = "99999999-8888-4777-8666-555555555555"
         config = self.configuration.plan(
-            instance_id=evidence.instance_id,
+            instance_id=target_instance_id,
             public_origin="https://anime.example",
             listen=ListenRequest(),
             insecure_http_accepted=False,
@@ -286,7 +284,7 @@ class ProductionRestorePlanTests(unittest.TestCase):
 
         self.assertEqual(
             bound.instance_id,
-            "11111111-2222-4333-8444-555555555555",
+            target_instance_id,
         )
         self.assertEqual(bound.non_secret_identity_digest, config.non_secret_identity_digest)
 
@@ -320,7 +318,7 @@ class ProductionRestorePlanTests(unittest.TestCase):
             ),
         )
         planned = self.configuration.plan(
-            instance_id=evidence.instance_id,
+            instance_id="99999999-8888-4777-8666-555555555555",
             public_origin="https://anime.example",
             listen=ListenRequest(),
             insecure_http_accepted=False,

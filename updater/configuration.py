@@ -17,10 +17,14 @@ from uuid import uuid4
 
 from durability.canonical import canonical_json_bytes, sha256_identity
 from durability.instance import (
+    DEFAULT_INSTANCE_NAME,
     InstanceLocator,
+    InstanceName,
     InstanceSnapshot,
     ListenIdentity,
     LocatorError,
+    instance_locator_digest,
+    instance_namespace,
     release_identity_from_manifest,
     replace_instance_locator,
 )
@@ -390,7 +394,13 @@ class LocalConfigurationHost:
     ) -> None:
         self.deployment.refresh_binding(
             HostPaths.production(snapshot),
-            managed_environment=dict(derive_runtime_environment(config)),
+            managed_environment=dict(
+                derive_runtime_environment(
+                    config,
+                    namespace=instance_namespace(snapshot.locator.instance_name),
+                    locator_digest=snapshot.digest,
+                )
+            ),
         )
 
     def reconcile_application(self, manifest: dict[str, object]) -> None:
@@ -667,7 +677,11 @@ class ConfigurationManager:
     def _pending_snapshot(
         snapshot: InstanceSnapshot, locator: InstanceLocator
     ) -> InstanceSnapshot:
-        return replace(snapshot, locator=locator)
+        return replace(
+            snapshot,
+            locator=locator,
+            digest=instance_locator_digest(locator),
+        )
 
     def _rollback(
         self,
@@ -689,6 +703,7 @@ class ConfigurationManager:
             elif live_config != previous:
                 raise ConfigurationError("CONFIG_ROLLBACK_STATE_DIVERGED")
             self.config_store.rebuild_runtime_env(
+                locator_digest=previous_snapshot.digest,
                 expected_revision=previous.config_revision
             )
 
@@ -797,14 +812,15 @@ class ConfigurationManager:
                 self.config_store.write(
                     plan.proposed, expected_revision=plan.current_revision
                 )
-                self.config_store.rebuild_runtime_env(
-                    expected_revision=plan.next_revision
-                )
                 proposed_locator = self._proposed_locator(
                     previous_snapshot, plan.proposed
                 )
                 pending_snapshot = self._pending_snapshot(
                     previous_snapshot, proposed_locator
+                )
+                self.config_store.rebuild_runtime_env(
+                    locator_digest=pending_snapshot.digest,
+                    expected_revision=plan.next_revision,
                 )
                 self.host.refresh_runtime(plan.proposed, pending_snapshot)
                 self.host.reconcile_application(manifest)
@@ -863,6 +879,7 @@ class ConfigurationManager:
 def build_configuration_manager(
     *,
     doctor: Callable[[InstanceSnapshot, ManagedConfig, dict[str, object]], None],
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
 ) -> ConfigurationManager:
     """Assemble the fixed production adapters with a complete Doctor gate."""
 
@@ -870,7 +887,7 @@ def build_configuration_manager(
         raise ConfigurationError("CONFIG_DOCTOR_ADAPTER_REQUIRED")
     from .runtime import production_runtime
 
-    runtime = production_runtime()
+    runtime = production_runtime(instance_name)
     if runtime.registry is None:
         raise ConfigurationError("CONFIG_LOCATOR_UNAVAILABLE")
     host = LocalConfigurationHost(
@@ -881,7 +898,7 @@ def build_configuration_manager(
         lock_path=runtime.paths.state_root / "update.lock",
     )
     return ConfigurationManager(
-        config_store=LocalManagedConfigStore(),
+        config_store=LocalManagedConfigStore(instance_name=instance_name),
         host=host,
         journal=LocalConfigurationOperationJournal(runtime.paths.state_root),
     )

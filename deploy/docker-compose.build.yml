@@ -36,7 +36,7 @@ services:
       - ${ANIMEMO_TEST_DATA_ROOT}/backups:/app/backups
       - ${ANIMEMO_TEST_DATA_ROOT}/media:/data/animemo/media
       - ${ANIMEMO_TEST_DATA_ROOT}/private:/app/runtime/private
-      - /run/animemo-updater:/run/animemo-updater:rw
+      - ${ANIMEMO_UPDATER_RUNTIME_ROOT:?ANIMEMO_UPDATER_RUNTIME_ROOT is required}:/run/animemo-updater:rw
 
   web:
     build:

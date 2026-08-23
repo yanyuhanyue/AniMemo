@@ -24,11 +24,17 @@ DIGEST = "sha256:" + "a" * 64
 
 def locator_payload() -> dict[str, object]:
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "instanceName": "default",
         "instanceId": "abcdefab-1234-5678-9234-567812345678",
-        "appRoot": "/opt/animemo",
-        "dataRoot": "/data/animemo",
-        "deploymentProfile": "v1.1-standard",
+        "appRoot": "/opt/animemo-instances/default",
+        "dataRoot": "/data/animemo-instances/default",
+        "updaterStateRoot": "/var/lib/animemo-updater/instances/default",
+        "updaterRuntimeRoot": "/run/animemo-updater/default",
+        "deploymentProfile": "v1.1-instance-scoped",
+        "composeProject": "animemo-default",
+        "updaterService": "animemo-updater@default.service",
+        "updaterSocketPath": "/run/animemo-updater/default/updater.sock",
         "listen": {"host": "127.0.0.1", "port": 8088},
         "publicOrigin": "https://animemo.example",
         "managedConfigPath": str(MANAGED_CONFIG_PATH),
@@ -41,6 +47,7 @@ def locator_payload() -> dict[str, object]:
             "apiDigest": DIGEST,
             "webDigest": DIGEST,
         },
+        "ownershipReceiptDigest": DIGEST,
     }
 
 
@@ -49,7 +56,8 @@ class CanonicalLocatorParserTests(unittest.TestCase):
         locator = parse_instance_locator(locator_payload())
 
         self.assertEqual(
-            str(locator.managed_config_path), "/data/animemo/config/animemo.json"
+            str(locator.managed_config_path),
+            "/data/animemo-instances/default/config/animemo.json",
         )
         self.assertEqual(locator.listen.host, "127.0.0.1")
         self.assertEqual(locator.public_origin, "https://animemo.example")
@@ -68,7 +76,7 @@ class CanonicalLocatorParserTests(unittest.TestCase):
             ),
             (
                 "managedConfigPath",
-                "/data/animemo/config/other.json",
+                "/data/animemo-instances/default/config/other.json",
                 "LOCATOR_CONFIG_PATH_INVALID",
             ),
             (

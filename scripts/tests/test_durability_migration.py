@@ -9,7 +9,7 @@ import unittest
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from unittest import mock
 
 from durability import migration, safe_io
@@ -24,7 +24,7 @@ from durability.compatibility import (
     UpgradeAction,
     evaluate_compatibility,
 )
-from durability.instance import InstanceLocator, ListenIdentity
+from durability.instance import InstanceLocator, ListenIdentity, instance_namespace
 from durability.secret_envelope import OneTimeKey, SecretEntry
 
 
@@ -188,15 +188,22 @@ class MigrationRuntimeTests(unittest.TestCase):
         )
 
     def locator(self) -> InstanceLocator:
+        namespace = instance_namespace()
         return InstanceLocator(
-            schema_version=1,
+            schema_version=2,
+            instance_name=namespace.name,
             instance_id=self.instance_id,
-            app_root=PurePosixPath("/opt/animemo"),
-            data_root=PurePosixPath("/data/animemo"),
-            deployment_profile="v1.1-standard",
+            app_root=namespace.app_root,
+            data_root=namespace.data_root,
+            updater_state_root=namespace.updater_state_root,
+            updater_runtime_root=namespace.updater_runtime_root,
+            deployment_profile="v1.1-instance-scoped",
+            compose_project=namespace.compose_project,
+            updater_service=namespace.updater_service,
+            updater_socket_path=namespace.updater_socket_path,
             listen=ListenIdentity("127.0.0.1", 8000),
             public_origin="https://anime.example.invalid",
-            managed_config_path=PurePosixPath("/data/animemo/config/animemo.json"),
+            managed_config_path=namespace.managed_config_path,
             config_revision="11111111-1111-4111-8111-111111111111",
             release_identity={
                 "version": "v1.1.0",
@@ -206,6 +213,7 @@ class MigrationRuntimeTests(unittest.TestCase):
                 "apiDigest": "sha256:" + "2" * 64,
                 "webDigest": "sha256:" + "3" * 64,
             },
+            ownership_receipt_digest="sha256:" + "4" * 64,
         )
 
     def configuration(

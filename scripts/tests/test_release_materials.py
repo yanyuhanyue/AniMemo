@@ -31,7 +31,7 @@ class InstallerMaterialsTests(unittest.TestCase):
     def contract(identity):
         return {
             "schemaVersion": 2,
-            "profile": "v1.1-standard",
+            "profile": "v1.1-instance-scoped",
             "platform": "linux/amd64",
             "archive": {
                 "name": "installer-materials.tar",
@@ -137,7 +137,7 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "deploy/docker-compose.yml",
                 "deploy/install-updater.sh",
                 "deploy/updater/animemo-updater",
-                "deploy/updater/animemo-updater.service",
+                "deploy/updater/animemo-updater@.service",
                 "deploy/updater/animemo-updater.sysusers.conf",
                 "deploy/updater/animemo-updater.tmpfiles.conf",
             )
@@ -186,7 +186,7 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "deploy/docker-compose.yml",
                 "deploy/install-updater.sh",
                 "deploy/updater/animemo-updater",
-                "deploy/updater/animemo-updater.service",
+                "deploy/updater/animemo-updater@.service",
                 "deploy/updater/animemo-updater.sysusers.conf",
                 "deploy/updater/animemo-updater.tmpfiles.conf",
             )
@@ -291,7 +291,7 @@ class InstallerMaterialsTests(unittest.TestCase):
             payload = archive.read_bytes()
             contract = {
                 "schemaVersion": 2,
-                "profile": "v1.1-standard",
+                "profile": "v1.1-instance-scoped",
                 "platform": "linux/amd64",
                 "archive": {
                     "name": "installer-materials.tar",
@@ -338,7 +338,7 @@ class InstallerMaterialsTests(unittest.TestCase):
             )
 
             self.assertEqual(contract["schemaVersion"], 2)
-            self.assertEqual(contract["profile"], "v1.1-standard")
+            self.assertEqual(contract["profile"], "v1.1-instance-scoped")
             self.assertEqual(contract["platform"], "linux/amd64")
             self.assertEqual(contract["archive"]["sha256"], identity.sha256)
             self.assertEqual(contract["archive"]["format"], "tar")

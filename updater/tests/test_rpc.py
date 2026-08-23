@@ -72,6 +72,28 @@ class UnixRpcTests(unittest.TestCase):
 
             self.assertEqual(path.read_text(encoding="utf-8"), "DO_NOT_DELETE\n")
 
+    def test_socket_parent_symlink_is_rejected_without_writing_outside(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            socket_parent = root / "instance"
+            try:
+                socket_parent.symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+            server = UnixRpcServer(socket_parent / "updater.sock", EchoAgent())
+            fake_socket = SimpleNamespace(
+                AF_UNIX=1,
+                SOCK_STREAM=1,
+                socket=lambda *_args: (_ for _ in ()).throw(AssertionError("socket must not be opened")),
+            )
+
+            with patch("updater.server.socket", fake_socket), self.assertRaisesRegex(StateError, "parent"):
+                server.serve_once()
+
+            self.assertFalse((outside / "updater.sock").exists())
+
     def test_one_json_request_round_trips_over_unix_socket(self):
         if not hasattr(socket, "AF_UNIX"):
             self.skipTest("AF_UNIX unavailable")

@@ -5,17 +5,26 @@ set -eu
 # import CURRENT, restart Docker, or touch any unrelated host service.
 
 INSTALL_ROOT=/opt/animemo-updater
-STATE_ROOT=/var/lib/animemo-updater
-RUNTIME_ROOT=/run/animemo-updater
 LAUNCHER=/usr/local/bin/animemo-updater
-SERVICE=animemo-updater.service
 
 die() {
     echo "AniMemo Updater install: $*" >&2
     exit 1
 }
 
-[ "$#" -eq 0 ] || die "this installer accepts no custom paths or commands"
+[ "$#" -eq 2 ] && [ "$1" = "--instance" ] || die "--instance NAME is required"
+INSTANCE=$2
+case "$INSTANCE" in
+    api|web|postgres|redis|updater|root|system|instances|current|previous|releases|bootstrap|cache|runtime)
+        die "reserved instance name" ;;
+    *[!a-z0-9-]*|-[a-z0-9-]*|*[a-z0-9-]-|"") die "invalid instance name" ;;
+esac
+[ "${INSTANCE#?}" != "$INSTANCE" ] || die "invalid instance name"
+case "${INSTANCE%${INSTANCE#?}}" in [a-z]) ;; *) die "invalid instance name" ;; esac
+[ "${#INSTANCE}" -le 32 ] || die "invalid instance name"
+STATE_ROOT=/var/lib/animemo-updater/instances/$INSTANCE
+RUNTIME_ROOT=/run/animemo-updater/$INSTANCE
+SERVICE=animemo-updater@$INSTANCE.service
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo is fine)"
 
 for command in /usr/bin/docker /usr/bin/gh python3 runuser systemctl systemd-sysusers systemd-tmpfiles install; do
@@ -28,7 +37,7 @@ SCRIPT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 [ -f "$SCRIPT_ROOT/durability/requirements.txt" ] || die "durability requirements are missing"
 [ -d "$SCRIPT_ROOT/wheelhouse" ] || die "offline wheelhouse is missing"
 [ -f "$SCRIPT_ROOT/deploy/updater/animemo-updater" ] || die "verified launcher is missing"
-[ -f "$SCRIPT_ROOT/deploy/updater/animemo-updater.service" ] || die "systemd service asset is missing"
+[ -f "$SCRIPT_ROOT/deploy/updater/animemo-updater@.service" ] || die "systemd service asset is missing"
 
 VERSION=$(sed -n 's/^__version__ = "\([0-9][0-9.]*\)"$/\1/p' "$SCRIPT_ROOT/updater/__init__.py")
 case "$VERSION" in
@@ -82,7 +91,7 @@ mkdir -p "$STATE_ROOT" "$RUNTIME_ROOT"
 
 install -m 0644 "$SCRIPT_ROOT/deploy/updater/animemo-updater.sysusers.conf" /usr/lib/sysusers.d/animemo-updater.conf
 install -m 0644 "$SCRIPT_ROOT/deploy/updater/animemo-updater.tmpfiles.conf" /usr/lib/tmpfiles.d/animemo-updater.conf
-install -m 0644 "$SCRIPT_ROOT/deploy/updater/animemo-updater.service" /etc/systemd/system/animemo-updater.service
+install -m 0644 "$SCRIPT_ROOT/deploy/updater/animemo-updater@.service" /etc/systemd/system/animemo-updater@.service
 systemd-sysusers /usr/lib/sysusers.d/animemo-updater.conf
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/animemo-updater.conf
 

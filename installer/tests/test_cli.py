@@ -183,6 +183,7 @@ class InstallerCliTests(unittest.TestCase):
 
         self.assertEqual(code, EXIT_SUCCESS)
         factory.assert_called_once_with(
+            instance_name="default",
             transport_source=InstallTransportSource.LOCAL_BUNDLE,
             transport_policy=policy,
             local_bundle_payload=payload,

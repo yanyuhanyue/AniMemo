@@ -6,6 +6,7 @@ import json
 import re
 import sys
 
+from durability.instance import DEFAULT_INSTANCE_NAME, InstanceName, LocatorError
 from durability.managed_config import ListenConfig
 
 from .errors import UpdaterError
@@ -17,6 +18,13 @@ from .runtime import (
 )
 
 OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _instance(value: str) -> InstanceName:
+    try:
+        return InstanceName(value)
+    except LocatorError:
+        raise argparse.ArgumentTypeError("instance name is invalid") from None
 
 
 def _operation_id(value: str) -> str:
@@ -59,6 +67,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="animemo-updater",
         description="Restricted AniMemo host Update Agent",
+    )
+    parser.add_argument(
+        "--instance",
+        type=_instance,
+        default=DEFAULT_INSTANCE_NAME,
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("serve", help="serve the fixed local Unix Socket")
@@ -127,7 +140,10 @@ def _run_configuration(args) -> int:
 
     from .configuration import ConfigurationError, build_configuration_manager
 
-    manager = build_configuration_manager(doctor=production_configuration_doctor)
+    manager = build_configuration_manager(
+        doctor=production_configuration_doctor,
+        instance_name=args.instance,
+    )
     if args.config_command == "show":
         _print(manager.show())
         return 0
@@ -160,9 +176,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "config":
             return _run_configuration(args)
         if args.command == "adopt-current":
-            _print(adopt_initial_release(load_initial_adoption_request()).as_dict())
+            _print(
+                adopt_initial_release(
+                    load_initial_adoption_request(args.instance)
+                ).as_dict()
+            )
             return 0
-        runtime = production_runtime()
+        runtime = production_runtime(args.instance)
         if args.command == "serve":
             runtime.serve_forever()
             return 0

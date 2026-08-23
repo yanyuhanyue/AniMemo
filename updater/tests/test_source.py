@@ -66,7 +66,7 @@ FAKE_DEPLOYMENT_FILES = [
 ]
 FAKE_DEPLOYMENT_CONTRACT = {
     "schemaVersion": 2,
-    "profile": "v1.1-standard",
+    "profile": "v1.1-instance-scoped",
     "platform": "linux/amd64",
     "archive": {
         "name": "installer-materials.tar",
@@ -377,7 +377,7 @@ class GitHubReleaseSourceTests(unittest.TestCase):
             verified = source.fetch_verified_materials("v1.0.0")
 
             self.assertEqual(verified.manifest, manifest)
-            self.assertEqual(verified.profile, "v1.1-standard")
+            self.assertEqual(verified.profile, "v1.1-instance-scoped")
             self.assertEqual(
                 verified.material(
                     "wheelhouse/qualified_dependency-1.0-py3-none-any.whl"
@@ -935,7 +935,7 @@ class GitHubReleaseSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             changed = {
                 "schemaVersion": 2,
-                "profile": "v1.1-standard",
+                "profile": "v1.1-instance-scoped",
                 "platform": "linux/amd64",
                 "archive": FAKE_DEPLOYMENT_CONTRACT["archive"],
                 "files": [

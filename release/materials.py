@@ -48,7 +48,7 @@ _FIXED_DEPLOYMENT_FILES = (
     "deploy/docker-compose.yml",
     "deploy/install-updater.sh",
     "deploy/updater/animemo-updater",
-    "deploy/updater/animemo-updater.service",
+    "deploy/updater/animemo-updater@.service",
     "deploy/updater/animemo-updater.sysusers.conf",
     "deploy/updater/animemo-updater.tmpfiles.conf",
 )
@@ -1137,7 +1137,7 @@ def _parse_material_contract(
         raise MaterialContractError("Installer material contract has an invalid shape")
     if (
         payload["schemaVersion"] != 2
-        or payload["profile"] != "v1.1-standard"
+        or payload["profile"] != "v1.1-instance-scoped"
         or payload["platform"] != "linux/amd64"
     ):
         raise MaterialContractError(

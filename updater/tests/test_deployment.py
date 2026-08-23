@@ -31,7 +31,7 @@ MATERIALS_DIGEST = "sha256:" + "c" * 64
 DEPLOYMENT_DIGEST = deployment_contract_digest(
     {
         "schemaVersion": 2,
-        "profile": "v1.1-standard",
+        "profile": "v1.1-instance-scoped",
         "platform": "linux/amd64",
         "archive": {
             "name": "installer-materials.tar",
@@ -179,8 +179,13 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             "cc.animemo.release.channel": "rc",
         }
         runner.container_labels = {
-            "api": dict(artifact_identity),
-            "web": dict(artifact_identity),
+            service: {
+                "io.animemo.instance-name": "default",
+                "io.animemo.instance-id": "00000000-0000-4000-8000-000000000000",
+                "io.animemo.compose-project": "animemo-default",
+                **(artifact_identity if service in {"api", "web"} else {}),
+            }
+            for service in ["postgres", "redis", "api", "web"]
         }
         effective_identity = release_identity or {
             "version": target["release"]["version"],
@@ -223,6 +228,24 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             release_probe=release_probe,
         )
         return deployment, runner, probes
+
+    def test_container_ownership_label_mismatch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            runner.container_labels["api"]["io.animemo.instance-id"] = (
+                "ffffffff-ffff-4fff-8fff-ffffffffffff"
+            )
+            with self.assertRaisesRegex(StateError, "ownership label is invalid"):
+                deployment._container_id(manifest(), "api")
+
+    def test_pre_update_backup_uses_the_instance_compose_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+
+            deployment.backup_database("a" * 32)
+
+            argv = runner.calls[-1][0]
+            self.assertEqual(argv[argv.index("--project-name") + 1], "animemo-default")
 
     def test_compose_uses_only_managed_configuration_and_a_minimal_child_environment(
         self,

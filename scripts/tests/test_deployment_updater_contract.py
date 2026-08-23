@@ -26,7 +26,8 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("ANIMEMO_LISTEN_HOST", services["web"]["ports"][0]["host_ip"])
         self.assertIn("ANIMEMO_LISTEN_PORT", services["web"]["ports"][0]["published"])
         self.assertNotIn(".env.production", json.dumps(compose))
-        self.assertNotIn("ANIMEMO_DATA_ROOT", json.dumps(compose))
+        self.assertIn("ANIMEMO_DATA_ROOT", json.dumps(compose))
+        self.assertIn("io.animemo.instance-name", json.dumps(compose))
         self.assertEqual(
             services["migration"]["command"],
             ["python", "manage.py", "migrate", "--noinput"],
@@ -93,7 +94,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("/run/animemo-updater", compose)
 
     def test_host_agent_service_has_fixed_unix_socket_and_honest_hardening(self):
-        service = (ROOT / "deploy/updater/animemo-updater.service").read_text(
+        service = (ROOT / "deploy/updater/animemo-updater@.service").read_text(
             encoding="utf-8"
         )
         tmpfiles = (ROOT / "deploy/updater/animemo-updater.tmpfiles.conf").read_text(
@@ -101,13 +102,16 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         )
         server = (ROOT / "updater/server.py").read_text(encoding="utf-8")
 
-        self.assertIn("ExecStart=/usr/local/bin/animemo-updater serve", service)
+        self.assertIn(
+            "ExecStart=/usr/local/bin/animemo-updater --instance %i serve",
+            service,
+        )
         self.assertIn("NoNewPrivileges=true", service)
         self.assertIn("PrivateTmp=true", service)
         self.assertIn("ProtectHome=true", service)
         self.assertIn("ProtectSystem=strict", service)
         self.assertIn(
-            "ReadWritePaths=/var/lib/animemo-updater /data/animemo /run/animemo-updater",
+            "ReadWritePaths=/var/lib/animemo-updater/instances/%i /data/animemo-instances/%i /run/animemo-updater/%i",
             service,
         )
         self.assertIn("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6", service)
@@ -122,7 +126,8 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
 
         self.assertFalse((ROOT / "deploy/bootstrap-updater.sh").exists())
         self.assertIn(
-            "/var/lib/animemo-updater/bootstrap/initial-adoption.json", runtime
+            'namespace.updater_state_root / "bootstrap/initial-adoption.json"',
+            runtime,
         )
         self.assertIn('commands.add_parser("adopt-current"', command)
         self.assertNotIn("RELEASE_MANIFEST_JSON", command)
@@ -239,7 +244,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             "/var/lib/animemo-updater",
             "/run/animemo-updater",
             "/usr/local/bin/animemo-updater",
-            "animemo-updater.service",
+            "animemo-updater@.service",
         ]:
             self.assertIn(fixed_target, installer)
         for forbidden in [

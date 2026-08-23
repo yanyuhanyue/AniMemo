@@ -267,21 +267,22 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",
             release,
         )
-        self.assertIn("docker compose --env-file .ci-runtime.env build api web", release)
+        compose = "docker compose --project-name animemo-release-gate --env-file .ci-runtime.env"
+        self.assertIn(f"{compose} build api web", release)
         self.assertIn(
-            "docker compose --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis",
+            f"{compose} up -d --wait --wait-timeout 120 postgres redis",
             release,
         )
         self.assertIn(
-            "docker compose --env-file .ci-runtime.env run --rm --no-deps migration",
+            f"{compose} run --rm --no-deps migration",
             release,
         )
         self.assertIn(
-            "docker compose --env-file .ci-runtime.env run --rm --no-deps bootstrap",
+            f"{compose} run --rm --no-deps bootstrap",
             release,
         )
         self.assertIn(
-            "docker compose --env-file .ci-runtime.env up -d --no-deps api web",
+            f"{compose} up -d --no-deps api web",
             release,
         )
         self.assertNotIn("EXPLICIT_RELEASE_JOBS", release)

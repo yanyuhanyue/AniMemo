@@ -31,7 +31,7 @@ from durability.compatibility import (
     ReasonCode,
     UpgradeAction,
 )
-from durability.instance import DATA_ROOT, UPDATER_STATE_ROOT
+from durability.instance import InstanceNamespace, instance_locator_digest
 from durability.managed_config import (
     derive_runtime_environment,
 )
@@ -258,8 +258,9 @@ def _secret_resolver(request: RestoreProtectionRequest):
 
 
 class ProductionRestoreDestination:
-    def __init__(self, target: TargetEvidence) -> None:
+    def __init__(self, target: TargetEvidence, namespace: InstanceNamespace) -> None:
         self.target = target
+        self.namespace = namespace
         if target.classification is TargetClass.ABSENT:
             classification = DestinationClass.FRESH
             empty_verified = False
@@ -274,8 +275,9 @@ class ProductionRestoreDestination:
             parent_ready = False
         self.snapshot = DestinationSnapshot(
             classification=classification,
-            deployment_profile="v1.1-standard",
-            canonical_roots=restore.CANONICAL_ROOTS,
+            instance_name=namespace.name,
+            deployment_profile="v1.1-instance-scoped",
+            canonical_roots=restore.canonical_roots_for(namespace.name),
             ownership_verified=classification
             in {DestinationClass.FRESH, DestinationClass.EXISTING_EMPTY},
             empty_verified=empty_verified,
@@ -286,7 +288,7 @@ class ProductionRestoreDestination:
     def inspect(self) -> DestinationSnapshot:
         # UpdateLock creates one private lock file before Restore's locked
         # destination recheck.  It is operation evidence, not an active instance.
-        state_root = Path(str(UPDATER_STATE_ROOT))
+        state_root = Path(str(self.namespace.updater_state_root))
         if state_root.exists():
             try:
                 names = {item.name for item in state_root.iterdir()}
@@ -522,7 +524,7 @@ class DockerPostgresProcessRunner:
             "/usr/bin/docker",
             "compose",
             "--project-name",
-            "animemo",
+            self.deployment.paths.compose_project,
             *env_files,
             "-f",
             str(self.deployment.compose_file),
@@ -575,12 +577,15 @@ class ProductionRestoreDatabase:
 class ProductionRestoreMutation:
     def __init__(self, *, fresh, configuration, installer_id: str) -> None:
         self.fresh = fresh
+        self.namespace = fresh.namespace
         self.configuration = configuration
         self.installer_id = installer_id
         self.installation_plan: InstallPlan | None = None
         self.restore_plan: RestorePlan | None = None
         self.reconfigure_names: tuple[str, ...] = ()
-        self.journal = RestoreOperationJournal()
+        self.journal = RestoreOperationJournal(
+            Path(str(self.namespace.updater_state_root))
+        )
         self.locator = None
         self.adoption_ready = False
 
@@ -590,6 +595,8 @@ class ProductionRestoreMutation:
         restore_plan: RestorePlan,
         reconfigure_names: tuple[str, ...],
     ) -> None:
+        if installation_plan.configuration.instance_id == restore_plan.instance_id:
+            raise RestoreAdapterError("RESTORE_TARGET_INSTANCE_ID_REUSED")
         self.installation_plan = installation_plan
         self.restore_plan = restore_plan
         self.reconfigure_names = reconfigure_names
@@ -602,7 +609,7 @@ class ProductionRestoreMutation:
     def acquire_lock(self, operation_id: str):
         if self.restore_plan is not None and operation_id != self.restore_plan.operation_id:
             raise RestoreAdapterError("RESTORE_OPERATION_ID_CHANGED")
-        return UpdateLock(Path(str(UPDATER_STATE_ROOT / "update.lock")))
+        return UpdateLock(Path(str(self.namespace.update_lock_path)))
 
     def begin(self, plan: RestorePlan) -> None:
         self.restore_plan = plan
@@ -640,7 +647,9 @@ class ProductionRestoreMutation:
         self, backup_root: Path, member_paths: tuple[str, ...]
     ) -> None:
         self._plan()
-        staging = Path(str(DATA_ROOT / f".restore-{self.installer_id}"))
+        staging = Path(
+            str(self.namespace.data_root / f".restore-{self.installer_id}")
+        )
         try:
             restore.LocalFilesystemStager().stage(
                 backup_root,
@@ -655,16 +664,30 @@ class ProductionRestoreMutation:
                 if isinstance(item, dict) and isinstance(item.get("path"), str)
             }
             archive_root = Path(
-                str(DATA_ROOT / "private" / "restore-source" / self.installer_id)
+                str(
+                    self.namespace.data_root
+                    / "private"
+                    / "restore-source"
+                    / self.installer_id
+                )
             )
             mappings = (
-                ("filesystem/plugins/cas/", Path(str(DATA_ROOT / "plugins" / "cas"))),
+                (
+                    "filesystem/plugins/cas/",
+                    Path(str(self.namespace.data_root / "plugins" / "cas")),
+                ),
                 (
                     "filesystem/plugins/durable/",
-                    Path(str(DATA_ROOT / "plugins" / "durable")),
+                    Path(str(self.namespace.data_root / "plugins" / "durable")),
                 ),
-                ("filesystem/media/", Path(str(DATA_ROOT / "media"))),
-                ("filesystem/private/", Path(str(DATA_ROOT / "private"))),
+                (
+                    "filesystem/media/",
+                    Path(str(self.namespace.data_root / "media")),
+                ),
+                (
+                    "filesystem/private/",
+                    Path(str(self.namespace.data_root / "private")),
+                ),
                 ("filesystem/config/", archive_root / "config"),
                 ("updater-state/", archive_root / "updater-state"),
             )
@@ -714,7 +737,7 @@ class ProductionRestoreMutation:
                 or stat.S_IMODE(launcher.lstat().st_mode) != 0o755
             ):
                 raise OSError
-            slots = ReleaseSlots(Path(str(UPDATER_STATE_ROOT / "releases"))).read()
+            slots = ReleaseSlots(Path(str(self.namespace.release_slots_root))).read()
             if slots["current"] is not None or slots["previous"] is not None:
                 raise OSError
         except OSError:
@@ -759,7 +782,8 @@ class ProductionRestoreMutation:
     ) -> None:
         plan = self._plan()
         if (
-            instance_id != plan.configuration.instance_id
+            plan.restore is None
+            or instance_id != plan.restore.instance_id
             or release_evidence.release_identity_digest
             != plan.release.manifest_digest
         ):
@@ -806,12 +830,12 @@ class ProductionRestoreValidation:
 
     def _filesystem_layout(self) -> None:
         required = {
-            Path(str(DATA_ROOT / "config")): 0o700,
-            Path(str(DATA_ROOT / "postgres")): 0o700,
-            Path(str(DATA_ROOT / "redis")): 0o700,
-            Path(str(DATA_ROOT / "plugins")): 0o755,
-            Path(str(DATA_ROOT / "media")): 0o755,
-            Path(str(DATA_ROOT / "private")): 0o700,
+            Path(str(self.mutation.namespace.data_root / "config")): 0o700,
+            Path(str(self.mutation.namespace.data_root / "postgres")): 0o700,
+            Path(str(self.mutation.namespace.data_root / "redis")): 0o700,
+            Path(str(self.mutation.namespace.data_root / "plugins")): 0o755,
+            Path(str(self.mutation.namespace.data_root / "media")): 0o755,
+            Path(str(self.mutation.namespace.data_root / "private")): 0o700,
         }
         for path, mode in required.items():
             metadata = path.lstat()
@@ -835,10 +859,14 @@ class ProductionRestoreValidation:
                 continue
             relative = logical[len(prefix) :]
             if prefix == "filesystem/media/":
-                target = Path(str(DATA_ROOT / "media")) / PurePosixPath(relative)
+                target = Path(
+                    str(self.mutation.namespace.data_root / "media")
+                ) / PurePosixPath(relative)
             else:
                 suffix = logical[len("filesystem/plugins/") :]
-                target = Path(str(DATA_ROOT / "plugins")) / PurePosixPath(suffix)
+                target = Path(
+                    str(self.mutation.namespace.data_root / "plugins")
+                ) / PurePosixPath(suffix)
             if self._digest(target) != item.get("sha256"):
                 raise RestoreAdapterError("RESTORE_PAYLOAD_INTEGRITY_FAILED")
 
@@ -866,7 +894,11 @@ class ProductionRestoreValidation:
         passed.add("database.schema_contract")
 
         config = mutation.configuration.config_for(install.configuration)
-        if config.instance_id != plan.instance_id:
+        if (
+            config.instance_id == plan.instance_id
+            or mutation.locator is None
+            or mutation.locator.instance_id != config.instance_id
+        ):
             raise RestoreAdapterError("RESTORE_INSTANCE_IDENTITY_INVALID")
         passed.add("instance.identity")
         self._filesystem_layout()
@@ -895,6 +927,7 @@ class ProductionRestoreValidation:
         passed.add("media.integrity")
 
         mutation.configuration.store.rebuild_runtime_env(
+            locator_digest=instance_locator_digest(mutation.locator),
             expected_revision=config.config_revision
         )
         deployment.validate_compose(release_manifest)
@@ -999,7 +1032,7 @@ class ProductionRestoreRuntimePort:
         request = RestoreRequest(
             operation_id=str(uuid.UUID(hex=operation_id)),
             backup_root=backup_root,
-            destination=ProductionRestoreDestination(target),
+            destination=ProductionRestoreDestination(target, self.fresh.namespace),
             release=release_port,
             updater=updater,
             secret_resolver=resolver,
@@ -1167,7 +1200,7 @@ class ProductionRestoreRuntimePort:
             or context.evidence != plan
             or accepted_plan_digest != plan.restore_plan_digest
             or installation_plan.restore != plan
-            or installation_plan.configuration.instance_id != plan.instance_id
+            or installation_plan.configuration.instance_id == plan.instance_id
         ):
             raise InstallerError(
                 "INSTALL_RESTORE_PLAN_NOT_ACCEPTED",

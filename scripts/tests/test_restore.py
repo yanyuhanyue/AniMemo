@@ -366,7 +366,8 @@ class RestoreRuntimeTests(unittest.TestCase):
     def snapshot(self, kind=restore.DestinationClass.FRESH):
         return restore.DestinationSnapshot(
             classification=kind,
-            deployment_profile="v1.1-standard",
+            instance_name="default",
+            deployment_profile="v1.1-instance-scoped",
             canonical_roots=restore.CANONICAL_ROOTS,
             ownership_verified=True,
             empty_verified=kind is restore.DestinationClass.EXISTING_EMPTY,

@@ -11,10 +11,11 @@ from typing import NoReturn, Protocol
 from uuid import UUID
 
 from durability.canonical import canonical_json_bytes
+from durability.instance import DEFAULT_INSTANCE_NAME, InstanceName, LocatorError
 from durability.private_store import AtomicPrivateFile, PrivateStoreError
 
 OPERATION_FORMAT = "animemo.operation"
-OPERATION_SCHEMA_VERSION = 1
+OPERATION_SCHEMA_VERSION = 2
 FRESH_INSTALL_KIND = "fresh_install"
 MAX_OPERATION_BYTES = 1024 * 1024
 RESTORE_OPERATION_IDENTITY = "animemo.restore-operation/v1"
@@ -70,6 +71,7 @@ _RECORD_FIELDS = frozenset(
         "kind",
         "status",
         "phase",
+        "instanceName",
         "instanceId",
         "planDigest",
         "releaseIdentityDigest",
@@ -149,6 +151,7 @@ class FreshInstallOperation:
     operation_id: str
     status: FreshInstallStatus
     phase: FreshInstallPhase
+    instance_name: InstanceName
     instance_id: str
     plan_digest: str
     release_identity_digest: str
@@ -176,6 +179,7 @@ class FreshInstallOperation:
             "kind": FRESH_INSTALL_KIND,
             "status": self.status.value,
             "phase": self.phase.value,
+            "instanceName": str(self.instance_name),
             "instanceId": self.instance_id,
             "planDigest": self.plan_digest,
             "releaseIdentityDigest": self.release_identity_digest,
@@ -301,10 +305,15 @@ def parse_fresh_install_operation(payload: object) -> FreshInstallOperation:
         _fail("FRESH_OPERATION_STATE_INVALID")
     if status is FreshInstallStatus.FAILED_NO_MUTATION and mutation:
         _fail("FRESH_OPERATION_STATE_INVALID")
+    try:
+        instance_name = InstanceName(payload["instanceName"])
+    except LocatorError:
+        _fail("FRESH_OPERATION_INSTANCE_NAME_INVALID")
     return FreshInstallOperation(
         operation_id=operation_id,
         status=status,
         phase=phase,
+        instance_name=instance_name,
         instance_id=_uuid(payload["instanceId"], "FRESH_OPERATION_INSTANCE_INVALID"),
         plan_digest=_digest(payload["planDigest"], "FRESH_OPERATION_PLAN_INVALID"),
         release_identity_digest=_digest(
@@ -354,6 +363,7 @@ def parse_fresh_install_operation_bytes(raw: bytes) -> FreshInstallOperation:
 
 def create_fresh_install_operation(
     *,
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
     instance_id: str,
     plan_digest: str,
     release_identity_digest: str,
@@ -366,10 +376,19 @@ def create_fresh_install_operation(
     if not _ID.fullmatch(identifier):
         _fail("FRESH_OPERATION_ID_INVALID")
     timestamp = _timestamp(at)
+    try:
+        selected_name = (
+            instance_name
+            if isinstance(instance_name, InstanceName)
+            else InstanceName(instance_name)
+        )
+    except LocatorError:
+        _fail("FRESH_OPERATION_INSTANCE_NAME_INVALID")
     operation = FreshInstallOperation(
         operation_id=identifier,
         status=FreshInstallStatus.RUNNING,
         phase=FreshInstallPhase.PREFLIGHT_VERIFIED,
+        instance_name=selected_name,
         instance_id=_uuid(instance_id, "FRESH_OPERATION_INSTANCE_INVALID"),
         plan_digest=_digest(plan_digest, "FRESH_OPERATION_PLAN_INVALID"),
         release_identity_digest=_digest(
