@@ -742,6 +742,25 @@ class ManifestContractTests(unittest.TestCase):
 
 
 class ProvenancePlanTests(unittest.TestCase):
+    def test_release_contract_closes_trusted_freshness_ttl_and_local_authority(self):
+        root = Path(__file__).resolve().parents[2]
+        contract = (root / "docs" / "release-contract-v1.md").read_text(
+            encoding="utf-8"
+        )
+        for term in (
+            "Phase A `Qualification`",
+            "Phase F `Release Metadata Freshness`",
+            "Phase B `Publish`",
+            "至少相隔 60 秒",
+            "不得超过 15 分钟",
+            "METADATA_FRESHNESS_EXPIRED",
+            "NON_AUTHORITY_DIAGNOSTIC",
+            "TRANSPORT_AND_QUALIFICATION_EVIDENCE",
+            "GitHub Immutable Release",
+        ):
+            self.assertIn(term, contract)
+        self.assertIn("不得回退到 Qualification 或任何本地结果", contract)
+
     def test_dry_run_plan_binds_both_images_to_commit_and_workflow(self):
         plan = build_provenance_plan(
             version="v1.0.0-rc.1",

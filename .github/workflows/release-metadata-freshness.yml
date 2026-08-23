@@ -1,0 +1,204 @@
+name: Release Metadata Freshness
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualification_run_id:
+        description: Exact successful Phase A Release Producer run
+        required: true
+        type: string
+      intended_main_sha:
+        description: Exact main commit qualified for publication
+        required: true
+        type: string
+
+concurrency:
+  group: animemo-release-metadata-freshness-${{ inputs.intended_main_sha }}-${{ inputs.qualification_run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+jobs:
+  trusted-metadata-freshness:
+    name: trusted-metadata-freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Bind the trusted runner to exact main
+        env:
+          INTENDED_MAIN_SHA: ${{ inputs.intended_main_sha }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$INTENDED_MAIN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_RUN_ATTEMPT" = "1"
+          test "$GITHUB_REF" = "refs/heads/main"
+          git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"
+          main_sha="$(git rev-parse origin/main^{commit})"
+          test "$INTENDED_MAIN_SHA" = "$main_sha"
+          test "$GITHUB_SHA" = "$INTENDED_MAIN_SHA"
+          test "$(git rev-parse HEAD^{commit})" = "$INTENDED_MAIN_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r release/requirements.txt
+      - name: Download and authenticate exact Phase A artifact
+        id: qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INTENDED_MAIN_SHA: ${{ inputs.intended_main_sha }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          headers=(
+            -H "Accept: application/vnd.github+json"
+            -H "Authorization: Bearer $GH_TOKEN"
+            -H "X-GitHub-Api-Version: 2022-11-28"
+          )
+          curl --fail --location --silent --show-error "${headers[@]}" \
+            "$api/actions/runs/$QUALIFICATION_RUN_ID" \
+            -o "$RUNNER_TEMP/qualification-run.json"
+          jq -e --arg repository "$GITHUB_REPOSITORY" \
+            --arg sha "$INTENDED_MAIN_SHA" '
+              .name == "Release Producer" and
+              .path == ".github/workflows/release.yml" and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "success" and
+              .run_attempt == 1 and
+              .repository.full_name == $repository and
+              .head_branch == "main" and
+              .head_sha == $sha
+            ' "$RUNNER_TEMP/qualification-run.json" >/dev/null
+          curl --fail --location --silent --show-error "${headers[@]}" \
+            "$api/actions/runs/$QUALIFICATION_RUN_ID/jobs?per_page=100" \
+            -o "$RUNNER_TEMP/qualification-jobs.json"
+          jq -e '
+            ([.jobs[] | select(
+              .name == "phase-a-qualification-evidence" and
+              .status == "completed" and
+              .conclusion == "success"
+            )] | length) == 1 and
+            ([.jobs[] | select(
+              .name == "publish-immutable-prerelease" and
+              .status == "completed" and
+              .conclusion == "skipped"
+            )] | length) == 1
+          ' "$RUNNER_TEMP/qualification-jobs.json" >/dev/null
+          curl --fail --location --silent --show-error "${headers[@]}" \
+            "$api/actions/runs/$QUALIFICATION_RUN_ID/artifacts?per_page=100" \
+            -o "$RUNNER_TEMP/qualification-artifacts.json"
+          jq -ce --arg id "$QUALIFICATION_RUN_ID" --arg sha "$INTENDED_MAIN_SHA" '
+            [.artifacts[] | select(
+              .name == ("release-qualification-" + $id) and
+              (.workflow_run.id | tostring) == $id and
+              .workflow_run.head_sha == $sha
+            )] as $matches |
+            if ($matches | length) == 1 then $matches[0] else error("qualification artifact cardinality") end
+          ' "$RUNNER_TEMP/qualification-artifacts.json" \
+            > "$RUNNER_TEMP/qualification-artifact.json"
+          artifact_id="$(jq -r '.id // empty' "$RUNNER_TEMP/qualification-artifact.json")"
+          archive_url="$(jq -r '.archive_download_url // empty' "$RUNNER_TEMP/qualification-artifact.json")"
+          metadata_digest="$(jq -r '.digest // empty' "$RUNNER_TEMP/qualification-artifact.json")"
+          artifact_expired="$(jq -r '.expired' "$RUNNER_TEMP/qualification-artifact.json")"
+          [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$artifact_expired" = "false"
+          test -n "$archive_url"
+          mkdir "$RUNNER_TEMP/qualification-archive"
+          curl --fail --location --silent --show-error "${headers[@]}" \
+            "$archive_url" -o "$RUNNER_TEMP/qualification-archive/evidence.zip"
+          actual_digest="sha256:$(sha256sum "$RUNNER_TEMP/qualification-archive/evidence.zip" | awk '{print $1}')"
+          test "$actual_digest" = "$metadata_digest"
+          python -m release.cli extract-qualification-artifact \
+            --archive "$RUNNER_TEMP/qualification-archive/evidence.zip" \
+            --destination "$RUNNER_TEMP/qualification" \
+            --qualification-run-id "$QUALIFICATION_RUN_ID" \
+            --expected-sha256 "$metadata_digest"
+          evidence="$RUNNER_TEMP/qualification/release-qualification-$QUALIFICATION_RUN_ID.json"
+          prepublication="$RUNNER_TEMP/qualification/prepublication-materials.json"
+          candidate_tree="$(git rev-parse "$INTENDED_MAIN_SHA^{tree}")"
+          test "$(jq -r '.run.attempt' "$evidence")" = "1"
+          test "$(jq -r '.candidate_sha' "$evidence")" = "$INTENDED_MAIN_SHA"
+          test "$(jq -r '.candidateSha' "$prepublication")" = "$INTENDED_MAIN_SHA"
+          test "$(jq -r '.candidateTreeSha' "$prepublication")" = "$candidate_tree"
+          python -m release.cli verify-prepublication-materials \
+            --prepublication "$prepublication" \
+            --installer-materials "$RUNNER_TEMP/qualification/installer-materials.tar" \
+            --deployment-contract "$RUNNER_TEMP/qualification/deployment-contract.json" \
+            --expected-candidate-sha "$INTENDED_MAIN_SHA" \
+            --expected-candidate-tree-sha "$candidate_tree"
+          python scripts/platform_qualification.py verify \
+            --input "$RUNNER_TEMP/qualification/platform-qualification.json" \
+            --candidate-sha "$INTENDED_MAIN_SHA" \
+            --run-id "$QUALIFICATION_RUN_ID" \
+            --run-attempt 1 \
+            --workflow-path .github/workflows/release.yml
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "candidate_tree=$candidate_tree" >> "$GITHUB_OUTPUT"
+      - name: Collect two complete trusted metadata snapshots
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INTENDED_MAIN_SHA: ${{ inputs.intended_main_sha }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          QUALIFICATION_ARTIFACT_ID: ${{ steps.qualification.outputs.artifact_id }}
+          CANDIDATE_TREE: ${{ steps.qualification.outputs.candidate_tree }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m release.cli collect-metadata-freshness \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --qualification-directory "$RUNNER_TEMP/qualification" \
+            --output-directory "$RUNNER_TEMP/metadata-freshness" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-attempt "$GITHUB_RUN_ATTEMPT" \
+            --workflow-sha "$GITHUB_SHA" \
+            --candidate-sha "$INTENDED_MAIN_SHA" \
+            --candidate-tree "$CANDIDATE_TREE" \
+            --qualification-run-id "$QUALIFICATION_RUN_ID" \
+            --qualification-artifact-id "$QUALIFICATION_ARTIFACT_ID"
+      - name: Enforce exact redacted nine-file output
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/metadata-freshness"
+          test "$(find "$directory" -mindepth 1 -maxdepth 1 -type f | wc -l)" = "9"
+          test "$(find "$directory" -mindepth 1 -maxdepth 1 ! -type f | wc -l)" = "0"
+          expected="$RUNNER_TEMP/freshness-expected.txt"
+          actual="$RUNNER_TEMP/freshness-actual.txt"
+          printf '%s\n' \
+            metadata-freshness.json \
+            request-diagnostics.json \
+            snapshot-a-input.json \
+            snapshot-a.json \
+            snapshot-a.md \
+            snapshot-b-input.json \
+            snapshot-b.json \
+            snapshot-b.md \
+            snapshot-comparison.json | sort > "$expected"
+          find "$directory" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort > "$actual"
+          diff -u "$expected" "$actual"
+          if grep -ERaiq 'authorization[[:space:]]*:|cookie[[:space:]]*:|bearer[[:space:]]+[a-z0-9._~+/=-]{12,}|github_pat_|gh[pousr]_' "$directory"; then
+            echo "credential-shaped material detected" >&2
+            exit 1
+          fi
+      - name: Upload exact trusted metadata freshness artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-metadata-freshness-${{ github.run_id }}
+          path: ${{ runner.temp }}/metadata-freshness
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: false

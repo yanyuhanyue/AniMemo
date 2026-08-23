@@ -104,6 +104,20 @@ predicate: https://slsa.dev/provenance/v1
 
 Release Dry Run 只有 `contents: read`，会构建本地 OCI archive、生成 Manifest/checksum，并输出 `provenance-plan.unsigned.json` 来验证 SLSA subject、commit 与 workflow 输入。该文件明确不是密码学签名；只有非 Dry Run 的 publish job 才申请 `id-token: write` / `attestations: write`，调用 `actions/attest` 产生可验证证明。
 
+## Trusted prepublication metadata freshness
+
+RC/Beta 发布采用三阶段门禁：Phase A `Qualification`、Phase F `Release Metadata Freshness`、Phase B `Publish`。Phase A 在 exact main commit 上生成七文件 Qualification Artifact；Phase F 只能在 GitHub-hosted runner 上运行 `.github/workflows/release-metadata-freshness.yml`，且 dispatch 只接受 `qualification_run_id` 与 `intended_main_sha`。它的仓库权限固定为 `contents: read`、`pull-requests: read`、`actions: read`，不具有发布写权限。
+
+Phase F 必须验证 Qualification producer、`operation=qualify`、attempt 1、head SHA、当前 main tree、唯一未过期 Artifact 及 Artifact digest，再从 Artifact 内部读取 release tag、Release Notes identity、JSON/Markdown digest、population、configuration identity 和 renderer identity。上述身份不得由操作者输入。Actions Artifact 的角色始终是 `TRANSPORT_AND_QUALIFICATION_EVIDENCE`；它和 Qualification Artifact 都不是 Release Authority，唯一 Release Authority 仍为最终的 GitHub Immutable Release。
+
+每个新鲜度 snapshot 都重新计算完整 commit range，并从第一个 commit 开始读取固定的 GitHub associated-pulls REST endpoint。只有 connection reset、EOF、timeout、HTTP 429/502/503/504 或 GitHub 明确的 secondary rate limit 可以触发最多三次“整份 snapshot”重试；不同 attempt 的部分响应不得拼接。401、permission 403、404、primary rate limit、无效 JSON/response shape 和 Release Notes contract failure 均立即失败。每次请求只记录闭合且脱敏的 HTTP/限流诊断，禁止保存 token、Authorization、Cookie、signed URL、完整 header 或环境变量。
+
+Phase F 必须得到两份完整成功 snapshot，完成时间至少相隔 60 秒。两份 input metadata、Release Notes JSON 与 Markdown 必须逐字节相同，identity 相同，并分别逐字节匹配 Qualification 的 JSON、Markdown、identity 和 population；conflict、unclassified、duplicate 均必须为零。成功产物 `release-metadata-freshness-<run-id>` 精确包含九个文件，`metadata-freshness.json` 使用拒绝未知字段与重复 JSON key 的 closed schema。
+
+Publish 必须同时接收 `qualification_run_id` 和 `metadata_freshness_run_id`；Qualification 操作拒绝这两个消费端输入。Publish 在任何 GHCR push、attestation、Git tag/push、Draft Release、asset upload 或 immutable publication 前验证 freshness workflow 的精确 name/path、attempt 1、main head SHA、dispatch inputs、唯一 Artifact、digest、expiry、九文件安全解包、candidate SHA/tree、Qualification run/artifact 绑定及全部 Release Notes identity。Freshness `completedAt` 到紧邻首个外部 mutation 的重新验证时间不得超过 15 分钟；过期以 `METADATA_FRESHNESS_EXPIRED` 失败，外部 mutation 计数保持为零，不得回退到 Qualification 或任何本地结果。
+
+本地操作者只负责 dispatch、保存 run ID 和只读轮询。本地可运行相同 collector 做诊断，但输出语义只能是 `NON_AUTHORITY_DIAGNOSTIC`；本地 Windows 网络、代理、手工 PR 清单、PR `updated_at`、Release Drafter draft、布尔 override、操作者提供的 snapshot hash/identity 均不能解锁 Publish。
+
 ## Tool interface
 
 ## Phase 3C Installer Material Profile

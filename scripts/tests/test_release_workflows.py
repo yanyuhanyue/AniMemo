@@ -23,6 +23,7 @@ HARDENED_WORKFLOWS = (
     "pre-merge-full.yml",
     "promote-release.yml",
     "release-gate.yml",
+    "release-metadata-freshness.yml",
     "release.yml",
 )
 
@@ -420,7 +421,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
     def test_release_workflows_pin_every_external_action_to_a_commit(self):
-        for name in ("release.yml", "promote-release.yml"):
+        for name in (
+            "release.yml",
+            "release-metadata-freshness.yml",
+            "promote-release.yml",
+        ):
             source = (ROOT / ".github" / "workflows" / name).read_text(
                 encoding="utf-8"
             )
@@ -723,6 +728,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(inputs["candidate_sha"]["required"], "false")
         self.assertIn("upgrade_base_sha", inputs)
         self.assertIn("target_version_override", inputs)
+        self.assertIn("metadata_freshness_run_id", inputs)
+        self.assertEqual(inputs["metadata_freshness_run_id"]["required"], "false")
         self.assertEqual(release["jobs"]["full-ci"]["uses"], "./.github/workflows/ci.yml")
         self.assertEqual(release["jobs"]["full-release-gate"]["uses"], "./.github/workflows/release-gate.yml")
         self.assertEqual(
@@ -879,7 +886,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(
             release["jobs"]["publish"]["needs"],
-            ["preflight", "release-authority"],
+            ["preflight", "release-authority", "metadata-freshness-authority"],
         )
         for job_name in ("dry-run", "publish"):
             self.assertNotIn("performance", release["jobs"][job_name]["needs"])
@@ -891,7 +898,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(authority["permissions"], {"contents": "read", "actions": "read"})
         self.assertIn("run_attempt=\"$(jq -r '.run_attempt // empty'", authority_source)
-        self.assertIn('[[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]', authority_source)
+        self.assertIn('test "$run_attempt" = "1"', authority_source)
 
     def test_phase_b_publish_scheduling_is_skip_safe_and_fail_closed(self):
         release = workflow("release.yml")
@@ -900,40 +907,48 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         expected_condition = (
             "${{ !cancelled() && inputs.operation == 'publish' "
             "&& needs.preflight.result == 'success' "
-            "&& needs.release-authority.result == 'success' }}"
+            "&& needs.release-authority.result == 'success' "
+            "&& needs.metadata-freshness-authority.result == 'success' }}"
         )
 
-        self.assertEqual(publish["needs"], ["preflight", "release-authority"])
+        self.assertEqual(
+            publish["needs"],
+            ["preflight", "release-authority", "metadata-freshness-authority"],
+        )
         self.assertEqual(condition, expected_condition)
         for required_guard in (
             "!cancelled()",
             "inputs.operation == 'publish'",
             "needs.preflight.result == 'success'",
             "needs.release-authority.result == 'success'",
+            "needs.metadata-freshness-authority.result == 'success'",
         ):
             self.assertIn(required_guard, condition)
         self.assertNotIn("always()", condition)
 
         cases = (
-            ("qualify", False, "success", "success", False),
-            ("publish", False, "success", "success", True),
-            ("publish", False, "failure", "success", False),
-            ("publish", False, "success", "failure", False),
-            ("publish", False, "success", "skipped", False),
-            ("publish", True, "success", "success", False),
+            ("qualify", False, "success", "success", "success", False),
+            ("publish", False, "success", "success", "success", True),
+            ("publish", False, "failure", "success", "success", False),
+            ("publish", False, "success", "failure", "success", False),
+            ("publish", False, "success", "success", "failure", False),
+            ("publish", False, "success", "success", "skipped", False),
+            ("publish", True, "success", "success", "success", False),
         )
-        for operation, cancelled, preflight, authority, expected in cases:
+        for operation, cancelled, preflight, authority, freshness, expected in cases:
             with self.subTest(
                 operation=operation,
                 cancelled=cancelled,
                 preflight=preflight,
                 authority=authority,
+                freshness=freshness,
             ):
                 eligible = (
                     not cancelled
                     and operation == "publish"
                     and preflight == "success"
                     and authority == "success"
+                    and freshness == "success"
                 )
                 self.assertEqual(eligible, expected)
 
@@ -1760,6 +1775,158 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "annotated_tag_subject:",
             production.split("workflow_dispatch:", 1)[1].split("jobs:", 1)[0],
         )
+
+    def test_metadata_freshness_workflow_has_two_inputs_and_read_only_permissions(self):
+        freshness = workflow("release-metadata-freshness.yml")
+        inputs = freshness["on"]["workflow_dispatch"]["inputs"]
+        self.assertEqual(
+            set(inputs), {"qualification_run_id", "intended_main_sha"}
+        )
+        self.assertEqual(
+            freshness["permissions"],
+            {"contents": "read", "pull-requests": "read", "actions": "read"},
+        )
+        self.assertEqual(
+            freshness["concurrency"]["group"],
+            "animemo-release-metadata-freshness-"
+            "${{ inputs.intended_main_sha }}-${{ inputs.qualification_run_id }}",
+        )
+        self.assertEqual(freshness["concurrency"]["cancel-in-progress"], "false")
+        self.assertEqual(freshness["name"], "Release Metadata Freshness")
+        self.assertEqual(set(freshness["on"]), {"workflow_dispatch"})
+
+    def test_metadata_freshness_workflow_rejects_arbitrary_authority_inputs(self):
+        source = (
+            ROOT / ".github" / "workflows" / "release-metadata-freshness.yml"
+        ).read_text(encoding="utf-8")
+        header = source[: source.index("jobs:")]
+        for forbidden in (
+            "release_title:",
+            "tag_subject:",
+            "release_notes_identity:",
+            "markdown_sha:",
+            "pull_requests:",
+            "api_url:",
+            "repository:",
+            "workflow_path:",
+            "target_version_override:",
+            "freshness_passed:",
+        ):
+            self.assertNotIn(forbidden, header)
+        self.assertNotIn("contents: write", source)
+        self.assertNotIn("packages: write", source)
+        self.assertNotIn("id-token: write", source)
+        self.assertNotIn("administration: write", source)
+        self.assertNotIn("shell=True", source)
+        self.assertNotIn("eval ", source)
+
+    def test_metadata_freshness_authenticates_exact_qualification_and_artifact(self):
+        source = (
+            ROOT / ".github" / "workflows" / "release-metadata-freshness.yml"
+        ).read_text(encoding="utf-8")
+        for guard in (
+            '.name == "Release Producer"',
+            '.path == ".github/workflows/release.yml"',
+            '.name == "phase-a-qualification-evidence"',
+            '.name == "publish-immutable-prerelease"',
+            '.conclusion == "skipped"',
+            '.event == "workflow_dispatch"',
+            '.conclusion == "success"',
+            ".run_attempt == 1",
+            '.head_branch == "main"',
+            '.head_sha == $sha',
+            '.name == ("release-qualification-" + $id)',
+            'test "$artifact_expired" = "false"',
+            "extract-qualification-artifact",
+            'test "$(jq -r \'.candidateTreeSha\' "$prepublication")" = "$candidate_tree"',
+        ):
+            self.assertIn(guard, source)
+        self.assertIn("fileCount", (ROOT / "release" / "metadata_freshness.py").read_text())
+
+    def test_metadata_freshness_collects_two_complete_snapshots_and_exact_artifact(self):
+        source = (
+            ROOT / ".github" / "workflows" / "release-metadata-freshness.yml"
+        ).read_text(encoding="utf-8")
+        module = (ROOT / "release" / "metadata_freshness.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("MINIMUM_SNAPSHOT_INTERVAL_SECONDS = 60", module)
+        self.assertIn("MAX_COMPLETE_ATTEMPTS = 3", module)
+        self.assertIn('snapshot_label="A"', module)
+        self.assertIn('snapshot_label="B"', module)
+        self.assertIn("runtime_clock.sleep(MINIMUM_SNAPSHOT_INTERVAL_SECONDS)", module)
+        self.assertIn("release-metadata-freshness-${{ github.run_id }}", source)
+        self.assertIn('test "$(find "$directory" -mindepth 1 -maxdepth 1 -type f | wc -l)" = "9"', source)
+        self.assertIn("credential-shaped material detected", source)
+
+    def test_publish_authenticates_freshness_producer_bindings_and_ttl(self):
+        release = workflow("release.yml")
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        authority = release["jobs"]["metadata-freshness-authority"]
+        self.assertEqual(authority["runs-on"], "ubuntu-latest")
+        self.assertEqual(authority["permissions"], {"contents": "read", "actions": "read"})
+        self.assertEqual(authority["needs"], ["preflight", "release-authority"])
+        for guard in (
+            '.name == "Release Metadata Freshness"',
+            '.path == ".github/workflows/release-metadata-freshness.yml"',
+            '.event == "workflow_dispatch"',
+            '.conclusion == "success"',
+            ".run_attempt == 1",
+            '.head_sha == $sha',
+            '--expected-qualification-run-id "$QUALIFICATION_RUN_ID"',
+            '--expected-candidate-sha "$INTENDED_MAIN_SHA"',
+            '.name == ("release-metadata-freshness-" + $id)',
+            'test "$artifact_expired" = "false"',
+            "extract-metadata-freshness-artifact",
+        ):
+            self.assertIn(guard, source)
+        publish = source[source.index("  publish:\n") :]
+        self.assertEqual(publish.count("verify-metadata-freshness"), 2)
+        self.assertIn("METADATA_FRESHNESS_EXPIRED", (ROOT / "release" / "metadata_freshness.py").read_text())
+
+    def test_every_external_release_mutation_is_after_the_freshness_gate(self):
+        release = workflow("release.yml")
+        publish = release["jobs"]["publish"]
+        self.assertIn("metadata-freshness-authority", publish["needs"])
+        steps = publish["steps"]
+        freshness_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("name")
+            == "Verify metadata freshness TTL immediately before external publication"
+        )
+        mutation_indices = []
+        mutation_fragments = (
+            "docker push",
+            "git tag --annotate",
+            'git push origin "refs/tags/',
+            'gh api --method POST "repos/$GITHUB_REPOSITORY/releases"',
+            'gh release upload "$RELEASE_TAG"',
+            'gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/',
+        )
+        for index, step in enumerate(steps):
+            body = str(step.get("run", ""))
+            action = str(step.get("uses", ""))
+            if any(fragment in body for fragment in mutation_fragments) or action.startswith(
+                "actions/attest@"
+            ):
+                mutation_indices.append(index)
+        self.assertTrue(mutation_indices)
+        self.assertTrue(all(index > freshness_index for index in mutation_indices))
+
+    def test_publish_has_no_freshness_fallback_or_manual_override(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        preflight = source[source.index("  preflight:\n") : source.index("  full-ci:\n")]
+        self.assertIn('test -z "$METADATA_FRESHNESS_RUN_ID"', preflight)
+        self.assertIn('[[ "$METADATA_FRESHNESS_RUN_ID" =~ ^[1-9][0-9]*$ ]]', preflight)
+        self.assertNotIn("freshness_passed", source)
+        self.assertNotIn("metadata_freshness_override", source)
+        self.assertNotIn("continue-on-error", source)
+        self.assertNotIn("local metadata", source.lower())
 
 if __name__ == "__main__":
     unittest.main()
