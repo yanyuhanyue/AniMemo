@@ -150,6 +150,11 @@ jobs:
             durability/requirements.txt
       - run: python -m pip install -r release/requirements.txt
       - run: python -m pip install -r durability/requirements.txt
+      - name: Bind immutable dependency images to the release authority
+        shell: bash
+        run: |
+          echo "POSTGRES_IMAGE=$(python release/dependency_images.py postgres)" >> "$GITHUB_ENV"
+          echo "REDIS_IMAGE=$(python release/dependency_images.py redis)" >> "$GITHUB_ENV"
       - name: Create ephemeral production-like environment
         shell: bash
         run: |
@@ -196,8 +201,8 @@ jobs:
           ANIMEMO_TEST_DATA_ROOT=$data_root
           ANIMEMO_API_IMAGE=animemo-api:release-gate
           ANIMEMO_WEB_IMAGE=animemo-web:release-gate
-          ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
-          ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+          ANIMEMO_POSTGRES_IMAGE=$POSTGRES_IMAGE
+          ANIMEMO_REDIS_IMAGE=$REDIS_IMAGE
           EOF
           sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater/release-gate
           sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/release-gate/managed.env
@@ -212,9 +217,13 @@ jobs:
         run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env config
       - name: Build production images
         run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env build api web
+      - name: Pull immutable runtime images with bounded transport retries
+        run: |
+          python scripts/pull_docker_image.py "$POSTGRES_IMAGE"
+          python scripts/pull_docker_image.py "$REDIS_IMAGE"
       - name: Start production-like stack
         run: |
-          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis
+          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --pull never --wait --wait-timeout 120 postgres redis
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps migration
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps bootstrap
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --no-deps api web

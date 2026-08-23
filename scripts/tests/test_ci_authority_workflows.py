@@ -261,6 +261,16 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
 
         self.assertIn("ANIMEMO_API_IMAGE=animemo-api:release-gate", release)
         self.assertIn("ANIMEMO_WEB_IMAGE=animemo-web:release-gate", release)
+        self.assertNotIn(
+            "POSTGRES_IMAGE: docker.io/library/postgres@sha256:", release
+        )
+        self.assertNotIn("REDIS_IMAGE: docker.io/library/redis@sha256:", release)
+        self.assertIn("python release/dependency_images.py postgres", release)
+        self.assertIn("python release/dependency_images.py redis", release)
+        self.assertIn(
+            'python scripts/pull_docker_image.py "$POSTGRES_IMAGE"', release
+        )
+        self.assertIn('python scripts/pull_docker_image.py "$REDIS_IMAGE"', release)
         self.assertIn("ANIMEMO_DATA_ROOT=$data_root", release)
         self.assertIn("ANIMEMO_TEST_DATA_ROOT=$data_root", release)
         self.assertIn("test -f deploy/docker-compose.build.yml", release)
@@ -273,7 +283,7 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         compose = "docker compose --project-name animemo-release-gate --env-file .ci-runtime.env"
         self.assertIn(f"{compose} build api web", release)
         self.assertIn(
-            f"{compose} up -d --wait --wait-timeout 120 postgres redis",
+            f"{compose} up -d --pull never --wait --wait-timeout 120 postgres redis",
             release,
         )
         self.assertIn(
@@ -294,6 +304,33 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
     def test_performance_backend_uses_an_explicit_isolated_frontend_origin(self):
         performance = self.source("performance.yml")
         self.assertIn("FRONTEND_URL: http://perf.example.test:8088", performance)
+
+    def test_all_compose_qualification_paths_use_the_bounded_pull_authority(self):
+        release_gate = self.source("release-gate.yml")
+        performance = self.source("performance.yml")
+        stateful = (ROOT / "scripts/stateful-upgrade-gate.sh").read_text(
+            encoding="utf-8"
+        )
+        dr = (ROOT / "scripts/dr-rehearsal.sh").read_text(encoding="utf-8")
+
+        self.assertEqual(release_gate.count("scripts/pull_docker_image.py"), 2)
+        self.assertEqual(performance.count("scripts/pull_docker_image.py"), 4)
+        for source in (stateful, dr):
+            self.assertEqual(source.count("scripts/pull_docker_image.py"), 2)
+            self.assertNotIn("up -d --wait --wait-timeout 120 postgres redis", source)
+            self.assertIn(
+                "up -d --pull never --wait --wait-timeout 120 postgres redis",
+                source,
+            )
+        self.assertNotIn(
+            "up -d --wait --wait-timeout 120 postgres redis", performance
+        )
+        self.assertEqual(
+            performance.count(
+                "up -d --pull never --wait --wait-timeout 120 postgres redis"
+            ),
+            2,
+        )
 
 
 if __name__ == "__main__":

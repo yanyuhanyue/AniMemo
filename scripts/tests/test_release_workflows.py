@@ -80,6 +80,16 @@ def workflow(name):
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
+    def test_platform_qualification_uses_the_bounded_registry_pull_authority(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            'python scripts/pull_docker_image.py "$POSTGRES_IMAGE"', source
+        )
+        self.assertNotIn('docker pull "$POSTGRES_IMAGE"', source)
+
     def test_release_resolver_requires_the_candidate_bound_reservation_ledger(self):
         release = workflow("release.yml")
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(

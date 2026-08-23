@@ -10,6 +10,12 @@ from pathlib import Path
 from jsonschema import Draft202012Validator, FormatChecker
 from packaging.version import InvalidVersion, Version
 
+from .dependency_images import (
+    POSTGRES_DIGEST,
+    POSTGRES_REPOSITORY,
+    REDIS_DIGEST,
+    REDIS_REPOSITORY,
+)
 from .materials import (
     INSTALLER_MATERIALS_NAME as MATERIAL_ARCHIVE_NAME,
 )
@@ -22,12 +28,6 @@ from .materials import (
 REPOSITORY = "yanyuhanyue/AniMemo"
 API_REPOSITORY = "ghcr.io/yanyuhanyue/animemo-api"
 WEB_REPOSITORY = "ghcr.io/yanyuhanyue/animemo-web"
-POSTGRES_REPOSITORY = "docker.io/library/postgres"
-REDIS_REPOSITORY = "docker.io/library/redis"
-POSTGRES_DIGEST = (
-    "sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571"
-)
-REDIS_DIGEST = "sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf"
 DEPLOYMENT_PROFILE = "v1.1-instance-scoped"
 INSTALLER_MATERIALS_NAME = "installer-materials.tar"
 DEPLOYMENT_CONTRACT_PATHS = (

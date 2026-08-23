@@ -288,7 +288,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker pull "$POSTGRES_IMAGE"
+          python scripts/pull_docker_image.py "$POSTGRES_IMAGE"
           docker run --detach --name "$QUALIFICATION_POSTGRES_NAME" \
             --publish 127.0.0.1:55432:5432 \
             --env POSTGRES_USER=qualification \

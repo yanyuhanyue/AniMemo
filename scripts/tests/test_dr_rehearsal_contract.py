@@ -22,8 +22,8 @@ class DisasterRecoveryRehearsalContractTests(unittest.TestCase):
             "ANIMEMO_TEST_DATA_ROOT=",
             "ANIMEMO_LISTEN_HOST=127.0.0.1",
             "ANIMEMO_LISTEN_PORT=8088",
-            "ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:",
-            "ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:",
+            "ANIMEMO_POSTGRES_IMAGE=$POSTGRES_IMAGE",
+            "ANIMEMO_REDIS_IMAGE=$REDIS_IMAGE",
         ):
             self.assertIn(required, self.script)
         dump = self.script.index("pg_dump --format=plain --no-owner --no-privileges")

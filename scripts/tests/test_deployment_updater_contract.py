@@ -347,7 +347,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             "COMPOSE_FILE=deploy/docker-compose.yml:updater/docker-compose.runtime.yml:deploy/docker-compose.build.yml",
             workflow,
         )
-        ready = workflow.index("up -d --wait --wait-timeout 120 postgres redis")
+        ready = workflow.index("- name: Start production-like stack")
         migration = workflow.index("run --rm --no-deps migration")
         bootstrap = workflow.index("run --rm --no-deps bootstrap")
         switch = workflow.index("up -d --no-deps api web")
@@ -398,7 +398,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertNotIn('if [[ "$source_root" == "$CURRENT_ROOT" ]]', gate)
         base_ready = gate.index(
             'run_compose base_services_start "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" '
-            "up -d --wait --wait-timeout 120 postgres redis"
+            "up -d --pull never --wait --wait-timeout 120 postgres redis"
         )
         base_migration = gate.index(
             'run_compose base_migration "$BASE_ROOT" "$JOB_TIMEOUT_SECONDS" '
