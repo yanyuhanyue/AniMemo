@@ -28,6 +28,19 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("backup.verify_backup", production)
         self.assertNotIn("scripts/dr_backup.py", production + cli + launcher)
 
+        release_gate = yaml.safe_load(
+            (ROOT / ".github/workflows/release-gate.yml").read_text(encoding="utf-8")
+        )
+        docker_runs = "\n".join(
+            str(step.get("run", "")) for step in release_gate["jobs"]["docker"]["steps"]
+        )
+        self.assertIn(
+            "python -m pip install -r release/requirements.txt", docker_runs
+        )
+        self.assertIn(
+            "python -m pip install -r durability/requirements.txt", docker_runs
+        )
+
     def test_production_compose_uses_digest_inputs_and_explicit_jobs(self):
         compose = yaml.safe_load(
             (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")

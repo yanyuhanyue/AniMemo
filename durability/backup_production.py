@@ -100,6 +100,27 @@ class ProductionBackupError(RuntimeError):
         super().__init__(code)
 
 
+@dataclass
+class _OneTimeKeyGuard:
+    path: Path
+    identity: tuple[int, int]
+    descriptor: int = -1
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+    def discard(self) -> None:
+        descriptor = self.descriptor
+        self.descriptor = -1
+        _secure_remove(
+            self.path,
+            expected_identity=self.identity,
+            descriptor=descriptor,
+        )
+
+
 @dataclass(frozen=True)
 class ProtectionRequest:
     kind: str | None
@@ -241,7 +262,7 @@ class BackupPlan:
     source_locator_digest: str
     destination: str
     member_classes: tuple[str, ...]
-    secret_mode: str
+    protection_mode: str
     quiescence_method: str
     writer_services: tuple[str, ...]
     estimated_bytes: int
@@ -258,7 +279,7 @@ class BackupPlan:
             "sourceLocatorDigest": self.source_locator_digest,
             "destination": self.destination,
             "memberClasses": list(self.member_classes),
-            "secretMode": self.secret_mode,
+            "secretMode": self.protection_mode,
             "quiescenceMethod": self.quiescence_method,
             "writerServices": list(self.writer_services),
             "estimatedBytes": self.estimated_bytes,
@@ -927,7 +948,7 @@ class ProductionBackupRuntime:
             source_locator_digest=body["sourceLocatorDigest"],
             destination=body["destination"],
             member_classes=tuple(body["memberClasses"]),
-            secret_mode=body["secretMode"],
+            protection_mode=body["secretMode"],
             quiescence_method=body["quiescenceMethod"],
             writer_services=tuple(body["writerServices"]),
             estimated_bytes=body["estimatedBytes"],
@@ -961,8 +982,7 @@ class ProductionBackupRuntime:
             raise ProductionBackupError(
                 "BACKUP_OPERATION_ACTIVE", "VALIDATION"
             ) from None
-        key_path: Path | None = None
-        key_identity: tuple[int, int] | None = None
+        key_guard: _OneTimeKeyGuard | None = None
         key_bound = False
         original_error: Exception | None = None
         states: Mapping[str, str] | None = None
@@ -993,8 +1013,7 @@ class ProductionBackupRuntime:
                     (
                         external_secret,
                         secret_source,
-                        key_path,
-                        key_identity,
+                        key_guard,
                     ) = _prepare_secret_source(binding, protection)
                     quiescence = {
                         "method": plan.quiescence_method,
@@ -1037,12 +1056,12 @@ class ProductionBackupRuntime:
                         "BACKUP_WRITER_RESTORE_FAILED", "RECOVERY"
                     )
             except Exception:  # noqa: BLE001 - collapse any unsafe recovery outcome
-                if key_path is not None and not key_bound:
-                    _secure_remove(key_path, expected_identity=key_identity)
+                if key_guard is not None and not key_bound:
+                    key_guard.discard()
                 raise ProductionBackupError("RECOVERY_REQUIRED", "RECOVERY") from None
             if original_error is not None:
-                if key_path is not None and not key_bound:
-                    _secure_remove(key_path, expected_identity=key_identity)
+                if key_guard is not None and not key_bound:
+                    key_guard.discard()
                 raise ProductionBackupError(
                     "BACKUP_FAILED_NO_RUNTIME_DAMAGE", "ENVIRONMENT"
                 ) from original_error
@@ -1060,6 +1079,8 @@ class ProductionBackupRuntime:
                 writer_state_restored=True,
             )
         finally:
+            if key_guard is not None:
+                key_guard.close()
             lock.__exit__(None, None, None)
 
 
@@ -1215,8 +1236,7 @@ def _prepare_secret_source(
 ) -> tuple[
     Passphrase | OneTimeKey | None,
     backup.SecretSource,
-    Path | None,
-    tuple[int, int] | None,
+    _OneTimeKeyGuard | None,
 ]:
     if protection.kind == "secret-reference":
         assert protection.path is not None
@@ -1230,15 +1250,12 @@ def _prepare_secret_source(
                 metadata={"coverage": "REGISTERED_PRODUCTION_SECRETS"},
             ),
             None,
-            None,
         )
-    key_path = None
-    key_identity = None
+    key_guard = None
     if protection.kind == "one-time-key":
         assert protection.path is not None
         external = OneTimeKey.generate()
-        key_identity = _write_one_time_key(protection.path, external.export())
-        key_path = protection.path
+        key_guard = _write_one_time_key(protection.path, external.export())
     else:
         external = _external_secret(protection)
     entries = _managed_secret_entries(binding.config)
@@ -1275,8 +1292,7 @@ def _prepare_secret_source(
             metadata={"suiteId": "argon2id-m65536-t3-p4-aes-256-gcm-v1"},
             envelope_factory=envelope_factory,
         ),
-        key_path,
-        key_identity,
+        key_guard,
     )
 
 
@@ -1565,7 +1581,7 @@ def _validate_new_private_output(path: Path) -> None:
         raise ProductionBackupError("BACKUP_KEY_PARENT_NOT_PRIVATE", "VALIDATION")
 
 
-def _write_one_time_key(path: Path, value: bytes) -> tuple[int, int]:
+def _write_one_time_key(path: Path, value: bytes) -> _OneTimeKeyGuard:
     _validate_new_private_output(path)
     descriptor = -1
     created_identity: tuple[int, int] | None = None
@@ -1577,19 +1593,30 @@ def _write_one_time_key(path: Path, value: bytes) -> tuple[int, int]:
         )
         opened = os.fstat(descriptor)
         created_identity = (opened.st_dev, opened.st_ino)
-        with os.fdopen(descriptor, "wb") as handle:
-            descriptor = -1
-            handle.write(value)
-            handle.flush()
-            os.fsync(handle.fileno())
+        remaining = memoryview(value)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("one-time key write failed")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
         os.chmod(path, 0o600)
         published = path.lstat()
         if (published.st_dev, published.st_ino) != created_identity:
             raise OSError("one-time key path changed")
         _fsync_directory(path.parent)
-        return created_identity
+        guard = _OneTimeKeyGuard(path, created_identity, descriptor)
+        descriptor = -1
+        if os.name != "posix":
+            guard.close()
+        return guard
     except OSError:
-        _secure_remove(path, expected_identity=created_identity)
+        _secure_remove(
+            path,
+            expected_identity=created_identity,
+            descriptor=descriptor,
+        )
+        descriptor = -1
         raise ProductionBackupError("BACKUP_KEY_OUTPUT_FAILED", "ENVIRONMENT") from None
     finally:
         if descriptor >= 0:
@@ -1600,15 +1627,18 @@ def _secure_remove(
     path: Path,
     *,
     expected_identity: tuple[int, int] | None,
+    descriptor: int = -1,
 ) -> None:
     if expected_identity is None:
+        if descriptor >= 0:
+            os.close(descriptor)
         return
-    descriptor = -1
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
-        )
+        if descriptor < 0:
+            descriptor = os.open(
+                path,
+                os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            )
         metadata = os.fstat(descriptor)
         if (
             not stat.S_ISREG(metadata.st_mode)
@@ -1616,6 +1646,7 @@ def _secure_remove(
             or (metadata.st_dev, metadata.st_ino) != expected_identity
         ):
             return
+        os.lseek(descriptor, 0, os.SEEK_SET)
         remaining = metadata.st_size
         while remaining:
             written = os.write(descriptor, b"\x00" * min(remaining, 4096))
@@ -1623,11 +1654,15 @@ def _secure_remove(
                 raise OSError("one-time key overwrite failed")
             remaining -= written
         os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = -1
         current = path.lstat()
         if (current.st_dev, current.st_ino) != expected_identity:
             return
+        if os.name != "posix":
+            os.close(descriptor)
+            descriptor = -1
+            current = path.lstat()
+            if (current.st_dev, current.st_ino) != expected_identity:
+                return
         path.unlink()
         _fsync_directory(path.parent)
     except OSError:

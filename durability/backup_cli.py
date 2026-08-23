@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from . import backup
@@ -159,21 +160,109 @@ def _protection_request(args, *, creating: bool):
     return ProtectionRequest(kind=args.protection_kind, path=path, fd=fd)
 
 
-def _emit(payload: object, *, as_json: bool, stream=None) -> None:
+_PUBLIC_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "backupId",
+        "checksumSetDigest",
+        "completedAt",
+        "databaseProfile",
+        "databaseUncompressedBytes",
+        "destination",
+        "error",
+        "estimatedBytes",
+        "format",
+        "instanceId",
+        "instanceName",
+        "manifestDigest",
+        "memberClasses",
+        "memberCount",
+        "ok",
+        "outcome",
+        "path",
+        "planDigest",
+        "protectionMode",
+        "quiescenceMethod",
+        "releaseIdentity",
+        "schemaVersion",
+        "secretMode",
+        "sourceInstance",
+        "sourceLocatorDigest",
+        "sourceRelease",
+        "startedAt",
+        "verificationCompletedBeforeResume",
+        "verified",
+        "writerServices",
+        "writerStateRestored",
+    }
+)
+_PUBLIC_NESTED_FIELDS = {
+    "databaseProfile": frozenset({"adapter", "argv", "serverMajor", "toolMajor"}),
+    "error": frozenset({"code"}),
+    "releaseIdentity": frozenset(
+        {"channel", "commit", "createdAt", "manifestDigest", "promotedFrom", "version"}
+    ),
+    "sourceInstance": frozenset({"id", "name"}),
+    "sourceRelease": frozenset(
+        {"channel", "commit", "createdAt", "manifestDigest", "promotedFrom", "version"}
+    ),
+}
+_PUBLIC_SEQUENCE_FIELDS = frozenset({"argv", "memberClasses", "writerServices"})
+_CLASSIFICATION_FIELDS = frozenset({"protectionMode", "secretMode"})
+_CLASSIFICATION_VALUES = frozenset({"envelope", "none", "reference"})
+
+
+def _closed_public_record(payload: Mapping[str, object]) -> dict[str, object]:
+    if not isinstance(payload, Mapping) or not set(payload).issubset(
+        _PUBLIC_TOP_LEVEL_FIELDS
+    ):
+        raise ValueError("operator output is not a closed public record")
+
+    def copy_value(key: str, value: object) -> object:
+        if key in _CLASSIFICATION_FIELDS:
+            if value not in _CLASSIFICATION_VALUES:
+                raise ValueError("operator protection classification is invalid")
+            return value
+        if key in _PUBLIC_NESTED_FIELDS:
+            if not isinstance(value, Mapping) or not set(value).issubset(
+                _PUBLIC_NESTED_FIELDS[key]
+            ):
+                raise ValueError("operator nested output is not closed")
+            return {
+                str(child_key): copy_value(str(child_key), child_value)
+                for child_key, child_value in value.items()
+            }
+        if key in _PUBLIC_SEQUENCE_FIELDS:
+            if not isinstance(value, (list, tuple)) or not all(
+                isinstance(item, str) for item in value
+            ):
+                raise ValueError("operator output sequence is invalid")
+            return list(value)
+        if isinstance(value, (str, int, bool)) or value is None:
+            return value
+        raise ValueError("operator output value is invalid")
+
+    return {str(key): copy_value(str(key), value) for key, value in payload.items()}
+
+
+def _emit(payload: Mapping[str, object], *, as_json: bool, stream=None) -> None:
+    public = _closed_public_record(payload)
     target = stream or sys.stdout
     if as_json:
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=target)
+        # The closed schema above admits only redacted operator metadata and
+        # protection classifications, never protection material.
+        print(  # lgtm[py/clear-text-logging-sensitive-data]
+            json.dumps(public, ensure_ascii=False, sort_keys=True), file=target
+        )
         return
-    if isinstance(payload, dict):
-        for key, value in payload.items():
-            rendered = (
-                json.dumps(value, ensure_ascii=False, sort_keys=True)
-                if isinstance(value, (dict, list))
-                else str(value)
-            )
-            print(f"{key}: {rendered}", file=target)
-        return
-    print(payload, file=target)
+    for key, value in public.items():
+        rendered = (
+            json.dumps(value, ensure_ascii=False, sort_keys=True)
+            if isinstance(value, (dict, list))
+            else str(value)
+        )
+        print(  # lgtm[py/clear-text-logging-sensitive-data]
+            f"{key}: {rendered}", file=target
+        )
 
 
 def _run_create(args) -> int:

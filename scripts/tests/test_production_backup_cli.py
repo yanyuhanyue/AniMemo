@@ -8,7 +8,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from durability import backup
-from durability.backup_cli import EXIT_CODES, _parser, _run_create, _run_verify
+from durability.backup_cli import (
+    EXIT_CODES,
+    _closed_public_record,
+    _parser,
+    _run_create,
+    _run_verify,
+)
 from durability.backup_production import ProductionBackupError
 
 
@@ -84,6 +90,14 @@ class ProductionBackupCliContractTests(unittest.TestCase):
                 "ENVIRONMENT": 6,
             },
         )
+
+    def test_operator_output_is_closed_and_never_accepts_secret_material(self) -> None:
+        self.assertEqual(
+            _closed_public_record({"secretMode": "envelope"}),
+            {"secretMode": "envelope"},
+        )
+        with self.assertRaisesRegex(ValueError, "closed public record"):
+            _closed_public_record({"credential": "must-not-be-rendered"})
 
     def test_non_interactive_create_requires_explicit_acceptance(self) -> None:
         args = SimpleNamespace(

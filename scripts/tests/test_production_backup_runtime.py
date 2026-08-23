@@ -238,7 +238,7 @@ class ProductionBackupRuntimeTests(unittest.TestCase):
 
     def reference_protection(self):
         path = self.keys / "reference.json"
-        path.write_bytes(
+        path.write_bytes(  # lgtm[py/clear-text-storage-sensitive-data]
             canonical_json_bytes(
                 {
                     "provider": "operator-secret-store",
@@ -450,7 +450,7 @@ class ProductionBackupRuntimeTests(unittest.TestCase):
         self.assertTrue(manifest["quiescence"]["verificationCompletedBeforeResume"])
         self.assertEqual(manifest["quiescence"]["writerServices"], ["api"])
         self.assertEqual(manifest["schemaVersion"], 1)
-        self.assertEqual(plan.secret_mode, "envelope")
+        self.assertEqual(plan.protection_mode, "envelope")
 
     def test_create_authenticates_secret_envelope_before_writer_resume(self):
         with (
@@ -504,7 +504,7 @@ class ProductionBackupRuntimeTests(unittest.TestCase):
     def test_reference_create_and_full_verify(self):
         protection = self.reference_protection()
         plan, receipt, _ = self.create(protection)
-        self.assertEqual(plan.secret_mode, "reference")
+        self.assertEqual(plan.protection_mode, "reference")
         self.assertTrue(
             verify_protected_backup(Path(receipt.path), protection=protection)[
                 "verified"
@@ -543,6 +543,8 @@ class ProductionBackupRuntimeTests(unittest.TestCase):
         (private / "backup-members.json").write_bytes(
             canonical_json_bytes({"schemaVersion": 1, "members": ["memo.bin"]}) + b"\n"
         )
+        if os.name == "posix":
+            os.chmod(private / "backup-members.json", 0o600)
         _plan, receipt, _ = self.create()
         self.assertEqual(
             (Path(receipt.path) / "filesystem" / "private" / "memo.bin").read_bytes(),
@@ -556,6 +558,8 @@ class ProductionBackupRuntimeTests(unittest.TestCase):
         (private / "backup-members.json").write_bytes(
             canonical_json_bytes({"schemaVersion": 1, "members": ["memo.bin"]}) + b"\n"
         )
+        if os.name == "posix":
+            os.chmod(private / "backup-members.json", 0o600)
         with self.assertRaisesRegex(
             ProductionBackupError, "BACKUP_PRIVATE_MEMBER_UNKNOWN"
         ):
