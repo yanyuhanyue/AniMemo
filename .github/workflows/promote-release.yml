@@ -122,6 +122,7 @@ jobs:
             --payload "rc-assets/animemo-$RC_TAG-portable.tar"
       - name: Require a reviewed Git-tracked RC live acceptance record
         env:
+          GH_TOKEN: ${{ github.token }}
           RC_TAG: ${{ inputs.rc_tag }}
         shell: bash
         run: |
@@ -130,6 +131,14 @@ jobs:
           test -f "$acceptance_path"
           test "$(git ls-files --error-unmatch "$acceptance_path")" = "$acceptance_path"
           cp "$acceptance_path" "$RUNNER_TEMP/rc-live-acceptance.json"
+          git fetch --force --tags origin main
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC_TAG" \
+            | jq '{id,tag_name,name,draft,prerelease,immutable}' \
+            > "$RUNNER_TEMP/source-rc-presentation.json"
+          python -m release.cli verify-stable-source-presentation \
+            --acceptance "$RUNNER_TEMP/rc-live-acceptance.json" \
+            --release "$RUNNER_TEMP/source-rc-presentation.json" \
+            --repository .
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -325,6 +334,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
+          RC_TAG: ${{ inputs.rc_tag }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
           API_DIGEST: ${{ needs.plan.outputs.api_digest }}
           WEB_DIGEST: ${{ needs.plan.outputs.web_digest }}
@@ -344,9 +354,16 @@ jobs:
             --stable-commit "$RC_COMMIT" \
             --stable-api-digest "$API_DIGEST" \
             --stable-web-digest "$WEB_DIGEST"
+          rm -rf "$RUNNER_TEMP/source-rc"
+          mkdir -p "$RUNNER_TEMP/source-rc"
+          gh release download "$RC_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern release-manifest.json \
+            --dir "$RUNNER_TEMP/source-rc"
           python -m release.cli plan-stable-publication-files \
             --repository "$GITHUB_REPOSITORY" --tag "$STABLE_TAG" \
             --acceptance promotion-output/rc-live-acceptance.json \
+            --promotion-acceptance promotion-output/stable-promotion-acceptance.json \
+            --rc-manifest "$RUNNER_TEMP/source-rc/release-manifest.json" \
             --rc-notes promotion-output/rc-release-notes.json \
             --stable-notes promotion-output/release-notes.json \
             --stable-notes-markdown promotion-output/release-notes.md \
@@ -356,6 +373,14 @@ jobs:
           cmp "$RUNNER_TEMP/revalidated-stable-publication-plan.json" \
             promotion-output/publication-plan.json
           git fetch --force --tags origin main
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC_TAG" \
+            | jq '{id,tag_name,name,draft,prerelease,immutable}' \
+            > "$RUNNER_TEMP/source-rc-presentation.json"
+          python -m release.cli verify-stable-source-presentation \
+            --acceptance promotion-output/rc-live-acceptance.json \
+            --promotion-acceptance promotion-output/stable-promotion-acceptance.json \
+            --release "$RUNNER_TEMP/source-rc-presentation.json" \
+            --repository .
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           # Capture the exact trusted workflow snapshot immediately before the
           # first external mutation. Once publication starts, a later main push
@@ -364,6 +389,14 @@ jobs:
           test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = "true"
           ! git ls-remote --exit-code --tags origin "refs/tags/$STABLE_TAG" >/dev/null 2>&1
           ! gh release view "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
+      - name: Emit the validated Stable presentation identity
+        id: presentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m release.cli emit-stable-presentation \
+            --plan promotion-output/publication-plan.json \
+            --github-output "$GITHUB_OUTPUT"
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -404,33 +437,59 @@ jobs:
       - name: Create Stable tag at the accepted RC commit
         env:
           GH_TOKEN: ${{ github.token }}
-          STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
+          STABLE_TAG: ${{ steps.presentation.outputs.release_tag }}
+          RESOLVED_STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
+          ANNOTATED_TAG_SUBJECT: ${{ steps.presentation.outputs.annotated_tag_subject }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
           PREVIOUS_STABLE: ${{ needs.plan.outputs.previous_stable }}
         shell: bash
         run: |
           set -euo pipefail
+          test "$STABLE_TAG" = "$RESOLVED_STABLE_TAG"
           ! git ls-remote --exit-code --tags origin "refs/tags/$STABLE_TAG" >/dev/null 2>&1
           ! gh release view "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git tag --annotate "$STABLE_TAG" "$RC_COMMIT" --message "AniMemo $STABLE_TAG"
+          git tag --annotate "$STABLE_TAG" "$RC_COMMIT" --message "$ANNOTATED_TAG_SUBJECT"
+          python -m release.cli verify-local-tag-presentation \
+            --plan promotion-output/publication-plan.json --repository .
           git push origin "refs/tags/$STABLE_TAG"
       - name: Create an unpublished Stable Draft Release
+        id: draft_release
         env:
           GH_TOKEN: ${{ github.token }}
-          STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
+          STABLE_TAG: ${{ steps.presentation.outputs.release_tag }}
+          RELEASE_TITLE: ${{ steps.presentation.outputs.release_title }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --verify-tag --draft --latest=false --title "AniMemo $STABLE_TAG" \
-            --notes-file promotion-output/release-notes.md
+          jq -n --arg tag "$STABLE_TAG" --arg name "$RELEASE_TITLE" \
+            --rawfile body promotion-output/release-notes.md \
+            '{tag_name:$tag,name:$name,body:$body,
+              draft:true,prerelease:false,make_latest:"false"}' \
+            > "$RUNNER_TEMP/stable-draft-create-request.json"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            --input "$RUNNER_TEMP/stable-draft-create-request.json" \
+            > "$RUNNER_TEMP/stable-draft-release.json"
+          release_id="$(jq -r '.id' "$RUNNER_TEMP/stable-draft-release.json")"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            > "$RUNNER_TEMP/stable-draft-release-readback.json"
+          jq '{id,tag_name,name,target_commitish,draft,prerelease,immutable,
+               assets:[.assets[]|{name}]}' \
+            "$RUNNER_TEMP/stable-draft-release-readback.json" \
+            > "$RUNNER_TEMP/stable-draft-presentation.json"
+          python -m release.cli verify-release-presentation \
+            --plan promotion-output/publication-plan.json \
+            --metadata "$RUNNER_TEMP/stable-draft-presentation.json" \
+            --repository . --state draft
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
       - name: Upload and read back the complete Stable Draft asset set
         env:
           GH_TOKEN: ${{ github.token }}
           STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+          RELEASE_ID: ${{ steps.draft_release.outputs.release_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -447,7 +506,7 @@ jobs:
             --pattern installer-materials.tar --pattern checksums.txt \
             --pattern "$STABLE_PORTABLE_ASSET" \
             --dir "$RUNNER_TEMP/stable-draft-readback"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$STABLE_TAG" \
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             | jq --arg target "$RC_COMMIT" \
               '{id,tag:.tag_name,target:$target,draft,prerelease,body,assets:[.assets[]|{name,size,digest}]}' \
               > "$RUNNER_TEMP/stable-draft-metadata.json"
@@ -483,6 +542,14 @@ jobs:
           env -u GH_TOKEN curl --fail --location --silent --show-error \
             -H 'Accept: application/vnd.github+json' "$public_api" \
             > "$RUNNER_TEMP/stable-public-release.json"
+          jq '{id,tag_name,name,target_commitish,draft,prerelease,immutable,
+               assets:[.assets[]|{name}]}' \
+            "$RUNNER_TEMP/stable-public-release.json" \
+            > "$RUNNER_TEMP/stable-public-presentation.json"
+          python -m release.cli verify-release-presentation \
+            --plan promotion-output/publication-plan.json \
+            --metadata "$RUNNER_TEMP/stable-public-presentation.json" \
+            --repository . --state published
           jq --arg target "$RC_COMMIT" \
             '{id,tag:.tag_name,target:$target,draft,prerelease,body,assets:[.assets[]|{name,size,digest}]}' \
             "$RUNNER_TEMP/stable-public-release.json" \
