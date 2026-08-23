@@ -244,8 +244,11 @@ class OwnershipReceiptContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             a_root, b_root = root / "a", root / "b"
-            a_root.mkdir()
-            b_root.mkdir()
+            a_root.mkdir(mode=0o700)
+            b_root.mkdir(mode=0o700)
+            if os.name != "nt":
+                self.assertEqual(a_root.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(b_root.stat().st_mode & 0o777, 0o700)
             a = LocalOwnershipReceiptStore.testing(a_root, instance_name="default")
             b = LocalOwnershipReceiptStore.testing(b_root, instance_name="v1-1-rc")
             b.publish(self.receipt())
