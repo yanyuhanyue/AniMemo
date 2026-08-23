@@ -236,7 +236,7 @@ def build_publication_plan(
         else {}
     )
     prerelease = channel != "stable"
-    title = f"AniMemo {tag}"
+    title = tag
     tag_command = ["git", "tag", "--annotate", tag, commit, "--message", title]
     create = [
         "gh",

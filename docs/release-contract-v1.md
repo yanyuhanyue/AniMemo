@@ -205,3 +205,11 @@ write-checksums
 ```
 
 成功输出 JSON；契约错误退出 `2` 并输出 `{code, detail}`。Workflow 与 Update Agent 共用同一 Manifest validator，避免产生端与消费端各自猜测语义。
+
+## Release title and notes presentation v2
+
+未来生成的 annotated Git tag message 与 GitHub Release title 必须精确等于已经通过通道和 SemVer 校验的 release tag，不得添加项目名前缀或接受独立的任意 title 输入。正式 Release Notes Markdown 的第一行同样固定为 `# {release_tag}`。
+
+`animemo.release-notes.renderer/v2` 只渲染包含真实 `INCLUDED` PR 的变更分类。空分类、空 Breaking Changes、空安全分类及其占位文本不得进入正文；升级和安装等具有实际操作价值的静态指导仅在条目非空时渲染。PR 标题继续经过 Markdown 转义，输入顺序不得改变 snapshot 或 Markdown identity。
+
+部署兼容性与公开资产属于冻结 authority context，不再作为 Release Notes 正文清单展示。`supported_os`、`docker_requirement` 和 canonical `release_assets` 仍由 Release Notes snapshot、Qualification、publication plan、公开资产回读和 Stable promotion 完整验证；本展示合同不改变实际发布资产集合、checksums、portable transport 或 Immutable Release Authority。
