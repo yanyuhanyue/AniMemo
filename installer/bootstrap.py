@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -28,6 +29,10 @@ _UTC = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 _CAPABILITY_TOKEN = object()
 _GH_EXECUTABLE = "/usr/bin/gh"
 _GH_VERSION = "2.97.0"
+_GH_VERSION_OUTPUT_LIMIT = 4096
+_GH_VERSION_LINE = re.compile(
+    r"gh version (?P<version>[0-9]+\.[0-9]+\.[0-9]+)(?: (?P<metadata>.*))?\Z"
+)
 _PROTECTED_RUNTIME_DIRECTORY = "materials"
 _REQUIRED_RUNTIME_MODULES = frozenset(
     {
@@ -42,11 +47,64 @@ _REQUIRED_RUNTIME_MODULES = frozenset(
 
 
 class BootstrapAuthorityError(RuntimeError):
-    pass
+    def __init__(self, code: str, *, reason: str | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.reason = reason
 
 
-def _reject(code: str) -> None:
-    raise BootstrapAuthorityError(code)
+class GhVersionOutputError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class GhCliVersionOutput:
+    executable_name: str
+    semantic_version: str
+    first_line: str
+    metadata_present: bool
+
+
+def parse_gh_cli_version_output(stdout: bytes) -> GhCliVersionOutput:
+    if type(stdout) is not bytes or not stdout:
+        raise GhVersionOutputError("GH_VERSION_OUTPUT_MALFORMED")
+    if len(stdout) > _GH_VERSION_OUTPUT_LIMIT:
+        raise GhVersionOutputError("GH_VERSION_OUTPUT_TOO_LARGE")
+    try:
+        output = stdout.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise GhVersionOutputError("GH_VERSION_OUTPUT_INVALID_UTF8") from error
+    if any(
+        unicodedata.category(character) == "Cc"
+        and character not in {"\r", "\n", "\t"}
+        for character in output
+    ):
+        raise GhVersionOutputError("GH_VERSION_OUTPUT_CONTROL_CHARACTER")
+    if "\r" in output.replace("\r\n", ""):
+        raise GhVersionOutputError("GH_VERSION_OUTPUT_MALFORMED")
+    first_line = output.split("\n", 1)[0].removesuffix("\r")
+    match = _GH_VERSION_LINE.fullmatch(first_line)
+    if match is None:
+        raise GhVersionOutputError("GH_VERSION_OUTPUT_MALFORMED")
+    version = match.group("version")
+    if version != _GH_VERSION:
+        raise GhVersionOutputError("GH_VERSION_MISMATCH")
+    return GhCliVersionOutput(
+        executable_name="gh",
+        semantic_version=version,
+        first_line=first_line,
+        metadata_present=bool(match.group("metadata")),
+    )
+
+
+def _reject(code: str, *, reason: str | None = None) -> None:
+    raise BootstrapAuthorityError(code, reason=reason)
+
+
+def _reject_gh_version(reason: str) -> None:
+    _reject("BOOTSTRAP_STAGE0_GH_VERSION_INVALID", reason=reason)
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -546,25 +604,34 @@ def _run_stage0_gh(arguments: tuple[str, ...]) -> object:
             [_GH_EXECUTABLE, *arguments],
             cwd="/",
             env=environment,
-            text=True,
-            encoding="utf-8",
-            errors="strict",
+            text=False,
+            shell=False,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=120,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError, UnicodeError):
+    except subprocess.TimeoutExpired:
+        if arguments == ("version",):
+            _reject_gh_version("GH_VERSION_PROCESS_TIMEOUT")
         _reject("BOOTSTRAP_STAGE0_GH_EXECUTION_FAILED")
-    if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 1024 * 1024:
-        _reject("BOOTSTRAP_STAGE0_GH_VERIFICATION_FAILED")
+    except (OSError, subprocess.SubprocessError):
+        if arguments == ("version",):
+            _reject_gh_version("GH_VERSION_PROCESS_FAILED")
+        _reject("BOOTSTRAP_STAGE0_GH_EXECUTION_FAILED")
     if arguments == ("version",):
-        if not result.stdout.startswith(f"gh version {_GH_VERSION}\n"):
-            _reject("BOOTSTRAP_STAGE0_GH_VERSION_INVALID")
-        return {"version": _GH_VERSION}
+        if result.returncode != 0:
+            _reject_gh_version("GH_VERSION_PROCESS_FAILED")
+        try:
+            parsed = parse_gh_cli_version_output(result.stdout)
+        except GhVersionOutputError as error:
+            _reject_gh_version(error.code)
+        return {"version": parsed.semantic_version}
+    if result.returncode != 0 or len(result.stdout) > 1024 * 1024:
+        _reject("BOOTSTRAP_STAGE0_GH_VERIFICATION_FAILED")
     try:
         value = json.loads(result.stdout)
-    except json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         _reject("BOOTSTRAP_STAGE0_GH_OUTPUT_INVALID")
     if type(value) not in {dict, list} or not value:
         _reject("BOOTSTRAP_STAGE0_GH_OUTPUT_INVALID")

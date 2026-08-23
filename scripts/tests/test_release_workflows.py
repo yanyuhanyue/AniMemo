@@ -12,6 +12,8 @@ from pathlib import Path
 import yaml
 from yaml.constructor import ConstructorError
 
+from scripts.ci_classify import classify_paths
+
 ROOT = Path(__file__).resolve().parents[2]
 
 HARDENED_WORKFLOWS = (
@@ -623,6 +625,24 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             1,
         )
         self.assertNotIn("--release-graph-contract", ci_source)
+
+    def test_release_gate_requires_pinned_gh_official_output_contract(self):
+        gate = workflow("release-gate.yml")
+        updater_steps = gate["jobs"]["updater-isolated"]["steps"]
+        commands = {step.get("run") for step in updater_steps if "run" in step}
+
+        self.assertIn(
+            "python -m unittest discover -s installer/tests -p 'test_*.py' -v",
+            commands,
+        )
+        self.assertEqual(
+            classify_paths(["installer/bootstrap.py"])["run_release_updater"],
+            "true",
+        )
+        self.assertIn(
+            "updater-isolated",
+            gate["jobs"]["selection-authority"]["needs"],
+        )
 
     def test_ci_and_release_gate_publish_complete_classifier_contract(self):
         expected_outputs = {

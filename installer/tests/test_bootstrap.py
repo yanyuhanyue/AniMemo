@@ -12,17 +12,24 @@ from pathlib import Path
 from unittest import mock
 
 from installer.bootstrap import (
+    _GH_VERSION,
     _REQUIRED_RUNTIME_MODULES,
     BootstrapAuthorityError,
     BootstrapPrivilegeGate,
+    GhVersionOutputError,
     ProductionBootstrapPrivilegeGate,
     _validate_protected_runtime_sources,
     authorize_online_stage0,
     close_bootstrap_authorization,
     commit_bootstrap_authorization,
+    parse_gh_cli_version_output,
 )
 from scripts.tests.trust_kit_fixture import authority_test_namespace
 from updater.trust_lifecycle import TrustCommitReceipt
+
+GH_VERSION_FIXTURE = (
+    Path(__file__).with_name("fixtures") / "gh-version-2.97.0.txt"
+)
 
 
 def _digest(data: bytes) -> str:
@@ -50,6 +57,72 @@ def _payload(archive: Path) -> dict[str, object]:
         },
         "verifiedAt": "2026-08-19T00:00:00Z",
     }
+
+
+class GitHubCliVersionOutputContractTests(unittest.TestCase):
+    def test_pinned_official_output_contract(self) -> None:
+        parsed = parse_gh_cli_version_output(GH_VERSION_FIXTURE.read_bytes())
+
+        self.assertEqual(parsed.executable_name, "gh")
+        self.assertEqual(parsed.semantic_version, _GH_VERSION)
+        self.assertEqual(
+            parsed.first_line,
+            "gh version 2.97.0 (2026-07-31)",
+        )
+        self.assertTrue(parsed.metadata_present)
+
+    def test_parser_accepts_supported_line_endings_and_display_metadata(self) -> None:
+        supported = (
+            b"gh version 2.97.0\n",
+            b"gh version 2.97.0\r\n",
+            b"gh version 2.97.0 (2026-07-31)\n",
+            b"gh version 2.97.0 (2026-07-31)\r\n",
+            b"gh version 2.97.0\nhttps://github.com/cli/cli/releases/tag/v2.97.0\n",
+            b"gh version 2.97.0 future display metadata\n",
+            GH_VERSION_FIXTURE.read_bytes(),
+        )
+        for output in supported:
+            with self.subTest(output=output):
+                self.assertEqual(
+                    parse_gh_cli_version_output(output).semantic_version,
+                    "2.97.0",
+                )
+
+    def test_parser_rejects_malformed_deceptive_and_wrong_versions(self) -> None:
+        rejected = (
+            (b"", "GH_VERSION_OUTPUT_MALFORMED"),
+            (b"\n", "GH_VERSION_OUTPUT_MALFORMED"),
+            (b"github version 2.97.0\n", "GH_VERSION_OUTPUT_MALFORMED"),
+            (b"gh version v2.97.0\n", "GH_VERSION_OUTPUT_MALFORMED"),
+            (b"gh version 2.97\n", "GH_VERSION_OUTPUT_MALFORMED"),
+            (b"gh version 2.97.0.1\n", "GH_VERSION_OUTPUT_MALFORMED"),
+            (b"gh version 2.97.00\n", "GH_VERSION_MISMATCH"),
+            (b"gh version 2.97.0evil\n", "GH_VERSION_OUTPUT_MALFORMED"),
+            (b"gh version 2.97.0-rc.1\n", "GH_VERSION_OUTPUT_MALFORMED"),
+            (b"gh version 2.96.0\n", "GH_VERSION_MISMATCH"),
+            (b"gh version 2.98.0\n", "GH_VERSION_MISMATCH"),
+            (b"gh version 3.0.0\n", "GH_VERSION_MISMATCH"),
+            (b" gh version 2.97.0\n", "GH_VERSION_OUTPUT_MALFORMED"),
+            (b"prefix gh version 2.97.0\n", "GH_VERSION_OUTPUT_MALFORMED"),
+            (
+                b"https://github.com/cli/cli/releases/tag/v2.97.0\ngh version 2.97.0\n",
+                "GH_VERSION_OUTPUT_MALFORMED",
+            ),
+            (b"gh version 2.97.0\x00\n", "GH_VERSION_OUTPUT_CONTROL_CHARACTER"),
+            (b"gh version 2.97.0\x1b[0m\n", "GH_VERSION_OUTPUT_CONTROL_CHARACTER"),
+            (b"gh version 2.97.0\xff\n", "GH_VERSION_OUTPUT_INVALID_UTF8"),
+            (b"gh version 2.97.0 " + b"x" * 4096, "GH_VERSION_OUTPUT_TOO_LARGE"),
+            (
+                b"https://example.test/2.97.0\n",
+                "GH_VERSION_OUTPUT_MALFORMED",
+            ),
+            (b"gh version 2.96.0 metadata 2.97.0\n", "GH_VERSION_MISMATCH"),
+        )
+        for output, code in rejected:
+            with self.subTest(output=output, code=code):
+                with self.assertRaises(GhVersionOutputError) as raised:
+                    parse_gh_cli_version_output(output)
+                self.assertEqual(raised.exception.code, code)
 
 
 class BootstrapPrivilegeGateTests(unittest.TestCase):
@@ -138,9 +211,9 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             protected = root / "installer-materials.tar"
             protected.write_bytes(b"verified materials")
             completed = (
-                subprocess.CompletedProcess([], 0, "gh version 2.97.0\n", ""),
-                subprocess.CompletedProcess([], 0, '{"release":"verified"}\n', ""),
-                subprocess.CompletedProcess([], 0, '{"asset":"verified"}\n', ""),
+                subprocess.CompletedProcess([], 0, b"gh version 2.97.0\n", b""),
+                subprocess.CompletedProcess([], 0, b'{"release":"verified"}\n', b""),
+                subprocess.CompletedProcess([], 0, b'{"asset":"verified"}\n', b""),
             )
             with (
                 authority_test_namespace(root),
@@ -161,13 +234,44 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
                     {"GH_PROMPT_DISABLED", "HOME", "LANG", "LC_ALL", "PATH"},
                 )
                 self.assertIs(call.kwargs["stdin"], subprocess.DEVNULL)
+                self.assertFalse(call.kwargs["shell"])
+                self.assertFalse(call.kwargs["text"])
+                self.assertTrue(call.kwargs["capture_output"])
+                self.assertEqual(call.kwargs["timeout"], 120)
             self.assertIn("verify-asset", run.call_args_list[2].args[0])
+            self.assertEqual(run.call_args_list[0].args[0], ["/usr/bin/gh", "version"])
+
+    def test_online_stage0_accepts_pinned_official_gh_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "installer-materials.tar").write_bytes(b"verified materials")
+            completed = (
+                subprocess.CompletedProcess(
+                    [],
+                    0,
+                    GH_VERSION_FIXTURE.read_bytes(),
+                    b"",
+                ),
+                subprocess.CompletedProcess([], 0, b'{"release":"verified"}\n', b""),
+                subprocess.CompletedProcess([], 0, b'{"asset":"verified"}\n', b""),
+            )
+            with (
+                authority_test_namespace(root),
+                mock.patch("installer.bootstrap.subprocess.run", side_effect=completed),
+            ):
+                receipt = authorize_online_stage0(
+                    tag="v1.1.0-rc.1",
+                    release_commit="1" * 40,
+                    verified_at="2026-08-19T00:00:00Z",
+                )
+
+        self.assertTrue(receipt.identity.startswith("sha256:"))
 
     def test_old_or_malformed_gh_fails_before_release_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "installer-materials.tar").write_bytes(b"verified materials")
-            old = subprocess.CompletedProcess([], 0, "gh version 2.96.0\n", "")
+            old = subprocess.CompletedProcess([], 0, b"gh version 2.96.0\n", b"")
             with (
                 authority_test_namespace(root),
                 mock.patch("installer.bootstrap.subprocess.run", return_value=old) as run,
@@ -182,6 +286,92 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
                     verified_at="2026-08-19T00:00:00Z",
                 )
             self.assertEqual(run.call_count, 1)
+            self.assertEqual(
+                {path.name for path in root.iterdir()},
+                {"installer-materials.tar"},
+            )
+
+    def test_stage0_records_process_failure_without_trusting_stderr(self) -> None:
+        failed = subprocess.CompletedProcess(
+            [],
+            1,
+            b"",
+            b"gh version 2.97.0 (2026-07-31)\n",
+        )
+        with (
+            mock.patch("installer.bootstrap.subprocess.run", return_value=failed),
+            self.assertRaisesRegex(
+                BootstrapAuthorityError,
+                "BOOTSTRAP_STAGE0_GH_VERSION_INVALID",
+            ) as raised,
+        ):
+            from installer.bootstrap import _run_stage0_gh
+
+            _run_stage0_gh(("version",))
+
+        self.assertEqual(raised.exception.reason, "GH_VERSION_PROCESS_FAILED")
+
+    def test_stage0_records_exact_version_failure_reasons(self) -> None:
+        from installer.bootstrap import _run_stage0_gh
+
+        failures = (
+            (
+                subprocess.CompletedProcess([], 0, b"gh version 2.96.0\n", b""),
+                "GH_VERSION_MISMATCH",
+            ),
+            (
+                subprocess.CompletedProcess([], 0, b"gh version 2.97.0\xff\n", b""),
+                "GH_VERSION_OUTPUT_INVALID_UTF8",
+            ),
+            (
+                subprocess.CompletedProcess([], 0, b"gh version 2.97.0\x00\n", b""),
+                "GH_VERSION_OUTPUT_CONTROL_CHARACTER",
+            ),
+            (
+                subprocess.CompletedProcess(
+                    [],
+                    0,
+                    b"gh version 2.97.0 " + b"x" * 4096,
+                    b"",
+                ),
+                "GH_VERSION_OUTPUT_TOO_LARGE",
+            ),
+            (
+                subprocess.CompletedProcess(
+                    [],
+                    0,
+                    b"not a version\n",
+                    b"gh version 2.97.0 (2026-07-31)\n",
+                ),
+                "GH_VERSION_OUTPUT_MALFORMED",
+            ),
+        )
+        for completed, reason in failures:
+            with self.subTest(reason=reason), mock.patch(
+                "installer.bootstrap.subprocess.run",
+                return_value=completed,
+            ), self.assertRaises(BootstrapAuthorityError) as raised:
+                _run_stage0_gh(("version",))
+            self.assertEqual(
+                raised.exception.code,
+                "BOOTSTRAP_STAGE0_GH_VERSION_INVALID",
+            )
+            self.assertEqual(raised.exception.reason, reason)
+
+    def test_stage0_records_version_process_timeout(self) -> None:
+        from installer.bootstrap import _run_stage0_gh
+
+        with mock.patch(
+            "installer.bootstrap.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["/usr/bin/gh", "version"], 120),
+        ), self.assertRaises(BootstrapAuthorityError) as raised:
+            _run_stage0_gh(("version",))
+
+        self.assertEqual(
+            raised.exception.code,
+            "BOOTSTRAP_STAGE0_GH_VERSION_INVALID",
+        )
+        self.assertEqual(raised.exception.reason, "GH_VERSION_PROCESS_TIMEOUT")
 
     def test_closed_authorization_binds_protected_bytes_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
