@@ -5,18 +5,63 @@ x-effective-release: &effective-release
   ANIMEMO_DATABASE_CONTRACT: ${ANIMEMO_DATABASE_CONTRACT:?verified database contract is required}
   ANIMEMO_CONFIGURATION_CONTRACT: ${ANIMEMO_CONFIGURATION_CONTRACT:?verified configuration contract is required}
 
+x-instance-labels: &instance-labels
+  io.animemo.instance-name: ${ANIMEMO_INSTANCE_NAME:?ANIMEMO_INSTANCE_NAME is required}
+  io.animemo.instance-id: ${ANIMEMO_INSTANCE_ID:?ANIMEMO_INSTANCE_ID is required}
+  io.animemo.compose-project: ${ANIMEMO_COMPOSE_PROJECT:?ANIMEMO_COMPOSE_PROJECT is required}
+
+x-api-runtime: &api-runtime
+  env_file:
+    - ${ANIMEMO_MANAGED_ENV_PATH:?ANIMEMO_MANAGED_ENV_PATH is required}
+  volumes:
+    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/plugins:/app/runtime/plugins
+    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/logs:/app/logs
+    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/backups:/app/backups
+    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/media:/data/animemo/media
+    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/private:/app/runtime/private
+
 services:
+  postgres:
+    volumes:
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/postgres:/var/lib/postgresql/data
+    labels: *instance-labels
+
+  redis:
+    volumes:
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/redis:/data
+    labels: *instance-labels
+
   migration:
+    <<: *api-runtime
     environment: *effective-release
+    labels: *instance-labels
 
   bootstrap:
+    <<: *api-runtime
     environment: *effective-release
+    labels: *instance-labels
 
   api:
+    <<: *api-runtime
     environment: *effective-release
+    volumes:
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/plugins:/app/runtime/plugins
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/logs:/app/logs
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/backups:/app/backups
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/media:/data/animemo/media
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/private:/app/runtime/private
+      - ${ANIMEMO_UPDATER_RUNTIME_ROOT:?ANIMEMO_UPDATER_RUNTIME_ROOT is required}:/run/animemo-updater:rw
+    labels: *instance-labels
 
   web:
     environment:
       ANIMEMO_RELEASE_VERSION: ${ANIMEMO_RELEASE_VERSION:?verified release version is required}
       ANIMEMO_RELEASE_COMMIT: ${ANIMEMO_RELEASE_COMMIT:?verified release commit is required}
       ANIMEMO_RELEASE_CHANNEL: ${ANIMEMO_RELEASE_CHANNEL:?verified release channel is required}
+    volumes:
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/media:/var/www/animemo-data/media:ro
+    labels: *instance-labels
+
+networks:
+  animemo:
+    labels: *instance-labels

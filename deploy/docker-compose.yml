@@ -1,22 +1,8 @@
-x-instance-labels: &instance-labels
-  io.animemo.instance-name: ${ANIMEMO_INSTANCE_NAME:?ANIMEMO_INSTANCE_NAME is required}
-  io.animemo.instance-id: ${ANIMEMO_INSTANCE_ID:?ANIMEMO_INSTANCE_ID is required}
-  io.animemo.compose-project: ${ANIMEMO_COMPOSE_PROJECT:?ANIMEMO_COMPOSE_PROJECT is required}
-
 x-api-common: &api-common
   image: ${ANIMEMO_API_IMAGE:?ANIMEMO_API_IMAGE must be an immutable ghcr.io/yanyuhanyue/animemo-api@sha256 digest}
-  env_file:
-    - ${ANIMEMO_MANAGED_ENV_PATH:?ANIMEMO_MANAGED_ENV_PATH is required}
   environment:
     TZ: Asia/Shanghai
-  volumes:
-    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/plugins:/app/runtime/plugins
-    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/logs:/app/logs
-    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/backups:/app/backups
-    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/media:/data/animemo/media
-    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/private:/app/runtime/private
   labels:
-    <<: *instance-labels
     cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
   networks:
     - animemo
@@ -34,10 +20,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     restart: unless-stopped
-    volumes:
-      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/postgres:/var/lib/postgresql/data
     labels:
-      <<: *instance-labels
       cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
     networks:
       - animemo
@@ -55,10 +38,7 @@ services:
     image: ${ANIMEMO_REDIS_IMAGE:?ANIMEMO_REDIS_IMAGE must be an immutable docker.io/library/redis@sha256 digest}
     command: ["redis-server", "--appendonly", "yes"]
     restart: unless-stopped
-    volumes:
-      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/redis:/data
     labels:
-      <<: *instance-labels
       cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
     networks:
       - animemo
@@ -87,13 +67,6 @@ services:
   api:
     <<: *api-common
     restart: unless-stopped
-    volumes:
-      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/plugins:/app/runtime/plugins
-      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/logs:/app/logs
-      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/backups:/app/backups
-      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/media:/data/animemo/media
-      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/private:/app/runtime/private
-      - ${ANIMEMO_UPDATER_RUNTIME_ROOT:?ANIMEMO_UPDATER_RUNTIME_ROOT is required}:/run/animemo-updater:rw
     logging:
       driver: json-file
       options: {max-size: "50m", max-file: "7"}
@@ -121,10 +94,7 @@ services:
         published: ${ANIMEMO_LISTEN_PORT:?ANIMEMO_LISTEN_PORT is required}
         host_ip: ${ANIMEMO_LISTEN_HOST:?ANIMEMO_LISTEN_HOST is required}
         protocol: tcp
-    volumes:
-      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/media:/var/www/animemo-data/media:ro
     labels:
-      <<: *instance-labels
       cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
     networks:
       - animemo
@@ -137,5 +107,3 @@ services:
 
 networks:
   animemo:
-    labels:
-      <<: *instance-labels

@@ -321,6 +321,12 @@ jobs:
           ANIMEMO_COMPOSE_PROJECT=animemo-qualification
           ANIMEMO_MANAGED_ENV_PATH=/run/animemo-updater/qualification/managed.env
           ANIMEMO_UPDATER_RUNTIME_ROOT=/run/animemo-updater/qualification
+          ANIMEMO_DATA_ROOT=/tmp/animemo-qualification-data
+          ANIMEMO_RELEASE_VERSION=v1.1.0-qualification
+          ANIMEMO_RELEASE_COMMIT=$CANDIDATE_SHA
+          ANIMEMO_RELEASE_CHANNEL=rc
+          ANIMEMO_DATABASE_CONTRACT=animemo-db-v1
+          ANIMEMO_CONFIGURATION_CONTRACT=animemo-config-v1
           POSTGRES_DB=animemo
           POSTGRES_USER=animemo
           POSTGRES_PASSWORD=qualification-only
@@ -329,6 +335,7 @@ jobs:
           sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" "$RUNNER_TEMP/platform-compose.env" /run/animemo-updater/qualification/managed.env
           docker compose --project-name animemo-qualification \
             --env-file "$RUNNER_TEMP/platform-compose.env" \
+            --file updater/docker-compose.runtime.yml \
             --file deploy/docker-compose.yml config --quiet
           printf '%s\n' "$CANDIDATE_SHA" > "$REHEARSAL_DIR/fresh_install"
           chmod 0600 "$REHEARSAL_DIR/fresh_install"

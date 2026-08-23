@@ -14,7 +14,11 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         compose = yaml.safe_load(
             (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
         )
+        runtime = yaml.safe_load(
+            (ROOT / "updater/docker-compose.runtime.yml").read_text(encoding="utf-8")
+        )
         services = compose["services"]
+        runtime_services = runtime["services"]
 
         self.assertNotIn("build", services["api"])
         self.assertNotIn("build", services["web"])
@@ -26,8 +30,10 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("ANIMEMO_LISTEN_HOST", services["web"]["ports"][0]["host_ip"])
         self.assertIn("ANIMEMO_LISTEN_PORT", services["web"]["ports"][0]["published"])
         self.assertNotIn(".env.production", json.dumps(compose))
-        self.assertIn("ANIMEMO_DATA_ROOT", json.dumps(compose))
-        self.assertIn("io.animemo.instance-name", json.dumps(compose))
+        self.assertNotIn("ANIMEMO_DATA_ROOT", json.dumps(compose))
+        self.assertIn("ANIMEMO_DATA_ROOT", json.dumps(runtime))
+        self.assertNotIn("io.animemo.instance-name", json.dumps(compose))
+        self.assertIn("io.animemo.instance-name", json.dumps(runtime))
         self.assertEqual(
             services["migration"]["command"],
             ["python", "manage.py", "migrate", "--noinput"],
@@ -40,7 +46,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             self.assertTrue(
                 any(
                     "/private:/app/runtime/private" in volume
-                    for volume in services[service]["volumes"]
+                    for volume in runtime_services[service]["volumes"]
                 )
             )
 
@@ -55,9 +61,10 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertNotIn("ANIMEMO_DATA_ROOT", build)
         self.assertNotIn("ANIMEMO_PORT", build)
         self.assertIn("ANIMEMO_TEST_DATA_ROOT", build)
+        self.assertIn("ANIMEMO_TEST_MANAGED_ENV_PATH", build)
         self.assertIn("ANIMEMO_PUBLIC_ORIGIN:?", build)
 
-    def test_updater_runtime_overlay_injects_only_verified_effective_identity(self):
+    def test_updater_runtime_overlay_injects_verified_identity_and_instance_binding(self):
         override = yaml.safe_load(
             (ROOT / "updater/docker-compose.runtime.yml").read_text(encoding="utf-8")
         )
@@ -75,6 +82,16 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             "ANIMEMO_RELEASE_CHANNEL",
         ]:
             self.assertIn(key, services["web"]["environment"])
+        rendered = json.dumps(override)
+        for key in (
+            "ANIMEMO_INSTANCE_NAME",
+            "ANIMEMO_INSTANCE_ID",
+            "ANIMEMO_COMPOSE_PROJECT",
+            "ANIMEMO_MANAGED_ENV_PATH",
+            "ANIMEMO_UPDATER_RUNTIME_ROOT",
+            "ANIMEMO_DATA_ROOT",
+        ):
+            self.assertIn(key, rendered)
 
     def test_api_startup_has_no_release_orchestration(self):
         dockerfile = (ROOT / "deploy/backend.Dockerfile").read_text(encoding="utf-8")
@@ -90,8 +107,11 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
 
     def test_django_never_mounts_docker_socket(self):
         compose = (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
-        self.assertNotIn("/var/run/docker.sock", compose)
-        self.assertIn("/run/animemo-updater", compose)
+        runtime = (ROOT / "updater/docker-compose.runtime.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("/var/run/docker.sock", compose + runtime)
+        self.assertIn("/run/animemo-updater", runtime)
 
     def test_host_agent_service_has_fixed_unix_socket_and_honest_hardening(self):
         service = (ROOT / "deploy/updater/animemo-updater@.service").read_text(

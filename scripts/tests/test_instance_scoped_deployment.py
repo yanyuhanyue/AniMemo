@@ -324,9 +324,14 @@ class DeploymentConsumerContractTests(unittest.TestCase):
         self.assertIn("UNSUPPORTED_NOT_AUTO_ADOPTED", text)
 
     def test_34_compose_declares_instance_labels_and_mounts(self):
-        text = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
-        self.assertIn("io.animemo.instance-name", text)
-        self.assertIn("${ANIMEMO_DATA_ROOT:?", text)
+        base = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
+        runtime = Path("updater/docker-compose.runtime.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("io.animemo.instance-name", base)
+        self.assertNotIn("${ANIMEMO_DATA_ROOT:?", base)
+        self.assertIn("io.animemo.instance-name", runtime)
+        self.assertIn("${ANIMEMO_DATA_ROOT:?", runtime)
 
     def test_35_restore_destination_uses_requested_target_namespace(self):
         target = TargetEvidence(TargetClass.ABSENT, DIGEST)
@@ -340,38 +345,74 @@ class DeploymentConsumerContractTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("docker"), "Docker CLI unavailable")
     def test_36_real_docker_compose_config(self):
         with tempfile.TemporaryDirectory() as temp:
-            env = Path(temp) / "managed.env"
-            env.write_text(
-                "ANIMEMO_DATA_ROOT=/tmp/animemo-instance-test\n"
-                "ANIMEMO_INSTANCE_NAME=v1-1-rc\n"
-                "ANIMEMO_INSTANCE_ID=12345678-1234-4234-9234-123456789abc\n"
-                "ANIMEMO_COMPOSE_PROJECT=animemo-v1-1-rc\n"
+            root = Path(temp)
+            trusted_env = root / "trusted.env"
+            common = (
                 "ANIMEMO_CONFIG_REVISION=22345678-1234-4234-9234-123456789abc\n"
                 "ANIMEMO_LISTEN_HOST=127.0.0.1\nANIMEMO_LISTEN_PORT=18088\n"
-                "ANIMEMO_MANAGED_ENV_PATH=" + str(env).replace("\\", "/") + "\n"
-                "ANIMEMO_UPDATER_RUNTIME_ROOT=/tmp/animemo-updater-v1-1-rc\n"
                 "ANIMEMO_TEST_DATA_ROOT=/tmp/animemo-instance-test\n"
                 "ANIMEMO_PUBLIC_ORIGIN=https://example.test\n"
                 "POSTGRES_DB=animemo\nPOSTGRES_USER=animemo\nPOSTGRES_PASSWORD=test-only\n"
                 "ANIMEMO_API_IMAGE=example.invalid/api@sha256:" + "a" * 64 + "\n"
                 "ANIMEMO_WEB_IMAGE=example.invalid/web@sha256:" + "b" * 64 + "\n"
                 "ANIMEMO_POSTGRES_IMAGE=postgres@sha256:" + "c" * 64 + "\n"
-                "ANIMEMO_REDIS_IMAGE=redis@sha256:" + "d" * 64 + "\n",
-                encoding="utf-8",
+                "ANIMEMO_REDIS_IMAGE=redis@sha256:" + "d" * 64 + "\n"
             )
-            result = subprocess.run(
+            trusted_env.write_text(common, encoding="utf-8")
+            child_env = {
+                **os.environ,
+                "ANIMEMO_TEST_MANAGED_ENV_PATH": str(trusted_env),
+            }
+            trusted = subprocess.run(
                 [
-                    "docker", "compose", "--project-name", "animemo-v1-1-rc",
-                    "--env-file", str(env), "-f", "deploy/docker-compose.yml",
+                    "docker", "compose", "--env-file", str(trusted_env),
+                    "-f", "deploy/docker-compose.yml",
                     "-f", "deploy/docker-compose.build.yml", "config",
                 ],
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
+                env=child_env,
                 check=False,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("io.animemo.instance-name: v1-1-rc", result.stdout)
+            self.assertEqual(trusted.returncode, 0, trusted.stderr)
+            self.assertNotIn("io.animemo.instance-name", trusted.stdout)
+
+            env = root / "managed.env"
+            env.write_text(
+                common
+                + "ANIMEMO_DATA_ROOT=/tmp/animemo-instance-test\n"
+                + "ANIMEMO_INSTANCE_NAME=v1-1-rc\n"
+                + "ANIMEMO_INSTANCE_ID=12345678-1234-4234-9234-123456789abc\n"
+                + "ANIMEMO_COMPOSE_PROJECT=animemo-v1-1-rc\n"
+                + "ANIMEMO_MANAGED_ENV_PATH=" + str(env).replace("\\", "/") + "\n"
+                + "ANIMEMO_UPDATER_RUNTIME_ROOT=/tmp/animemo-updater-v1-1-rc\n"
+                + "ANIMEMO_RELEASE_VERSION=v1.1.0-rc.7\n"
+                + "ANIMEMO_RELEASE_COMMIT=" + "e" * 40 + "\n"
+                + "ANIMEMO_RELEASE_CHANNEL=rc\n"
+                + "ANIMEMO_DATABASE_CONTRACT=animemo-db-v1\n"
+                + "ANIMEMO_CONFIGURATION_CONTRACT=animemo-config-v1\n",
+                encoding="utf-8",
+            )
+            for compose_files in (
+                ("deploy/docker-compose.yml", "updater/docker-compose.runtime.yml"),
+                ("updater/docker-compose.runtime.yml", "deploy/docker-compose.yml"),
+            ):
+                with self.subTest(compose_files=compose_files):
+                    result = subprocess.run(
+                        [
+                            "docker", "compose", "--project-name", "animemo-v1-1-rc",
+                            "--env-file", str(env),
+                            "-f", compose_files[0], "-f", compose_files[1], "config",
+                        ],
+                        capture_output=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("io.animemo.instance-name: v1-1-rc", result.stdout)
+                    self.assertIn("/tmp/animemo-instance-test/postgres", result.stdout)
 
 
 if __name__ == "__main__":
