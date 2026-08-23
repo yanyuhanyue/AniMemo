@@ -30,7 +30,7 @@ from durability.managed_config import (
     RedisConfig,
     TrustedOriginsConfig,
 )
-from durability.secret_envelope import SecretEnvelopeCorruptError
+from durability.secret_envelope import OneTimeKey, SecretEnvelopeCorruptError
 from release.contract import PRODUCTION_BACKUP_CONTRACT
 from updater.deployment import HostPaths
 from updater.state import OperationStore, UpdateLock
@@ -238,18 +238,15 @@ class ProductionBackupRuntimeTests(unittest.TestCase):
 
     def reference_protection(self):
         path = self.keys / "reference.json"
-        # The fixture stores only public schema field names, never a secret value.
-        # lgtm[py/clear-text-storage-sensitive-data]
-        path.write_bytes(
-            canonical_json_bytes(
-                {
-                    "provider": "operator-secret-store",
-                    "version": "v1",
-                    "coverage": list(_SECRET_COVERAGE),
-                }
-            )
-            + b"\n"
-        )
+        public_reference = canonical_json_bytes(
+            {
+                "provider": "operator-secret-store",
+                "version": "v1",
+                "coverage": list(_SECRET_COVERAGE),
+            }
+        ) + b"\n"
+        # The serialized values are public environment-variable names, not secrets.
+        path.write_bytes(public_reference)  # codeql[py/clear-text-storage-sensitive-data]
         if os.name == "posix":
             os.chmod(path, 0o600)
         return ProtectionRequest("secret-reference", path=path)
@@ -400,6 +397,15 @@ class ProductionBackupRuntimeTests(unittest.TestCase):
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(protection.path.stat().st_mode), 0o600)
         self.assertFalse((Path(receipt.path) / protection.path.name).exists())
+
+    def test_one_time_key_file_preserves_newline_bytes_exactly(self):
+        material = b"\n" + b"x" * 31
+        with patch(
+            "durability.backup_production.OneTimeKey.generate",
+            return_value=OneTimeKey.from_bytes(material),
+        ):
+            _plan, _receipt, protection = self.create()
+        self.assertEqual(protection.path.read_bytes(), material)
 
     def test_existing_one_time_key_is_never_overwritten(self):
         path = self.keys / "existing.key"

@@ -1588,7 +1588,11 @@ def _write_one_time_key(path: Path, value: bytes) -> _OneTimeKeyGuard:
     try:
         descriptor = os.open(
             path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0),
             0o600,
         )
         opened = os.fstat(descriptor)
@@ -1637,7 +1641,9 @@ def _secure_remove(
         if descriptor < 0:
             descriptor = os.open(
                 path,
-                os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDWR
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_BINARY", 0),
             )
         metadata = os.fstat(descriptor)
         if (
