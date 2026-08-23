@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
+import stat
 import sys
 from pathlib import Path
 
@@ -63,12 +65,22 @@ from .portable import (
     portable_release_asset_name,
     promote_portable_payload,
 )
+from .presentation import (
+    PresentationError,
+    presentation_identity_from_publication_plan,
+    presentation_identity_from_stable_plan,
+    verify_local_annotated_tag,
+    verify_release_presentation_metadata,
+    verify_stable_source_rc_presentation,
+)
 from .publication import (
     PublicationError,
     build_publication_plan,
     validate_publication_plan,
 )
 from .trust_bootstrap import TrustBootstrapError, build_initial_trust_kit
+
+_MAX_PRESENTATION_JSON_BYTES = 1024 * 1024
 
 
 class PublicationInputSnapshot:
@@ -159,6 +171,165 @@ def _write_outputs(path: Path | None, payload: dict[str, object]) -> None:
     with path.open("a", encoding="utf-8") as output:
         for key, value in payload.items():
             output.write(f"{names.get(key, key)}={value}\n")
+
+
+def _workspace_path(path: Path, *, subject: str, directory: bool = False) -> Path:
+    workspace = Path.cwd().resolve(strict=True)
+    candidate = Path(os.path.abspath(path))
+    try:
+        resolved = candidate.resolve(strict=True)
+        contained = os.path.commonpath((str(workspace), str(resolved))) == str(
+            workspace
+        )
+    except (OSError, ValueError) as error:
+        raise PresentationError(f"{subject} is unavailable") from error
+    if not contained or candidate.is_symlink():
+        raise PresentationError(f"{subject} must be contained by the current workspace")
+    if directory:
+        if not resolved.is_dir():
+            raise PresentationError(f"{subject} must be a directory")
+    elif not resolved.is_file():
+        raise PresentationError(f"{subject} must be a regular file")
+    return resolved
+
+
+def _read_presentation_json(
+    path: Path, *, workspace_contained: bool
+) -> dict[str, object]:
+    source = (
+        _workspace_path(path, subject="Release presentation plan")
+        if workspace_contained
+        else Path(os.path.abspath(path))
+    )
+    value = read_bounded_release_file(
+        source,
+        subject="Release presentation JSON",
+        maximum=_MAX_PRESENTATION_JSON_BYTES,
+        allow_empty=False,
+    )
+    return _decode_json_object(value, source)
+
+
+def _write_presentation_outputs(path: Path, payload: dict[str, str]) -> None:
+    required = {"release_tag", "release_title", "annotated_tag_subject"}
+    if set(payload) != required or any(
+        "\n" in value or "\r" in value for value in payload.values()
+    ):
+        raise PresentationError("Release presentation outputs are invalid")
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise PresentationError("GitHub output must be a single-link regular file")
+    flags = (
+        os.O_WRONLY
+        | os.O_APPEND
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise PresentationError("GitHub output changed before open")
+        with os.fdopen(
+            descriptor, "a", encoding="utf-8", newline="\n", closefd=False
+        ) as output:
+            for name in ("release_tag", "release_title", "annotated_tag_subject"):
+                delimiter = f"ANIMEMO_PRESENTATION_{secrets.token_hex(16)}"
+                while payload[name] == delimiter:
+                    delimiter = f"ANIMEMO_PRESENTATION_{secrets.token_hex(16)}"
+                output.write(f"{name}<<{delimiter}\n{payload[name]}\n{delimiter}\n")
+            output.flush()
+            os.fsync(output.fileno())
+    finally:
+        os.close(descriptor)
+
+
+def _presentation_plan(path: Path) -> dict[str, object]:
+    return _read_presentation_json(path, workspace_contained=True)
+
+
+def _presentation_identity(plan: dict[str, object]):
+    validated = validate_publication_plan(plan)
+    if validated["channel"] == "stable":
+        return validated, presentation_identity_from_stable_plan(validated)
+    return validated, presentation_identity_from_publication_plan(validated)
+
+
+def _emit_presentation(args, *, stable: bool) -> dict[str, object]:
+    plan = _presentation_plan(args.plan)
+    identity = (
+        presentation_identity_from_stable_plan(plan)
+        if stable
+        else presentation_identity_from_publication_plan(plan)
+    )
+    _write_presentation_outputs(args.github_output, identity.as_outputs())
+    return identity.as_outputs()
+
+
+def _emit_publication_presentation(args) -> dict[str, object]:
+    return _emit_presentation(args, stable=False)
+
+
+def _emit_stable_presentation(args) -> dict[str, object]:
+    return _emit_presentation(args, stable=True)
+
+
+def _verify_local_tag_presentation(args) -> dict[str, object]:
+    validated, identity = _presentation_identity(_presentation_plan(args.plan))
+    repository = _workspace_path(
+        args.repository,
+        subject="Local Git repository",
+        directory=True,
+    )
+    return verify_local_annotated_tag(
+        repository,
+        identity=identity,
+        expected_commit=validated["commit"],
+    )
+
+
+def _verify_release_presentation(args) -> dict[str, object]:
+    plan = _presentation_plan(args.plan)
+    metadata = _read_presentation_json(args.metadata, workspace_contained=False)
+    repository = _workspace_path(
+        args.repository,
+        subject="Local Git repository",
+        directory=True,
+    )
+    return verify_release_presentation_metadata(
+        plan,
+        metadata=metadata,
+        repository=repository,
+        state=args.state,
+    )
+
+
+def _verify_stable_source_presentation(args) -> dict[str, object]:
+    acceptance = _read_presentation_json(args.acceptance, workspace_contained=True)
+    promotion = (
+        _read_presentation_json(
+            args.promotion_acceptance,
+            workspace_contained=True,
+        )
+        if args.promotion_acceptance is not None
+        else None
+    )
+    release = _read_presentation_json(args.release, workspace_contained=False)
+    repository = _workspace_path(
+        args.repository,
+        subject="Local Git repository",
+        directory=True,
+    )
+    return verify_stable_source_rc_presentation(
+        release=release,
+        acceptance=acceptance,
+        promotion_acceptance=promotion,
+        repository=repository,
+    )
 
 
 def _resolve(args) -> dict[str, object]:
@@ -901,6 +1072,40 @@ def _parser() -> argparse.ArgumentParser:
     stable_publication.add_argument("--portable", type=Path, required=True)
     stable_publication.add_argument("--output", type=Path, required=True)
     stable_publication.set_defaults(handler=_plan_stable_publication_files)
+    publication_presentation = subparsers.add_parser("emit-publication-presentation")
+    publication_presentation.add_argument("--plan", type=Path, required=True)
+    publication_presentation.add_argument("--github-output", type=Path, required=True)
+    publication_presentation.set_defaults(handler=_emit_publication_presentation)
+
+    stable_presentation = subparsers.add_parser("emit-stable-presentation")
+    stable_presentation.add_argument("--plan", type=Path, required=True)
+    stable_presentation.add_argument("--github-output", type=Path, required=True)
+    stable_presentation.set_defaults(handler=_emit_stable_presentation)
+
+    local_tag_presentation = subparsers.add_parser("verify-local-tag-presentation")
+    local_tag_presentation.add_argument("--plan", type=Path, required=True)
+    local_tag_presentation.add_argument("--repository", type=Path, default=Path("."))
+    local_tag_presentation.set_defaults(handler=_verify_local_tag_presentation)
+
+    release_presentation = subparsers.add_parser("verify-release-presentation")
+    release_presentation.add_argument("--plan", type=Path, required=True)
+    release_presentation.add_argument("--metadata", type=Path, required=True)
+    release_presentation.add_argument("--repository", type=Path, default=Path("."))
+    release_presentation.add_argument(
+        "--state", choices=("draft", "published"), required=True
+    )
+    release_presentation.set_defaults(handler=_verify_release_presentation)
+
+    stable_source_presentation = subparsers.add_parser(
+        "verify-stable-source-presentation"
+    )
+    stable_source_presentation.add_argument("--acceptance", type=Path, required=True)
+    stable_source_presentation.add_argument("--promotion-acceptance", type=Path)
+    stable_source_presentation.add_argument("--release", type=Path, required=True)
+    stable_source_presentation.add_argument(
+        "--repository", type=Path, default=Path(".")
+    )
+    stable_source_presentation.set_defaults(handler=_verify_stable_source_presentation)
     return parser
 
 
@@ -908,6 +1113,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
         payload = args.handler(args)
+    except PresentationError as error:
+        print(
+            json.dumps(
+                {"code": error.code, "detail": str(error)},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     except (
         ReleaseContractError,
         AcceptanceError,

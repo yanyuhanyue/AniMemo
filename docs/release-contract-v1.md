@@ -210,6 +210,12 @@ write-checksums
 
 未来生成的 annotated Git tag message 与 GitHub Release title 必须精确等于已经通过通道和 SemVer 校验的 release tag，不得添加项目名前缀或接受独立的任意 title 输入。正式 Release Notes Markdown 的第一行同样固定为 `# {release_tag}`。
 
+`release.presentation.ReleasePresentationIdentity` 是 RC 与 Stable 共同使用的展示身份模块。其 interface 只暴露 `release_tag`、`release_title` 与 `annotated_tag_subject`，后两者必须逐字节等于前者；身份只能从已经通过 closed-schema validator 的 publication 或 Stable plan 做纯投影。Workflow 不执行 plan 中的 command 数组，不从 dispatch input、环境变量或 PR 标题接受展示覆盖，也不使用 `eval` 或 shell command 拼接。
+
+远端事务具有三层顺序门禁：创建本地 annotated tag 后，必须在 push 前验证 object type、tag name、peeled commit、tagger、精确 subject 及空 body；创建 Draft 后，必须在上传资产前验证 tag、title、draft/prerelease 状态和零资产集合；发布不可变 Release 后仍再次验证相同展示身份。任一前置门禁失败时，后续 mutation 计数必须保持为零。
+
+Stable Promotion 使用同一个身份 validator 和相同的 tag/Draft 守卫。其 source RC 还必须满足 Release name 等于 RC tag、annotated tag subject 等于 RC tag、tag body 为空、immutable 与 prerelease 均为真，并具有有效的受审查验收收据。任何不满足这些条件的 RC 均不得作为 Stable 来源，即使镜像、资产与证明链本身完整。
+
 `animemo.release-notes.renderer/v2` 只渲染包含真实 `INCLUDED` PR 的变更分类。空分类、空 Breaking Changes、空安全分类及其占位文本不得进入正文；升级和安装等具有实际操作价值的静态指导仅在条目非空时渲染。PR 标题继续经过 Markdown 转义，输入顺序不得改变 snapshot 或 Markdown identity。
 
 部署兼容性与公开资产属于冻结 authority context，不再作为 Release Notes 正文清单展示。`supported_os`、`docker_requirement` 和 canonical `release_assets` 仍由 Release Notes snapshot、Qualification、publication plan、公开资产回读和 Stable promotion 完整验证；本展示合同不改变实际发布资产集合、checksums、portable transport 或 Immutable Release Authority。

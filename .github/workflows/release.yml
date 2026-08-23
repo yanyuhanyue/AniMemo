@@ -1323,26 +1323,40 @@ jobs:
           OPERATION=portable python -m scripts.release_authority \
             > release-output/portable-pipeline-authority.json
           test "$(jq -r '.external_mutation_mode' release-output/publication-plan.json)" = "PLAN_ONLY"
-      - name: Create the immutable annotated RC tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+      - name: Emit the validated RC presentation identity
+        id: presentation
         shell: bash
         run: |
           set -euo pipefail
+          python -m release.cli emit-publication-presentation \
+            --plan release-output/publication-plan.json \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Create the immutable annotated RC tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.presentation.outputs.release_tag }}
+          RESOLVED_RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          ANNOTATED_TAG_SUBJECT: ${{ steps.presentation.outputs.annotated_tag_subject }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "$RESOLVED_RELEASE_TAG"
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git tag --annotate "$RELEASE_TAG" "$GITHUB_SHA" --message "AniMemo $RELEASE_TAG"
+          git tag --annotate "$RELEASE_TAG" "$GITHUB_SHA" --message "$ANNOTATED_TAG_SUBJECT"
+          python -m release.cli verify-local-tag-presentation \
+            --plan release-output/publication-plan.json --repository .
           git push origin "refs/tags/$RELEASE_TAG"
       - name: Create an unpublished GitHub Draft Pre-release
         id: draft_release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          RELEASE_TAG: ${{ steps.presentation.outputs.release_tag }}
+          RELEASE_TITLE: ${{ steps.presentation.outputs.release_title }}
         shell: bash
         run: |
           set -euo pipefail
-          jq -n --arg tag "$RELEASE_TAG" --arg name "AniMemo $RELEASE_TAG" \
+          jq -n --arg tag "$RELEASE_TAG" --arg name "$RELEASE_TITLE" \
             --rawfile body release-output/release-notes.md \
             '{tag_name:$tag,name:$name,body:$body,
               draft:true,prerelease:true,make_latest:"false"}' \
@@ -1350,12 +1364,18 @@ jobs:
           gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
             --input "$RUNNER_TEMP/draft-create-request.json" \
             > "$RUNNER_TEMP/draft-release.json"
-          jq -e --arg tag "$RELEASE_TAG" \
-            '.tag_name == $tag and .draft == true and .prerelease == true
-             and .immutable == false' \
-            "$RUNNER_TEMP/draft-release.json" >/dev/null
           release_id="$(jq -r '.id' "$RUNNER_TEMP/draft-release.json")"
           [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            > "$RUNNER_TEMP/draft-release-readback.json"
+          jq '{id,tag_name,name,target_commitish,draft,prerelease,immutable,
+               assets:[.assets[]|{name}]}' \
+            "$RUNNER_TEMP/draft-release-readback.json" \
+            > "$RUNNER_TEMP/draft-presentation.json"
+          python -m release.cli verify-release-presentation \
+            --plan release-output/publication-plan.json \
+            --metadata "$RUNNER_TEMP/draft-presentation.json" \
+            --repository . --state draft
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
       - name: Upload and read back the complete Draft asset set
         env:
@@ -1419,6 +1439,14 @@ jobs:
           env -u GH_TOKEN curl --fail --location --silent --show-error \
             -H 'Accept: application/vnd.github+json' "$public_api" \
             > "$RUNNER_TEMP/public-release.json"
+          jq '{id,tag_name,name,target_commitish,draft,prerelease,immutable,
+               assets:[.assets[]|{name}]}' \
+            "$RUNNER_TEMP/public-release.json" \
+            > "$RUNNER_TEMP/public-presentation.json"
+          python -m release.cli verify-release-presentation \
+            --plan release-output/publication-plan.json \
+            --metadata "$RUNNER_TEMP/public-presentation.json" \
+            --repository . --state published
           target="$(git rev-list -n 1 "$RELEASE_TAG")"
           jq --arg target "$target" \
             '{id,tag:.tag_name,target:$target,draft,prerelease,body,assets:[.assets[]|{name,size,digest}]}' \

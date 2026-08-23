@@ -207,6 +207,18 @@ class ReleasePublicationCliTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 2)
 
+    def test_presentation_contract_and_local_transaction_simulation(self):
+        completed = subprocess.run(
+            [sys.executable, "-m", "unittest", "release.test_presentation", "-v"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("LocalPublicationTransactionSimulationTests", completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

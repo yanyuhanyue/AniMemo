@@ -1631,5 +1631,115 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
 
 
+    def test_rc_presentation_is_plan_derived_and_guarded_before_each_mutation(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = source[source.index("  publish:\n") :]
+
+        self.assertEqual(publish.count("emit-publication-presentation"), 1)
+        self.assertIn(
+            "RELEASE_TAG: ${{ steps.presentation.outputs.release_tag }}",
+            publish,
+        )
+        self.assertIn(
+            "RELEASE_TITLE: ${{ steps.presentation.outputs.release_title }}",
+            publish,
+        )
+        self.assertIn(
+            "ANNOTATED_TAG_SUBJECT: ${{ steps.presentation.outputs.annotated_tag_subject }}",
+            publish,
+        )
+        self.assertIn('--message "$ANNOTATED_TAG_SUBJECT"', publish)
+        self.assertIn('--arg name "$RELEASE_TITLE"', publish)
+        local_guard = publish.index("verify-local-tag-presentation")
+        remote_push = publish.index('git push origin "refs/tags/$RELEASE_TAG"')
+        draft_guard = publish.index("--repository . --state draft")
+        draft_get = publish.index(
+            'gh api "repos/$GITHUB_REPOSITORY/releases/$release_id"'
+        )
+        asset_upload = publish.index('gh release upload "$RELEASE_TAG"')
+        post_guard = publish.index("--repository . --state published")
+        post_verification = publish.index("verify-post-publish")
+        self.assertLess(local_guard, remote_push)
+        self.assertLess(draft_get, draft_guard)
+        self.assertLess(draft_guard, asset_upload)
+        self.assertLess(post_guard, post_verification)
+
+    def test_stable_presentation_uses_the_shared_validator_and_rejects_bad_source_rc(
+        self,
+    ):
+        source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = source[source.index("  publish:\n") :]
+        plan = source[source.index("  plan:\n") : source.index("  dry-run:\n")]
+
+        self.assertEqual(publish.count("emit-stable-presentation"), 1)
+        self.assertEqual(plan.count("verify-stable-source-presentation"), 1)
+        self.assertLess(
+            plan.index("verify-stable-source-presentation"),
+            plan.index("docker/login-action"),
+        )
+        self.assertEqual(publish.count("verify-stable-source-presentation"), 1)
+        self.assertLess(
+            publish.index("verify-stable-source-presentation"),
+            publish.index("crane tag"),
+        )
+        self.assertIn(
+            "STABLE_TAG: ${{ steps.presentation.outputs.release_tag }}",
+            publish,
+        )
+        self.assertIn(
+            "RELEASE_TITLE: ${{ steps.presentation.outputs.release_title }}",
+            publish,
+        )
+        self.assertIn('--message "$ANNOTATED_TAG_SUBJECT"', publish)
+        self.assertIn('--arg name "$RELEASE_TITLE"', publish)
+        self.assertLess(
+            publish.index("verify-local-tag-presentation"),
+            publish.index('git push origin "refs/tags/$STABLE_TAG"'),
+        )
+        self.assertLess(
+            publish.index("--repository . --state draft"),
+            publish.index('gh release upload "$STABLE_TAG"'),
+        )
+        self.assertLess(
+            publish.index('gh api "repos/$GITHUB_REPOSITORY/releases/$release_id"'),
+            publish.index("--repository . --state draft"),
+        )
+        self.assertLess(
+            publish.index("--repository . --state published"),
+            publish.index("verify-post-publish"),
+        )
+
+    def test_production_workflows_have_no_duplicate_prefix_formatter_or_shell_eval(
+        self,
+    ):
+        production = "\n".join(
+            (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+            for name in ("release.yml", "promote-release.yml")
+        )
+        for forbidden in (
+            "AniMemo $RELEASE_TAG",
+            "AniMemo ${RELEASE_TAG}",
+            "AniMemo $STABLE_TAG",
+            "AniMemo ${STABLE_TAG}",
+            '--title "AniMemo',
+            '--message "AniMemo',
+            "eval ",
+            "bash -c",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, production)
+        self.assertNotIn(
+            "release_title:",
+            production.split("workflow_dispatch:", 1)[1].split("jobs:", 1)[0],
+        )
+        self.assertNotIn(
+            "annotated_tag_subject:",
+            production.split("workflow_dispatch:", 1)[1].split("jobs:", 1)[0],
+        )
+
 if __name__ == "__main__":
     unittest.main()
