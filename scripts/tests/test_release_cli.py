@@ -92,6 +92,23 @@ class ReleaseCliTests(unittest.TestCase):
         self.assertNotIn("--allow-expired", verification.stdout)
         self.assertNotIn("--override", verification.stdout)
 
+        qualification = self.run_cli(
+            "validate-qualification-run-metadata", "--help"
+        )
+        for argument in (
+            "--run-metadata",
+            "--jobs-metadata",
+            "--artifacts-metadata",
+            "--expected-run-id",
+            "--expected-sha",
+        ):
+            self.assertIn(argument, qualification.stdout)
+        freshness = self.run_cli("validate-freshness-run-metadata", "--help")
+        self.assertIn("--run-metadata", freshness.stdout)
+        self.assertIn("--artifacts-metadata", freshness.stdout)
+        for forbidden in ("--repository", "--api-url", "--allow-expired", "--override"):
+            self.assertNotIn(forbidden, qualification.stdout + freshness.stdout)
+
     def test_resolve_version_emits_json_and_github_outputs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

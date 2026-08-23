@@ -31,6 +31,9 @@ from .notes import (
 
 REPOSITORY = "yanyuhanyue/AniMemo"
 WORKFLOW_PATH = ".github/workflows/release-metadata-freshness.yml"
+QUALIFICATION_WORKFLOW_NAME = "Release Producer"
+QUALIFICATION_WORKFLOW_PATH = ".github/workflows/release.yml"
+FRESHNESS_WORKFLOW_NAME = "Release Metadata Freshness"
 SCHEMA_VERSION = 1
 MINIMUM_SNAPSHOT_INTERVAL_SECONDS = 60
 FRESHNESS_TTL_SECONDS = 15 * 60
@@ -602,6 +605,161 @@ def _validate_comparison(value: object) -> dict[str, Any]:
     ):
         raise MetadataFreshnessError("snapshot comparison result is invalid")
     return value
+
+
+def _workflow_run_identity(
+    value: object,
+    *,
+    expected_run_id: int,
+    expected_sha: str,
+    expected_name: str,
+    expected_path: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise MetadataFreshnessError("workflow run metadata is invalid")
+    repository = value.get("repository")
+    if (
+        isinstance(expected_run_id, bool)
+        or not isinstance(expected_run_id, int)
+        or expected_run_id <= 0
+        or not isinstance(expected_sha, str)
+        or not _SHA.fullmatch(expected_sha)
+        or value.get("id") != expected_run_id
+        or value.get("name") != expected_name
+        or value.get("path") != expected_path
+        or value.get("event") != "workflow_dispatch"
+        or value.get("status") != "completed"
+        or value.get("conclusion") != "success"
+        or value.get("run_attempt") != 1
+        or not isinstance(repository, dict)
+        or repository.get("full_name") != REPOSITORY
+        or value.get("head_branch") != "main"
+        or value.get("head_sha") != expected_sha
+    ):
+        raise MetadataFreshnessError("workflow run authority binding differs")
+    return value
+
+
+def _select_artifact_metadata(
+    value: object,
+    *,
+    expected_run_id: int,
+    expected_sha: str,
+    expected_name: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or not isinstance(value.get("artifacts"), list):
+        raise MetadataFreshnessError("artifact listing metadata is invalid")
+    artifacts = value["artifacts"]
+    if value.get("total_count") != len(artifacts):
+        raise MetadataFreshnessError("artifact listing is incomplete")
+    matches = []
+    for artifact in artifacts:
+        if isinstance(artifact, dict) and artifact.get("name") == expected_name:
+            matches.append(artifact)
+    if len(matches) != 1:
+        raise MetadataFreshnessError("artifact authority cardinality differs")
+    artifact = matches[0]
+    artifact_id = artifact.get("id")
+    workflow_run = artifact.get("workflow_run")
+    expected_url = (
+        f"https://api.github.com/repos/{REPOSITORY}/actions/artifacts/"
+        f"{artifact_id}/zip"
+    )
+    if (
+        isinstance(artifact_id, bool)
+        or not isinstance(artifact_id, int)
+        or artifact_id <= 0
+        or not isinstance(workflow_run, dict)
+        or workflow_run.get("id") != expected_run_id
+        or workflow_run.get("head_sha") != expected_sha
+        or artifact.get("expired") is not False
+        or not isinstance(artifact.get("digest"), str)
+        or not _DIGEST.fullmatch(artifact["digest"])
+        or artifact.get("archive_download_url") != expected_url
+    ):
+        raise MetadataFreshnessError("artifact authority binding differs")
+    return {
+        "artifactId": artifact_id,
+        "archiveDownloadUrl": expected_url,
+        "digest": artifact["digest"],
+        "name": expected_name,
+        "workflowRunId": expected_run_id,
+        "headSha": expected_sha,
+    }
+
+
+def validate_qualification_run_metadata(
+    *,
+    run_metadata: object,
+    jobs_metadata: object,
+    artifacts_metadata: object,
+    expected_run_id: int,
+    expected_sha: str,
+) -> dict[str, Any]:
+    """Validate Phase A producer, qualify-only job proof and exact artifact."""
+
+    _workflow_run_identity(
+        run_metadata,
+        expected_run_id=expected_run_id,
+        expected_sha=expected_sha,
+        expected_name=QUALIFICATION_WORKFLOW_NAME,
+        expected_path=QUALIFICATION_WORKFLOW_PATH,
+    )
+    if not isinstance(jobs_metadata, dict) or not isinstance(
+        jobs_metadata.get("jobs"), list
+    ):
+        raise MetadataFreshnessError("qualification job metadata is invalid")
+    jobs = jobs_metadata["jobs"]
+    if jobs_metadata.get("total_count") != len(jobs):
+        raise MetadataFreshnessError("qualification job listing is incomplete")
+    phase_a = [
+        job
+        for job in jobs
+        if isinstance(job, dict)
+        and job.get("name") == "phase-a-qualification-evidence"
+        and job.get("status") == "completed"
+        and job.get("conclusion") == "success"
+    ]
+    publish = [
+        job
+        for job in jobs
+        if isinstance(job, dict)
+        and job.get("name") == "publish-immutable-prerelease"
+        and job.get("status") == "completed"
+        and job.get("conclusion") == "skipped"
+    ]
+    if len(phase_a) != 1 or len(publish) != 1:
+        raise MetadataFreshnessError("qualification operation proof differs")
+    return _select_artifact_metadata(
+        artifacts_metadata,
+        expected_run_id=expected_run_id,
+        expected_sha=expected_sha,
+        expected_name=f"release-qualification-{expected_run_id}",
+    )
+
+
+def validate_freshness_run_metadata(
+    *,
+    run_metadata: object,
+    artifacts_metadata: object,
+    expected_run_id: int,
+    expected_sha: str,
+) -> dict[str, Any]:
+    """Validate the trusted Phase F producer and its unique artifact."""
+
+    _workflow_run_identity(
+        run_metadata,
+        expected_run_id=expected_run_id,
+        expected_sha=expected_sha,
+        expected_name=FRESHNESS_WORKFLOW_NAME,
+        expected_path=WORKFLOW_PATH,
+    )
+    return _select_artifact_metadata(
+        artifacts_metadata,
+        expected_run_id=expected_run_id,
+        expected_sha=expected_sha,
+        expected_name=f"release-metadata-freshness-{expected_run_id}",
+    )
 
 
 def _git_commit_range(repository_root: Path, range_start: str, candidate_sha: str) -> list[str]:

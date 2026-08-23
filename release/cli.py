@@ -52,6 +52,8 @@ from .metadata_freshness import (
     MetadataFreshnessError,
     collect_metadata_freshness,
     extract_metadata_freshness_artifact,
+    validate_freshness_run_metadata,
+    validate_qualification_run_metadata,
     verify_metadata_freshness_artifact,
 )
 from .mirror import (
@@ -493,6 +495,25 @@ def _verify_metadata_freshness(args) -> dict[str, object]:
             qualification_run_id=args.expected_qualification_run_id,
             qualification_artifact_id=args.expected_qualification_artifact_id,
         ),
+    )
+
+
+def _validate_qualification_run_metadata(args) -> dict[str, object]:
+    return validate_qualification_run_metadata(
+        run_metadata=_read_json(args.run_metadata),
+        jobs_metadata=_read_json(args.jobs_metadata),
+        artifacts_metadata=_read_json(args.artifacts_metadata),
+        expected_run_id=args.expected_run_id,
+        expected_sha=args.expected_sha,
+    )
+
+
+def _validate_freshness_run_metadata(args) -> dict[str, object]:
+    return validate_freshness_run_metadata(
+        run_metadata=_read_json(args.run_metadata),
+        artifacts_metadata=_read_json(args.artifacts_metadata),
+        expected_run_id=args.expected_run_id,
+        expected_sha=args.expected_sha,
     )
 
 
@@ -1043,6 +1064,29 @@ def _parser() -> argparse.ArgumentParser:
         "--expected-qualification-artifact-id", type=int, required=True
     )
     freshness_verify.set_defaults(handler=_verify_metadata_freshness)
+
+    qualification_metadata = subparsers.add_parser(
+        "validate-qualification-run-metadata"
+    )
+    qualification_metadata.add_argument("--run-metadata", type=Path, required=True)
+    qualification_metadata.add_argument("--jobs-metadata", type=Path, required=True)
+    qualification_metadata.add_argument(
+        "--artifacts-metadata", type=Path, required=True
+    )
+    qualification_metadata.add_argument("--expected-run-id", type=int, required=True)
+    qualification_metadata.add_argument("--expected-sha", required=True)
+    qualification_metadata.set_defaults(
+        handler=_validate_qualification_run_metadata
+    )
+
+    freshness_metadata = subparsers.add_parser("validate-freshness-run-metadata")
+    freshness_metadata.add_argument("--run-metadata", type=Path, required=True)
+    freshness_metadata.add_argument(
+        "--artifacts-metadata", type=Path, required=True
+    )
+    freshness_metadata.add_argument("--expected-run-id", type=int, required=True)
+    freshness_metadata.add_argument("--expected-sha", required=True)
+    freshness_metadata.set_defaults(handler=_validate_freshness_run_metadata)
 
     trust_bootstrap = subparsers.add_parser("build-initial-trust-kit")
     trust_bootstrap.add_argument("--verifier", type=Path, required=True)

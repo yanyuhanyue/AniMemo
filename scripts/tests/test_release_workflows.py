@@ -1825,23 +1825,26 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             ROOT / ".github" / "workflows" / "release-metadata-freshness.yml"
         ).read_text(encoding="utf-8")
         for guard in (
-            '.name == "Release Producer"',
-            '.path == ".github/workflows/release.yml"',
-            '.name == "phase-a-qualification-evidence"',
-            '.name == "publish-immutable-prerelease"',
-            '.conclusion == "skipped"',
-            '.event == "workflow_dispatch"',
-            '.conclusion == "success"',
-            ".run_attempt == 1",
-            '.head_branch == "main"',
-            '.head_sha == $sha',
-            '.name == ("release-qualification-" + $id)',
-            'test "$artifact_expired" = "false"',
+            "validate-qualification-run-metadata",
+            '--run-metadata "$RUNNER_TEMP/qualification-run.json"',
+            '--jobs-metadata "$RUNNER_TEMP/qualification-jobs.json"',
+            '--artifacts-metadata "$RUNNER_TEMP/qualification-artifacts.json"',
+            '--expected-run-id "$QUALIFICATION_RUN_ID"',
+            '--expected-sha "$INTENDED_MAIN_SHA"',
             "extract-qualification-artifact",
             'test "$(jq -r \'.candidateTreeSha\' "$prepublication")" = "$candidate_tree"',
         ):
             self.assertIn(guard, source)
-        self.assertIn("fileCount", (ROOT / "release" / "metadata_freshness.py").read_text())
+        module = (ROOT / "release" / "metadata_freshness.py").read_text()
+        for guard in (
+            "QUALIFICATION_WORKFLOW_NAME = \"Release Producer\"",
+            'job.get("name") == "phase-a-qualification-evidence"',
+            'job.get("name") == "publish-immutable-prerelease"',
+            'job.get("conclusion") == "skipped"',
+            "artifact.get(\"expired\") is not False",
+            "fileCount",
+        ):
+            self.assertIn(guard, module)
 
     def test_metadata_freshness_collects_two_complete_snapshots_and_exact_artifact(self):
         source = (
@@ -1870,22 +1873,23 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(authority["permissions"], {"contents": "read", "actions": "read"})
         self.assertEqual(authority["needs"], ["preflight", "release-authority"])
         for guard in (
-            '.name == "Release Metadata Freshness"',
-            '.path == ".github/workflows/release-metadata-freshness.yml"',
-            '.event == "workflow_dispatch"',
-            '.conclusion == "success"',
-            ".run_attempt == 1",
-            '.head_sha == $sha',
+            "validate-freshness-run-metadata",
+            '--run-metadata "$RUNNER_TEMP/freshness-run.json"',
+            '--artifacts-metadata "$RUNNER_TEMP/freshness-artifacts.json"',
+            '--expected-run-id "$FRESHNESS_RUN_ID"',
+            '--expected-sha "$INTENDED_MAIN_SHA"',
             '--expected-qualification-run-id "$QUALIFICATION_RUN_ID"',
             '--expected-candidate-sha "$INTENDED_MAIN_SHA"',
-            '.name == ("release-metadata-freshness-" + $id)',
-            'test "$artifact_expired" = "false"',
             "extract-metadata-freshness-artifact",
         ):
             self.assertIn(guard, source)
+        module = (ROOT / "release" / "metadata_freshness.py").read_text()
+        self.assertIn('FRESHNESS_WORKFLOW_NAME = "Release Metadata Freshness"', module)
+        self.assertIn('value.get("event") != "workflow_dispatch"', module)
+        self.assertIn('value.get("run_attempt") != 1', module)
         publish = source[source.index("  publish:\n") :]
         self.assertEqual(publish.count("verify-metadata-freshness"), 2)
-        self.assertIn("METADATA_FRESHNESS_EXPIRED", (ROOT / "release" / "metadata_freshness.py").read_text())
+        self.assertIn("METADATA_FRESHNESS_EXPIRED", module)
 
     def test_every_external_release_mutation_is_after_the_freshness_gate(self):
         release = workflow("release.yml")
@@ -1901,6 +1905,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         mutation_indices = []
         mutation_fragments = (
             "docker push",
+            "python -m release.cli build-portable",
             "git tag --annotate",
             'git push origin "refs/tags/',
             'gh api --method POST "repos/$GITHUB_REPOSITORY/releases"',
@@ -1910,21 +1915,35 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         for index, step in enumerate(steps):
             body = str(step.get("run", ""))
             action = str(step.get("uses", ""))
-            if any(fragment in body for fragment in mutation_fragments) or action.startswith(
-                "actions/attest@"
+            action_push = action.startswith("docker/build-push-action@") and str(
+                step.get("with", {}).get("push", "")
+            ).lower() == "true"
+            if (
+                any(fragment in body for fragment in mutation_fragments)
+                or action.startswith("actions/attest@")
+                or action_push
             ):
                 mutation_indices.append(index)
         self.assertTrue(mutation_indices)
         self.assertTrue(all(index > freshness_index for index in mutation_indices))
+        external_fragments = tuple(
+            fragment
+            for fragment in mutation_fragments
+            if fragment != "python -m release.cli build-portable"
+        )
         for job_name, job in release["jobs"].items():
             if job_name == "publish":
                 continue
             for step in job.get("steps", []):
                 body = str(step.get("run", ""))
                 action = str(step.get("uses", ""))
+                action_push = action.startswith("docker/build-push-action@") and str(
+                    step.get("with", {}).get("push", "")
+                ).lower() == "true"
                 self.assertFalse(
-                    any(fragment in body for fragment in mutation_fragments)
-                    or action.startswith("actions/attest@"),
+                    any(fragment in body for fragment in external_fragments)
+                    or action.startswith("actions/attest@")
+                    or action_push,
                     f"external mutation bypass in job {job_name}",
                 )
 

@@ -11,6 +11,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from release.materials import extract_qualification_artifact
 from release.metadata_freshness import (
     ARTIFACT_FILES,
     DIAGNOSTIC_FIELDS,
@@ -25,6 +26,8 @@ from release.metadata_freshness import (
     _validate_receipt,
     collect_metadata_freshness,
     extract_metadata_freshness_artifact,
+    validate_freshness_run_metadata,
+    validate_qualification_run_metadata,
     verify_metadata_freshness_artifact,
 )
 from release.notes import build_release_notes, render_release_notes
@@ -35,8 +38,8 @@ TREE = "b21598e5352654985a17146b3272775df0694fbe"
 BASE = "225c47e858d56e449869c32ebb7102107c151d61"
 COMMIT_ONE = "d" * 40
 COMMIT_TWO = "e" * 40
-QUALIFICATION_RUN_ID = 123
-QUALIFICATION_ARTIFACT_ID = 456
+QUALIFICATION_RUN_ID = 32635898412
+QUALIFICATION_ARTIFACT_ID = 9492671353
 FRESHNESS_RUN_ID = 789
 
 
@@ -60,6 +63,62 @@ def _normalized_pull(title: str = "修复发布门禁", *, number: int = 45) -> 
         "title": title,
         "source_identity": "f" * 40,
         "labels": ["release/fix"],
+    }
+
+
+def _run_metadata(
+    *, run_id: int, name: str, path: str, head_sha: str = CANDIDATE
+) -> dict[str, object]:
+    return {
+        "id": run_id,
+        "name": name,
+        "path": path,
+        "event": "workflow_dispatch",
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": 1,
+        "repository": {"full_name": "yanyuhanyue/AniMemo"},
+        "head_branch": "main",
+        "head_sha": head_sha,
+    }
+
+
+def _artifact_listing(
+    *, run_id: int, artifact_id: int, name: str, digest: str
+) -> dict[str, object]:
+    return {
+        "total_count": 1,
+        "artifacts": [
+            {
+                "id": artifact_id,
+                "name": name,
+                "expired": False,
+                "digest": digest,
+                "archive_download_url": (
+                    "https://api.github.com/repos/yanyuhanyue/AniMemo/"
+                    f"actions/artifacts/{artifact_id}/zip"
+                ),
+                "workflow_run": {"id": run_id, "head_sha": CANDIDATE},
+            }
+        ],
+    }
+
+
+def _qualification_jobs() -> dict[str, object]:
+    return {
+        "total_count": 2,
+        "jobs": [
+            {
+                "name": "phase-a-qualification-evidence",
+                "status": "completed",
+                "conclusion": "success",
+            },
+            {
+                "name": "publish-immutable-prerelease",
+                "status": "completed",
+                "conclusion": "skipped",
+            },
+        ],
     }
 
 
@@ -459,6 +518,159 @@ class MetadataFreshnessTests(unittest.TestCase):
                     artifact_directory=self.output,
                     qualification_directory=self.qualification,
                     expectation=expectation,
+                )
+
+    def test_full_trusted_transaction_unlocks_publish_only_after_verification(
+        self,
+    ) -> None:
+        mutation_unlocked = False
+        qualification_archive = self.root / "qualification.zip"
+        with zipfile.ZipFile(qualification_archive, "w") as archive:
+            for path in sorted(self.qualification.iterdir()):
+                archive.write(path, arcname=path.name)
+        qualification_digest = (
+            "sha256:" + hashlib.sha256(qualification_archive.read_bytes()).hexdigest()
+        )
+        qualification_artifact = validate_qualification_run_metadata(
+            run_metadata=_run_metadata(
+                run_id=QUALIFICATION_RUN_ID,
+                name="Release Producer",
+                path=".github/workflows/release.yml",
+            ),
+            jobs_metadata=_qualification_jobs(),
+            artifacts_metadata=_artifact_listing(
+                run_id=QUALIFICATION_RUN_ID,
+                artifact_id=QUALIFICATION_ARTIFACT_ID,
+                name=f"release-qualification-{QUALIFICATION_RUN_ID}",
+                digest=qualification_digest,
+            ),
+            expected_run_id=QUALIFICATION_RUN_ID,
+            expected_sha=CANDIDATE,
+        )
+        self.assertFalse(mutation_unlocked)
+        qualification_consumer = self.root / "qualification-consumer"
+        extract_qualification_artifact(
+            qualification_archive,
+            qualification_consumer,
+            qualification_run_id=QUALIFICATION_RUN_ID,
+            expected_sha256=str(qualification_artifact["digest"]),
+        )
+
+        clock = FakeClock()
+        collect_metadata_freshness(
+            repository_root=self.repository,
+            qualification_directory=qualification_consumer,
+            output_directory=self.output,
+            identity=self.identity,
+            source=StubSource(),
+            clock=clock,
+            commit_loader=self._commits,
+        )
+        self.assertFalse(mutation_unlocked)
+        freshness_archive = self.root / "freshness.zip"
+        with zipfile.ZipFile(freshness_archive, "w") as archive:
+            for path in sorted(self.output.iterdir()):
+                archive.write(path, arcname=path.name)
+        freshness_digest = (
+            "sha256:" + hashlib.sha256(freshness_archive.read_bytes()).hexdigest()
+        )
+        freshness_artifact = validate_freshness_run_metadata(
+            run_metadata=_run_metadata(
+                run_id=FRESHNESS_RUN_ID,
+                name="Release Metadata Freshness",
+                path=".github/workflows/release-metadata-freshness.yml",
+            ),
+            artifacts_metadata=_artifact_listing(
+                run_id=FRESHNESS_RUN_ID,
+                artifact_id=900002,
+                name=f"release-metadata-freshness-{FRESHNESS_RUN_ID}",
+                digest=freshness_digest,
+            ),
+            expected_run_id=FRESHNESS_RUN_ID,
+            expected_sha=CANDIDATE,
+        )
+        freshness_consumer = self.root / "freshness-consumer"
+        extract_metadata_freshness_artifact(
+            freshness_archive,
+            freshness_consumer,
+            expected_sha256=str(freshness_artifact["digest"]),
+        )
+        verification = verify_metadata_freshness_artifact(
+            artifact_directory=freshness_consumer,
+            qualification_directory=qualification_consumer,
+            expectation=self.expectation,
+            verified_at=clock.now() + timedelta(minutes=1),
+        )
+        mutation_unlocked = verification["status"] == "PASS"
+        self.assertTrue(mutation_unlocked)
+        self.assertEqual(qualification_artifact["artifactId"], 9492671353)
+        self.assertEqual(verification["qualificationRunId"], 32635898412)
+
+    def test_run_and_artifact_authority_metadata_fail_closed(self) -> None:
+        qualification_run = _run_metadata(
+            run_id=QUALIFICATION_RUN_ID,
+            name="Release Producer",
+            path=".github/workflows/release.yml",
+        )
+        qualification_artifacts = _artifact_listing(
+            run_id=QUALIFICATION_RUN_ID,
+            artifact_id=QUALIFICATION_ARTIFACT_ID,
+            name=f"release-qualification-{QUALIFICATION_RUN_ID}",
+            digest="sha256:" + "1" * 64,
+        )
+        cases: list[tuple[object, object, object]] = []
+        wrong_workflow = copy.deepcopy(qualification_run)
+        wrong_workflow["name"] = "Untrusted Producer"
+        cases.append((wrong_workflow, _qualification_jobs(), qualification_artifacts))
+        failed_run = copy.deepcopy(qualification_run)
+        failed_run["conclusion"] = "failure"
+        cases.append((failed_run, _qualification_jobs(), qualification_artifacts))
+        failed_jobs = _qualification_jobs()
+        failed_jobs["jobs"][0]["conclusion"] = "failure"
+        cases.append((qualification_run, failed_jobs, qualification_artifacts))
+        wrong_head = copy.deepcopy(qualification_run)
+        wrong_head["head_sha"] = "2" * 40
+        cases.append((wrong_head, _qualification_jobs(), qualification_artifacts))
+        expired = copy.deepcopy(qualification_artifacts)
+        expired["artifacts"][0]["expired"] = True
+        cases.append((qualification_run, _qualification_jobs(), expired))
+        duplicate = copy.deepcopy(qualification_artifacts)
+        duplicate["artifacts"].append(copy.deepcopy(duplicate["artifacts"][0]))
+        cases.append((qualification_run, _qualification_jobs(), duplicate))
+        for run, jobs, artifacts in cases:
+            with self.subTest(run=run, jobs=jobs, artifacts=artifacts), self.assertRaises(
+                MetadataFreshnessError
+            ):
+                validate_qualification_run_metadata(
+                    run_metadata=run,
+                    jobs_metadata=jobs,
+                    artifacts_metadata=artifacts,
+                    expected_run_id=QUALIFICATION_RUN_ID,
+                    expected_sha=CANDIDATE,
+                )
+        freshness_artifacts = _artifact_listing(
+            run_id=FRESHNESS_RUN_ID,
+            artifact_id=900002,
+            name=f"release-metadata-freshness-{FRESHNESS_RUN_ID}",
+            digest="sha256:" + "2" * 64,
+        )
+        for name, head_sha in (
+            ("Untrusted Freshness", CANDIDATE),
+            ("Release Metadata Freshness", "3" * 40),
+        ):
+            with self.subTest(name=name, head_sha=head_sha), self.assertRaises(
+                MetadataFreshnessError
+            ):
+                validate_freshness_run_metadata(
+                    run_metadata=_run_metadata(
+                        run_id=FRESHNESS_RUN_ID,
+                        name=name,
+                        path=".github/workflows/release-metadata-freshness.yml",
+                        head_sha=head_sha,
+                    ),
+                    artifacts_metadata=freshness_artifacts,
+                    expected_run_id=FRESHNESS_RUN_ID,
+                    expected_sha=CANDIDATE,
                 )
 
     def test_exact_zip_extract_and_extra_or_missing_file_rejection(self) -> None:

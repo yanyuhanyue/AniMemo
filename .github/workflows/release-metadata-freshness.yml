@@ -71,53 +71,22 @@ jobs:
           curl --fail --location --silent --show-error "${headers[@]}" \
             "$api/actions/runs/$QUALIFICATION_RUN_ID" \
             -o "$RUNNER_TEMP/qualification-run.json"
-          jq -e --arg repository "$GITHUB_REPOSITORY" \
-            --arg sha "$INTENDED_MAIN_SHA" '
-              .name == "Release Producer" and
-              .path == ".github/workflows/release.yml" and
-              .event == "workflow_dispatch" and
-              .status == "completed" and
-              .conclusion == "success" and
-              .run_attempt == 1 and
-              .repository.full_name == $repository and
-              .head_branch == "main" and
-              .head_sha == $sha
-            ' "$RUNNER_TEMP/qualification-run.json" >/dev/null
           curl --fail --location --silent --show-error "${headers[@]}" \
             "$api/actions/runs/$QUALIFICATION_RUN_ID/jobs?per_page=100" \
             -o "$RUNNER_TEMP/qualification-jobs.json"
-          jq -e '
-            ([.jobs[] | select(
-              .name == "phase-a-qualification-evidence" and
-              .status == "completed" and
-              .conclusion == "success"
-            )] | length) == 1 and
-            ([.jobs[] | select(
-              .name == "publish-immutable-prerelease" and
-              .status == "completed" and
-              .conclusion == "skipped"
-            )] | length) == 1
-          ' "$RUNNER_TEMP/qualification-jobs.json" >/dev/null
           curl --fail --location --silent --show-error "${headers[@]}" \
             "$api/actions/runs/$QUALIFICATION_RUN_ID/artifacts?per_page=100" \
             -o "$RUNNER_TEMP/qualification-artifacts.json"
-          jq -ce --arg id "$QUALIFICATION_RUN_ID" --arg sha "$INTENDED_MAIN_SHA" '
-            [.artifacts[] | select(
-              .name == ("release-qualification-" + $id) and
-              (.workflow_run.id | tostring) == $id and
-              .workflow_run.head_sha == $sha
-            )] as $matches |
-            if ($matches | length) == 1 then $matches[0] else error("qualification artifact cardinality") end
-          ' "$RUNNER_TEMP/qualification-artifacts.json" \
+          python -m release.cli validate-qualification-run-metadata \
+            --run-metadata "$RUNNER_TEMP/qualification-run.json" \
+            --jobs-metadata "$RUNNER_TEMP/qualification-jobs.json" \
+            --artifacts-metadata "$RUNNER_TEMP/qualification-artifacts.json" \
+            --expected-run-id "$QUALIFICATION_RUN_ID" \
+            --expected-sha "$INTENDED_MAIN_SHA" \
             > "$RUNNER_TEMP/qualification-artifact.json"
-          artifact_id="$(jq -r '.id // empty' "$RUNNER_TEMP/qualification-artifact.json")"
-          archive_url="$(jq -r '.archive_download_url // empty' "$RUNNER_TEMP/qualification-artifact.json")"
-          metadata_digest="$(jq -r '.digest // empty' "$RUNNER_TEMP/qualification-artifact.json")"
-          artifact_expired="$(jq -r '.expired' "$RUNNER_TEMP/qualification-artifact.json")"
-          [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]]
-          [[ "$metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          test "$artifact_expired" = "false"
-          test -n "$archive_url"
+          artifact_id="$(jq -r '.artifactId' "$RUNNER_TEMP/qualification-artifact.json")"
+          archive_url="$(jq -r '.archiveDownloadUrl' "$RUNNER_TEMP/qualification-artifact.json")"
+          metadata_digest="$(jq -r '.digest' "$RUNNER_TEMP/qualification-artifact.json")"
           mkdir "$RUNNER_TEMP/qualification-archive"
           curl --fail --location --silent --show-error "${headers[@]}" \
             "$archive_url" -o "$RUNNER_TEMP/qualification-archive/evidence.zip"
