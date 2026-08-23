@@ -6,6 +6,7 @@ import unittest
 from release.notes import (
     ReleaseNotesError,
     build_release_notes,
+    configuration,
     promote_release_notes,
     render_release_notes,
     validate_release_notes,
@@ -107,40 +108,101 @@ class ReleaseNotesTests(unittest.TestCase):
         markdown = render_release_notes(first)
         self.assertIn("新增中文功能 (#2)", markdown)
         self.assertIn(r"修复 \[Markdown\] \*边界\* (#9)", markdown)
-        self.assertIn("## 📝 文档 (Documentation)", markdown)
+        self.assertIn("## 📝 文档", markdown)
 
-    def test_rc_and_stable_rendering_bind_upgrade_install_security_and_assets(self):
+    def test_feature_only_rendering_omits_empty_categories_and_authority_context(self):
         artifact = build_release_notes(
             context=context(),
             pulls=[pull(1, "release/feature", "发行自动化")],
         )
         markdown = render_release_notes(artifact)
-        self.assertTrue(markdown.startswith("# AniMemo v1.1.0-rc.TEST\n"))
+        self.assertTrue(markdown.startswith("# v1.1.0-rc.TEST\n"))
+        self.assertNotIn("AniMemo", markdown.splitlines()[0])
+        self.assertIn("## ✨ 新增功能", markdown)
         for heading in (
-            "## ✨ 新增功能 (Features)",
-            "## 🐛 Bug 修复 (Bug Fixes)",
-            "## 💡 功能与体验优化 (Improvements)",
-            "## 🚀 性能与工程改进 (Performance & Engineering)",
-            "## 🔄 升级 (Upgrade)",
-            "## 📦 安装 (Installation)",
-            "## 🛡️ 安全 (Security)",
+            "## 🐛 Bug 修复",
+            "## 💡 功能与体验优化",
+            "## 🚀 性能与工程改进",
+            "## 🔒 安全与稳定性",
+            "## 📝 文档",
             "## ⚠️ Breaking Changes",
             "## 📋 部署环境",
             "## 📦 Release Assets",
         ):
+            self.assertNotIn(heading, markdown)
+        for placeholder in ("- 无", "\n无\n", "暂无", "No changes", "None"):
+            self.assertNotIn(placeholder, markdown)
+        for asset in artifact["context"]["release_assets"]:
+            self.assertNotIn(f"`{asset}`", markdown)
+        self.assertEqual(artifact["context"]["supported_os"], ["Ubuntu 24.04 LTS"])
+        self.assertEqual(
+            artifact["context"]["docker_requirement"],
+            "Docker Engine 27+ with Compose v2",
+        )
+        self.assertEqual(
+            artifact["context"]["release_assets"],
+            [
+                "release-manifest.json",
+                "deployment-contract.json",
+                "installer-materials.tar",
+                "checksums.txt",
+            ],
+        )
+        for heading in (
+            "## 🔄 升级 (Upgrade)",
+            "## 📦 安装 (Installation)",
+        ):
             self.assertIn(heading, markdown)
         self.assertIn("从 v1.0.0 升级", markdown)
         self.assertIn("install.animemo.cc", markdown)
-        self.assertIn("不声明新的 Heavy Security 认证", markdown)
-        self.assertIn("`release-manifest.json`", markdown)
 
+    def test_security_and_breaking_sections_render_only_for_actual_changes(self):
+        feature_security = build_release_notes(
+            context=context(),
+            pulls=[
+                pull(1, "release/feature"),
+                pull(2, "release/security", "修复令牌边界"),
+            ],
+        )
+        feature_security_markdown = render_release_notes(feature_security)
+        self.assertIn("## ✨ 新增功能", feature_security_markdown)
+        self.assertIn("## 🔒 安全与稳定性", feature_security_markdown)
+        self.assertIn("修复令牌边界 (#2)", feature_security_markdown)
+        self.assertNotIn("## ⚠️ Breaking Changes", feature_security_markdown)
+
+        breaking_fix = build_release_notes(
+            context=context(),
+            pulls=[
+                pull(1, "release/breaking", "更新部署根目录"),
+                pull(2, "release/fix"),
+            ],
+        )
+        breaking_fix_markdown = render_release_notes(breaking_fix)
+        self.assertIn("## 🐛 Bug 修复", breaking_fix_markdown)
+        self.assertIn("## ⚠️ Breaking Changes", breaking_fix_markdown)
+        self.assertIn("更新部署根目录 (#1)", breaking_fix_markdown)
+        self.assertNotIn("## 🔒 安全与稳定性", breaking_fix_markdown)
+        self.assertNotIn("## 📝 文档", breaking_fix_markdown)
+
+    def test_renderer_v2_changes_configuration_identity_without_changing_snapshot_schema(self):
+        current = configuration()
+        self.assertEqual(current["renderer"], "animemo.release-notes.renderer/v2")
+        self.assertEqual(current["schema"], "animemo.release-notes.configuration/v1")
+        artifact = build_release_notes(
+            context=context(), pulls=[pull(1, "release/feature")]
+        )
+        self.assertEqual(artifact["schema"], "animemo.release-notes/v1")
+        self.assertEqual(artifact["configuration"], current)
+
+    def test_stable_rendering_uses_version_only_heading_and_keeps_static_guidance(self):
         stable = build_release_notes(
             context=context(release_tag="v1.1.0", channel="stable", previous_stable=""),
             pulls=[pull(1, "release/feature")],
         )
         stable_markdown = render_release_notes(stable)
+        self.assertEqual(stable_markdown.splitlines()[0], "# v1.1.0")
         self.assertIn("首个 Stable 发行基线", stable_markdown)
-        self.assertNotEqual(stable["identity"], artifact["identity"])
+        self.assertIn("## 📦 安装 (Installation)", stable_markdown)
 
     def test_snapshot_tamper_and_unknown_fields_are_rejected(self):
         artifact = build_release_notes(
@@ -155,6 +217,17 @@ class ReleaseNotesTests(unittest.TestCase):
             mutation(candidate)
             with self.subTest(candidate=candidate), self.assertRaises(ReleaseNotesError):
                 validate_release_notes(candidate)
+
+    def test_noncanonical_authority_context_is_rejected_before_rendering(self):
+        invalid_contexts = (
+            context(supported_os=["Unknown OS"]),
+            context(release_assets=["release-manifest.json"]),
+        )
+        for invalid in invalid_contexts:
+            with self.subTest(context=invalid), self.assertRaises(ReleaseNotesError):
+                build_release_notes(
+                    context=invalid, pulls=[pull(1, "release/feature")]
+                )
 
     def test_stable_notes_are_derived_from_the_same_frozen_pr_population(self):
         rc = build_release_notes(

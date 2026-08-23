@@ -17,6 +17,7 @@ CANONICAL_RELEASE_ASSETS = (
     "installer-materials.tar",
     "checksums.txt",
 )
+CANONICAL_SUPPORTED_OS = ("Ubuntu 24.04 LTS",)
 
 _PRIMARY_LABELS = {
     "release/feature": "feature",
@@ -115,7 +116,7 @@ def _configuration() -> dict[str, Any]:
             "skip-changelog": "EXCLUDED_SKIP",
         },
         "category_order": list(_CATEGORY_ORDER),
-        "renderer": "animemo.release-notes.renderer/v1",
+        "renderer": "animemo.release-notes.renderer/v2",
         "unclassified_policy": "FAIL_QUALIFICATION",
         "conflicting_primary_policy": "FAIL_QUALIFICATION",
     }
@@ -169,6 +170,8 @@ def _validate_context(value: Any) -> dict[str, Any]:
         raise ReleaseNotesError("supported_os must be unique and sorted")
     for item in operating_systems:
         _text(item, "supported_os item")
+    if operating_systems != list(CANONICAL_SUPPORTED_OS):
+        raise ReleaseNotesError("supported_os must be the frozen canonical set")
     assets = result["release_assets"]
     if assets != list(CANONICAL_RELEASE_ASSETS):
         raise ReleaseNotesError("release_assets must be the frozen canonical asset set")
@@ -338,8 +341,10 @@ def _items(snapshot: Mapping[str, Any], categories: set[str]) -> list[str]:
     ]
 
 
-def _section(title: str, items: list[str]) -> list[str]:
-    return [title, "", *(items or ["- 无"]), ""]
+def _optional_section(title: str, items: list[str]) -> list[str]:
+    if not items:
+        return []
+    return [title, "", *items, ""]
 
 
 def render_release_notes(value: Mapping[str, Any]) -> str:
@@ -352,22 +357,22 @@ def render_release_notes(value: Mapping[str, Any]) -> str:
         "rc": "RC 候选版本；发布后仍须通过 Fresh Base live acceptance。",
         "stable": "Stable 版本；由已验收 RC 的同一提交与 OCI 摘要提升。",
     }[context["channel"]]
-    lines = [f"# AniMemo {context['release_tag']}", "", f"> {channel_line}", ""]
-    lines.extend(_section("## ✨ 新增功能 (Features)", _items(snapshot, {"feature"})))
-    lines.extend(_section("## 🐛 Bug 修复 (Bug Fixes)", _items(snapshot, {"fix"})))
+    lines = [f"# {context['release_tag']}", "", f"> {channel_line}", ""]
+    lines.extend(_optional_section("## ✨ 新增功能", _items(snapshot, {"feature"})))
+    lines.extend(_optional_section("## 🐛 Bug 修复", _items(snapshot, {"fix"})))
     lines.extend(
-        _section(
-            "## 💡 功能与体验优化 (Improvements)",
+        _optional_section(
+            "## 💡 功能与体验优化",
             _items(snapshot, {"improvement", "ui"}),
         )
     )
     lines.extend(
-        _section(
-            "## 🚀 性能与工程改进 (Performance & Engineering)",
+        _optional_section(
+            "## 🚀 性能与工程改进",
             _items(snapshot, {"performance", "refactor", "deployment", "ci", "dependencies"}),
         )
     )
-    lines.extend(_section("## 📝 文档 (Documentation)", _items(snapshot, {"docs"})))
+    lines.extend(_optional_section("## 📝 文档", _items(snapshot, {"docs"})))
     if context["previous_stable"]:
         upgrade = [
             f"- 支持从 {context['previous_stable']} 升级到 {context['target_version']}。",
@@ -379,9 +384,9 @@ def render_release_notes(value: Mapping[str, Any]) -> str:
             "- 这是首个 Stable 发行基线，没有可声明的历史 Stable 升级起点。",
             f"- 最低 Updater 版本：{context['minimum_updater_version']}。",
         ]
-    lines.extend(_section("## 🔄 升级 (Upgrade)", upgrade))
+    lines.extend(_optional_section("## 🔄 升级 (Upgrade)", upgrade))
     lines.extend(
-        _section(
+        _optional_section(
             "## 📦 安装 (Installation)",
             [
                 "- `install.animemo.cc` 仅提供引导与安装体验，GitHub Release 是唯一发行权威。",
@@ -390,25 +395,14 @@ def render_release_notes(value: Mapping[str, Any]) -> str:
             ],
         )
     )
-    security_items = _items(snapshot, {"security"})
-    security_items.append(
-        "- 本说明不声明新的 Heavy Security 认证；首次公开 Pre-RC 前仍需完成 Security Delta。"
-    )
-    lines.extend(_section("## 🛡️ 安全 (Security)", security_items))
-    lines.extend(_section("## ⚠️ Breaking Changes", _items(snapshot, {"breaking"})))
     lines.extend(
-        _section(
-            "## 📋 部署环境",
-            [
-                *(f"- 支持：{item}" for item in context["supported_os"]),
-                f"- 容器运行要求：{context['docker_requirement']}。",
-            ],
+        _optional_section(
+            "## 🔒 安全与稳定性", _items(snapshot, {"security"})
         )
     )
     lines.extend(
-        _section(
-            "## 📦 Release Assets",
-            [f"- `{name}`" for name in context["release_assets"]],
+        _optional_section(
+            "## ⚠️ Breaking Changes", _items(snapshot, {"breaking"})
         )
     )
     return "\n".join(lines).rstrip() + "\n"

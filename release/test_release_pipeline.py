@@ -44,6 +44,7 @@ from release.publication import (
     PublicationError,
     PublicationTransaction,
     build_publication_plan,
+    validate_publication_plan,
     verify_post_publish,
 )
 from release.vm_qualification import (
@@ -192,11 +193,18 @@ class DraftPublicationTests(unittest.TestCase):
     def test_rc_draft_upload_readback_verify_then_publish(self):
         plan = publication_plan()
         commands = plan["commands"]
+        self.assertEqual(commands["create_tag"][-1], "v1.1.0-rc.TEST")
+        self.assertEqual(
+            commands["create_draft"][commands["create_draft"].index("--title") + 1],
+            "v1.1.0-rc.TEST",
+        )
+        self.assertNotIn("AniMemo", commands["create_tag"][-1])
         self.assertIn("--draft", commands["create_draft"])
         self.assertIn("--prerelease", commands["create_draft"])
         self.assertIn("--notes-file", commands["create_draft"])
         self.assertNotIn("--generate-notes", commands["create_draft"])
         self.assertEqual(plan["external_mutation_mode"], "PLAN_ONLY")
+        self.assertEqual(validate_publication_plan(copy.deepcopy(plan)), plan)
 
         transaction = PublicationTransaction(plan)
         transaction.record_tag_created(tag="v1.1.0-rc.TEST", target=COMMIT)
@@ -258,6 +266,12 @@ class DraftPublicationTests(unittest.TestCase):
 
     def test_stable_plan_reuses_rc_commit_and_digests_without_build_commands(self):
         plan = publication_plan(channel="stable", tag="v1.1.0")
+        commands = plan["commands"]
+        self.assertEqual(commands["create_tag"][-1], "v1.1.0")
+        self.assertEqual(
+            commands["create_draft"][commands["create_draft"].index("--title") + 1],
+            "v1.1.0",
+        )
         flattened = " ".join(word for command in plan["commands"].values() for word in command)
         self.assertNotIn("docker build", flattened)
         self.assertNotIn("build-push-action", flattened)

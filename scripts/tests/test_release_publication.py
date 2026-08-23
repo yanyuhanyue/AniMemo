@@ -13,7 +13,7 @@ from release.publication import build_publication_plan, verify_asset_readback
 
 ROOT = Path(__file__).resolve().parents[2]
 COMMIT = "a" * 40
-NOTES = "# AniMemo v1.1.0-rc.TEST\n"
+NOTES = "# v1.1.0-rc.TEST\n"
 CONTENTS = {
     "release-manifest.json": b"manifest\n",
     "deployment-contract.json": b"deployment\n",
