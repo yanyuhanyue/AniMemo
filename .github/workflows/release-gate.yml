@@ -176,6 +176,7 @@ jobs:
           ANIMEMO_COMPOSE_PROJECT=animemo-release-gate
           ANIMEMO_MANAGED_ENV_PATH=/run/animemo-updater/release-gate/managed.env
           ANIMEMO_UPDATER_RUNTIME_ROOT=/run/animemo-updater/release-gate
+          ANIMEMO_DATA_ROOT=$data_root
           ANIMEMO_TEST_DATA_ROOT=$data_root
           ANIMEMO_API_IMAGE=animemo-api:release-gate
           ANIMEMO_WEB_IMAGE=animemo-web:release-gate

@@ -261,6 +261,8 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
 
         self.assertIn("ANIMEMO_API_IMAGE=animemo-api:release-gate", release)
         self.assertIn("ANIMEMO_WEB_IMAGE=animemo-web:release-gate", release)
+        self.assertIn("ANIMEMO_DATA_ROOT=$data_root", release)
+        self.assertIn("ANIMEMO_TEST_DATA_ROOT=$data_root", release)
         self.assertIn("test -f deploy/docker-compose.build.yml", release)
         self.assertNotIn('if [[ -f deploy/docker-compose.build.yml ]]; then', release)
         self.assertIn(
