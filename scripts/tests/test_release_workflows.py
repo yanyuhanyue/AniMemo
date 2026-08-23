@@ -624,6 +624,16 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("--release-graph-contract", ci_source)
 
+    def test_release_gate_requires_pinned_gh_official_output_contract(self):
+        gate = workflow("release-gate.yml")
+        updater_steps = gate["jobs"]["updater-isolated"]["steps"]
+        commands = {step.get("run") for step in updater_steps if "run" in step}
+
+        self.assertIn(
+            "python -m unittest discover -s installer/tests -p 'test_*.py' -v",
+            commands,
+        )
+
     def test_ci_and_release_gate_publish_complete_classifier_contract(self):
         expected_outputs = {
             "schema_version",
