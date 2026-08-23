@@ -72,7 +72,11 @@ AUDITED_CONTRACT_CHANGE_PATHS = frozenset(
     }
 )
 
-RECOVERY_RUNTIME_PREFIXES = ("durability/", "scripts/tests/test_durability_")
+RECOVERY_RUNTIME_PREFIXES = (
+    "durability/",
+    "scripts/tests/test_durability_",
+    "scripts/tests/test_production_backup_",
+)
 RECOVERY_RUNTIME_PATHS = frozenset(
     {
         "scripts/dr-rehearsal.sh",

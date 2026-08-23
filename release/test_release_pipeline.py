@@ -72,6 +72,7 @@ def frozen_prepublication_fixture(directory: Path):
     for relative in (
         "deploy/docker-compose.yml",
         "deploy/install-updater.sh",
+        "deploy/updater/animemo",
         "deploy/updater/animemo-updater",
         "deploy/updater/animemo-updater@.service",
         "deploy/updater/animemo-updater.sysusers.conf",
@@ -699,7 +700,7 @@ class FrozenPrepublicationMaterialTests(unittest.TestCase):
                     payload["pretrust"]["aggregateSha256"],
                 ),
                 (
-                    "sha256:cb8d90ee18a78079f3989ee50ccc4eada7b74889fc122151582512d9e1443b2d",
+                    "sha256:77235727fcd7e23aeccf34f8c45134ac2ac5cbf909a211469df60335ab25b38f",
                     "sha256:ca794441aa84a156fc47d0cf2efc2d04aef61517925e5dcccbbcc181ec98b93a",
                     "sha256:bf605057d25869d1a0616a574547c5d2106fe1a4aa013ea7af09dfe03b6e2502",
                 ),

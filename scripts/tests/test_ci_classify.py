@@ -292,6 +292,14 @@ class CiClassificationTests(unittest.TestCase):
             result, "run_release_stateful", "run_release_docker", "full_gate"
         )
 
+    def test_production_backup_tests_select_recovery_dr_gate(self):
+        result = classify_paths(["scripts/tests/test_production_backup_runtime.py"])
+
+        self.assertEqual(result["risk_level"], "CRITICAL")
+        self.assert_true(
+            result, "recovery", "run_plugins", "run_postgres", "run_release_dr"
+        )
+
     def test_case_h_deployment_runtime_selects_docker_and_stateful(self):
         result = classify_paths(["deploy/docker-compose.yml"])
 

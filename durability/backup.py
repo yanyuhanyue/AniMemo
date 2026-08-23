@@ -172,6 +172,7 @@ class BackupSourceIdentity:
     database_contract: Mapping[str, Any]
     configuration_contract: Mapping[str, Any]
     plugin_sdk_apis: tuple[str, ...] = ()
+    instance_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -214,6 +215,8 @@ class R2Reference:
     endpoint_identity: str
     bucket: str
     object_keys: tuple[str, ...]
+    inventory_timestamp: str | None = None
+    coverage_classification: str | None = None
 
 
 @dataclass(frozen=True)
@@ -225,6 +228,7 @@ class BackupRequest:
     secret: SecretSource | None = None
     local_media_references: Mapping[str, str] = field(default_factory=dict)
     r2_references: tuple[R2Reference, ...] = ()
+    registered_private_members: tuple[str, ...] = ()
     producer: Mapping[str, Any] = field(default_factory=dict)
     platform: Mapping[str, Any] = field(default_factory=dict)
     quiescence: Mapping[str, Any] = field(default_factory=dict)
@@ -596,6 +600,78 @@ def verify_backup(path: Path) -> BackupVerification:
     return _verify_tree(Path(path), allow_staging=False, expected_lifecycle="FINALIZED")
 
 
+def inspect_backup(path: Path) -> dict[str, Any]:
+    """Return bounded public metadata without performing full verification.
+
+    Inspection deliberately reads only the canonical manifest.  It does not
+    hash payload members, expand the database dump, or authenticate secrets,
+    and therefore always reports ``verified`` as false.
+    """
+
+    root = Path(path)
+    if _is_link_or_reparse(root) or not root.is_dir():
+        raise BackupError("BACKUP_ROOT_INVALID", "backup root is not a safe directory")
+    manifest_path = root / MANIFEST_NAME
+    if _is_link_or_reparse(manifest_path) or not manifest_path.is_file():
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "backup manifest is missing or unsafe"
+        )
+    encoded = _read_regular_file(manifest_path, maximum=_MAX_MANIFEST_BYTES)
+    manifest = _strict_json_object(encoded, code="BACKUP_MANIFEST_INVALID")
+    if canonical_json_bytes(manifest) + b"\n" != encoded:
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "backup manifest is not canonical JSON"
+        )
+    if (
+        manifest.get("format") != FORMAT
+        or manifest.get("schemaVersion") != SCHEMA_VERSION
+    ):
+        if isinstance(manifest.get("format"), str) and isinstance(
+            manifest.get("schemaVersion"), int
+        ):
+            raise UnsupportedBackupFormat()
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "backup format identity is malformed"
+        )
+    backup_id = _require_uuid(manifest.get("backupId"), field_name="backupId")
+    started_at = manifest.get("startedAt")
+    completed_at = manifest.get("completedAt")
+    _parse_utc(started_at, field_name="startedAt")
+    _parse_utc(completed_at, field_name="completedAt")
+    source = manifest.get("source")
+    filesystem = manifest.get("filesystem")
+    secrets = manifest.get("secrets")
+    if (
+        not isinstance(source, Mapping)
+        or not isinstance(source.get("release"), Mapping)
+        or not isinstance(filesystem, Mapping)
+        or not isinstance(filesystem.get("members"), list)
+        or not isinstance(secrets, Mapping)
+        or secrets.get("mode") not in {"none", "envelope", "reference"}
+    ):
+        raise BackupError(
+            "BACKUP_MANIFEST_INVALID", "backup inspection metadata is invalid"
+        )
+    instance_id = _require_uuid(source.get("instanceId"), field_name="instanceId")
+    instance_name = source.get("instanceName")
+    if instance_name is not None and (
+        not isinstance(instance_name, str) or not instance_name
+    ):
+        raise BackupError("BACKUP_MANIFEST_INVALID", "source instance name is invalid")
+    return {
+        "backupId": backup_id,
+        "format": FORMAT,
+        "schemaVersion": SCHEMA_VERSION,
+        "sourceInstance": {"name": instance_name, "id": instance_id},
+        "releaseIdentity": dict(source["release"]),
+        "memberCount": len(filesystem["members"]),
+        "startedAt": started_at,
+        "completedAt": completed_at,
+        "protectionMode": secrets["mode"],
+        "verified": False,
+    }
+
+
 def list_finalized_backups(destination_root: Path) -> tuple[Path, ...]:
     """Return structurally valid, finalized artifacts; hidden staging is ignored."""
 
@@ -640,6 +716,14 @@ def _validate_request(request: BackupRequest) -> None:
     if not isinstance(request.pg_dump_timeout, int) or request.pg_dump_timeout <= 0:
         raise BackupError("PG_DUMP_TIMEOUT_INVALID", "pg_dump timeout must be positive")
     _require_uuid(request.source.instance_id, field_name="instanceId")
+    if request.source.instance_name is not None and (
+        not isinstance(request.source.instance_name, str)
+        or not request.source.instance_name
+        or len(request.source.instance_name.encode("utf-8")) > 128
+    ):
+        raise BackupError(
+            "BACKUP_SOURCE_IDENTITY_INVALID", "source instance name is invalid"
+        )
     _require_sha256(
         request.source.source_locator_digest, field_name="sourceLocatorDigest"
     )
@@ -750,6 +834,20 @@ def _validate_request(request: BackupRequest) -> None:
             },
             label="r2Reference",
         )
+        if (reference.inventory_timestamp is None) != (
+            reference.coverage_classification is None
+        ):
+            raise BackupError(
+                "BACKUP_R2_REFERENCE_INVALID",
+                "R2 coverage evidence is incomplete",
+            )
+        if reference.inventory_timestamp is not None:
+            _parse_utc(reference.inventory_timestamp, field_name="inventoryTimestamp")
+            if reference.coverage_classification != "AUTHORITATIVE_DATABASE_COMPLETE":
+                raise BackupError(
+                    "BACKUP_EXTERNAL_MEDIA_COVERAGE_UNPROVEN",
+                    "R2 reference coverage is not authoritative and complete",
+                )
     physical_identities = [
         (reference.endpoint_identity, reference.bucket)
         for reference in request.r2_references
@@ -758,6 +856,14 @@ def _validate_request(request: BackupRequest) -> None:
         raise BackupError(
             "BACKUP_R2_REFERENCE_INVALID", "R2 physical identities are duplicated"
         )
+    private_members = tuple(request.registered_private_members)
+    if len(private_members) != len(set(private_members)):
+        raise BackupError(
+            "BACKUP_PRIVATE_REGISTRY_INVALID", "private member registry is duplicated"
+        )
+    for relative in private_members:
+        _canonical_relative_path(relative)
+        _validate_source_relative("filesystem/private", relative)
 
 
 def _preflight_sources(
@@ -774,10 +880,12 @@ def _preflight_sources(
                 "BACKUP_SOURCE_OVERLAP", "backup destination overlaps a source root"
             )
         entries = _enumerate_source_files(absolute)
-        if filesystem_source.logical_root == "filesystem/private" and entries:
+        if filesystem_source.logical_root == "filesystem/private" and {
+            relative for relative, _path, _mode in entries
+        } != set(request.registered_private_members):
             raise BackupError(
                 "BACKUP_SOURCE_NOT_ALLOWED",
-                "no private member is registered for Backup Format v1",
+                "private source differs from its closed member registry",
             )
         for relative, file_path, _ in entries:
             _validate_source_relative(filesystem_source.logical_root, relative)
@@ -1105,6 +1213,14 @@ def _build_media_metadata(
             ),
             "coverage": "reference-dependent",
             "remoteBytesCopied": False,
+            **(
+                {
+                    "inventoryTimestamp": item.inventory_timestamp,
+                    "coverageClassification": item.coverage_classification,
+                }
+                if item.inventory_timestamp is not None
+                else {}
+            ),
         }
         for item in sorted(
             request.r2_references,
@@ -1187,17 +1303,38 @@ def _verify_media_metadata(
         )
     physical_identities: set[tuple[str, str]] = set()
     for reference in external:
-        if not isinstance(reference, dict) or set(reference) != {
+        legacy_fields = {
             "backendType",
             "endpointIdentity",
             "bucket",
             "objectKeys",
             "coverage",
             "remoteBytesCopied",
+        }
+        extended_fields = legacy_fields | {
+            "inventoryTimestamp",
+            "coverageClassification",
+        }
+        if not isinstance(reference, dict) or frozenset(reference) not in {
+            frozenset(legacy_fields),
+            frozenset(extended_fields),
         }:
             raise BackupError(
                 "BACKUP_MANIFEST_INVALID", "external media reference is invalid"
             )
+        if set(reference) == extended_fields:
+            _parse_utc(
+                reference.get("inventoryTimestamp"),
+                field_name="inventoryTimestamp",
+            )
+            if (
+                reference.get("coverageClassification")
+                != "AUTHORITATIVE_DATABASE_COMPLETE"
+            ):
+                raise BackupError(
+                    "BACKUP_MANIFEST_INVALID",
+                    "external media coverage classification is invalid",
+                )
         if (
             reference.get("backendType") != "r2"
             or not isinstance(reference.get("endpointIdentity"), str)
@@ -1478,7 +1615,7 @@ def _verify_tree(
     ):
         _validate_non_secret_json(value, label=label)
     source_metadata = manifest["source"]
-    if not isinstance(source_metadata, dict) or set(source_metadata) != {
+    legacy_source_fields = {
         "instanceId",
         "sourceLocatorDigest",
         "release",
@@ -1486,9 +1623,19 @@ def _verify_tree(
         "databaseContract",
         "configurationContract",
         "pluginSdkApis",
+    }
+    if not isinstance(source_metadata, dict) or frozenset(source_metadata) not in {
+        frozenset(legacy_source_fields),
+        frozenset(legacy_source_fields | {"instanceName"}),
     }:
         raise BackupError("BACKUP_MANIFEST_INVALID", "source identity is invalid")
     _require_uuid(source_metadata.get("instanceId"), field_name="instanceId")
+    if "instanceName" in source_metadata and (
+        not isinstance(source_metadata["instanceName"], str)
+        or not source_metadata["instanceName"]
+        or len(source_metadata["instanceName"].encode("utf-8")) > 128
+    ):
+        raise BackupError("BACKUP_MANIFEST_INVALID", "source instance name is invalid")
     _require_sha256(
         source_metadata.get("sourceLocatorDigest"), field_name="sourceLocatorDigest"
     )
@@ -2416,7 +2563,7 @@ def _mark_incomplete(staging: Path) -> None:
 
 
 def _source_identity_json(source: BackupSourceIdentity) -> dict[str, Any]:
-    return {
+    payload = {
         "instanceId": source.instance_id,
         "sourceLocatorDigest": source.source_locator_digest,
         "release": dict(source.release),
@@ -2425,6 +2572,9 @@ def _source_identity_json(source: BackupSourceIdentity) -> dict[str, Any]:
         "configurationContract": dict(source.configuration_contract),
         "pluginSdkApis": sorted(source.plugin_sdk_apis),
     }
+    if source.instance_name is not None:
+        payload["instanceName"] = source.instance_name
+    return payload
 
 
 def _validate_non_secret_json(

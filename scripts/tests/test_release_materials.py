@@ -80,6 +80,7 @@ class InstallerMaterialsTests(unittest.TestCase):
             names = [member.name for member in members]
             self.assertEqual(names, sorted(names))
             self.assertIn("deploy/docker-compose.yml", names)
+            self.assertIn("deploy/updater/animemo", names)
             self.assertIn("deploy/updater/animemo-updater", names)
             launcher = next(
                 member
@@ -87,6 +88,12 @@ class InstallerMaterialsTests(unittest.TestCase):
                 if member.name == "deploy/updater/animemo-updater"
             )
             self.assertEqual(launcher.mode, 0o755)
+            operator = next(
+                member for member in members if member.name == "deploy/updater/animemo"
+            )
+            self.assertEqual(operator.mode, 0o755)
+            self.assertIn("durability/backup_cli.py", names)
+            self.assertIn("durability/backup_production.py", names)
             self.assertIn("durability/managed_config.py", names)
             self.assertIn("release/contract.py", names)
             self.assertIn("updater/source.py", names)
@@ -136,6 +143,7 @@ class InstallerMaterialsTests(unittest.TestCase):
             fixed = (
                 "deploy/docker-compose.yml",
                 "deploy/install-updater.sh",
+                "deploy/updater/animemo",
                 "deploy/updater/animemo-updater",
                 "deploy/updater/animemo-updater@.service",
                 "deploy/updater/animemo-updater.sysusers.conf",
@@ -185,6 +193,7 @@ class InstallerMaterialsTests(unittest.TestCase):
             fixed = (
                 "deploy/docker-compose.yml",
                 "deploy/install-updater.sh",
+                "deploy/updater/animemo",
                 "deploy/updater/animemo-updater",
                 "deploy/updater/animemo-updater@.service",
                 "deploy/updater/animemo-updater.sysusers.conf",

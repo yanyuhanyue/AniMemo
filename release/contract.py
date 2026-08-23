@@ -34,6 +34,18 @@ DEPLOYMENT_CONTRACT_PATHS = (
     "deploy/docker-compose.yml",
     "updater/docker-compose.runtime.yml",
 )
+PRODUCTION_BACKUP_CONTRACT = {
+    "schemaVersion": 1,
+    "quiescenceMethod": "compose-graceful-writer-stop/v1",
+    "writerServices": ["api"],
+    "allowedRunningServices": ["postgres", "redis", "web"],
+    "privateRegistry": "backup-members.json",
+    "updaterStateMembers": [
+        "ownership.json",
+        "releases/release-slots.json",
+        "runtime.json",
+    ],
+}
 SCHEMA_PATH = Path(__file__).with_name("release-manifest.schema.json")
 STABLE_TAG = re.compile(
     r"^v(?P<base>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$"
@@ -633,6 +645,7 @@ def build_manifest(
             "profile": DEPLOYMENT_PROFILE,
             "contractSha256": deployment_contract_sha256,
             "files": copy.deepcopy(deployment_files),
+            "backup": copy.deepcopy(PRODUCTION_BACKUP_CONTRACT),
             "installerMaterials": {
                 "name": INSTALLER_MATERIALS_NAME,
                 "sha256": f"sha256:{materials_digest}",
@@ -750,6 +763,8 @@ def validate_manifest(
         raise ReleaseContractError(
             "Deployment contract files are incomplete or unordered"
         )
+    if "backup" in deployment and deployment["backup"] != PRODUCTION_BACKUP_CONTRACT:
+        raise ReleaseContractError("Production Backup deployment contract is invalid")
 
     database = payload["compatibility"]["database"]
     migration = database["migration"]

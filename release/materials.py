@@ -47,6 +47,7 @@ INITIAL_TRUST_KIT_FILES = frozenset(
 _FIXED_DEPLOYMENT_FILES = (
     "deploy/docker-compose.yml",
     "deploy/install-updater.sh",
+    "deploy/updater/animemo",
     "deploy/updater/animemo-updater",
     "deploy/updater/animemo-updater@.service",
     "deploy/updater/animemo-updater.sysusers.conf",
@@ -629,6 +630,7 @@ def _mode_for(relative: str) -> int:
     return (
         0o755
         if relative.endswith(".sh")
+        or relative == "deploy/updater/animemo"
         or relative == "deploy/updater/animemo-updater"
         or relative == OFFLINE_RELEASE_VERIFIER_MATERIAL
         else 0o644

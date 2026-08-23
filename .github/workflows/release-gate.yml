@@ -139,6 +139,12 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: durability/requirements.txt
+      - run: python -m pip install -r durability/requirements.txt
       - name: Create ephemeral production-like environment
         shell: bash
         run: |
@@ -201,6 +207,10 @@ jobs:
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps migration
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps bootstrap
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --no-deps api web
+      - name: Run real production PostgreSQL Backup adapter create and verify
+        env:
+          ANIMEMO_RUN_PRODUCTION_BACKUP_DOCKER_TEST: "1"
+        run: python -m unittest scripts.tests.test_production_backup_postgres.RealProductionPostgresBackupTests -v
       - name: Run health and frontend smoke checks
         shell: bash
         run: |
