@@ -264,9 +264,10 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("ANIMEMO_DATA_ROOT=$data_root", release)
         self.assertIn("ANIMEMO_TEST_DATA_ROOT=$data_root", release)
         self.assertIn("test -f deploy/docker-compose.build.yml", release)
+        self.assertIn("test -f updater/docker-compose.runtime.yml", release)
         self.assertNotIn('if [[ -f deploy/docker-compose.build.yml ]]; then', release)
         self.assertIn(
-            "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",
+            "COMPOSE_FILE=deploy/docker-compose.yml:updater/docker-compose.runtime.yml:deploy/docker-compose.build.yml",
             release,
         )
         compose = "docker compose --project-name animemo-release-gate --env-file .ci-runtime.env"

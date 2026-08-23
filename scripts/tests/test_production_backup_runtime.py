@@ -238,7 +238,9 @@ class ProductionBackupRuntimeTests(unittest.TestCase):
 
     def reference_protection(self):
         path = self.keys / "reference.json"
-        path.write_bytes(  # lgtm[py/clear-text-storage-sensitive-data]
+        # The fixture stores only public schema field names, never a secret value.
+        # lgtm[py/clear-text-storage-sensitive-data]
+        path.write_bytes(
             canonical_json_bytes(
                 {
                     "provider": "operator-secret-store",

@@ -336,6 +336,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         )
 
         self.assertIn("test -f deploy/docker-compose.build.yml", workflow)
+        self.assertIn("test -f updater/docker-compose.runtime.yml", workflow)
         self.assertIn("python -m pip install -r durability/requirements.txt", workflow)
         self.assertIn(
             'install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater',
@@ -343,7 +344,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         )
         self.assertNotIn("if [[ -f deploy/docker-compose.build.yml ]]; then", workflow)
         self.assertIn(
-            "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",
+            "COMPOSE_FILE=deploy/docker-compose.yml:updater/docker-compose.runtime.yml:deploy/docker-compose.build.yml",
             workflow,
         )
         ready = workflow.index("up -d --wait --wait-timeout 120 postgres redis")

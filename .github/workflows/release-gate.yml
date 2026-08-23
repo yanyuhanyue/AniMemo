@@ -180,6 +180,11 @@ jobs:
           ANIMEMO_LISTEN_HOST=127.0.0.1
           ANIMEMO_LISTEN_PORT=8088
           ANIMEMO_CONFIG_REVISION=11111111-1111-4111-8111-111111111111
+          ANIMEMO_RELEASE_VERSION=v1.1.0-rc.0
+          ANIMEMO_RELEASE_COMMIT=${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
+          ANIMEMO_RELEASE_CHANNEL=rc
+          ANIMEMO_DATABASE_CONTRACT=animemo.database/v1
+          ANIMEMO_CONFIGURATION_CONTRACT=animemo.configuration/v1
           ANIMEMO_INSTANCE_NAME=release-gate
           ANIMEMO_INSTANCE_ID=12345678-1234-4234-9234-123456789abc
           ANIMEMO_COMPOSE_PROJECT=animemo-release-gate
@@ -199,7 +204,8 @@ jobs:
         shell: bash
         run: |
           test -f deploy/docker-compose.build.yml
-          echo "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml" >> "$GITHUB_ENV"
+          test -f updater/docker-compose.runtime.yml
+          echo "COMPOSE_FILE=deploy/docker-compose.yml:updater/docker-compose.runtime.yml:deploy/docker-compose.build.yml" >> "$GITHUB_ENV"
       - name: Validate Compose configuration
         run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env config
       - name: Build production images
