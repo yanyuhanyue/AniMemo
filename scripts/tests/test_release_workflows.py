@@ -1926,11 +1926,6 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 mutation_indices.append(index)
         self.assertTrue(mutation_indices)
         self.assertTrue(all(index > freshness_index for index in mutation_indices))
-        external_fragments = tuple(
-            fragment
-            for fragment in mutation_fragments
-            if fragment != "python -m release.cli build-portable"
-        )
         for job_name, job in release["jobs"].items():
             if job_name == "publish":
                 continue
@@ -1941,7 +1936,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     step.get("with", {}).get("push", "")
                 ).lower() == "true"
                 self.assertFalse(
-                    any(fragment in body for fragment in external_fragments)
+                    any(fragment in body for fragment in mutation_fragments)
                     or action.startswith("actions/attest@")
                     or action_push,
                     f"external mutation bypass in job {job_name}",
