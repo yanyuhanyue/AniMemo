@@ -44,6 +44,18 @@ from .materials import (
     reject_duplicate_json_keys,
     verify_prepublication_material_identity,
 )
+from .metadata_freshness import WORKFLOW_PATH as METADATA_FRESHNESS_WORKFLOW_PATH
+from .metadata_freshness import (
+    FreshnessExpectation,
+    FreshnessRunIdentity,
+    GitHubAssociatedPullSource,
+    MetadataFreshnessError,
+    collect_metadata_freshness,
+    extract_metadata_freshness_artifact,
+    validate_freshness_run_metadata,
+    validate_qualification_run_metadata,
+    verify_metadata_freshness_artifact,
+)
 from .mirror import (
     MirrorError,
     build_offline_pair_mirror_plan_from_files,
@@ -440,6 +452,68 @@ def _extract_qualification_artifact(args) -> dict[str, object]:
         args.destination,
         qualification_run_id=args.qualification_run_id,
         expected_sha256=args.expected_sha256,
+    )
+
+
+def _collect_metadata_freshness(args) -> dict[str, object]:
+    token = os.environ.get("GITHUB_TOKEN", "")
+    identity = FreshnessRunIdentity(
+        workflow_run_id=args.workflow_run_id,
+        workflow_attempt=args.workflow_attempt,
+        workflow_path=METADATA_FRESHNESS_WORKFLOW_PATH,
+        workflow_sha=args.workflow_sha,
+        candidate_sha=args.candidate_sha,
+        candidate_tree=args.candidate_tree,
+        qualification_run_id=args.qualification_run_id,
+        qualification_artifact_id=args.qualification_artifact_id,
+    )
+    return collect_metadata_freshness(
+        repository_root=args.repository_root,
+        qualification_directory=args.qualification_directory,
+        output_directory=args.output_directory,
+        identity=identity,
+        source=GitHubAssociatedPullSource(token),
+    )
+
+
+def _extract_metadata_freshness_artifact(args) -> dict[str, object]:
+    return extract_metadata_freshness_artifact(
+        args.archive,
+        args.destination,
+        expected_sha256=args.expected_sha256,
+    )
+
+
+def _verify_metadata_freshness(args) -> dict[str, object]:
+    return verify_metadata_freshness_artifact(
+        artifact_directory=args.artifact_directory,
+        qualification_directory=args.qualification_directory,
+        expectation=FreshnessExpectation(
+            workflow_run_id=args.expected_workflow_run_id,
+            candidate_sha=args.expected_candidate_sha,
+            candidate_tree=args.expected_candidate_tree,
+            qualification_run_id=args.expected_qualification_run_id,
+            qualification_artifact_id=args.expected_qualification_artifact_id,
+        ),
+    )
+
+
+def _validate_qualification_run_metadata(args) -> dict[str, object]:
+    return validate_qualification_run_metadata(
+        run_metadata=_read_json(args.run_metadata),
+        jobs_metadata=_read_json(args.jobs_metadata),
+        artifacts_metadata=_read_json(args.artifacts_metadata),
+        expected_run_id=args.expected_run_id,
+        expected_sha=args.expected_sha,
+    )
+
+
+def _validate_freshness_run_metadata(args) -> dict[str, object]:
+    return validate_freshness_run_metadata(
+        run_metadata=_read_json(args.run_metadata),
+        artifacts_metadata=_read_json(args.artifacts_metadata),
+        expected_run_id=args.expected_run_id,
+        expected_sha=args.expected_sha,
     )
 
 
@@ -944,6 +1018,76 @@ def _parser() -> argparse.ArgumentParser:
     qualification_artifact.add_argument("--expected-sha256", required=True)
     qualification_artifact.set_defaults(handler=_extract_qualification_artifact)
 
+    freshness_collection = subparsers.add_parser("collect-metadata-freshness")
+    freshness_collection.add_argument("--repository-root", type=Path, required=True)
+    freshness_collection.add_argument(
+        "--qualification-directory", type=Path, required=True
+    )
+    freshness_collection.add_argument("--output-directory", type=Path, required=True)
+    freshness_collection.add_argument("--workflow-run-id", type=int, required=True)
+    freshness_collection.add_argument("--workflow-attempt", type=int, required=True)
+    freshness_collection.add_argument("--workflow-sha", required=True)
+    freshness_collection.add_argument("--candidate-sha", required=True)
+    freshness_collection.add_argument("--candidate-tree", required=True)
+    freshness_collection.add_argument(
+        "--qualification-run-id", type=int, required=True
+    )
+    freshness_collection.add_argument(
+        "--qualification-artifact-id", type=int, required=True
+    )
+    freshness_collection.set_defaults(handler=_collect_metadata_freshness)
+
+    freshness_artifact = subparsers.add_parser(
+        "extract-metadata-freshness-artifact"
+    )
+    freshness_artifact.add_argument("--archive", type=Path, required=True)
+    freshness_artifact.add_argument("--destination", type=Path, required=True)
+    freshness_artifact.add_argument("--expected-sha256", required=True)
+    freshness_artifact.set_defaults(handler=_extract_metadata_freshness_artifact)
+
+    freshness_verify = subparsers.add_parser("verify-metadata-freshness")
+    freshness_verify.add_argument(
+        "--artifact-directory", type=Path, required=True
+    )
+    freshness_verify.add_argument(
+        "--qualification-directory", type=Path, required=True
+    )
+    freshness_verify.add_argument(
+        "--expected-workflow-run-id", type=int, required=True
+    )
+    freshness_verify.add_argument("--expected-candidate-sha", required=True)
+    freshness_verify.add_argument("--expected-candidate-tree", required=True)
+    freshness_verify.add_argument(
+        "--expected-qualification-run-id", type=int, required=True
+    )
+    freshness_verify.add_argument(
+        "--expected-qualification-artifact-id", type=int, required=True
+    )
+    freshness_verify.set_defaults(handler=_verify_metadata_freshness)
+
+    qualification_metadata = subparsers.add_parser(
+        "validate-qualification-run-metadata"
+    )
+    qualification_metadata.add_argument("--run-metadata", type=Path, required=True)
+    qualification_metadata.add_argument("--jobs-metadata", type=Path, required=True)
+    qualification_metadata.add_argument(
+        "--artifacts-metadata", type=Path, required=True
+    )
+    qualification_metadata.add_argument("--expected-run-id", type=int, required=True)
+    qualification_metadata.add_argument("--expected-sha", required=True)
+    qualification_metadata.set_defaults(
+        handler=_validate_qualification_run_metadata
+    )
+
+    freshness_metadata = subparsers.add_parser("validate-freshness-run-metadata")
+    freshness_metadata.add_argument("--run-metadata", type=Path, required=True)
+    freshness_metadata.add_argument(
+        "--artifacts-metadata", type=Path, required=True
+    )
+    freshness_metadata.add_argument("--expected-run-id", type=int, required=True)
+    freshness_metadata.add_argument("--expected-sha", required=True)
+    freshness_metadata.set_defaults(handler=_validate_freshness_run_metadata)
+
     trust_bootstrap = subparsers.add_parser("build-initial-trust-kit")
     trust_bootstrap.add_argument("--verifier", type=Path, required=True)
     trust_bootstrap.add_argument("--output", type=Path, required=True)
@@ -1114,6 +1258,15 @@ def main(argv: list[str] | None = None) -> int:
         args = _parser().parse_args(argv)
         payload = args.handler(args)
     except PresentationError as error:
+        print(
+            json.dumps(
+                {"code": error.code, "detail": str(error)},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    except MetadataFreshnessError as error:
         print(
             json.dumps(
                 {"code": error.code, "detail": str(error)},

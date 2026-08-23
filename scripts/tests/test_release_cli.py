@@ -60,6 +60,55 @@ class ReleaseCliTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, completed.stdout)
 
+    def test_metadata_freshness_cli_does_not_accept_operator_identity_overrides(self):
+        completed = self.run_cli("collect-metadata-freshness", "--help")
+        for argument in (
+            "--repository-root",
+            "--qualification-directory",
+            "--output-directory",
+            "--workflow-run-id",
+            "--workflow-attempt",
+            "--workflow-sha",
+            "--candidate-sha",
+            "--candidate-tree",
+            "--qualification-run-id",
+            "--qualification-artifact-id",
+        ):
+            self.assertIn(argument, completed.stdout)
+        for forbidden in (
+            "--repository ",
+            "--api-url",
+            "--workflow-path",
+            "--release-tag",
+            "--release-notes-identity",
+            "--markdown-sha",
+            "--freshness-passed",
+        ):
+            self.assertNotIn(forbidden, completed.stdout)
+
+        verification = self.run_cli("verify-metadata-freshness", "--help")
+        self.assertIn("--expected-workflow-run-id", verification.stdout)
+        self.assertIn("--expected-qualification-artifact-id", verification.stdout)
+        self.assertNotIn("--allow-expired", verification.stdout)
+        self.assertNotIn("--override", verification.stdout)
+
+        qualification = self.run_cli(
+            "validate-qualification-run-metadata", "--help"
+        )
+        for argument in (
+            "--run-metadata",
+            "--jobs-metadata",
+            "--artifacts-metadata",
+            "--expected-run-id",
+            "--expected-sha",
+        ):
+            self.assertIn(argument, qualification.stdout)
+        freshness = self.run_cli("validate-freshness-run-metadata", "--help")
+        self.assertIn("--run-metadata", freshness.stdout)
+        self.assertIn("--artifacts-metadata", freshness.stdout)
+        for forbidden in ("--repository", "--api-url", "--allow-expired", "--override"):
+            self.assertNotIn(forbidden, qualification.stdout + freshness.stdout)
+
     def test_resolve_version_emits_json_and_github_outputs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

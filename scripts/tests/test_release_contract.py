@@ -289,6 +289,7 @@ class VersionResolutionTests(unittest.TestCase):
                 "v1.1.0-rc.5",
             ],
         )
+
         self.assertTrue(
             all(
                 item["status"] == "ABORTED_PARTIAL_GHCR_TRANSACTION"
@@ -436,6 +437,23 @@ class VersionResolutionTests(unittest.TestCase):
             {"targetVersion": "v1.1.0", "releaseTag": "v1.1.0-rc.6", "sequence": 6},
         )
         self.assertEqual(previous_stable_tag(["v1.0.0"], target="v1.1.0"), "v1.0.0")
+
+    def test_rc9_sequence_remains_next_when_rc8_is_the_latest_real_tag(self):
+        root = Path(__file__).parents[2]
+        reservations = json.loads(
+            (root / "release" / "publication-reservations.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        resolved = resolve_prerelease(
+            tags=["v1.0.0", "v1.1.0-rc.8"],
+            bump="minor",
+            channel="rc",
+            publication_reservations=reservations,
+        )
+        self.assertEqual(resolved["targetVersion"], "v1.1.0")
+        self.assertEqual(resolved["releaseTag"], "v1.1.0-rc.9")
+        self.assertEqual(resolved["sequence"], 9)
 
     def test_publication_reservation_validation_fails_closed(self):
         valid = {
@@ -742,6 +760,25 @@ class ManifestContractTests(unittest.TestCase):
 
 
 class ProvenancePlanTests(unittest.TestCase):
+    def test_release_contract_closes_trusted_freshness_ttl_and_local_authority(self):
+        root = Path(__file__).resolve().parents[2]
+        contract = (root / "docs" / "release-contract-v1.md").read_text(
+            encoding="utf-8"
+        )
+        for term in (
+            "Phase A `Qualification`",
+            "Phase F `Release Metadata Freshness`",
+            "Phase B `Publish`",
+            "至少相隔 60 秒",
+            "不得超过 15 分钟",
+            "METADATA_FRESHNESS_EXPIRED",
+            "NON_AUTHORITY_DIAGNOSTIC",
+            "TRANSPORT_AND_QUALIFICATION_EVIDENCE",
+            "GitHub Immutable Release",
+        ):
+            self.assertIn(term, contract)
+        self.assertIn("不得回退到 Qualification 或任何本地结果", contract)
+
     def test_dry_run_plan_binds_both_images_to_commit_and_workflow(self):
         plan = build_provenance_plan(
             version="v1.0.0-rc.1",
