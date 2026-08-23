@@ -30,9 +30,9 @@ from release.metadata_freshness import (
 from release.notes import build_release_notes, render_release_notes
 from scripts.release_qualification import REQUIRED_GATES, build_qualification_evidence
 
-CANDIDATE = "a" * 40
-TREE = "b" * 40
-BASE = "c" * 40
+CANDIDATE = "e65f9beb0b5a19be2b4562206b38bb6d00adff7e"
+TREE = "b21598e5352654985a17146b3272775df0694fbe"
+BASE = "225c47e858d56e449869c32ebb7102107c151d61"
 COMMIT_ONE = "d" * 40
 COMMIT_TWO = "e" * 40
 QUALIFICATION_RUN_ID = 123
@@ -288,11 +288,47 @@ class MetadataFreshnessTests(unittest.TestCase):
         with self.assertRaisesRegex(MetadataFreshnessError, "snapshots differ"):
             self._collect(source)
 
-    def test_current_identity_or_population_different_from_qualification_fails(self) -> None:
+    def test_current_identity_different_from_qualification_fails(self) -> None:
         source = StubSource()
         source.titles = {"A": "新标题", "B": "新标题"}
         with self.assertRaisesRegex(MetadataFreshnessError, "differs from qualification"):
             self._collect(source)
+
+    def test_population_different_from_qualification_fails(self) -> None:
+        class ExtraPullSource(StubSource):
+            def fetch(self, **kwargs) -> FetchResponse:
+                response = super().fetch(**kwargs)
+                if kwargs["commit"] == COMMIT_ONE and response.pulls is not None:
+                    response.pulls.append(_pull("新增发布条目", number=46))
+                return response
+
+        with self.assertRaisesRegex(MetadataFreshnessError, "differs from qualification"):
+            self._collect(ExtraPullSource())
+
+    def test_historical_qualification_passes_old_main_and_not_a_new_main(self) -> None:
+        _, clock = self._collect()
+        self.assertEqual(
+            verify_metadata_freshness_artifact(
+                artifact_directory=self.output,
+                qualification_directory=self.qualification,
+                expectation=self.expectation,
+                verified_at=clock.now(),
+            )["candidateSha"],
+            "e65f9beb0b5a19be2b4562206b38bb6d00adff7e",
+        )
+        with self.assertRaises(MetadataFreshnessError):
+            verify_metadata_freshness_artifact(
+                artifact_directory=self.output,
+                qualification_directory=self.qualification,
+                expectation=FreshnessExpectation(
+                    workflow_run_id=FRESHNESS_RUN_ID,
+                    candidate_sha="2" * 40,
+                    candidate_tree="3" * 40,
+                    qualification_run_id=QUALIFICATION_RUN_ID,
+                    qualification_artifact_id=QUALIFICATION_ARTIFACT_ID,
+                ),
+                verified_at=clock.now(),
+            )
 
     def test_transient_failure_restarts_the_whole_snapshot(self) -> None:
         source = StubSource()
@@ -514,6 +550,42 @@ class GitHubAdapterTests(unittest.TestCase):
         self.assertEqual(response.error_code, "SECONDARY_RATE_LIMIT")
         self.assertEqual(response.retry_after_seconds, 7)
         self.assertNotIn("secret", json.dumps(response.diagnostic))
+
+    def test_only_502_503_and_504_server_errors_are_retryable(self) -> None:
+        for status, expected in ((500, False), (502, True), (503, True), (504, True)):
+            with self.subTest(status=status):
+                def opener(*_args, status_code=status, **_kwargs):
+                    raise urllib.error.HTTPError(
+                        "https://api.github.com/fixed",
+                        status_code,
+                        "server error",
+                        {"X-GitHub-Request-Id": "request-id"},
+                        io.BytesIO(b'{"message":"server error"}'),
+                    )
+
+                response = GitHubAssociatedPullSource(
+                    "secret", opener=opener
+                ).fetch(
+                    repository="yanyuhanyue/AniMemo",
+                    commit=COMMIT_ONE,
+                    snapshot="A",
+                    attempt=1,
+                )
+                self.assertEqual(response.error_code, "SERVER_ERROR")
+                self.assertIs(response.retryable, expected)
+
+    def test_unknown_transport_failure_is_not_mislabeled_as_retryable_eof(self) -> None:
+        def opener(*_args, **_kwargs):
+            raise urllib.error.URLError("certificate verification failed")
+
+        response = GitHubAssociatedPullSource("secret", opener=opener).fetch(
+            repository="yanyuhanyue/AniMemo",
+            commit=COMMIT_ONE,
+            snapshot="A",
+            attempt=1,
+        )
+        self.assertEqual(response.error_code, "TRANSPORT_OTHER")
+        self.assertIs(response.retryable, False)
 
 
 if __name__ == "__main__":

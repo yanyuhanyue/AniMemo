@@ -150,6 +150,7 @@ RETRYABLE_ERROR_CODES = frozenset(
 )
 
 ERROR_CODES = RETRYABLE_ERROR_CODES | {
+    "TRANSPORT_OTHER",
     "PRIMARY_RATE_LIMIT",
     "AUTHENTICATION_FAILURE",
     "PERMISSION_FAILURE",
@@ -170,13 +171,17 @@ class MetadataFreshnessError(ValueError):
         *,
         code: str = "RELEASE_NOTES_CONTRACT_FAILURE",
         retry_after_seconds: int | None = None,
+        retryable: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retry_after_seconds = retry_after_seconds
+        self._retryable = retryable
 
     @property
     def retryable(self) -> bool:
+        if self._retryable is not None:
+            return self._retryable
         return self.code in RETRYABLE_ERROR_CODES
 
 
@@ -243,6 +248,7 @@ class FetchResponse:
     diagnostic: dict[str, Any]
     error_code: str | None = None
     retry_after_seconds: int | None = None
+    retryable: bool | None = None
 
 
 class AssociatedPullSource(Protocol):
@@ -378,7 +384,7 @@ def _transport_error_code(error: BaseException) -> str:
         return "TRANSPORT_EOF"
     if "timed out" in text or "timeout" in text:
         return "TRANSPORT_TIMEOUT"
-    return "TRANSPORT_EOF"
+    return "TRANSPORT_OTHER"
 
 
 class GitHubAssociatedPullSource:
@@ -486,6 +492,16 @@ class GitHubAssociatedPullSource:
             diagnostic=diagnostic,
             error_code=error_code,
             retry_after_seconds=_retry_after(headers),
+            retryable=(
+                error_code
+                in {
+                    "TRANSPORT_CONNECTION_RESET",
+                    "TRANSPORT_EOF",
+                    "TRANSPORT_TIMEOUT",
+                    "SECONDARY_RATE_LIMIT",
+                }
+                or (error_code == "SERVER_ERROR" and status_code in {502, 503, 504})
+            ),
         )
 
 
@@ -774,6 +790,7 @@ def _complete_snapshot(
                 f"associated-pulls request failed with {response.error_code}",
                 code=response.error_code,
                 retry_after_seconds=response.retry_after_seconds,
+                retryable=response.retryable,
             )
         if response.pulls is None:
             raise MetadataFreshnessError(
@@ -833,7 +850,7 @@ def _collect_with_retry(
             if not error.retryable or attempt == MAX_COMPLETE_ATTEMPTS:
                 raise
             delay = max(5 * (2 ** (attempt - 1)), error.retry_after_seconds or 0)
-            clock.sleep(min(delay, 120))
+            clock.sleep(delay)
     raise AssertionError("bounded retry loop did not terminate")
 
 

@@ -1852,6 +1852,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("MINIMUM_SNAPSHOT_INTERVAL_SECONDS = 60", module)
         self.assertIn("MAX_COMPLETE_ATTEMPTS = 3", module)
+        self.assertIn('test "$GITHUB_WORKFLOW_SHA" = "$INTENDED_MAIN_SHA"', source)
         self.assertIn('snapshot_label="A"', module)
         self.assertIn('snapshot_label="B"', module)
         self.assertIn("runtime_clock.sleep(MINIMUM_SNAPSHOT_INTERVAL_SECONDS)", module)
@@ -1915,6 +1916,17 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 mutation_indices.append(index)
         self.assertTrue(mutation_indices)
         self.assertTrue(all(index > freshness_index for index in mutation_indices))
+        for job_name, job in release["jobs"].items():
+            if job_name == "publish":
+                continue
+            for step in job.get("steps", []):
+                body = str(step.get("run", ""))
+                action = str(step.get("uses", ""))
+                self.assertFalse(
+                    any(fragment in body for fragment in mutation_fragments)
+                    or action.startswith("actions/attest@"),
+                    f"external mutation bypass in job {job_name}",
+                )
 
     def test_publish_has_no_freshness_fallback_or_manual_override(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(

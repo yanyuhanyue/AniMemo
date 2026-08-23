@@ -289,6 +289,7 @@ class VersionResolutionTests(unittest.TestCase):
                 "v1.1.0-rc.5",
             ],
         )
+
         self.assertTrue(
             all(
                 item["status"] == "ABORTED_PARTIAL_GHCR_TRANSACTION"
@@ -436,6 +437,23 @@ class VersionResolutionTests(unittest.TestCase):
             {"targetVersion": "v1.1.0", "releaseTag": "v1.1.0-rc.6", "sequence": 6},
         )
         self.assertEqual(previous_stable_tag(["v1.0.0"], target="v1.1.0"), "v1.0.0")
+
+    def test_rc9_sequence_remains_next_when_rc8_is_the_latest_real_tag(self):
+        root = Path(__file__).parents[2]
+        reservations = json.loads(
+            (root / "release" / "publication-reservations.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        resolved = resolve_prerelease(
+            tags=["v1.0.0", "v1.1.0-rc.8"],
+            bump="minor",
+            channel="rc",
+            publication_reservations=reservations,
+        )
+        self.assertEqual(resolved["targetVersion"], "v1.1.0")
+        self.assertEqual(resolved["releaseTag"], "v1.1.0-rc.9")
+        self.assertEqual(resolved["sequence"], 9)
 
     def test_publication_reservation_validation_fails_closed(self):
         valid = {
