@@ -30,6 +30,13 @@ from durability.compatibility import (
     DimensionAssessment,
     evaluate_compatibility,
 )
+from durability.instance import (
+    DEFAULT_INSTANCE_NAME,
+    InstanceName,
+    InstanceNamespace,
+    LocatorError,
+    instance_namespace,
+)
 from updater.local_bundle import (
     LOCAL_BUNDLE_POLICY_IDENTITY,
     LocalBundleTransportPolicy,
@@ -38,7 +45,7 @@ from updater.transport import ExplicitTransportPolicy
 
 INSTALL_PLAN_IDENTITY = "animemo.install-plan/v1"
 INSTALL_RESULT_IDENTITY = "animemo.install-result/v1"
-STANDARD_DEPLOYMENT_PROFILE = "v1.1-standard"
+STANDARD_DEPLOYMENT_PROFILE = "v1.1-instance-scoped"
 STANDARD_PLATFORM_PROFILE = "v1.1-standard-linux-amd64"
 _INSTALL_RELEASE_VERSION = re.compile(
     r"^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-rc\.[1-9][0-9]*)?$"
@@ -291,6 +298,7 @@ class InstallRequest:
     mode: InstallerMode
     selector: ReleaseSelector
     public_origin: str
+    instance_name: InstanceName = DEFAULT_INSTANCE_NAME
     transport_source: InstallTransportSource = InstallTransportSource.GITHUB
     local_bundle_payload: Path | None = None
     local_bundle_release_attestation: Path | None = None
@@ -302,6 +310,18 @@ class InstallRequest:
     transport_policy_identity: str = field(init=False)
 
     def __post_init__(self) -> None:
+        try:
+            name = (
+                self.instance_name
+                if isinstance(self.instance_name, InstanceName)
+                else InstanceName(self.instance_name)
+            )
+        except LocatorError:
+            raise InstallerError(
+                "INSTALL_INSTANCE_NAME_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            ) from None
+        object.__setattr__(self, "instance_name", name)
         if type(self.transport_source) is not InstallTransportSource:
             raise InstallerError(
                 "INSTALL_TRANSPORT_SOURCE_INVALID",
@@ -605,6 +625,7 @@ class RestorePlanEvidence:
 @dataclass(frozen=True)
 class InstallPlan:
     operation_id: str
+    instance_name: InstanceName
     mode: InstallerMode
     action: InstallAction
     selector: ReleaseSelector
@@ -624,6 +645,7 @@ class InstallPlan:
         return {
             "planIdentity": INSTALL_PLAN_IDENTITY,
             "operationId": self.operation_id,
+            "instanceName": str(self.instance_name),
             "mode": self.mode.value,
             "action": self.action.value,
             "selector": self.selector.as_dict(),
@@ -648,6 +670,7 @@ class InstallResult:
     outcome: InstallOutcome
     operation_id: str
     mode: InstallerMode
+    instance_name: InstanceName
     instance_id: str
     release: Mapping[str, object]
     state: str
@@ -662,6 +685,7 @@ class InstallResult:
             "outcome": self.outcome.value,
             "operationId": self.operation_id,
             "mode": self.mode.value,
+            "instanceName": str(self.instance_name),
             "instanceId": self.instance_id,
             "release": dict(self.release),
             "state": self.state,
@@ -818,6 +842,7 @@ class Installer:
         fresh: FreshInstallPort,
         restore: RestoreRuntimePort,
         bootstrap_privilege_gate: BootstrapPrivilegeGatePort,
+        namespace: InstanceNamespace | None = None,
     ) -> None:
         self._releases = releases
         self._target = target
@@ -828,9 +853,16 @@ class Installer:
         self._fresh = fresh
         self._restore = restore
         self._bootstrap_privilege_gate = bootstrap_privilege_gate
+        self._namespace = namespace or instance_namespace()
 
     def plan(self, request: InstallRequest) -> InstallPlan:
         """Build a read-only, exact, secret-free operation plan."""
+
+        if request.instance_name != self._namespace.name:
+            raise InstallerError(
+                "INSTALL_INSTANCE_NAMESPACE_MISMATCH",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
 
         release = self._resolve(
             request.selector,
@@ -869,7 +901,7 @@ class Installer:
                 platform=platform,
                 protection=request.restore_protection,
             )
-            instance_id = restore.instance_id
+            instance_id = str(uuid.uuid4())
             action = InstallAction.RESTORE_TO_NEW
             steps = _RESTORE_STEPS
         elif target.classification in {TargetClass.ABSENT, TargetClass.VERIFIED_EMPTY}:
@@ -937,6 +969,7 @@ class Installer:
         body = {
             "planIdentity": INSTALL_PLAN_IDENTITY,
             "operationId": operation_id,
+            "instanceName": str(request.instance_name),
             "mode": request.mode.value,
             "action": action.value,
             "selector": request.selector.as_dict(),
@@ -953,6 +986,7 @@ class Installer:
         }
         plan = InstallPlan(
             operation_id=operation_id,
+            instance_name=request.instance_name,
             mode=request.mode,
             action=action,
             selector=request.selector,
@@ -1414,6 +1448,7 @@ class Installer:
             outcome=outcome,
             operation_id=plan.operation_id,
             mode=plan.mode,
+            instance_name=plan.instance_name,
             instance_id=plan.configuration.instance_id,
             release=plan.release.as_dict(),
             state=state,

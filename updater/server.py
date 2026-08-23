@@ -15,7 +15,7 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 
 class UnixRpcServer:
     def __init__(self, socket_path: Path, agent, *, socket_mode: int = 0o660):
-        self.socket_path = socket_path.resolve()
+        self.socket_path = Path(os.path.abspath(socket_path))
         self.agent = agent
         self.socket_mode = socket_mode
 
@@ -62,7 +62,14 @@ class UnixRpcServer:
         self.socket_path.unlink()
 
     def _listen(self):
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+        socket_parent = self.socket_path.parent
+        try:
+            parent_metadata = socket_parent.lstat()
+        except FileNotFoundError:
+            socket_parent.mkdir(mode=0o750)
+            parent_metadata = socket_parent.lstat()
+        if stat.S_ISLNK(parent_metadata.st_mode) or not stat.S_ISDIR(parent_metadata.st_mode):
+            raise StateError("Updater socket parent must be a real directory")
         self._remove_stale_socket()
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(self.socket_path))

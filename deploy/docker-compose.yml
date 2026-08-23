@@ -1,17 +1,7 @@
-name: animemo
-
 x-api-common: &api-common
   image: ${ANIMEMO_API_IMAGE:?ANIMEMO_API_IMAGE must be an immutable ghcr.io/yanyuhanyue/animemo-api@sha256 digest}
-  env_file:
-    - /run/animemo-updater/managed.env
   environment:
     TZ: Asia/Shanghai
-  volumes:
-    - /data/animemo/plugins:/app/runtime/plugins
-    - /data/animemo/logs:/app/logs
-    - /data/animemo/backups:/app/backups
-    - /data/animemo/media:/data/animemo/media
-    - /data/animemo/private:/app/runtime/private
   labels:
     cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
   networks:
@@ -25,14 +15,11 @@ x-api-common: &api-common
 services:
   postgres:
     image: ${ANIMEMO_POSTGRES_IMAGE:?ANIMEMO_POSTGRES_IMAGE must be an immutable docker.io/library/postgres@sha256 digest}
-    container_name: animemo-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     restart: unless-stopped
-    volumes:
-      - /data/animemo/postgres:/var/lib/postgresql/data
     labels:
       cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
     networks:
@@ -49,11 +36,8 @@ services:
 
   redis:
     image: ${ANIMEMO_REDIS_IMAGE:?ANIMEMO_REDIS_IMAGE must be an immutable docker.io/library/redis@sha256 digest}
-    container_name: animemo-redis
     command: ["redis-server", "--appendonly", "yes"]
     restart: unless-stopped
-    volumes:
-      - /data/animemo/redis:/data
     labels:
       cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
     networks:
@@ -82,15 +66,7 @@ services:
 
   api:
     <<: *api-common
-    container_name: animemo-api
     restart: unless-stopped
-    volumes:
-      - /data/animemo/plugins:/app/runtime/plugins
-      - /data/animemo/logs:/app/logs
-      - /data/animemo/backups:/app/backups
-      - /data/animemo/media:/data/animemo/media
-      - /data/animemo/private:/app/runtime/private
-      - /run/animemo-updater:/run/animemo-updater:rw
     logging:
       driver: json-file
       options: {max-size: "50m", max-file: "7"}
@@ -107,7 +83,6 @@ services:
 
   web:
     image: ${ANIMEMO_WEB_IMAGE:?ANIMEMO_WEB_IMAGE must be an immutable ghcr.io/yanyuhanyue/animemo-web@sha256 digest}
-    container_name: animemo-web
     depends_on:
       api:
         condition: service_healthy
@@ -119,8 +94,6 @@ services:
         published: ${ANIMEMO_LISTEN_PORT:?ANIMEMO_LISTEN_PORT is required}
         host_ip: ${ANIMEMO_LISTEN_HOST:?ANIMEMO_LISTEN_HOST is required}
         protocol: tcp
-    volumes:
-      - /data/animemo/media:/var/www/animemo-data/media:ro
     labels:
       cc.animemo.config-revision: ${ANIMEMO_CONFIG_REVISION:?ANIMEMO_CONFIG_REVISION is required}
     networks:
@@ -134,7 +107,3 @@ services:
 
 networks:
   animemo:
-    name: animemo
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16

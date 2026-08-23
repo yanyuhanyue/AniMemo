@@ -171,14 +171,20 @@ jobs:
           ANIMEMO_LISTEN_HOST=127.0.0.1
           ANIMEMO_LISTEN_PORT=8088
           ANIMEMO_CONFIG_REVISION=11111111-1111-4111-8111-111111111111
+          ANIMEMO_INSTANCE_NAME=release-gate
+          ANIMEMO_INSTANCE_ID=12345678-1234-4234-9234-123456789abc
+          ANIMEMO_COMPOSE_PROJECT=animemo-release-gate
+          ANIMEMO_MANAGED_ENV_PATH=/run/animemo-updater/release-gate/managed.env
+          ANIMEMO_UPDATER_RUNTIME_ROOT=/run/animemo-updater/release-gate
+          ANIMEMO_DATA_ROOT=$data_root
           ANIMEMO_TEST_DATA_ROOT=$data_root
           ANIMEMO_API_IMAGE=animemo-api:release-gate
           ANIMEMO_WEB_IMAGE=animemo-web:release-gate
           ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
           ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
           EOF
-          sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater
-          sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/managed.env
+          sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater/release-gate
+          sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/release-gate/managed.env
           echo "RELEASE_GATE_DATA_ROOT=$data_root" >> "$GITHUB_ENV"
       - name: Select candidate Compose contract
         shell: bash
@@ -186,15 +192,15 @@ jobs:
           test -f deploy/docker-compose.build.yml
           echo "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml" >> "$GITHUB_ENV"
       - name: Validate Compose configuration
-        run: docker compose --env-file .ci-runtime.env config
+        run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env config
       - name: Build production images
-        run: docker compose --env-file .ci-runtime.env build api web
+        run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env build api web
       - name: Start production-like stack
         run: |
-          docker compose --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis
-          docker compose --env-file .ci-runtime.env run --rm --no-deps migration
-          docker compose --env-file .ci-runtime.env run --rm --no-deps bootstrap
-          docker compose --env-file .ci-runtime.env up -d --no-deps api web
+          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis
+          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps migration
+          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps bootstrap
+          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --no-deps api web
       - name: Run health and frontend smoke checks
         shell: bash
         run: |
@@ -203,13 +209,13 @@ jobs:
               break
             fi
             if [[ "$attempt" == 30 ]]; then
-              docker compose --env-file .ci-runtime.env ps
+              docker compose --project-name animemo-release-gate --env-file .ci-runtime.env ps
               exit 1
             fi
             sleep 5
           done
           curl --fail --silent --show-error -H 'Host: ci.example.test' http://127.0.0.1:8088/ | grep -q '<div id="root">'
-          docker compose --env-file .ci-runtime.env ps
+          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env ps
       - name: Complete and lock the real first-run setup API
         shell: bash
         run: |
@@ -227,7 +233,7 @@ jobs:
               --password-env ANIMEMO_CI_SETUP_PASSWORD
       - name: Verify fresh D1A routes, pull-only capability, and empty sync state
         run: >-
-          docker compose --env-file .ci-runtime.env exec -T api
+          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env exec -T api
           python manage.py shell -c
           "from django.db import connection; from django.urls import resolve, reverse;
           from journal.external_accounts.providers.bangumi import BangumiAccountProvider;
@@ -247,10 +253,10 @@ jobs:
           print('Fresh D1A pull-only gate: PASS')"
       - name: Print logs on failure
         if: failure()
-        run: docker compose --env-file .ci-runtime.env logs --no-color
+        run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env logs --no-color
       - name: Cleanup
         if: always()
-        run: docker compose --env-file .ci-runtime.env down -v
+        run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env down -v
 
   stateful-upgrade:
     name: stateful-upgrade

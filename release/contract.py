@@ -28,7 +28,7 @@ POSTGRES_DIGEST = (
     "sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571"
 )
 REDIS_DIGEST = "sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf"
-DEPLOYMENT_PROFILE = "v1.1-standard"
+DEPLOYMENT_PROFILE = "v1.1-instance-scoped"
 INSTALLER_MATERIALS_NAME = "installer-materials.tar"
 DEPLOYMENT_CONTRACT_PATHS = (
     "deploy/docker-compose.yml",

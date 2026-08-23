@@ -10,6 +10,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from durability.instance import DEFAULT_INSTANCE_NAME, InstanceName, LocatorError
+
 from .bootstrap import BootstrapAuthorityError
 from .runtime import (
     Installer,
@@ -62,6 +64,13 @@ def _listen(value: str) -> ListenRequest:
     return ListenRequest(host=host, port=port)
 
 
+def _instance(value: str) -> InstanceName:
+    try:
+        return InstanceName(value)
+    except LocatorError:
+        raise argparse.ArgumentTypeError("instance name is invalid") from None
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="animemo-installer")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -82,6 +91,11 @@ def _parser() -> argparse.ArgumentParser:
         child.add_argument("--bundle-payload", type=Path)
         child.add_argument("--release-attestation", type=Path)
         child.add_argument("--public-origin", required=True)
+        child.add_argument(
+            "--instance",
+            type=_instance,
+            default=DEFAULT_INSTANCE_NAME,
+        )
         child.add_argument("--listen", type=_listen, default=ListenRequest())
         child.add_argument("--accept-direct-exposure", action="store_true")
         child.add_argument("--accept-insecure-http", action="store_true")
@@ -127,6 +141,7 @@ def _request(args: argparse.Namespace) -> InstallRequest:
         mode=args.mode,
         selector=ReleaseSelector(channel=args.channel, version=args.version),
         public_origin=args.public_origin,
+        instance_name=args.instance,
         transport_source=InstallTransportSource(args.source),
         local_bundle_payload=(
             args.bundle_payload.absolute() if args.bundle_payload is not None else None
@@ -176,6 +191,7 @@ def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> 
             from .production import build_runtime
 
             runtime = build_runtime(
+                instance_name=request.instance_name,
                 transport_source=request.transport_source,
                 transport_policy=explicit_transport_policy(request.transport_source),
                 local_bundle_payload=request.local_bundle_payload,

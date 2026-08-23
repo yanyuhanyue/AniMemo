@@ -63,14 +63,20 @@ IDENTITY = transport_policy_identity()
 
 def locator_payload() -> dict[str, object]:
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "instanceName": "default",
         "instanceId": "12345678-1234-5678-9234-567812345678",
-        "appRoot": "/opt/animemo",
-        "dataRoot": "/data/animemo",
-        "deploymentProfile": "v1.1-standard",
+        "appRoot": "/opt/animemo-instances/default",
+        "dataRoot": "/data/animemo-instances/default",
+        "updaterStateRoot": "/var/lib/animemo-updater/instances/default",
+        "updaterRuntimeRoot": "/run/animemo-updater/default",
+        "deploymentProfile": "v1.1-instance-scoped",
+        "composeProject": "animemo-default",
+        "updaterService": "animemo-updater@default.service",
+        "updaterSocketPath": "/run/animemo-updater/default/updater.sock",
         "listen": {"host": "127.0.0.1", "port": 8088},
         "publicOrigin": "https://animemo.example",
-        "managedConfigPath": "/data/animemo/config/animemo.json",
+        "managedConfigPath": "/data/animemo-instances/default/config/animemo.json",
         "configRevision": "11111111-1111-4111-8111-111111111111",
         "releaseIdentity": {
             "version": "v1.1.0-rc.1",
@@ -80,6 +86,7 @@ def locator_payload() -> dict[str, object]:
             "apiDigest": DIGEST,
             "webDigest": DIGEST,
         },
+        "ownershipReceiptDigest": DIGEST,
     }
 
 
@@ -286,7 +293,7 @@ class CanonicalLocatorTests(unittest.TestCase):
 
         self.assertEqual(locator.app_root, APP_ROOT)
         self.assertEqual(locator.data_root, DATA_ROOT)
-        self.assertEqual(locator.deployment_profile, "v1.1-standard")
+        self.assertEqual(locator.deployment_profile, "v1.1-instance-scoped")
         self.assertTrue(locator.listen.is_loopback)
 
     def test_legacy_roots_profiles_unknown_and_secret_fields_fail_closed(self):

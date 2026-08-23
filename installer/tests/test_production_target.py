@@ -63,7 +63,7 @@ class ReleaseFixture:
             manifest_digest=release_identity["manifestDigest"],
             material_identity_digest=digest("b"),
             deployment_identity_digest=digest("c"),
-            deployment_profile="v1.1-standard",
+            deployment_profile="v1.1-instance-scoped",
             platform_profile="v1.1-standard-linux-amd64",
         )
         relative = Path("deploy/target-proof.txt")
@@ -136,7 +136,7 @@ class EmptyRuntimeRunner:
         self.compose_resource = compose_resource
 
     def run(self, argv):
-        if argv[:3] == ["/usr/bin/systemctl", "show", "animemo-updater.service"]:
+        if argv[:2] == ["/usr/bin/systemctl", "show"]:
             return SimpleNamespace(stdout="not-found\n")
         if self.compose_resource and argv[1:3] == ["container", "ls"]:
             return SimpleNamespace(stdout="container-id\n")
@@ -144,6 +144,58 @@ class EmptyRuntimeRunner:
 
 
 class ProductionTargetPortTests(unittest.TestCase):
+    def test_non_directory_instance_root_is_foreign(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "default"
+            root.write_text("foreign", encoding="utf-8")
+            target = ProductionTargetPort(runner=EmptyRuntimeRunner())
+            target.namespace = SimpleNamespace(
+                name="default",
+                owned_roots=(root,),
+                locator_path=Path(directory) / "instance.json",
+            )
+
+            evidence = target.inspect()
+
+        self.assertEqual(evidence.classification, TargetClass.FOREIGN)
+
+    def test_symlink_instance_root_is_foreign(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            actual = parent / "actual"
+            actual.mkdir()
+            root = parent / "default"
+            try:
+                root.symlink_to(actual, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+            target = ProductionTargetPort(runner=EmptyRuntimeRunner())
+            target.namespace = SimpleNamespace(
+                name="default",
+                owned_roots=(root,),
+                locator_path=parent / "instance.json",
+            )
+
+            evidence = target.inspect()
+
+        self.assertEqual(evidence.classification, TargetClass.FOREIGN)
+
+    def test_casefold_instance_directory_collision_is_foreign(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            (parent / "Default").mkdir()
+            target = ProductionTargetPort(runner=EmptyRuntimeRunner())
+            root = parent / "default"
+            target.namespace = SimpleNamespace(
+                name="default",
+                owned_roots=(root,),
+                locator_path=root / "instance.json",
+            )
+
+            evidence = target.inspect()
+
+        self.assertEqual(evidence.classification, TargetClass.FOREIGN)
+
     def test_local_bundle_without_payload_attestation_and_verifier_fails_closed(
         self,
     ) -> None:
@@ -297,23 +349,28 @@ class ProductionTargetPortTests(unittest.TestCase):
         self.assertEqual(receipt.verified_release_identity, materials.identity_digest)
         self.assertEqual(receipt.transport_policy_identity, policy.identity)
 
-    def test_launcher_without_locator_is_partial_state(self) -> None:
+    def test_instance_service_without_locator_is_partial_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             roots = tuple(
-                root / name for name in ("app", "data", "updater", "state", "run")
+                root / name for name in ("app", "data", "state", "run")
             )
-            launcher = root / "animemo-updater"
-            launcher.write_bytes(b"partial launcher")
-            with (
-                mock.patch.object(production, "_CANONICAL_ROOTS", roots),
-                mock.patch.object(
-                    production,
-                    "_CANONICAL_EXTERNAL_ARTIFACTS",
-                    (launcher,),
-                ),
+            target = ProductionTargetPort(runner=EmptyRuntimeRunner())
+            target.namespace = SimpleNamespace(
+                name="default",
+                app_root=roots[0],
+                data_root=roots[1],
+                updater_state_root=roots[2],
+                updater_runtime_root=roots[3],
+                locator_path=root / "instance.json",
+                owned_roots=roots,
+                updater_service="animemo-updater@default.service",
+                compose_project="animemo-default",
+            )
+            with mock.patch.object(
+                target, "_external_runtime_present", return_value=True
             ):
-                evidence = ProductionTargetPort(runner=EmptyRuntimeRunner()).inspect()
+                evidence = target.inspect()
 
         self.assertEqual(evidence.classification, TargetClass.PARTIAL_AMBIGUOUS)
 
@@ -321,15 +378,23 @@ class ProductionTargetPortTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             roots = tuple(
-                root / name for name in ("app", "data", "updater", "state", "run")
+                root / name for name in ("app", "data", "state", "run")
             )
-            with (
-                mock.patch.object(production, "_CANONICAL_ROOTS", roots),
-                mock.patch.object(production, "_CANONICAL_EXTERNAL_ARTIFACTS", ()),
-            ):
-                evidence = ProductionTargetPort(
-                    runner=EmptyRuntimeRunner(compose_resource=True)
-                ).inspect()
+            target = ProductionTargetPort(
+                runner=EmptyRuntimeRunner(compose_resource=True)
+            )
+            target.namespace = SimpleNamespace(
+                name="default",
+                app_root=roots[0],
+                data_root=roots[1],
+                updater_state_root=roots[2],
+                updater_runtime_root=roots[3],
+                locator_path=root / "instance.json",
+                owned_roots=roots,
+                updater_service="animemo-updater@default.service",
+                compose_project="animemo-default",
+            )
+            evidence = target.inspect()
 
         self.assertEqual(evidence.classification, TargetClass.PARTIAL_AMBIGUOUS)
 
@@ -365,9 +430,13 @@ class ProductionTargetPortTests(unittest.TestCase):
             platform=PlatformFixture(),
             doctor=doctor,
         )
+        target.namespace = SimpleNamespace(
+            name="default",
+            app_root=app_root,
+            locator_path=locator_marker,
+            owned_roots=(app_root, root / "data", root / "state", root / "run"),
+        )
         with (
-            mock.patch.object(production, "APP_ROOT", app_root),
-            mock.patch.object(production, "INSTANCE_LOCATOR_PATH", locator_marker),
             mock.patch.object(
                 production, "load_instance_snapshot", return_value=snapshot
             ),
@@ -375,6 +444,18 @@ class ProductionTargetPortTests(unittest.TestCase):
                 production,
                 "LocalManagedConfigStore",
                 return_value=ConfigStoreFixture(config),
+            ),
+            mock.patch.object(
+                production,
+                "LocalOwnershipReceiptStore",
+                return_value=SimpleNamespace(
+                    read=lambda: SimpleNamespace(
+                        receipt_digest=locator.ownership_receipt_digest,
+                        instance_name=locator.instance_name,
+                        instance_id=locator.instance_id,
+                        compose_project=locator.compose_project,
+                    )
+                ),
             ),
         ):
             evidence = target.inspect()
@@ -470,6 +551,41 @@ class ProductionConfigurationPreflightTests(unittest.TestCase):
                     instance_id=INSTANCE_ID,
                     public_origin="https://anime.example",
                     listen=ListenRequest("127.0.0.1", port),
+                    insecure_http_accepted=False,
+                )
+
+    def test_instance_id_already_bound_to_another_name_fails(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as config_directory,
+            tempfile.TemporaryDirectory() as runtime_directory,
+            tempfile.TemporaryDirectory() as registry_directory,
+        ):
+            registry = Path(registry_directory)
+            other = registry / "other"
+            other.mkdir()
+            (other / "instance.json").write_text("published", encoding="utf-8")
+            store = production.LocalManagedConfigStore(
+                config_root=Path(config_directory),
+                runtime_root=Path(runtime_directory),
+            )
+            adapter = ProductionManagedConfigurationPort(store)
+            snapshot = SimpleNamespace(
+                locator=SimpleNamespace(instance_id=INSTANCE_ID)
+            )
+
+            with (
+                mock.patch.object(production, "UPDATER_STATE_BASE", registry),
+                mock.patch.object(
+                    production, "load_instance_snapshot", return_value=snapshot
+                ),
+                self.assertRaisesRegex(
+                    production.ManagedConfigError, "CONFIG_INSTANCE_ID_COLLISION"
+                ),
+            ):
+                adapter.plan(
+                    instance_id=INSTANCE_ID,
+                    public_origin="https://anime.example",
+                    listen=ListenRequest("127.0.0.1", 18088),
                     insecure_http_accepted=False,
                 )
 

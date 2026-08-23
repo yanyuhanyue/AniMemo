@@ -86,8 +86,8 @@ if [[ ! "$UPDATER_GID" =~ ^[1-9][0-9]*$ ]]; then
   echo "Unable to resolve the animemo-api service group from sysusers configuration." >&2
   exit 1
 fi
-grep -Fxq 'User=animemo-updater' "$CURRENT_ROOT/deploy/updater/animemo-updater.service"
-grep -Fxq 'Group=animemo-api' "$CURRENT_ROOT/deploy/updater/animemo-updater.service"
+grep -Fxq 'User=animemo-updater' "$CURRENT_ROOT/deploy/updater/animemo-updater@.service"
+grep -Fxq 'Group=animemo-api' "$CURRENT_ROOT/deploy/updater/animemo-updater@.service"
 grep -Fxq 'd /var/lib/animemo-updater 0700 animemo-updater animemo-api -' \
   "$CURRENT_ROOT/deploy/updater/animemo-updater.tmpfiles.conf"
 TEMP_PARENT="$(python3 "$CURRENT_ROOT/scripts/dr_recovery_paths.py" canonical-directory \
@@ -184,7 +184,13 @@ ALLOW_INSECURE_PRODUCTION_COOKIES=true
 PLUGIN_MIN_FREE_DISK_MB=0
 MEDIA_LOCAL_STORAGE_ROOT=/data/animemo/media
 ANIMEMO_DATA_ROOT=$data_root
+ANIMEMO_INSTANCE_NAME=dr-$phase
+ANIMEMO_INSTANCE_ID=12345678-1234-4234-9234-123456789ab$([[ "$phase" == a ]] && printf c || printf d)
+ANIMEMO_COMPOSE_PROJECT=$project
+ANIMEMO_MANAGED_ENV_PATH=$env_file
+ANIMEMO_UPDATER_RUNTIME_ROOT=$TEMP_ROOT/runtime-$phase
 ANIMEMO_TEST_DATA_ROOT=$data_root
+ANIMEMO_TEST_MANAGED_ENV_PATH=$env_file
 ANIMEMO_LISTEN_HOST=127.0.0.1
 ANIMEMO_LISTEN_PORT=8088
 ANIMEMO_CONFIG_REVISION=11111111-1111-4111-8111-111111111111

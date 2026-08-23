@@ -4,12 +4,16 @@ import test from "node:test";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 
-test("production deployment has one environment template", () => {
+test("production deployment binds one instance-scoped environment template in its runtime overlay", () => {
   assert.equal(existsSync(new URL("../.env.production.example", import.meta.url)), false);
   assert.equal(existsSync(new URL("../deploy/.env.production.example", import.meta.url)), false);
   const compose = read("../deploy/docker-compose.yml");
-  assert.match(compose, /\/run\/animemo-updater\/managed\.env/);
+  const runtime = read("../updater/docker-compose.runtime.yml");
+  assert.doesNotMatch(compose, /env_file|\/run\/animemo-updater\/managed\.env/);
+  assert.match(runtime, /ANIMEMO_MANAGED_ENV_PATH/);
+  assert.doesNotMatch(runtime, /\/run\/animemo-updater\/managed\.env/);
   assert.doesNotMatch(compose, /\.env\.production/);
+  assert.doesNotMatch(runtime, /\.env\.production/);
 });
 
 test("API healthcheck is secure-forwarded and validates status and body", () => {

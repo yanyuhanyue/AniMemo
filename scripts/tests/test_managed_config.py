@@ -38,7 +38,7 @@ def payload() -> dict[str, object]:
         "schema": "animemo.managed-config/v1",
         "instanceId": INSTANCE_ID,
         "configRevision": REVISION,
-        "deploymentProfile": "v1.1-standard",
+        "deploymentProfile": "v1.1-instance-scoped",
         "listen": {"host": "127.0.0.1", "port": 8088},
         "publicOrigin": "https://animemo.example",
         "directAccess": {
@@ -157,17 +157,26 @@ class ManagedConfigSchemaTests(unittest.TestCase):
         self,
     ) -> None:
         config = parse_managed_config(encoded())
-        environment = derive_runtime_environment(config)
-        rendered = canonical_managed_env_bytes(config).decode("utf-8")
+        locator_digest = "sha256:" + "a" * 64
+        environment = derive_runtime_environment(
+            config, locator_digest=locator_digest
+        )
+        rendered = canonical_managed_env_bytes(
+            config, locator_digest=locator_digest
+        ).decode("utf-8")
 
         self.assertEqual(environment["ANIMEMO_PUBLIC_ORIGIN"], config.public_origin)
         self.assertEqual(environment["ANIMEMO_LISTEN_HOST"], "127.0.0.1")
         self.assertEqual(environment["ANIMEMO_LISTEN_PORT"], "8088")
+        self.assertEqual(environment["ANIMEMO_LOCATOR_DIGEST"], locator_digest)
         self.assertIn("animemo.example", environment["ALLOWED_HOSTS"])
         self.assertNotIn("FRONTEND_URL", environment)
         self.assertNotIn("BANGUMI_OAUTH_REDIRECT_URI", environment)
         self.assertIn(DATABASE_SECRET, rendered)
-        self.assertEqual(str(MANAGED_ENV_PATH), "/run/animemo-updater/managed.env")
+        self.assertEqual(
+            str(MANAGED_ENV_PATH),
+            "/run/animemo-updater/default/managed.env",
+        )
 
     def test_change_plan_and_repr_do_not_disclose_secrets(self) -> None:
         current = parse_managed_config(encoded())
@@ -205,13 +214,19 @@ class ManagedConfigAtomicStoreTests(unittest.TestCase):
             config = parse_managed_config(encoded())
 
             store.write(config, expected_revision=None, must_not_exist=True)
-            runtime_path = store.rebuild_runtime_env(expected_revision=REVISION)
+            locator_digest = "sha256:" + "a" * 64
+            runtime_path = store.rebuild_runtime_env(
+                locator_digest=locator_digest,
+                expected_revision=REVISION,
+            )
 
             self.assertEqual(store.read(), config)
             self.assertEqual(runtime_path, runtime_root / "managed.env")
             self.assertEqual(
                 (runtime_root / "managed.env").read_bytes(),
-                canonical_managed_env_bytes(config),
+                canonical_managed_env_bytes(
+                    config, locator_digest=locator_digest
+                ),
             )
             if os.name != "nt":
                 self.assertEqual(

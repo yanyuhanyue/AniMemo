@@ -25,11 +25,15 @@ class CanonicalInstanceRegistryTests(unittest.TestCase):
             paths = HostPaths.production(snapshot)
 
             self.assertEqual(snapshot, published)
-            self.assertEqual(paths.app_root, Path("/opt/animemo"))
-            self.assertEqual(paths.data_root, Path("/data/animemo"))
+            self.assertEqual(
+                paths.app_root, Path("/opt/animemo-instances/default")
+            )
+            self.assertEqual(
+                paths.data_root, Path("/data/animemo-instances/default")
+            )
             self.assertEqual(
                 paths.managed_config_path,
-                Path("/data/animemo/config/animemo.json"),
+                Path("/data/animemo-instances/default/config/animemo.json"),
             )
             self.assertEqual(paths.listen_host, "127.0.0.1")
             self.assertEqual(paths.listen_port, 8088)

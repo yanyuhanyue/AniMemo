@@ -11,6 +11,7 @@ from unittest import mock
 from durability.instance import (
     InstanceSnapshot,
     ListenIdentity,
+    instance_locator_digest,
     instance_locator_payload,
     parse_instance_locator,
     release_identity_from_manifest,
@@ -149,20 +150,30 @@ class ConfigurationManagerTests(unittest.TestCase):
             runtime_root=runtime_root,
         )
         store.write(config, expected_revision=None, must_not_exist=True)
-        store.rebuild_runtime_env(expected_revision=config.config_revision)
+        store.rebuild_runtime_env(
+            locator_digest="sha256:" + "1" * 64,
+            expected_revision=config.config_revision,
+        )
 
         locator = parse_instance_locator(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
+                "instanceName": "default",
                 "instanceId": config.instance_id,
-                "appRoot": "/opt/animemo",
-                "dataRoot": "/data/animemo",
-                "deploymentProfile": "v1.1-standard",
+                "appRoot": "/opt/animemo-instances/default",
+                "dataRoot": "/data/animemo-instances/default",
+                "updaterStateRoot": "/var/lib/animemo-updater/instances/default",
+                "updaterRuntimeRoot": "/run/animemo-updater/default",
+                "deploymentProfile": "v1.1-instance-scoped",
+                "composeProject": "animemo-default",
+                "updaterService": "animemo-updater@default.service",
+                "updaterSocketPath": "/run/animemo-updater/default/updater.sock",
                 "listen": {"host": config.listen.host, "port": config.listen.port},
                 "publicOrigin": config.public_origin,
-                "managedConfigPath": "/data/animemo/config/animemo.json",
+                "managedConfigPath": "/data/animemo-instances/default/config/animemo.json",
                 "configRevision": config.config_revision,
                 "releaseIdentity": dict(release_identity_from_manifest(target)),
+                "ownershipReceiptDigest": "sha256:" + "9" * 64,
             }
         )
         snapshot = InstanceSnapshot(
@@ -285,7 +296,12 @@ class ConfigurationManagerTests(unittest.TestCase):
             self.assertEqual(store.read(), plan.proposed)
             self.assertEqual(
                 store.runtime_env_path.read_bytes(),
-                canonical_managed_env_bytes(plan.proposed),
+                canonical_managed_env_bytes(
+                    plan.proposed,
+                    locator_digest=instance_locator_digest(
+                        host.current_snapshot.locator
+                    ),
+                ),
             )
             self.assertEqual(
                 host.current_snapshot.locator.config_revision, plan.next_revision
@@ -340,7 +356,9 @@ class ConfigurationManagerTests(unittest.TestCase):
             self.assertEqual(store.read(), previous)
             self.assertEqual(
                 store.runtime_env_path.read_bytes(),
-                canonical_managed_env_bytes(previous),
+                canonical_managed_env_bytes(
+                    previous, locator_digest=old_snapshot.digest
+                ),
             )
             self.assertEqual(host.current_snapshot, old_snapshot)
             self.assertEqual(host.calls.count("reconcile-api-web"), 2)

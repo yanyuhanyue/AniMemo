@@ -30,7 +30,8 @@ class IntegrationDestination:
     def inspect(self) -> restore.DestinationSnapshot:
         return restore.DestinationSnapshot(
             classification=restore.DestinationClass.EXISTING_EMPTY,
-            deployment_profile="v1.1-standard",
+            instance_name="default",
+            deployment_profile="v1.1-instance-scoped",
             canonical_roots=restore.CANONICAL_ROOTS,
             ownership_verified=True,
             empty_verified=True,

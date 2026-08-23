@@ -1,5 +1,5 @@
 [Unit]
-Description=AniMemo restricted host Update Agent
+Description=AniMemo restricted host Update Agent (%i)
 Documentation=https://github.com/yanyuhanyue/AniMemo
 Requires=docker.service
 After=docker.service network-online.target
@@ -10,10 +10,10 @@ Type=simple
 User=animemo-updater
 Group=animemo-api
 SupplementaryGroups=docker
-Environment=HOME=/var/lib/animemo-updater
-Environment=GH_CONFIG_DIR=/var/lib/animemo-updater/gh
+Environment=HOME=/var/lib/animemo-updater/instances/%i
+Environment=GH_CONFIG_DIR=/var/lib/animemo-updater/instances/%i/gh
 WorkingDirectory=/opt/animemo-updater/current
-ExecStart=/usr/local/bin/animemo-updater serve
+ExecStart=/usr/local/bin/animemo-updater --instance %i serve
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
@@ -30,9 +30,11 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadOnlyPaths=/opt/animemo /opt/animemo-updater
-ReadWritePaths=/var/lib/animemo-updater /data/animemo /run/animemo-updater
-RuntimeDirectory=animemo-updater
+ReadOnlyPaths=/opt/animemo-instances/%i /opt/animemo-updater
+ReadWritePaths=/var/lib/animemo-updater/instances/%i /data/animemo-instances/%i /run/animemo-updater/%i
+StateDirectory=animemo-updater/instances/%i
+StateDirectoryMode=0700
+RuntimeDirectory=animemo-updater/%i
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 

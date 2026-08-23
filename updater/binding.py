@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from durability.instance import (
     InstanceSnapshot,
+    instance_namespace,
     release_identity_from_manifest,
     replace_instance_locator,
 )
@@ -36,11 +37,18 @@ class CanonicalRuntimeBinding:
                 "Managed configuration does not match the canonical locator"
             )
         self.config_store.rebuild_runtime_env(
+            locator_digest=snapshot.digest,
             expected_revision=config.config_revision
         )
         self.deployment.refresh_binding(
             HostPaths.production(snapshot),
-            managed_environment=dict(derive_runtime_environment(config)),
+            managed_environment=dict(
+                derive_runtime_environment(
+                    config,
+                    namespace=instance_namespace(locator.instance_name),
+                    locator_digest=snapshot.digest,
+                )
+            ),
         )
         return snapshot
 

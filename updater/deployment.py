@@ -17,13 +17,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from durability.instance import (
-    APP_ROOT,
-    DATA_ROOT,
-    MANAGED_CONFIG_PATH,
-    UPDATER_RUNTIME_ROOT,
-    UPDATER_STATE_ROOT,
+    DEFAULT_INSTANCE_NAME,
     InstanceLocator,
+    InstanceName,
     InstanceSnapshot,
+    instance_namespace,
 )
 from release.contract import (
     API_REPOSITORY,
@@ -72,9 +70,13 @@ def _sha256_file(path: Path) -> str:
 
 @dataclass(frozen=True)
 class HostPaths:
+    instance_name: InstanceName
+    instance_id: str
+    compose_project: str
     app_root: Path
     data_root: Path
     state_root: Path
+    runtime_root: Path
     managed_config_path: Path
     managed_env_path: Path
     listen_host: str
@@ -89,18 +91,26 @@ class HostPaths:
                 "Production Update Agent requires a canonical instance snapshot"
             )
         locator = snapshot.locator
+        namespace = instance_namespace(locator.instance_name)
         if (
-            locator.app_root != APP_ROOT
-            or locator.data_root != DATA_ROOT
-            or locator.managed_config_path != MANAGED_CONFIG_PATH
+            locator.app_root != namespace.app_root
+            or locator.data_root != namespace.data_root
+            or locator.updater_state_root != namespace.updater_state_root
+            or locator.updater_runtime_root != namespace.updater_runtime_root
+            or locator.managed_config_path != namespace.managed_config_path
+            or locator.compose_project != namespace.compose_project
         ):
             raise ValueError("Production Update Agent locator is not canonical")
         return cls(
-            app_root=Path(str(APP_ROOT)),
-            data_root=Path(str(DATA_ROOT)),
-            state_root=Path(str(UPDATER_STATE_ROOT)),
-            managed_config_path=Path(str(MANAGED_CONFIG_PATH)),
-            managed_env_path=Path(str(UPDATER_RUNTIME_ROOT / "managed.env")),
+            instance_name=namespace.name,
+            instance_id=locator.instance_id,
+            compose_project=namespace.compose_project,
+            app_root=Path(str(namespace.app_root)),
+            data_root=Path(str(namespace.data_root)),
+            state_root=Path(str(namespace.updater_state_root)),
+            runtime_root=Path(str(namespace.updater_runtime_root)),
+            managed_config_path=Path(str(namespace.managed_config_path)),
+            managed_env_path=Path(str(namespace.managed_env_path)),
             listen_host=locator.listen.host,
             listen_port=locator.listen.port,
             public_origin=locator.public_origin,
@@ -111,18 +121,25 @@ class HostPaths:
     def initial_adoption(cls, locator: InstanceLocator) -> HostPaths:
         if not isinstance(locator, InstanceLocator):
             raise TypeError("Initial adoption requires a canonical locator")
+        namespace = instance_namespace(locator.instance_name)
         if (
-            locator.app_root != APP_ROOT
-            or locator.data_root != DATA_ROOT
-            or locator.managed_config_path != MANAGED_CONFIG_PATH
+            locator.app_root != namespace.app_root
+            or locator.data_root != namespace.data_root
+            or locator.updater_state_root != namespace.updater_state_root
+            or locator.updater_runtime_root != namespace.updater_runtime_root
+            or locator.managed_config_path != namespace.managed_config_path
         ):
             raise ValueError("Initial adoption locator is not canonical")
         return cls(
-            app_root=Path(str(APP_ROOT)),
-            data_root=Path(str(DATA_ROOT)),
-            state_root=Path(str(UPDATER_STATE_ROOT)),
-            managed_config_path=Path(str(MANAGED_CONFIG_PATH)),
-            managed_env_path=Path(str(UPDATER_RUNTIME_ROOT / "managed.env")),
+            instance_name=namespace.name,
+            instance_id=locator.instance_id,
+            compose_project=namespace.compose_project,
+            app_root=Path(str(namespace.app_root)),
+            data_root=Path(str(namespace.data_root)),
+            state_root=Path(str(namespace.updater_state_root)),
+            runtime_root=Path(str(namespace.updater_runtime_root)),
+            managed_config_path=Path(str(namespace.managed_config_path)),
+            managed_env_path=Path(str(namespace.managed_env_path)),
             listen_host=locator.listen.host,
             listen_port=locator.listen.port,
             public_origin=locator.public_origin,
@@ -130,15 +147,28 @@ class HostPaths:
         )
 
     @classmethod
-    def testing(cls, *, app: Path, data: Path, state: Path):
+    def testing(
+        cls,
+        *,
+        app: Path,
+        data: Path,
+        state: Path,
+        instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+        instance_id: str = "00000000-0000-4000-8000-000000000000",
+    ):
+        name = instance_name if isinstance(instance_name, InstanceName) else InstanceName(instance_name)
         resolved_roots = (app.resolve(), data.resolve(), state.resolve())
         for value in resolved_roots:
             if not value.is_absolute():
                 raise ValueError("Test paths must be absolute")
         return cls(
+            instance_name=name,
+            instance_id=instance_id,
+            compose_project=f"animemo-{name}",
             app_root=resolved_roots[0],
             data_root=resolved_roots[1],
             state_root=resolved_roots[2],
+            runtime_root=resolved_roots[2] / "runtime",
             managed_config_path=resolved_roots[1] / "config" / "animemo.json",
             managed_env_path=resolved_roots[2] / "managed.env",
             listen_host="127.0.0.1",
@@ -290,6 +320,19 @@ class ImmutableComposeDeployment:
         ).stdout.strip()
         if not container:
             raise StateError(f"AniMemo {service} container is unavailable")
+        expected_labels = {
+            "io.animemo.instance-name": str(self.paths.instance_name),
+            "io.animemo.instance-id": self.paths.instance_id,
+            "io.animemo.compose-project": self.paths.compose_project,
+        }
+        for label, expected in expected_labels.items():
+            actual = self._inspect_container(
+                container, f'{{{{ index .Config.Labels "{label}" }}}}'
+            )
+            if actual != expected:
+                raise StateError(
+                    f"AniMemo {service} container ownership label is invalid"
+                )
         return container
 
     def _inspect_container(self, container: str, template: str) -> str:
@@ -399,7 +442,7 @@ class ImmutableComposeDeployment:
                 "/usr/bin/docker",
                 "compose",
                 "--project-name",
-                "animemo",
+                self.paths.compose_project,
                 *env_files,
                 "-f",
                 str(self.compose_file),
@@ -588,7 +631,7 @@ class ImmutableComposeDeployment:
                 "/usr/bin/docker",
                 "compose",
                 "--project-name",
-                "animemo",
+                self.paths.compose_project,
                 "--env-file",
                 str(self.paths.managed_env_path),
                 "-f",

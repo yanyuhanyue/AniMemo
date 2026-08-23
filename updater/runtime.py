@@ -3,16 +3,20 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from durability.instance import (
+    DEFAULT_INSTANCE_NAME,
     InstanceLocator,
+    InstanceName,
     InstanceSnapshot,
     LocalLocatorStore,
     LocalReadOnlyHost,
     LocatorError,
     ReadOnlyHost,
+    instance_locator_digest,
     instance_locator_payload,
+    instance_namespace,
     load_instance_snapshot,
     publish_instance_locator,
     release_identity_from_manifest,
@@ -21,6 +25,7 @@ from durability.managed_config import (
     LocalManagedConfigStore,
     derive_runtime_environment,
 )
+from durability.ownership import LocalOwnershipReceiptStore
 
 from . import __version__
 from .agent import UpdateAgent
@@ -37,12 +42,13 @@ from .source import ReleaseResolver
 from .state import OperationStore
 from .transport import ExplicitTransportPolicy
 
-PRODUCTION_SOCKET_PATH = Path("/run/animemo-updater/updater.sock")
+_DEFAULT_NAMESPACE = instance_namespace()
+PRODUCTION_SOCKET_PATH = Path(str(_DEFAULT_NAMESPACE.updater_socket_path))
 PRODUCTION_BOOTSTRAP_MANIFEST = Path(
-    "/var/lib/animemo-updater/bootstrap/release-manifest.json"
+    str(_DEFAULT_NAMESPACE.updater_state_root / "bootstrap/release-manifest.json")
 )
 PRODUCTION_ADOPTION_REQUEST = Path(
-    "/var/lib/animemo-updater/bootstrap/initial-adoption.json"
+    str(_DEFAULT_NAMESPACE.updater_state_root / "bootstrap/initial-adoption.json")
 )
 
 
@@ -82,6 +88,8 @@ class CanonicalInstanceRegistry:
     store: ReadOnlyHost
     expected_owner_uid: int | None = None
     expected_owner_gid: int | None = None
+    instance_name: InstanceName = DEFAULT_INSTANCE_NAME
+    verify_ownership: bool = False
 
     def __init__(
         self,
@@ -89,26 +97,54 @@ class CanonicalInstanceRegistry:
         store: ReadOnlyHost | None = None,
         expected_owner_uid: int | None = None,
         expected_owner_gid: int | None = None,
+        instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+        verify_ownership: bool = False,
     ) -> None:
-        object.__setattr__(self, "store", store or LocalLocatorStore())
+        namespace = instance_namespace(instance_name)
+        object.__setattr__(
+            self,
+            "store",
+            store or LocalLocatorStore(instance_name=namespace.name),
+        )
         object.__setattr__(self, "expected_owner_uid", expected_owner_uid)
         object.__setattr__(self, "expected_owner_gid", expected_owner_gid)
+        object.__setattr__(self, "instance_name", namespace.name)
+        object.__setattr__(self, "verify_ownership", verify_ownership)
 
     def snapshot(self) -> InstanceSnapshot:
-        return load_instance_snapshot(
+        snapshot = load_instance_snapshot(
             self.store,
+            instance_name=self.instance_name,
             expected_owner_uid=self.expected_owner_uid,
             expected_owner_gid=self.expected_owner_gid,
         )
+        if self.verify_ownership:
+            receipt = LocalOwnershipReceiptStore(
+                instance_name=self.instance_name
+            ).read()
+            if (
+                receipt.receipt_digest
+                != snapshot.locator.ownership_receipt_digest
+                or receipt.instance_name != snapshot.locator.instance_name
+                or receipt.instance_id != snapshot.locator.instance_id
+                or receipt.compose_project != snapshot.locator.compose_project
+            ):
+                raise LocatorError("OWNERSHIP_RECEIPT_LOCATOR_MISMATCH")
+        return snapshot
 
     @classmethod
-    def production(cls) -> CanonicalInstanceRegistry:
+    def production(
+        cls,
+        instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+    ) -> CanonicalInstanceRegistry:
         if __import__("os").name == "nt":
             raise StateError("Canonical production locator requires a POSIX host")
         import grp
         import pwd
 
         return cls(
+            instance_name=instance_name,
+            verify_ownership=True,
             expected_owner_uid=pwd.getpwnam("animemo-updater").pw_uid,
             expected_owner_gid=grp.getgrnam("animemo-api").gr_gid,
         )
@@ -224,7 +260,9 @@ class HostAgentRuntime:
         runtime_binding = (
             CanonicalRuntimeBinding(
                 registry=registry,
-                config_store=LocalManagedConfigStore(),
+                config_store=LocalManagedConfigStore(
+                    instance_name=paths.instance_name
+                ),
                 deployment=deployment,
             )
             if registry is not None
@@ -268,15 +306,23 @@ class HostAgentRuntime:
                 registry.store
                 if registry is not None
                 and isinstance(registry.store, LocalLocatorStore)
-                else LocalLocatorStore.testing(state_root / "instance.json")
+                else LocalLocatorStore.testing(
+                    state_root / "instance.json",
+                    instance_name=paths.instance_name,
+                )
             ),
         )
 
     @classmethod
-    def production(cls) -> HostAgentRuntime:
-        registry = CanonicalInstanceRegistry.production()
+    def production(
+        cls,
+        instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+    ) -> HostAgentRuntime:
+        namespace = instance_namespace(instance_name)
+        registry = CanonicalInstanceRegistry.production(namespace.name)
         snapshot = registry.snapshot()
-        config = LocalManagedConfigStore().read()
+        config_store = LocalManagedConfigStore(instance_name=namespace.name)
+        config = config_store.read()
         if (
             config.config_revision != snapshot.locator.config_revision
             or config.listen.host != snapshot.locator.listen.host
@@ -286,15 +332,22 @@ class HostAgentRuntime:
             raise StateError(
                 "Managed configuration does not match the canonical locator"
             )
-        LocalManagedConfigStore().rebuild_runtime_env(
+        config_store.rebuild_runtime_env(
+            locator_digest=snapshot.digest,
             expected_revision=config.config_revision
         )
         return cls._build(
             paths=HostPaths.production(snapshot),
-            socket_path=PRODUCTION_SOCKET_PATH,
-            bootstrap_manifest=PRODUCTION_BOOTSTRAP_MANIFEST,
+            socket_path=Path(str(namespace.updater_socket_path)),
+            bootstrap_manifest=Path(
+                str(namespace.updater_state_root / "bootstrap/release-manifest.json")
+            ),
             registry=registry,
-            managed_environment=dict(derive_runtime_environment(config)),
+            managed_environment=dict(
+                derive_runtime_environment(
+                    config, namespace=namespace, locator_digest=snapshot.digest
+                )
+            ),
         )
 
     @classmethod
@@ -355,7 +408,10 @@ class HostAgentRuntime:
             if self.runtime_state.path.exists():
                 raise StateError("Runtime compatibility state already exists")
             try:
-                load_instance_snapshot(self.locator_store)
+                load_instance_snapshot(
+                    self.locator_store,
+                    instance_name=self.paths.instance_name,
+                )
             except Exception as error:
                 if not getattr(error, "code", None) == "LOCATOR_MISSING":
                     raise StateError(
@@ -564,7 +620,10 @@ class HostAgentRuntime:
                 if runtime_identity != expected_runtime:
                     raise StateError("Initial adoption recovery runtime state differs")
             try:
-                published = load_instance_snapshot(self.locator_store)
+                published = load_instance_snapshot(
+                    self.locator_store,
+                    instance_name=self.paths.instance_name,
+                )
             except LocatorError as error:
                 if error.code != "LOCATOR_MISSING":
                     raise StateError("Initial adoption recovery locator is invalid") from error
@@ -599,11 +658,16 @@ class HostAgentRuntime:
         self.server.serve_forever()
 
 
-def production_runtime() -> HostAgentRuntime:
-    return HostAgentRuntime.production()
+def production_runtime(
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+) -> HostAgentRuntime:
+    return HostAgentRuntime.production(instance_name)
 
 
-def load_initial_adoption_request() -> InitialAdoptionRequest:
+def load_initial_adoption_request(
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+) -> InitialAdoptionRequest:
+    namespace = instance_namespace(instance_name)
     try:
         if __import__("os").name == "nt":
             raise StateError("Initial adoption requires a POSIX host")
@@ -611,7 +675,7 @@ def load_initial_adoption_request() -> InitialAdoptionRequest:
         import pwd
 
         secure = LocalReadOnlyHost().read_secure_bytes(
-            PurePosixPath(str(PRODUCTION_ADOPTION_REQUEST)),
+            namespace.updater_state_root / "bootstrap/initial-adoption.json",
             limit=1024 * 1024,
             expected_owner_uid=pwd.getpwnam("animemo-updater").pw_uid,
             expected_owner_gid=grp.getgrnam("animemo-api").gr_gid,
@@ -660,8 +724,9 @@ def adopt_initial_release(request: InitialAdoptionRequest) -> AdoptionReceipt:
 
     if not isinstance(request, InitialAdoptionRequest):
         raise StateError("Initial adoption request is invalid")
-    registry = CanonicalInstanceRegistry.production()
-    config_store = LocalManagedConfigStore()
+    namespace = instance_namespace(request.locator.instance_name)
+    registry = CanonicalInstanceRegistry.production(namespace.name)
+    config_store = LocalManagedConfigStore(instance_name=namespace.name)
     config = config_store.read()
     if (
         config.instance_id != request.locator.instance_id
@@ -671,13 +736,25 @@ def adopt_initial_release(request: InitialAdoptionRequest) -> AdoptionReceipt:
         or config.public_origin != request.locator.public_origin
     ):
         raise StateError("Managed configuration does not match the adoption locator")
-    config_store.rebuild_runtime_env(expected_revision=config.config_revision)
+    planned_locator_digest = instance_locator_digest(request.locator)
+    config_store.rebuild_runtime_env(
+        locator_digest=planned_locator_digest,
+        expected_revision=config.config_revision,
+    )
     runtime = HostAgentRuntime._build(
         paths=HostPaths.initial_adoption(request.locator),
-        socket_path=PRODUCTION_SOCKET_PATH,
-        bootstrap_manifest=PRODUCTION_BOOTSTRAP_MANIFEST,
+        socket_path=Path(str(namespace.updater_socket_path)),
+        bootstrap_manifest=Path(
+            str(namespace.updater_state_root / "bootstrap/release-manifest.json")
+        ),
         registry=registry,
-        managed_environment=dict(derive_runtime_environment(config)),
+        managed_environment=dict(
+            derive_runtime_environment(
+                config,
+                namespace=namespace,
+                locator_digest=planned_locator_digest,
+            )
+        ),
         background=False,
     )
     return runtime.adopt_initial_release(request)

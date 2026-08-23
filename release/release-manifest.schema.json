@@ -40,7 +40,7 @@
       "additionalProperties": false,
       "required": ["profile", "contractSha256", "files", "installerMaterials"],
       "properties": {
-        "profile": {"const": "v1.1-standard"},
+        "profile": {"const": "v1.1-instance-scoped"},
         "contractSha256": {"$ref": "#/$defs/digest"},
         "files": {
           "type": "array",

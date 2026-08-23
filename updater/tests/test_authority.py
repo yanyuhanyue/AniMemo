@@ -22,7 +22,7 @@ from updater.tests.test_source import (
 )
 
 EXPECTED_IDENTITY = (
-    "sha256:1f7ffdc18c6c469d14d26d257e1905ac6f2891e558a2ece296aa6c7d3f7cd63d"
+    "sha256:339d3880560e647e5f33a4468f403710a14b8d244dd3772ceb12e33f476e9fc2"
 )
 MATERIAL_PATH = "wheelhouse/qualified_dependency-1.0-py3-none-any.whl"
 

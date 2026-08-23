@@ -14,37 +14,180 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 from urllib.parse import urlsplit
 from uuid import UUID
 
-APP_ROOT = PurePosixPath("/opt/animemo")
-DATA_ROOT = PurePosixPath("/data/animemo")
-UPDATER_APP_ROOT = PurePosixPath("/opt/animemo-updater")
-UPDATER_STATE_ROOT = PurePosixPath("/var/lib/animemo-updater")
-UPDATER_RUNTIME_ROOT = PurePosixPath("/run/animemo-updater")
-INSTANCE_LOCATOR_PATH = UPDATER_STATE_ROOT / "instance.json"
-MANAGED_CONFIG_ROOT = DATA_ROOT / "config"
-MANAGED_CONFIG_PATH = MANAGED_CONFIG_ROOT / "animemo.json"
-BACKUP_ROOT = DATA_ROOT / "backups"
-UPDATER_SOCKET_PATH = UPDATER_RUNTIME_ROOT / "updater.sock"
+APP_ROOT_BASE = PurePosixPath("/opt/animemo-instances")
+DATA_ROOT_BASE = PurePosixPath("/data/animemo-instances")
+UPDATER_PROGRAM_ROOT = PurePosixPath("/opt/animemo-updater")
+UPDATER_STATE_BASE = PurePosixPath("/var/lib/animemo-updater/instances")
+UPDATER_RUNTIME_BASE = PurePosixPath("/run/animemo-updater")
 
-LOCATOR_SCHEMA_VERSION = 1
-STANDARD_DEPLOYMENT_PROFILE = "v1.1-standard"
+LOCATOR_SCHEMA_VERSION = 2
+STANDARD_DEPLOYMENT_PROFILE = "v1.1-instance-scoped"
 MAX_LOCATOR_BYTES = 1024 * 1024
+
+_INSTANCE_NAME = re.compile(r"^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$")
+_RESERVED_INSTANCE_NAMES = frozenset(
+    {
+        "api",
+        "web",
+        "postgres",
+        "redis",
+        "updater",
+        "root",
+        "system",
+        "instances",
+        "current",
+        "previous",
+        "releases",
+        "bootstrap",
+        "cache",
+        "runtime",
+    }
+)
+
+
+class LocatorError(Exception):
+    """A stable, secret-safe canonical locator failure."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+    def __repr__(self) -> str:
+        return f"LocatorError(code={self.code!r})"
+
+
+class InstanceName(str):
+    """Closed, injection-safe operator name for exactly one AniMemo instance."""
+
+    def __new__(cls, value: object) -> Self:
+        if (
+            not isinstance(value, str)
+            or _INSTANCE_NAME.fullmatch(value) is None
+            or value in _RESERVED_INSTANCE_NAMES
+        ):
+            raise LocatorError("INSTANCE_NAME_INVALID")
+        return str.__new__(cls, value)
+
+
+@dataclass(frozen=True)
+class InstanceNamespace:
+    """The only production mapping from an InstanceName to host resources."""
+
+    name: InstanceName
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, InstanceName):
+            object.__setattr__(self, "name", InstanceName(self.name))
+
+    @property
+    def app_root(self) -> PurePosixPath:
+        return APP_ROOT_BASE / self.name
+
+    @property
+    def data_root(self) -> PurePosixPath:
+        return DATA_ROOT_BASE / self.name
+
+    @property
+    def updater_state_root(self) -> PurePosixPath:
+        return UPDATER_STATE_BASE / self.name
+
+    @property
+    def updater_runtime_root(self) -> PurePosixPath:
+        return UPDATER_RUNTIME_BASE / self.name
+
+    @property
+    def managed_config_path(self) -> PurePosixPath:
+        return self.data_root / "config" / "animemo.json"
+
+    @property
+    def backup_root(self) -> PurePosixPath:
+        return self.data_root / "backups"
+
+    @property
+    def locator_path(self) -> PurePosixPath:
+        return self.updater_state_root / "instance.json"
+
+    @property
+    def updater_socket_path(self) -> PurePosixPath:
+        return self.updater_runtime_root / "updater.sock"
+
+    @property
+    def managed_env_path(self) -> PurePosixPath:
+        return self.updater_runtime_root / "managed.env"
+
+    @property
+    def compose_project(self) -> str:
+        return f"animemo-{self.name}"
+
+    @property
+    def updater_service(self) -> str:
+        return f"animemo-updater@{self.name}.service"
+
+    @property
+    def update_lock_path(self) -> PurePosixPath:
+        return self.updater_state_root / "update.lock"
+
+    @property
+    def operations_root(self) -> PurePosixPath:
+        return self.updater_state_root / "operations"
+
+    @property
+    def release_slots_root(self) -> PurePosixPath:
+        return self.updater_state_root / "releases"
+
+    @property
+    def owned_roots(self) -> tuple[PurePosixPath, ...]:
+        return (
+            self.app_root,
+            self.data_root,
+            self.updater_state_root,
+            self.updater_runtime_root,
+        )
+
+
+def instance_namespace(value: InstanceName | str = "default") -> InstanceNamespace:
+    return InstanceNamespace(value if isinstance(value, InstanceName) else InstanceName(value))
+
+
+DEFAULT_INSTANCE_NAME = InstanceName("default")
+DEFAULT_NAMESPACE = instance_namespace(DEFAULT_INSTANCE_NAME)
+
+# Compatibility imports remain deterministic aliases for the default v2 namespace;
+# none of these represent the unsupported pre-v1.1 singleton layout.
+APP_ROOT = DEFAULT_NAMESPACE.app_root
+DATA_ROOT = DEFAULT_NAMESPACE.data_root
+UPDATER_APP_ROOT = UPDATER_PROGRAM_ROOT
+UPDATER_STATE_ROOT = DEFAULT_NAMESPACE.updater_state_root
+UPDATER_RUNTIME_ROOT = DEFAULT_NAMESPACE.updater_runtime_root
+INSTANCE_LOCATOR_PATH = DEFAULT_NAMESPACE.locator_path
+MANAGED_CONFIG_ROOT = DEFAULT_NAMESPACE.managed_config_path.parent
+MANAGED_CONFIG_PATH = DEFAULT_NAMESPACE.managed_config_path
+BACKUP_ROOT = DEFAULT_NAMESPACE.backup_root
+UPDATER_SOCKET_PATH = DEFAULT_NAMESPACE.updater_socket_path
 
 _REQUIRED_FIELDS = frozenset(
     {
         "schemaVersion",
+        "instanceName",
         "instanceId",
         "appRoot",
         "dataRoot",
+        "updaterStateRoot",
+        "updaterRuntimeRoot",
         "deploymentProfile",
+        "composeProject",
+        "updaterService",
+        "updaterSocketPath",
         "listen",
         "publicOrigin",
         "managedConfigPath",
         "configRevision",
         "releaseIdentity",
+        "ownershipReceiptDigest",
     }
 )
 _LISTEN_FIELDS = frozenset({"host", "port"})
@@ -70,17 +213,6 @@ _SECRET_FIELD_PARTS = (
 _MAX_IDENTITY_DEPTH = 12
 _MAX_IDENTITY_MEMBERS = 256
 _MAX_IDENTITY_STRING = 4096
-
-
-class LocatorError(Exception):
-    """A stable, secret-safe canonical locator failure."""
-
-    def __init__(self, code: str) -> None:
-        self.code = code
-        super().__init__(code)
-
-    def __repr__(self) -> str:
-        return f"LocatorError(code={self.code!r})"
 
 
 class ReadOnlyHost(Protocol):
@@ -200,21 +332,32 @@ class LocalReadOnlyHost:
 class LocalLocatorStore(LocalReadOnlyHost):
     """Secure local adapter for the fixed locator file."""
 
-    def __init__(self, physical_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        physical_path: Path | None = None,
+        *,
+        instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+    ) -> None:
         self._locator_path = physical_path
+        self._canonical_path = instance_namespace(instance_name).locator_path
         self.emulates_private_permissions = (
             physical_path is not None and os.name == "nt"
         )
 
     @classmethod
-    def testing(cls, path: Path) -> LocalLocatorStore:
+    def testing(
+        cls,
+        path: Path,
+        *,
+        instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+    ) -> LocalLocatorStore:
         path = Path(os.path.abspath(path))
         if not path.is_absolute():
             raise ValueError("Testing locator path must be absolute")
-        return cls(path)
+        return cls(path, instance_name=instance_name)
 
     def _physical_path(self, path: PurePosixPath) -> Path:
-        if path != INSTANCE_LOCATOR_PATH:
+        if path != self._canonical_path:
             raise LocatorError("LOCATOR_PATH_NOT_CANONICAL")
         return self._locator_path or Path(str(path))
 
@@ -382,15 +525,22 @@ class ListenIdentity:
 @dataclass(frozen=True)
 class InstanceLocator:
     schema_version: int
+    instance_name: InstanceName
     instance_id: str
     app_root: PurePosixPath
     data_root: PurePosixPath
+    updater_state_root: PurePosixPath
+    updater_runtime_root: PurePosixPath
     deployment_profile: str
+    compose_project: str
+    updater_service: str
+    updater_socket_path: PurePosixPath
     listen: ListenIdentity
     public_origin: str
     managed_config_path: PurePosixPath
     config_revision: str
     release_identity: Mapping[str, Any]
+    ownership_receipt_digest: str
 
 
 def _field_is_secret(name: object) -> bool:
@@ -545,8 +695,14 @@ def _parse_release_identity(value: object) -> Mapping[str, Any]:
     return MappingProxyType({field: value[field] for field in sorted(value)})
 
 
+def parse_release_identity(value: object) -> Mapping[str, Any]:
+    """Validate the shared closed, non-secret installed-release identity."""
+
+    return _parse_release_identity(value)
+
+
 def parse_instance_locator(payload: Mapping[str, Any]) -> InstanceLocator:
-    """Parse the only supported v1.1 canonical locator schema."""
+    """Parse the only supported v1.1 instance-scoped locator schema."""
 
     _require_exact_fields(payload, _REQUIRED_FIELDS)
     if (
@@ -557,20 +713,43 @@ def parse_instance_locator(payload: Mapping[str, Any]) -> InstanceLocator:
     if payload["deploymentProfile"] != STANDARD_DEPLOYMENT_PROFILE:
         raise LocatorError("LOCATOR_PROFILE_UNSUPPORTED")
 
+    instance_name = InstanceName(payload["instanceName"])
+    namespace = instance_namespace(instance_name)
+
     app_root = _canonical_absolute_path(
         payload["appRoot"], code="LOCATOR_APP_ROOT_INVALID"
     )
     data_root = _canonical_absolute_path(
         payload["dataRoot"], code="LOCATOR_DATA_ROOT_INVALID"
     )
-    if app_root != APP_ROOT or data_root != DATA_ROOT:
+    updater_state_root = _canonical_absolute_path(
+        payload["updaterStateRoot"], code="LOCATOR_STATE_ROOT_INVALID"
+    )
+    updater_runtime_root = _canonical_absolute_path(
+        payload["updaterRuntimeRoot"], code="LOCATOR_RUNTIME_ROOT_INVALID"
+    )
+    if (
+        app_root != namespace.app_root
+        or data_root != namespace.data_root
+        or updater_state_root != namespace.updater_state_root
+        or updater_runtime_root != namespace.updater_runtime_root
+    ):
         raise LocatorError("LOCATOR_CANONICAL_ROOT_MISMATCH")
 
     managed_config_path = _canonical_absolute_path(
         payload["managedConfigPath"], code="LOCATOR_CONFIG_PATH_INVALID"
     )
-    if managed_config_path != MANAGED_CONFIG_PATH:
+    if managed_config_path != namespace.managed_config_path:
         raise LocatorError("LOCATOR_CONFIG_PATH_INVALID")
+    updater_socket_path = _canonical_absolute_path(
+        payload["updaterSocketPath"], code="LOCATOR_SOCKET_PATH_INVALID"
+    )
+    if updater_socket_path != namespace.updater_socket_path:
+        raise LocatorError("LOCATOR_SOCKET_PATH_INVALID")
+    if payload["composeProject"] != namespace.compose_project:
+        raise LocatorError("LOCATOR_COMPOSE_PROJECT_INVALID")
+    if payload["updaterService"] != namespace.updater_service:
+        raise LocatorError("LOCATOR_UPDATER_SERVICE_INVALID")
 
     try:
         instance_id = str(UUID(str(payload["instanceId"])))
@@ -609,33 +788,53 @@ def parse_instance_locator(payload: Mapping[str, Any]) -> InstanceLocator:
         raise LocatorError("LOCATOR_CONFIG_REVISION_INVALID")
 
     normalized_release_identity = _parse_release_identity(payload["releaseIdentity"])
+    ownership_receipt_digest = payload["ownershipReceiptDigest"]
+    if (
+        not isinstance(ownership_receipt_digest, str)
+        or _SHA256_IDENTITY.fullmatch(ownership_receipt_digest) is None
+    ):
+        raise LocatorError("LOCATOR_OWNERSHIP_RECEIPT_INVALID")
 
     return InstanceLocator(
         schema_version=LOCATOR_SCHEMA_VERSION,
+        instance_name=instance_name,
         instance_id=instance_id,
         app_root=app_root,
         data_root=data_root,
+        updater_state_root=updater_state_root,
+        updater_runtime_root=updater_runtime_root,
         deployment_profile=STANDARD_DEPLOYMENT_PROFILE,
+        compose_project=namespace.compose_project,
+        updater_service=namespace.updater_service,
+        updater_socket_path=updater_socket_path,
         listen=ListenIdentity(host=host, port=port),
         public_origin=_parse_public_origin(payload["publicOrigin"]),
         managed_config_path=managed_config_path,
         config_revision=config_revision,
         release_identity=normalized_release_identity,
+        ownership_receipt_digest=ownership_receipt_digest,
     )
 
 
 def instance_locator_payload(locator: InstanceLocator) -> dict[str, object]:
     payload = {
         "schemaVersion": locator.schema_version,
+        "instanceName": str(locator.instance_name),
         "instanceId": locator.instance_id,
         "appRoot": str(locator.app_root),
         "dataRoot": str(locator.data_root),
+        "updaterStateRoot": str(locator.updater_state_root),
+        "updaterRuntimeRoot": str(locator.updater_runtime_root),
         "deploymentProfile": locator.deployment_profile,
+        "composeProject": locator.compose_project,
+        "updaterService": locator.updater_service,
+        "updaterSocketPath": str(locator.updater_socket_path),
         "listen": {"host": locator.listen.host, "port": locator.listen.port},
         "publicOrigin": locator.public_origin,
         "managedConfigPath": str(locator.managed_config_path),
         "configRevision": locator.config_revision,
         "releaseIdentity": dict(locator.release_identity),
+        "ownershipReceiptDigest": locator.ownership_receipt_digest,
     }
     parsed = parse_instance_locator(payload)
     if parsed != locator:
@@ -658,6 +857,12 @@ def _locator_bytes(locator: InstanceLocator) -> bytes:
 
 def _sha256_identity(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def instance_locator_digest(locator: InstanceLocator) -> str:
+    if not isinstance(locator, InstanceLocator):
+        raise LocatorError("LOCATOR_SCHEMA_INVALID")
+    return _sha256_identity(_locator_bytes(locator))
 
 
 def release_identity_from_manifest(manifest: Mapping[str, Any]) -> Mapping[str, str]:
@@ -696,18 +901,21 @@ def release_identity_from_manifest(manifest: Mapping[str, Any]) -> Mapping[str, 
 def load_instance_snapshot(
     host: ReadOnlyHost | None = None,
     *,
-    path: PurePosixPath = INSTANCE_LOCATOR_PATH,
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+    path: PurePosixPath | None = None,
     expected_owner_uid: int | None = None,
     expected_owner_gid: int | None = None,
 ) -> InstanceSnapshot:
     """Read the fixed locator without env, cwd, Compose, or legacy fallback."""
 
-    if path != INSTANCE_LOCATOR_PATH:
+    namespace = instance_namespace(instance_name)
+    canonical_path = namespace.locator_path
+    if path is not None and path != canonical_path:
         raise LocatorError("LOCATOR_PATH_NOT_CANONICAL")
     reader = host or LocalReadOnlyHost()
     try:
         secure = reader.read_secure_bytes(
-            path,
+            canonical_path,
             limit=MAX_LOCATOR_BYTES,
             expected_owner_uid=expected_owner_uid,
             expected_owner_gid=expected_owner_gid,
@@ -741,6 +949,8 @@ def load_instance_snapshot(
     if not isinstance(parsed, Mapping):
         raise LocatorError("LOCATOR_SCHEMA_INVALID")
     locator = parse_instance_locator(parsed)
+    if locator.instance_name != namespace.name:
+        raise LocatorError("LOCATOR_INSTANCE_NAME_MISMATCH")
     return InstanceSnapshot(
         locator=locator,
         digest=_sha256_identity(_locator_bytes(locator)),
@@ -751,12 +961,14 @@ def load_instance_snapshot(
 def load_instance_locator(
     host: ReadOnlyHost | None = None,
     *,
-    path: PurePosixPath = INSTANCE_LOCATOR_PATH,
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+    path: PurePosixPath | None = None,
     expected_owner_uid: int | None = None,
     expected_owner_gid: int | None = None,
 ) -> InstanceLocator:
     return load_instance_snapshot(
         host,
+        instance_name=instance_name,
         path=path,
         expected_owner_uid=expected_owner_uid,
         expected_owner_gid=expected_owner_gid,
@@ -772,16 +984,18 @@ def publish_instance_locator(
 ) -> InstanceSnapshot:
     if store is None and (owner_uid is None or owner_gid is None):
         raise LocatorError("LOCATOR_OWNER_REQUIRED")
-    writer = store or LocalLocatorStore()
+    writer = store or LocalLocatorStore(instance_name=locator.instance_name)
+    namespace = instance_namespace(locator.instance_name)
     payload = _locator_bytes(locator)
     writer.publish_initial_bytes(
-        INSTANCE_LOCATOR_PATH,
+        namespace.locator_path,
         payload,
         owner_uid=owner_uid,
         owner_gid=owner_gid,
     )
     snapshot = load_instance_snapshot(
         writer,
+        instance_name=locator.instance_name,
         expected_owner_uid=owner_uid,
         expected_owner_gid=owner_gid,
     )
@@ -800,16 +1014,18 @@ def replace_instance_locator(
 ) -> InstanceSnapshot:
     if store is None and (owner_uid is None or owner_gid is None):
         raise LocatorError("LOCATOR_OWNER_REQUIRED")
-    writer = store or LocalLocatorStore()
+    writer = store or LocalLocatorStore(instance_name=locator.instance_name)
+    namespace = instance_namespace(locator.instance_name)
     current = load_instance_snapshot(
         writer,
+        instance_name=locator.instance_name,
         expected_owner_uid=owner_uid,
         expected_owner_gid=owner_gid,
     )
     if current.digest != expected_digest:
         raise LocatorError("LOCATOR_CONCURRENT_MODIFICATION")
     writer.replace_bytes(
-        INSTANCE_LOCATOR_PATH,
+        namespace.locator_path,
         _locator_bytes(locator),
         expected_storage_digest=current.storage_digest,
         owner_uid=owner_uid,
@@ -817,6 +1033,7 @@ def replace_instance_locator(
     )
     snapshot = load_instance_snapshot(
         writer,
+        instance_name=locator.instance_name,
         expected_owner_uid=owner_uid,
         expected_owner_gid=owner_gid,
     )

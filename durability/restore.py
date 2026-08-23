@@ -37,6 +37,12 @@ from .compatibility import (
     UpgradeAction,
     evaluate_compatibility,
 )
+from .instance import (
+    DEFAULT_INSTANCE_NAME,
+    InstanceName,
+    LocatorError,
+    instance_namespace,
+)
 from .resource_budget import (
     DEFAULT_RESOURCE_BUDGET,
     CopyByteCounter,
@@ -56,13 +62,20 @@ from .secret_envelope import (
 )
 
 RESTORE_PLAN_IDENTITY = "animemo.restore-plan/v1"
-CANONICAL_ROOTS = (
-    "/opt/animemo",
-    "/data/animemo",
-    "/opt/animemo-updater",
-    "/var/lib/animemo-updater",
-    "/run/animemo-updater",
-)
+def canonical_roots_for(
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+) -> tuple[str, ...]:
+    namespace = instance_namespace(instance_name)
+    return (
+        str(namespace.app_root),
+        str(namespace.data_root),
+        "/opt/animemo-updater",
+        str(namespace.updater_state_root),
+        str(namespace.updater_runtime_root),
+    )
+
+
+CANONICAL_ROOTS = canonical_roots_for()
 CANONICAL_BACKUP_ROOTS = (
     "filesystem/config",
     "filesystem/plugins/cas",
@@ -158,6 +171,7 @@ class RestoreRecoveryPersistenceError(RestoreError):
 @dataclass(frozen=True)
 class DestinationSnapshot:
     classification: DestinationClass
+    instance_name: InstanceName
     deployment_profile: str
     canonical_roots: tuple[str, ...]
     ownership_verified: bool
@@ -168,6 +182,7 @@ class DestinationSnapshot:
     def as_dict(self) -> dict[str, object]:
         return {
             "classification": self.classification.value,
+            "instanceName": str(self.instance_name),
             "deploymentProfile": self.deployment_profile,
             "canonicalRoots": list(self.canonical_roots),
             "ownershipVerified": self.ownership_verified,
@@ -958,9 +973,13 @@ def _inspect_destination(port: DestinationPort) -> DestinationSnapshot:
         DestinationClass.EXISTING_EMPTY,
     }:
         raise RestorePreflightError("RESTORE_DESTINATION_REJECTED")
-    if snapshot.deployment_profile != "v1.1-standard":
+    if snapshot.deployment_profile != "v1.1-instance-scoped":
         raise RestorePreflightError("RESTORE_DESTINATION_REJECTED")
-    if snapshot.canonical_roots != CANONICAL_ROOTS:
+    try:
+        expected_roots = canonical_roots_for(snapshot.instance_name)
+    except LocatorError:
+        raise RestorePreflightError("RESTORE_DESTINATION_REJECTED") from None
+    if snapshot.canonical_roots != expected_roots:
         raise RestorePreflightError("RESTORE_DESTINATION_REJECTED")
     _canonical_digest(snapshot.evidence_digest, "RESTORE_DESTINATION_EVALUATION_FAILED")
     if not snapshot.ownership_verified:

@@ -4,6 +4,8 @@ x-api-build: &api-build
 
 x-api-build-common: &api-build-common
   build: *api-build
+  env_file:
+    - ${ANIMEMO_TEST_MANAGED_ENV_PATH:-../.ci-runtime.env}
   environment:
     ANIMEMO_PUBLIC_ORIGIN: ${ANIMEMO_PUBLIC_ORIGIN:?ANIMEMO_PUBLIC_ORIGIN is required}
   volumes:

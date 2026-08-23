@@ -59,7 +59,7 @@ MATERIAL_FILES = sorted([
 ], key=lambda item: item["path"])
 DEPLOYMENT_CONTRACT = {
     "schemaVersion": 2,
-    "profile": "v1.1-standard",
+    "profile": "v1.1-instance-scoped",
     "platform": "linux/amd64",
     "archive": {
         "name": "installer-materials.tar",
@@ -628,7 +628,9 @@ class ManifestContractTests(unittest.TestCase):
                 "platform": "linux/amd64",
             },
         )
-        self.assertEqual(payload["deployment"]["profile"], "v1.1-standard")
+        self.assertEqual(
+            payload["deployment"]["profile"], "v1.1-instance-scoped"
+        )
         self.assertEqual(
             payload["artifacts"],
             {
