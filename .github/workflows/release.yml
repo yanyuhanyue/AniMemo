@@ -899,6 +899,29 @@ jobs:
             --output release-output/installer-materials.tar
           tar --extract --to-stdout --file release-output/installer-materials.tar \
             release/platform-qualification.json | cmp - release/platform-qualification.json
+          clean_materials="$RUNNER_TEMP/animemo-clean-stage0-materials"
+          clean_runtime="$RUNNER_TEMP/animemo-clean-stage0-runtime"
+          rm -rf "$clean_materials" "$clean_runtime"
+          install -d -m 0700 "$clean_materials"
+          tar --extract --file release-output/installer-materials.tar \
+            --directory "$clean_materials" --no-same-owner
+          python3 -m venv "$clean_runtime"
+          if "$clean_runtime/bin/python" -P -B -c 'import cramjam' 2>/dev/null; then
+            echo "clean Stage-0 runtime unexpectedly inherited release dependencies" >&2
+            exit 1
+          fi
+          /usr/bin/env -i HOME="$RUNNER_TEMP" PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            "$clean_runtime/bin/python" -P -B -m pip install \
+            --disable-pip-version-check --no-cache-dir --no-index --only-binary=:all: \
+            --find-links "$clean_materials/wheelhouse" \
+            -r "$clean_materials/release/requirements.txt" \
+            -r "$clean_materials/durability/requirements.txt"
+          /usr/bin/env -i -C "$clean_materials" \
+            HOME="$RUNNER_TEMP" PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            PYTHONPATH="$clean_materials" PYTHONSAFEPATH=1 \
+            "$clean_runtime/bin/python" -P -B -m installer --help >/dev/null
           python -m release.cli generate-deployment-contract \
             --root . --installer-materials release-output/installer-materials.tar \
             --output release-output/deployment-contract.json
