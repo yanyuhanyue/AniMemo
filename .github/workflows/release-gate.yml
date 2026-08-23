@@ -139,6 +139,15 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            release/requirements.txt
+            durability/requirements.txt
+      - run: python -m pip install -r release/requirements.txt
+      - run: python -m pip install -r durability/requirements.txt
       - name: Create ephemeral production-like environment
         shell: bash
         run: |
@@ -171,6 +180,11 @@ jobs:
           ANIMEMO_LISTEN_HOST=127.0.0.1
           ANIMEMO_LISTEN_PORT=8088
           ANIMEMO_CONFIG_REVISION=11111111-1111-4111-8111-111111111111
+          ANIMEMO_RELEASE_VERSION=v1.1.0-rc.0
+          ANIMEMO_RELEASE_COMMIT=${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
+          ANIMEMO_RELEASE_CHANNEL=rc
+          ANIMEMO_DATABASE_CONTRACT=animemo.database/v1
+          ANIMEMO_CONFIGURATION_CONTRACT=animemo.configuration/v1
           ANIMEMO_INSTANCE_NAME=release-gate
           ANIMEMO_INSTANCE_ID=12345678-1234-4234-9234-123456789abc
           ANIMEMO_COMPOSE_PROJECT=animemo-release-gate
@@ -190,7 +204,8 @@ jobs:
         shell: bash
         run: |
           test -f deploy/docker-compose.build.yml
-          echo "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml" >> "$GITHUB_ENV"
+          test -f updater/docker-compose.runtime.yml
+          echo "COMPOSE_FILE=deploy/docker-compose.yml:updater/docker-compose.runtime.yml:deploy/docker-compose.build.yml" >> "$GITHUB_ENV"
       - name: Validate Compose configuration
         run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env config
       - name: Build production images
@@ -201,6 +216,10 @@ jobs:
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps migration
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps bootstrap
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --no-deps api web
+      - name: Run real production PostgreSQL Backup adapter create and verify
+        env:
+          ANIMEMO_RUN_PRODUCTION_BACKUP_DOCKER_TEST: "1"
+        run: python -m unittest scripts.tests.test_production_backup_postgres.RealProductionPostgresBackupTests -v
       - name: Run health and frontend smoke checks
         shell: bash
         run: |

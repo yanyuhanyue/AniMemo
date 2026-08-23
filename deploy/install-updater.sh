@@ -6,6 +6,7 @@ set -eu
 
 INSTALL_ROOT=/opt/animemo-updater
 LAUNCHER=/usr/local/bin/animemo-updater
+ANIMEMO_LAUNCHER=/usr/local/bin/animemo
 
 die() {
     echo "AniMemo Updater install: $*" >&2
@@ -37,7 +38,15 @@ SCRIPT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 [ -f "$SCRIPT_ROOT/durability/requirements.txt" ] || die "durability requirements are missing"
 [ -d "$SCRIPT_ROOT/wheelhouse" ] || die "offline wheelhouse is missing"
 [ -f "$SCRIPT_ROOT/deploy/updater/animemo-updater" ] || die "verified launcher is missing"
+[ -f "$SCRIPT_ROOT/deploy/updater/animemo" ] || die "verified operator launcher is missing"
+[ -f "$SCRIPT_ROOT/durability/backup_cli.py" ] || die "production backup CLI is missing"
+[ -f "$SCRIPT_ROOT/durability/backup_production.py" ] || die "production backup adapter is missing"
 [ -f "$SCRIPT_ROOT/deploy/updater/animemo-updater@.service" ] || die "systemd service asset is missing"
+if [ -e "$ANIMEMO_LAUNCHER" ] || [ -L "$ANIMEMO_LAUNCHER" ]; then
+    [ -L "$ANIMEMO_LAUNCHER" ] \
+        && [ "$(readlink -- "$ANIMEMO_LAUNCHER")" = "$INSTALL_ROOT/animemo-launcher" ] \
+        || die "operator launcher path is foreign"
+fi
 
 VERSION=$(sed -n 's/^__version__ = "\([0-9][0-9.]*\)"$/\1/p' "$SCRIPT_ROOT/updater/__init__.py")
 case "$VERSION" in
@@ -96,11 +105,15 @@ systemd-sysusers /usr/lib/sysusers.d/animemo-updater.conf
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/animemo-updater.conf
 
 install -m 0755 "$SCRIPT_ROOT/deploy/updater/animemo-updater" "$INSTALL_ROOT/launcher"
+install -m 0755 "$SCRIPT_ROOT/deploy/updater/animemo" "$INSTALL_ROOT/animemo-launcher"
 ln -sfn "$INSTALL_ROOT/launcher" "$LAUNCHER"
+ln -sfn "$INSTALL_ROOT/animemo-launcher" "$ANIMEMO_LAUNCHER"
 ln -sfn "$RELEASE_ROOT" "$INSTALL_ROOT/.current-new"
 mv -Tf "$INSTALL_ROOT/.current-new" "$INSTALL_ROOT/current"
 runuser -u animemo-updater -g animemo-api -- "$LAUNCHER" version >/dev/null \
     || die "installed updater is not executable by the service identity"
+runuser -u animemo-updater -g animemo-api -- "$ANIMEMO_LAUNCHER" backup --help >/dev/null \
+    || die "installed production backup CLI is not executable by the service identity"
 
 systemctl daemon-reload
 

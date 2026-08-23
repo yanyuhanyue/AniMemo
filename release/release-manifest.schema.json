@@ -48,6 +48,19 @@
           "maxItems": 2,
           "items": {"$ref": "#/$defs/deploymentFile"}
         },
+        "backup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schemaVersion", "quiescenceMethod", "writerServices", "allowedRunningServices", "privateRegistry", "updaterStateMembers"],
+          "properties": {
+            "schemaVersion": {"const": 1},
+            "quiescenceMethod": {"const": "compose-graceful-writer-stop/v1"},
+            "writerServices": {"const": ["api"]},
+            "allowedRunningServices": {"const": ["postgres", "redis", "web"]},
+            "privateRegistry": {"const": "backup-members.json"},
+            "updaterStateMembers": {"const": ["ownership.json", "releases/release-slots.json", "runtime.json"]}
+          }
+        },
         "installerMaterials": {
           "type": "object",
           "additionalProperties": false,

@@ -361,9 +361,18 @@ class SecretEnvelopeTests(unittest.TestCase):
         self.assertEqual(repr(envelope), "<SecretEnvelope redacted>")
         self.assertEqual(repr(opened), "<OpenedSecretPayload redacted>")
 
+        self.assertEqual(
+            SecretEntry.preserve(
+                "POSTGRES_PASSWORD", b"database-password"
+            ).classification,
+            "PRESERVE",
+        )
+        self.assertEqual(
+            SecretEntry.preserve("REDIS_URL", b"redis://redis:6379/0").classification,
+            "PRESERVE",
+        )
+
         for target_local_name in (
-            "POSTGRES_PASSWORD",
-            "REDIS_URL",
             "GITHUB_TOKEN",
             "GHCR_TOKEN",
         ):

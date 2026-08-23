@@ -10,6 +10,37 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class DeploymentUpdaterContractTests(unittest.TestCase):
+    def test_production_backup_cli_is_installed_offline_without_rehearsal_helper(self):
+        installer = (ROOT / "deploy/install-updater.sh").read_text(encoding="utf-8")
+        launcher = (ROOT / "deploy/updater/animemo").read_text(encoding="utf-8")
+        production = (ROOT / "durability/backup_production.py").read_text(
+            encoding="utf-8"
+        )
+        cli = (ROOT / "durability/backup_cli.py").read_text(encoding="utf-8")
+
+        self.assertIn("/usr/local/bin/animemo", installer)
+        self.assertIn('readlink -- "$ANIMEMO_LAUNCHER"', installer)
+        self.assertIn("operator launcher path is foreign", installer)
+        self.assertIn('"$ANIMEMO_LAUNCHER" backup --help', installer)
+        self.assertIn("-m durability.backup_cli", launcher)
+        self.assertIn("from . import backup", production)
+        self.assertIn("backup.create_backup", production)
+        self.assertIn("backup.verify_backup", production)
+        self.assertNotIn("scripts/dr_backup.py", production + cli + launcher)
+
+        release_gate = yaml.safe_load(
+            (ROOT / ".github/workflows/release-gate.yml").read_text(encoding="utf-8")
+        )
+        docker_runs = "\n".join(
+            str(step.get("run", "")) for step in release_gate["jobs"]["docker"]["steps"]
+        )
+        self.assertIn(
+            "python -m pip install -r release/requirements.txt", docker_runs
+        )
+        self.assertIn(
+            "python -m pip install -r durability/requirements.txt", docker_runs
+        )
+
     def test_production_compose_uses_digest_inputs_and_explicit_jobs(self):
         compose = yaml.safe_load(
             (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")
@@ -305,6 +336,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         )
 
         self.assertIn("test -f deploy/docker-compose.build.yml", workflow)
+        self.assertIn("test -f updater/docker-compose.runtime.yml", workflow)
         self.assertIn("python -m pip install -r durability/requirements.txt", workflow)
         self.assertIn(
             'install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater',
@@ -312,7 +344,7 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         )
         self.assertNotIn("if [[ -f deploy/docker-compose.build.yml ]]; then", workflow)
         self.assertIn(
-            "COMPOSE_FILE=deploy/docker-compose.yml:deploy/docker-compose.build.yml",
+            "COMPOSE_FILE=deploy/docker-compose.yml:updater/docker-compose.runtime.yml:deploy/docker-compose.build.yml",
             workflow,
         )
         ready = workflow.index("up -d --wait --wait-timeout 120 postgres redis")
