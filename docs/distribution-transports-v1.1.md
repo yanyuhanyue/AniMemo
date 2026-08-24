@@ -113,7 +113,7 @@ test -p "$GH_TOKEN_PIPE"
 GH_TOKEN="$(
   /usr/bin/timeout --signal=TERM --kill-after=5s 35s \
     /bin/bash --noprofile --norc -c \
-    'set -euo pipefail; IFS= read -r -t 30 token <"$1"; test -n "$token"; /usr/bin/printf "%s" "$token"' \
+    'set -euo pipefail; IFS= read -r -t 30 token <"$1"; test -n "$token"; printf "%s" "$token"' \
     animemo-gh-token-reader "$GH_TOKEN_PIPE"
 )"
 test -n "$GH_TOKEN"

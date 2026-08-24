@@ -177,10 +177,11 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
             "/usr/bin/timeout --signal=TERM --kill-after=5s 35s \\\n"
             "    /bin/bash --noprofile --norc -c \\\n"
             "    'set -euo pipefail; IFS= read -r -t 30 token <\"$1\"; "
-            "test -n \"$token\"; /usr/bin/printf \"%s\" \"$token\"' \\\n"
+            "test -n \"$token\"; printf \"%s\" \"$token\"' \\\n"
             '    animemo-gh-token-reader "$GH_TOKEN_PIPE"',
             stage0,
         )
+        self.assertNotIn('/usr/bin/printf "%s" "$token"', stage0)
         self.assertIn("export GH_TOKEN", stage0)
         installer_execution = stage0.index('"$RUNTIME/bin/python" -P -B -m installer')
         credential_export = stage0.rindex("export GH_TOKEN", 0, installer_execution)
@@ -208,7 +209,7 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
         end = stage0.index("sudo /usr/bin/env -i", start)
         producer = stage0[start:end].replace(
             "/usr/bin/gh auth token",
-            '/usr/bin/printf "%s\\n" github_pat_fixture',
+            'printf "%s\\n" github_pat_fixture',
         )
         reader_start = stage0.index('GH_TOKEN="$(')
         reader_end = stage0.index('\ntest -n "$GH_TOKEN"', reader_start)
