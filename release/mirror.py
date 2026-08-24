@@ -897,9 +897,18 @@ class OfficialReleaseMirrorPublisher:
         range_status, range_headers, first_mib = self._public_reader.first_mib(url)
         with source.open("rb") as stream:
             expected_first_mib = stream.read(1024 * 1024)
+        expected_range = (
+            f"bytes 0-{len(expected_first_mib) - 1}/{declared['size']}"
+        )
+        accept_ranges = _header(range_headers, "Accept-Ranges")
         if (
             range_status != 206
-            or _header(range_headers, "Accept-Ranges") != "bytes"
+            or _header(range_headers, "Content-Length")
+            != str(len(expected_first_mib))
+            or _header(range_headers, "Content-Range") != expected_range
+            or accept_ranges not in {None, "bytes"}
+            or _header(range_headers, "Transfer-Encoding") is not None
+            or _header(range_headers, "Content-Encoding") is not None
             or first_mib != expected_first_mib
         ):
             raise MirrorError("mirror public first-MiB Range readback failed")

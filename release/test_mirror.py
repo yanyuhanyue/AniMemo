@@ -93,7 +93,12 @@ class MemoryPublicReader:
         self.ranges.append(url)
         key = url.removeprefix(MIRROR_ORIGIN + "/")
         content = self.store.objects[key]
-        return 206, {"Accept-Ranges": "bytes"}, content[: 1024 * 1024]
+        body = content[: 1024 * 1024]
+        return 206, {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(len(body)),
+            "Content-Range": f"bytes 0-{len(body) - 1}/{len(content)}",
+        }, body
 
 
 class CloudflareMemoryPublicReader(MemoryPublicReader):
@@ -102,6 +107,30 @@ class CloudflareMemoryPublicReader(MemoryPublicReader):
         if status == 200:
             headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return status, headers
+
+
+class CloudflareRangeMemoryPublicReader(CloudflareMemoryPublicReader):
+    def first_mib(self, url: str) -> tuple[int, dict[str, str], bytes]:
+        self.ranges.append(url)
+        key = url.removeprefix(MIRROR_ORIGIN + "/")
+        content = self.store.objects[key]
+        body = content[: 1024 * 1024]
+        return 206, {
+            "Content-Length": str(len(body)),
+            "Content-Range": f"bytes 0-{len(body) - 1}/{len(content)}",
+        }, body
+
+
+class InvalidRangeMemoryPublicReader(MemoryPublicReader):
+    def __init__(self, store: MemoryStore, range_headers: dict[str, str]) -> None:
+        super().__init__(store)
+        self.range_headers = range_headers
+
+    def first_mib(self, url: str) -> tuple[int, dict[str, str], bytes]:
+        self.ranges.append(url)
+        key = url.removeprefix(MIRROR_ORIGIN + "/")
+        content = self.store.objects[key]
+        return 206, self.range_headers, content[: 1024 * 1024]
 
 
 class CacheControlValidationTests(unittest.TestCase):
@@ -359,6 +388,71 @@ class MirrorPublisherTests(MirrorReceiptTests):
 
         self.assertEqual(result["uploadedObjectCount"], 6)
         self.assertEqual(result["publicReadback"], "PASS")
+
+    def test_publisher_accepts_bound_206_without_optional_accept_ranges(self) -> None:
+        large_name = "installer-materials.tar"
+        self.contents[large_name] = b"x" * (1024 * 1024 + 17)
+        self.assets = [
+            {
+                "name": name,
+                "size": len(self.contents[name]),
+                "sha256": identity(self.contents[name]),
+            }
+            for name in mirror_release_assets(TAG)
+        ]
+        store = MemoryStore()
+        reader = CloudflareRangeMemoryPublicReader(store)
+        publisher = OfficialReleaseMirrorPublisher(store=store, public_reader=reader)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_assets(root)
+            result = publisher.publish(receipt=self.receipt(), asset_directory=root)
+
+        self.assertEqual(result["uploadedObjectCount"], 6)
+        self.assertEqual(result["rangeStatus"], "PASS")
+
+    def test_publisher_rejects_unbound_or_inconsistent_206_response(self) -> None:
+        first_name = mirror_release_assets(TAG)[0]
+        first_size = len(self.contents[first_name])
+        valid_length = str(first_size)
+        valid_range = f"bytes 0-{first_size - 1}/{first_size}"
+        cases = (
+            {"Content-Length": "1", "Content-Range": valid_range},
+            {"Content-Length": valid_length},
+            {
+                "Content-Length": valid_length,
+                "Content-Range": f"bytes 1-{first_size}/{first_size}",
+            },
+            {
+                "Content-Length": valid_length,
+                "Content-Range": valid_range,
+                "Accept-Ranges": "none",
+            },
+            {
+                "Content-Length": valid_length,
+                "Content-Range": valid_range,
+                "Transfer-Encoding": "chunked",
+            },
+            {
+                "Content-Length": valid_length,
+                "Content-Range": valid_range,
+                "Content-Encoding": "gzip",
+            },
+        )
+        for headers in cases:
+            with self.subTest(headers=headers):
+                store = MemoryStore()
+                reader = InvalidRangeMemoryPublicReader(store, headers)
+                publisher = OfficialReleaseMirrorPublisher(
+                    store=store, public_reader=reader
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self._write_assets(root)
+                    with self.assertRaisesRegex(MirrorError, "Range readback"):
+                        publisher.publish(
+                            receipt=self.receipt(), asset_directory=root
+                        )
 
     def test_existing_different_object_freezes_without_overwrite(self) -> None:
         store = MemoryStore()
