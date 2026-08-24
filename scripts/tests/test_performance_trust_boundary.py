@@ -22,6 +22,15 @@ IDENTITY_INPUTS = {
     "trusted",
     "allow_untrusted",
 }
+TRUSTED_MAIN_SCRIPT = """set -euo pipefail
+test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"
+test "$GITHUB_REF" = "refs/heads/main"
+git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"
+test "$(git rev-parse HEAD^{commit})" = "$TRUSTED_SHA"
+test "$(git rev-parse origin/main^{commit})" = "$TRUSTED_SHA"
+test -z "$(git status --porcelain --untracked-files=no)"
+echo "verified=true" >> "$GITHUB_OUTPUT"
+"""
 
 
 def load_yaml(source: str) -> dict[str, object]:
@@ -33,6 +42,24 @@ def workflow(name: str) -> tuple[dict[str, object], str]:
         encoding="utf-8"
     )
     return load_yaml(source), source
+
+
+def job_binds_exact_current_main(job: dict[str, object]) -> bool:
+    steps = job.get("steps", [])
+    if not isinstance(steps, list) or len(steps) < 2:
+        return False
+    checkout, binding = steps[:2]
+    if not isinstance(checkout, dict) or not isinstance(binding, dict):
+        return False
+    return (
+        checkout.get("uses", "").startswith("actions/checkout@")
+        and checkout.get("with", {}).get("ref") == "${{ github.sha }}"
+        and checkout.get("with", {}).get("persist-credentials") == "false"
+        and binding.get("id") == "trusted_main"
+        and binding.get("env", {}).get("TRUSTED_SHA") == "${{ github.sha }}"
+        and binding.get("shell") == "bash"
+        and binding.get("run") == TRUSTED_MAIN_SCRIPT
+    )
 
 
 def classify_performance_boundary(source: str) -> str:
@@ -74,7 +101,22 @@ def classify_performance_boundary(source: str) -> str:
         return "FAIL_UNTRUSTED_CANDIDATE_IN_CACHE_CAPABLE_DEFAULT_BRANCH_CONTEXT"
     if "pull_request" in triggers and "pull_request_target" not in triggers:
         return "PASS_LOW_TRUST_PULL_REQUEST_CONTEXT"
-    if triggers == {"workflow_call": {}} and not input_names and not dynamic_checkout:
+    code_executing_jobs = [
+        job
+        for job in jobs.values()
+        if isinstance(job, dict)
+        and any(
+            isinstance(step, dict) and "run" in step
+            for step in job.get("steps", [])
+        )
+    ]
+    if (
+        triggers == {"workflow_call": {}}
+        and not input_names
+        and not dynamic_checkout
+        and code_executing_jobs
+        and all(job_binds_exact_current_main(job) for job in code_executing_jobs)
+    ):
         return "PASS_TRUSTED_MAIN_BOUNDARY"
     return "FAIL_UNCLASSIFIED_PERFORMANCE_BOUNDARY"
 
@@ -91,6 +133,9 @@ class PerformanceTrustBoundaryTests(unittest.TestCase):
         self.assertEqual(
             performance["concurrency"]["group"],
             "animemo-performance-trusted-${{ github.sha }}",
+        )
+        self.assertEqual(
+            classify_performance_boundary(source), "PASS_TRUSTED_MAIN_BOUNDARY"
         )
 
     def test_every_code_executing_job_binds_its_own_runner_to_current_main(self):
@@ -110,25 +155,15 @@ class PerformanceTrustBoundaryTests(unittest.TestCase):
             self.assertEqual(checkout["with"]["persist-credentials"], "false", name)
 
             binding = steps[1]
-            self.assertEqual(binding["id"], "trusted_main", name)
-            self.assertEqual(binding["env"]["TRUSTED_SHA"], "${{ github.sha }}", name)
-            run = binding["run"]
-            for guard in (
-                'test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"',
-                'test "$GITHUB_REF" = "refs/heads/main"',
-                'git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"',
-                'test "$(git rev-parse HEAD^{commit})" = "$TRUSTED_SHA"',
-                'test "$(git rev-parse origin/main^{commit})" = "$TRUSTED_SHA"',
-                'test -z "$(git status --porcelain --untracked-files=no)"',
-                'echo "verified=true" >> "$GITHUB_OUTPUT"',
-            ):
-                self.assertIn(guard, run, f"{name}: {guard}")
+            self.assertTrue(job_binds_exact_current_main(job), name)
+            self.assertEqual(binding["run"], TRUSTED_MAIN_SCRIPT, name)
 
             for step in steps[2:]:
-                if step.get("if") and "always()" in step["if"]:
+                condition = step.get("if", "")
+                if "always()" in condition or "failure()" in condition:
                     self.assertIn(
                         "steps.trusted_main.outputs.verified == 'true'",
-                        step["if"],
+                        condition,
                         f"{name}: {step.get('name', step.get('uses'))}",
                     )
 
@@ -248,8 +283,19 @@ jobs:
   performance:
     steps:
       - uses: actions/checkout@fixed
-        with: {ref: '${{ github.sha }}'}
-      - run: test "$GITHUB_REF" = refs/heads/main
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - id: trusted_main
+        env: {TRUSTED_SHA: '${{ github.sha }}'}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"
+          test "$GITHUB_REF" = "refs/heads/main"
+          git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"
+          test "$(git rev-parse HEAD^{commit})" = "$TRUSTED_SHA"
+          test "$(git rev-parse origin/main^{commit})" = "$TRUSTED_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          echo "verified=true" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@fixed
         with: {cache-binary: false, keep-state: false, cleanup: true}
       - run: docker compose build
@@ -269,6 +315,32 @@ jobs:
         self.assertEqual(
             classify_performance_boundary(low_trust),
             "PASS_LOW_TRUST_PULL_REQUEST_CONTEXT",
+        )
+
+    def test_security_classifier_rejects_missing_main_freshness_guard(self):
+        missing_freshness_guard = """
+on:
+  workflow_call: {}
+jobs:
+  performance:
+    steps:
+      - uses: actions/checkout@fixed
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - id: trusted_main
+        env: {TRUSTED_SHA: '${{ github.sha }}'}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD^{commit})" = "$TRUSTED_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          echo "verified=true" >> "$GITHUB_OUTPUT"
+      - run: docker compose build
+"""
+        self.assertEqual(
+            classify_performance_boundary(missing_freshness_guard),
+            "FAIL_UNCLASSIFIED_PERFORMANCE_BOUNDARY",
         )
 
 

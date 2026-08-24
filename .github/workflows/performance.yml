@@ -21,7 +21,8 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Bind this runner to exact current main
+      - &trusted_main_binding
+        name: Bind this runner to exact current main
         id: trusted_main
         env:
           TRUSTED_SHA: ${{ github.sha }}
@@ -114,20 +115,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Bind this runner to exact current main
-        id: trusted_main
-        env:
-          TRUSTED_SHA: ${{ github.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"
-          test "$GITHUB_REF" = "refs/heads/main"
-          git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"
-          test "$(git rev-parse HEAD^{commit})" = "$TRUSTED_SHA"
-          test "$(git rev-parse origin/main^{commit})" = "$TRUSTED_SHA"
-          test -z "$(git status --porcelain --untracked-files=no)"
-          echo "verified=true" >> "$GITHUB_OUTPUT"
+      - *trusted_main_binding
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
@@ -182,20 +170,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Bind this runner to exact current main
-        id: trusted_main
-        env:
-          TRUSTED_SHA: ${{ github.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"
-          test "$GITHUB_REF" = "refs/heads/main"
-          git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"
-          test "$(git rev-parse HEAD^{commit})" = "$TRUSTED_SHA"
-          test "$(git rev-parse origin/main^{commit})" = "$TRUSTED_SHA"
-          test -z "$(git status --porcelain --untracked-files=no)"
-          echo "verified=true" >> "$GITHUB_OUTPUT"
+      - *trusted_main_binding
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
@@ -390,20 +365,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Bind this runner to exact current main
-        id: trusted_main
-        env:
-          TRUSTED_SHA: ${{ github.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"
-          test "$GITHUB_REF" = "refs/heads/main"
-          git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"
-          test "$(git rev-parse HEAD^{commit})" = "$TRUSTED_SHA"
-          test "$(git rev-parse origin/main^{commit})" = "$TRUSTED_SHA"
-          test -z "$(git status --porcelain --untracked-files=no)"
-          echo "verified=true" >> "$GITHUB_OUTPUT"
+      - *trusted_main_binding
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
@@ -570,20 +532,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Bind this runner to exact current main
-        id: trusted_main
-        env:
-          TRUSTED_SHA: ${{ github.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"
-          test "$GITHUB_REF" = "refs/heads/main"
-          git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"
-          test "$(git rev-parse HEAD^{commit})" = "$TRUSTED_SHA"
-          test "$(git rev-parse origin/main^{commit})" = "$TRUSTED_SHA"
-          test -z "$(git status --porcelain --untracked-files=no)"
-          echo "verified=true" >> "$GITHUB_OUTPUT"
+      - *trusted_main_binding
       - name: Require every performance evidence producer to succeed
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}

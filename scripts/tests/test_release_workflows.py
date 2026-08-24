@@ -817,11 +817,15 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("merge_group:", source)
         self.assertNotIn("candidate_sha", source)
         self.assertEqual(source.count("ref: ${{ github.sha }}"), 5)
-        self.assertEqual(source.count("id: trusted_main"), 5)
-        self.assertEqual(source.count('test "$GITHUB_REF" = "refs/heads/main"'), 5)
-        self.assertEqual(source.count('git rev-parse origin/main^{commit}'), 5)
-        self.assertEqual(source.count('git status --porcelain --untracked-files=no'), 5)
-        self.assertEqual(source.count('test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"'), 5)
+        self.assertEqual(source.count("&trusted_main_binding"), 1)
+        self.assertEqual(source.count("*trusted_main_binding"), 4)
+        for name, job in performance["jobs"].items():
+            self.assertEqual(job["steps"][1]["id"], "trusted_main", name)
+            self.assertEqual(
+                job["steps"][1]["env"]["TRUSTED_SHA"],
+                "${{ github.sha }}",
+                name,
+            )
         self.assertIn("services:", source)
         self.assertIn("postgres:", source)
         self.assertIn("redis:", source)
