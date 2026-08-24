@@ -907,6 +907,8 @@ class OfficialReleaseMirrorPublisher:
             != str(len(expected_first_mib))
             or _header(range_headers, "Content-Range") != expected_range
             or accept_ranges not in {None, "bytes"}
+            or _header(range_headers, "Transfer-Encoding") is not None
+            or _header(range_headers, "Content-Encoding") is not None
             or first_mib != expected_first_mib
         ):
             raise MirrorError("mirror public first-MiB Range readback failed")

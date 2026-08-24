@@ -428,6 +428,16 @@ class MirrorPublisherTests(MirrorReceiptTests):
                 "Content-Range": valid_range,
                 "Accept-Ranges": "none",
             },
+            {
+                "Content-Length": valid_length,
+                "Content-Range": valid_range,
+                "Transfer-Encoding": "chunked",
+            },
+            {
+                "Content-Length": valid_length,
+                "Content-Range": valid_range,
+                "Content-Encoding": "gzip",
+            },
         )
         for headers in cases:
             with self.subTest(headers=headers):
