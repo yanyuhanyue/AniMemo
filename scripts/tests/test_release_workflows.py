@@ -80,6 +80,66 @@ def workflow(name):
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
+    def test_dynamic_candidate_buildx_jobs_cannot_write_shared_caches(self):
+        candidate_buildx_jobs = set()
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            document = yaml.load(
+                path.read_text(encoding="utf-8"),
+                Loader=UniqueKeyLoader,
+            )
+            for job_name, job in document.get("jobs", {}).items():
+                steps = job.get("steps", [])
+                checks_out_dynamic_candidate = any(
+                    step.get("uses", "").startswith("actions/checkout@")
+                    and step.get("with", {}).get("ref")
+                    == "${{ inputs.candidate_sha }}"
+                    for step in steps
+                )
+                buildx_steps = [
+                    step
+                    for step in steps
+                    if step.get("uses", "").startswith(
+                        "docker/setup-buildx-action@"
+                    )
+                ]
+                if not checks_out_dynamic_candidate or not buildx_steps:
+                    continue
+
+                identity = f"{path.name}:{job_name}"
+                candidate_buildx_jobs.add(identity)
+                for step in buildx_steps:
+                    inputs = step.get("with", {})
+                    self.assertEqual(
+                        inputs.get("cache-binary"),
+                        "false",
+                        identity,
+                    )
+                    self.assertIn(inputs.get("keep-state"), (None, "false"), identity)
+                    self.assertIn(inputs.get("cleanup"), (None, "true"), identity)
+
+                for step in steps:
+                    self.assertFalse(
+                        step.get("uses", "").startswith("actions/cache@"),
+                        identity,
+                    )
+                    for key, value in step.get("with", {}).items():
+                        if key == "cache-to":
+                            self.assertNotIn(
+                                "type=gha",
+                                value.replace(" ", "").lower(),
+                                identity,
+                            )
+                        if key == "keep-state":
+                            self.assertNotEqual(value, "true", identity)
+
+        self.assertEqual(
+            candidate_buildx_jobs,
+            {
+                "performance.yml:isolated-resource-load",
+                "performance.yml:isolated-long-operation-capacity",
+            },
+        )
+
     def test_release_resolver_requires_the_candidate_bound_reservation_ledger(self):
         release = workflow("release.yml")
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
