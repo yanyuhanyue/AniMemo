@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -104,9 +105,25 @@ class StatefulUpgradeDiagnosticsTests(unittest.TestCase):
         )
         self._write_executable(
             "python3",
-            """
+            r"""
             #!/usr/bin/env bash
-            exit 0
+            set -euo pipefail
+            if [[ "$*" == *"-m release.registry_transport pull-all --projection compose-env"* ]]; then
+              printf '%s\n' \
+                'ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571' \
+                'ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf' \
+                'DEPENDENCY_IMAGE_AUTHORITY_SHA256=sha256:5731c649d00fcc8bada9ce3fcd92039c09b43bd47c7110d8d335392a51ab37c6'
+              exit 0
+            fi
+            converted=()
+            for argument in "$@"; do
+              if [[ "$argument" == /* ]] && command -v cygpath >/dev/null 2>&1; then
+                converted+=("$(cygpath -w "$argument")")
+              else
+                converted+=("$argument")
+              fi
+            done
+            exec "$FAKE_REAL_PYTHON" "${converted[@]}"
             """,
         )
         self._write_executable(
@@ -123,6 +140,11 @@ class StatefulUpgradeDiagnosticsTests(unittest.TestCase):
             set -euo pipefail
             printf '%s\n' "$*" >>"$FAKE_DOCKER_CALLS"
             args="$*"
+
+            if [[ "$args" == *"config --format json"* ]]; then
+              printf '%s\n' '{"name":"animemo-upgrade-test","services":{"postgres":{"image":"docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571","platform":"linux/amd64","volumes":[{"type":"bind","source":"/tmp/stateful/postgres","target":"/var/lib/postgresql/data"}],"networks":{"upgrade-gate":null}},"redis":{"image":"docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf","platform":"linux/amd64","volumes":[{"type":"bind","source":"/tmp/stateful/redis","target":"/data"}],"networks":{"upgrade-gate":null}}},"networks":{"upgrade-gate":{"name":"animemo-upgrade-test-network"}}}'
+              exit 0
+            fi
 
             matches_once() {
               local kind="$1"
@@ -196,6 +218,8 @@ class StatefulUpgradeDiagnosticsTests(unittest.TestCase):
                 "FAKE_STATE_DIR_WIN": str(self.state),
                 "FAKE_BASE_SHA": BASE_SHA,
                 "FAKE_HEAD_SHA": HEAD_SHA,
+                "FAKE_REAL_PYTHON_WIN": sys.executable,
+                "COMPOSE_PROJECT_NAME": "animemo-upgrade-test",
                 "RUNNER_TEMP_WIN": str(self.temp_root),
                 "STATEFUL_UPGRADE_COMMAND_TIMEOUT_SECONDS": "1",
                 "STATEFUL_UPGRADE_BUILD_TIMEOUT_SECONDS": "1",
@@ -219,6 +243,7 @@ class StatefulUpgradeDiagnosticsTests(unittest.TestCase):
             'export PATH="$(to_posix "$FAKE_BIN"):$PATH"; '
             'export FAKE_DOCKER_CALLS="$(to_posix "$FAKE_DOCKER_CALLS_WIN")"; '
             'export FAKE_STATE_DIR="$(to_posix "$FAKE_STATE_DIR_WIN")"; '
+            'export FAKE_REAL_PYTHON="$(to_posix "$FAKE_REAL_PYTHON_WIN")"; '
             'export RUNNER_TEMP="$(to_posix "$RUNNER_TEMP_WIN")"; '
             'export STATEFUL_UPGRADE_TEMP_ROOT="$RUNNER_TEMP/upgrade-root"; '
             'exec "$(to_posix "$STATEFUL_SCRIPT_WIN")" '
@@ -310,6 +335,7 @@ class StatefulUpgradeDiagnosticsTests(unittest.TestCase):
         health_count = int((self.state / "health-count").read_text(encoding="utf-8"))
         self.assertGreaterEqual(health_count, 5)
         self.assertIn("Stateful production upgrade gate: PASS", output)
+        self.assertIn("STATEFUL_DEPENDENCY_PROJECTION_RECEIPT", output)
 
     def test_health_probe_hang_times_out_and_never_reaches_seed(self) -> None:
         completed = self.run_gate(

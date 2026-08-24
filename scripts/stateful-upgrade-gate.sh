@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_SHA=""
@@ -407,6 +408,9 @@ wait_for_api() {
 }
 
 DEPENDENCY_ENV_FILE="$TEMP_ROOT/dependency-images.env"
+BASE_EFFECTIVE_CONFIG="$TEMP_ROOT/base-effective-compose.json"
+CURRENT_EFFECTIVE_CONFIG="$TEMP_ROOT/current-effective-compose.json"
+DEPENDENCY_PROJECTION_RECEIPT="$META_ROOT/stateful-dependency-projection-receipt.json"
 unset ANIMEMO_POSTGRES_IMAGE ANIMEMO_REDIS_IMAGE
 (cd "$CURRENT_ROOT" && python3 -m release.registry_transport pull-all --projection compose-env) \
   > "$DEPENDENCY_ENV_FILE"
@@ -477,8 +481,120 @@ echo "Ephemeral data root: $DATA_ROOT"
 git -C "$ROOT" worktree add --detach "$BASE_ROOT" "$BASE_SHA"
 BASE_ADDED=true
 
-echo "== Validate isolated Base Compose configuration =="
-run_compose base_config "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" config --quiet
+echo "== Render and validate canonical Base and Current dependency projections =="
+run_compose base_effective_config "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" \
+  config --format json >"$BASE_EFFECTIVE_CONFIG"
+run_compose current_effective_config "$CURRENT_ROOT" "$COMMAND_TIMEOUT_SECONDS" \
+  config --format json >"$CURRENT_EFFECTIVE_CONFIG"
+chmod 600 "$BASE_EFFECTIVE_CONFIG" "$CURRENT_EFFECTIVE_CONFIG"
+python3 - \
+  "$CURRENT_ROOT" \
+  "$DEPENDENCY_ENV_FILE" \
+  "$BASE_EFFECTIVE_CONFIG" \
+  "$CURRENT_EFFECTIVE_CONFIG" \
+  "$DEPENDENCY_PROJECTION_RECEIPT" \
+  "$BASE_SHA" \
+  "$HEAD_SHA" \
+  "$PROJECT_NAME" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+(
+    current_root,
+    projection_path,
+    base_config_path,
+    current_config_path,
+    receipt_path,
+    base_sha,
+    head_sha,
+    project_name,
+) = sys.argv[1:]
+
+sys.path.insert(0, current_root)
+from release.dependency_images import AUTHORITY  # noqa: E402
+
+authority_identity = AUTHORITY.identity
+
+projection = {}
+for raw_line in Path(projection_path).read_text(encoding="utf-8").splitlines():
+    name, separator, value = raw_line.partition("=")
+    if not separator or not name or name in projection:
+        raise SystemExit("Stateful dependency projection is invalid")
+    projection[name] = value
+
+expected_projection_names = {
+    "ANIMEMO_POSTGRES_IMAGE",
+    "ANIMEMO_REDIS_IMAGE",
+    "DEPENDENCY_IMAGE_AUTHORITY_SHA256",
+}
+if set(projection) != expected_projection_names:
+    raise SystemExit("Stateful dependency projection fields are invalid")
+if projection["DEPENDENCY_IMAGE_AUTHORITY_SHA256"] != authority_identity:
+    raise SystemExit("Stateful dependency projection authority identity differs")
+
+expected = {}
+expected_platform = {}
+for role in ("postgres", "redis"):
+    image = AUTHORITY.image(role)
+    reference = image.reference
+    if projection[f"ANIMEMO_{role.upper()}_IMAGE"] != reference:
+        raise SystemExit(f"Stateful {role} projection differs from authority")
+    expected[role] = reference
+    expected_platform[role] = image.platform
+
+base_bytes = Path(base_config_path).read_bytes()
+current_bytes = Path(current_config_path).read_bytes()
+base = json.loads(base_bytes)
+current = json.loads(current_bytes)
+for label, config in (("Base", base), ("Current", current)):
+    services = config.get("services")
+    if not isinstance(services, dict):
+        raise SystemExit(f"{label} effective Compose services are invalid")
+    for role in ("postgres", "redis"):
+        service = services.get(role)
+        if not isinstance(service, dict) or service.get("image") != expected[role]:
+            raise SystemExit(f"{label} effective {role} image differs from authority")
+        if "${" in service["image"]:
+            raise SystemExit(f"{label} effective {role} image remains unresolved")
+        if service.get("platform") != expected_platform[role]:
+            raise SystemExit(
+                f"{label} effective {role} platform differs from authority"
+            )
+
+for role in ("postgres", "redis"):
+    base_service = base["services"][role]
+    current_service = current["services"][role]
+    if base_service.get("image") != current_service.get("image"):
+        raise SystemExit(f"Persistent {role} image differs across upgrade")
+    if base_service.get("volumes") != current_service.get("volumes"):
+        raise SystemExit(f"Persistent {role} data mounts differ across upgrade")
+    if base_service.get("networks") != current_service.get("networks"):
+        raise SystemExit(f"Persistent {role} networks differ across upgrade")
+if base.get("name") != project_name or current.get("name") != project_name:
+    raise SystemExit("Stateful Compose project identity differs")
+if base.get("networks") != current.get("networks"):
+    raise SystemExit("Stateful Compose network identity differs")
+
+receipt = {
+    "receiptType": "STATEFUL_DEPENDENCY_PROJECTION_RECEIPT",
+    "baseSha": base_sha,
+    "headSha": head_sha,
+    "authorityIdentity": authority_identity,
+    "postgresReference": expected["postgres"],
+    "redisReference": expected["redis"],
+    "platformAuthority": expected_platform["postgres"],
+    "baseConfigIdentity": "sha256:" + hashlib.sha256(base_bytes).hexdigest(),
+    "currentConfigIdentity": "sha256:" + hashlib.sha256(current_bytes).hexdigest(),
+    "persistentDependencyMatch": True,
+    "result": "PASS",
+}
+encoded = json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+Path(receipt_path).write_text(encoded + "\n", encoding="utf-8")
+print("STATEFUL_DEPENDENCY_PROJECTION_RECEIPT " + encoded)
+PY
+chmod 600 "$DEPENDENCY_PROJECTION_RECEIPT"
 
 echo "== Build Base API and boot persistent services =="
 run_compose base_build "$BASE_ROOT" "$BUILD_TIMEOUT_SECONDS" build api

@@ -282,8 +282,13 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn("root=self.paths.data_root", deployment)
         self.assertIn("root=self.paths.state_root", deployment)
         self.assertIn("tempfile.mkstemp", state)
-        self.assertIn("metadata.st_nlink != 1", state)
-        self.assertIn("opened.st_nlink != 1", state)
+        self.assertIn("stat.S_ISLNK(metadata.st_mode)", state)
+        self.assertIn("metadata.st_nlink > 1", state)
+        self.assertIn("metadata.st_nlink == 0", state)
+        self.assertIn("opened.st_nlink > 1", state)
+        self.assertIn("opened.st_nlink == 0", state)
+        self.assertIn("os.path.samestat(metadata, opened)", state)
+        self.assertIn("PRIVATE_STATE_CHANGED_REPEATEDLY_DURING_READ", state)
         self.assertIn("stat.S_ISSOCK(existing.st_mode)", server)
         self.assertNotIn("self.socket_path.unlink(missing_ok=True)", server)
 
@@ -437,6 +442,34 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn('--kill-after="${TIMEOUT_KILL_AFTER_SECONDS}s"', gate)
         self.assertIn("diagnostic_api_inspect", gate)
         self.assertNotIn('compose "$source_root" exec -T api python -', gate)
+
+    def test_stateful_gate_projects_canonical_dependency_images_into_both_effective_configs(
+        self,
+    ):
+        overlay = (ROOT / "deploy/docker-compose.upgrade-gate.yml").read_text(
+            encoding="utf-8"
+        )
+        gate = (ROOT / "scripts/stateful-upgrade-gate.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "image: ${ANIMEMO_POSTGRES_IMAGE:?ANIMEMO_POSTGRES_IMAGE is required}",
+            overlay,
+        )
+        self.assertIn(
+            "image: ${ANIMEMO_REDIS_IMAGE:?ANIMEMO_REDIS_IMAGE is required}",
+            overlay,
+        )
+        self.assertEqual(overlay.count("platform: linux/amd64"), 2)
+        self.assertIn("config --format json", gate)
+        self.assertIn("STATEFUL_DEPENDENCY_PROJECTION_RECEIPT", gate)
+        self.assertIn("persistentDependencyMatch", gate)
+        self.assertIn('service.get("platform") != expected_platform[role]', gate)
+        self.assertLess(
+            gate.index("config --format json"),
+            gate.index("up -d --wait --wait-timeout 120 postgres redis"),
+        )
 
     def test_upgrade_gate_overrides_only_the_legacy_bootstrap_server_command(self):
         production = (ROOT / "deploy/docker-compose.yml").read_text(encoding="utf-8")

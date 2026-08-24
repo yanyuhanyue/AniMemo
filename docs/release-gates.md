@@ -250,6 +250,24 @@ builder; it does not claim to reconstruct a historical published archive. CAS
 still addresses the actual published archive bytes, and an already-published
 official version retains its original blob instead of being rewritten.
 
+## Updater background lifecycle gate
+
+Background apply and rollback dispatches return their durable operation record
+immediately, while an internal lifecycle manager retains ownership of the
+mutation worker and global update lock. Operation terminal state and worker
+completion are separate boundaries: completion is published only after the
+executor has returned, any failure transition is durable, the lock lease is
+released exactly once, and the worker is removed from the active registry.
+Internal bounded `wait` and idempotent `close` barriers make test/runtime cleanup
+deterministic; they are deliberately absent from the Unix RPC protocol. Runtime
+shutdown rejects new mutation workers and waits for active workers without
+force-killing a thread or deleting operation state.
+
+Private state reads retain fixed-root containment, regular single-link inode,
+and `O_NOFOLLOW` checks. Atomic-replacement windows (`nlink == 0`, temporary
+absence/permission, or differing pre-open/open inode identity) receive bounded
+retries, while symlinks, non-regular files, and hard links fail permanently.
+
 ## Fresh Docker release gate
 
 The `docker` job validates `EMPTY DATABASE -> CURRENT RELEASE` with the base
@@ -265,17 +283,23 @@ recreating persistent state:
 
 1. Create an isolated Compose project and runner-temporary data root.
 2. Check out Base in a detached Git worktree.
-3. Build/start Base PostgreSQL, Redis, and API using the Base release's audited
-   historical behavior, then record PostgreSQL and Redis container IDs.
-4. Seed a user, journal entry, user plugin installation, `watch_history`
+3. Pull and verify Current's canonical PostgreSQL/Redis references, apply the
+   current-owned upgrade override last, and render machine-readable Base and
+   Current effective Compose configurations before any container starts.
+4. Prove both effective configurations use the same exact dependency images,
+   persistent mounts, project, and network identity; the historical Base's raw
+   mutable tag literals are non-authoritative input only.
+5. Build/start Base PostgreSQL, Redis, and API with `--pull never`, then record
+   PostgreSQL and Redis container IDs.
+6. Seed a user, journal entry, user plugin installation, `watch_history`
    `PluginData`, official project/version/blob/deployment, CAS, and runtime.
-5. Build Current with the current build override.
-6. Run Current's explicit `migration` and `bootstrap` jobs, then replace only
+7. Build Current with the current build override.
+8. Run Current's explicit `migration` and `bootstrap` jobs, then replace only
    Current API while retaining the recorded PostgreSQL and Redis containers.
-7. Verify migrations, health, seeded state, immutable versions, original official
+9. Verify migrations, health, seeded state, immutable versions, original official
    PackageBlob retention, CAS, deployment, runtime reconciliation, and Integration
    Protocol migration coverage.
-8. Restart Current API once, prove the data-service container IDs are unchanged,
+10. Restart Current API once, prove the data-service container IDs are unchanged,
    and verify the state again.
 
 The job never runs `down -v` between Base and Current. Cleanup is scoped to the

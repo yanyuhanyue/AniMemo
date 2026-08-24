@@ -655,7 +655,10 @@ class HostAgentRuntime:
             lock_lease.__exit__(None, None, None)
 
     def serve_forever(self) -> None:
-        self.server.serve_forever()
+        try:
+            self.server.serve_forever()
+        finally:
+            self.agent.close(timeout=30.0)
 
 
 def production_runtime(

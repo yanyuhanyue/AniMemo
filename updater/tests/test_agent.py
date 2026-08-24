@@ -766,6 +766,9 @@ class UpdateAgentTests(unittest.TestCase):
 
             self.assertEqual(operation["status"], "failed_pre_switch")
             self.assertIn("worker exploded", operation["events"][-1]["detail"])
+            self.assertTrue(
+                agent.wait_for_background_operation(operation_id, timeout=1)
+            )
 
     def test_second_background_update_is_rejected_before_operation_creation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -806,6 +809,9 @@ class UpdateAgentTests(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertEqual(operation["status"], "succeeded")
+            self.assertTrue(
+                agent.wait_for_background_operation(operation_id, timeout=1)
+            )
 
     def test_background_rollback_returns_operation_before_executor_finishes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -844,6 +850,9 @@ class UpdateAgentTests(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertEqual(operation["status"], "rolled_back")
+            self.assertTrue(
+                agent.wait_for_background_operation(operation_id, timeout=1)
+            )
 
     def test_second_background_rollback_is_rejected_before_operation_creation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -886,6 +895,9 @@ class UpdateAgentTests(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertEqual(operation["status"], "rolled_back")
+            self.assertTrue(
+                agent.wait_for_background_operation(operation_id, timeout=1)
+            )
 
     def test_background_rollback_exception_is_persisted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -912,6 +924,95 @@ class UpdateAgentTests(unittest.TestCase):
 
             self.assertEqual(operation["status"], "failed_pre_switch")
             self.assertIn("rollback worker exploded", operation["events"][-1]["detail"])
+            self.assertTrue(
+                agent.wait_for_background_operation(operation_id, timeout=1)
+            )
+
+    def test_close_waits_for_active_apply_and_leaves_no_update_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            agent.background = True
+            started = threading.Event()
+            release = threading.Event()
+            original = agent.executor.apply
+
+            def slow_apply(operation_id, target, **kwargs):
+                started.set()
+                release.wait(2)
+                return original(operation_id, target, **kwargs)
+
+            agent.executor.apply = slow_apply
+            plan = agent.dispatch(
+                {"operation": "plan_update", "params": {"version": "v1.0.1"}}
+            )
+            result = agent.dispatch(
+                {
+                    "operation": "apply_update",
+                    "params": {
+                        "planId": plan["planId"],
+                        "confirmation": "APPLY v1.0.1",
+                    },
+                }
+            )
+            self.assertTrue(started.wait(1))
+            closed = threading.Event()
+            closer = threading.Thread(
+                target=lambda: (agent.close(timeout=2), closed.set()),
+                name="agent-close-test",
+            )
+            closer.start()
+            self.assertFalse(closed.wait(0.05))
+            release.set()
+            closer.join(2)
+
+            self.assertFalse(closer.is_alive())
+            self.assertTrue(closed.is_set())
+            self.assertEqual(agent.active_background_operation_ids(), ())
+            self.assertTrue(
+                agent.wait_for_background_operation(
+                    result["operation"]["id"], timeout=0
+                )
+            )
+            self.assertFalse(
+                any(
+                    thread.is_alive()
+                    and thread.name.startswith("animemo-update-")
+                    for thread in threading.enumerate()
+                )
+            )
+
+    def test_close_rejects_new_apply_and_rollback_mutations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            plan = agent.dispatch(
+                {"operation": "plan_update", "params": {"version": "v1.0.1"}}
+            )
+            agent.close(timeout=0)
+
+            with self.assertRaisesRegex(
+                StateError, "BACKGROUND_OPERATION_MANAGER_CLOSED"
+            ):
+                agent.dispatch(
+                    {
+                        "operation": "apply_update",
+                        "params": {
+                            "planId": plan["planId"],
+                            "confirmation": "APPLY v1.0.1",
+                        },
+                    }
+                )
+            with self.assertRaisesRegex(
+                StateError, "BACKGROUND_OPERATION_MANAGER_CLOSED"
+            ):
+                agent.dispatch(
+                    {
+                        "operation": "rollback_previous",
+                        "params": {"confirmation": "ROLLBACK PREVIOUS"},
+                    }
+                )
+
+            self.assertIsNone(agent.plans.get(plan["planId"])["consumedAt"])
+            self.assertEqual(agent.operations.list(), [])
 
 
 if __name__ == "__main__":

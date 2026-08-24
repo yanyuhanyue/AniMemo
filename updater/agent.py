@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
 import time
 from pathlib import Path
 
 from . import __version__
+from .background import BackgroundOperationManager
 from .compatibility import DeploymentContext, plan_switch
 from .errors import RequestRejected, StateError
 from .local_bundle import LocalBundleTransportPolicy
@@ -156,6 +156,7 @@ class UpdateAgent:
         self._resolvers = {self.transport_policy.identity: source}
         self._local_resolvers = {}
         self._runtime_refreshed_at = 0.0
+        self._background_workers = BackgroundOperationManager()
 
     def _resolver_for(self, policy: ExplicitTransportPolicy):
         cached = self._resolvers.get(policy.identity)
@@ -515,31 +516,58 @@ class UpdateAgent:
             ),
         }
 
-    def _run_apply(self, operation_id, manifest, lock_lease):
+    def _run_apply(self, operation_id, manifest):
         try:
             self.executor.apply(operation_id, manifest, lock_held=True)
         except Exception as error:  # noqa: BLE001 - worker failures must become durable operation state
             operation = self.operations.get(operation_id)
             if operation["status"] in TERMINAL_STATES:
                 return
-            target = "failed_pre_switch" if operation["status"] in PRE_SWITCH_RECOVERY else "manual_recovery_required"
-            self.operations.transition(operation_id, target, detail=f"background update worker failed: {redact(error)}")
-        finally:
-            lock_lease.__exit__(None, None, None)
+            target = (
+                "failed_pre_switch"
+                if operation["status"] in PRE_SWITCH_RECOVERY
+                else "manual_recovery_required"
+            )
+            self.operations.transition(
+                operation_id,
+                target,
+                detail=f"background update worker failed: {redact(error)}",
+            )
 
-    def _run_rollback(self, operation_id, manifest, lock_lease):
+    def _run_rollback(self, operation_id, manifest):
         try:
             self.executor.rollback(operation_id, manifest, lock_held=True)
         except Exception as error:  # noqa: BLE001 - worker failures must become durable operation state
             operation = self.operations.get(operation_id)
             if operation["status"] in TERMINAL_STATES:
                 return
-            target = "failed_pre_switch" if operation["status"] in PRE_SWITCH_RECOVERY else "manual_recovery_required"
-            self.operations.transition(operation_id, target, detail=f"background rollback worker failed: {redact(error)}")
-        finally:
-            lock_lease.__exit__(None, None, None)
+            target = (
+                "failed_pre_switch"
+                if operation["status"] in PRE_SWITCH_RECOVERY
+                else "manual_recovery_required"
+            )
+            self.operations.transition(
+                operation_id,
+                target,
+                detail=f"background rollback worker failed: {redact(error)}",
+            )
+
+    def wait_for_background_operation(
+        self, operation_id: str, *, timeout: float | None
+    ) -> bool:
+        return self._background_workers.wait(operation_id, timeout)
+
+    def active_background_operation_ids(self) -> tuple[str, ...]:
+        return self._background_workers.active_operation_ids()
+
+    def close(self, *, timeout: float | None = 30.0) -> None:
+        self._background_workers.close(timeout)
 
     def _apply(self, params):
+        with self._background_workers.mutation_start():
+            return self._apply_while_open(params)
+
+    def _apply_while_open(self, params):
         self.operations.require_recovery_clear()
         stored = self.plans.get(params["planId"])
         version = stored["manifest"]["release"]["version"]
@@ -570,21 +598,38 @@ class UpdateAgent:
                 },
             )
             if self.background:
-                worker = threading.Thread(
-                    target=self._run_apply,
-                    args=(operation["id"], stored["manifest"], lock_lease),
-                    name=f"animemo-update-{operation['id'][:8]}",
-                    daemon=True,
-                )
-                worker.start()
                 handed_off = True
+                try:
+                    self._background_workers.start(
+                        operation["id"],
+                        self._run_apply,
+                        operation["id"],
+                        stored["manifest"],
+                        cleanup=lambda: lock_lease.__exit__(None, None, None),
+                        name=f"animemo-update-{operation['id'][:8]}",
+                    )
+                except BaseException as error:
+                    self.operations.transition(
+                        operation["id"],
+                        "failed_pre_switch",
+                        detail=f"background update worker failed to start: {redact(error)}",
+                    )
+                    raise
                 return {"operation": operation}
-            return {"operation": self.executor.apply(operation["id"], stored["manifest"], lock_held=True)}
+            return {
+                "operation": self.executor.apply(
+                    operation["id"], stored["manifest"], lock_held=True
+                )
+            }
         finally:
             if not handed_off:
                 lock_lease.__exit__(None, None, None)
 
     def _rollback_previous(self, params):
+        with self._background_workers.mutation_start():
+            return self._rollback_previous_while_open(params)
+
+    def _rollback_previous_while_open(self, params):
         lock_lease = self.executor.acquire_lock()
         handed_off = False
         try:
@@ -642,16 +687,29 @@ class UpdateAgent:
                 },
             )
             if self.background:
-                worker = threading.Thread(
-                    target=self._run_rollback,
-                    args=(operation["id"], previous, lock_lease),
-                    name=f"animemo-rollback-{operation['id'][:8]}",
-                    daemon=True,
-                )
-                worker.start()
                 handed_off = True
+                try:
+                    self._background_workers.start(
+                        operation["id"],
+                        self._run_rollback,
+                        operation["id"],
+                        previous,
+                        cleanup=lambda: lock_lease.__exit__(None, None, None),
+                        name=f"animemo-rollback-{operation['id'][:8]}",
+                    )
+                except BaseException as error:
+                    self.operations.transition(
+                        operation["id"],
+                        "failed_pre_switch",
+                        detail=f"background rollback worker failed to start: {redact(error)}",
+                    )
+                    raise
                 return {"operation": operation}
-            return {"operation": self.executor.rollback(operation["id"], previous, lock_held=True)}
+            return {
+                "operation": self.executor.rollback(
+                    operation["id"], previous, lock_held=True
+                )
+            }
         finally:
             if not handed_off:
                 lock_lease.__exit__(None, None, None)
