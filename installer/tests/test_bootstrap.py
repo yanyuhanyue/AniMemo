@@ -168,10 +168,19 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
         self.assertIn('/usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"', stage0)
         self.assertIn(
             "/usr/bin/timeout --signal=TERM --kill-after=5s 30s \\\n"
-            '  /usr/bin/gh auth token >"$GH_TOKEN_PIPE" &',
+            "  /bin/bash --noprofile --norc -c \\\n"
+            "  'exec /usr/bin/gh auth token >\"$1\"' \\\n"
+            '  animemo-gh-token-writer "$GH_TOKEN_PIPE" &',
             stage0,
         )
-        self.assertIn('IFS= read -r -t 35 GH_TOKEN <"$GH_TOKEN_PIPE"', stage0)
+        self.assertIn(
+            "/usr/bin/timeout --signal=TERM --kill-after=5s 35s \\\n"
+            "    /bin/bash --noprofile --norc -c \\\n"
+            "    'set -euo pipefail; IFS= read -r -t 30 token <\"$1\"; "
+            "test -n \"$token\"; /usr/bin/printf \"%s\" \"$token\"' \\\n"
+            '    animemo-gh-token-reader "$GH_TOKEN_PIPE"',
+            stage0,
+        )
         self.assertIn("export GH_TOKEN", stage0)
         installer_execution = stage0.index('"$RUNTIME/bin/python" -P -B -m installer')
         credential_export = stage0.rindex("export GH_TOKEN", 0, installer_execution)
@@ -199,16 +208,30 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
         end = stage0.index("sudo /usr/bin/env -i", start)
         producer = stage0[start:end].replace(
             "/usr/bin/gh auth token",
-            "/usr/bin/printf '%s\\n' github_pat_fixture",
+            '/usr/bin/printf "%s\\n" github_pat_fixture',
         )
-        reader = 'IFS= read -r -t 35 GH_TOKEN <"$GH_TOKEN_PIPE"'
+        reader_start = stage0.index('GH_TOKEN="$(')
+        reader_end = stage0.index('\ntest -n "$GH_TOKEN"', reader_start)
+        reader = stage0[reader_start:reader_end]
+        cleanup_start = stage0.index("cleanup_stage0() {")
+        cleanup_end = stage0.index("trap cleanup_stage0 EXIT", cleanup_start) + len(
+            "trap cleanup_stage0 EXIT"
+        )
+        cleanup = stage0[cleanup_start:cleanup_end]
         script = (
             "set -euo pipefail\n"
-            'GH_TOKEN_PIPE="$TEST_ROOT/gh-token.pipe"\n'
+            'STAGE0_DIRECTORY="$TEST_ROOT/stage0"\n'
+            '/usr/bin/mkdir "$STAGE0_DIRECTORY"\n'
+            'MIRROR_CANDIDATE="$STAGE0_DIRECTORY/candidate.tar"\n'
+            'GH_TOKEN_PIPE="$STAGE0_DIRECTORY/gh-token.pipe"\n'
+            "GH_TOKEN_WRITER=''\n"
+            + cleanup
+            + "\n"
             + producer
             + reader
             + "\n"
             + 'wait "$GH_TOKEN_WRITER"\n'
+            + "GH_TOKEN_WRITER=''\n"
             + 'test "$GH_TOKEN" = github_pat_fixture\n'
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -221,29 +244,45 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
                 timeout=10,
                 env={"TEST_ROOT": directory, "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
             )
+            self.assertFalse(Path(directory, "stage0").exists())
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(os.name == "posix", "Credential handoff requires POSIX FIFO")
-    def test_ephemeral_credential_handoff_fails_closed_on_producer_stall(self) -> None:
+    def test_ephemeral_credential_handoff_bounds_preopen_producer_death(self) -> None:
         stage0 = _official_mirror_stage0_contract()
         start = stage0.index('/usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"')
         end = stage0.index("sudo /usr/bin/env -i", start)
-        producer = (
-            stage0[start:end]
-            .replace("--kill-after=5s 30s", "--kill-after=1s 1s")
-            .replace("/usr/bin/gh auth token", "/usr/bin/sleep 30")
+        producer = stage0[start:end].replace(
+            "--kill-after=5s 30s", "--kill-after=1s 1s"
         )
-        reader = 'IFS= read -r -t 35 GH_TOKEN <"$GH_TOKEN_PIPE"'.replace(
-            "-t 35", "-t 2"
+        reader_start = stage0.index('GH_TOKEN="$(')
+        reader_end = stage0.index('\ntest -n "$GH_TOKEN"', reader_start)
+        reader = (
+            stage0[reader_start:reader_end]
+            .replace("--kill-after=5s 35s", "--kill-after=1s 2s")
+            .replace("-t 30", "-t 1")
         )
+        cleanup_start = stage0.index("cleanup_stage0() {")
+        cleanup_end = stage0.index("trap cleanup_stage0 EXIT", cleanup_start) + len(
+            "trap cleanup_stage0 EXIT"
+        )
+        cleanup = stage0[cleanup_start:cleanup_end]
         script = (
             "set -euo pipefail\n"
-            'GH_TOKEN_PIPE="$TEST_ROOT/gh-token.pipe"\n'
+            'STAGE0_DIRECTORY="$TEST_ROOT/stage0"\n'
+            '/usr/bin/mkdir "$STAGE0_DIRECTORY"\n'
+            'MIRROR_CANDIDATE="$STAGE0_DIRECTORY/candidate.tar"\n'
+            'GH_TOKEN_PIPE="$STAGE0_DIRECTORY/gh-token.pipe"\n'
+            "GH_TOKEN_WRITER=''\n"
+            + cleanup
+            + "\n"
             + producer
+            + "/usr/bin/sleep 3\n"
+            + 'wait "$GH_TOKEN_WRITER" || true\n'
+            + "GH_TOKEN_WRITER=''\n"
             + reader
             + "\n"
-            + 'wait "$GH_TOKEN_WRITER"\n'
         )
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
@@ -252,9 +291,10 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
-                timeout=6,
+                timeout=8,
                 env={"TEST_ROOT": directory, "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
             )
+            self.assertFalse(Path(directory, "stage0").exists())
 
         self.assertNotEqual(result.returncode, 0)
 

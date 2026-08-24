@@ -81,7 +81,6 @@ GH_TOKEN_PIPE="$STAGE0_DIRECTORY/gh-token.pipe"
 GH_TOKEN_WRITER=''
 cleanup_stage0() {
   if test -n "$GH_TOKEN_WRITER"; then
-    /usr/bin/kill "$GH_TOKEN_WRITER" 2>/dev/null || true
     wait "$GH_TOKEN_WRITER" 2>/dev/null || true
   fi
   /usr/bin/rm -f -- "$MIRROR_CANDIDATE"
@@ -100,7 +99,9 @@ MIRROR_URL="https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/$E
 
 /usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"
 /usr/bin/timeout --signal=TERM --kill-after=5s 30s \
-  /usr/bin/gh auth token >"$GH_TOKEN_PIPE" &
+  /bin/bash --noprofile --norc -c \
+  'exec /usr/bin/gh auth token >"$1"' \
+  animemo-gh-token-writer "$GH_TOKEN_PIPE" &
 GH_TOKEN_WRITER=$!
 sudo /usr/bin/env -i EXACT_TAG="$EXACT_TAG" MIRROR_CANDIDATE="$MIRROR_CANDIDATE" \
   GH_TOKEN_PIPE="$GH_TOKEN_PIPE" \
@@ -109,7 +110,12 @@ sudo /usr/bin/env -i EXACT_TAG="$EXACT_TAG" MIRROR_CANDIDATE="$MIRROR_CANDIDATE"
 set -euo pipefail
 umask 077
 test -p "$GH_TOKEN_PIPE"
-IFS= read -r -t 35 GH_TOKEN <"$GH_TOKEN_PIPE"
+GH_TOKEN="$(
+  /usr/bin/timeout --signal=TERM --kill-after=5s 35s \
+    /bin/bash --noprofile --norc -c \
+    'set -euo pipefail; IFS= read -r -t 30 token <"$1"; test -n "$token"; /usr/bin/printf "%s" "$token"' \
+    animemo-gh-token-reader "$GH_TOKEN_PIPE"
+)"
 test -n "$GH_TOKEN"
 export GH_TOKEN
 ANIMEMO_ROOT=/var/lib/animemo
