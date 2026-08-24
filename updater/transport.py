@@ -87,6 +87,43 @@ _BOUNDED_HTTP_RESPONSE_HEADERS = frozenset(
         "Content-Type",
     }
 )
+_BOUNDED_WORKER_OBJECTS = frozenset((*RELEASE_BUNDLE_OBJECTS, MIRROR_RECEIPT_NAME))
+
+
+def _bounded_worker_object_url(exact_version: str, logical_name: str) -> str:
+    if (
+        not isinstance(exact_version, str)
+        or _EXACT_VERSION.fullmatch(exact_version) is None
+        or logical_name not in _BOUNDED_WORKER_OBJECTS
+    ):
+        raise ValueError("invalid bounded worker object identity")
+    version = quote(f"v{exact_version}", safe="")
+    name = quote(logical_name, safe="")
+    return f"{OFFICIAL_MIRROR_ORIGIN}/{MIRROR_PATH_PREFIX}/{version}/{name}"
+
+
+def _bounded_worker_object_identity(url: str) -> tuple[str, str]:
+    parsed = urlsplit(url)
+    expected_origin = urlsplit(OFFICIAL_MIRROR_ORIGIN)
+    segments = parsed.path.removeprefix("/").split("/")
+    prefix_segments = MIRROR_PATH_PREFIX.split("/")
+    if (
+        parsed.scheme != expected_origin.scheme
+        or parsed.netloc != expected_origin.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or len(segments) != len(prefix_segments) + 2
+        or segments[: len(prefix_segments)] != prefix_segments
+        or not segments[-2].startswith("v")
+    ):
+        raise ValueError("bounded worker URL escaped the official mirror")
+    exact_version = segments[-2].removeprefix("v")
+    logical_name = segments[-1]
+    if url != _bounded_worker_object_url(exact_version, logical_name):
+        raise ValueError("bounded worker URL is not canonical")
+    return exact_version, logical_name
 
 
 class TransportError(RequestRejected):
@@ -684,16 +721,19 @@ class _AbsoluteDeadlineOpener:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise _OpenWallClockExpired("Transport open deadline was exhausted")
-        parsed = urlsplit(request.full_url)
         accept = request.get_header("Accept") or "application/octet-stream"
+        try:
+            exact_version, logical_name = _bounded_worker_object_identity(
+                request.full_url
+            )
+        except (TypeError, ValueError) as error:
+            raise TransportError(
+                "TRANSPORT_POLICY_INVALID",
+                "Bounded transport worker received an unmanaged URL",
+                phase="policy",
+            ) from error
         if (
-            parsed.scheme != "https"
-            or not parsed.netloc
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-            or request.get_method() != "GET"
+            request.get_method() != "GET"
             or accept not in {"application/json", "application/octet-stream"}
             or type(timeout_seconds) is not int
             or timeout_seconds <= 0
@@ -741,12 +781,12 @@ class _AbsoluteDeadlineOpener:
         body = root / "body.bin"
         metadata = root / "metadata.json"
         worker_arguments = (
-            "--url",
-            request.full_url,
-            "--body",
-            str(body),
-            "--metadata",
-            str(metadata),
+            "--version",
+            exact_version,
+            "--logical-name",
+            logical_name,
+            "--workspace",
+            str(root),
             "--socket-timeout",
             str(timeout_seconds),
             "--maximum-bytes",
@@ -2459,9 +2499,11 @@ class _BoundedWorkerRejectRedirects(HTTPRedirectHandler):
 
 def _bounded_worker_parse_arguments(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--url", required=True)
-    parser.add_argument("--body", required=True)
-    parser.add_argument("--metadata", required=True)
+    parser.add_argument("--version", required=True)
+    parser.add_argument(
+        "--logical-name", required=True, choices=sorted(_BOUNDED_WORKER_OBJECTS)
+    )
+    parser.add_argument("--workspace", required=True)
     parser.add_argument("--socket-timeout", required=True, type=int)
     parser.add_argument("--maximum-bytes", required=True, type=int)
     parser.add_argument(
@@ -2470,31 +2512,35 @@ def _bounded_worker_parse_arguments(argv: list[str]) -> argparse.Namespace:
         choices=("application/json", "application/octet-stream"),
     )
     arguments = parser.parse_args(argv)
-    parsed = urlsplit(arguments.url)
-    body = Path(arguments.body)
-    metadata = Path(arguments.metadata)
+    workspace = Path(arguments.workspace)
+    try:
+        temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+        resolved_workspace = workspace.resolve(strict=True)
+        workspace_metadata = workspace.lstat()
+    except OSError:
+        raise SystemExit(2) from None
     if (
-        parsed.scheme != "https"
-        or not parsed.netloc
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-        or parsed.hostname is None
+        _EXACT_VERSION.fullmatch(arguments.version) is None
         or arguments.socket_timeout <= 0
         or not 0 < arguments.maximum_bytes <= (2**63 - 1)
-        or not body.is_absolute()
-        or not metadata.is_absolute()
-        or body.name != "body.bin"
-        or metadata.name != "metadata.json"
-        or body.parent != metadata.parent
-        or not body.parent.is_dir()
-        or body.exists()
-        or metadata.exists()
+        or not workspace.is_absolute()
+        or workspace.is_symlink()
+        or not stat.S_ISDIR(workspace_metadata.st_mode)
+        or resolved_workspace.parent != temporary_root
+        or not resolved_workspace.name.startswith("animemo-bounded-http-")
+        or os.path.normcase(str(workspace.absolute()))
+        != os.path.normcase(str(resolved_workspace))
     ):
         raise SystemExit(2)
-    arguments.body = body
-    arguments.metadata = metadata
+    if os.name != "nt" and workspace_metadata.st_mode & 0o077:
+        raise SystemExit(2)
+    arguments.url = _bounded_worker_object_url(
+        arguments.version, arguments.logical_name
+    )
+    arguments.body = resolved_workspace / "body.bin"
+    arguments.metadata = resolved_workspace / "metadata.json"
+    if arguments.body.exists() or arguments.metadata.exists():
+        raise SystemExit(2)
     return arguments
 
 

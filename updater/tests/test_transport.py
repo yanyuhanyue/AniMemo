@@ -1034,7 +1034,9 @@ class OfficialMirrorReceiptAndBudgetTests(unittest.TestCase):
             workspace = root / "workspace"
             workspace.mkdir()
             request = transport_module.Request(
-                "https://download.animemo.cc/fixed", method="GET"
+                "https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/"
+                "v1.1.0-rc.10/checksums.txt",
+                method="GET",
             )
             opener = transport_module._AbsoluteDeadlineOpener(worker_path=worker)
             with (
@@ -1092,7 +1094,9 @@ class OfficialMirrorReceiptAndBudgetTests(unittest.TestCase):
             workspace = root / "workspace"
             workspace.mkdir()
             request = transport_module.Request(
-                "https://download.animemo.cc/fixed", method="GET"
+                "https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/"
+                "v1.1.0-rc.10/checksums.txt",
+                method="GET",
             )
             opener = transport_module._AbsoluteDeadlineOpener(worker_path=worker)
             with (
@@ -1200,12 +1204,12 @@ class BoundedHttpWorkerTests(unittest.TestCase):
     @staticmethod
     def arguments(root: Path, *, maximum_bytes: int) -> list[str]:
         return [
-            "--url",
-            "https://download.animemo.cc/fixed",
-            "--body",
-            str(root / "body.bin"),
-            "--metadata",
-            str(root / "metadata.json"),
+            "--version",
+            "1.1.0-rc.10",
+            "--logical-name",
+            "checksums.txt",
+            "--workspace",
+            str(root),
             "--socket-timeout",
             "60",
             "--maximum-bytes",
@@ -1213,6 +1217,26 @@ class BoundedHttpWorkerTests(unittest.TestCase):
             "--accept",
             "application/octet-stream",
         ]
+
+    def test_worker_rejects_raw_network_and_file_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="animemo-bounded-http-") as temporary:
+            with self.assertRaises(SystemExit):
+                transport_module._bounded_worker_parse_arguments(
+                    [
+                        "--url",
+                        "https://127.0.0.1/private",
+                        "--body",
+                        str(Path(temporary) / "body.bin"),
+                        "--metadata",
+                        str(Path(temporary) / "metadata.json"),
+                        "--socket-timeout",
+                        "60",
+                        "--maximum-bytes",
+                        "1024",
+                        "--accept",
+                        "application/octet-stream",
+                    ]
+                )
 
     def test_worker_writes_exact_body_and_closed_success_metadata(self) -> None:
         payload = b"bounded-worker-payload"
@@ -1224,7 +1248,7 @@ class BoundedHttpWorkerTests(unittest.TestCase):
                 return FakeResponse(payload, request.full_url)
 
         opener = Opener()
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(prefix="animemo-bounded-http-") as temporary:
             root = Path(temporary)
             with patch.object(
                 transport_module,
@@ -1246,6 +1270,11 @@ class BoundedHttpWorkerTests(unittest.TestCase):
             self.assertEqual(metadata["size"], len(payload))
             self.assertEqual(opener.timeout, 60)
             self.assertEqual(opener.request.get_method(), "GET")
+            self.assertEqual(
+                opener.request.full_url,
+                "https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/"
+                "v1.1.0-rc.10/checksums.txt",
+            )
 
     def test_worker_fails_closed_before_committing_an_oversized_body(self) -> None:
         payload = b"too-large"
@@ -1255,7 +1284,7 @@ class BoundedHttpWorkerTests(unittest.TestCase):
                 del timeout
                 return FakeResponse(payload, request.full_url)
 
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(prefix="animemo-bounded-http-") as temporary:
             root = Path(temporary)
             with patch.object(
                 transport_module,
