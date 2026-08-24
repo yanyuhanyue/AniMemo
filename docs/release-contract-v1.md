@@ -157,6 +157,18 @@ Registry transport may retry only a bounded pull of that same derived
 `repository@sha256:digest`, verifies the resulting local RepoDigest and
 platform, and permits Compose startup only with `--pull never`.
 
+The Stateful Upgrade gate treats the historical commit as the Base application
+source, not as dependency-image authority. Its current-owned final Compose
+override projects PostgreSQL and Redis only from
+`release/dependency-images.json`. Before any container starts, the gate renders
+machine-readable Base and Current effective configurations and proves that both
+resolve the same exact repository, digest, `linux/amd64` platform authority,
+data mounts, project, and network identity. Historical mutable tag literals may
+remain in the detached Base source as non-authoritative input, but cannot remain
+in either effective configuration. The one persistent dependency-container pair
+then runs through Base application startup and the Current application switch
+with `--pull never` and unchanged container identities.
+
 Consumers receive `VerifiedReleaseMaterials`, which owns a durable verified
 material root and exposes only role/path and four-image lookup Interfaces. Plan
 may use cached verified evidence; execute refreshes GitHub Release metadata,
