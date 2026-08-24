@@ -27,6 +27,7 @@ BACKOFF_SECONDS = (15, 45)
 COMMAND_TIMEOUT_SECONDS = 180
 INSPECT_TIMEOUT_SECONDS = 30
 MAX_DIAGNOSTIC_CHARACTERS = 4096
+MAX_REPODIGEST_CHARACTERS = 512
 
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _HTTP_STATUS_PATTERNS = (
@@ -72,6 +73,21 @@ _RETRYABLE_PATTERNS = (
     "connection timed out",
 )
 _CACHE_MISS_PATTERNS = ("no such image", "no such object")
+_REPOSITORY_COMPONENT = r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
+_OBSERVED_REPOSITORY = re.compile(
+    rf"(?:{_REPOSITORY_COMPONENT}|"
+    rf"{_REPOSITORY_COMPONENT}(?::[0-9]+)?/"
+    rf"{_REPOSITORY_COMPONENT}(?:/{_REPOSITORY_COMPONENT})*)"
+)
+_OBSERVED_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+_DOCKER_HUB_OFFICIAL_REPOSITORIES = {
+    "postgres": "docker.io/library/postgres",
+    "library/postgres": "docker.io/library/postgres",
+    "docker.io/library/postgres": "docker.io/library/postgres",
+    "redis": "docker.io/library/redis",
+    "library/redis": "docker.io/library/redis",
+    "docker.io/library/redis": "docker.io/library/redis",
+}
 
 
 class DiagnosticClassification(str, Enum):
@@ -87,6 +103,20 @@ class DependencyImageTransportError(RuntimeError):
         super().__init__(message)
 
 
+class DependencyImagePullAllError(DependencyImageTransportError):
+    def __init__(
+        self,
+        failures: tuple[tuple[str, DependencyImageTransportError], ...],
+        receipts: tuple[object, ...],
+    ) -> None:
+        self.failures = failures
+        self.receipts = receipts
+        diagnostic = "; ".join(
+            f"{role}={error}" for role, error in failures
+        )
+        super().__init__("DEPENDENCY_IMAGE_PULL_ALL_FAILED", diagnostic)
+
+
 @dataclass(frozen=True)
 class CommandResult:
     returncode: int
@@ -97,14 +127,45 @@ class CommandResult:
 @dataclass(frozen=True)
 class PullReceipt:
     role: str
-    reference: str
+    canonical_reference: str
     platform: str
     source: str
     attempts: int
-    repo_digest: str
+    observed_repo_digest: str
+    normalized_repo_digest: str
     os: str
     architecture: str
     authority_identity: str
+
+    @property
+    def reference(self) -> str:
+        return self.canonical_reference
+
+    @property
+    def repo_digest(self) -> str:
+        return self.normalized_repo_digest
+
+
+@dataclass(frozen=True)
+class ObservedRepoDigest:
+    raw: str
+    repository: str
+    digest: str
+
+    @property
+    def normalized_repository(self) -> str:
+        return normalize_docker_repository(self.repository)
+
+    @property
+    def normalized(self) -> str:
+        return f"{self.normalized_repository}@{self.digest}"
+
+
+@dataclass(frozen=True)
+class ImageInspection:
+    repo_digests: object
+    os: object
+    architecture: object
 
 
 RunCommand = Callable[[tuple[str, ...], int], CommandResult]
@@ -113,6 +174,73 @@ Sleep = Callable[[int], None]
 
 def _error(code: str, diagnostic: str = "") -> NoReturn:
     raise DependencyImageTransportError(code, diagnostic)
+
+
+def parse_observed_repo_digest(raw: object) -> ObservedRepoDigest:
+    if (
+        not isinstance(raw, str)
+        or not raw
+        or len(raw) > MAX_REPODIGEST_CHARACTERS
+        or raw.count("@") != 1
+        or any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in raw)
+    ):
+        _error("DEPENDENCY_IMAGE_REPODIGEST_MALFORMED")
+    repository, digest = raw.split("@", 1)
+    if (
+        not _OBSERVED_REPOSITORY.fullmatch(repository)
+        or not _OBSERVED_DIGEST.fullmatch(digest)
+    ):
+        _error("DEPENDENCY_IMAGE_REPODIGEST_MALFORMED")
+    return ObservedRepoDigest(raw=raw, repository=repository, digest=digest)
+
+
+def normalize_docker_repository(repository: str) -> str:
+    if not isinstance(repository, str) or not _OBSERVED_REPOSITORY.fullmatch(
+        repository
+    ):
+        _error("DEPENDENCY_IMAGE_REPODIGEST_MALFORMED")
+    return _DOCKER_HUB_OFFICIAL_REPOSITORIES.get(repository, repository)
+
+
+def repo_digest_matches_authority(
+    observed_repo_digests: object,
+    image: DependencyImage,
+) -> ObservedRepoDigest:
+    if (
+        not isinstance(observed_repo_digests, (list, tuple))
+        or not observed_repo_digests
+    ):
+        _error("DEPENDENCY_IMAGE_REPODIGEST_MALFORMED")
+    parsed = tuple(
+        parse_observed_repo_digest(raw) for raw in observed_repo_digests
+    )
+    canonical = tuple(
+        item
+        for item in parsed
+        if item.normalized_repository == image.repository
+    )
+    observed_diagnostic = json.dumps(
+        {"observedRepoDigests": [item.raw for item in parsed]},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if not canonical:
+        _error(
+            "DEPENDENCY_IMAGE_REPOSITORY_MISMATCH",
+            observed_diagnostic,
+        )
+    canonical_digests = {item.digest for item in canonical}
+    if len(canonical_digests) != 1:
+        _error(
+            "DEPENDENCY_IMAGE_REPODIGEST_AMBIGUOUS",
+            observed_diagnostic,
+        )
+    if image.digest not in canonical_digests:
+        _error(
+            "DEPENDENCY_IMAGE_LOCAL_DIGEST_MISMATCH",
+            observed_diagnostic,
+        )
+    return next(item for item in canonical if item.digest == image.digest)
 
 
 def sanitize_diagnostic(raw: bytes) -> str:
@@ -204,7 +332,7 @@ def _inspect_image(
     *,
     run_command: RunCommand,
     cache_probe: bool,
-) -> tuple[tuple[str, ...], str, str] | None:
+) -> ImageInspection | None:
     try:
         result = run_command(
             ("docker", "image", "inspect", image.reference),
@@ -233,32 +361,27 @@ def _inspect_image(
     repo_digests = inspected.get("RepoDigests")
     os_name = inspected.get("Os")
     architecture = inspected.get("Architecture")
-    if (
-        not isinstance(repo_digests, list)
-        or not all(isinstance(item, str) for item in repo_digests)
-        or not isinstance(os_name, str)
-        or not isinstance(architecture, str)
-    ):
-        _error("DEPENDENCY_IMAGE_DOCKER_DAEMON_FAILURE")
-    return tuple(repo_digests), os_name, architecture
+    return ImageInspection(repo_digests, os_name, architecture)
 
 
 def _verify_inspection(
     image: DependencyImage,
-    inspection: tuple[tuple[str, ...], str, str],
+    inspection: ImageInspection,
     *,
     cache_probe: bool,
-) -> tuple[str, str, str] | None:
-    repo_digests, os_name, architecture = inspection
-    if image.reference not in repo_digests:
+) -> tuple[ObservedRepoDigest, str, str] | None:
+    try:
+        observed = repo_digest_matches_authority(
+            inspection.repo_digests,
+            image,
+        )
+        if inspection.os != "linux" or inspection.architecture != "amd64":
+            _error("DEPENDENCY_IMAGE_PLATFORM_MISMATCH")
+    except DependencyImageTransportError:
         if cache_probe:
             return None
-        _error("DEPENDENCY_IMAGE_LOCAL_DIGEST_MISMATCH")
-    if os_name != "linux" or architecture != "amd64":
-        if cache_probe:
-            return None
-        _error("DEPENDENCY_IMAGE_PLATFORM_MISMATCH")
-    return image.reference, os_name, architecture
+        raise
+    return observed, inspection.os, inspection.architecture
 
 
 def pull_dependency_image(
@@ -283,14 +406,15 @@ def pull_dependency_image(
             image, inspection, cache_probe=True
         )
         if verified is not None:
-            repo_digest, os_name, architecture = verified
+            observed, os_name, architecture = verified
             return PullReceipt(
                 role=role,
-                reference=image.reference,
+                canonical_reference=image.reference,
                 platform=image.platform,
                 source="CACHE_HIT_VERIFIED",
                 attempts=0,
-                repo_digest=repo_digest,
+                observed_repo_digest=observed.raw,
+                normalized_repo_digest=observed.normalized,
                 os=os_name,
                 architecture=architecture,
                 authority_identity=authority.identity,
@@ -336,14 +460,15 @@ def pull_dependency_image(
     )
     if verified is None:  # pragma: no cover - post-pull mismatches raise
         _error("DEPENDENCY_IMAGE_LOCAL_DIGEST_MISMATCH")
-    repo_digest, os_name, architecture = verified
+    observed, os_name, architecture = verified
     return PullReceipt(
         role=role,
-        reference=image.reference,
+        canonical_reference=image.reference,
         platform=image.platform,
         source="NETWORK_PULL_VERIFIED",
         attempts=completed_attempt,
-        repo_digest=repo_digest,
+        observed_repo_digest=observed.raw,
+        normalized_repo_digest=observed.normalized,
         os=os_name,
         architecture=architecture,
         authority_identity=authority.identity,
@@ -359,15 +484,27 @@ def pull_all_dependency_images(
 ) -> tuple[object, object]:
     authority = authority or AUTHORITY
     pull_image = pull_image or pull_dependency_image
-    return tuple(
-        pull_image(
-            role,
-            run_command=run_command,
-            sleep=sleep,
-            authority=authority,
-        )
-        for role in authority.roles
-    )
+    receipts: list[object] = []
+    failures: list[tuple[str, DependencyImageTransportError]] = []
+    for role in authority.roles:
+        try:
+            receipts.append(
+                pull_image(
+                    role,
+                    run_command=run_command,
+                    sleep=sleep,
+                    authority=authority,
+                )
+            )
+        except DependencyImageTransportError as error:
+            failures.append((role, error))
+    if failures:
+        raise DependencyImagePullAllError(tuple(failures), tuple(receipts))
+    return tuple(receipts)  # type: ignore[return-value]
+
+
+def _receipt_json(receipt: PullReceipt) -> str:
+    return json.dumps(asdict(receipt), sort_keys=True, separators=(",", ":"))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -392,15 +529,51 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "pull":
             receipt = pull_dependency_image(args.role, authority=AUTHORITY)
         else:
-            pull_all_dependency_images(authority=AUTHORITY)
+            receipts = pull_all_dependency_images(authority=AUTHORITY)
+    except DependencyImagePullAllError as error:
+        for completed in error.receipts:
+            if isinstance(completed, PullReceipt):
+                print(
+                    f"DEPENDENCY_IMAGE_PULL_RECEIPT {_receipt_json(completed)}",
+                    file=sys.stderr,
+                )
+        for role, failure in error.failures:
+            failure_record = {
+                "code": failure.code,
+                "diagnostic": failure.diagnostic,
+                "role": role,
+            }
+            print(
+                "DEPENDENCY_IMAGE_ROLE_FAILURE "
+                + json.dumps(
+                    failure_record,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                file=sys.stderr,
+            )
+        print(str(error), file=sys.stderr)
+        return 1
     except DependencyImageTransportError as error:
         print(str(error), file=sys.stderr)
         return 1
     if args.command == "pull":
-        print(json.dumps(asdict(receipt), sort_keys=True, separators=(",", ":")))
+        print(_receipt_json(receipt))
     elif args.projection == "github-env":
+        for completed in receipts:
+            if isinstance(completed, PullReceipt):
+                print(
+                    f"DEPENDENCY_IMAGE_PULL_RECEIPT {_receipt_json(completed)}",
+                    file=sys.stderr,
+                )
         print("\n".join(github_env_lines(AUTHORITY)))
     else:
+        for completed in receipts:
+            if isinstance(completed, PullReceipt):
+                print(
+                    f"DEPENDENCY_IMAGE_PULL_RECEIPT {_receipt_json(completed)}",
+                    file=sys.stderr,
+                )
         print("\n".join(compose_env_lines(AUTHORITY)))
     return 0
 

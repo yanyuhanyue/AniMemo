@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import subprocess
+import sys
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 from release.dependency_images import load_dependency_image_authority
 from release.registry_transport import (
@@ -15,8 +19,11 @@ from release.registry_transport import (
     DependencyImageTransportError,
     DiagnosticClassification,
     classify_diagnostic,
+    normalize_docker_repository,
+    parse_observed_repo_digest,
     pull_all_dependency_images,
     pull_dependency_image,
+    repo_digest_matches_authority,
     sanitize_diagnostic,
 )
 
@@ -27,10 +34,25 @@ Error response from daemon: received unexpected HTTP status: 502 Bad Gateway
 Process completed with exit code 1.
 """
 
+MOBY_FAMILIAR_POSTGRES_FIXTURE = (
+    "postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61"
+    "cd7cf1a67d71ec530eec5d7ae0cbe571"
+)
+MOBY_FAMILIAR_REDIS_FIXTURE = (
+    "redis@sha256:9702d01c1f10c3ea9f48211b4362e44f"
+    "154ff02d063e6f7268eba804059f53bf"
+)
 
-def inspect_payload(reference: str, *, os_name: str = "linux", architecture: str = "amd64") -> bytes:
+
+def inspect_payload(
+    reference: str | list[object],
+    *,
+    os_name: object = "linux",
+    architecture: object = "amd64",
+) -> bytes:
+    repo_digests = reference if isinstance(reference, list) else [reference]
     return json.dumps(
-        [{"RepoDigests": [reference], "Os": os_name, "Architecture": architecture}]
+        [{"RepoDigests": repo_digests, "Os": os_name, "Architecture": architecture}]
     ).encode()
 
 
@@ -80,6 +102,258 @@ class RegistryTransportTests(unittest.TestCase):
             authority=self.authority,
         )
         return receipt, runner, sleeps
+
+    def assert_repo_error(
+        self,
+        observed: object,
+        code: str,
+        *,
+        role: str = "postgres",
+    ) -> None:
+        with self.assertRaisesRegex(DependencyImageTransportError, code):
+            repo_digest_matches_authority(
+                observed,
+                self.authority.image(role),
+            )
+
+    def test_docker_hub_official_familiar_aliases_normalize_for_both_roles(self) -> None:
+        cases = {
+            "postgres": (
+                "postgres",
+                "library/postgres",
+                "docker.io/library/postgres",
+            ),
+            "redis": (
+                "redis",
+                "library/redis",
+                "docker.io/library/redis",
+            ),
+        }
+        for role, repositories in cases.items():
+            image = self.authority.image(role)
+            for repository in repositories:
+                with self.subTest(role=role, repository=repository):
+                    raw = f"{repository}@{image.digest}"
+                    parsed = parse_observed_repo_digest(raw)
+                    self.assertEqual(
+                        normalize_docker_repository(parsed.repository),
+                        image.repository,
+                    )
+                    accepted = repo_digest_matches_authority([raw], image)
+                    self.assertEqual(accepted.raw, raw)
+                    self.assertEqual(accepted.normalized, image.reference)
+
+    def test_canonical_match_can_coexist_with_an_unrelated_repository(self) -> None:
+        image = self.postgres
+        accepted = repo_digest_matches_authority(
+            [
+                f"other.example/library/postgres@{image.digest}",
+                f"postgres@{image.digest}",
+            ],
+            image,
+        )
+        self.assertEqual(accepted.raw, f"postgres@{image.digest}")
+
+    def test_same_canonical_repository_with_conflicting_digest_is_ambiguous(self) -> None:
+        self.assert_repo_error(
+            [
+                f"postgres@{self.postgres.digest}",
+                "library/postgres@sha256:" + "c" * 64,
+            ],
+            "REPODIGEST_AMBIGUOUS",
+        )
+
+    def test_observed_repo_digest_parser_rejects_all_malformed_boundaries(self) -> None:
+        malformed = (
+            f"postgres:16@{self.postgres.digest}",
+            "postgres" + self.postgres.digest,
+            f"postgres@@{self.postgres.digest}",
+            f"postgres@{self.postgres.digest.upper()}",
+            "postgres@sha512:" + "a" * 64,
+            f"@{self.postgres.digest}",
+            f"post gres@{self.postgres.digest}",
+            f"postgres@{self.postgres.digest}\n",
+            f"postgres\x00@{self.postgres.digest}",
+        )
+        for raw in malformed:
+            with self.subTest(raw=raw):
+                self.assert_repo_error([raw], "REPODIGEST_MALFORMED")
+        self.assert_repo_error([], "REPODIGEST_MALFORMED")
+        self.assert_repo_error([123], "REPODIGEST_MALFORMED")
+
+    def test_digest_only_and_arbitrary_repository_acceptance_are_closed(self) -> None:
+        image = self.postgres
+        for raw in (
+            f"evil.example/postgres@{image.digest}",
+            f"docker.io/other/postgres@{image.digest}",
+        ):
+            with self.subTest(raw=raw):
+                self.assert_repo_error([raw], "REPOSITORY_MISMATCH")
+        self.assert_repo_error(
+            [f"postgres@sha256:{'c' * 64}"],
+            "LOCAL_DIGEST_MISMATCH",
+        )
+
+    def test_moby_familiar_postgres_failure_fixture_now_verifies(self) -> None:
+        accepted = repo_digest_matches_authority(
+            [MOBY_FAMILIAR_POSTGRES_FIXTURE],
+            self.postgres,
+        )
+        self.assertEqual(accepted.normalized, self.postgres.reference)
+
+    def test_moby_familiar_redis_smoke_fixture_verifies(self) -> None:
+        accepted = repo_digest_matches_authority(
+            [MOBY_FAMILIAR_REDIS_FIXTURE],
+            self.redis,
+        )
+        self.assertEqual(accepted.normalized, self.redis.reference)
+
+    def test_verified_cache_and_network_receipts_preserve_raw_and_normalized(self) -> None:
+        cache_runner = ScriptedRunner(
+            [CommandResult(0, inspect_payload(MOBY_FAMILIAR_REDIS_FIXTURE), b"")]
+        )
+        cache_receipt = pull_dependency_image(
+            "redis", run_command=cache_runner, authority=self.authority
+        )
+        self.assertEqual(cache_receipt.source, "CACHE_HIT_VERIFIED")
+        self.assertEqual(
+            cache_receipt.observed_repo_digest,
+            MOBY_FAMILIAR_REDIS_FIXTURE,
+        )
+        self.assertEqual(cache_receipt.normalized_repo_digest, self.redis.reference)
+
+        network_runner = ScriptedRunner(
+            [
+                missing(),
+                pulled(),
+                CommandResult(
+                    0,
+                    inspect_payload(MOBY_FAMILIAR_POSTGRES_FIXTURE),
+                    b"",
+                ),
+            ]
+        )
+        network_receipt = pull_dependency_image(
+            "postgres", run_command=network_runner, authority=self.authority
+        )
+        self.assertEqual(network_receipt.source, "NETWORK_PULL_VERIFIED")
+        self.assertEqual(
+            network_receipt.canonical_reference,
+            self.postgres.reference,
+        )
+        self.assertEqual(
+            network_receipt.observed_repo_digest,
+            MOBY_FAMILIAR_POSTGRES_FIXTURE,
+        )
+        self.assertEqual(
+            network_receipt.normalized_repo_digest,
+            self.postgres.reference,
+        )
+        self.assertEqual((network_receipt.os, network_receipt.architecture), ("linux", "amd64"))
+
+    def test_inspection_platform_and_shape_failures_are_distinct(self) -> None:
+        cases = (
+            ({"RepoDigests": [MOBY_FAMILIAR_POSTGRES_FIXTURE], "Architecture": "amd64"}, "PLATFORM_MISMATCH"),
+            ({"RepoDigests": [MOBY_FAMILIAR_POSTGRES_FIXTURE], "Os": "windows", "Architecture": "amd64"}, "PLATFORM_MISMATCH"),
+            ({"RepoDigests": [MOBY_FAMILIAR_POSTGRES_FIXTURE], "Os": "linux", "Architecture": "arm64"}, "PLATFORM_MISMATCH"),
+            ({"RepoDigests": [], "Os": "linux", "Architecture": "amd64"}, "REPODIGEST_MALFORMED"),
+            ({"RepoDigests": [123], "Os": "linux", "Architecture": "amd64"}, "REPODIGEST_MALFORMED"),
+        )
+        for inspected, code in cases:
+            with self.subTest(code=code, inspected=inspected):
+                runner = ScriptedRunner(
+                    [
+                        missing(),
+                        pulled(),
+                        CommandResult(0, json.dumps([inspected]).encode(), b""),
+                    ]
+                )
+                with self.assertRaisesRegex(DependencyImageTransportError, code):
+                    pull_dependency_image(
+                        "postgres",
+                        run_command=runner,
+                        authority=self.authority,
+                    )
+
+    def test_pull_exit_zero_without_canonical_semantic_match_fails(self) -> None:
+        runner = ScriptedRunner(
+            [
+                missing(),
+                pulled(),
+                CommandResult(
+                    0,
+                    inspect_payload(
+                        f"evil.example/postgres@{self.postgres.digest}"
+                    ),
+                    b"",
+                ),
+            ]
+        )
+        with self.assertRaisesRegex(
+            DependencyImageTransportError,
+            "REPOSITORY_MISMATCH",
+        ):
+            pull_dependency_image(
+                "postgres", run_command=runner, authority=self.authority
+            )
+
+    def test_pull_all_attempts_both_roles_before_aggregate_failure(self) -> None:
+        def failing_pull(failing_role: str, calls: list[str]):
+            def pull(role: str, **_kwargs):
+                calls.append(role)
+                if role == failing_role:
+                    raise DependencyImageTransportError(
+                        "DEPENDENCY_IMAGE_LOCAL_DIGEST_MISMATCH"
+                    )
+                return role
+
+            return pull
+
+        for failing_role in self.authority.roles:
+            calls: list[str] = []
+            with self.subTest(failing_role=failing_role), self.assertRaisesRegex(
+                DependencyImageTransportError,
+                "PULL_ALL_FAILED",
+            ):
+                pull_all_dependency_images(
+                    authority=self.authority,
+                    pull_image=failing_pull(failing_role, calls),
+                )
+            self.assertEqual(calls, ["postgres", "redis"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX fake Docker executable required")
+    def test_python_s_pull_entrypoint_crosses_a_fake_docker_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            docker = Path(directory) / "docker"
+            docker.write_text(
+                "#!/bin/sh\n"
+                "test \"$1\" = image\n"
+                "test \"$2\" = inspect\n"
+                f"printf '%s' '[{{\"RepoDigests\":[\"{MOBY_FAMILIAR_POSTGRES_FIXTURE}\"],\"Os\":\"linux\",\"Architecture\":\"amd64\"}}]'\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-S",
+                    "-m",
+                    "release.registry_transport",
+                    "pull",
+                    "--role",
+                    "postgres",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={**os.environ, "PATH": directory + os.pathsep + os.environ["PATH"]},
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt["observed_repo_digest"], MOBY_FAMILIAR_POSTGRES_FIXTURE)
+        self.assertEqual(receipt["normalized_repo_digest"], self.postgres.reference)
 
     def test_closed_postgres_role_produces_exact_pull_argv(self) -> None:
         receipt, runner, _ = self.pull_after([], role="postgres")
