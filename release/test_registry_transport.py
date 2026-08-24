@@ -18,6 +18,7 @@ from release.registry_transport import (
     CommandResult,
     DependencyImageTransportError,
     DiagnosticClassification,
+    PullReceipt,
     classify_diagnostic,
     normalize_docker_repository,
     parse_observed_repo_digest,
@@ -88,6 +89,21 @@ class RegistryTransportTests(unittest.TestCase):
         self.authority = load_dependency_image_authority()
         self.redis = self.authority.image("redis")
         self.postgres = self.authority.image("postgres")
+
+    def fake_receipt(self, role: str) -> PullReceipt:
+        image = self.authority.image(role)
+        return PullReceipt(
+            role=role,
+            canonical_reference=image.reference,
+            platform=image.platform,
+            source="CACHE_HIT_VERIFIED",
+            attempts=0,
+            observed_repo_digest=f"{role}@{image.digest}",
+            normalized_repo_digest=image.reference,
+            os="linux",
+            architecture="amd64",
+            authority_identity=self.authority.identity,
+        )
 
     def pull_after(self, failures: list[CommandResult | BaseException], *, role: str = "redis"):
         image = self.authority.image(role)
@@ -305,7 +321,7 @@ class RegistryTransportTests(unittest.TestCase):
                     raise DependencyImageTransportError(
                         "DEPENDENCY_IMAGE_LOCAL_DIGEST_MISMATCH"
                     )
-                return role
+                return self.fake_receipt(role)
 
             return pull
 
@@ -455,13 +471,16 @@ class RegistryTransportTests(unittest.TestCase):
 
         def pull(role: str, *, authority, **_kwargs):
             calls.append((role, authority))
-            return role
+            return self.fake_receipt(role)
 
         receipts = pull_all_dependency_images(
             authority=self.authority,
             pull_image=pull,
         )
-        self.assertEqual(receipts, ("postgres", "redis"))
+        self.assertEqual(
+            tuple(receipt.role for receipt in receipts),
+            ("postgres", "redis"),
+        )
         self.assertEqual(calls, [("postgres", self.authority), ("redis", self.authority)])
 
     def test_terminal_http_statuses_stop_immediately(self) -> None:
@@ -670,6 +689,15 @@ class RegistryTransportTests(unittest.TestCase):
         self.assertNotIn("eval(", source)
         self.assertNotIn("docker image rm", source)
         self.assertNotIn("mirror", source.lower())
+
+    def test_transport_does_not_duplicate_canonical_authority_literals(self) -> None:
+        source = inspect.getsource(
+            __import__("release.registry_transport", fromlist=["*"])
+        )
+        for role in self.authority.roles:
+            image = self.authority.image(role)
+            self.assertNotIn(image.repository, source)
+            self.assertNotIn(image.digest, source)
 
 
 if __name__ == "__main__":

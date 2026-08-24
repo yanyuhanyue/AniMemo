@@ -92,7 +92,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 checks_out_dynamic_candidate = any(
                     step.get("uses", "").startswith("actions/checkout@")
                     and step.get("with", {}).get("ref")
-                    == "${{ inputs.candidate_sha }}"
+                    in (
+                        "${{ inputs.candidate_sha }}",
+                        "${{ github.sha }}",
+                    )
                     for step in steps
                 )
                 buildx_steps = [
@@ -118,17 +121,15 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     self.assertIn(inputs.get("cleanup"), (None, "true"), identity)
 
                 for step in steps:
+                    action = step.get("uses", "").split("@", 1)[0]
                     self.assertFalse(
-                        step.get("uses", "").startswith("actions/cache@"),
+                        action == "actions/cache"
+                        or action.startswith("actions/cache/"),
                         identity,
                     )
                     for key, value in step.get("with", {}).items():
                         if key == "cache-to":
-                            self.assertNotIn(
-                                "type=gha",
-                                value.replace(" ", "").lower(),
-                                identity,
-                            )
+                            self.fail(f"{identity} enables cache export: {value}")
                         if key == "keep-state":
                             self.assertNotEqual(value, "true", identity)
 
@@ -137,6 +138,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             {
                 "performance.yml:isolated-resource-load",
                 "performance.yml:isolated-long-operation-capacity",
+                "release.yml:dry-run",
             },
         )
 

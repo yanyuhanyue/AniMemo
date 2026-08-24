@@ -80,14 +80,6 @@ _OBSERVED_REPOSITORY = re.compile(
     rf"{_REPOSITORY_COMPONENT}(?:/{_REPOSITORY_COMPONENT})*)"
 )
 _OBSERVED_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
-_DOCKER_HUB_OFFICIAL_REPOSITORIES = {
-    "postgres": "docker.io/library/postgres",
-    "library/postgres": "docker.io/library/postgres",
-    "docker.io/library/postgres": "docker.io/library/postgres",
-    "redis": "docker.io/library/redis",
-    "library/redis": "docker.io/library/redis",
-    "docker.io/library/redis": "docker.io/library/redis",
-}
 
 
 class DiagnosticClassification(str, Enum):
@@ -107,7 +99,7 @@ class DependencyImagePullAllError(DependencyImageTransportError):
     def __init__(
         self,
         failures: tuple[tuple[str, DependencyImageTransportError], ...],
-        receipts: tuple[object, ...],
+        receipts: tuple[PullReceipt, ...],
     ) -> None:
         self.failures = failures
         self.receipts = receipts
@@ -170,6 +162,7 @@ class ImageInspection:
 
 RunCommand = Callable[[tuple[str, ...], int], CommandResult]
 Sleep = Callable[[int], None]
+PullImage = Callable[..., PullReceipt]
 
 
 def _error(code: str, diagnostic: str = "") -> NoReturn:
@@ -199,7 +192,12 @@ def normalize_docker_repository(repository: str) -> str:
         repository
     ):
         _error("DEPENDENCY_IMAGE_REPODIGEST_MALFORMED")
-    return _DOCKER_HUB_OFFICIAL_REPOSITORIES.get(repository, repository)
+    components = repository.split("/")
+    if len(components) == 1:
+        return f"docker.io/library/{repository}"
+    if len(components) == 2 and components[0] == "library":
+        return f"docker.io/{repository}"
+    return repository
 
 
 def repo_digest_matches_authority(
@@ -480,31 +478,40 @@ def pull_all_dependency_images(
     run_command: RunCommand = _run_command,
     sleep: Sleep = time.sleep,
     authority: DependencyImageAuthority | None = None,
-    pull_image: Callable[..., object] | None = None,
-) -> tuple[object, object]:
+    pull_image: PullImage | None = None,
+) -> tuple[PullReceipt, PullReceipt]:
     authority = authority or AUTHORITY
     pull_image = pull_image or pull_dependency_image
-    receipts: list[object] = []
+    receipts: list[PullReceipt] = []
     failures: list[tuple[str, DependencyImageTransportError]] = []
     for role in authority.roles:
         try:
-            receipts.append(
-                pull_image(
-                    role,
-                    run_command=run_command,
-                    sleep=sleep,
-                    authority=authority,
-                )
+            receipt = pull_image(
+                role,
+                run_command=run_command,
+                sleep=sleep,
+                authority=authority,
             )
+            if not isinstance(receipt, PullReceipt):
+                _error("DEPENDENCY_IMAGE_RECEIPT_INVALID")
+            receipts.append(receipt)
         except DependencyImageTransportError as error:
             failures.append((role, error))
     if failures:
         raise DependencyImagePullAllError(tuple(failures), tuple(receipts))
-    return tuple(receipts)  # type: ignore[return-value]
+    return receipts[0], receipts[1]
 
 
 def _receipt_json(receipt: PullReceipt) -> str:
     return json.dumps(asdict(receipt), sort_keys=True, separators=(",", ":"))
+
+
+def _emit_pull_receipts(receipts: tuple[PullReceipt, ...]) -> None:
+    for receipt in receipts:
+        print(
+            f"DEPENDENCY_IMAGE_PULL_RECEIPT {_receipt_json(receipt)}",
+            file=sys.stderr,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -531,12 +538,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             receipts = pull_all_dependency_images(authority=AUTHORITY)
     except DependencyImagePullAllError as error:
-        for completed in error.receipts:
-            if isinstance(completed, PullReceipt):
-                print(
-                    f"DEPENDENCY_IMAGE_PULL_RECEIPT {_receipt_json(completed)}",
-                    file=sys.stderr,
-                )
+        _emit_pull_receipts(error.receipts)
         for role, failure in error.failures:
             failure_record = {
                 "code": failure.code,
@@ -559,22 +561,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.command == "pull":
         print(_receipt_json(receipt))
-    elif args.projection == "github-env":
-        for completed in receipts:
-            if isinstance(completed, PullReceipt):
-                print(
-                    f"DEPENDENCY_IMAGE_PULL_RECEIPT {_receipt_json(completed)}",
-                    file=sys.stderr,
-                )
-        print("\n".join(github_env_lines(AUTHORITY)))
     else:
-        for completed in receipts:
-            if isinstance(completed, PullReceipt):
-                print(
-                    f"DEPENDENCY_IMAGE_PULL_RECEIPT {_receipt_json(completed)}",
-                    file=sys.stderr,
-                )
-        print("\n".join(compose_env_lines(AUTHORITY)))
+        _emit_pull_receipts(receipts)
+        projection = (
+            github_env_lines(AUTHORITY)
+            if args.projection == "github-env"
+            else compose_env_lines(AUTHORITY)
+        )
+        print("\n".join(projection))
     return 0
 
 
