@@ -18,6 +18,7 @@ from release.mirror import (
     OfficialMirrorPublicReader,
     OfficialReleaseMirrorPublisher,
     R2S3ObjectStore,
+    _collect_response_headers,
     _gh_environment,
     _is_immutable_cache_control,
     _verify_github_release_authority,
@@ -109,6 +110,7 @@ class CacheControlValidationTests(unittest.TestCase):
             "public,max-age=31536000,immutable",
             "public, max-age=31536000, immutable",
             "IMMUTABLE, PUBLIC, MAX-AGE=31536000",
+            "\tpublic,\tmax-age=31536000,\timmutable\t",
         ):
             with self.subTest(value=value):
                 self.assertTrue(_is_immutable_cache_control(value))
@@ -120,9 +122,29 @@ class CacheControlValidationTests(unittest.TestCase):
             "public,max-age=31536000,immutable,no-store",
             "public,public,max-age=31536000,immutable",
             "private,max-age=31536000,immutable",
+            "\vpublic,max-age=31536000,immutable",
+            "\fpublic,max-age=31536000,immutable",
+            "\r\n public,max-age=31536000,immutable",
+            "\u00a0public,max-age=31536000,immutable",
         ):
             with self.subTest(value=value):
                 self.assertFalse(_is_immutable_cache_control(value))
+
+    def test_duplicate_response_fields_are_merged_before_validation(self) -> None:
+        class DuplicateHeaders(dict[str, str]):
+            def items(self):
+                return [
+                    ("Cache-Control", "public,max-age=31536000,immutable"),
+                    ("cache-control", "no-store"),
+                ]
+
+        collected = _collect_response_headers(DuplicateHeaders())
+
+        self.assertEqual(
+            collected["cache-control"],
+            "public,max-age=31536000,immutable,no-store",
+        )
+        self.assertFalse(_is_immutable_cache_control(collected["cache-control"]))
 
 
 class MirrorWorkflowIdentityTests(unittest.TestCase):
