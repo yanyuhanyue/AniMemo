@@ -288,6 +288,7 @@ DEPENDENCY_ENV_FILE="$TEMP_ROOT/dependency-images.env"
 # NEGATIVE_TEST_FIXTURE: these legacy prefixes are not assignments or authority;
 # ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:
 # ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:
+unset ANIMEMO_POSTGRES_IMAGE ANIMEMO_REDIS_IMAGE
 (cd "$CURRENT_ROOT" && python3 -m release.registry_transport pull-all --projection compose-env) \
   > "$DEPENDENCY_ENV_FILE"
 chmod 600 "$DEPENDENCY_ENV_FILE"

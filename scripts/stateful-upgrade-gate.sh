@@ -407,6 +407,7 @@ wait_for_api() {
 }
 
 DEPENDENCY_ENV_FILE="$TEMP_ROOT/dependency-images.env"
+unset ANIMEMO_POSTGRES_IMAGE ANIMEMO_REDIS_IMAGE
 (cd "$CURRENT_ROOT" && python3 -m release.registry_transport pull-all --projection compose-env) \
   > "$DEPENDENCY_ENV_FILE"
 chmod 600 "$DEPENDENCY_ENV_FILE"

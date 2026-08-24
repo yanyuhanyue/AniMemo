@@ -1561,36 +1561,99 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         if bash is None:
             self.skipTest("Git Bash or bash is required for the rehearsal CLI gate.")
 
+        for name in (
+            "dr-rehearsal.sh",
+            "stateful-upgrade-gate.sh",
+            "rehearse-release-images.sh",
+        ):
+            source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+            unset = source.index(
+                "unset ANIMEMO_POSTGRES_IMAGE ANIMEMO_REDIS_IMAGE"
+            )
+            projection = source.index(
+                "release.registry_transport pull-all --projection compose-env"
+            )
+            with self.subTest(script=name):
+                self.assertLess(unset, projection)
+
         script = (ROOT / "scripts" / "rehearse-release-images.sh").as_posix()
-        environment = os.environ.copy()
-        environment["GITHUB_ACTIONS"] = "true"
-        environment["ANIMEMO_POSTGRES_IMAGE"] = "registry.invalid/postgres:latest"
-        environment["ANIMEMO_REDIS_IMAGE"] = "registry.invalid/redis:latest"
-        environment.pop("RUNNER_TEMP", None)
-        completed = subprocess.run(
-            [
-                bash,
-                script,
-                "--api-image",
-                "api@sha256:test",
-                "--web-image",
-                "web@sha256:test",
-                "--version",
-                "v1.1.0-rc.1",
-                "--commit",
-                "c" * 40,
-                "--channel",
-                "rc",
-                "--confirm-isolated",
-            ],
-            cwd=ROOT,
-            env=environment,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(completed.returncode, 2)
-        self.assertIn("RUNNER_TEMP must be an absolute isolated runner path.", completed.stderr)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            marker = root / "docker-environment.txt"
+            fake_python = fake_bin / "python3"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' "
+                "'ANIMEMO_POSTGRES_IMAGE=registry.example/postgres@sha256:"
+                + "a" * 64
+                + "' "
+                "'ANIMEMO_REDIS_IMAGE=registry.example/redis@sha256:"
+                + "b" * 64
+                + "' "
+                "'DEPENDENCY_IMAGE_AUTHORITY_SHA256=sha256:"
+                + "c" * 64
+                + "'\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            fake_docker = fake_bin / "docker"
+            fake_docker.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s|%s\\n' "
+                "\"${ANIMEMO_POSTGRES_IMAGE-UNSET}\" "
+                "\"${ANIMEMO_REDIS_IMAGE-UNSET}\" >> \"$DOCKER_ENV_MARKER\"\n"
+                "exit 42\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            fake_sudo = fake_bin / "sudo"
+            fake_sudo.write_text(
+                "#!/usr/bin/env bash\nexit 0\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            for command in (fake_python, fake_docker, fake_sudo):
+                command.chmod(0o755)
+
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GITHUB_ACTIONS": "true",
+                    "RUNNER_TEMP": "/tmp",
+                    "ANIMEMO_POSTGRES_IMAGE": "registry.invalid/postgres:latest",
+                    "ANIMEMO_REDIS_IMAGE": "registry.invalid/redis:latest",
+                    "DOCKER_ENV_MARKER": marker.as_posix(),
+                    "PATH": str(fake_bin) + os.pathsep + environment["PATH"],
+                }
+            )
+            completed = subprocess.run(
+                [
+                    bash,
+                    script,
+                    "--api-image",
+                    "api@sha256:test",
+                    "--web-image",
+                    "web@sha256:test",
+                    "--version",
+                    "v1.1.0-rc.1",
+                    "--commit",
+                    "c" * 40,
+                    "--channel",
+                    "rc",
+                    "--confirm-isolated",
+                ],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 42, completed.stderr)
+            observations = marker.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(observations)
+            self.assertTrue(all(item == "UNSET|UNSET" for item in observations))
 
     def test_exact_image_rehearsal_trusts_only_the_runtime_web_proxy(self):
         source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(encoding="utf-8")

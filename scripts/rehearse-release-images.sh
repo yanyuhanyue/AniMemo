@@ -50,6 +50,7 @@ DATA_ROOT="$TEMP_ROOT/data"
 META_ROOT="$TEMP_ROOT/meta"
 ENV_FILE="$TEMP_ROOT/rehearsal.env"
 DEPENDENCY_ENV_FILE="$TEMP_ROOT/dependency-images.env"
+unset ANIMEMO_POSTGRES_IMAGE ANIMEMO_REDIS_IMAGE
 (cd "$ROOT" && python3 -m release.registry_transport pull-all --projection compose-env) \
   > "$DEPENDENCY_ENV_FILE"
 chmod 600 "$DEPENDENCY_ENV_FILE"
