@@ -406,6 +406,23 @@ wait_for_api() {
   return 124
 }
 
+mapfile -t dependency_authority < <(
+  python3 -I "$CURRENT_ROOT/release/dependency_images.py" emit-github-env
+)
+if [[ "${#dependency_authority[@]}" -ne 3 ||
+      "${dependency_authority[0]}" != POSTGRES_IMAGE=* ||
+      "${dependency_authority[1]}" != REDIS_IMAGE=* ||
+      "${dependency_authority[2]}" != DEPENDENCY_IMAGE_AUTHORITY_SHA256=sha256:* ]]; then
+  echo "Canonical dependency image authority projection is invalid." >&2
+  exit 1
+fi
+POSTGRES_IMAGE="${dependency_authority[0]#POSTGRES_IMAGE=}"
+REDIS_IMAGE="${dependency_authority[1]#REDIS_IMAGE=}"
+DEPENDENCY_IMAGE_AUTHORITY_SHA256="${dependency_authority[2]#DEPENDENCY_IMAGE_AUTHORITY_SHA256=}"
+export POSTGRES_IMAGE REDIS_IMAGE DEPENDENCY_IMAGE_AUTHORITY_SHA256
+(cd "$CURRENT_ROOT" && python3 -m release.registry_transport pull --role postgres)
+(cd "$CURRENT_ROOT" && python3 -m release.registry_transport pull --role redis)
+
 mkdir -p "$DATA_ROOT"/{plugins,logs,backups,media,postgres,redis} "$META_ROOT"
 chmod -R a+rwx "$DATA_ROOT" "$META_ROOT"
 sudo install -d -m 0700 -o 10001 -g 10001 "$DATA_ROOT/private"
@@ -452,8 +469,8 @@ UPGRADE_SOURCE_ROOT=$CURRENT_ROOT
 COMPOSE_PROJECT_NAME=$PROJECT_NAME
 ANIMEMO_API_IMAGE=$PROJECT_NAME-api:current
 ANIMEMO_WEB_IMAGE=$PROJECT_NAME-web:current
-ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
-ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+ANIMEMO_POSTGRES_IMAGE=$POSTGRES_IMAGE
+ANIMEMO_REDIS_IMAGE=$REDIS_IMAGE
 EOF
 
 if [[ -e /run/animemo-updater/managed.env ]]; then
@@ -477,12 +494,12 @@ run_compose base_config "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" config --quiet
 
 echo "== Build Base API and boot persistent services =="
 run_compose base_build "$BASE_ROOT" "$BUILD_TIMEOUT_SECONDS" build api
-run_compose base_services_start "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" up -d --wait --wait-timeout 120 postgres redis
+run_compose base_services_start "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" up -d --pull never --wait --wait-timeout 120 postgres redis
 run_compose base_migration "$BASE_ROOT" "$JOB_TIMEOUT_SECONDS" run --rm --no-deps migration
 run_compose base_bootstrap "$BASE_ROOT" "$JOB_TIMEOUT_SECONDS" \
   run --rm --no-deps bootstrap \
   sh -eu -c 'python manage.py sync_official_plugins && exec python manage.py collectstatic --noinput'
-run_compose base_api_start "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" up -d --no-deps api
+run_compose base_api_start "$BASE_ROOT" "$COMMAND_TIMEOUT_SECONDS" up -d --pull never --no-deps api
 wait_for_api "$BASE_ROOT" base_api_health BASELINE
 
 echo "== Seed representative persistent Base state =="
@@ -502,7 +519,7 @@ run_compose current_migration "$CURRENT_ROOT" "$JOB_TIMEOUT_SECONDS" run --rm --
 run_compose current_bootstrap "$CURRENT_ROOT" "$JOB_TIMEOUT_SECONDS" run --rm --no-deps bootstrap
 
 echo "== Replace only the API container with Current =="
-run_compose current_api_replace "$CURRENT_ROOT" "$COMMAND_TIMEOUT_SECONDS" up -d --no-deps --force-recreate api
+run_compose current_api_replace "$CURRENT_ROOT" "$COMMAND_TIMEOUT_SECONDS" up -d --pull never --no-deps --force-recreate api
 wait_for_api "$CURRENT_ROOT" current_api_health CURRENT
 CURRENT_POSTGRES_ID="$(run_compose current_postgres_identity "$CURRENT_ROOT" "$COMMAND_TIMEOUT_SECONDS" ps -q postgres)"
 CURRENT_REDIS_ID="$(run_compose current_redis_identity "$CURRENT_ROOT" "$COMMAND_TIMEOUT_SECONDS" ps -q redis)"

@@ -33,15 +33,30 @@ if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ || ! "$CHANNEL" =~ ^(beta|rc)$ ]]; then
   echo "Release identity arguments are invalid." >&2
   exit 2
 fi
-if [[ ! "${ANIMEMO_POSTGRES_IMAGE:-}" =~ ^docker\.io/library/postgres@sha256:[0-9a-f]{64}$ ||
-      ! "${ANIMEMO_REDIS_IMAGE:-}" =~ ^docker\.io/library/redis@sha256:[0-9a-f]{64}$ ]]; then
-  echo "Exact immutable PostgreSQL and Redis image identities are required." >&2
-  exit 2
-fi
 if [[ -z "${RUNNER_TEMP:-}" || "$RUNNER_TEMP" != /* ]]; then
   echo "RUNNER_TEMP must be an absolute isolated runner path." >&2
   exit 2
 fi
+
+mapfile -t dependency_authority < <(
+  python3 -I "$ROOT/release/dependency_images.py" emit-github-env
+)
+if [[ "${#dependency_authority[@]}" -ne 3 ||
+      "${dependency_authority[0]}" != POSTGRES_IMAGE=* ||
+      "${dependency_authority[1]}" != REDIS_IMAGE=* ||
+      "${dependency_authority[2]}" != DEPENDENCY_IMAGE_AUTHORITY_SHA256=sha256:* ]]; then
+  echo "Canonical dependency image authority projection is invalid." >&2
+  exit 1
+fi
+POSTGRES_IMAGE="${dependency_authority[0]#POSTGRES_IMAGE=}"
+REDIS_IMAGE="${dependency_authority[1]#REDIS_IMAGE=}"
+DEPENDENCY_IMAGE_AUTHORITY_SHA256="${dependency_authority[2]#DEPENDENCY_IMAGE_AUTHORITY_SHA256=}"
+ANIMEMO_POSTGRES_IMAGE="$POSTGRES_IMAGE"
+ANIMEMO_REDIS_IMAGE="$REDIS_IMAGE"
+export POSTGRES_IMAGE REDIS_IMAGE DEPENDENCY_IMAGE_AUTHORITY_SHA256
+export ANIMEMO_POSTGRES_IMAGE ANIMEMO_REDIS_IMAGE
+(cd "$ROOT" && python3 -m release.registry_transport pull --role postgres)
+(cd "$ROOT" && python3 -m release.registry_transport pull --role redis)
 
 TEMP_ROOT="$(mktemp -d "$RUNNER_TEMP/animemo-release-images.XXXXXX")"
 case "$TEMP_ROOT" in
@@ -138,10 +153,10 @@ export STATEFUL_UPGRADE_HELPER_ROOT="$ROOT"
 export STATEFUL_UPGRADE_META_ROOT="$META_ROOT"
 
 "${COMPOSE[@]}" config --quiet
-"${COMPOSE[@]}" up -d --wait --wait-timeout 120 postgres redis
+"${COMPOSE[@]}" up -d --pull never --wait --wait-timeout 120 postgres redis
 "${COMPOSE[@]}" run --rm --no-deps migration
 "${COMPOSE[@]}" run --rm --no-deps bootstrap
-"${COMPOSE[@]}" up -d --no-deps --wait --wait-timeout 120 api web
+"${COMPOSE[@]}" up -d --pull never --no-deps --wait --wait-timeout 120 api web
 
 api_container="$("${COMPOSE[@]}" ps -q api)"
 web_container="$("${COMPOSE[@]}" ps -q web)"
@@ -175,7 +190,7 @@ lines[matches[0]] = f"TRUSTED_PROXY_IPS={os.environ['TRUSTED_PROXY_CIDR']}"
 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 
-"${COMPOSE[@]}" up -d --no-deps --force-recreate --wait --wait-timeout 120 api
+"${COMPOSE[@]}" up -d --pull never --no-deps --force-recreate --wait --wait-timeout 120 api
 api_container="$("${COMPOSE[@]}" ps -q api)"
 test -n "$api_container"
 

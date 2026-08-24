@@ -143,13 +143,17 @@ duplicates, uncontracted members, and size/count excess fail closed. The
 Installer never resolves packages online or fills missing bytes from a source
 checkout.
 
-Manifest v2 binds four `linux/amd64` exact images: API, Web, PostgreSQL, and
-Redis. The qualified dependency baseline is:
+Manifest v2 binds four exact images: API, Web, PostgreSQL, and Redis. The
+qualified PostgreSQL/Redis repository, digest, and platform values have one
+data authority: `release/dependency-images.json`. Consumers must load that
+closed document through `release/dependency_images.py`; workflow, shell,
+manifest code, raw schema, and this contract do not maintain independent
+copies. `validate_manifest()` compares every dependency-image field with the
+loaded authority after structural schema validation.
 
-```text
-docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
-docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
-```
+Registry transport may retry only a bounded pull of that same derived
+`repository@sha256:digest`, verifies the resulting local RepoDigest and
+platform, and permits Compose startup only with `--pull never`.
 
 Consumers receive `VerifiedReleaseMaterials`, which owns a durable verified
 material root and exposes only role/path and four-image lookup Interfaces. Plan

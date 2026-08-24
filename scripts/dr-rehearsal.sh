@@ -200,8 +200,8 @@ STATEFUL_UPGRADE_HELPER_ROOT=$CURRENT_ROOT
 COMPOSE_PROJECT_NAME=$project
 ANIMEMO_API_IMAGE=$IMAGE_NAME
 ANIMEMO_WEB_IMAGE=${PROJECT_PREFIX}-web:${CANDIDATE_SHA:0:12}
-ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
-ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+ANIMEMO_POSTGRES_IMAGE=$POSTGRES_IMAGE
+ANIMEMO_REDIS_IMAGE=$REDIS_IMAGE
 EOF
   chmod 600 "$env_file"
 }
@@ -285,6 +285,22 @@ wait_for_api() {
 
 mkdir -p "$META_ROOT"
 chmod a+rwx "$META_ROOT"
+mapfile -t dependency_authority < <(
+  python3 -I "$CURRENT_ROOT/release/dependency_images.py" emit-github-env
+)
+if [[ "${#dependency_authority[@]}" -ne 3 ||
+      "${dependency_authority[0]}" != POSTGRES_IMAGE=* ||
+      "${dependency_authority[1]}" != REDIS_IMAGE=* ||
+      "${dependency_authority[2]}" != DEPENDENCY_IMAGE_AUTHORITY_SHA256=sha256:* ]]; then
+  echo "Canonical dependency image authority projection is invalid." >&2
+  exit 1
+fi
+POSTGRES_IMAGE="${dependency_authority[0]#POSTGRES_IMAGE=}"
+REDIS_IMAGE="${dependency_authority[1]#REDIS_IMAGE=}"
+DEPENDENCY_IMAGE_AUTHORITY_SHA256="${dependency_authority[2]#DEPENDENCY_IMAGE_AUTHORITY_SHA256=}"
+export POSTGRES_IMAGE REDIS_IMAGE DEPENDENCY_IMAGE_AUTHORITY_SHA256
+(cd "$CURRENT_ROOT" && python3 -m release.registry_transport pull --role postgres)
+(cd "$CURRENT_ROOT" && python3 -m release.registry_transport pull --role redis)
 write_env a
 write_env b
 
@@ -366,10 +382,10 @@ with UpdateLock(root / "update.lock"):
     pass
 print("Representative updater CURRENT/PREVIOUS/history/operation fixture: PASS")
 PY
-compose a up -d --wait --wait-timeout 120 postgres redis
+compose a up -d --pull never --wait --wait-timeout 120 postgres redis
 compose a run --rm --no-deps migration
 compose a run --rm --no-deps bootstrap
-compose a up -d --no-deps api
+compose a up -d --pull never --no-deps api
 wait_for_api a
 
 echo "== Seed representative database, plugin, media, private, and auth state on A =="
@@ -595,7 +611,7 @@ echo "Portable local media set restored; external R2 inventory is not exercised 
 
 echo "== Prove B starts with a fresh database and rebuildable Redis =="
 compose b config --quiet
-compose b up -d --wait --wait-timeout 120 postgres redis
+compose b up -d --pull never --wait --wait-timeout 120 postgres redis
 test "$(compose b exec -T postgres psql -At -U animemo -d animemo -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")" = "0"
 test "$(compose b exec -T redis redis-cli --raw DBSIZE | tr -d '\r')" = "0"
 
@@ -604,7 +620,7 @@ as_root gzip -dc -- "$DATA_B/database.sql.gz" | compose b exec -T postgres psql 
 compose b run --rm --no-deps migration
 compose b run --rm --no-deps bootstrap
 compose b run --rm --no-deps api python manage.py rotate_authentication_epoch --confirm-restore
-compose b up -d --no-deps api
+compose b up -d --pull never --no-deps api
 wait_for_api b
 
 echo "== Verify restored application graph, setup lock, and authentication behavior =="

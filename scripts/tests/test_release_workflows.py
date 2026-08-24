@@ -1157,8 +1157,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             promotion,
         )
         self.assertNotIn("build-installer-materials", promotion)
-        self.assertIn("POSTGRES_IMAGE: docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571", release)
-        self.assertIn("REDIS_IMAGE: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf", release)
+        self.assertNotIn("docker.io/library/postgres@sha256:", release)
+        self.assertNotIn("docker.io/library/redis@sha256:", release)
+        self.assertIn(
+            'python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"',
+            release,
+        )
         self.assertIn('test "$UPGRADE_BASE_SHA" != "$GITHUB_SHA"', release)
         self.assertIn('if [[ "$BASE_SHA" == "$HEAD_SHA" ]]', gate)
         release_gate = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(
@@ -1166,6 +1170,85 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("timeout-minutes: 40", release_gate)
         self.assertIn('merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"', gate)
+
+    def test_dependency_workflows_bind_once_and_use_closed_transport_roles(self):
+        expected_counts = {
+            "release.yml": 3,
+            "release-gate.yml": 3,
+            "performance.yml": 2,
+        }
+        projection = 'python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"'
+        for name, count in expected_counts.items():
+            source = (ROOT / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            with self.subTest(workflow=name):
+                self.assertEqual(source.count(projection), count)
+                self.assertEqual(
+                    source.count("python -m release.registry_transport pull --role postgres"),
+                    count,
+                )
+                self.assertEqual(
+                    source.count("python -m release.registry_transport pull --role redis"),
+                    count,
+                )
+                self.assertNotIn("docker.io/library/postgres@sha256:", source)
+                self.assertNotIn("docker.io/library/redis@sha256:", source)
+
+    def test_all_dependency_compose_startups_disable_hidden_pulls(self):
+        paths = (
+            ROOT / ".github" / "workflows" / "release-gate.yml",
+            ROOT / ".github" / "workflows" / "performance.yml",
+            ROOT / "scripts" / "dr-rehearsal.sh",
+            ROOT / "scripts" / "stateful-upgrade-gate.sh",
+            ROOT / "scripts" / "rehearse-release-images.sh",
+        )
+        for path in paths:
+            startup_lines = [
+                line.strip()
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if re.search(r"(?:docker compose|compose [ab]|run_compose|COMPOSE\[@\]).*\bup\b", line)
+            ]
+            with self.subTest(path=path.name):
+                self.assertTrue(startup_lines)
+                for line in startup_lines:
+                    self.assertIn("--pull never", line, line)
+
+    def test_dr_upgrade_and_release_rehearsal_use_canonical_transport(self):
+        for name in (
+            "dr-rehearsal.sh",
+            "stateful-upgrade-gate.sh",
+            "rehearse-release-images.sh",
+        ):
+            source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+            with self.subTest(script=name):
+                self.assertEqual(
+                    source.count("dependency_images.py\" emit-github-env"), 1
+                )
+                self.assertEqual(
+                    source.count("release.registry_transport pull --role postgres"), 1
+                )
+                self.assertEqual(
+                    source.count("release.registry_transport pull --role redis"), 1
+                )
+                self.assertNotIn("docker.io/library/postgres@sha256:", source)
+                self.assertNotIn("docker.io/library/redis@sha256:", source)
+
+    def test_publish_acquires_dependencies_before_any_external_mutation(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = source[source.index("  publish:") :]
+        pull_gate = publish.index("Acquire exact dependency images before external publication")
+        for mutation_marker in (
+            "docker/login-action",
+            "docker push",
+            "actions/attest@",
+            "git push origin",
+            'gh api --method POST "repos/$GITHUB_REPOSITORY/releases"',
+        ):
+            with self.subTest(marker=mutation_marker):
+                self.assertLess(pull_gate, publish.index(mutation_marker))
 
     def test_release_verifier_is_built_offline_from_a_pinned_go_toolchain(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -1460,76 +1543,41 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             source.index('"${COMPOSE[@]}" config --quiet'),
         )
 
-    def test_exact_image_rehearsal_rejects_mutable_dependency_images_before_work(self):
+    def test_exact_image_rehearsal_ignores_dependency_image_environment_overrides(self):
         bash = _bash_path()
         if bash is None:
             self.skipTest("Git Bash or bash is required for the rehearsal CLI gate.")
 
         script = (ROOT / "scripts" / "rehearse-release-images.sh").as_posix()
-        valid_postgres = "docker.io/library/postgres@sha256:" + "a" * 64
-        valid_redis = "docker.io/library/redis@sha256:" + "b" * 64
-        invalid_pairs = (
-            ("", valid_redis),
-            (valid_postgres, ""),
-            ("docker.io/library/postgres:16", valid_redis),
-            ("registry.example/postgres@sha256:" + "a" * 64, valid_redis),
-            ("docker.io/library/postgres@sha256:" + "a" * 63, valid_redis),
-            ("docker.io/library/postgres@sha256:" + "A" * 64, valid_redis),
-            (valid_postgres, "docker.io/library/redis:7"),
-            (valid_postgres, "registry.example/redis@sha256:" + "b" * 64),
-            (valid_postgres, "docker.io/library/redis@sha256:" + "b" * 63),
-            (valid_postgres, "docker.io/library/redis@sha256:" + "B" * 64),
+        environment = os.environ.copy()
+        environment["GITHUB_ACTIONS"] = "true"
+        environment["ANIMEMO_POSTGRES_IMAGE"] = "registry.invalid/postgres:latest"
+        environment["ANIMEMO_REDIS_IMAGE"] = "registry.invalid/redis:latest"
+        environment.pop("RUNNER_TEMP", None)
+        completed = subprocess.run(
+            [
+                bash,
+                script,
+                "--api-image",
+                "api@sha256:test",
+                "--web-image",
+                "web@sha256:test",
+                "--version",
+                "v1.1.0-rc.1",
+                "--commit",
+                "c" * 40,
+                "--channel",
+                "rc",
+                "--confirm-isolated",
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
         )
-
-        def run(postgres: str, redis: str) -> subprocess.CompletedProcess[str]:
-            environment = os.environ.copy()
-            environment["GITHUB_ACTIONS"] = "true"
-            environment.pop("RUNNER_TEMP", None)
-            if postgres:
-                environment["ANIMEMO_POSTGRES_IMAGE"] = postgres
-            else:
-                environment.pop("ANIMEMO_POSTGRES_IMAGE", None)
-            if redis:
-                environment["ANIMEMO_REDIS_IMAGE"] = redis
-            else:
-                environment.pop("ANIMEMO_REDIS_IMAGE", None)
-            return subprocess.run(
-                [
-                    bash,
-                    script,
-                    "--api-image",
-                    "api@sha256:test",
-                    "--web-image",
-                    "web@sha256:test",
-                    "--version",
-                    "v1.1.0-rc.1",
-                    "--commit",
-                    "c" * 40,
-                    "--channel",
-                    "rc",
-                    "--confirm-isolated",
-                ],
-                cwd=ROOT,
-                env=environment,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-
-        for postgres, redis in invalid_pairs:
-            with self.subTest(postgres=postgres, redis=redis):
-                completed = run(postgres, redis)
-                self.assertEqual(completed.returncode, 2)
-                self.assertIn(
-                    "Exact immutable PostgreSQL and Redis image identities are required.",
-                    completed.stderr,
-                )
-                self.assertNotIn("RUNNER_TEMP must be", completed.stderr)
-
-        completed = run(valid_postgres, valid_redis)
         self.assertEqual(completed.returncode, 2)
         self.assertIn("RUNNER_TEMP must be an absolute isolated runner path.", completed.stderr)
-        self.assertNotIn("Exact immutable PostgreSQL", completed.stderr)
 
     def test_exact_image_rehearsal_trusts_only_the_runtime_web_proxy(self):
         source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(encoding="utf-8")
@@ -1538,7 +1586,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn(".NetworkSettings.Networks", source)
         self.assertIn('print(f"{address}/32")', source)
         self.assertIn("TRUSTED_PROXY_CIDR", source)
-        self.assertIn("--force-recreate --wait --wait-timeout 120 api", source)
+        self.assertIn(
+            "--pull never --no-deps --force-recreate --wait --wait-timeout 120 api",
+            source,
+        )
         self.assertIn("AdminAuditLog.objects.get(action='installation.initialized').ip_address", source)
         self.assertIn("recorded_ip == proxy_ip", source)
         self.assertNotIn("TRUSTED_PROXY_IPS=172.16.0.0/12", source)

@@ -10,6 +10,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator, FormatChecker
 from packaging.version import InvalidVersion, Version
 
+from .dependency_images import AUTHORITY as DEPENDENCY_IMAGE_AUTHORITY
 from .materials import (
     INSTALLER_MATERIALS_NAME as MATERIAL_ARCHIVE_NAME,
 )
@@ -22,12 +23,10 @@ from .materials import (
 REPOSITORY = "yanyuhanyue/AniMemo"
 API_REPOSITORY = "ghcr.io/yanyuhanyue/animemo-api"
 WEB_REPOSITORY = "ghcr.io/yanyuhanyue/animemo-web"
-POSTGRES_REPOSITORY = "docker.io/library/postgres"
-REDIS_REPOSITORY = "docker.io/library/redis"
-POSTGRES_DIGEST = (
-    "sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571"
-)
-REDIS_DIGEST = "sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf"
+POSTGRES_REPOSITORY = DEPENDENCY_IMAGE_AUTHORITY.postgres.repository
+POSTGRES_DIGEST = DEPENDENCY_IMAGE_AUTHORITY.postgres.digest
+REDIS_REPOSITORY = DEPENDENCY_IMAGE_AUTHORITY.redis.repository
+REDIS_DIGEST = DEPENDENCY_IMAGE_AUTHORITY.redis.digest
 DEPLOYMENT_PROFILE = "v1.1-instance-scoped"
 INSTALLER_MATERIALS_NAME = "installer-materials.tar"
 DEPLOYMENT_CONTRACT_PATHS = (
@@ -631,14 +630,14 @@ def build_manifest(
                 "platform": "linux/amd64",
             },
             "postgres": {
-                "repository": POSTGRES_REPOSITORY,
-                "digest": POSTGRES_DIGEST,
-                "platform": "linux/amd64",
+                "repository": DEPENDENCY_IMAGE_AUTHORITY.postgres.repository,
+                "digest": DEPENDENCY_IMAGE_AUTHORITY.postgres.digest,
+                "platform": DEPENDENCY_IMAGE_AUTHORITY.postgres.platform,
             },
             "redis": {
-                "repository": REDIS_REPOSITORY,
-                "digest": REDIS_DIGEST,
-                "platform": "linux/amd64",
+                "repository": DEPENDENCY_IMAGE_AUTHORITY.redis.repository,
+                "digest": DEPENDENCY_IMAGE_AUTHORITY.redis.digest,
+                "platform": DEPENDENCY_IMAGE_AUTHORITY.redis.platform,
             },
         },
         "deployment": {
@@ -709,6 +708,18 @@ def validate_manifest(
         raise ReleaseContractError(
             f"Invalid release manifest at {location}: {error.message}"
         )
+
+    for role in DEPENDENCY_IMAGE_AUTHORITY.roles:
+        image = DEPENDENCY_IMAGE_AUTHORITY.image(role)
+        expected = {
+            "repository": image.repository,
+            "digest": image.digest,
+            "platform": image.platform,
+        }
+        if payload["images"][role] != expected:
+            raise ReleaseContractError(
+                f"Manifest {role} differs from the canonical dependency image authority"
+            )
 
     release = payload["release"]
     version = release["version"]

@@ -184,6 +184,13 @@ jobs:
         with:
           python-version: "3.12"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Bind and acquire exact performance dependency images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"
+          python -m release.registry_transport pull --role postgres
+          python -m release.registry_transport pull --role redis
       - name: Prepare the disposable production-like environment
         shell: bash
         run: |
@@ -220,8 +227,8 @@ jobs:
           ANIMEMO_TEST_DATA_ROOT=$data_root
           ANIMEMO_API_IMAGE=animemo-perf-api:candidate
           ANIMEMO_WEB_IMAGE=animemo-perf-web:candidate
-          ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
-          ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+          ANIMEMO_POSTGRES_IMAGE=$POSTGRES_IMAGE
+          ANIMEMO_REDIS_IMAGE=$REDIS_IMAGE
           EOF
           sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater
           sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/managed.env
@@ -234,10 +241,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker compose --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis
+          docker compose --env-file .ci-runtime.env up -d --pull never --wait --wait-timeout 120 postgres redis
           docker compose --env-file .ci-runtime.env run --rm --no-deps migration
           docker compose --env-file .ci-runtime.env run --rm --no-deps bootstrap
-          docker compose --env-file .ci-runtime.env up -d --no-deps api web
+          docker compose --env-file .ci-runtime.env up -d --pull never --no-deps api web
       - name: Wait for the candidate Web/API health endpoint
         shell: bash
         run: |
@@ -374,6 +381,13 @@ jobs:
         with:
           python-version: "3.12"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Bind and acquire exact capacity dependency images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"
+          python -m release.registry_transport pull --role postgres
+          python -m release.registry_transport pull --role redis
       - name: Prepare the unique disposable capacity environment
         shell: bash
         run: |
@@ -413,8 +427,8 @@ jobs:
           ANIMEMO_TEST_DATA_ROOT=$data_root
           ANIMEMO_API_IMAGE=animemo-capacity-api:candidate
           ANIMEMO_WEB_IMAGE=animemo-capacity-web:candidate
-          ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
-          ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+          ANIMEMO_POSTGRES_IMAGE=$POSTGRES_IMAGE
+          ANIMEMO_REDIS_IMAGE=$REDIS_IMAGE
           EOF
           sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater
           sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/managed.env
@@ -427,10 +441,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker compose --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis
+          docker compose --env-file .ci-runtime.env up -d --pull never --wait --wait-timeout 120 postgres redis
           docker compose --env-file .ci-runtime.env run --rm --no-deps migration
           docker compose --env-file .ci-runtime.env run --rm --no-deps bootstrap
-          docker compose --env-file .ci-runtime.env up -d --no-deps api web
+          docker compose --env-file .ci-runtime.env up -d --pull never --no-deps api web
           for attempt in {1..30}; do
             if curl --fail --silent --show-error -H 'Host: capacity.example.test' \
               http://127.0.0.1:8089/health/ \

@@ -59,8 +59,6 @@ env:
   CRANE_REQUIRED_VERSION: 0.21.9
   API_REPOSITORY: ghcr.io/yanyuhanyue/animemo-api
   WEB_REPOSITORY: ghcr.io/yanyuhanyue/animemo-web
-  POSTGRES_IMAGE: docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
-  REDIS_IMAGE: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
 
 jobs:
   preflight:
@@ -275,6 +273,13 @@ jobs:
           rehearsal_dir="$RUNNER_TEMP/animemo-platform-rehearsals-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           install -d -m 0700 "$rehearsal_dir"
           echo "REHEARSAL_DIR=$rehearsal_dir" >> "$GITHUB_ENV"
+      - name: Bind and acquire exact platform dependency images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"
+          python -m release.registry_transport pull --role postgres
+          python -m release.registry_transport pull --role redis
       - name: Install exact Python and PostgreSQL 16 qualification tools
         shell: bash
         run: |
@@ -288,7 +293,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker pull "$POSTGRES_IMAGE"
           docker run --detach --name "$QUALIFICATION_POSTGRES_NAME" \
             --publish 127.0.0.1:55432:5432 \
             --env POSTGRES_USER=qualification \
@@ -767,6 +771,13 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Bind and acquire exact dry-run dependency images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"
+          python -m release.registry_transport pull --role postgres
+          python -m release.registry_transport pull --role redis
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
@@ -852,9 +863,6 @@ jobs:
             ANIMEMO_COMMIT=${{ needs.preflight.outputs.candidate_sha }}
             ANIMEMO_CHANNEL=${{ inputs.channel }}
       - name: Start and accept the exact locally built API and Web images
-        env:
-          ANIMEMO_POSTGRES_IMAGE: ${{ env.POSTGRES_IMAGE }}
-          ANIMEMO_REDIS_IMAGE: ${{ env.REDIS_IMAGE }}
         shell: bash
         run: >-
           bash scripts/rehearse-release-images.sh
@@ -1198,6 +1206,13 @@ jobs:
           ' "$response" >/dev/null
           enforced_by_owner="$(jq -r '.enforced_by_owner' "$response")"
           printf 'Immutable Releases enabled=true enforced_by_owner=%s\n' "$enforced_by_owner"
+      - name: Acquire exact dependency images before external publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"
+          python -m release.registry_transport pull --role postgres
+          python -m release.registry_transport pull --role redis
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -1266,8 +1281,6 @@ jobs:
       - name: Start and accept the exact images before any external publication
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-          ANIMEMO_POSTGRES_IMAGE: ${{ env.POSTGRES_IMAGE }}
-          ANIMEMO_REDIS_IMAGE: ${{ env.REDIS_IMAGE }}
         shell: bash
         run: >-
           bash scripts/rehearse-release-images.sh
