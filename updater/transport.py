@@ -88,6 +88,7 @@ _BOUNDED_HTTP_RESPONSE_HEADERS = frozenset(
     }
 )
 _BOUNDED_WORKER_OBJECTS = frozenset((*RELEASE_BUNDLE_OBJECTS, MIRROR_RECEIPT_NAME))
+_BOUNDED_WORKSPACE_TOKEN = re.compile(r"^animemo-bounded-http-[A-Za-z0-9_-]{6,64}$")
 
 
 def _bounded_worker_object_url(exact_version: str, logical_name: str) -> str:
@@ -768,9 +769,17 @@ class _AbsoluteDeadlineOpener:
                 phase="resource",
             )
         try:
-            root = Path(tempfile.mkdtemp(prefix="animemo-bounded-http-")).resolve(
-                strict=True
-            )
+            temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+            root = Path(
+                tempfile.mkdtemp(
+                    prefix="animemo-bounded-http-", dir=temporary_root
+                )
+            ).resolve(strict=True)
+            if (
+                root.parent != temporary_root
+                or _BOUNDED_WORKSPACE_TOKEN.fullmatch(root.name) is None
+            ):
+                raise OSError("bounded transport workspace escaped its temporary root")
             os.chmod(root, 0o700)
         except OSError as error:
             raise TransportError(
@@ -785,8 +794,8 @@ class _AbsoluteDeadlineOpener:
             exact_version,
             "--logical-name",
             logical_name,
-            "--workspace",
-            str(root),
+            "--workspace-token",
+            root.name,
             "--socket-timeout",
             str(timeout_seconds),
             "--maximum-bytes",
@@ -822,9 +831,13 @@ class _AbsoluteDeadlineOpener:
         if module_worker:
             environment["PYTHONPATH"] = str(module_root)
         if os.name == "nt":
+            environment["TEMP"] = str(temporary_root)
+            environment["TMP"] = str(temporary_root)
             for name in ("SYSTEMROOT", "WINDIR"):
                 if name in os.environ:
                     environment[name] = os.environ[name]
+        else:
+            environment["TMPDIR"] = str(temporary_root)
         creationflags = (
             getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         )
@@ -2503,7 +2516,7 @@ def _bounded_worker_parse_arguments(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--logical-name", required=True, choices=sorted(_BOUNDED_WORKER_OBJECTS)
     )
-    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--workspace-token", required=True)
     parser.add_argument("--socket-timeout", required=True, type=int)
     parser.add_argument("--maximum-bytes", required=True, type=int)
     parser.add_argument(
@@ -2512,9 +2525,11 @@ def _bounded_worker_parse_arguments(argv: list[str]) -> argparse.Namespace:
         choices=("application/json", "application/octet-stream"),
     )
     arguments = parser.parse_args(argv)
-    workspace = Path(arguments.workspace)
+    if _BOUNDED_WORKSPACE_TOKEN.fullmatch(arguments.workspace_token) is None:
+        raise SystemExit(2)
     try:
         temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+        workspace = temporary_root / arguments.workspace_token
         resolved_workspace = workspace.resolve(strict=True)
         workspace_metadata = workspace.lstat()
     except OSError:

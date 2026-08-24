@@ -1031,7 +1031,7 @@ class OfficialMirrorReceiptAndBudgetTests(unittest.TestCase):
             root = Path(temporary)
             worker = root / "worker.py"
             worker.write_text("raise SystemExit(0)\n", encoding="utf-8")
-            workspace = root / "workspace"
+            workspace = root / "animemo-bounded-http-fixed01"
             workspace.mkdir()
             request = transport_module.Request(
                 "https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/"
@@ -1041,6 +1041,11 @@ class OfficialMirrorReceiptAndBudgetTests(unittest.TestCase):
             opener = transport_module._AbsoluteDeadlineOpener(worker_path=worker)
             with (
                 patch.object(transport_module.time, "monotonic", side_effect=clock),
+                patch.object(
+                    transport_module.tempfile,
+                    "gettempdir",
+                    return_value=str(root),
+                ),
                 patch.object(
                     transport_module.tempfile,
                     "mkdtemp",
@@ -1091,7 +1096,7 @@ class OfficialMirrorReceiptAndBudgetTests(unittest.TestCase):
             root = Path(temporary)
             worker = root / "worker.py"
             worker.write_text("raise SystemExit(0)\n", encoding="utf-8")
-            workspace = root / "workspace"
+            workspace = root / "animemo-bounded-http-fixed01"
             workspace.mkdir()
             request = transport_module.Request(
                 "https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/"
@@ -1100,6 +1105,11 @@ class OfficialMirrorReceiptAndBudgetTests(unittest.TestCase):
             )
             opener = transport_module._AbsoluteDeadlineOpener(worker_path=worker)
             with (
+                patch.object(
+                    transport_module.tempfile,
+                    "gettempdir",
+                    return_value=str(root),
+                ),
                 patch.object(
                     transport_module.tempfile,
                     "mkdtemp",
@@ -1122,6 +1132,67 @@ class OfficialMirrorReceiptAndBudgetTests(unittest.TestCase):
             self.assertTrue(process.killed)
             self.assertTrue(process.reaped)
             self.assertFalse(workspace.exists())
+
+    def test_worker_receives_only_a_token_and_the_same_private_temporary_root(self) -> None:
+        class CompletedWorker:
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                del timeout
+                return self.returncode
+
+        captured: dict[str, object] = {}
+
+        def spawn(command, **options):
+            captured["command"] = command
+            captured["environment"] = options["env"]
+            return CompletedWorker()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary).resolve()
+            worker = temporary_root / "worker.py"
+            worker.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            workspace = temporary_root / "animemo-bounded-http-fixed01"
+            workspace.mkdir(mode=0o700)
+            request = transport_module.Request(
+                "https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/"
+                "v1.1.0-rc.10/checksums.txt",
+                method="GET",
+            )
+            opener = transport_module._AbsoluteDeadlineOpener(worker_path=worker)
+            with (
+                patch.object(
+                    transport_module.tempfile,
+                    "gettempdir",
+                    return_value=str(temporary_root),
+                ),
+                patch.object(
+                    transport_module.tempfile,
+                    "mkdtemp",
+                    return_value=str(workspace),
+                ),
+                patch.object(transport_module.subprocess, "Popen", side_effect=spawn),
+                self.assertRaises(TransportError),
+            ):
+                opener.open_with_deadline(
+                    request,
+                    timeout_seconds=60,
+                    deadline=time.monotonic() + 1,
+                    maximum_bytes=1024,
+                )
+
+            command = list(captured["command"])
+            environment = dict(captured["environment"])
+            self.assertIn("--workspace-token", command)
+            self.assertNotIn("--workspace", command)
+            if os.name == "nt":
+                self.assertEqual(environment["TEMP"], str(temporary_root))
+                self.assertEqual(environment["TMP"], str(temporary_root))
+            else:
+                self.assertEqual(environment["TMPDIR"], str(temporary_root))
 
     def test_only_the_closed_network_failure_set_retries(self) -> None:
         cases = (
@@ -1208,8 +1279,8 @@ class BoundedHttpWorkerTests(unittest.TestCase):
             "1.1.0-rc.10",
             "--logical-name",
             "checksums.txt",
-            "--workspace",
-            str(root),
+            "--workspace-token",
+            root.name,
             "--socket-timeout",
             "60",
             "--maximum-bytes",
