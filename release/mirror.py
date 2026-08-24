@@ -825,6 +825,17 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
     return None
 
 
+def _is_immutable_cache_control(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    directives = [directive.strip().lower() for directive in value.split(",")]
+    return len(directives) == 3 and set(directives) == {
+        "public",
+        "max-age=31536000",
+        "immutable",
+    }
+
+
 class OfficialReleaseMirrorPublisher:
     """Publish a complete immutable Release path through a narrow storage seam."""
 
@@ -856,7 +867,7 @@ class OfficialReleaseMirrorPublisher:
             or _header(headers, "Accept-Ranges") != "bytes"
             or _header(headers, "Content-Type")
             != _asset_content_type(declared["name"])
-            or _header(headers, "Cache-Control") != CACHE_CONTROL
+            or not _is_immutable_cache_control(_header(headers, "Cache-Control"))
             or _header(headers, "Content-Encoding") is not None
             or _header(headers, "Access-Control-Allow-Origin") == "*"
         ):
@@ -991,7 +1002,9 @@ class OfficialReleaseMirrorPublisher:
                 or _header(marker_headers, "Content-Length")
                 != str(len(marker_bytes))
                 or _header(marker_headers, "Content-Type") != "application/json"
-                or _header(marker_headers, "Cache-Control") != CACHE_CONTROL
+                or not _is_immutable_cache_control(
+                    _header(marker_headers, "Cache-Control")
+                )
                 or _header(marker_headers, "Content-Encoding") is not None
                 or _header(marker_headers, "Access-Control-Allow-Origin") == "*"
                 or public_marker.read_bytes() != marker_bytes
