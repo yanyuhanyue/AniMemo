@@ -807,18 +807,21 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(release["jobs"]["full-release-gate"]["with"]["upgrade_base_sha"], "${{ inputs.upgrade_base_sha }}")
         self.assertTrue(release["jobs"]["full-release-gate"]["with"]["force_full"])
 
-    def test_performance_workflow_is_manual_or_reusable_and_pins_exact_candidate(self):
+    def test_performance_workflow_is_reusable_and_binds_every_runner_to_exact_main(self):
         performance = workflow("performance.yml")
-        self.assertEqual(set(performance["on"]), {"workflow_dispatch", "workflow_call"})
-        for trigger in ("workflow_dispatch", "workflow_call"):
-            self.assertIn("candidate_sha", performance["on"][trigger]["inputs"])
-            self.assertEqual(performance["on"][trigger]["inputs"]["candidate_sha"]["required"], "true")
-            self.assertEqual(performance["on"][trigger]["inputs"]["candidate_sha"]["type"], "string")
+        self.assertEqual(performance["on"], {"workflow_call": {}})
 
         source = (ROOT / ".github" / "workflows" / "performance.yml").read_text(encoding="utf-8")
+        self.assertNotIn("workflow_dispatch:", source)
         self.assertNotIn("pull_request:", source)
         self.assertNotIn("merge_group:", source)
-        self.assertGreaterEqual(source.count("ref: ${{ inputs.candidate_sha }}"), 3)
+        self.assertNotIn("candidate_sha", source)
+        self.assertEqual(source.count("ref: ${{ github.sha }}"), 5)
+        self.assertEqual(source.count("id: trusted_main"), 5)
+        self.assertEqual(source.count('test "$GITHUB_REF" = "refs/heads/main"'), 5)
+        self.assertEqual(source.count('git rev-parse origin/main^{commit}'), 5)
+        self.assertEqual(source.count('git status --porcelain --untracked-files=no'), 5)
+        self.assertEqual(source.count('test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"'), 5)
         self.assertIn("services:", source)
         self.assertIn("postgres:", source)
         self.assertIn("redis:", source)
@@ -848,9 +851,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("Require every performance evidence producer to succeed", source)
         self.assertIn("toJSON(needs)", source)
         self.assertIn('job["result"] != "success"', source)
-        self.assertNotIn("inputs.candidate_sha || github.sha", source)
-        self.assertIn('CANDIDATE_SHA: ${{ inputs.candidate_sha }}', source)
-        self.assertIn('test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"', source)
+        self.assertIn("FRONTEND_PERF_COMMIT: ${{ github.sha }}", source)
+        self.assertNotIn("${{ inputs.", source)
         self.assertIn("isolated-long-operation-capacity:", source)
         self.assertIn("name: performance-long-operation-capacity", source)
         self.assertIn("ANIMEMO_ISOLATED_CAPACITY_PROBE=true", source)
@@ -914,10 +916,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(performance["uses"], "./.github/workflows/performance.yml")
         self.assertEqual(performance["needs"], "preflight")
         self.assertEqual(performance["if"], "${{ inputs.operation == 'qualify' && inputs.channel == 'rc' }}")
-        self.assertEqual(
-            performance["with"]["candidate_sha"],
-            "${{ needs.preflight.outputs.candidate_sha }}",
-        )
+        self.assertNotIn("with", performance)
 
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         promote_source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
