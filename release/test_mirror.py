@@ -18,8 +18,10 @@ from release.mirror import (
     OfficialMirrorPublicReader,
     OfficialReleaseMirrorPublisher,
     R2S3ObjectStore,
-    _verify_github_release_authority,
+    _collect_response_headers,
     _gh_environment,
+    _is_immutable_cache_control,
+    _verify_github_release_authority,
     build_mirror_receipt,
     load_mirror_receipt_bytes,
     mirror_release_assets,
@@ -92,6 +94,57 @@ class MemoryPublicReader:
         key = url.removeprefix(MIRROR_ORIGIN + "/")
         content = self.store.objects[key]
         return 206, {"Accept-Ranges": "bytes"}, content[: 1024 * 1024]
+
+
+class CloudflareMemoryPublicReader(MemoryPublicReader):
+    def read_to(self, url: str, destination: Path) -> tuple[int, dict[str, str]]:
+        status, headers = super().read_to(url, destination)
+        if status == 200:
+            headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return status, headers
+
+
+class CacheControlValidationTests(unittest.TestCase):
+    def test_equivalent_closed_directive_lists_are_accepted(self) -> None:
+        for value in (
+            "public,max-age=31536000,immutable",
+            "public, max-age=31536000, immutable",
+            "IMMUTABLE, PUBLIC, MAX-AGE=31536000",
+            "\tpublic,\tmax-age=31536000,\timmutable\t",
+        ):
+            with self.subTest(value=value):
+                self.assertTrue(_is_immutable_cache_control(value))
+
+    def test_missing_duplicate_or_additional_directives_are_rejected(self) -> None:
+        for value in (
+            None,
+            "public,max-age=31536000",
+            "public,max-age=31536000,immutable,no-store",
+            "public,public,max-age=31536000,immutable",
+            "private,max-age=31536000,immutable",
+            "\vpublic,max-age=31536000,immutable",
+            "\fpublic,max-age=31536000,immutable",
+            "\r\n public,max-age=31536000,immutable",
+            "\u00a0public,max-age=31536000,immutable",
+        ):
+            with self.subTest(value=value):
+                self.assertFalse(_is_immutable_cache_control(value))
+
+    def test_duplicate_response_fields_are_merged_before_validation(self) -> None:
+        class DuplicateHeaders(dict[str, str]):
+            def items(self):
+                return [
+                    ("Cache-Control", "public,max-age=31536000,immutable"),
+                    ("cache-control", "no-store"),
+                ]
+
+        collected = _collect_response_headers(DuplicateHeaders())
+
+        self.assertEqual(
+            collected["cache-control"],
+            "public,max-age=31536000,immutable,no-store",
+        )
+        self.assertFalse(_is_immutable_cache_control(collected["cache-control"]))
 
 
 class MirrorWorkflowIdentityTests(unittest.TestCase):
@@ -294,6 +347,18 @@ class MirrorPublisherTests(MirrorReceiptTests):
         }
         self.assertTrue(all(reader.reads.count(url) == 4 for url in asset_urls))
         self.assertTrue(all(reader.ranges.count(url) == 2 for url in asset_urls))
+
+    def test_publisher_accepts_cloudflare_cache_control_serialization(self) -> None:
+        store = MemoryStore()
+        reader = CloudflareMemoryPublicReader(store)
+        publisher = OfficialReleaseMirrorPublisher(store=store, public_reader=reader)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_assets(root)
+            result = publisher.publish(receipt=self.receipt(), asset_directory=root)
+
+        self.assertEqual(result["uploadedObjectCount"], 6)
+        self.assertEqual(result["publicReadback"], "PASS")
 
     def test_existing_different_object_freezes_without_overwrite(self) -> None:
         store = MemoryStore()

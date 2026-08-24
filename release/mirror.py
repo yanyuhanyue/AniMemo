@@ -819,10 +819,40 @@ def _verified_asset_identity(path: Path, declared: Mapping[str, Any]) -> None:
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:
     expected = name.lower()
+    values = [value for key, value in headers.items() if key.lower() == expected]
+    if not values or not all(isinstance(value, str) for value in values):
+        return None
+    return ",".join(values)
+
+
+def _collect_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    collected: dict[str, str] = {}
     for key, value in headers.items():
-        if key.lower() == expected:
-            return value
-    return None
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise MirrorError("Official Mirror public response header is invalid")
+        name = key.lower()
+        collected[name] = (
+            f"{collected[name]},{value}" if name in collected else value
+        )
+    return collected
+
+
+def _is_immutable_cache_control(value: str | None) -> bool:
+    if (
+        not isinstance(value, str)
+        or not value.isascii()
+        or any(
+            (ord(character) < 32 and character != "\t") or ord(character) == 127
+            for character in value
+        )
+    ):
+        return False
+    directives = [directive.strip(" \t").lower() for directive in value.split(",")]
+    return len(directives) == 3 and set(directives) == {
+        "public",
+        "max-age=31536000",
+        "immutable",
+    }
 
 
 class OfficialReleaseMirrorPublisher:
@@ -856,7 +886,7 @@ class OfficialReleaseMirrorPublisher:
             or _header(headers, "Accept-Ranges") != "bytes"
             or _header(headers, "Content-Type")
             != _asset_content_type(declared["name"])
-            or _header(headers, "Cache-Control") != CACHE_CONTROL
+            or not _is_immutable_cache_control(_header(headers, "Cache-Control"))
             or _header(headers, "Content-Encoding") is not None
             or _header(headers, "Access-Control-Allow-Origin") == "*"
         ):
@@ -991,7 +1021,9 @@ class OfficialReleaseMirrorPublisher:
                 or _header(marker_headers, "Content-Length")
                 != str(len(marker_bytes))
                 or _header(marker_headers, "Content-Type") != "application/json"
-                or _header(marker_headers, "Cache-Control") != CACHE_CONTROL
+                or not _is_immutable_cache_control(
+                    _header(marker_headers, "Cache-Control")
+                )
                 or _header(marker_headers, "Content-Encoding") is not None
                 or _header(marker_headers, "Access-Control-Allow-Origin") == "*"
                 or public_marker.read_bytes() != marker_bytes
@@ -1313,7 +1345,10 @@ class OfficialMirrorPublicReader:
                 request, timeout=self._timeout_seconds
             )
         except HTTPError as error:
-            return error.code, dict(error.headers.items()) if error.headers else {}
+            return (
+                error.code,
+                _collect_response_headers(error.headers) if error.headers else {},
+            )
         except (TimeoutError, URLError, OSError) as error:
             raise MirrorError("Official Mirror public readback failed") from error
         with response_context as response:
@@ -1338,7 +1373,7 @@ class OfficialMirrorPublicReader:
             except BaseException:
                 destination.unlink(missing_ok=True)
                 raise
-            return status, dict(response.headers.items())
+            return status, _collect_response_headers(response.headers)
 
     def first_mib(self, url: str) -> tuple[int, Mapping[str, str], bytes]:
         request = self._request(url, range_header="bytes=0-1048575")
@@ -1349,10 +1384,18 @@ class OfficialMirrorPublicReader:
                 body = response.read(1024 * 1024 + 1)
                 if len(body) > 1024 * 1024:
                     raise MirrorError("Official Mirror Range response is too large")
-                return getattr(response, "status", 200), dict(response.headers.items()), body
+                return (
+                    getattr(response, "status", 200),
+                    _collect_response_headers(response.headers),
+                    body,
+                )
         except HTTPError as error:
             body = error.read(1024 * 1024 + 1)
-            return error.code, dict(error.headers.items()) if error.headers else {}, body
+            return (
+                error.code,
+                _collect_response_headers(error.headers) if error.headers else {},
+                body,
+            )
         except (TimeoutError, URLError, OSError) as error:
             raise MirrorError("Official Mirror public Range readback failed") from error
 
