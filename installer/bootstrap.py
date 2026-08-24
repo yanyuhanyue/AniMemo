@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -569,6 +570,11 @@ class ProductionBootstrapPrivilegeGate:
             version=version,
             release_commit=release_commit,
         )
+        try:
+            for module_name in sorted(_REQUIRED_RUNTIME_MODULES):
+                importlib.import_module(module_name)
+        except Exception:  # noqa: BLE001 - privileged boundary stays redacted
+            _reject("BOOTSTRAP_RUNTIME_MODULE_IMPORT_FAILED")
         _validate_protected_runtime_sources(authorization)
         try:
             from updater.trust_lifecycle import (
@@ -599,6 +605,15 @@ def _run_stage0_gh(arguments: tuple[str, ...]) -> object:
         "LC_ALL": "C.UTF-8",
         "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
     }
+    token = os.environ.get("GH_TOKEN")
+    if token is not None:
+        if (
+            not token
+            or len(token) > 4096
+            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in token)
+        ):
+            _reject("BOOTSTRAP_STAGE0_GH_CREDENTIAL_INVALID")
+        environment["GH_TOKEN"] = token
     try:
         result = subprocess.run(
             [_GH_EXECUTABLE, *arguments],

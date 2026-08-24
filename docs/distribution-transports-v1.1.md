@@ -77,8 +77,15 @@ test "$(/usr/bin/gh --version | /usr/bin/sed -nE 's/^gh version ([0-9]+\.[0-9]+\
 
 STAGE0_DIRECTORY="$(/usr/bin/mktemp -d)"
 MIRROR_CANDIDATE="$STAGE0_DIRECTORY/installer-materials.tar"
+GH_TOKEN_PIPE="$STAGE0_DIRECTORY/gh-token.pipe"
+GH_TOKEN_WRITER=''
 cleanup_stage0() {
+  if test -n "$GH_TOKEN_WRITER"; then
+    /usr/bin/kill "$GH_TOKEN_WRITER" 2>/dev/null || true
+    wait "$GH_TOKEN_WRITER" 2>/dev/null || true
+  fi
   /usr/bin/rm -f -- "$MIRROR_CANDIDATE"
+  /usr/bin/rm -f -- "$GH_TOKEN_PIPE"
   /usr/bin/rmdir -- "$STAGE0_DIRECTORY"
 }
 trap cleanup_stage0 EXIT
@@ -91,11 +98,19 @@ MIRROR_URL="https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/$E
 /usr/bin/gh release verify-asset "$EXACT_TAG" "$MIRROR_CANDIDATE" \
   --repo yanyuhanyue/AniMemo
 
+/usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"
+/usr/bin/gh auth token >"$GH_TOKEN_PIPE" &
+GH_TOKEN_WRITER=$!
 sudo /usr/bin/env -i EXACT_TAG="$EXACT_TAG" MIRROR_CANDIDATE="$MIRROR_CANDIDATE" \
+  GH_TOKEN_PIPE="$GH_TOKEN_PIPE" \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
   GH_PROMPT_DISABLED=1 /bin/bash --noprofile --norc <<'ANIMEMO_PROTECTED_HANDOFF'
 set -euo pipefail
 umask 077
+test -p "$GH_TOKEN_PIPE"
+IFS= read -r GH_TOKEN <"$GH_TOKEN_PIPE"
+test -n "$GH_TOKEN"
+export GH_TOKEN
 ANIMEMO_ROOT=/var/lib/animemo
 AUTHORITY_PARENT="$ANIMEMO_ROOT/bootstrap-authority"
 PROTECTED_ROOT=/var/lib/animemo/bootstrap-authority/v1
@@ -212,6 +227,8 @@ assert_safe_root_directory "$RUNTIME" 700
   --public-origin '<PUBLIC_ORIGIN>' --non-interactive --accept <INSTALLER_ARGS>
 completed=1
 ANIMEMO_PROTECTED_HANDOFF
+wait "$GH_TOKEN_WRITER"
+GH_TOKEN_WRITER=''
 # OFFICIAL_MIRROR_STAGE0_END
 ```
 
