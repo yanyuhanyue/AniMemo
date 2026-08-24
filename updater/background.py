@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 
 from .errors import StateError
 
@@ -17,10 +18,14 @@ class BackgroundOperationManager:
         self._completed: dict[str, bool] = {}
         self._closing = False
 
-    def require_open(self) -> None:
+    @contextmanager
+    def mutation_start(self):
+        """Linearize mutation admission with close and worker registration."""
+
         with self._condition:
             if self._closing:
                 raise StateError("BACKGROUND_OPERATION_MANAGER_CLOSED")
+            yield
 
     def start(
         self,
@@ -85,10 +90,10 @@ class BackgroundOperationManager:
         try:
             worker.start()
         except BaseException:
+            cleanup_failed_start()
             with self._condition:
                 self._active.pop(operation_id, None)
                 self._condition.notify_all()
-            cleanup_failed_start()
             raise
 
     def wait(self, operation_id: str, timeout: float | None) -> bool:

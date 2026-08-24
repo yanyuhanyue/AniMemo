@@ -110,6 +110,26 @@ class BackgroundOperationManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(StateError, "BACKGROUND_OPERATION_WORKER_FAILED"):
             manager.close(timeout=0)
 
+    def test_close_cannot_pass_mutation_admission_before_worker_registration(self):
+        manager = BackgroundOperationManager()
+        worker_release = threading.Event()
+        close_returned = threading.Event()
+
+        with manager.mutation_start():
+            closer = threading.Thread(
+                target=lambda: (manager.close(timeout=2), close_returned.set())
+            )
+            closer.start()
+            self.assertFalse(close_returned.wait(0.05))
+            manager.start("operation-1", lambda: worker_release.wait(2))
+
+        self.assertFalse(close_returned.wait(0.05))
+        worker_release.set()
+        closer.join(2)
+
+        self.assertFalse(closer.is_alive())
+        self.assertTrue(close_returned.is_set())
+
     def test_background_lifecycle_does_not_expand_rpc_protocol(self):
         self.assertNotIn("wait_for_background_operation", OPERATION_FIELDS)
         self.assertNotIn("shutdown", OPERATION_FIELDS)

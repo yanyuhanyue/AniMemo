@@ -564,7 +564,10 @@ class UpdateAgent:
         self._background_workers.close(timeout)
 
     def _apply(self, params):
-        self._background_workers.require_open()
+        with self._background_workers.mutation_start():
+            return self._apply_while_open(params)
+
+    def _apply_while_open(self, params):
         self.operations.require_recovery_clear()
         stored = self.plans.get(params["planId"])
         version = stored["manifest"]["release"]["version"]
@@ -623,7 +626,10 @@ class UpdateAgent:
                 lock_lease.__exit__(None, None, None)
 
     def _rollback_previous(self, params):
-        self._background_workers.require_open()
+        with self._background_workers.mutation_start():
+            return self._rollback_previous_while_open(params)
+
+    def _rollback_previous_while_open(self, params):
         lock_lease = self.executor.acquire_lock()
         handed_off = False
         try:
