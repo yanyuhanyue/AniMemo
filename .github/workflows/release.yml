@@ -79,6 +79,7 @@ jobs:
         id: candidate
         env:
           OPERATION: ${{ inputs.operation }}
+          CHANNEL: ${{ inputs.channel }}
           REQUESTED_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           INTENDED_MAIN_SHA: ${{ inputs.intended_main_sha }}
           UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}
@@ -92,7 +93,15 @@ jobs:
           test -z "$(git status --porcelain --untracked-files=no)"
           main_sha="$(git rev-parse origin/main^{commit})"
           test "$INTENDED_MAIN_SHA" = "$main_sha"
-          if [[ "$OPERATION" = "publish" ]]; then
+          if [[ "$OPERATION" = "qualify" && "$CHANNEL" = "rc" ]]; then
+            if [[ -n "$REQUESTED_CANDIDATE_SHA" ]]; then
+              echo "RC_QUALIFICATION_REQUIRES_CURRENT_MAIN" >&2
+              exit 1
+            fi
+            test "$GITHUB_REF" = "refs/heads/main"
+            test "$GITHUB_SHA" = "$main_sha"
+            test "$INTENDED_MAIN_SHA" = "$GITHUB_SHA"
+          elif [[ "$OPERATION" = "publish" ]]; then
             test -z "$REQUESTED_CANDIDATE_SHA"
             [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             [[ "$METADATA_FRESHNESS_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -234,8 +243,6 @@ jobs:
     if: ${{ inputs.operation == 'qualify' && inputs.channel == 'rc' }}
     needs: preflight
     uses: ./.github/workflows/performance.yml
-    with:
-      candidate_sha: ${{ needs.preflight.outputs.candidate_sha }}
 
   platform-qualification:
     name: platform-qualification-linux-amd64

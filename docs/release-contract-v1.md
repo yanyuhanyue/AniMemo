@@ -29,6 +29,8 @@ v1.1.0         GitHub Release，只能从同版本 RC 晋升
 
 Beta/RC workflow 对 main 的指定 commit 构建 API/Web 一次，向 GHCR 推送并记录 digest。Stable workflow 不运行 image build，只读取 RC Manifest、核验生产验收确认、检查 Stable 不存在，然后为相同 OCI digest 增加 Stable tag 并生成 Stable Manifest。
 
+完整性能资格验证只接受受保护分支的 exact current main。`.github/workflows/performance.yml` 仅作为无身份输入的 reusable workflow 存在，不提供 `workflow_dispatch`，也不接受 candidate SHA、ref、branch 或布尔信任声明。每个独立性能 runner 都在执行仓库代码前验证 repository、`refs/heads/main`、`github.sha`、`origin/main` 与干净 worktree；main 在排队期间推进会使旧 SHA 失败关闭。Release Producer 的 RC Qualification 必须省略 `candidate_sha` 并从 main 调度，调用性能工作流时不传递身份输入。Beta 的既有只读候选 dry-run 合同保持，但不会获得完整性能资格。普通 PR 仍由自然 CI、Release Gate、CodeQL 与 Trusted Pre-Merge 验证；本合同不新增 PR performance authority、Artifact authority 或 `pull_request_target` 候选执行路径。
+
 自动门禁必须证明：
 
 ```text
