@@ -33,11 +33,6 @@ if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ || ! "$CHANNEL" =~ ^(beta|rc)$ ]]; then
   echo "Release identity arguments are invalid." >&2
   exit 2
 fi
-if [[ ! "${ANIMEMO_POSTGRES_IMAGE:-}" =~ ^docker\.io/library/postgres@sha256:[0-9a-f]{64}$ ||
-      ! "${ANIMEMO_REDIS_IMAGE:-}" =~ ^docker\.io/library/redis@sha256:[0-9a-f]{64}$ ]]; then
-  echo "Exact immutable PostgreSQL and Redis image identities are required." >&2
-  exit 2
-fi
 if [[ -z "${RUNNER_TEMP:-}" || "$RUNNER_TEMP" != /* ]]; then
   echo "RUNNER_TEMP must be an absolute isolated runner path." >&2
   exit 2
@@ -54,6 +49,11 @@ PROJECT_NAME="$(printf '%s' "$PROJECT_NAME" | tr '[:upper:]_' '[:lower:]-' | tr 
 DATA_ROOT="$TEMP_ROOT/data"
 META_ROOT="$TEMP_ROOT/meta"
 ENV_FILE="$TEMP_ROOT/rehearsal.env"
+DEPENDENCY_ENV_FILE="$TEMP_ROOT/dependency-images.env"
+unset ANIMEMO_POSTGRES_IMAGE ANIMEMO_REDIS_IMAGE
+(cd "$ROOT" && python3 -m release.registry_transport pull-all --projection compose-env) \
+  > "$DEPENDENCY_ENV_FILE"
+chmod 600 "$DEPENDENCY_ENV_FILE"
 COMPOSE=(
   docker compose
   --project-name "$PROJECT_NAME"
@@ -105,8 +105,6 @@ ANIMEMO_MANAGED_ENV_PATH=$ENV_FILE
 ANIMEMO_UPDATER_RUNTIME_ROOT=$TEMP_ROOT/updater-runtime
 ANIMEMO_API_IMAGE=$API_IMAGE
 ANIMEMO_WEB_IMAGE=$WEB_IMAGE
-ANIMEMO_POSTGRES_IMAGE=$ANIMEMO_POSTGRES_IMAGE
-ANIMEMO_REDIS_IMAGE=$ANIMEMO_REDIS_IMAGE
 ANIMEMO_RELEASE_VERSION=$VERSION
 ANIMEMO_RELEASE_COMMIT=$COMMIT
 ANIMEMO_RELEASE_CHANNEL=$CHANNEL
@@ -117,6 +115,7 @@ STATEFUL_UPGRADE_ENV_FILE=$ENV_FILE
 STATEFUL_UPGRADE_HELPER_ROOT=$ROOT
 STATEFUL_UPGRADE_META_ROOT=$META_ROOT
 EOF
+cat "$DEPENDENCY_ENV_FILE" >> "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
 export ANIMEMO_DATA_ROOT="$DATA_ROOT"
@@ -138,10 +137,10 @@ export STATEFUL_UPGRADE_HELPER_ROOT="$ROOT"
 export STATEFUL_UPGRADE_META_ROOT="$META_ROOT"
 
 "${COMPOSE[@]}" config --quiet
-"${COMPOSE[@]}" up -d --wait --wait-timeout 120 postgres redis
+"${COMPOSE[@]}" up -d --pull never --wait --wait-timeout 120 postgres redis
 "${COMPOSE[@]}" run --rm --no-deps migration
 "${COMPOSE[@]}" run --rm --no-deps bootstrap
-"${COMPOSE[@]}" up -d --no-deps --wait --wait-timeout 120 api web
+"${COMPOSE[@]}" up -d --pull never --no-deps --wait --wait-timeout 120 api web
 
 api_container="$("${COMPOSE[@]}" ps -q api)"
 web_container="$("${COMPOSE[@]}" ps -q web)"
@@ -175,7 +174,7 @@ lines[matches[0]] = f"TRUSTED_PROXY_IPS={os.environ['TRUSTED_PROXY_CIDR']}"
 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 
-"${COMPOSE[@]}" up -d --no-deps --force-recreate --wait --wait-timeout 120 api
+"${COMPOSE[@]}" up -d --pull never --no-deps --force-recreate --wait --wait-timeout 120 api
 api_container="$("${COMPOSE[@]}" ps -q api)"
 test -n "$api_container"
 

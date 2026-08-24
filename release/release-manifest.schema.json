@@ -31,8 +31,8 @@
       "properties": {
         "api": {"$ref": "#/$defs/apiImage"},
         "web": {"$ref": "#/$defs/webImage"},
-        "postgres": {"$ref": "#/$defs/postgresImage"},
-        "redis": {"$ref": "#/$defs/redisImage"}
+        "postgres": {"$ref": "#/$defs/dependencyImage"},
+        "redis": {"$ref": "#/$defs/dependencyImage"}
       }
     },
     "deployment": {
@@ -195,24 +195,14 @@
         "platform": {"const": "linux/amd64"}
       }
     },
-    "postgresImage": {
+    "dependencyImage": {
       "type": "object",
       "additionalProperties": false,
       "required": ["repository", "digest", "platform"],
       "properties": {
-        "repository": {"const": "docker.io/library/postgres"},
-        "digest": {"const": "sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571"},
-        "platform": {"const": "linux/amd64"}
-      }
-    },
-    "redisImage": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["repository", "digest", "platform"],
-      "properties": {
-        "repository": {"const": "docker.io/library/redis"},
-        "digest": {"const": "sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf"},
-        "platform": {"const": "linux/amd64"}
+        "repository": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "platform": {"type": "string", "pattern": "^[a-z0-9]+/[a-z0-9]+$"}
       }
     }
   }

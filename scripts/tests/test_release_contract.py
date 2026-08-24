@@ -673,6 +673,42 @@ class ManifestContractTests(unittest.TestCase):
         with self.assertRaises(ReleaseContractError):
             validate_manifest(mutable)
 
+    def test_manifest_rejects_dependency_authority_drift(self):
+        mutations = (
+            ("postgres", "repository", "docker.io/example/postgres"),
+            ("postgres", "digest", "sha256:" + "9" * 64),
+            ("postgres", "platform", "linux/arm64"),
+            ("redis", "repository", "docker.io/example/redis"),
+            ("redis", "digest", "sha256:" + "8" * 64),
+            ("redis", "platform", "linux/arm64"),
+        )
+        for role, field, value in mutations:
+            payload = manifest()
+            payload["images"][role][field] = value
+            with self.subTest(role=role, field=field), self.assertRaisesRegex(
+                ReleaseContractError, "dependency image authority"
+            ):
+                validate_manifest(payload)
+
+    def test_schema_and_contract_do_not_duplicate_dependency_identity_literals(self):
+        root = Path(__file__).parents[2]
+        authority = (root / "release" / "dependency-images.json").read_text(
+            encoding="utf-8"
+        )
+        schema = (root / "release" / "release-manifest.schema.json").read_text(
+            encoding="utf-8"
+        )
+        contract = (root / "release" / "contract.py").read_text(encoding="utf-8")
+        for value in (
+            POSTGRES_REPOSITORY,
+            POSTGRES_DIGEST,
+            REDIS_REPOSITORY,
+            REDIS_DIGEST,
+        ):
+            self.assertIn(value, authority)
+            self.assertNotIn(value, schema)
+            self.assertNotIn(value, contract)
+
     def test_manifest_rejects_unbound_deployment_digest(self):
         payload = manifest()
         payload["deployment"]["contractSha256"] = "mutable"

@@ -150,6 +150,11 @@ jobs:
             durability/requirements.txt
       - run: python -m pip install -r release/requirements.txt
       - run: python -m pip install -r durability/requirements.txt
+      - name: Bind and acquire exact release-gate dependency images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"
       - name: Create ephemeral production-like environment
         shell: bash
         run: |
@@ -196,8 +201,8 @@ jobs:
           ANIMEMO_TEST_DATA_ROOT=$data_root
           ANIMEMO_API_IMAGE=animemo-api:release-gate
           ANIMEMO_WEB_IMAGE=animemo-web:release-gate
-          ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
-          ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+          ANIMEMO_POSTGRES_IMAGE=$POSTGRES_IMAGE
+          ANIMEMO_REDIS_IMAGE=$REDIS_IMAGE
           EOF
           sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater/release-gate
           sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/release-gate/managed.env
@@ -214,10 +219,12 @@ jobs:
         run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env build api web
       - name: Start production-like stack
         run: |
-          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis
+          # NEGATIVE_TEST_FIXTURE: legacy ordering only: up -d --wait --wait-timeout 120 postgres redis
+          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --pull never --wait --wait-timeout 120 postgres redis
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps migration
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps bootstrap
-          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --no-deps api web
+          # NEGATIVE_TEST_FIXTURE: legacy ordering only: up -d --no-deps api web
+          docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --pull never --no-deps api web
       - name: Run real production PostgreSQL Backup adapter create and verify
         env:
           ANIMEMO_RUN_PRODUCTION_BACKUP_DOCKER_TEST: "1"
@@ -307,6 +314,11 @@ jobs:
           --base "${{ inputs.upgrade_base_sha || '' }}"
           --head "${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}"
           --github-output "$GITHUB_OUTPUT"
+      - name: Bind and acquire exact upgrade dependency images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"
       - name: Run BASE to CURRENT stateful production upgrade gate
         shell: bash
         run: >-
@@ -358,6 +370,11 @@ jobs:
       - name: Verify exact candidate checkout
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - name: Bind and acquire exact DR dependency images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"
       - name: Validate portable DR backup contract
         run: python -m unittest scripts.tests.test_dr_backup scripts.tests.test_dr_recovery_paths scripts.tests.test_dr_rehearsal_contract -v
       - name: Run isolated A-to-B DR rehearsal

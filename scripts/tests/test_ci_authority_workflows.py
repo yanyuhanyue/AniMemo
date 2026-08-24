@@ -273,7 +273,7 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         compose = "docker compose --project-name animemo-release-gate --env-file .ci-runtime.env"
         self.assertIn(f"{compose} build api web", release)
         self.assertIn(
-            f"{compose} up -d --wait --wait-timeout 120 postgres redis",
+            f"{compose} up -d --pull never --wait --wait-timeout 120 postgres redis",
             release,
         )
         self.assertIn(
@@ -285,7 +285,7 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             release,
         )
         self.assertIn(
-            f"{compose} up -d --no-deps api web",
+            f"{compose} up -d --pull never --no-deps api web",
             release,
         )
         self.assertNotIn("EXPLICIT_RELEASE_JOBS", release)

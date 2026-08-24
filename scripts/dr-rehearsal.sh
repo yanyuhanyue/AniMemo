@@ -200,9 +200,8 @@ STATEFUL_UPGRADE_HELPER_ROOT=$CURRENT_ROOT
 COMPOSE_PROJECT_NAME=$project
 ANIMEMO_API_IMAGE=$IMAGE_NAME
 ANIMEMO_WEB_IMAGE=${PROJECT_PREFIX}-web:${CANDIDATE_SHA:0:12}
-ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
-ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
 EOF
+  cat "$DEPENDENCY_ENV_FILE" >> "$env_file"
   chmod 600 "$env_file"
 }
 
@@ -285,6 +284,14 @@ wait_for_api() {
 
 mkdir -p "$META_ROOT"
 chmod a+rwx "$META_ROOT"
+DEPENDENCY_ENV_FILE="$TEMP_ROOT/dependency-images.env"
+# NEGATIVE_TEST_FIXTURE: these legacy prefixes are not assignments or authority;
+# ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:
+# ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:
+unset ANIMEMO_POSTGRES_IMAGE ANIMEMO_REDIS_IMAGE
+(cd "$CURRENT_ROOT" && python3 -m release.registry_transport pull-all --projection compose-env) \
+  > "$DEPENDENCY_ENV_FILE"
+chmod 600 "$DEPENDENCY_ENV_FILE"
 write_env a
 write_env b
 
@@ -366,10 +373,10 @@ with UpdateLock(root / "update.lock"):
     pass
 print("Representative updater CURRENT/PREVIOUS/history/operation fixture: PASS")
 PY
-compose a up -d --wait --wait-timeout 120 postgres redis
+compose a up -d --wait --wait-timeout 120 postgres redis --pull never
 compose a run --rm --no-deps migration
 compose a run --rm --no-deps bootstrap
-compose a up -d --no-deps api
+compose a up -d --no-deps api --pull never
 wait_for_api a
 
 echo "== Seed representative database, plugin, media, private, and auth state on A =="
@@ -595,7 +602,7 @@ echo "Portable local media set restored; external R2 inventory is not exercised 
 
 echo "== Prove B starts with a fresh database and rebuildable Redis =="
 compose b config --quiet
-compose b up -d --wait --wait-timeout 120 postgres redis
+compose b up -d --wait --wait-timeout 120 postgres redis --pull never
 test "$(compose b exec -T postgres psql -At -U animemo -d animemo -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")" = "0"
 test "$(compose b exec -T redis redis-cli --raw DBSIZE | tr -d '\r')" = "0"
 
@@ -604,7 +611,7 @@ as_root gzip -dc -- "$DATA_B/database.sql.gz" | compose b exec -T postgres psql 
 compose b run --rm --no-deps migration
 compose b run --rm --no-deps bootstrap
 compose b run --rm --no-deps api python manage.py rotate_authentication_epoch --confirm-restore
-compose b up -d --no-deps api
+compose b up -d --no-deps api --pull never
 wait_for_api b
 
 echo "== Verify restored application graph, setup lock, and authentication behavior =="

@@ -80,6 +80,68 @@ def workflow(name):
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
+    def test_dynamic_candidate_buildx_jobs_cannot_write_shared_caches(self):
+        candidate_buildx_jobs = set()
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            document = yaml.load(
+                path.read_text(encoding="utf-8"),
+                Loader=UniqueKeyLoader,
+            )
+            for job_name, job in document.get("jobs", {}).items():
+                steps = job.get("steps", [])
+                checks_out_dynamic_candidate = any(
+                    step.get("uses", "").startswith("actions/checkout@")
+                    and step.get("with", {}).get("ref")
+                    in (
+                        "${{ inputs.candidate_sha }}",
+                        "${{ github.sha }}",
+                    )
+                    for step in steps
+                )
+                buildx_steps = [
+                    step
+                    for step in steps
+                    if step.get("uses", "").startswith(
+                        "docker/setup-buildx-action@"
+                    )
+                ]
+                if not checks_out_dynamic_candidate or not buildx_steps:
+                    continue
+
+                identity = f"{path.name}:{job_name}"
+                candidate_buildx_jobs.add(identity)
+                for step in buildx_steps:
+                    inputs = step.get("with", {})
+                    self.assertEqual(
+                        inputs.get("cache-binary"),
+                        "false",
+                        identity,
+                    )
+                    self.assertIn(inputs.get("keep-state"), (None, "false"), identity)
+                    self.assertIn(inputs.get("cleanup"), (None, "true"), identity)
+
+                for step in steps:
+                    action = step.get("uses", "").split("@", 1)[0]
+                    self.assertFalse(
+                        action == "actions/cache"
+                        or action.startswith("actions/cache/"),
+                        identity,
+                    )
+                    for key, value in step.get("with", {}).items():
+                        if key == "cache-to":
+                            self.fail(f"{identity} enables cache export: {value}")
+                        if key == "keep-state":
+                            self.assertNotEqual(value, "true", identity)
+
+        self.assertEqual(
+            candidate_buildx_jobs,
+            {
+                "performance.yml:isolated-resource-load",
+                "performance.yml:isolated-long-operation-capacity",
+                "release.yml:dry-run",
+            },
+        )
+
     def test_release_resolver_requires_the_candidate_bound_reservation_ledger(self):
         release = workflow("release.yml")
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -745,18 +807,25 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(release["jobs"]["full-release-gate"]["with"]["upgrade_base_sha"], "${{ inputs.upgrade_base_sha }}")
         self.assertTrue(release["jobs"]["full-release-gate"]["with"]["force_full"])
 
-    def test_performance_workflow_is_manual_or_reusable_and_pins_exact_candidate(self):
+    def test_performance_workflow_is_reusable_and_binds_every_runner_to_exact_main(self):
         performance = workflow("performance.yml")
-        self.assertEqual(set(performance["on"]), {"workflow_dispatch", "workflow_call"})
-        for trigger in ("workflow_dispatch", "workflow_call"):
-            self.assertIn("candidate_sha", performance["on"][trigger]["inputs"])
-            self.assertEqual(performance["on"][trigger]["inputs"]["candidate_sha"]["required"], "true")
-            self.assertEqual(performance["on"][trigger]["inputs"]["candidate_sha"]["type"], "string")
+        self.assertEqual(performance["on"], {"workflow_call": {}})
 
         source = (ROOT / ".github" / "workflows" / "performance.yml").read_text(encoding="utf-8")
+        self.assertNotIn("workflow_dispatch:", source)
         self.assertNotIn("pull_request:", source)
         self.assertNotIn("merge_group:", source)
-        self.assertGreaterEqual(source.count("ref: ${{ inputs.candidate_sha }}"), 3)
+        self.assertNotIn("candidate_sha", source)
+        self.assertEqual(source.count("ref: ${{ github.sha }}"), 5)
+        self.assertEqual(source.count("&trusted_main_binding"), 1)
+        self.assertEqual(source.count("*trusted_main_binding"), 4)
+        for name, job in performance["jobs"].items():
+            self.assertEqual(job["steps"][1]["id"], "trusted_main", name)
+            self.assertEqual(
+                job["steps"][1]["env"]["TRUSTED_SHA"],
+                "${{ github.sha }}",
+                name,
+            )
         self.assertIn("services:", source)
         self.assertIn("postgres:", source)
         self.assertIn("redis:", source)
@@ -786,9 +855,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("Require every performance evidence producer to succeed", source)
         self.assertIn("toJSON(needs)", source)
         self.assertIn('job["result"] != "success"', source)
-        self.assertNotIn("inputs.candidate_sha || github.sha", source)
-        self.assertIn('CANDIDATE_SHA: ${{ inputs.candidate_sha }}', source)
-        self.assertIn('test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"', source)
+        self.assertIn("FRONTEND_PERF_COMMIT: ${{ github.sha }}", source)
+        self.assertNotIn("${{ inputs.", source)
         self.assertIn("isolated-long-operation-capacity:", source)
         self.assertIn("name: performance-long-operation-capacity", source)
         self.assertIn("ANIMEMO_ISOLATED_CAPACITY_PROBE=true", source)
@@ -852,10 +920,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(performance["uses"], "./.github/workflows/performance.yml")
         self.assertEqual(performance["needs"], "preflight")
         self.assertEqual(performance["if"], "${{ inputs.operation == 'qualify' && inputs.channel == 'rc' }}")
-        self.assertEqual(
-            performance["with"]["candidate_sha"],
-            "${{ needs.preflight.outputs.candidate_sha }}",
-        )
+        self.assertNotIn("with", performance)
 
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         promote_source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
@@ -1157,8 +1222,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             promotion,
         )
         self.assertNotIn("build-installer-materials", promotion)
-        self.assertIn("POSTGRES_IMAGE: docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571", release)
-        self.assertIn("REDIS_IMAGE: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf", release)
+        self.assertNotIn("docker.io/library/postgres@sha256:", release)
+        self.assertNotIn("docker.io/library/redis@sha256:", release)
+        self.assertIn(
+            'python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"',
+            release,
+        )
         self.assertIn('test "$UPGRADE_BASE_SHA" != "$GITHUB_SHA"', release)
         self.assertIn('if [[ "$BASE_SHA" == "$HEAD_SHA" ]]', gate)
         release_gate = (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(
@@ -1166,6 +1235,94 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("timeout-minutes: 40", release_gate)
         self.assertIn('merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"', gate)
+
+    def test_dependency_workflows_bind_once_and_use_closed_transport_roles(self):
+        expected_counts = {
+            "release.yml": 3,
+            "release-gate.yml": 3,
+            "performance.yml": 2,
+        }
+        projection = (
+            'python -m release.registry_transport pull-all --projection github-env '
+            '>> "$GITHUB_ENV"'
+        )
+        for name, count in expected_counts.items():
+            source = (ROOT / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            with self.subTest(workflow=name):
+                self.assertEqual(source.count(projection), count)
+                self.assertNotIn("release.registry_transport pull --role", source)
+                self.assertNotIn("docker.io/library/postgres@sha256:", source)
+                self.assertNotIn("docker.io/library/redis@sha256:", source)
+
+    def test_all_dependency_compose_startups_disable_hidden_pulls(self):
+        paths = (
+            ROOT / ".github" / "workflows" / "release-gate.yml",
+            ROOT / ".github" / "workflows" / "performance.yml",
+            ROOT / "scripts" / "dr-rehearsal.sh",
+            ROOT / "scripts" / "stateful-upgrade-gate.sh",
+            ROOT / "scripts" / "rehearse-release-images.sh",
+        )
+        for path in paths:
+            startup_lines = [
+                line.strip()
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if re.search(r"(?:docker compose|compose [ab]|run_compose|COMPOSE\[@\]).*\bup\b", line)
+            ]
+            with self.subTest(path=path.name):
+                self.assertTrue(startup_lines)
+                for line in startup_lines:
+                    self.assertIn("--pull never", line, line)
+
+    def test_dr_upgrade_and_release_rehearsal_use_canonical_transport(self):
+        for name in (
+            "dr-rehearsal.sh",
+            "stateful-upgrade-gate.sh",
+            "rehearse-release-images.sh",
+        ):
+            source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+            active_source = "\n".join(
+                line
+                for line in source.splitlines()
+                if not line.lstrip().startswith("#")
+            )
+            with self.subTest(script=name):
+                self.assertEqual(
+                    source.count(
+                        "release.registry_transport pull-all --projection compose-env"
+                    ),
+                    1,
+                )
+                self.assertNotIn("dependency_images.py\" emit-github-env", source)
+                self.assertNotIn("release.registry_transport pull --role", source)
+                self.assertNotIn(
+                    "docker.io/library/postgres@sha256:", active_source
+                )
+                self.assertNotIn("docker.io/library/redis@sha256:", active_source)
+
+    def test_publish_acquires_dependencies_before_any_external_mutation(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = source[source.index("  publish:") :]
+        pull_gate = publish.index("Acquire exact dependency images before external publication")
+        dependency_layouts = publish.index(
+            "Materialize exact dependency OCI layouts before external publication"
+        )
+        for mutation_marker in (
+            "docker/login-action",
+            "docker push",
+            "actions/attest@",
+            "git push origin",
+            'gh api --method POST "repos/$GITHUB_REPOSITORY/releases"',
+        ):
+            with self.subTest(marker=mutation_marker):
+                self.assertLess(pull_gate, publish.index(mutation_marker))
+                self.assertLess(dependency_layouts, publish.index(mutation_marker))
+        post_mutation = publish[publish.index("Publish only the already rehearsed images") :]
+        self.assertNotIn('export_layout postgres "$POSTGRES_IMAGE"', post_mutation)
+        self.assertNotIn('export_layout redis "$REDIS_IMAGE"', post_mutation)
 
     def test_release_verifier_is_built_offline_from_a_pinned_go_toolchain(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -1453,6 +1610,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         bindings = set(
             re.findall(r"^([A-Z0-9_]+)=", env_file.group("body"), re.MULTILINE)
         )
+        if "release.registry_transport pull-all --projection compose-env" in source:
+            bindings.update(
+                {"ANIMEMO_POSTGRES_IMAGE", "ANIMEMO_REDIS_IMAGE"}
+            )
 
         self.assertSetEqual(required - bindings, set())
         self.assertLess(
@@ -1460,40 +1621,79 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             source.index('"${COMPOSE[@]}" config --quiet'),
         )
 
-    def test_exact_image_rehearsal_rejects_mutable_dependency_images_before_work(self):
+    def test_exact_image_rehearsal_ignores_dependency_image_environment_overrides(self):
         bash = _bash_path()
         if bash is None:
             self.skipTest("Git Bash or bash is required for the rehearsal CLI gate.")
 
-        script = (ROOT / "scripts" / "rehearse-release-images.sh").as_posix()
-        valid_postgres = "docker.io/library/postgres@sha256:" + "a" * 64
-        valid_redis = "docker.io/library/redis@sha256:" + "b" * 64
-        invalid_pairs = (
-            ("", valid_redis),
-            (valid_postgres, ""),
-            ("docker.io/library/postgres:16", valid_redis),
-            ("registry.example/postgres@sha256:" + "a" * 64, valid_redis),
-            ("docker.io/library/postgres@sha256:" + "a" * 63, valid_redis),
-            ("docker.io/library/postgres@sha256:" + "A" * 64, valid_redis),
-            (valid_postgres, "docker.io/library/redis:7"),
-            (valid_postgres, "registry.example/redis@sha256:" + "b" * 64),
-            (valid_postgres, "docker.io/library/redis@sha256:" + "b" * 63),
-            (valid_postgres, "docker.io/library/redis@sha256:" + "B" * 64),
-        )
+        for name in (
+            "dr-rehearsal.sh",
+            "stateful-upgrade-gate.sh",
+            "rehearse-release-images.sh",
+        ):
+            source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+            unset = source.index(
+                "unset ANIMEMO_POSTGRES_IMAGE ANIMEMO_REDIS_IMAGE"
+            )
+            projection = source.index(
+                "release.registry_transport pull-all --projection compose-env"
+            )
+            with self.subTest(script=name):
+                self.assertLess(unset, projection)
 
-        def run(postgres: str, redis: str) -> subprocess.CompletedProcess[str]:
+        script = (ROOT / "scripts" / "rehearse-release-images.sh").as_posix()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            marker = root / "docker-environment.txt"
+            fake_python = fake_bin / "python3"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' "
+                "'ANIMEMO_POSTGRES_IMAGE=registry.example/postgres@sha256:"
+                + "a" * 64
+                + "' "
+                "'ANIMEMO_REDIS_IMAGE=registry.example/redis@sha256:"
+                + "b" * 64
+                + "' "
+                "'DEPENDENCY_IMAGE_AUTHORITY_SHA256=sha256:"
+                + "c" * 64
+                + "'\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            fake_docker = fake_bin / "docker"
+            fake_docker.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s|%s\\n' "
+                "\"${ANIMEMO_POSTGRES_IMAGE-UNSET}\" "
+                "\"${ANIMEMO_REDIS_IMAGE-UNSET}\" >> \"$DOCKER_ENV_MARKER\"\n"
+                "exit 42\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            fake_sudo = fake_bin / "sudo"
+            fake_sudo.write_text(
+                "#!/usr/bin/env bash\nexit 0\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            for command in (fake_python, fake_docker, fake_sudo):
+                command.chmod(0o755)
+
             environment = os.environ.copy()
-            environment["GITHUB_ACTIONS"] = "true"
-            environment.pop("RUNNER_TEMP", None)
-            if postgres:
-                environment["ANIMEMO_POSTGRES_IMAGE"] = postgres
-            else:
-                environment.pop("ANIMEMO_POSTGRES_IMAGE", None)
-            if redis:
-                environment["ANIMEMO_REDIS_IMAGE"] = redis
-            else:
-                environment.pop("ANIMEMO_REDIS_IMAGE", None)
-            return subprocess.run(
+            environment.update(
+                {
+                    "GITHUB_ACTIONS": "true",
+                    "RUNNER_TEMP": "/tmp",
+                    "ANIMEMO_POSTGRES_IMAGE": "registry.invalid/postgres:latest",
+                    "ANIMEMO_REDIS_IMAGE": "registry.invalid/redis:latest",
+                    "DOCKER_ENV_MARKER": marker.as_posix(),
+                    "PATH": str(fake_bin) + os.pathsep + environment["PATH"],
+                }
+            )
+            completed = subprocess.run(
                 [
                     bash,
                     script,
@@ -1515,21 +1715,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-
-        for postgres, redis in invalid_pairs:
-            with self.subTest(postgres=postgres, redis=redis):
-                completed = run(postgres, redis)
-                self.assertEqual(completed.returncode, 2)
-                self.assertIn(
-                    "Exact immutable PostgreSQL and Redis image identities are required.",
-                    completed.stderr,
-                )
-                self.assertNotIn("RUNNER_TEMP must be", completed.stderr)
-
-        completed = run(valid_postgres, valid_redis)
-        self.assertEqual(completed.returncode, 2)
-        self.assertIn("RUNNER_TEMP must be an absolute isolated runner path.", completed.stderr)
-        self.assertNotIn("Exact immutable PostgreSQL", completed.stderr)
+            self.assertEqual(completed.returncode, 42, completed.stderr)
+            observations = marker.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(observations)
+            self.assertTrue(all(item == "UNSET|UNSET" for item in observations))
 
     def test_exact_image_rehearsal_trusts_only_the_runtime_web_proxy(self):
         source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(encoding="utf-8")
@@ -1538,7 +1727,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn(".NetworkSettings.Networks", source)
         self.assertIn('print(f"{address}/32")', source)
         self.assertIn("TRUSTED_PROXY_CIDR", source)
-        self.assertIn("--force-recreate --wait --wait-timeout 120 api", source)
+        self.assertIn(
+            "--pull never --no-deps --force-recreate --wait --wait-timeout 120 api",
+            source,
+        )
         self.assertIn("AdminAuditLog.objects.get(action='installation.initialized').ip_address", source)
         self.assertIn("recorded_ip == proxy_ip", source)
         self.assertNotIn("TRUSTED_PROXY_IPS=172.16.0.0/12", source)

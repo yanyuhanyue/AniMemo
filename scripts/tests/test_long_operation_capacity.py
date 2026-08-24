@@ -350,9 +350,11 @@ class LongOperationCapacityTests(unittest.TestCase):
     def test_registered_performance_workflow_runs_capacity_job_and_never_targets_production(self):
         workflow = Path(".github/workflows/performance.yml").read_text(encoding="utf-8")
         for required in (
-            "workflow_dispatch:",
             "workflow_call:",
-            "ref: ${{ inputs.candidate_sha }}",
+            "ref: ${{ github.sha }}",
+            "Bind this runner to exact current main",
+            'test "$GITHUB_REF" = "refs/heads/main"',
+            "git rev-parse origin/main^{commit}",
             "COMPOSE_PROJECT_NAME: animemo-capacity-${{ github.run_id }}-${{ github.run_attempt }}",
             "ANIMEMO_ISOLATED_CAPACITY_PROBE=true",
             "ANIMEMO_ISOLATED_PROVIDER_LATENCY_MS=1200",
@@ -365,6 +367,8 @@ class LongOperationCapacityTests(unittest.TestCase):
             "name: performance-long-operation-capacity",
         ):
             self.assertIn(required, workflow)
+        self.assertNotIn("workflow_dispatch:", workflow)
+        self.assertNotIn("candidate_sha", workflow)
         self.assertNotIn("ssh ", workflow.lower())
         self.assertNotIn("https://animemo.cc", workflow)
         self.assertNotIn("api.bgm.tv", workflow)

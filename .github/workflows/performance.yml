@@ -1,21 +1,10 @@
 name: Performance Baseline
 
 on:
-  workflow_dispatch:
-    inputs:
-      candidate_sha:
-        description: Exact candidate commit to measure
-        required: true
-        type: string
-  workflow_call:
-    inputs:
-      candidate_sha:
-        description: Exact candidate commit to measure
-        required: true
-        type: string
+  workflow_call: {}
 
 concurrency:
-  group: animemo-performance-${{ inputs.candidate_sha }}
+  group: animemo-performance-trusted-${{ github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -30,13 +19,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Prove the exact frontend candidate identity
+      - &trusted_main_binding
+        name: Bind this runner to exact current main
+        id: trusted_main
         env:
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          TRUSTED_SHA: ${{ github.sha }}
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"
+          test "$GITHUB_REF" = "refs/heads/main"
+          git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"
+          test "$(git rev-parse HEAD^{commit})" = "$TRUSTED_SHA"
+          test "$(git rev-parse origin/main^{commit})" = "$TRUSTED_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          echo "verified=true" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 20
@@ -55,13 +54,13 @@ jobs:
           echo "PROVISION_STAGE=BROWSER_RUNTIME_VERIFICATION STATUS=PASS"
       - name: Run deterministic frontend performance probe
         env:
-          FRONTEND_PERF_COMMIT: ${{ inputs.candidate_sha }}
+          FRONTEND_PERF_COMMIT: ${{ github.sha }}
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
         run: |
           mkdir -p artifacts
           node tests/performance-frontend-e2e.mjs
       - name: Upload frontend evidence
-        if: ${{ always() }}
+        if: ${{ always() && steps.trusted_main.outputs.verified == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: performance-frontend
@@ -114,13 +113,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Prove the exact backend candidate identity
-        env:
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-        shell: bash
-        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - *trusted_main_binding
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
@@ -152,7 +147,7 @@ jobs:
               }, report["database"]
           PY
       - name: Upload backend evidence
-        if: ${{ always() }}
+        if: ${{ always() && steps.trusted_main.outputs.verified == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: performance-backend
@@ -173,17 +168,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Prove the exact isolated-load candidate identity
-        env:
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-        shell: bash
-        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - *trusted_main_binding
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        with:
+          cache-binary: false
+          keep-state: false
+          cleanup: true
+      - name: Bind and acquire exact performance dependency images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"
       - name: Prepare the disposable production-like environment
         shell: bash
         run: |
@@ -220,8 +220,8 @@ jobs:
           ANIMEMO_TEST_DATA_ROOT=$data_root
           ANIMEMO_API_IMAGE=animemo-perf-api:candidate
           ANIMEMO_WEB_IMAGE=animemo-perf-web:candidate
-          ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
-          ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+          ANIMEMO_POSTGRES_IMAGE=$POSTGRES_IMAGE
+          ANIMEMO_REDIS_IMAGE=$REDIS_IMAGE
           EOF
           sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater
           sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/managed.env
@@ -234,10 +234,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker compose --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis
+          docker compose --env-file .ci-runtime.env up -d --pull never --wait --wait-timeout 120 postgres redis
           docker compose --env-file .ci-runtime.env run --rm --no-deps migration
           docker compose --env-file .ci-runtime.env run --rm --no-deps bootstrap
-          docker compose --env-file .ci-runtime.env up -d --no-deps api web
+          docker compose --env-file .ci-runtime.env up -d --pull never --no-deps api web
       - name: Wait for the candidate Web/API health endpoint
         shell: bash
         run: |
@@ -330,14 +330,14 @@ jobs:
             --resource-interval-seconds 15 \
             --output artifacts/resource-load.json
       - name: Capture scoped Compose state and logs
-        if: ${{ always() }}
+        if: ${{ always() && steps.trusted_main.outputs.verified == 'true' }}
         shell: bash
         run: |
           mkdir -p artifacts
           docker compose --env-file .ci-runtime.env ps --all > artifacts/compose-ps.txt 2>&1 || true
           docker compose --env-file .ci-runtime.env logs --no-color > artifacts/compose.log 2>&1 || true
       - name: Upload isolated resource/load evidence
-        if: ${{ always() }}
+        if: ${{ always() && steps.trusted_main.outputs.verified == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: performance-resource-load
@@ -345,10 +345,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Print isolated logs on failure
-        if: ${{ failure() }}
+        if: ${{ failure() && steps.trusted_main.outputs.verified == 'true' }}
         run: docker compose --env-file .ci-runtime.env logs --no-color
       - name: Remove only this disposable performance Compose project
-        if: ${{ always() }}
+        if: ${{ always() && steps.trusted_main.outputs.verified == 'true' }}
         run: docker compose --env-file .ci-runtime.env down -v --remove-orphans
 
   isolated-long-operation-capacity:
@@ -363,17 +363,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Prove the exact capacity candidate identity
-        env:
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-        shell: bash
-        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - *trusted_main_binding
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        with:
+          cache-binary: false
+          keep-state: false
+          cleanup: true
+      - name: Bind and acquire exact capacity dependency images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"
       - name: Prepare the unique disposable capacity environment
         shell: bash
         run: |
@@ -413,8 +418,8 @@ jobs:
           ANIMEMO_TEST_DATA_ROOT=$data_root
           ANIMEMO_API_IMAGE=animemo-capacity-api:candidate
           ANIMEMO_WEB_IMAGE=animemo-capacity-web:candidate
-          ANIMEMO_POSTGRES_IMAGE=docker.io/library/postgres@sha256:075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571
-          ANIMEMO_REDIS_IMAGE=docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+          ANIMEMO_POSTGRES_IMAGE=$POSTGRES_IMAGE
+          ANIMEMO_REDIS_IMAGE=$REDIS_IMAGE
           EOF
           sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater
           sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .ci-runtime.env /run/animemo-updater/managed.env
@@ -427,10 +432,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker compose --env-file .ci-runtime.env up -d --wait --wait-timeout 120 postgres redis
+          docker compose --env-file .ci-runtime.env up -d --pull never --wait --wait-timeout 120 postgres redis
           docker compose --env-file .ci-runtime.env run --rm --no-deps migration
           docker compose --env-file .ci-runtime.env run --rm --no-deps bootstrap
-          docker compose --env-file .ci-runtime.env up -d --no-deps api web
+          docker compose --env-file .ci-runtime.env up -d --pull never --no-deps api web
           for attempt in {1..30}; do
             if curl --fail --silent --show-error -H 'Host: capacity.example.test' \
               http://127.0.0.1:8089/health/ \
@@ -497,14 +502,14 @@ jobs:
             --resource-interval-seconds 0.5 \
             --output artifacts/long-operation-capacity.json
       - name: Capture scoped capacity Compose state and logs
-        if: ${{ always() }}
+        if: ${{ always() && steps.trusted_main.outputs.verified == 'true' }}
         shell: bash
         run: |
           mkdir -p artifacts
           docker compose --env-file .ci-runtime.env ps --all > artifacts/capacity-compose-ps.txt 2>&1 || true
           docker compose --env-file .ci-runtime.env logs --no-color > artifacts/capacity-compose.log 2>&1 || true
       - name: Upload isolated long-operation capacity evidence
-        if: ${{ always() }}
+        if: ${{ always() && steps.trusted_main.outputs.verified == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: performance-long-operation-capacity
@@ -512,7 +517,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Remove only this disposable capacity Compose project
-        if: ${{ always() }}
+        if: ${{ always() && steps.trusted_main.outputs.verified == 'true' }}
         run: docker compose --env-file .ci-runtime.env down -v --remove-orphans
 
   regression-gate:
@@ -525,8 +530,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
+      - *trusted_main_binding
       - name: Require every performance evidence producer to succeed
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -571,7 +577,7 @@ jobs:
             --resource artifacts/resource/resource-load.json \
             --output artifacts/regression-gate.json
       - name: Upload the aggregate regression gate evidence
-        if: ${{ always() }}
+        if: ${{ always() && steps.trusted_main.outputs.verified == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: performance-regression-gate
