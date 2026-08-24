@@ -157,6 +157,45 @@ Registry transport may retry only a bounded pull of that same derived
 `repository@sha256:digest`, verifies the resulting local RepoDigest and
 platform, and permits Compose startup only with `--pull never`.
 
+GitHub Release asset transport has a separate, closed resource-budget
+contract. `GitHubReleaseSource` validates the exact Release metadata once and
+requires the complete five-asset v1.1 inventory: the portable archive plus
+`checksums.txt`, `deployment-contract.json`, `installer-materials.tar`, and
+`release-manifest.json`. Only the latter four become ordered
+`TransportObjectPlan` values. Metadata byte size is used only to calculate a
+bounded timeout and to reject a transfer-size mismatch; it is not a content
+digest, checksum, attestation, or second Release Authority.
+
+Transfer policy version 1 is compiled into the updater and cannot be changed by
+environment, workflow input, Installer argument, or arbitrary URL. Each object
+gets `min(900, max(60, 30 + ceil(size / 131072)))` seconds, at most three
+attempts, backoff of 10 then 30 seconds, and the entire bundle has a monotonic
+1800-second deadline. The RC.10 `installer-materials.tar` size of 62,484,480
+bytes therefore receives 507 seconds. A successful object remains in the
+current acquire's private pending bundle and is not downloaded again when a
+later object retries. Every attempt uses a new private directory; partial
+attempts are deleted, and only a complete four-object bundle is atomically
+committed. Incomplete state is never reused across acquire calls.
+
+Command execution distinguishes timeout, non-zero exit, and process-start
+failure while preserving `CommandFailed` as their compatibility parent.
+Diagnostics exclude argv and environment, remove credentials, ANSI control
+sequences and NULs, and are bounded to 4096 characters per stream. Timeout,
+EOF, reset, selected 5xx responses, temporary DNS failure, and TLS timeout may
+retry only the same object and credential mode. Timeout never enables a host
+credential. A single anonymous-to-authenticated transition is allowed only for
+an explicit anonymous 401, authentication-required 403, or rate-limit response
+that can benefit from authentication; the token exists only in that attempt's
+environment. Authenticated authentication failure, 404, unsafe paths, size
+mismatch, unknown command failure, resource exhaustion, and exhausted bundle
+deadline fail closed.
+
+The explicit transport policy remains unchanged: `github` and
+`official-mirror` are selected independently, `fallback_allowed=false`, and a
+failure never selects the other source. Both transports consume the same four
+plans and must still pass checksums, manifest, deployment-contract, tag, and
+attestation verification before producing `VerifiedReleaseMaterials`.
+
 The Stateful Upgrade gate treats the historical commit as the Base application
 source, not as dependency-image authority. Its current-owned final Compose
 override projects PostgreSQL and Redis only from
