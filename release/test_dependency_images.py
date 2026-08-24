@@ -49,6 +49,85 @@ def authority_bytes(**overrides: object) -> bytes:
 
 
 class DependencyImageAuthorityTests(unittest.TestCase):
+    def test_release_package_import_is_standard_library_only(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                "-c",
+                (
+                    "import sys; import release; "
+                    "assert 'release.contract' not in sys.modules; "
+                    "assert 'jsonschema' not in sys.modules"
+                ),
+            ],
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_standard_library_module_entrypoints_remain_runnable(self) -> None:
+        commands = (
+            ("release.dependency_images", "emit-github-env"),
+            ("release.registry_transport", "--help"),
+        )
+        for module, argument in commands:
+            with self.subTest(module=module):
+                result = subprocess.run(
+                    [sys.executable, "-S", "-m", module, argument],
+                    cwd=ROOT,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_release_top_level_public_api_is_preserved_and_lazy(self) -> None:
+        expected = (
+            "ReleaseContractError",
+            "assert_tag_absent",
+            "build_manifest",
+            "promote_manifest",
+            "resolve_prerelease",
+            "validate_manifest",
+        )
+        script = f"""
+import sys
+import release
+assert tuple(release.__all__) == {expected!r}
+assert "release.contract" not in sys.modules
+from release import (
+    ReleaseContractError,
+    assert_tag_absent,
+    build_manifest,
+    promote_manifest,
+    resolve_prerelease,
+    validate_manifest,
+)
+assert "release.contract" in sys.modules
+assert release.build_manifest is build_manifest
+assert all(name in dir(release) for name in release.__all__)
+try:
+    getattr(release, "unknown_public_export")
+except AttributeError:
+    pass
+else:
+    raise AssertionError("unknown export did not fail")
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_canonical_file_loads_exact_closed_roles(self) -> None:
         authority = load_dependency_image_authority()
         self.assertEqual(authority.schema_version, 1)
