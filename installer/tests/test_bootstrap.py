@@ -167,15 +167,96 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
         self.assertIn("--source official-mirror", stage0)
         self.assertIn('/usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"', stage0)
         self.assertIn(
-            '/usr/bin/gh auth token >"$GH_TOKEN_PIPE" &',
+            "/usr/bin/timeout --signal=TERM --kill-after=5s 30s \\\n"
+            '  /usr/bin/gh auth token >"$GH_TOKEN_PIPE" &',
             stage0,
         )
-        self.assertIn('IFS= read -r GH_TOKEN <"$GH_TOKEN_PIPE"', stage0)
+        self.assertIn('IFS= read -r -t 35 GH_TOKEN <"$GH_TOKEN_PIPE"', stage0)
         self.assertIn("export GH_TOKEN", stage0)
+        installer_execution = stage0.index('"$RUNTIME/bin/python" -P -B -m installer')
+        credential_export = stage0.rindex("export GH_TOKEN", 0, installer_execution)
+        final_launch = stage0.index(
+            '/usr/bin/chmod -R a+rX,go-w "$RUNTIME"', credential_export
+        )
+        self.assertLess(credential_export, installer_execution)
+        self.assertNotIn(
+            "/usr/bin/env -i",
+            stage0[final_launch:installer_execution],
+        )
+        self.assertIn(
+            "export HOME PATH LANG LC_ALL GH_PROMPT_DISABLED GH_TOKEN",
+            stage0[credential_export:installer_execution],
+        )
         self.assertNotIn("gh release download", stage0)
         self.assertNotIn("download.animemo.app", stage0)
         self.assertNotIn("curl |", stage0)
         self.assertNotIn("rm -rf", stage0)
+
+    @unittest.skipUnless(os.name == "posix", "Credential handoff requires POSIX FIFO")
+    def test_ephemeral_credential_crosses_the_real_fifo_with_deadlines(self) -> None:
+        stage0 = _official_mirror_stage0_contract()
+        start = stage0.index('/usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"')
+        end = stage0.index("sudo /usr/bin/env -i", start)
+        producer = stage0[start:end].replace(
+            "/usr/bin/gh auth token",
+            "/usr/bin/printf '%s\\n' github_pat_fixture",
+        )
+        reader = 'IFS= read -r -t 35 GH_TOKEN <"$GH_TOKEN_PIPE"'
+        script = (
+            "set -euo pipefail\n"
+            'GH_TOKEN_PIPE="$TEST_ROOT/gh-token.pipe"\n'
+            + producer
+            + reader
+            + "\n"
+            + 'wait "$GH_TOKEN_WRITER"\n'
+            + 'test "$GH_TOKEN" = github_pat_fixture\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                ["/bin/bash", "--noprofile", "--norc"],
+                input=script,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+                env={"TEST_ROOT": directory, "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(os.name == "posix", "Credential handoff requires POSIX FIFO")
+    def test_ephemeral_credential_handoff_fails_closed_on_producer_stall(self) -> None:
+        stage0 = _official_mirror_stage0_contract()
+        start = stage0.index('/usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"')
+        end = stage0.index("sudo /usr/bin/env -i", start)
+        producer = (
+            stage0[start:end]
+            .replace("--kill-after=5s 30s", "--kill-after=1s 1s")
+            .replace("/usr/bin/gh auth token", "/usr/bin/sleep 30")
+        )
+        reader = 'IFS= read -r -t 35 GH_TOKEN <"$GH_TOKEN_PIPE"'.replace(
+            "-t 35", "-t 2"
+        )
+        script = (
+            "set -euo pipefail\n"
+            'GH_TOKEN_PIPE="$TEST_ROOT/gh-token.pipe"\n'
+            + producer
+            + reader
+            + "\n"
+            + 'wait "$GH_TOKEN_WRITER"\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                ["/bin/bash", "--noprofile", "--norc"],
+                input=script,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=6,
+                env={"TEST_ROOT": directory, "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+            )
+
+        self.assertNotEqual(result.returncode, 0)
 
     def test_failed_protected_reverification_rolls_back_only_this_invocation(self) -> None:
         stage0 = _official_mirror_stage0_contract()

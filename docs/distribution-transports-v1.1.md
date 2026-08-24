@@ -99,7 +99,8 @@ MIRROR_URL="https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/$E
   --repo yanyuhanyue/AniMemo
 
 /usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"
-/usr/bin/gh auth token >"$GH_TOKEN_PIPE" &
+/usr/bin/timeout --signal=TERM --kill-after=5s 30s \
+  /usr/bin/gh auth token >"$GH_TOKEN_PIPE" &
 GH_TOKEN_WRITER=$!
 sudo /usr/bin/env -i EXACT_TAG="$EXACT_TAG" MIRROR_CANDIDATE="$MIRROR_CANDIDATE" \
   GH_TOKEN_PIPE="$GH_TOKEN_PIPE" \
@@ -108,7 +109,7 @@ sudo /usr/bin/env -i EXACT_TAG="$EXACT_TAG" MIRROR_CANDIDATE="$MIRROR_CANDIDATE"
 set -euo pipefail
 umask 077
 test -p "$GH_TOKEN_PIPE"
-IFS= read -r GH_TOKEN <"$GH_TOKEN_PIPE"
+IFS= read -r -t 35 GH_TOKEN <"$GH_TOKEN_PIPE"
 test -n "$GH_TOKEN"
 export GH_TOKEN
 ANIMEMO_ROOT=/var/lib/animemo
@@ -217,14 +218,14 @@ assert_safe_root_directory "$RUNTIME" 700
   -r "$MATERIALS/release/requirements.txt" \
   -r "$MATERIALS/durability/requirements.txt"
 /usr/bin/chmod -R a+rX,go-w "$RUNTIME"
-/usr/bin/env -i -C "$MATERIALS" \
-  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
-  LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-  PYTHONPATH="$MATERIALS" \
-  PYTHONSAFEPATH=1 \
+(
+  cd "$MATERIALS"
+  export HOME PATH LANG LC_ALL GH_PROMPT_DISABLED GH_TOKEN
+  export PYTHONPATH="$MATERIALS" PYTHONSAFEPATH=1
   "$RUNTIME/bin/python" -P -B -m installer \
-  install --version "$EXACT_TAG" --source official-mirror \
-  --public-origin '<PUBLIC_ORIGIN>' --non-interactive --accept <INSTALLER_ARGS>
+    install --version "$EXACT_TAG" --source official-mirror \
+    --public-origin '<PUBLIC_ORIGIN>' --non-interactive --accept <INSTALLER_ARGS>
+)
 completed=1
 ANIMEMO_PROTECTED_HANDOFF
 wait "$GH_TOKEN_WRITER"
@@ -232,7 +233,7 @@ GH_TOKEN_WRITER=''
 # OFFICIAL_MIRROR_STAGE0_END
 ```
 
-这段流程不从 install.animemo.cc 执行脚本，不读取 mirror receipt 作为权威，也不使用 `latest`、query、任意 URL 或 GitHub/mirror 自动 fallback。候选资产在首次 `verify-asset` 前不会进入 root-owned 路径；受保护副本的任一次再验证失败都会由 trap 清除本次创建的候选和 final path，不留下 AniMemo 持久 mutation。只有两次受保护副本验证完成后才解包、创建 venv 并执行 AniMemo Python byte。隔离运行时只从同一副本绑定的 wheelhouse 安装两份固定 requirements，显式禁止索引、源码包与缓存，不继承系统或用户 site-packages。`env -C`、`PYTHONSAFEPATH=1` 与 Python `-P` 同时把当前目录移出模块搜索前缀。Installer 随后在任何产品 mutation 前再次验证受保护副本，将已加载的核心模块逐字节绑定回该 tar，才消费闭合的 `BOOTSTRAP_PRIVILEGE_GATE`。
+这段流程不从 install.animemo.cc 执行脚本，不读取 mirror receipt 作为权威，也不使用 `latest`、query、任意 URL 或 GitHub/mirror 自动 fallback。候选资产在首次 `verify-asset` 前不会进入 root-owned 路径；受保护副本的任一次再验证失败都会由 trap 清除本次创建的候选和 final path，不留下 AniMemo 持久 mutation。只有两次受保护副本验证完成后才解包、创建 venv 并执行 AniMemo Python byte。隔离运行时只从同一副本绑定的 wheelhouse 安装两份固定 requirements，显式禁止索引、源码包与缓存，不继承系统或用户 site-packages。受限权限交接只通过 mode `0600` 的一次性 FIFO 传递当前 GitHub CLI 凭据，producer 与 reader 都有 deadline；凭据不进入 argv、持久文件或输出，并只在已由外层 `env -i` 清洗的 root shell 中导出。受保护材料目录的显式 `cd`、`PYTHONSAFEPATH=1` 与 Python `-P` 同时约束模块搜索前缀。Installer 随后在任何产品 mutation 前再次验证受保护副本，将已加载的核心模块逐字节绑定回该 tar，才消费闭合的 `BOOTSTRAP_PRIVILEGE_GATE`。
 
 非交互执行必须显式提供 `--public-origin`。需要 Official Mirror 时，额外提供 `--source official-mirror`；失败不会自动调用 GitHub transport。Portable CTA 在 authority 冻结前不会提供绕过命令。
 
