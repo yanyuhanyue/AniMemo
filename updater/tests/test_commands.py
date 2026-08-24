@@ -241,6 +241,44 @@ class CommandRunnerTests(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 10)
             self.assertFalse(destination.exists())
 
+    def test_write_gzip_deadline_is_not_extended_by_a_pipe_holding_descendant(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "descendant.sql.gz"
+            child = (
+                "import subprocess,sys; "
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(4)']); "
+                "sys.stdout.buffer.write(b'SELECT 1;\\n'); sys.stdout.flush()"
+            )
+            started = time.monotonic()
+            CommandRunner().write_gzip(
+                [sys.executable, "-c", child],
+                destination,
+                timeout=1,
+            )
+
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertTrue(destination.exists())
+
+    def test_write_gzip_caller_interrupt_kills_and_reaps_the_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            process = MagicMock()
+            process.stdout = io.BytesIO(b"")
+            process.stderr = io.BytesIO(b"")
+            process.wait.side_effect = [KeyboardInterrupt(), 0]
+            process.poll.return_value = None
+            with (
+                patch("updater.commands.subprocess.Popen", return_value=process),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                CommandRunner().write_gzip(
+                    ["backup-tool", "dump"],
+                    Path(directory) / "interrupt.sql.gz",
+                    timeout=1,
+                )
+
+            process.kill.assert_called_once_with()
+            self.assertEqual(process.wait.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
