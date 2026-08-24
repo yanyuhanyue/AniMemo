@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -12,10 +13,13 @@ from enum import Enum
 from typing import NoReturn
 
 from .dependency_images import (
+    AUTHORITY,
     DependencyImage,
     DependencyImageAuthority,
     DependencyImageAuthorityError,
-    load_dependency_image_authority,
+    compose_env_lines,
+    github_env_lines,
+    validate_dependency_image,
 )
 
 MAX_ATTEMPTS = 3
@@ -24,17 +28,17 @@ COMMAND_TIMEOUT_SECONDS = 180
 INSPECT_TIMEOUT_SECONDS = 30
 MAX_DIAGNOSTIC_CHARACTERS = 4096
 
-_REPOSITORY = re.compile(
-    r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?"
-    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+"
-)
-_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
-_REFERENCE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-_HTTP_STATUS = re.compile(
-    r"(?:http(?:/\d(?:\.\d)?)?\s+|http status(?: code)?\s*[:=]?\s*|"
-    r"status(?: code)?\s*[:=]\s*)([0-9]{3})",
-    re.IGNORECASE,
+_HTTP_STATUS_PATTERNS = (
+    re.compile(
+        r"(?:http(?:/\d(?:\.\d)?)?\s+|http status(?: code)?\s*[:=]?\s*|"
+        r"status(?: code)?\s*[:=]\s*)([0-9]{3})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"unexpected status from [^\r\n]*?:\s*([0-9]{3})\b",
+        re.IGNORECASE,
+    ),
 )
 _RETRYABLE_HTTP = frozenset((429, 500, 502, 503, 504))
 _TERMINAL_PATTERNS = (
@@ -153,7 +157,11 @@ def sanitize_diagnostic(raw: bytes) -> str:
 def classify_diagnostic(raw: bytes) -> DiagnosticClassification:
     diagnostic = sanitize_diagnostic(raw)
     lowered = diagnostic.lower()
-    statuses = {int(match) for match in _HTTP_STATUS.findall(diagnostic)}
+    statuses = {
+        int(match)
+        for pattern in _HTTP_STATUS_PATTERNS
+        for match in pattern.findall(diagnostic)
+    }
     if any(pattern in lowered for pattern in _TERMINAL_PATTERNS):
         return DiagnosticClassification.TERMINAL
     if statuses and any(status not in _RETRYABLE_HTTP for status in statuses):
@@ -180,15 +188,14 @@ def _command_diagnostic(result: CommandResult) -> bytes:
     return result.stdout + (b"\n" if result.stdout and result.stderr else b"") + result.stderr
 
 
-def _validate_reference(image: DependencyImage) -> None:
-    if (
-        image.role not in ("postgres", "redis")
-        or image.platform != "linux/amd64"
-        or not _REPOSITORY.fullmatch(image.repository)
-        or not _DIGEST.fullmatch(image.digest)
-        or not _REFERENCE.fullmatch(image.reference)
-        or image.reference != f"{image.repository}@{image.digest}"
-    ):
+def _validate_reference(image: DependencyImage, *, expected_role: str) -> None:
+    try:
+        validate_dependency_image(image)
+    except DependencyImageAuthorityError as error:
+        raise DependencyImageTransportError(
+            "DEPENDENCY_IMAGE_REFERENCE_INVALID"
+        ) from error
+    if image.role != expected_role:
         _error("DEPENDENCY_IMAGE_REFERENCE_INVALID")
 
 
@@ -261,14 +268,14 @@ def pull_dependency_image(
     sleep: Sleep = time.sleep,
     authority: DependencyImageAuthority | None = None,
 ) -> PullReceipt:
-    authority = authority or load_dependency_image_authority()
+    authority = authority or AUTHORITY
     try:
         image = authority.image(role)
     except DependencyImageAuthorityError as error:
         raise DependencyImageTransportError(
             "DEPENDENCY_IMAGE_REFERENCE_INVALID"
         ) from error
-    _validate_reference(image)
+    _validate_reference(image, expected_role=role)
 
     inspection = _inspect_image(image, run_command=run_command, cache_probe=True)
     if inspection is not None:
@@ -343,6 +350,26 @@ def pull_dependency_image(
     )
 
 
+def pull_all_dependency_images(
+    *,
+    run_command: RunCommand = _run_command,
+    sleep: Sleep = time.sleep,
+    authority: DependencyImageAuthority | None = None,
+    pull_image: Callable[..., object] | None = None,
+) -> tuple[object, object]:
+    authority = authority or AUTHORITY
+    pull_image = pull_image or pull_dependency_image
+    return tuple(
+        pull_image(
+            role,
+            run_command=run_command,
+            sleep=sleep,
+            authority=authority,
+        )
+        for role in authority.roles
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Fetch and verify one canonical dependency image."
@@ -350,15 +377,31 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     pull = subparsers.add_parser("pull")
     pull.add_argument("--role", required=True, choices=("postgres", "redis"))
+    pull_all = subparsers.add_parser("pull-all")
+    pull_all.add_argument(
+        "--projection",
+        required=True,
+        choices=("github-env", "compose-env"),
+    )
     args = parser.parse_args(argv)
-    if args.command != "pull":
-        return 2
+    expected_identity = os.environ.get("DEPENDENCY_IMAGE_AUTHORITY_SHA256")
+    if expected_identity is not None and expected_identity != AUTHORITY.identity:
+        print("DEPENDENCY_IMAGE_AUTHORITY_SNAPSHOT_MISMATCH", file=sys.stderr)
+        return 1
     try:
-        receipt = pull_dependency_image(args.role)
+        if args.command == "pull":
+            receipt = pull_dependency_image(args.role, authority=AUTHORITY)
+        else:
+            pull_all_dependency_images(authority=AUTHORITY)
     except DependencyImageTransportError as error:
         print(str(error), file=sys.stderr)
         return 1
-    print(json.dumps(asdict(receipt), sort_keys=True, separators=(",", ":")))
+    if args.command == "pull":
+        print(json.dumps(asdict(receipt), sort_keys=True, separators=(",", ":")))
+    elif args.projection == "github-env":
+        print("\n".join(github_env_lines(AUTHORITY)))
+    else:
+        print("\n".join(compose_env_lines(AUTHORITY)))
     return 0
 
 

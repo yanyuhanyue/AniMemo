@@ -19,6 +19,7 @@ from release.dependency_images import (
     REDIS_IMAGE,
     REDIS_REPOSITORY,
     DependencyImageAuthorityError,
+    compose_env_lines,
     github_env_lines,
     load_dependency_image_authority,
     parse_dependency_image_authority,
@@ -212,6 +213,19 @@ class DependencyImageAuthorityTests(unittest.TestCase):
             (
                 f"POSTGRES_IMAGE={POSTGRES_IMAGE}",
                 f"REDIS_IMAGE={REDIS_IMAGE}",
+                f"DEPENDENCY_IMAGE_AUTHORITY_SHA256={authority.identity}",
+            ),
+        )
+        self.assertTrue(all("\n" not in line and "\r" not in line for line in lines))
+
+    def test_compose_env_projection_is_fixed_order_single_line_and_complete(self) -> None:
+        authority = load_dependency_image_authority()
+        lines = compose_env_lines(authority)
+        self.assertEqual(
+            lines,
+            (
+                f"ANIMEMO_POSTGRES_IMAGE={POSTGRES_IMAGE}",
+                f"ANIMEMO_REDIS_IMAGE={REDIS_IMAGE}",
                 f"DEPENDENCY_IMAGE_AUTHORITY_SHA256={authority.identity}",
             ),
         )

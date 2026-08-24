@@ -188,9 +188,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"
-          python -m release.registry_transport pull --role postgres
-          python -m release.registry_transport pull --role redis
+          python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"
       - name: Prepare the disposable production-like environment
         shell: bash
         run: |
@@ -385,9 +383,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"
-          python -m release.registry_transport pull --role postgres
-          python -m release.registry_transport pull --role redis
+          python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"
       - name: Prepare the unique disposable capacity environment
         shell: bash
         run: |

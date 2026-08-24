@@ -1160,7 +1160,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("docker.io/library/postgres@sha256:", release)
         self.assertNotIn("docker.io/library/redis@sha256:", release)
         self.assertIn(
-            'python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"',
+            'python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"',
             release,
         )
         self.assertIn('test "$UPGRADE_BASE_SHA" != "$GITHUB_SHA"', release)
@@ -1177,21 +1177,17 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "release-gate.yml": 3,
             "performance.yml": 2,
         }
-        projection = 'python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"'
+        projection = (
+            'python -m release.registry_transport pull-all --projection github-env '
+            '>> "$GITHUB_ENV"'
+        )
         for name, count in expected_counts.items():
             source = (ROOT / ".github" / "workflows" / name).read_text(
                 encoding="utf-8"
             )
             with self.subTest(workflow=name):
                 self.assertEqual(source.count(projection), count)
-                self.assertEqual(
-                    source.count("python -m release.registry_transport pull --role postgres"),
-                    count,
-                )
-                self.assertEqual(
-                    source.count("python -m release.registry_transport pull --role redis"),
-                    count,
-                )
+                self.assertNotIn("release.registry_transport pull --role", source)
                 self.assertNotIn("docker.io/library/postgres@sha256:", source)
                 self.assertNotIn("docker.io/library/redis@sha256:", source)
 
@@ -1221,18 +1217,24 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "rehearse-release-images.sh",
         ):
             source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+            active_source = "\n".join(
+                line
+                for line in source.splitlines()
+                if not line.lstrip().startswith("#")
+            )
             with self.subTest(script=name):
                 self.assertEqual(
-                    source.count("dependency_images.py\" emit-github-env"), 1
+                    source.count(
+                        "release.registry_transport pull-all --projection compose-env"
+                    ),
+                    1,
                 )
-                self.assertEqual(
-                    source.count("release.registry_transport pull --role postgres"), 1
+                self.assertNotIn("dependency_images.py\" emit-github-env", source)
+                self.assertNotIn("release.registry_transport pull --role", source)
+                self.assertNotIn(
+                    "docker.io/library/postgres@sha256:", active_source
                 )
-                self.assertEqual(
-                    source.count("release.registry_transport pull --role redis"), 1
-                )
-                self.assertNotIn("docker.io/library/postgres@sha256:", source)
-                self.assertNotIn("docker.io/library/redis@sha256:", source)
+                self.assertNotIn("docker.io/library/redis@sha256:", active_source)
 
     def test_publish_acquires_dependencies_before_any_external_mutation(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -1240,6 +1242,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         publish = source[source.index("  publish:") :]
         pull_gate = publish.index("Acquire exact dependency images before external publication")
+        dependency_layouts = publish.index(
+            "Materialize exact dependency OCI layouts before external publication"
+        )
         for mutation_marker in (
             "docker/login-action",
             "docker push",
@@ -1249,6 +1254,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ):
             with self.subTest(marker=mutation_marker):
                 self.assertLess(pull_gate, publish.index(mutation_marker))
+                self.assertLess(dependency_layouts, publish.index(mutation_marker))
+        post_mutation = publish[publish.index("Publish only the already rehearsed images") :]
+        self.assertNotIn('export_layout postgres "$POSTGRES_IMAGE"', post_mutation)
+        self.assertNotIn('export_layout redis "$REDIS_IMAGE"', post_mutation)
 
     def test_release_verifier_is_built_offline_from_a_pinned_go_toolchain(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -1536,6 +1545,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         bindings = set(
             re.findall(r"^([A-Z0-9_]+)=", env_file.group("body"), re.MULTILINE)
         )
+        if "release.registry_transport pull-all --projection compose-env" in source:
+            bindings.update(
+                {"ANIMEMO_POSTGRES_IMAGE", "ANIMEMO_REDIS_IMAGE"}
+            )
 
         self.assertSetEqual(required - bindings, set())
         self.assertLess(

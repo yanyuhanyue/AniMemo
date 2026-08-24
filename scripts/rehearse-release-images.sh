@@ -38,26 +38,6 @@ if [[ -z "${RUNNER_TEMP:-}" || "$RUNNER_TEMP" != /* ]]; then
   exit 2
 fi
 
-mapfile -t dependency_authority < <(
-  python3 -I "$ROOT/release/dependency_images.py" emit-github-env
-)
-if [[ "${#dependency_authority[@]}" -ne 3 ||
-      "${dependency_authority[0]}" != POSTGRES_IMAGE=* ||
-      "${dependency_authority[1]}" != REDIS_IMAGE=* ||
-      "${dependency_authority[2]}" != DEPENDENCY_IMAGE_AUTHORITY_SHA256=sha256:* ]]; then
-  echo "Canonical dependency image authority projection is invalid." >&2
-  exit 1
-fi
-POSTGRES_IMAGE="${dependency_authority[0]#POSTGRES_IMAGE=}"
-REDIS_IMAGE="${dependency_authority[1]#REDIS_IMAGE=}"
-DEPENDENCY_IMAGE_AUTHORITY_SHA256="${dependency_authority[2]#DEPENDENCY_IMAGE_AUTHORITY_SHA256=}"
-ANIMEMO_POSTGRES_IMAGE="$POSTGRES_IMAGE"
-ANIMEMO_REDIS_IMAGE="$REDIS_IMAGE"
-export POSTGRES_IMAGE REDIS_IMAGE DEPENDENCY_IMAGE_AUTHORITY_SHA256
-export ANIMEMO_POSTGRES_IMAGE ANIMEMO_REDIS_IMAGE
-(cd "$ROOT" && python3 -m release.registry_transport pull --role postgres)
-(cd "$ROOT" && python3 -m release.registry_transport pull --role redis)
-
 TEMP_ROOT="$(mktemp -d "$RUNNER_TEMP/animemo-release-images.XXXXXX")"
 case "$TEMP_ROOT" in
   "$RUNNER_TEMP"/*) ;;
@@ -69,6 +49,10 @@ PROJECT_NAME="$(printf '%s' "$PROJECT_NAME" | tr '[:upper:]_' '[:lower:]-' | tr 
 DATA_ROOT="$TEMP_ROOT/data"
 META_ROOT="$TEMP_ROOT/meta"
 ENV_FILE="$TEMP_ROOT/rehearsal.env"
+DEPENDENCY_ENV_FILE="$TEMP_ROOT/dependency-images.env"
+(cd "$ROOT" && python3 -m release.registry_transport pull-all --projection compose-env) \
+  > "$DEPENDENCY_ENV_FILE"
+chmod 600 "$DEPENDENCY_ENV_FILE"
 COMPOSE=(
   docker compose
   --project-name "$PROJECT_NAME"
@@ -120,8 +104,6 @@ ANIMEMO_MANAGED_ENV_PATH=$ENV_FILE
 ANIMEMO_UPDATER_RUNTIME_ROOT=$TEMP_ROOT/updater-runtime
 ANIMEMO_API_IMAGE=$API_IMAGE
 ANIMEMO_WEB_IMAGE=$WEB_IMAGE
-ANIMEMO_POSTGRES_IMAGE=$ANIMEMO_POSTGRES_IMAGE
-ANIMEMO_REDIS_IMAGE=$ANIMEMO_REDIS_IMAGE
 ANIMEMO_RELEASE_VERSION=$VERSION
 ANIMEMO_RELEASE_COMMIT=$COMMIT
 ANIMEMO_RELEASE_CHANNEL=$CHANNEL
@@ -132,6 +114,7 @@ STATEFUL_UPGRADE_ENV_FILE=$ENV_FILE
 STATEFUL_UPGRADE_HELPER_ROOT=$ROOT
 STATEFUL_UPGRADE_META_ROOT=$META_ROOT
 EOF
+cat "$DEPENDENCY_ENV_FILE" >> "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
 export ANIMEMO_DATA_ROOT="$DATA_ROOT"

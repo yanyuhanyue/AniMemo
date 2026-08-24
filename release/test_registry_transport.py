@@ -15,6 +15,7 @@ from release.registry_transport import (
     DependencyImageTransportError,
     DiagnosticClassification,
     classify_diagnostic,
+    pull_all_dependency_images,
     pull_dependency_image,
     sanitize_diagnostic,
 )
@@ -160,6 +161,34 @@ class RegistryTransportTests(unittest.TestCase):
             [CommandResult(1, b"", REAL_QUALIFICATION_502_FIXTURE)]
         )
         self.assertEqual(receipt.attempts, 2)
+
+    def test_docker_head_request_status_is_classified(self) -> None:
+        self.assertEqual(
+            classify_diagnostic(
+                b"unexpected status from HEAD request to https://registry.example/v2/x: 503 Service Unavailable"
+            ),
+            DiagnosticClassification.RETRYABLE,
+        )
+        self.assertEqual(
+            classify_diagnostic(
+                b"unexpected status from HEAD request to https://registry.example/v2/x: 401 Unauthorized"
+            ),
+            DiagnosticClassification.TERMINAL,
+        )
+
+    def test_pull_all_uses_one_authority_snapshot_for_both_roles(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        def pull(role: str, *, authority, **_kwargs):
+            calls.append((role, authority))
+            return role
+
+        receipts = pull_all_dependency_images(
+            authority=self.authority,
+            pull_image=pull,
+        )
+        self.assertEqual(receipts, ("postgres", "redis"))
+        self.assertEqual(calls, [("postgres", self.authority), ("redis", self.authority)])
 
     def test_terminal_http_statuses_stop_immediately(self) -> None:
         for status in (400, 401, 403, 404):

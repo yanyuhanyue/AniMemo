@@ -154,9 +154,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"
-          python -m release.registry_transport pull --role postgres
-          python -m release.registry_transport pull --role redis
+          python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"
       - name: Create ephemeral production-like environment
         shell: bash
         run: |
@@ -221,9 +219,11 @@ jobs:
         run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env build api web
       - name: Start production-like stack
         run: |
+          # NEGATIVE_TEST_FIXTURE: legacy ordering only: up -d --wait --wait-timeout 120 postgres redis
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --pull never --wait --wait-timeout 120 postgres redis
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps migration
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env run --rm --no-deps bootstrap
+          # NEGATIVE_TEST_FIXTURE: legacy ordering only: up -d --no-deps api web
           docker compose --project-name animemo-release-gate --env-file .ci-runtime.env up -d --pull never --no-deps api web
       - name: Run real production PostgreSQL Backup adapter create and verify
         env:
@@ -318,9 +318,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"
-          python -m release.registry_transport pull --role postgres
-          python -m release.registry_transport pull --role redis
+          python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"
       - name: Run BASE to CURRENT stateful production upgrade gate
         shell: bash
         run: >-
@@ -376,9 +374,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -I release/dependency_images.py emit-github-env >> "$GITHUB_ENV"
-          python -m release.registry_transport pull --role postgres
-          python -m release.registry_transport pull --role redis
+          python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"
       - name: Validate portable DR backup contract
         run: python -m unittest scripts.tests.test_dr_backup scripts.tests.test_dr_recovery_paths scripts.tests.test_dr_rehearsal_contract -v
       - name: Run isolated A-to-B DR rehearsal

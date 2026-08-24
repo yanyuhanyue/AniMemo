@@ -60,6 +60,20 @@ class DependencyImageAuthority:
         _fail("ROLE_INVALID")
 
 
+def validate_dependency_image(image: DependencyImage) -> DependencyImage:
+    if image.role not in _ROLES:
+        _fail("ROLE_INVALID")
+    if not isinstance(image.repository, str) or not _REPOSITORY.fullmatch(
+        image.repository
+    ):
+        _fail("REPOSITORY_INVALID")
+    if not isinstance(image.digest, str) or not _DIGEST.fullmatch(image.digest):
+        _fail("DIGEST_INVALID")
+    if image.platform != "linux/amd64":
+        _fail("PLATFORM_INVALID")
+    return image
+
+
 def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -121,17 +135,13 @@ def parse_dependency_image_authority(raw: bytes) -> DependencyImageAuthority:
         repository = raw_image["repository"]
         digest = raw_image["digest"]
         platform = raw_image["platform"]
-        if not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository):
-            _fail("REPOSITORY_INVALID")
-        if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
-            _fail("DIGEST_INVALID")
-        if platform != "linux/amd64":
-            _fail("PLATFORM_INVALID")
-        images[role] = DependencyImage(
-            role=role,
-            repository=repository,
-            digest=digest,
-            platform=platform,
+        images[role] = validate_dependency_image(
+            DependencyImage(
+                role=role,
+                repository=repository,
+                digest=digest,
+                platform=platform,
+            )
         )
 
     canonical = _canonical_bytes(images)
@@ -165,6 +175,16 @@ def github_env_lines(
     )
 
 
+def compose_env_lines(
+    authority: DependencyImageAuthority,
+) -> tuple[str, str, str]:
+    return (
+        f"ANIMEMO_POSTGRES_IMAGE={authority.postgres.reference}",
+        f"ANIMEMO_REDIS_IMAGE={authority.redis.reference}",
+        f"DEPENDENCY_IMAGE_AUTHORITY_SHA256={authority.identity}",
+    )
+
+
 AUTHORITY = load_dependency_image_authority()
 POSTGRES_REPOSITORY = AUTHORITY.postgres.repository
 POSTGRES_DIGEST = AUTHORITY.postgres.digest
@@ -182,8 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=("emit-github-env",))
     args = parser.parse_args(argv)
     if args.command == "emit-github-env":
-        authority = load_dependency_image_authority()
-        sys.stdout.write("\n".join(github_env_lines(authority)) + "\n")
+        sys.stdout.write("\n".join(github_env_lines(AUTHORITY)) + "\n")
         return 0
     return 2
 
