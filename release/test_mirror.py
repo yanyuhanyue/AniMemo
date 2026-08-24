@@ -22,6 +22,7 @@ from release.mirror import (
     build_mirror_receipt,
     load_mirror_receipt_bytes,
     mirror_release_assets,
+    publish_release_mirror,
     validate_mirror_receipt,
 )
 
@@ -90,6 +91,25 @@ class MemoryPublicReader:
         key = url.removeprefix(MIRROR_ORIGIN + "/")
         content = self.store.objects[key]
         return 206, {"Accept-Ranges": "bytes"}, content[: 1024 * 1024]
+
+
+class MirrorWorkflowIdentityTests(unittest.TestCase):
+    def test_publisher_rejects_workflow_sha_that_differs_from_main_checkout(self):
+        environment = {
+            "GITHUB_REPOSITORY": "yanyuhanyue/AniMemo",
+            "GITHUB_WORKFLOW_REF": (
+                "yanyuhanyue/AniMemo/.github/workflows/"
+                "release-mirror.yml@refs/heads/main"
+            ),
+            "GITHUB_WORKFLOW_SHA": "1" * 40,
+        }
+        checkout = mock.Mock(returncode=0, stdout=("2" * 40) + "\n")
+        with (
+            mock.patch.dict(os.environ, environment, clear=True),
+            mock.patch("release.mirror.subprocess.run", return_value=checkout),
+            self.assertRaisesRegex(MirrorError, "workflow identity"),
+        ):
+            publish_release_mirror(TAG)
 
 
 class MirrorReceiptTests(unittest.TestCase):

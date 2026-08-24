@@ -57,6 +57,7 @@ jobs:
             "yanyuhanyue/AniMemo/.github/workflows/release-mirror.yml@refs/heads/main"
           git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"
           test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+          test "$GITHUB_WORKFLOW_SHA" = "$(git rev-parse HEAD)"
           test -z "$(git status --porcelain --untracked-files=no)"
           if [[ "$GITHUB_EVENT_NAME" = "release" ]]; then
             test -z "$DISPATCH_TAG"

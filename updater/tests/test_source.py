@@ -25,6 +25,13 @@ from updater.source import (
     GitHubReleaseSource,
     _validate_release_asset_inventory,
 )
+from updater.transport import (
+    AcquiredTransportSet,
+    ExplicitTransportPolicy,
+    TransportObjectReceipt,
+    TransportReceipt,
+    TransportSourceId,
+)
 
 
 def link_directory(link: Path, target: Path) -> None:
@@ -354,6 +361,44 @@ class FakePublicRest:
     def get_attestation_bundle(self, url, *, repository_id):
         self.bundle_calls.append((url, repository_id))
         return self.bundle_payload
+
+
+class RecordingOfficialMirrorTransport:
+    transport_id = TransportSourceId.OFFICIAL_MIRROR
+
+    def __init__(self, manifest) -> None:
+        self.materials = _release_materials(manifest)
+        self.requests = []
+
+    def acquire(self, request, private_staging):
+        self.requests.append(request)
+        receipts = []
+        for plan in request.object_plans:
+            content = self.materials[plan.logical_name]
+            if len(content) != plan.expected_size:
+                raise AssertionError(plan.logical_name)
+            destination = private_staging / plan.logical_name
+            destination.write_bytes(content)
+            receipts.append(
+                TransportObjectReceipt(
+                    logical_name=plan.logical_name,
+                    relative_path=plan.logical_name,
+                    sha256=hashlib.sha256(content).hexdigest(),
+                    size=len(content),
+                )
+            )
+        objects = tuple(receipts)
+        receipt = TransportReceipt(
+            transport_id=self.transport_id,
+            request_identity=request.identity,
+            objects=objects,
+            identity="mirror-transport-receipt-test-fixture",
+        )
+        return AcquiredTransportSet(
+            root=private_staging,
+            objects=objects,
+            receipt=receipt,
+        )
 
 
 class FakeHttpResponse:
@@ -851,6 +896,52 @@ class GitHubReleaseSourceTests(unittest.TestCase):
             verified = source.fetch_verified_materials("v1.1.0")
 
             self.assertEqual(verified.manifest["release"]["version"], "v1.1.0")
+
+    def test_official_mirror_transport_cannot_replace_github_release_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = stable_manifest()
+            manifest["release"]["version"] = "v1.1.0"
+            manifest["release"]["promotedFrom"] = "v1.1.0-rc.1"
+            manifest["releaseNotes"]["tag"] = "v1.1.0"
+            runner = FakeRunner(manifest)
+            rest = FakePublicRest(manifest)
+            transport = RecordingOfficialMirrorTransport(manifest)
+            policy = ExplicitTransportPolicy.official_mirror()
+            source = GitHubReleaseSource(
+                Path(directory),
+                runner=runner,
+                rest=rest,
+                policy=policy,
+                transports={TransportSourceId.OFFICIAL_MIRROR: transport},
+            )
+
+            verified = source.fetch_verified_materials("v1.1.0")
+
+            self.assertEqual(verified.manifest, manifest)
+            self.assertEqual(len(transport.requests), 1)
+            self.assertEqual(
+                transport.requests[0].exact_version,
+                "1.1.0",
+            )
+            github_calls = [path for path, _label in rest.calls]
+            self.assertIn(
+                "/repos/yanyuhanyue/AniMemo/releases/tags/v1.1.0",
+                github_calls,
+            )
+            self.assertIn(
+                "/repos/yanyuhanyue/AniMemo/git/ref/tags/v1.1.0",
+                github_calls,
+            )
+            self.assertEqual(
+                sum(path.startswith("/repos/yanyuhanyue/AniMemo/attestations/") for path in github_calls),
+                5,
+            )
+            command_lines = [" ".join(call) for call in runner.calls]
+            self.assertEqual(
+                sum("attestation verify" in call for call in command_lines),
+                5,
+            )
+            self.assertFalse(any("release download" in call for call in command_lines))
 
     def test_v1_1_release_rejects_portable_transport_asset_lookalike(self):
         with tempfile.TemporaryDirectory() as directory:

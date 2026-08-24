@@ -37,6 +37,10 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             "release-mirror.yml@refs/heads/main",
             mirror,
         )
+        self.assertIn(
+            'test "$GITHUB_WORKFLOW_SHA" = "$(git rev-parse HEAD)"',
+            mirror,
+        )
         self.assertNotIn("github.event.release.body", source)
         self.assertNotIn("github.event.release.name", source)
         self.assertNotIn("github.event.pull_request", source)

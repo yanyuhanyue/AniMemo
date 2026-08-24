@@ -30,6 +30,16 @@ from updater.trust_lifecycle import TrustCommitReceipt
 GH_VERSION_FIXTURE = (
     Path(__file__).with_name("fixtures") / "gh-version-2.97.0.txt"
 )
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _official_mirror_stage0_contract() -> str:
+    source = (PROJECT_ROOT / "docs" / "distribution-transports-v1.1.md").read_text(
+        encoding="utf-8"
+    )
+    return source.split("# OFFICIAL_MIRROR_STAGE0_BEGIN", 1)[1].split(
+        "# OFFICIAL_MIRROR_STAGE0_END", 1
+    )[0]
 
 
 def _digest(data: bytes) -> str:
@@ -123,6 +133,240 @@ class GitHubCliVersionOutputContractTests(unittest.TestCase):
                 with self.assertRaises(GhVersionOutputError) as raised:
                     parse_gh_cli_version_output(output)
                 self.assertEqual(raised.exception.code, code)
+
+
+class OfficialMirrorStage0ContractTests(unittest.TestCase):
+    def test_github_authority_precedes_fixed_mirror_acquisition_and_execution(self) -> None:
+        stage0 = _official_mirror_stage0_contract()
+        release_verify = stage0.index('/usr/bin/gh release verify "$EXACT_TAG"')
+        mirror_download = stage0.index(
+            '/usr/bin/curl --proto \'=https\' --tlsv1.2 --location --max-redirs 0'
+        )
+        candidate_verify = stage0.index(
+            '/usr/bin/gh release verify-asset "$EXACT_TAG" "$MIRROR_CANDIDATE"'
+        )
+        protected_copy = stage0.index(
+            '/usr/bin/install -o root -g root -m 0600 "$MIRROR_CANDIDATE" "$HANDOFF"'
+        )
+        protected_verify = stage0.index(
+            '/usr/bin/gh release verify-asset "$EXACT_TAG" "$PROTECTED"'
+        )
+        extraction = stage0.index('/usr/bin/tar -xf "$PROTECTED"')
+        execution = stage0.index("-m installer \\")
+
+        self.assertLess(release_verify, mirror_download)
+        self.assertLess(mirror_download, candidate_verify)
+        self.assertLess(candidate_verify, protected_copy)
+        self.assertLess(protected_copy, protected_verify)
+        self.assertLess(protected_verify, extraction)
+        self.assertLess(extraction, execution)
+        self.assertIn(
+            'MIRROR_URL="https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/$EXACT_TAG/installer-materials.tar"',
+            stage0,
+        )
+        self.assertIn("--source official-mirror", stage0)
+        self.assertNotIn("gh release download", stage0)
+        self.assertNotIn("download.animemo.app", stage0)
+        self.assertNotIn("curl |", stage0)
+        self.assertNotIn("rm -rf", stage0)
+
+    def test_failed_protected_reverification_rolls_back_only_this_invocation(self) -> None:
+        stage0 = _official_mirror_stage0_contract()
+        self.assertIn("created_protected=0", stage0)
+        self.assertIn("created_protected_root=0", stage0)
+        self.assertIn("completed=0", stage0)
+        self.assertIn('test "$created_protected" = 0 ||', stage0)
+        self.assertIn(
+            'test "$created_protected_root" = 1 && test -e "$PROTECTED_ROOT"',
+            stage0,
+        )
+        self.assertIn('/usr/bin/rm -f -- "$PROTECTED"', stage0)
+        self.assertIn('test ! -L "$path"', stage0)
+        self.assertIn("assert_safe_root_directory /var/lib ''", stage0)
+        self.assertLess(
+            stage0.index('test ! -e "$PROTECTED" && test ! -L "$PROTECTED"'),
+            stage0.index('/usr/bin/ln "$HANDOFF" "$PROTECTED"'),
+        )
+        self.assertLess(
+            stage0.index("created_protected=1"),
+            stage0.index('/usr/bin/ln "$HANDOFF" "$PROTECTED"'),
+        )
+        self.assertLess(
+            stage0.index(
+                '/usr/bin/gh release verify-asset "$EXACT_TAG" "$PROTECTED"'
+            ),
+            stage0.index("completed=1"),
+        )
+        self.assertEqual(stage0.count("--max-redirs 0"), 1)
+        self.assertIn("--connect-timeout 30 --max-time 900", stage0)
+        self.assertIn("--retry 2 --retry-delay 10 --retry-max-time 600", stage0)
+
+    @unittest.skipUnless(os.name == "posix", "Stage-0 shell transaction requires POSIX")
+    def test_candidate_verification_failure_removes_every_stage0_path(self) -> None:
+        stage0 = _official_mirror_stage0_contract()
+        start = stage0.index('STAGE0_DIRECTORY="$(/usr/bin/mktemp -d)"')
+        end = stage0.index('MIRROR_URL="https://download.animemo.cc', start)
+        transaction = stage0[start:end].replace(
+            'STAGE0_DIRECTORY="$(/usr/bin/mktemp -d)"',
+            'STAGE0_DIRECTORY="$TEST_ROOT/candidate"\n'
+            '/usr/bin/install -d -m 0700 -- "$STAGE0_DIRECTORY"',
+        )
+        script = (
+            "set -euo pipefail\n"
+            + transaction
+            + '\nprintf "untrusted" > "$MIRROR_CANDIDATE"\n'
+            + "/bin/false # injected first verify-asset failure\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = subprocess.run(
+                ["/bin/bash", "--noprofile", "--norc"],
+                input=script,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={"TEST_ROOT": str(root), "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(list(root.iterdir()), [])
+
+    @unittest.skipUnless(os.name == "posix", "Stage-0 root transaction requires POSIX")
+    def test_protected_reverification_failure_rolls_back_created_root_tree(self) -> None:
+        sudo = Path("/usr/bin/sudo")
+        if not sudo.exists() or subprocess.run(
+            [str(sudo), "-n", "/bin/true"],
+            check=False,
+            capture_output=True,
+        ).returncode != 0:
+            self.skipTest("passwordless sudo is required for the root transaction test")
+
+        stage0 = _official_mirror_stage0_contract()
+        body = stage0.split("<<'ANIMEMO_PROTECTED_HANDOFF'\n", 1)[1].split(
+            "\nANIMEMO_PROTECTED_HANDOFF", 1
+        )[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.tar"
+            candidate.write_bytes(b"verified candidate fixture")
+            counter = root / "gh-count"
+            counter.write_text("0", encoding="ascii")
+            counter.chmod(0o666)
+            fake_gh = root / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                f'count="$(/usr/bin/cat {counter.as_posix()})"\n'
+                'count="$((count + 1))"\n'
+                f'/usr/bin/printf "%s" "$count" > {counter.as_posix()}\n'
+                'test "$count" -lt 2\n',
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            body = body.replace(
+                "ANIMEMO_ROOT=/var/lib/animemo",
+                'ANIMEMO_ROOT="$TEST_ROOT/animemo"',
+            ).replace(
+                "PROTECTED_ROOT=/var/lib/animemo/bootstrap-authority/v1",
+                'PROTECTED_ROOT="$AUTHORITY_PARENT/v1"',
+            ).replace(
+                "assert_safe_root_directory /var/lib ''",
+                ": # /var/lib is outside the isolated test namespace",
+            ).replace("/usr/bin/gh", fake_gh.as_posix())
+            result = subprocess.run(
+                [
+                    str(sudo),
+                    "-n",
+                    "/usr/bin/env",
+                    "-i",
+                    f"TEST_ROOT={root}",
+                    "EXACT_TAG=v1.1.0-rc.10",
+                    f"MIRROR_CANDIDATE={candidate}",
+                    "HOME=/root",
+                    "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                    "LANG=C.UTF-8",
+                    "LC_ALL=C.UTF-8",
+                    "/bin/bash",
+                    "--noprofile",
+                    "--norc",
+                ],
+                input=body,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(counter.read_text(encoding="ascii"), "2")
+            self.assertFalse((root / "animemo").exists())
+
+    @unittest.skipUnless(os.name == "posix", "Stage-0 root transaction requires POSIX")
+    def test_partial_directory_creation_failure_removes_earlier_parents(self) -> None:
+        sudo = Path("/usr/bin/sudo")
+        if not sudo.exists() or subprocess.run(
+            [str(sudo), "-n", "/bin/true"],
+            check=False,
+            capture_output=True,
+        ).returncode != 0:
+            self.skipTest("passwordless sudo is required for the root transaction test")
+
+        stage0 = _official_mirror_stage0_contract()
+        body = stage0.split("<<'ANIMEMO_PROTECTED_HANDOFF'\n", 1)[1].split(
+            "\nANIMEMO_PROTECTED_HANDOFF", 1
+        )[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.tar"
+            candidate.write_bytes(b"candidate fixture")
+            counter = root / "install-count"
+            counter.write_text("0", encoding="ascii")
+            counter.chmod(0o666)
+            fake_install = root / "install"
+            fake_install.write_text(
+                "#!/bin/sh\n"
+                f'count="$(/usr/bin/cat {counter.as_posix()})"\n'
+                'count="$((count + 1))"\n'
+                f'/usr/bin/printf "%s" "$count" > {counter.as_posix()}\n'
+                'test "$count" -lt 2 || exit 1\n'
+                'exec /usr/bin/install "$@"\n',
+                encoding="utf-8",
+            )
+            fake_install.chmod(0o755)
+            body = body.replace(
+                "ANIMEMO_ROOT=/var/lib/animemo",
+                'ANIMEMO_ROOT="$TEST_ROOT/animemo"',
+            ).replace(
+                "PROTECTED_ROOT=/var/lib/animemo/bootstrap-authority/v1",
+                'PROTECTED_ROOT="$AUTHORITY_PARENT/v1"',
+            ).replace(
+                "assert_safe_root_directory /var/lib ''",
+                ": # /var/lib is outside the isolated test namespace",
+            ).replace("/usr/bin/install", fake_install.as_posix())
+            result = subprocess.run(
+                [
+                    str(sudo),
+                    "-n",
+                    "/usr/bin/env",
+                    "-i",
+                    f"TEST_ROOT={root}",
+                    "EXACT_TAG=v1.1.0-rc.10",
+                    f"MIRROR_CANDIDATE={candidate}",
+                    "HOME=/root",
+                    "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                    "LANG=C.UTF-8",
+                    "LC_ALL=C.UTF-8",
+                    "/bin/bash",
+                    "--noprofile",
+                    "--norc",
+                ],
+                input=body,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(counter.read_text(encoding="ascii"), "2")
+            self.assertFalse((root / "animemo").exists())
 
 
 class BootstrapPrivilegeGateTests(unittest.TestCase):

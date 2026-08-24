@@ -45,57 +45,177 @@ bundle 内自带 checksum、公钥或自声明 trust root 不构成 Release Auth
 
 本安全边界由 `docs/installer-contract-v2.md` 冻结；原 `docs/installer-contract-v1.md` 保持其历史冻结字节不变。
 
-推荐验证步骤不会使用 `curl | sudo sh`，并且精确选择 tag。Ubuntu 24.04 主机还必须先从发行版签名仓库安装 `python3-venv`，使后续已验证 wheelhouse 能在不访问 Python 包索引的条件下形成隔离 Installer 运行时：
+Official Mirror 的固定身份如下；它只运输原始字节，不发布 Release，也不提供 authority fallback：
+
+- provider：Cloudflare R2；
+- bucket：`animemo-release-mirror`；
+- origin：`https://download.animemo.cc`；
+- prefix：`yanyuhanyue/AniMemo/releases/download`；
+- 完整性 marker：`<prefix>/<EXACT_TAG>/mirror-receipt.json`，且只能在五项资产完成后写入。
+
+下列 Ubuntu 24.04 Stage‑0 是正式的 Official Mirror 首装入口。它从 GitHub 官方签名 APT 源安装精确 `/usr/bin/gh` 2.97.0，先验证 GitHub Immutable Release，再以固定 URL 下载 installer materials。`curl --location --max-redirs 0` 明确拒绝任何重定向；retry、连接时间和总时间均有上限。APT 和 Python 运行时依赖属于主机前置条件，不是 AniMemo 产品 mutation。
 
 ```sh
+# OFFICIAL_MIRROR_STAGE0_BEGIN
+set -euo pipefail
+EXACT_TAG='<EXACT_TAG>'
+[[ "$EXACT_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]
+
 sudo /usr/bin/apt-get update
-sudo /usr/bin/apt-get install --yes --no-install-recommends python3-venv
-gh release verify <EXACT_TAG> --repo yanyuhanyue/AniMemo
-gh release download <EXACT_TAG> --repo yanyuhanyue/AniMemo \
-  --pattern installer-materials.tar --dir ./animemo-stage0
-gh release verify-asset <EXACT_TAG> ./animemo-stage0/installer-materials.tar \
-  --repo yanyuhanyue/AniMemo
-```
+sudo /usr/bin/apt-get install --yes --no-install-recommends ca-certificates curl python3-venv
+/usr/bin/curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+  https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+  --output /tmp/githubcli-archive-keyring.gpg
+sudo /usr/bin/install -o root -g root -m 0644 /tmp/githubcli-archive-keyring.gpg \
+  /usr/share/keyrings/githubcli-archive-keyring.gpg
+printf 'deb [arch=%s signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' \
+  "$(/usr/bin/dpkg --print-architecture)" | \
+  sudo /usr/bin/tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+sudo /usr/bin/apt-get update
+sudo /usr/bin/apt-get install --yes --no-install-recommends gh=2.97.0
+test "$(/usr/bin/gh --version | /usr/bin/sed -nE 's/^gh version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | /usr/bin/head -n 1)" = 2.97.0
 
-只有上述两项 authority gate 均通过后，操作员才可用系统工具完成固定的受保护交接（下列命令中的 `<INSTALLER_ARGS>` 必须替换为正常 Installer 参数）：
-
-```sh
-sudo /usr/bin/install -d -o root -g root -m 0700 /var/lib/animemo/bootstrap-authority/v1
-sudo /usr/bin/install -o root -g root -m 0600 \
-  ./animemo-stage0/installer-materials.tar \
-  /var/lib/animemo/bootstrap-authority/v1/installer-materials.tar
-sudo /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
-  LANG=C.UTF-8 LC_ALL=C.UTF-8 GH_PROMPT_DISABLED=1 \
-  /usr/bin/gh release verify-asset <EXACT_TAG> /var/lib/animemo/bootstrap-authority/v1/installer-materials.tar \
+STAGE0_DIRECTORY="$(/usr/bin/mktemp -d)"
+MIRROR_CANDIDATE="$STAGE0_DIRECTORY/installer-materials.tar"
+cleanup_stage0() {
+  /usr/bin/rm -f -- "$MIRROR_CANDIDATE"
+  /usr/bin/rmdir -- "$STAGE0_DIRECTORY"
+}
+trap cleanup_stage0 EXIT
+MIRROR_URL="https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/$EXACT_TAG/installer-materials.tar"
+/usr/bin/gh release verify "$EXACT_TAG" --repo yanyuhanyue/AniMemo
+/usr/bin/curl --proto '=https' --tlsv1.2 --location --max-redirs 0 \
+  --fail --silent --show-error --connect-timeout 30 --max-time 900 \
+  --retry 2 --retry-delay 10 --retry-max-time 600 \
+  --output "$MIRROR_CANDIDATE" "$MIRROR_URL"
+/usr/bin/gh release verify-asset "$EXACT_TAG" "$MIRROR_CANDIDATE" \
   --repo yanyuhanyue/AniMemo
-sudo /usr/bin/install -d -o root -g root -m 0700 \
-  /var/lib/animemo/bootstrap-authority/v1/materials
-sudo /usr/bin/tar -xf /var/lib/animemo/bootstrap-authority/v1/installer-materials.tar \
-  -C /var/lib/animemo/bootstrap-authority/v1/materials --no-same-owner
-sudo /usr/bin/chown -R root:root /var/lib/animemo/bootstrap-authority/v1/materials
-sudo /usr/bin/chmod -R go-w /var/lib/animemo/bootstrap-authority/v1/materials
-sudo /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
-  LANG=C.UTF-8 LC_ALL=C.UTF-8 /usr/bin/python3 -P -B -m venv \
-  /var/lib/animemo/bootstrap-authority/v1/installer-runtime
-sudo /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+
+sudo /usr/bin/env -i EXACT_TAG="$EXACT_TAG" MIRROR_CANDIDATE="$MIRROR_CANDIDATE" \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  GH_PROMPT_DISABLED=1 /bin/bash --noprofile --norc <<'ANIMEMO_PROTECTED_HANDOFF'
+set -euo pipefail
+umask 077
+ANIMEMO_ROOT=/var/lib/animemo
+AUTHORITY_PARENT="$ANIMEMO_ROOT/bootstrap-authority"
+PROTECTED_ROOT=/var/lib/animemo/bootstrap-authority/v1
+PROTECTED="$PROTECTED_ROOT/installer-materials.tar"
+MATERIALS="$PROTECTED_ROOT/materials"
+RUNTIME="$PROTECTED_ROOT/installer-runtime"
+created_animemo_root=0
+created_authority_parent=0
+created_protected_root=0
+created_protected=0
+created_materials=0
+created_runtime=0
+completed=0
+HANDOFF=''
+cleanup() {
+  test -z "$HANDOFF" || /usr/bin/rm -f -- "$HANDOFF"
+  test "$completed" = 1 && return 0
+  if test "$created_runtime" = 1 && test -e "$RUNTIME"; then
+    /usr/bin/find "$RUNTIME" -xdev -depth -mindepth 1 -delete
+    /usr/bin/rmdir -- "$RUNTIME"
+  fi
+  if test "$created_materials" = 1 && test -e "$MATERIALS"; then
+    /usr/bin/find "$MATERIALS" -xdev -depth -mindepth 1 -delete
+    /usr/bin/rmdir -- "$MATERIALS"
+  fi
+  test "$created_protected" = 0 || /usr/bin/rm -f -- "$PROTECTED"
+  if test "$created_protected_root" = 1 && test -e "$PROTECTED_ROOT"; then
+    /usr/bin/rmdir -- "$PROTECTED_ROOT"
+  fi
+  if test "$created_authority_parent" = 1 && test -e "$AUTHORITY_PARENT"; then
+    /usr/bin/rmdir -- "$AUTHORITY_PARENT"
+  fi
+  if test "$created_animemo_root" = 1 && test -e "$ANIMEMO_ROOT"; then
+    /usr/bin/rmdir -- "$ANIMEMO_ROOT"
+  fi
+}
+trap cleanup EXIT
+
+assert_safe_root_directory() {
+  path="$1"
+  exact_mode="$2"
+  test -d "$path"
+  test ! -L "$path"
+  metadata="$(/usr/bin/stat -c '%u:%g:%a' -- "$path")"
+  uid="${metadata%%:*}"
+  remainder="${metadata#*:}"
+  gid="${remainder%%:*}"
+  mode="${remainder##*:}"
+  test "$uid" = 0
+  test "$gid" = 0
+  test $((8#$mode & 022)) = 0
+  test -z "$exact_mode" || test "$mode" = "$exact_mode"
+}
+
+ensure_safe_root_directory() {
+  path="$1"
+  mode="$2"
+  created_flag="$3"
+  if test -L "$path" || { test -e "$path" && test ! -d "$path"; }; then
+    return 1
+  fi
+  if test ! -e "$path"; then
+    printf -v "$created_flag" 1
+    /usr/bin/install -d -o root -g root -m "0$mode" -- "$path"
+  fi
+  assert_safe_root_directory "$path" "$mode"
+}
+
+assert_safe_root_directory /var/lib ''
+ensure_safe_root_directory "$ANIMEMO_ROOT" 700 created_animemo_root
+ensure_safe_root_directory "$AUTHORITY_PARENT" 700 created_authority_parent
+ensure_safe_root_directory "$PROTECTED_ROOT" 700 created_protected_root
+test ! -e "$PROTECTED" && test ! -L "$PROTECTED"
+test ! -e "$MATERIALS" && test ! -L "$MATERIALS"
+test ! -e "$RUNTIME" && test ! -L "$RUNTIME"
+HANDOFF="$(/usr/bin/mktemp -p "$PROTECTED_ROOT" .installer-materials.XXXXXXXX.candidate)"
+/usr/bin/install -o root -g root -m 0600 "$MIRROR_CANDIDATE" "$HANDOFF"
+/usr/bin/gh release verify-asset "$EXACT_TAG" "$HANDOFF" \
+  --repo yanyuhanyue/AniMemo
+created_protected=1
+/usr/bin/ln "$HANDOFF" "$PROTECTED"
+/usr/bin/rm -f -- "$HANDOFF"
+HANDOFF=''
+test -f "$PROTECTED" && test ! -L "$PROTECTED"
+test "$(/usr/bin/stat -c '%u:%g:%a:%h' -- "$PROTECTED")" = '0:0:600:1'
+/usr/bin/gh release verify-asset "$EXACT_TAG" "$PROTECTED" \
+  --repo yanyuhanyue/AniMemo
+
+created_materials=1
+/usr/bin/install -d -o root -g root -m 0700 -- "$MATERIALS"
+assert_safe_root_directory "$MATERIALS" 700
+/usr/bin/tar -xf "$PROTECTED" -C "$MATERIALS" \
+  --no-same-owner --no-same-permissions
+/usr/bin/chown -R --no-dereference root:root "$MATERIALS"
+/usr/bin/chmod -R go-w "$MATERIALS"
+created_runtime=1
+/usr/bin/python3 -P -B -m venv "$RUNTIME"
+assert_safe_root_directory "$RUNTIME" 700
+/usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
   LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-  /var/lib/animemo/bootstrap-authority/v1/installer-runtime/bin/python -P -B -m pip install \
+  "$RUNTIME/bin/python" -P -B -m pip install \
   --disable-pip-version-check --no-cache-dir --no-index --only-binary=:all: \
-  --find-links /var/lib/animemo/bootstrap-authority/v1/materials/wheelhouse \
-  -r /var/lib/animemo/bootstrap-authority/v1/materials/release/requirements.txt \
-  -r /var/lib/animemo/bootstrap-authority/v1/materials/durability/requirements.txt
-sudo /usr/bin/chmod -R a+rX,go-w \
-  /var/lib/animemo/bootstrap-authority/v1/installer-runtime
-sudo /usr/bin/env -i -C /var/lib/animemo/bootstrap-authority/v1/materials \
+  --find-links "$MATERIALS/wheelhouse" \
+  -r "$MATERIALS/release/requirements.txt" \
+  -r "$MATERIALS/durability/requirements.txt"
+/usr/bin/chmod -R a+rX,go-w "$RUNTIME"
+/usr/bin/env -i -C "$MATERIALS" \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
   LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-  PYTHONPATH=/var/lib/animemo/bootstrap-authority/v1/materials \
+  PYTHONPATH="$MATERIALS" \
   PYTHONSAFEPATH=1 \
-  /var/lib/animemo/bootstrap-authority/v1/installer-runtime/bin/python -P -B -m installer \
-  <INSTALLER_ARGS>
+  "$RUNTIME/bin/python" -P -B -m installer \
+  install --version "$EXACT_TAG" --source official-mirror \
+  --public-origin '<PUBLIC_ORIGIN>' --non-interactive --accept <INSTALLER_ARGS>
+completed=1
+ANIMEMO_PROTECTED_HANDOFF
+# OFFICIAL_MIRROR_STAGE0_END
 ```
 
-这段流程不从 install.animemo.cc 获取可执行脚本。用户目录中的首次验证只决定候选是否可复制；root-owned 副本必须由独立安装的固定 `/usr/bin/gh` 2.97.0 再次验证，且该验证必须发生在解包和执行任何 AniMemo Python byte 之前，从而关闭 verified-path 到 protected-path 的替换窗口。隔离运行时只从该副本绑定的 wheelhouse 安装两份固定 requirements，显式禁止索引、源码包与缓存，不继承系统或用户 site-packages。`env -C`、`PYTHONSAFEPATH=1` 与 Python `-P` 同时把当前目录移出模块搜索前缀，防止用户目录中的同名 `installer` 包抢先获得 root 执行。Installer 随后在任何 Docker、APT、systemd 或 AniMemo 持久化动作前再次验证受保护副本，并把当前已载入的 Installer、Updater、Release 与 durability 核心模块逐字节绑定回该 tar 后，才消费闭合的 `BOOTSTRAP_PRIVILEGE_GATE`；第一项受权 mutation 是原子安装 TrustProfile、两套 trusted root 和两套 TUF root。受保护目录中存在额外、缺失或已替换的运行模块时必须失败关闭。
+这段流程不从 install.animemo.cc 执行脚本，不读取 mirror receipt 作为权威，也不使用 `latest`、query、任意 URL 或 GitHub/mirror 自动 fallback。候选资产在首次 `verify-asset` 前不会进入 root-owned 路径；受保护副本的任一次再验证失败都会由 trap 清除本次创建的候选和 final path，不留下 AniMemo 持久 mutation。只有两次受保护副本验证完成后才解包、创建 venv 并执行 AniMemo Python byte。隔离运行时只从同一副本绑定的 wheelhouse 安装两份固定 requirements，显式禁止索引、源码包与缓存，不继承系统或用户 site-packages。`env -C`、`PYTHONSAFEPATH=1` 与 Python `-P` 同时把当前目录移出模块搜索前缀。Installer 随后在任何产品 mutation 前再次验证受保护副本，将已加载的核心模块逐字节绑定回该 tar，才消费闭合的 `BOOTSTRAP_PRIVILEGE_GATE`。
 
 非交互执行必须显式提供 `--public-origin`。需要 Official Mirror 时，额外提供 `--source official-mirror`；失败不会自动调用 GitHub transport。Portable CTA 在 authority 冻结前不会提供绕过命令。
 

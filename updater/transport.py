@@ -1,21 +1,39 @@
 from __future__ import annotations
 
+import argparse
+import errno
 import hashlib
+import http.client
 import json
+import math
 import os
 import re
 import shutil
+import socket
+import ssl
 import stat
+import subprocess
+import sys
 import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from io import BytesIO
 from pathlib import Path
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from release.mirror import (
+    MAX_MIRROR_RECEIPT_BYTES,
+    MIRROR_ORIGIN,
+    MIRROR_PATH_PREFIX,
+    MIRROR_RECEIPT_NAME,
+    MirrorError,
+    load_mirror_receipt_bytes,
+)
 
 from .commands import CommandRunner
 from .errors import (
@@ -56,13 +74,19 @@ _EXACT_VERSION = re.compile(
 _HTTP_STATUS = re.compile(r"(?i)\bHTTP(?:\s+status)?[: ]+(\d{3})\b")
 GITHUB_RELEASE_ORIGIN = "https://github.com"
 OFFICIAL_MIRROR_ENDPOINT_ID = "official-primary"
-OFFICIAL_MIRROR_ORIGIN = "https://download.animemo.app"
+OFFICIAL_MIRROR_ORIGIN = MIRROR_ORIGIN
 _READ_CHUNK_BYTES = 1024 * 1024
-
-
-class _RejectRedirects(HTTPRedirectHandler):
-    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
-        del request, file_pointer, code, message, headers, new_url
+_BOUNDED_HTTP_RESPONSE_HEADERS = frozenset(
+    {
+        "Accept-Ranges",
+        "Access-Control-Allow-Origin",
+        "Cache-Control",
+        "Content-Encoding",
+        "Content-Length",
+        "Content-Range",
+        "Content-Type",
+    }
+)
 
 
 class TransportError(RequestRejected):
@@ -482,6 +506,471 @@ def _fsync_file(path: Path) -> None:
         os.close(descriptor)
 
 
+class _OpenWallClockExpired(TimeoutError):
+    pass
+
+
+def _kill_and_reap_bounded_worker(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError as error:
+            if process.poll() is None:
+                raise TransportError(
+                    "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                    "Bounded transport worker could not be terminated",
+                    phase="resource",
+                ) from error
+    while True:
+        try:
+            process.wait()
+            return
+        except (InterruptedError, KeyboardInterrupt):
+            continue
+        except OSError as error:
+            if process.poll() is not None:
+                return
+            raise TransportError(
+                "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                "Bounded transport worker could not be reaped",
+                phase="resource",
+            ) from error
+
+
+def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
+def _read_bounded_worker_metadata(path: Path) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        before = path.lstat()
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise TransportError(
+            "TRANSPORT_RECEIPT_INVALID",
+            "Bounded transport worker returned invalid metadata",
+        ) from error
+    try:
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or not stat.S_ISREG(opened.st_mode)
+                or path.is_symlink()
+                or before.st_nlink != 1
+                or opened.st_nlink != 1
+                or _file_identity(before) != _file_identity(opened)
+                or not 1 <= opened.st_size <= 8192
+            ):
+                raise TransportError(
+                    "TRANSPORT_RECEIPT_INVALID",
+                    "Bounded transport worker returned invalid metadata",
+                )
+            raw = os.read(descriptor, 8193)
+            after = os.fstat(descriptor)
+        except OSError as error:
+            raise TransportError(
+                "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                "Bounded transport metadata could not be read",
+                phase="resource",
+            ) from error
+        if len(raw) != opened.st_size or _file_identity(after) != _file_identity(
+            opened
+        ):
+            raise TransportError(
+                "TRANSPORT_RECEIPT_INVALID",
+                "Bounded transport worker returned invalid metadata",
+            )
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+class _SpoolResponse:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        body_metadata: os.stat_result,
+        final_url: str,
+        headers: dict[str, str],
+    ) -> None:
+        self._root = root
+        body = root / "body.bin"
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(body, flags)
+            opened = os.fstat(descriptor)
+        except OSError as error:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise TransportError(
+                "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                "Bounded transport material could not be opened",
+                phase="resource",
+            ) from error
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or _file_identity(opened) != _file_identity(body_metadata)
+        ):
+            os.close(descriptor)
+            raise TransportError(
+                "TRANSPORT_RECEIPT_INVALID",
+                "Bounded transport worker returned invalid material",
+            )
+        try:
+            self._stream = os.fdopen(descriptor, "rb")
+        except OSError as error:
+            os.close(descriptor)
+            raise TransportError(
+                "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                "Bounded transport material could not be opened",
+                phase="resource",
+            ) from error
+        self._final_url = final_url
+        self.headers = headers
+
+    def settimeout(self, _seconds: float) -> None:
+        return None
+
+    def read1(self, size: int = -1) -> bytes:
+        return self._stream.read(size)
+
+    def geturl(self) -> str:
+        return self._final_url
+
+    def close(self) -> None:
+        if not self._stream.closed:
+            self._stream.close()
+        if self._root.exists():
+            try:
+                shutil.rmtree(self._root)
+            except OSError as error:
+                raise TransportError(
+                    "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                    "Bounded transport workspace could not be removed",
+                    phase="resource",
+                ) from error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+
+class _AbsoluteDeadlineOpener:
+    def __init__(self, *, worker_path: Path | None = None) -> None:
+        self._worker_path = worker_path
+
+    def open_with_deadline(
+        self,
+        request: Request,
+        *,
+        timeout_seconds: int,
+        deadline: float,
+        maximum_bytes: int,
+    ):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _OpenWallClockExpired("Transport open deadline was exhausted")
+        parsed = urlsplit(request.full_url)
+        accept = request.get_header("Accept") or "application/octet-stream"
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or request.get_method() != "GET"
+            or accept not in {"application/json", "application/octet-stream"}
+            or type(timeout_seconds) is not int
+            or timeout_seconds <= 0
+            or type(maximum_bytes) is not int
+            or maximum_bytes <= 0
+        ):
+            raise TransportError(
+                "TRANSPORT_POLICY_INVALID",
+                "Bounded transport worker received an invalid request",
+                phase="policy",
+            )
+        module_worker = self._worker_path is None
+        try:
+            worker = (
+                Path(__file__) if module_worker else self._worker_path
+            ).resolve(strict=True)
+            worker_metadata = worker.lstat()
+        except OSError as error:
+            raise TransportError(
+                "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                "Bounded transport worker is unavailable",
+                phase="resource",
+            ) from error
+        if (
+            not stat.S_ISREG(worker_metadata.st_mode)
+            or worker.is_symlink()
+            or worker_metadata.st_nlink != 1
+        ):
+            raise TransportError(
+                "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                "Bounded transport worker is unsafe",
+                phase="resource",
+            )
+        try:
+            root = Path(tempfile.mkdtemp(prefix="animemo-bounded-http-")).resolve(
+                strict=True
+            )
+            os.chmod(root, 0o700)
+        except OSError as error:
+            raise TransportError(
+                "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                "Bounded transport workspace could not be created",
+                phase="resource",
+            ) from error
+        body = root / "body.bin"
+        metadata = root / "metadata.json"
+        worker_arguments = (
+            "--url",
+            request.full_url,
+            "--body",
+            str(body),
+            "--metadata",
+            str(metadata),
+            "--socket-timeout",
+            str(timeout_seconds),
+            "--maximum-bytes",
+            str(maximum_bytes),
+            "--accept",
+            accept,
+        )
+        if module_worker:
+            module_root = worker.parent.parent
+            command = (
+                sys.executable,
+                "-P",
+                "-B",
+                "-m",
+                "updater.transport",
+                "--animemo-bounded-http-worker",
+                *worker_arguments,
+            )
+            worker_cwd = module_root
+        else:
+            command = (
+                sys.executable,
+                "-P",
+                "-B",
+                str(worker),
+                *worker_arguments,
+            )
+            worker_cwd = worker.parent
+        environment = {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONSAFEPATH": "1",
+        }
+        if module_worker:
+            environment["PYTHONPATH"] = str(module_root)
+        if os.name == "nt":
+            for name in ("SYSTEMROOT", "WINDIR"):
+                if name in os.environ:
+                    environment[name] = os.environ[name]
+        creationflags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        )
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=worker_cwd,
+                env=environment,
+                close_fds=True,
+                creationflags=creationflags,
+            )
+        except OSError as error:
+            try:
+                shutil.rmtree(root)
+            except OSError as cleanup_error:
+                raise TransportError(
+                    "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                    "Bounded transport workspace could not be removed",
+                    phase="resource",
+                ) from cleanup_error
+            raise TransportError(
+                "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                "Bounded transport worker could not start",
+                phase="resource",
+            ) from error
+        try:
+            try:
+                wait_remaining = deadline - time.monotonic()
+                if wait_remaining <= 0:
+                    raise _OpenWallClockExpired(
+                        "Transport open deadline was exhausted"
+                    )
+                process.wait(timeout=wait_remaining)
+            except subprocess.TimeoutExpired as error:
+                raise _OpenWallClockExpired(
+                    "Transport open deadline was exhausted"
+                ) from error
+            finally:
+                _kill_and_reap_bounded_worker(process)
+            if process.returncode != 0:
+                raise TransportError(
+                    "TRANSPORT_UNAVAILABLE",
+                    "Bounded transport worker failed closed",
+                )
+            raw = _read_bounded_worker_metadata(metadata)
+            try:
+                value = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise TransportError(
+                    "TRANSPORT_RECEIPT_INVALID",
+                    "Bounded transport worker returned invalid metadata",
+                ) from error
+            if not isinstance(value, dict) or not isinstance(value.get("kind"), str):
+                raise TransportError(
+                    "TRANSPORT_RECEIPT_INVALID",
+                    "Bounded transport worker returned invalid metadata",
+                )
+            kind = value["kind"]
+            if kind == "success":
+                if set(value) != {"final_url", "headers", "kind", "size"}:
+                    raise TransportError(
+                        "TRANSPORT_RECEIPT_INVALID",
+                        "Bounded transport worker returned invalid metadata",
+                    )
+                headers = value["headers"]
+                size = value["size"]
+                final_url = value["final_url"]
+                try:
+                    body_metadata = body.lstat()
+                    metadata_metadata = metadata.lstat()
+                    material_names = {path.name for path in root.iterdir()}
+                except OSError as error:
+                    raise TransportError(
+                        "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                        "Bounded transport material could not be inspected",
+                        phase="resource",
+                    ) from error
+                if (
+                    not isinstance(headers, dict)
+                    or not set(headers).issubset(_BOUNDED_HTTP_RESPONSE_HEADERS)
+                    or not all(
+                        isinstance(name, str)
+                        and isinstance(header, str)
+                        and len(header) <= 2048
+                        and "\r" not in header
+                        and "\n" not in header
+                        for name, header in headers.items()
+                    )
+                    or sum(len(name) + len(header) for name, header in headers.items())
+                    > 4096
+                    or type(size) is not int
+                    or not 0 <= size <= maximum_bytes
+                    or not isinstance(final_url, str)
+                    or material_names != {"body.bin", "metadata.json"}
+                    or not stat.S_ISREG(body_metadata.st_mode)
+                    or not stat.S_ISREG(metadata_metadata.st_mode)
+                    or body.is_symlink()
+                    or metadata.is_symlink()
+                    or body_metadata.st_nlink != 1
+                    or metadata_metadata.st_nlink != 1
+                    or body_metadata.st_size != size
+                ):
+                    raise TransportError(
+                        "TRANSPORT_RECEIPT_INVALID",
+                        "Bounded transport worker returned invalid metadata",
+                    )
+                return _SpoolResponse(
+                    root,
+                    body_metadata=body_metadata,
+                    final_url=final_url,
+                    headers=headers,
+                )
+            if set(value) not in ({"kind"}, {"code", "kind"}):
+                raise TransportError(
+                    "TRANSPORT_RECEIPT_INVALID",
+                    "Bounded transport worker returned invalid metadata",
+                )
+            if (
+                kind == "http-error"
+                and type(value.get("code")) is int
+                and 100 <= value["code"] <= 599
+            ):
+                raise HTTPError(
+                    request.full_url,
+                    value["code"],
+                    "bounded transport HTTP failure",
+                    {},
+                    BytesIO(b""),
+                )
+            if "code" in value:
+                raise TransportError(
+                    "TRANSPORT_RECEIPT_INVALID",
+                    "Bounded transport worker returned invalid metadata",
+                )
+            if kind == "redirect":
+                raise TransportError(
+                    "TRANSPORT_REDIRECT_REJECTED",
+                    "Transport redirect was rejected",
+                )
+            if kind == "timeout":
+                raise TimeoutError("bounded transport timeout")
+            if kind == "temporary-dns":
+                raise URLError(socket.gaierror(socket.EAI_AGAIN, "temporary dns"))
+            if kind == "connection-reset":
+                raise ConnectionResetError("bounded transport connection reset")
+            if kind == "eof":
+                raise EOFError("bounded transport eof")
+            if kind == "tls-certificate":
+                raise URLError(
+                    ssl.SSLCertVerificationError(1, "certificate verification failed")
+                )
+            if kind == "response-too-large":
+                raise TransportError(
+                    "TRANSPORT_RESPONSE_TOO_LARGE",
+                    "Transport response exceeded its resource limit",
+                    phase="resource",
+                )
+            if kind == "local-resource":
+                raise TransportError(
+                    "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                    "Bounded transport worker exhausted a local resource",
+                    phase="resource",
+                )
+            if kind == "network-terminal":
+                raise URLError("bounded transport terminal network failure")
+            raise TransportError(
+                "TRANSPORT_RECEIPT_INVALID",
+                "Bounded transport worker returned invalid metadata",
+            )
+        # Caller interruption must not leave the worker or its spool behind.
+        except BaseException:
+            if root.exists():
+                try:
+                    shutil.rmtree(root)
+                except OSError as error:
+                    raise TransportError(
+                        "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                        "Bounded transport workspace could not be removed",
+                        phase="resource",
+                    ) from error
+            raise
+
+
 class _HttpsTransportSource:
     transport_id: TransportSourceId
     origin: str
@@ -494,7 +983,14 @@ class _HttpsTransportSource:
                 transport_id=self.transport_id,
                 phase="policy",
             )
-        self._opener = opener or build_opener(_RejectRedirects())
+        self._opener = opener or _AbsoluteDeadlineOpener()
+        if not callable(getattr(self._opener, "open_with_deadline", None)):
+            raise TransportError(
+                "TRANSPORT_POLICY_INVALID",
+                "Transport opener cannot enforce an absolute connection deadline",
+                transport_id=self.transport_id,
+                phase="policy",
+            )
         self._timeout_seconds = timeout_seconds
         parsed = urlsplit(self.origin)
         if (
@@ -516,6 +1012,167 @@ class _HttpsTransportSource:
     def _object_url(self, request: TransportRequest, logical_name: str) -> str:
         raise NotImplementedError
 
+    def _preflight(
+        self,
+        request: TransportRequest,
+        *,
+        started: float,
+    ) -> dict[str, object]:
+        del request, started
+        return {}
+
+    @staticmethod
+    def _ensure_bundle_deadline(started: float) -> None:
+        if (
+            time.monotonic() - started
+            >= DEFAULT_TRANSFER_BUDGET_POLICY.maximum_bundle_elapsed_seconds
+        ):
+            raise TransportError(
+                "TRANSPORT_BUNDLE_DEADLINE_EXHAUSTED",
+                "Transport bundle deadline was exhausted",
+                phase="deadline",
+            )
+
+    def _remaining_transfer_seconds(
+        self,
+        *,
+        attempt_deadline: float,
+        bundle_deadline: float,
+    ) -> float:
+        now = time.monotonic()
+        if now >= bundle_deadline:
+            raise TransportError(
+                "TRANSPORT_BUNDLE_DEADLINE_EXHAUSTED",
+                "Transport bundle deadline was exhausted",
+                transport_id=self.transport_id,
+                phase="deadline",
+            )
+        if now >= attempt_deadline:
+            raise TransportError(
+                "TRANSPORT_TIMEOUT",
+                "Transport object wall-clock deadline was exhausted",
+                transport_id=self.transport_id,
+                phase="deadline",
+                retriable=True,
+            )
+        return min(attempt_deadline, bundle_deadline) - now
+
+    def _read_with_deadline(
+        self,
+        response,
+        size: int,
+        *,
+        attempt_deadline: float,
+        bundle_deadline: float,
+    ) -> bytes:
+        remaining = self._remaining_transfer_seconds(
+            attempt_deadline=attempt_deadline,
+            bundle_deadline=bundle_deadline,
+        )
+        timeout_set = False
+        candidates = (
+            response,
+            getattr(response, "fp", None),
+            getattr(getattr(response, "fp", None), "raw", None),
+            getattr(
+                getattr(getattr(response, "fp", None), "raw", None),
+                "_sock",
+                None,
+            ),
+        )
+        for candidate in candidates:
+            setter = getattr(candidate, "settimeout", None)
+            if callable(setter):
+                setter(max(0.001, remaining))
+                timeout_set = True
+                break
+        reader = getattr(response, "read1", None)
+        if not timeout_set or not callable(reader):
+            raise TransportError(
+                "TRANSPORT_DEADLINE_CONTROL_UNAVAILABLE",
+                "Transport response cannot enforce its wall-clock deadline",
+                transport_id=self.transport_id,
+                phase="deadline",
+            )
+        chunk = reader(size)
+        self._remaining_transfer_seconds(
+            attempt_deadline=attempt_deadline,
+            bundle_deadline=bundle_deadline,
+        )
+        return chunk
+
+    def _open_with_deadline(
+        self,
+        request: Request,
+        *,
+        timeout_seconds: int,
+        attempt_deadline: float,
+        bundle_deadline: float,
+        maximum_bytes: int,
+    ):
+        self._remaining_transfer_seconds(
+            attempt_deadline=attempt_deadline,
+            bundle_deadline=bundle_deadline,
+        )
+        try:
+            value = self._opener.open_with_deadline(
+                request,
+                timeout_seconds=timeout_seconds,
+                deadline=min(attempt_deadline, bundle_deadline),
+                maximum_bytes=maximum_bytes,
+            )
+        except _OpenWallClockExpired as error:
+            if bundle_deadline <= attempt_deadline:
+                raise TransportError(
+                    "TRANSPORT_BUNDLE_DEADLINE_EXHAUSTED",
+                    "Transport bundle deadline was exhausted during connection setup",
+                    transport_id=self.transport_id,
+                    phase="deadline",
+                ) from error
+            raise TransportError(
+                "TRANSPORT_TIMEOUT",
+                "Transport object wall-clock deadline was exhausted during connection setup",
+                transport_id=self.transport_id,
+                phase="deadline",
+                retriable=True,
+            ) from error
+        try:
+            self._remaining_transfer_seconds(
+                attempt_deadline=attempt_deadline,
+                bundle_deadline=bundle_deadline,
+            )
+        except TransportError:
+            closer = getattr(value, "close", None)
+            if callable(closer):
+                closer()
+            raise
+        return value
+
+    @staticmethod
+    def _network_failure_is_retriable(error: BaseException) -> bool:
+        reason = error.reason if isinstance(error, URLError) else error
+        if isinstance(reason, TimeoutError):
+            return True
+        if isinstance(
+            reason,
+            (
+                ConnectionResetError,
+                EOFError,
+                http.client.IncompleteRead,
+                http.client.RemoteDisconnected,
+            ),
+        ):
+            return True
+        if isinstance(reason, socket.gaierror):
+            return reason.errno == socket.EAI_AGAIN
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return False
+        return isinstance(reason, OSError) and reason.errno in {
+            getattr(socket, "ECONNABORTED", 103),
+            getattr(socket, "ECONNRESET", 104),
+            getattr(socket, "ETIMEDOUT", 110),
+        }
+
     def acquire(
         self,
         request: TransportRequest,
@@ -529,11 +1186,24 @@ class _HttpsTransportSource:
                 phase="request",
             )
         staging = _validated_staging(Path(private_staging))
+        started = time.monotonic()
+        bundle_deadline = (
+            started + DEFAULT_TRANSFER_BUDGET_POLICY.maximum_bundle_elapsed_seconds
+        )
+        preflight = self._preflight(request, started=started)
+        expected_sha256 = preflight.get("expected_sha256", {})
+        if not isinstance(expected_sha256, dict):
+            raise TransportError(
+                "TRANSPORT_RECEIPT_INVALID",
+                "Transport preflight returned an invalid receipt",
+                transport_id=self.transport_id,
+            )
         pending = Path(
             tempfile.mkdtemp(prefix=".transport-pending-", dir=staging)
         ).resolve(strict=True)
         os.chmod(pending, 0o700)
         receipts: list[TransportObjectReceipt] = []
+        diagnostics: list[TransportObjectDiagnostic] = []
         total_bytes = 0
         committed = False
         final: Path | None = None
@@ -541,17 +1211,102 @@ class _HttpsTransportSource:
             for plan in request.object_plans:
                 logical_name = plan.logical_name
                 url = self._object_url(request, logical_name)
-                receipt = self._download(
-                    url,
-                    logical_name=logical_name,
-                    expected_size=plan.expected_size,
-                    destination=pending / logical_name,
-                    max_object_bytes=request.max_object_bytes,
-                    remaining_total_bytes=request.max_total_bytes - total_bytes,
+                computed_timeout = DEFAULT_TRANSFER_BUDGET_POLICY.timeout_for_size(
+                    plan.expected_size
                 )
+                attempt_started = time.monotonic()
+                failures: list[str] = []
+                receipt: TransportObjectReceipt | None = None
+                attempt_count = 0
+                for attempt_count in range(
+                    1, DEFAULT_TRANSFER_BUDGET_POLICY.maximum_attempts_per_object + 1
+                ):
+                    self._ensure_bundle_deadline(started)
+                    remaining = (
+                        DEFAULT_TRANSFER_BUDGET_POLICY.maximum_bundle_elapsed_seconds
+                        - (time.monotonic() - started)
+                    )
+                    timeout = min(computed_timeout, math.floor(remaining))
+                    if timeout <= 0:
+                        self._ensure_bundle_deadline(started)
+                        raise TransportError(
+                            "TRANSPORT_BUNDLE_DEADLINE_EXHAUSTED",
+                            "Transport bundle deadline was exhausted",
+                            transport_id=self.transport_id,
+                            phase="deadline",
+                        )
+                    try:
+                        attempt_deadline = time.monotonic() + computed_timeout
+                        receipt = self._download(
+                            url,
+                            logical_name=logical_name,
+                            expected_size=plan.expected_size,
+                            expected_sha256=expected_sha256.get(logical_name),
+                            destination=pending / logical_name,
+                            max_object_bytes=request.max_object_bytes,
+                            remaining_total_bytes=request.max_total_bytes - total_bytes,
+                            timeout_seconds=timeout,
+                            attempt_deadline=attempt_deadline,
+                            bundle_deadline=bundle_deadline,
+                        )
+                        self._ensure_bundle_deadline(started)
+                        break
+                    except TransportError as error:
+                        failures.append(error.code)
+                        if (
+                            not error.retriable
+                            or attempt_count
+                            >= DEFAULT_TRANSFER_BUDGET_POLICY.maximum_attempts_per_object
+                        ):
+                            if error.retriable:
+                                raise TransportError(
+                                    "TRANSPORT_OBJECT_RETRIES_EXHAUSTED",
+                                    "Transport object retries were exhausted",
+                                    transport_id=self.transport_id,
+                                    retriable=True,
+                                ) from error
+                            raise
+                        backoff = DEFAULT_TRANSFER_BUDGET_POLICY.backoff_seconds[
+                            attempt_count - 1
+                        ]
+                        if time.monotonic() - started + backoff >= (
+                            DEFAULT_TRANSFER_BUDGET_POLICY.maximum_bundle_elapsed_seconds
+                        ):
+                            raise TransportError(
+                                "TRANSPORT_BUNDLE_DEADLINE_EXHAUSTED",
+                                "Transport bundle deadline was exhausted",
+                                transport_id=self.transport_id,
+                                phase="deadline",
+                            ) from error
+                        time.sleep(backoff)
+                if receipt is None:
+                    raise TransportError(
+                        "TRANSPORT_OBJECT_RETRIES_EXHAUSTED",
+                        "Transport object retries were exhausted",
+                        transport_id=self.transport_id,
+                    )
                 receipts.append(receipt)
                 total_bytes += receipt.size
+                diagnostics.append(
+                    TransportObjectDiagnostic(
+                        logical_name=logical_name,
+                        expected_size=plan.expected_size,
+                        computed_timeout_seconds=computed_timeout,
+                        attempt_count=attempt_count,
+                        credential_transition_count=0,
+                        failure_classes=tuple(failures),
+                        elapsed_milliseconds=round(
+                            (time.monotonic() - attempt_started) * 1000
+                        ),
+                        result="PASS",
+                    )
+                )
             objects = tuple(receipts)
+            receipt_context = {
+                key: value
+                for key, value in preflight.items()
+                if key != "expected_sha256"
+            }
             receipt_identity = _canonical_identity(
                 {
                     "objects": [
@@ -565,6 +1320,7 @@ class _HttpsTransportSource:
                     ],
                     "receipt_version": 1,
                     "request_identity": request.identity,
+                    "source_context": receipt_context,
                     "transport_id": self.transport_id.value,
                 }
             )
@@ -574,14 +1330,22 @@ class _HttpsTransportSource:
                 objects=objects,
                 identity=receipt_identity,
             )
+            self._ensure_bundle_deadline(started)
             _fsync_directory(pending)
+            self._ensure_bundle_deadline(started)
             final = staging / (f"acquired-{request.identity[:16]}-{uuid.uuid4().hex}")
             os.replace(pending, final)
             _fsync_directory(staging)
+            self._ensure_bundle_deadline(started)
             acquired = AcquiredTransportSet(
                 root=final,
                 objects=objects,
                 receipt=receipt,
+                diagnostics=TransportAcquisitionDiagnostics(
+                    objects=tuple(diagnostics),
+                    elapsed_milliseconds=round((time.monotonic() - started) * 1000),
+                    result="PASS",
+                ),
             )
             committed = True
             return acquired
@@ -598,9 +1362,13 @@ class _HttpsTransportSource:
         *,
         logical_name: str,
         expected_size: int,
+        expected_sha256: object,
         destination: Path,
         max_object_bytes: int,
         remaining_total_bytes: int,
+        timeout_seconds: int,
+        attempt_deadline: float,
+        bundle_deadline: float,
     ) -> TransportObjectReceipt:
         parsed = urlsplit(url)
         expected = urlsplit(self.origin)
@@ -629,9 +1397,14 @@ class _HttpsTransportSource:
         digest = hashlib.sha256()
         size = 0
         try:
-            response_context = self._opener.open(
+            response_context = self._open_with_deadline(
                 request,
-                timeout=self._timeout_seconds,
+                timeout_seconds=timeout_seconds,
+                attempt_deadline=attempt_deadline,
+                bundle_deadline=bundle_deadline,
+                maximum_bytes=(
+                    min(max_object_bytes, remaining_total_bytes, expected_size) + 1
+                ),
             )
             with response_context as response:
                 final_url = response.geturl() if hasattr(response, "geturl") else url
@@ -668,15 +1441,28 @@ class _HttpsTransportSource:
                             "Transport object size differs from exact release metadata",
                             transport_id=self.transport_id,
                         )
-                descriptor = os.open(
-                    destination,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                    0o600,
-                )
+                try:
+                    descriptor = os.open(
+                        destination,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                except OSError as error:
+                    raise TransportError(
+                        "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                        "Transport staging could not create a private object",
+                        transport_id=self.transport_id,
+                        phase="resource",
+                    ) from error
                 try:
                     with os.fdopen(descriptor, "wb", closefd=True) as output:
                         while True:
-                            chunk = response.read(_READ_CHUNK_BYTES)
+                            chunk = self._read_with_deadline(
+                                response,
+                                _READ_CHUNK_BYTES,
+                                attempt_deadline=attempt_deadline,
+                                bundle_deadline=bundle_deadline,
+                            )
                             if not chunk:
                                 break
                             if not isinstance(chunk, bytes):
@@ -693,15 +1479,32 @@ class _HttpsTransportSource:
                                     transport_id=self.transport_id,
                                 )
                             digest.update(chunk)
-                            output.write(chunk)
+                            try:
+                                output.write(chunk)
+                            except OSError as error:
+                                raise TransportError(
+                                    "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                                    "Transport staging could not persist an object",
+                                    transport_id=self.transport_id,
+                                    phase="resource",
+                                ) from error
                         if declared is not None and declared != size:
                             raise TransportError(
-                                "TRANSPORT_RECEIPT_INVALID",
-                                "Transport response length did not match its receipt",
+                                "TRANSPORT_INCOMPLETE_RESPONSE",
+                                "Transport response ended before its declared length",
                                 transport_id=self.transport_id,
+                                retriable=True,
                             )
-                        output.flush()
-                        os.fsync(output.fileno())
+                        try:
+                            output.flush()
+                            os.fsync(output.fileno())
+                        except OSError as error:
+                            raise TransportError(
+                                "TRANSPORT_LOCAL_RESOURCE_FAILED",
+                                "Transport staging could not persist an object",
+                                transport_id=self.transport_id,
+                                phase="resource",
+                            ) from error
                 except BaseException:
                     if destination.exists():
                         destination.unlink()
@@ -718,7 +1521,7 @@ class _HttpsTransportSource:
                 retriable = True
             else:
                 code = "TRANSPORT_UNAVAILABLE"
-                retriable = 500 <= error.code < 600
+                retriable = error.code in {500, 502, 503, 504}
             raise TransportError(
                 code,
                 "Transport endpoint did not provide the requested object",
@@ -734,26 +1537,18 @@ class _HttpsTransportSource:
                 transport_id=self.transport_id,
                 retriable=True,
             ) from error
-        except URLError as error:
-            if isinstance(error.reason, TimeoutError):
-                raise TransportError(
-                    "TRANSPORT_TIMEOUT",
-                    "Transport endpoint timed out",
-                    transport_id=self.transport_id,
-                    retriable=True,
-                ) from error
+        except (
+            URLError,
+            OSError,
+            EOFError,
+            http.client.IncompleteRead,
+            http.client.RemoteDisconnected,
+        ) as error:
             raise TransportError(
                 "TRANSPORT_UNAVAILABLE",
                 "Transport endpoint is unavailable",
                 transport_id=self.transport_id,
-                retriable=True,
-            ) from error
-        except OSError as error:
-            raise TransportError(
-                "TRANSPORT_UNAVAILABLE",
-                "Transport endpoint is unavailable",
-                transport_id=self.transport_id,
-                retriable=True,
+                retriable=self._network_failure_is_retriable(error),
             ) from error
         _validate_regular_material(destination, root=destination.parent)
         if size != expected_size:
@@ -761,6 +1556,14 @@ class _HttpsTransportSource:
             raise TransportError(
                 "TRANSPORT_OBJECT_SIZE_MISMATCH",
                 "Transport object size differs from exact release metadata",
+                transport_id=self.transport_id,
+            )
+        observed_sha256 = "sha256:" + digest.hexdigest()
+        if expected_sha256 is not None and observed_sha256 != expected_sha256:
+            destination.unlink(missing_ok=True)
+            raise TransportError(
+                "TRANSPORT_OBJECT_DIGEST_MISMATCH",
+                "Transport object differs from the mirror completeness marker",
                 transport_id=self.transport_id,
             )
         return TransportObjectReceipt(
@@ -1397,7 +2200,466 @@ class OfficialMirrorTransportSource(_HttpsTransportSource):
         self.endpoint_id = endpoint_id
         super().__init__(opener=opener, timeout_seconds=30)
 
+    def _receipt_url(self, request: TransportRequest) -> str:
+        tag = quote(f"v{request.exact_version}", safe="")
+        return (
+            f"{self.origin}/{MIRROR_PATH_PREFIX}/{tag}/{MIRROR_RECEIPT_NAME}"
+        )
+
+    def _read_receipt_once(
+        self,
+        request: TransportRequest,
+        *,
+        timeout_seconds: int,
+        attempt_deadline: float,
+        bundle_deadline: float,
+    ) -> dict[str, object]:
+        url = self._receipt_url(request)
+        parsed = urlsplit(url)
+        expected = urlsplit(self.origin)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != expected.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise TransportError(
+                "TRANSPORT_POLICY_INVALID",
+                "Official mirror marker escaped the managed endpoint",
+                transport_id=self.transport_id,
+                phase="request",
+            )
+        http_request = Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "AniMemo-Updater",
+            },
+            method="GET",
+        )
+        try:
+            with self._open_with_deadline(
+                http_request,
+                timeout_seconds=timeout_seconds,
+                attempt_deadline=attempt_deadline,
+                bundle_deadline=bundle_deadline,
+                maximum_bytes=MAX_MIRROR_RECEIPT_BYTES + 1,
+            ) as response:
+                final_url = response.geturl() if hasattr(response, "geturl") else url
+                if final_url != url:
+                    raise TransportError(
+                        "TRANSPORT_REDIRECT_REJECTED",
+                        "Official mirror marker redirect was rejected",
+                        transport_id=self.transport_id,
+                    )
+                length = response.headers.get("Content-Length")
+                declared: int | None = None
+                if length is not None:
+                    try:
+                        declared = int(length)
+                    except (TypeError, ValueError) as error:
+                        raise TransportError(
+                            "MIRROR_RECEIPT_INVALID",
+                            "Official mirror marker length is invalid",
+                            transport_id=self.transport_id,
+                        ) from error
+                    if not 1 <= declared <= MAX_MIRROR_RECEIPT_BYTES:
+                        raise TransportError(
+                            "MIRROR_RECEIPT_INVALID",
+                            "Official mirror marker length is invalid",
+                            transport_id=self.transport_id,
+                        )
+                chunks: list[bytes] = []
+                observed = 0
+                while True:
+                    chunk = self._read_with_deadline(
+                        response,
+                        min(_READ_CHUNK_BYTES, MAX_MIRROR_RECEIPT_BYTES + 1 - observed),
+                        attempt_deadline=attempt_deadline,
+                        bundle_deadline=bundle_deadline,
+                    )
+                    if not isinstance(chunk, bytes):
+                        raise TransportError(
+                            "MIRROR_RECEIPT_INVALID",
+                            "Official mirror marker returned non-byte content",
+                            transport_id=self.transport_id,
+                        )
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    observed += len(chunk)
+                    if observed > MAX_MIRROR_RECEIPT_BYTES:
+                        raise TransportError(
+                            "MIRROR_RECEIPT_INVALID",
+                            "Official mirror marker exceeded its resource limit",
+                            transport_id=self.transport_id,
+                        )
+                data = b"".join(chunks)
+                if declared is not None and declared != len(data):
+                    raise TransportError(
+                        "MIRROR_RECEIPT_INCOMPLETE",
+                        "Official mirror marker ended before its declared length",
+                        transport_id=self.transport_id,
+                        retriable=True,
+                    )
+        except HTTPError as error:
+            if error.code == 404:
+                code = "MIRROR_RECEIPT_MISSING"
+                retriable = False
+            elif error.code == 429 or error.code in {500, 502, 503, 504}:
+                code = "MIRROR_RECEIPT_UNAVAILABLE"
+                retriable = True
+            elif 300 <= error.code < 400:
+                code = "TRANSPORT_REDIRECT_REJECTED"
+                retriable = False
+            else:
+                code = "MIRROR_RECEIPT_UNAVAILABLE"
+                retriable = False
+            raise TransportError(
+                code,
+                "Official mirror completeness marker is unavailable",
+                transport_id=self.transport_id,
+                retriable=retriable,
+            ) from error
+        except TransportError:
+            raise
+        except TimeoutError as error:
+            raise TransportError(
+                "MIRROR_RECEIPT_UNAVAILABLE",
+                "Official mirror completeness marker is unavailable",
+                transport_id=self.transport_id,
+                retriable=True,
+            ) from error
+        except (
+            URLError,
+            OSError,
+            EOFError,
+            http.client.IncompleteRead,
+            http.client.RemoteDisconnected,
+        ) as error:
+            raise TransportError(
+                "MIRROR_RECEIPT_UNAVAILABLE",
+                "Official mirror completeness marker is unavailable",
+                transport_id=self.transport_id,
+                retriable=self._network_failure_is_retriable(error),
+            ) from error
+        try:
+            receipt = load_mirror_receipt_bytes(data)
+        except MirrorError as error:
+            raise TransportError(
+                "MIRROR_RECEIPT_INVALID",
+                "Official mirror completeness marker is invalid",
+                transport_id=self.transport_id,
+            ) from error
+        expected_tag = f"v{request.exact_version}"
+        if receipt["releaseTag"] != expected_tag:
+            raise TransportError(
+                "MIRROR_RECEIPT_INVALID",
+                "Official mirror marker tag differs from the exact request",
+                transport_id=self.transport_id,
+            )
+        by_name = {item["name"]: item for item in receipt["assets"]}
+        for plan in request.object_plans:
+            item = by_name.get(plan.logical_name)
+            if item is None or item["size"] != plan.expected_size:
+                raise TransportError(
+                    "MIRROR_RECEIPT_INVALID",
+                    "Official mirror marker differs from GitHub release metadata",
+                    transport_id=self.transport_id,
+                )
+        return {
+            "receipt_digest": receipt["receiptDigest"],
+            "expected_sha256": {
+                plan.logical_name: by_name[plan.logical_name]["sha256"]
+                for plan in request.object_plans
+            },
+        }
+
+    def _preflight(
+        self,
+        request: TransportRequest,
+        *,
+        started: float,
+    ) -> dict[str, object]:
+        timeout = DEFAULT_TRANSFER_BUDGET_POLICY.timeout_for_size(
+            MAX_MIRROR_RECEIPT_BYTES
+        )
+        for attempt in range(
+            1, DEFAULT_TRANSFER_BUDGET_POLICY.maximum_attempts_per_object + 1
+        ):
+            self._ensure_bundle_deadline(started)
+            remaining = (
+                DEFAULT_TRANSFER_BUDGET_POLICY.maximum_bundle_elapsed_seconds
+                - (time.monotonic() - started)
+            )
+            try:
+                attempt_deadline = time.monotonic() + timeout
+                result = self._read_receipt_once(
+                    request,
+                    timeout_seconds=min(timeout, math.floor(remaining)),
+                    attempt_deadline=attempt_deadline,
+                    bundle_deadline=(
+                        started
+                        + DEFAULT_TRANSFER_BUDGET_POLICY.maximum_bundle_elapsed_seconds
+                    ),
+                )
+                self._ensure_bundle_deadline(started)
+                return result
+            except TransportError as error:
+                if (
+                    not error.retriable
+                    or attempt
+                    >= DEFAULT_TRANSFER_BUDGET_POLICY.maximum_attempts_per_object
+                ):
+                    if error.retriable:
+                        raise TransportError(
+                            "MIRROR_RECEIPT_RETRIES_EXHAUSTED",
+                            "Official mirror marker retries were exhausted",
+                            transport_id=self.transport_id,
+                            retriable=True,
+                        ) from error
+                    raise
+                backoff = DEFAULT_TRANSFER_BUDGET_POLICY.backoff_seconds[attempt - 1]
+                if time.monotonic() - started + backoff >= (
+                    DEFAULT_TRANSFER_BUDGET_POLICY.maximum_bundle_elapsed_seconds
+                ):
+                    raise TransportError(
+                        "TRANSPORT_BUNDLE_DEADLINE_EXHAUSTED",
+                        "Transport bundle deadline was exhausted",
+                        transport_id=self.transport_id,
+                        phase="deadline",
+                    ) from error
+                time.sleep(backoff)
+        raise TransportError(
+            "MIRROR_RECEIPT_RETRIES_EXHAUSTED",
+            "Official mirror marker retries were exhausted",
+            transport_id=self.transport_id,
+        )
+
     def _object_url(self, request: TransportRequest, logical_name: str) -> str:
-        version = quote(request.exact_version, safe="")
+        version = quote(f"v{request.exact_version}", safe="")
         name = quote(logical_name, safe="")
-        return f"{self.origin}/github/yanyuhanyue/AniMemo/releases/v{version}/{name}"
+        return f"{self.origin}/{MIRROR_PATH_PREFIX}/{version}/{name}"
+
+
+class _BoundedWorkerResponseTooLarge(Exception):
+    pass
+
+
+class _BoundedWorkerLocalResourceFailure(Exception):
+    pass
+
+
+class _BoundedWorkerRejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        del request, file_pointer, code, message, headers, new_url
+
+
+def _bounded_worker_parse_arguments(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--url", required=True)
+    parser.add_argument("--body", required=True)
+    parser.add_argument("--metadata", required=True)
+    parser.add_argument("--socket-timeout", required=True, type=int)
+    parser.add_argument("--maximum-bytes", required=True, type=int)
+    parser.add_argument(
+        "--accept",
+        required=True,
+        choices=("application/json", "application/octet-stream"),
+    )
+    arguments = parser.parse_args(argv)
+    parsed = urlsplit(arguments.url)
+    body = Path(arguments.body)
+    metadata = Path(arguments.metadata)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.hostname is None
+        or arguments.socket_timeout <= 0
+        or not 0 < arguments.maximum_bytes <= (2**63 - 1)
+        or not body.is_absolute()
+        or not metadata.is_absolute()
+        or body.name != "body.bin"
+        or metadata.name != "metadata.json"
+        or body.parent != metadata.parent
+        or not body.parent.is_dir()
+        or body.exists()
+        or metadata.exists()
+    ):
+        raise SystemExit(2)
+    arguments.body = body
+    arguments.metadata = metadata
+    return arguments
+
+
+def _bounded_worker_write_exclusive(path: Path, payload: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise _BoundedWorkerLocalResourceFailure from error
+
+
+def _bounded_worker_write_metadata(path: Path, value: dict[str, object]) -> None:
+    payload = (
+        json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode("ascii")
+    if not 1 <= len(payload) <= 8192:
+        raise _BoundedWorkerLocalResourceFailure
+    _bounded_worker_write_exclusive(path, payload)
+
+
+def _bounded_worker_response_headers(response) -> dict[str, str]:
+    selected: dict[str, str] = {}
+    total = 0
+    for name in sorted(_BOUNDED_HTTP_RESPONSE_HEADERS):
+        value = response.headers.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, str) or "\r" in value or "\n" in value:
+            raise URLError("invalid response header")
+        total += len(name) + len(value)
+        if len(value) > 2048 or total > 4096:
+            raise URLError("oversized response headers")
+        selected[name] = value
+    return selected
+
+
+def _bounded_worker_download(arguments: argparse.Namespace) -> dict[str, object]:
+    request = Request(
+        arguments.url,
+        headers={
+            "Accept": arguments.accept,
+            "User-Agent": "AniMemo-Updater",
+        },
+        method="GET",
+    )
+    opener = build_opener(_BoundedWorkerRejectRedirects())
+    response = opener.open(request, timeout=arguments.socket_timeout)
+
+    try:
+        final_url = response.geturl()
+        headers = _bounded_worker_response_headers(response)
+        declared = headers.get("Content-Length")
+        if declared is not None:
+            try:
+                declared_size = int(declared)
+            except ValueError as error:
+                raise URLError("invalid content length") from error
+            if declared_size < 0 or declared_size > arguments.maximum_bytes:
+                raise _BoundedWorkerResponseTooLarge
+        reader = getattr(response, "read1", None)
+        if not callable(reader):
+            raise URLError("bounded response reader unavailable")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        try:
+            descriptor = os.open(arguments.body, flags, 0o600)
+        except OSError as error:
+            raise _BoundedWorkerLocalResourceFailure from error
+        size = 0
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                while True:
+                    chunk = reader(_READ_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > arguments.maximum_bytes:
+                        raise _BoundedWorkerResponseTooLarge
+                    try:
+                        stream.write(chunk)
+                    except OSError as error:
+                        raise _BoundedWorkerLocalResourceFailure from error
+                try:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                except OSError as error:
+                    raise _BoundedWorkerLocalResourceFailure from error
+        finally:
+            os.close(descriptor)
+    finally:
+        response.close()
+    return {
+        "final_url": final_url,
+        "headers": headers,
+        "kind": "success",
+        "size": size,
+    }
+
+
+def _bounded_worker_failure_kind(error: BaseException) -> dict[str, object]:
+    if isinstance(error, HTTPError):
+        if 300 <= error.code <= 399:
+            return {"kind": "redirect"}
+        return {"code": error.code, "kind": "http-error"}
+    reason = error.reason if isinstance(error, URLError) else error
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return {"kind": "timeout"}
+    if isinstance(reason, socket.gaierror):
+        if reason.errno == socket.EAI_AGAIN:
+            return {"kind": "temporary-dns"}
+        return {"kind": "network-terminal"}
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return {"kind": "tls-certificate"}
+    if isinstance(
+        reason,
+        (ConnectionResetError, http.client.RemoteDisconnected),
+    ):
+        return {"kind": "connection-reset"}
+    if isinstance(reason, (EOFError, http.client.IncompleteRead)):
+        return {"kind": "eof"}
+    if isinstance(error, _BoundedWorkerResponseTooLarge):
+        return {"kind": "response-too-large"}
+    if isinstance(error, _BoundedWorkerLocalResourceFailure):
+        return {"kind": "local-resource"}
+    if isinstance(reason, OSError):
+        if reason.errno == errno.ETIMEDOUT:
+            return {"kind": "timeout"}
+        if reason.errno in {errno.ECONNABORTED, errno.ECONNRESET}:
+            return {"kind": "connection-reset"}
+    return {"kind": "network-terminal"}
+
+
+def _bounded_http_worker_main(argv: list[str]) -> int:
+    arguments = _bounded_worker_parse_arguments(argv)
+    try:
+        result = _bounded_worker_download(arguments)
+    except Exception as error:  # noqa: BLE001 - serialize only a closed failure kind
+        try:
+            arguments.body.unlink(missing_ok=True)
+            _bounded_worker_write_metadata(
+                arguments.metadata,
+                _bounded_worker_failure_kind(error),
+            )
+        except (OSError, _BoundedWorkerLocalResourceFailure):
+            return 2
+        return 0
+    try:
+        _bounded_worker_write_metadata(arguments.metadata, result)
+    except _BoundedWorkerLocalResourceFailure:
+        try:
+            arguments.body.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] != ["--animemo-bounded-http-worker"]:
+        raise SystemExit(2)
+    raise SystemExit(_bounded_http_worker_main(sys.argv[2:]))

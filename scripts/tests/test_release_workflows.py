@@ -117,6 +117,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             'test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"',
             source,
         )
+        self.assertIn(
+            'test "$GITHUB_WORKFLOW_SHA" = "$(git rev-parse HEAD)"',
+            source,
+        )
 
     def test_release_mirror_has_fixed_uploader_and_three_secret_boundary(self):
         mirror = workflow("release-mirror.yml")

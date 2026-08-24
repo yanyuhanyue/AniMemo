@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import errno
+import hashlib
 import io
+import json
 import os
+import socket
+import ssl
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
 import updater.transport as transport_module
+from release.mirror import build_mirror_receipt, mirror_release_assets
 from updater.errors import CommandExited, CommandTimedOut
 from updater.transport import (
     DEFAULT_TRANSFER_BUDGET_POLICY,
@@ -72,18 +80,28 @@ class FakeResponse:
                 len(body) if declared_length is None else declared_length
             )
         }
+        self.timeouts: list[float] = []
 
     def read(self, size: int = -1) -> bytes:
         return self._stream.read(size)
 
+    def read1(self, size: int = -1) -> bytes:
+        return self._stream.read(size)
+
+    def settimeout(self, seconds: float) -> None:
+        self.timeouts.append(seconds)
+
     def geturl(self) -> str:
         return self._url
+
+    def close(self) -> None:
+        self._stream.close()
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self._stream.close()
+        self.close()
 
 
 class FakeOpener:
@@ -95,24 +113,45 @@ class FakeOpener:
         redirected_urls: dict[str, str] | None = None,
         errors: dict[str, BaseException] | None = None,
     ):
-        self.objects = objects
+        self.objects = dict(objects)
         self.declared_lengths = declared_lengths or {}
         self.redirected_urls = redirected_urls or {}
         self.errors = errors or {}
         self.urls: list[str] = []
+        self.timeouts: list[int] = []
 
     def open(self, request, timeout: int):
-        del timeout
+        self.timeouts.append(timeout)
         url = request.full_url
         self.urls.append(url)
         name = Path(urlsplit(url).path).name
         if name in self.errors:
             raise self.errors[name]
+        if name == "mirror-receipt.json" and name not in self.objects:
+            tag = Path(urlsplit(url).path).parent.name
+            self.objects.update(official_mirror_fixture(self.objects, tag=tag))
         return FakeResponse(
             self.objects[name],
             self.redirected_urls.get(name, url),
             declared_length=self.declared_lengths.get(name),
         )
+
+    def open_with_deadline(
+        self,
+        request,
+        *,
+        timeout_seconds: int,
+        deadline: float,
+        maximum_bytes: int,
+    ):
+        del maximum_bytes
+        if time.monotonic() >= deadline:
+            raise transport_module._OpenWallClockExpired("fixture deadline")
+        response = self.open(request, timeout_seconds)
+        if time.monotonic() >= deadline:
+            response.close()
+            raise transport_module._OpenWallClockExpired("fixture deadline")
+        return response
 
 
 def link_directory(link: Path, target: Path) -> None:
@@ -133,6 +172,42 @@ def object_plans(objects: dict[str, bytes]) -> tuple[TransportObjectPlan, ...]:
     return tuple(
         TransportObjectPlan(name, len(objects[name])) for name in RELEASE_BUNDLE_OBJECTS
     )
+
+
+def official_mirror_fixture(
+    objects: dict[str, bytes], *, tag: str = "v1.1.0"
+) -> dict[str, bytes]:
+    portable_name = mirror_release_assets(tag)[-1]
+    contents = {**objects, portable_name: b"portable-fixture"}
+    assets = [
+        {
+            "name": name,
+            "size": len(contents[name]),
+            "sha256": "sha256:" + hashlib.sha256(contents[name]).hexdigest(),
+        }
+        for name in mirror_release_assets(tag)
+    ]
+    receipt = build_mirror_receipt(
+        release_tag=tag,
+        release_id=1,
+        release_commit="0" * 40,
+        assets=assets,
+        publisher_run_id=1,
+        published_at="2026-08-24T15:00:00Z",
+    )
+    return {
+        **objects,
+        "mirror-receipt.json": (
+            json.dumps(
+                receipt,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8"),
+    }
 
 
 class RecordingGitHubRunner:
@@ -360,7 +435,7 @@ class TransportSourceTests(unittest.TestCase):
         )
         self.assertEqual(
             {urlsplit(url).netloc for url in mirror_opener.urls},
-            {"download.animemo.app"},
+            {"download.animemo.cc"},
         )
 
     def test_oversized_object_fails_closed_and_removes_partial_state(self):
@@ -477,10 +552,17 @@ class TransportSourceTests(unittest.TestCase):
         }
         opener = FakeOpener(
             bodies,
-            errors={"installer-materials.tar": URLError("fixture unavailable")},
+            errors={
+                "installer-materials.tar": URLError(
+                    socket.gaierror(socket.EAI_AGAIN, "temporary dns")
+                )
+            },
         )
 
-        with tempfile.TemporaryDirectory() as temporary:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(transport_module.time, "sleep", return_value=None),
+        ):
             staging = Path(temporary).resolve() / "private"
             staging.mkdir(mode=0o700)
             with self.assertRaises(TransportError) as raised:
@@ -491,7 +573,7 @@ class TransportSourceTests(unittest.TestCase):
                     staging,
                 )
 
-            self.assertEqual(raised.exception.code, "TRANSPORT_UNAVAILABLE")
+            self.assertEqual(raised.exception.code, "TRANSPORT_OBJECT_RETRIES_EXHAUSTED")
             self.assertTrue(raised.exception.retriable)
             self.assertEqual(list(staging.iterdir()), [])
 
@@ -503,7 +585,10 @@ class TransportSourceTests(unittest.TestCase):
             bodies,
             errors={"checksums.txt": TimeoutError("fixture timeout")},
         )
-        with tempfile.TemporaryDirectory() as temporary:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(transport_module.time, "sleep", return_value=None),
+        ):
             staging = Path(temporary).resolve() / "private"
             staging.mkdir(mode=0o700)
             with self.assertRaises(TransportError) as raised:
@@ -513,7 +598,7 @@ class TransportSourceTests(unittest.TestCase):
                     ),
                     staging,
                 )
-            self.assertEqual(raised.exception.code, "TRANSPORT_TIMEOUT")
+            self.assertEqual(raised.exception.code, "TRANSPORT_OBJECT_RETRIES_EXHAUSTED")
             self.assertTrue(raised.exception.retriable)
             self.assertEqual(list(staging.iterdir()), [])
 
@@ -650,6 +735,571 @@ class TransportSourceTests(unittest.TestCase):
 
             self.assertNotEqual(first.root, second.root)
             self.assertEqual(first.receipt.identity, second.receipt.identity)
+
+
+class OfficialMirrorReceiptAndBudgetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.objects = {
+            name: f"fixed:{name}".encode("ascii")
+            for name in RELEASE_BUNDLE_OBJECTS
+        }
+        self.request = TransportRequest.release_bundle(
+            "1.1.0-rc.10", object_plans=object_plans(self.objects)
+        )
+
+    def test_receipt_is_read_before_the_exact_four_transport_objects(self) -> None:
+        opener = FakeOpener(
+            official_mirror_fixture(self.objects, tag="v1.1.0-rc.10")
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(transport_module.time, "sleep", return_value=None),
+        ):
+            staging = Path(temporary).resolve() / "private"
+            staging.mkdir(mode=0o700)
+            acquired = OfficialMirrorTransportSource(opener=opener).acquire(
+                self.request, staging
+            )
+
+        names = [Path(urlsplit(url).path).name for url in opener.urls]
+        self.assertEqual(names, ["mirror-receipt.json", *RELEASE_BUNDLE_OBJECTS])
+        self.assertEqual(
+            {urlsplit(url).netloc for url in opener.urls}, {"download.animemo.cc"}
+        )
+        self.assertTrue(
+            all(
+                urlsplit(url).path.startswith(
+                    "/yanyuhanyue/AniMemo/releases/download/v1.1.0-rc.10/"
+                )
+                for url in opener.urls
+            )
+        )
+        self.assertIsNotNone(acquired.diagnostics)
+        self.assertEqual(acquired.diagnostics.result, "PASS")
+
+    def test_missing_receipt_fails_before_any_asset_is_accepted(self) -> None:
+        opener = FakeOpener(
+            self.objects,
+            errors={
+                "mirror-receipt.json": HTTPError(
+                    "https://download.animemo.cc/fixed",
+                    404,
+                    "missing",
+                    None,
+                    None,
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            staging = Path(temporary).resolve() / "private"
+            staging.mkdir(mode=0o700)
+            with self.assertRaises(TransportError) as raised:
+                OfficialMirrorTransportSource(opener=opener).acquire(
+                    self.request, staging
+                )
+        self.assertEqual(raised.exception.code, "MIRROR_RECEIPT_MISSING")
+        self.assertEqual(
+            [Path(urlsplit(url).path).name for url in opener.urls],
+            ["mirror-receipt.json"],
+        )
+
+    def test_receipt_length_tag_schema_and_github_size_binding_fail_closed(self) -> None:
+        valid = official_mirror_fixture(self.objects, tag="v1.1.0-rc.10")
+        marker = valid["mirror-receipt.json"]
+        unknown = json.loads(marker)
+        unknown["fallback"] = "github"
+        unknown_marker = (
+            json.dumps(unknown, separators=(",", ":"), sort_keys=True) + "\n"
+        ).encode("utf-8")
+        duplicate_marker = marker.replace(
+            b'"repository":',
+            b'"repository":"attacker/repo","repository":',
+            1,
+        )
+        wrong_tag = official_mirror_fixture(
+            self.objects, tag="v1.1.0-rc.11"
+        )["mirror-receipt.json"]
+        wrong_size_receipt = json.loads(marker)
+        wrong_size_assets = [dict(item) for item in wrong_size_receipt["assets"]]
+        wrong_size_assets[0]["size"] += 1
+        wrong_size = build_mirror_receipt(
+            release_tag="v1.1.0-rc.10",
+            release_id=wrong_size_receipt["releaseId"],
+            release_commit=wrong_size_receipt["releaseCommit"],
+            assets=wrong_size_assets,
+            publisher_run_id=wrong_size_receipt["publisherRunId"],
+            published_at=wrong_size_receipt["publishedAt"],
+        )
+        wrong_size_marker = (
+            json.dumps(wrong_size, separators=(",", ":"), sort_keys=True) + "\n"
+        ).encode("utf-8")
+        cases = {
+            "declared-length": FakeOpener(
+                valid,
+                declared_lengths={"mirror-receipt.json": len(marker) + 1},
+            ),
+            "tag": FakeOpener({**valid, "mirror-receipt.json": wrong_tag}),
+            "unknown-field": FakeOpener(
+                {**valid, "mirror-receipt.json": unknown_marker}
+            ),
+            "duplicate-field": FakeOpener(
+                {**valid, "mirror-receipt.json": duplicate_marker}
+            ),
+            "github-size": FakeOpener(
+                {**valid, "mirror-receipt.json": wrong_size_marker}
+            ),
+        }
+        for name, opener in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                staging = Path(temporary).resolve() / "private"
+                staging.mkdir(mode=0o700)
+                with self.assertRaises(TransportError) as raised:
+                    OfficialMirrorTransportSource(opener=opener).acquire(
+                        self.request, staging
+                    )
+                expected_code = (
+                    "MIRROR_RECEIPT_RETRIES_EXHAUSTED"
+                    if name == "declared-length"
+                    else "MIRROR_RECEIPT_INVALID"
+                )
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertEqual(list(staging.iterdir()), [])
+                expected_attempts = 3 if name == "declared-length" else 1
+                self.assertEqual(
+                    [Path(urlsplit(url).path).name for url in opener.urls],
+                    ["mirror-receipt.json"] * expected_attempts,
+                )
+
+    def test_receipt_checksum_mismatch_rejects_the_atomic_bundle(self) -> None:
+        fixture = official_mirror_fixture(self.objects, tag="v1.1.0-rc.10")
+        fixture["checksums.txt"] = b"x" * len(self.objects["checksums.txt"])
+        opener = FakeOpener(fixture)
+        with tempfile.TemporaryDirectory() as temporary:
+            staging = Path(temporary).resolve() / "private"
+            staging.mkdir(mode=0o700)
+            with self.assertRaises(TransportError) as raised:
+                OfficialMirrorTransportSource(opener=opener).acquire(
+                    self.request, staging
+                )
+            self.assertEqual(list(staging.iterdir()), [])
+        self.assertEqual(raised.exception.code, "TRANSPORT_OBJECT_DIGEST_MISMATCH")
+
+    def test_mirror_timeout_retries_three_times_without_cross_source_fallback(self) -> None:
+        opener = FakeOpener(
+            official_mirror_fixture(self.objects, tag="v1.1.0-rc.10"),
+            errors={"checksums.txt": TimeoutError("bounded fixture")},
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(transport_module.time, "sleep", return_value=None),
+        ):
+            staging = Path(temporary).resolve() / "private"
+            staging.mkdir(mode=0o700)
+            with self.assertRaises(TransportError) as raised:
+                OfficialMirrorTransportSource(opener=opener).acquire(
+                    self.request, staging
+                )
+            self.assertEqual(list(staging.iterdir()), [])
+        names = [Path(urlsplit(url).path).name for url in opener.urls]
+        self.assertEqual(names.count("checksums.txt"), 3)
+        self.assertEqual(raised.exception.code, "TRANSPORT_OBJECT_RETRIES_EXHAUSTED")
+        self.assertEqual(
+            {urlsplit(url).netloc for url in opener.urls}, {"download.animemo.cc"}
+        )
+
+    def test_slow_progress_cannot_cross_the_object_wall_clock_deadline(self) -> None:
+        clock = FakeMonotonic()
+
+        class SlowProgressOpener(FakeOpener):
+            def open(self, request, timeout: int):
+                response = super().open(request, timeout)
+                if Path(urlsplit(request.full_url).path).name == "checksums.txt":
+                    original = response.read1
+
+                    def slow_read(size: int = -1):
+                        clock.advance(61)
+                        return original(size)
+
+                    response.read1 = slow_read
+                return response
+
+        opener = SlowProgressOpener(
+            official_mirror_fixture(self.objects, tag="v1.1.0-rc.10")
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(transport_module.time, "monotonic", side_effect=clock),
+            patch.object(transport_module.time, "sleep", return_value=None),
+        ):
+            staging = Path(temporary).resolve() / "private"
+            staging.mkdir(mode=0o700)
+            with self.assertRaises(TransportError) as raised:
+                OfficialMirrorTransportSource(opener=opener).acquire(
+                    self.request, staging
+                )
+
+            self.assertEqual(raised.exception.code, "TRANSPORT_OBJECT_RETRIES_EXHAUSTED")
+            self.assertEqual(
+                [Path(urlsplit(url).path).name for url in opener.urls].count(
+                    "checksums.txt"
+                ),
+                3,
+            )
+            self.assertEqual(list(staging.iterdir()), [])
+
+    def test_slow_open_and_headers_cannot_cross_the_absolute_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sentinel = root / "worker-survived"
+            worker = root / "slow_worker.py"
+            worker.write_text(
+                "import time\n"
+                "from pathlib import Path\n"
+                "time.sleep(0.4)\n"
+                f"Path({str(sentinel)!r}).write_text('unsafe')\n",
+                encoding="utf-8",
+            )
+            source = OfficialMirrorTransportSource(
+                opener=transport_module._AbsoluteDeadlineOpener(worker_path=worker)
+            )
+            request = transport_module.Request(
+                source._receipt_url(self.request), method="GET"
+            )
+            started = time.monotonic()
+            failures: list[BaseException] = []
+            elapsed: list[float] = []
+
+            def open_in_apply_thread() -> None:
+                try:
+                    source._open_with_deadline(
+                        request,
+                        timeout_seconds=60,
+                        attempt_deadline=started + 0.1,
+                        bundle_deadline=started + 1,
+                        maximum_bytes=1024,
+                    )
+                except TransportError as error:
+                    failures.append(error)
+                finally:
+                    elapsed.append(time.monotonic() - started)
+
+            apply_thread = threading.Thread(target=open_in_apply_thread)
+            apply_thread.start()
+            apply_thread.join(timeout=2)
+            time.sleep(0.5)
+
+            self.assertFalse(apply_thread.is_alive())
+            self.assertEqual(len(failures), 1)
+            self.assertIsInstance(failures[0], TransportError)
+            self.assertEqual(failures[0].code, "TRANSPORT_TIMEOUT")
+            self.assertLess(elapsed[0], 0.5)
+            self.assertFalse(sentinel.exists())
+
+    def test_worker_startup_time_is_charged_to_the_absolute_deadline(self) -> None:
+        clock = FakeMonotonic()
+
+        class ExpiredDuringSpawn:
+            returncode = None
+
+            def __init__(self) -> None:
+                self.killed = False
+                self.reaped = False
+                self.wait_timeouts: list[float | None] = []
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                self.wait_timeouts.append(timeout)
+                if timeout is not None:
+                    raise AssertionError("stale pre-spawn timeout was used")
+                self.reaped = True
+                return self.returncode
+
+        process = ExpiredDuringSpawn()
+
+        def delayed_spawn(*args, **kwargs):
+            del args, kwargs
+            clock.advance(2)
+            return process
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worker = root / "worker.py"
+            worker.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            request = transport_module.Request(
+                "https://download.animemo.cc/fixed", method="GET"
+            )
+            opener = transport_module._AbsoluteDeadlineOpener(worker_path=worker)
+            with (
+                patch.object(transport_module.time, "monotonic", side_effect=clock),
+                patch.object(
+                    transport_module.tempfile,
+                    "mkdtemp",
+                    return_value=str(workspace),
+                ),
+                patch.object(
+                    transport_module.subprocess,
+                    "Popen",
+                    side_effect=delayed_spawn,
+                ),
+                self.assertRaises(transport_module._OpenWallClockExpired),
+            ):
+                opener.open_with_deadline(
+                    request,
+                    timeout_seconds=60,
+                    deadline=1,
+                    maximum_bytes=1024,
+                )
+
+            self.assertTrue(process.killed)
+            self.assertTrue(process.reaped)
+            self.assertEqual(process.wait_timeouts, [None])
+            self.assertFalse(workspace.exists())
+
+    def test_caller_interrupt_still_kills_reaps_and_cleans_the_worker(self) -> None:
+        class InterruptedWorker:
+            returncode = None
+
+            def __init__(self) -> None:
+                self.killed = False
+                self.reaped = False
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                if timeout is not None:
+                    raise KeyboardInterrupt
+                self.reaped = True
+                return self.returncode
+
+        process = InterruptedWorker()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worker = root / "worker.py"
+            worker.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            request = transport_module.Request(
+                "https://download.animemo.cc/fixed", method="GET"
+            )
+            opener = transport_module._AbsoluteDeadlineOpener(worker_path=worker)
+            with (
+                patch.object(
+                    transport_module.tempfile,
+                    "mkdtemp",
+                    return_value=str(workspace),
+                ),
+                patch.object(
+                    transport_module.subprocess,
+                    "Popen",
+                    return_value=process,
+                ),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                opener.open_with_deadline(
+                    request,
+                    timeout_seconds=60,
+                    deadline=time.monotonic() + 1,
+                    maximum_bytes=1024,
+                )
+
+            self.assertTrue(process.killed)
+            self.assertTrue(process.reaped)
+            self.assertFalse(workspace.exists())
+
+    def test_only_the_closed_network_failure_set_retries(self) -> None:
+        cases = (
+            (
+                "temporary-dns",
+                URLError(socket.gaierror(socket.EAI_AGAIN, "temporary dns")),
+                3,
+            ),
+            (
+                "certificate",
+                URLError(ssl.SSLCertVerificationError(1, "certificate verify failed")),
+                1,
+            ),
+            (
+                "http-500",
+                HTTPError("https://download.animemo.cc/fixed", 500, "error", {}, None),
+                3,
+            ),
+            (
+                "http-501",
+                HTTPError("https://download.animemo.cc/fixed", 501, "error", {}, None),
+                1,
+            ),
+        )
+        for name, failure, expected_attempts in cases:
+            opener = FakeOpener(
+                official_mirror_fixture(self.objects, tag="v1.1.0-rc.10"),
+                errors={"checksums.txt": failure},
+            )
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as temporary,
+                patch.object(transport_module.time, "sleep", return_value=None),
+            ):
+                staging = Path(temporary).resolve() / "private"
+                staging.mkdir(mode=0o700)
+                with self.assertRaises(TransportError):
+                    OfficialMirrorTransportSource(opener=opener).acquire(
+                        self.request, staging
+                    )
+                self.assertEqual(
+                    [Path(urlsplit(url).path).name for url in opener.urls].count(
+                        "checksums.txt"
+                    ),
+                    expected_attempts,
+                )
+                self.assertEqual(list(staging.iterdir()), [])
+
+    def test_local_resource_exhaustion_never_retries_as_network_failure(self) -> None:
+        opener = FakeOpener(
+            official_mirror_fixture(self.objects, tag="v1.1.0-rc.10")
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            staging = Path(temporary).resolve() / "private"
+            staging.mkdir(mode=0o700)
+            with (
+                patch.object(
+                    transport_module.os,
+                    "fsync",
+                    side_effect=OSError(errno.ENOSPC, "disk full"),
+                ),
+                self.assertRaises(TransportError) as raised,
+            ):
+                OfficialMirrorTransportSource(opener=opener).acquire(
+                    self.request, staging
+                )
+
+            self.assertEqual(raised.exception.code, "TRANSPORT_LOCAL_RESOURCE_FAILED")
+            self.assertFalse(raised.exception.retriable)
+            self.assertEqual(
+                [Path(urlsplit(url).path).name for url in opener.urls].count(
+                    "checksums.txt"
+                ),
+                1,
+            )
+            self.assertEqual(list(staging.iterdir()), [])
+
+
+class BoundedHttpWorkerTests(unittest.TestCase):
+    @staticmethod
+    def arguments(root: Path, *, maximum_bytes: int) -> list[str]:
+        return [
+            "--url",
+            "https://download.animemo.cc/fixed",
+            "--body",
+            str(root / "body.bin"),
+            "--metadata",
+            str(root / "metadata.json"),
+            "--socket-timeout",
+            "60",
+            "--maximum-bytes",
+            str(maximum_bytes),
+            "--accept",
+            "application/octet-stream",
+        ]
+
+    def test_worker_writes_exact_body_and_closed_success_metadata(self) -> None:
+        payload = b"bounded-worker-payload"
+
+        class Opener:
+            def open(self, request, timeout):
+                self.request = request
+                self.timeout = timeout
+                return FakeResponse(payload, request.full_url)
+
+        opener = Opener()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(
+                transport_module,
+                "build_opener",
+                return_value=opener,
+            ):
+                code = transport_module._bounded_http_worker_main(
+                    self.arguments(root, maximum_bytes=len(payload))
+                )
+
+            metadata = json.loads((root / "metadata.json").read_bytes())
+            self.assertEqual(code, 0)
+            self.assertEqual((root / "body.bin").read_bytes(), payload)
+            self.assertEqual(
+                set(metadata),
+                {"final_url", "headers", "kind", "size"},
+            )
+            self.assertEqual(metadata["kind"], "success")
+            self.assertEqual(metadata["size"], len(payload))
+            self.assertEqual(opener.timeout, 60)
+            self.assertEqual(opener.request.get_method(), "GET")
+
+    def test_worker_fails_closed_before_committing_an_oversized_body(self) -> None:
+        payload = b"too-large"
+
+        class Opener:
+            def open(self, request, timeout):
+                del timeout
+                return FakeResponse(payload, request.full_url)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(
+                transport_module,
+                "build_opener",
+                return_value=Opener(),
+            ):
+                code = transport_module._bounded_http_worker_main(
+                    self.arguments(root, maximum_bytes=len(payload) - 1)
+                )
+
+            metadata = json.loads((root / "metadata.json").read_bytes())
+            self.assertEqual(code, 0)
+            self.assertEqual(metadata, {"kind": "response-too-large"})
+            self.assertFalse((root / "body.bin").exists())
+
+    def test_worker_error_serialization_is_a_closed_retry_boundary(self) -> None:
+        cases = (
+            (TimeoutError(), {"kind": "timeout"}),
+            (
+                socket.gaierror(socket.EAI_AGAIN, "temporary"),
+                {"kind": "temporary-dns"},
+            ),
+            (ConnectionResetError(), {"kind": "connection-reset"}),
+            (EOFError(), {"kind": "eof"}),
+            (
+                ssl.SSLCertVerificationError(1, "certificate"),
+                {"kind": "tls-certificate"},
+            ),
+            (
+                HTTPError("https://download.animemo.cc/fixed", 302, "", {}, None),
+                {"kind": "redirect"},
+            ),
+            (
+                HTTPError("https://download.animemo.cc/fixed", 503, "", {}, None),
+                {"code": 503, "kind": "http-error"},
+            ),
+            (PermissionError(), {"kind": "network-terminal"}),
+        )
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(
+                    transport_module._bounded_worker_failure_kind(error),
+                    expected,
+                )
 
 
 class ReleaseAssetBudgetAndObjectTransportTests(unittest.TestCase):

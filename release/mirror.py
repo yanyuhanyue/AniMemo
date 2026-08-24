@@ -1600,6 +1600,27 @@ def publish_release_mirror(tag: str) -> dict[str, Any]:
         "yanyuhanyue/AniMemo/.github/workflows/release-mirror.yml@refs/heads/main"
     ):
         raise MirrorError("Mirror publisher is not using the trusted default-branch definition")
+    workflow_sha = os.environ.get("GITHUB_WORKFLOW_SHA", "")
+    try:
+        checkout = subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            cwd=Path(__file__).resolve().parents[1],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise MirrorError("Mirror publisher checkout identity is unavailable") from error
+    checkout_sha = checkout.stdout.strip()
+    if (
+        checkout.returncode != 0
+        or _COMMIT.fullmatch(workflow_sha) is None
+        or workflow_sha != checkout_sha
+    ):
+        raise MirrorError(
+            "Mirror publisher workflow identity differs from the trusted main checkout"
+        )
     try:
         run_id = int(os.environ["GITHUB_RUN_ID"])
     except (KeyError, TypeError, ValueError) as error:
