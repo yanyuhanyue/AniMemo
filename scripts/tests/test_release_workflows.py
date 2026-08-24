@@ -24,6 +24,7 @@ HARDENED_WORKFLOWS = (
     "promote-release.yml",
     "release-gate.yml",
     "release-metadata-freshness.yml",
+    "release-mirror.yml",
     "release.yml",
 )
 
@@ -80,6 +81,122 @@ def workflow(name):
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
+    def test_release_mirror_is_closed_read_only_and_default_branch_bound(self):
+        mirror = workflow("release-mirror.yml")
+        source = (ROOT / ".github" / "workflows" / "release-mirror.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(mirror["name"], "Release Mirror")
+        self.assertEqual(set(mirror["on"]), {"release", "workflow_dispatch"})
+        self.assertEqual(mirror["on"]["release"]["types"], ["published"])
+        self.assertEqual(
+            set(mirror["on"]["workflow_dispatch"]["inputs"]), {"release_tag"}
+        )
+        self.assertEqual(
+            mirror["permissions"],
+            {"contents": "read", "actions": "read", "attestations": "read"},
+        )
+        self.assertEqual(
+            mirror["concurrency"]["group"],
+            "release-mirror-${{ github.event.release.tag_name || inputs.release_tag }}",
+        )
+        self.assertEqual(mirror["concurrency"]["cancel-in-progress"], "false")
+        self.assertEqual(set(mirror["jobs"]), {"mirror"})
+        self.assertEqual(mirror["jobs"]["mirror"]["runs-on"], "ubuntu-24.04")
+        self.assertEqual(mirror["env"], {"GH_REQUIRED_VERSION": "2.97.0"})
+        self.assertIn("验证固定 GitHub CLI 安全基线", source)
+        self.assertIn('test "$version" = "$GH_REQUIRED_VERSION"', source)
+        self.assertIn(
+            "yanyuhanyue/AniMemo/.github/workflows/release-mirror.yml@refs/heads/main",
+            source,
+        )
+        self.assertIn('test "$GITHUB_REF" = "refs/tags/$release_tag"', source)
+        self.assertIn('test "$GITHUB_REF" = "refs/heads/main"', source)
+        self.assertIn(
+            'test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"',
+            source,
+        )
+        self.assertIn(
+            'test "$GITHUB_WORKFLOW_SHA" = "$(git rev-parse HEAD)"',
+            source,
+        )
+
+    def test_release_mirror_has_fixed_uploader_and_three_secret_boundary(self):
+        mirror = workflow("release-mirror.yml")
+        source = (ROOT / ".github" / "workflows" / "release-mirror.yml").read_text(
+            encoding="utf-8"
+        )
+        steps = mirror["jobs"]["mirror"]["steps"]
+        publisher = next(
+            step for step in steps if step.get("name") == "发布并匿名回读精确镜像"
+        )
+        secret_names = {
+            "ANIMEMO_RELEASE_MIRROR_ACCOUNT_ID",
+            "ANIMEMO_RELEASE_MIRROR_ACCESS_KEY_ID",
+            "ANIMEMO_RELEASE_MIRROR_SECRET_ACCESS_KEY",
+        }
+
+        self.assertEqual(
+            {name for name in publisher["env"] if name.startswith("ANIMEMO_")},
+            secret_names,
+        )
+        self.assertEqual(
+            {value for name, value in publisher["env"].items() if name in secret_names},
+            {f"${{{{ secrets.{name} }}}}" for name in secret_names},
+        )
+        self.assertIn(
+            "python -m release.mirror --release-tag \"$RELEASE_TAG\"", publisher["run"]
+        )
+        self.assertNotIn("ANIMEMO_RELEASE_MIRROR_", publisher["run"])
+        upload = next(
+            step
+            for step in steps
+            if step.get("uses", "").startswith("actions/upload-artifact@")
+        )
+        self.assertEqual(
+            upload["uses"],
+            f"actions/upload-artifact@{PINNED_RELEASE_ACTIONS['actions/upload-artifact']}",
+        )
+        self.assertEqual(
+            upload["with"]["name"],
+            "release-mirror-${{ steps.release.outputs.release_id }}",
+        )
+        for forbidden in (
+            "contents: write",
+            "packages: write",
+            "id-token: write",
+            "allow_overwrite",
+            "fallback",
+            "aws-actions/",
+            "wrangler",
+            "npx",
+        ):
+            self.assertNotIn(forbidden, source)
+
+    def test_release_mirror_shell_steps_are_syntactically_valid(self):
+        bash = _bash_path()
+        self.assertIsNotNone(bash, "Release Mirror contract requires bash")
+        mirror = workflow("release-mirror.yml")
+        scripts = [
+            step["run"]
+            for step in mirror["jobs"]["mirror"]["steps"]
+            if step.get("shell") == "bash" and "run" in step
+        ]
+        self.assertEqual(len(scripts), 3)
+        for script in scripts:
+            with self.subTest(first_line=script.splitlines()[0]):
+                syntax = subprocess.run(
+                    [bash, "-n"],
+                    input=script,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
     def test_dynamic_candidate_buildx_jobs_cannot_write_shared_caches(self):
         candidate_buildx_jobs = set()
         for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):

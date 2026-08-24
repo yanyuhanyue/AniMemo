@@ -23,6 +23,19 @@ verify the exact tag and the exact protected `installer-materials.tar`. Offline
 Stage-0 requires an operator or trusted image to provision the verifier and roots
 independently of the Portable payload. Portable-only first trust is forbidden.
 
+The online carrier may explicitly acquire only
+`installer-materials.tar` from the fixed Official Mirror origin
+`https://download.animemo.cc/yanyuhanyue/AniMemo/releases/download/<EXACT_TAG>/`.
+It must verify the GitHub Immutable Release before that download, reject every
+redirect and query, verify the mirror bytes with `gh release verify-asset`, copy
+them into a root-owned candidate, and reverify both that candidate and its fixed
+final path before extraction. Any verification failure removes paths created by
+that invocation and leaves zero persistent AniMemo mutation. The receipt is a
+transport completeness marker only and cannot satisfy either GitHub gate. This
+flow is selected only by `--source official-mirror`; no automatic or error-driven
+cross-source fallback exists. The exact command contract is frozen in
+`docs/distribution-transports-v1.1.md`.
+
 ## 2. Verified bootstrap state machine
 
 `UNTRUSTED_INPUT -> ACQUIRED -> AUTHORITY_VERIFIED -> PROTECTED_COPY_VERIFIED ->

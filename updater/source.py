@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -38,6 +39,7 @@ from .transport import (
     ExplicitTransportPolicy,
     GitHubTransportSource,
     OfficialMirrorTransportSource,
+    TransportObjectPlan,
     TransportRequest,
     TransportSourceId,
 )
@@ -52,6 +54,8 @@ EXPECTED_RELEASE_ASSETS = {
     "installer-materials.tar",
     "release-manifest.json",
 }
+MAX_RELEASE_ASSET_BYTES = 512 * 1024 * 1024
+MAX_RELEASE_TRANSPORT_BYTES = 1024 * 1024 * 1024
 
 
 def _expected_release_asset_names(version: str) -> set[str]:
@@ -59,6 +63,92 @@ def _expected_release_asset_names(version: str) -> set[str]:
     if Version(version.removeprefix("v")).release >= (1, 1, 0):
         expected.add(f"animemo-{version}-portable.tar")
     return expected
+
+
+@dataclass(frozen=True)
+class ReleaseAssetInventoryEntry:
+    name: str
+    state: str
+    size: int
+
+
+@dataclass(frozen=True)
+class ReleaseAssetInventory:
+    version: str
+    prerelease: bool
+    assets: tuple[ReleaseAssetInventoryEntry, ...]
+
+    @property
+    def transport_object_plans(self) -> tuple[TransportObjectPlan, ...]:
+        by_name = {item.name: item for item in self.assets}
+        return tuple(
+            TransportObjectPlan(name, by_name[name].size)
+            for name in (
+                "checksums.txt",
+                "deployment-contract.json",
+                "installer-materials.tar",
+                "release-manifest.json",
+            )
+        )
+
+
+def _validate_release_asset_inventory(
+    metadata: object,
+    version: str,
+    *,
+    max_object_bytes: int = MAX_RELEASE_ASSET_BYTES,
+    max_total_bytes: int = MAX_RELEASE_TRANSPORT_BYTES,
+) -> ReleaseAssetInventory:
+    if (
+        type(metadata) is not dict
+        or metadata.get("tag_name") != version
+        or metadata.get("draft") is not False
+        or type(metadata.get("prerelease")) is not bool
+    ):
+        raise RequestRejected("Exact GitHub release metadata is invalid")
+    parsed_version = Version(version.removeprefix("v"))
+    if metadata["prerelease"] is not parsed_version.is_prerelease:
+        raise RequestRejected("Exact GitHub release metadata channel is invalid")
+    raw_assets = metadata.get("assets")
+    if type(raw_assets) is not list:
+        raise RequestRejected("GitHub release assets differ from the release contract")
+    entries: list[ReleaseAssetInventoryEntry] = []
+    for item in raw_assets:
+        if (
+            type(item) is not dict
+            or not isinstance(item.get("name"), str)
+            or item.get("state") != "uploaded"
+            or type(item.get("size")) is not int
+            or item["size"] <= 0
+            or item["size"] > max_object_bytes
+        ):
+            raise RequestRejected("GitHub release assets differ from the release contract")
+        entries.append(
+            ReleaseAssetInventoryEntry(
+                name=item["name"],
+                state=item["state"],
+                size=item["size"],
+            )
+        )
+    names = [item.name for item in entries]
+    expected_names = _expected_release_asset_names(version)
+    if (
+        len(names) != len(expected_names)
+        or len(names) != len(set(names))
+        or set(names) != expected_names
+    ):
+        raise RequestRejected("GitHub release assets differ from the release contract")
+    by_name = {item.name: item for item in entries}
+    transport_total = sum(by_name[name].size for name in EXPECTED_RELEASE_ASSETS)
+    if transport_total > max_total_bytes:
+        raise RequestRejected("GitHub release transport assets exceed the resource limit")
+    return ReleaseAssetInventory(
+        version=version,
+        prerelease=metadata["prerelease"],
+        assets=tuple(sorted(entries, key=lambda item: item.name)),
+    )
+
+
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 ATTESTATION_BUNDLE_PATH = re.compile(
     r"^/attestations/(?P<repository_id>[1-9][0-9]*)/"
@@ -533,22 +623,27 @@ class GitHubReleaseSource:
             f"/repos/{REPOSITORY}/releases/tags/{version}",
             label="Exact GitHub release metadata",
         )
-        if (
-            not isinstance(metadata, dict)
-            or metadata.get("tag_name") != version
-            or metadata.get("draft") is not False
-            or not isinstance(metadata.get("prerelease"), bool)
-        ):
-            raise RequestRejected("Exact GitHub release metadata is invalid")
+        inventory = _validate_release_asset_inventory(metadata, version)
         with tempfile.TemporaryDirectory(
             prefix=f".{version}.", dir=self.cache_root
         ) as temporary:
             staging = Path(temporary)
-            acquired = self.transport_source.acquire(
-                TransportRequest.release_bundle(version.removeprefix("v")),
-                staging,
+            transport_request = TransportRequest.release_bundle(
+                version.removeprefix("v"),
+                object_plans=inventory.transport_object_plans,
             )
-            if acquired.receipt.transport_id is not self.transport_policy.source:
+            acquired = self.transport_source.acquire(transport_request, staging)
+            if (
+                acquired.receipt.transport_id is not self.transport_policy.source
+                or acquired.receipt.request_identity != transport_request.identity
+                or tuple(
+                    (item.logical_name, item.size) for item in acquired.objects
+                )
+                != tuple(
+                    (item.logical_name, item.expected_size)
+                    for item in inventory.transport_object_plans
+                )
+            ):
                 raise RequestRejected("Release transport receipt and policy differ")
             destination = acquired.root
             for name in EXPECTED_RELEASE_ASSETS:
@@ -610,26 +705,6 @@ class GitHubReleaseSource:
             if metadata["prerelease"] != expected_prerelease:
                 raise RequestRejected(
                     "GitHub release metadata and manifest channel differ"
-                )
-            release_assets = metadata.get("assets")
-            if not isinstance(release_assets, list) or any(
-                not isinstance(item, dict)
-                or not isinstance(item.get("name"), str)
-                or item.get("state") != "uploaded"
-                for item in release_assets
-            ):
-                raise RequestRejected(
-                    "GitHub release assets differ from the release contract"
-                )
-            asset_names = [item["name"] for item in release_assets]
-            expected_release_assets = _expected_release_asset_names(version)
-            if (
-                len(asset_names) != len(expected_release_assets)
-                or len(asset_names) != len(set(asset_names))
-                or set(asset_names) != expected_release_assets
-            ):
-                raise RequestRejected(
-                    "GitHub release assets differ from the release contract"
                 )
             commit = manifest["release"]["commit"]
             provenance_commit = manifest["provenance"]["sourceCommit"]
@@ -754,11 +829,11 @@ class GitHubReleaseSource:
                     tag_commit=commit,
                     assets=tuple(
                         ReleaseAssetEvidence(
-                            name=item["name"],
-                            state=item["state"],
+                            name=item.name,
+                            state=item.state,
                         )
-                        for item in release_assets
-                        if item["name"] in EXPECTED_RELEASE_ASSETS
+                        for item in inventory.assets
+                        if item.name in EXPECTED_RELEASE_ASSETS
                     ),
                     attestations=tuple(attestation_evidence),
                 )

@@ -18,11 +18,19 @@ from cramjam import snappy
 
 from release.contract import build_manifest, deployment_contract_digest
 from scripts.tests.trust_kit_fixture import contract_only_test_pretrust_bytes
-from updater.errors import CommandFailed, RequestRejected
+from updater.errors import CommandExited, CommandFailed, RequestRejected
 from updater.source import (
     MAX_GITHUB_JSON_BYTES,
     GitHubPublicRest,
     GitHubReleaseSource,
+    _validate_release_asset_inventory,
+)
+from updater.transport import (
+    AcquiredTransportSet,
+    ExplicitTransportPolicy,
+    TransportObjectReceipt,
+    TransportReceipt,
+    TransportSourceId,
 )
 
 
@@ -94,6 +102,55 @@ FAKE_DEPLOYMENT_CONTRACT = {
 }
 
 
+def _release_materials(manifest, deployment_contract=None):
+    deployment_contract = deployment_contract or FAKE_DEPLOYMENT_CONTRACT
+    manifest_bytes = (
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode()
+    deployment_bytes = (
+        json.dumps(
+            deployment_contract,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n"
+    ).encode()
+    checksums = (
+        f"{hashlib.sha256(manifest_bytes).hexdigest()}  release-manifest.json\n"
+        f"{hashlib.sha256(deployment_bytes).hexdigest()}  deployment-contract.json\n"
+        f"{hashlib.sha256(FAKE_MATERIAL_ARCHIVE).hexdigest()}  installer-materials.tar\n"
+    ).encode()
+    return {
+        "checksums.txt": checksums,
+        "deployment-contract.json": deployment_bytes,
+        "installer-materials.tar": FAKE_MATERIAL_ARCHIVE,
+        "release-manifest.json": manifest_bytes,
+    }
+
+
+def _release_asset_metadata(manifest, deployment_contract=None):
+    materials = _release_materials(manifest, deployment_contract)
+    assets = [
+        {"name": name, "state": "uploaded", "size": len(materials[name])}
+        for name in (
+            "checksums.txt",
+            "deployment-contract.json",
+            "installer-materials.tar",
+            "release-manifest.json",
+        )
+    ]
+    if tuple(int(item) for item in manifest["release"]["version"].removeprefix("v").split(".")[:2]) >= (1, 1):
+        assets.append(
+            {
+                "name": f"animemo-{manifest['release']['version']}-portable.tar",
+                "state": "uploaded",
+                "size": 1,
+            }
+        )
+    return assets
+
+
 class FakeRunner:
     def __init__(
         self,
@@ -135,6 +192,10 @@ class FakeRunner:
             "draft": False,
             "prerelease": manifest["release"]["channel"] != "stable",
             "published_at": "2026-08-12T01:00:00Z",
+            "assets": _release_asset_metadata(
+                manifest,
+                self.deployment_contract,
+            ),
         }
 
     def run(self, argv, **kwargs):
@@ -156,34 +217,31 @@ class FakeRunner:
             return type("Result", (), {"stdout": json.dumps(self.exact_release)})()
         if argv[1:3] == ["release", "download"]:
             if self.fail_anonymous_download and "GH_TOKEN" not in kwargs.get("env", {}):
-                raise CommandFailed("anonymous release download failed")
+                raise CommandExited(
+                    "/usr/bin/gh",
+                    1,
+                    "",
+                    "HTTP 401 authentication required",
+                )
             output = Path(argv[argv.index("--dir") + 1])
             output.mkdir(parents=True, exist_ok=True)
-            encoded = (json.dumps(self.manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
-            deployment_encoded = (
-                json.dumps(self.deployment_contract, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-            ).encode()
-            (output / "release-manifest.json").write_bytes(encoded)
-            (output / "deployment-contract.json").write_bytes(deployment_encoded)
-            (output / "installer-materials.tar").write_bytes(FAKE_MATERIAL_ARCHIVE)
-            checksums = (
-                f"{hashlib.sha256(encoded).hexdigest()}  release-manifest.json\n"
-                f"{hashlib.sha256(deployment_encoded).hexdigest()}  deployment-contract.json\n"
-                f"{hashlib.sha256(FAKE_MATERIAL_ARCHIVE).hexdigest()}  installer-materials.tar\n"
-            )
+            materials = _release_materials(self.manifest, self.deployment_contract)
+            checksums = materials["checksums.txt"].decode()
             if self.duplicate_checksum:
-                checksums += f"{hashlib.sha256(encoded).hexdigest()}  release-manifest.json\n"
+                checksums += (
+                    f"{hashlib.sha256(materials['release-manifest.json']).hexdigest()}"
+                    "  release-manifest.json\n"
+                )
             if self.tamper_checksum:
                 replacement = "0" if checksums[0] != "0" else "1"
                 checksums = replacement + checksums[1:]
-            (output / "checksums.txt").write_text(
-                checksums,
-                encoding="utf-8",
-            )
+            materials["checksums.txt"] = checksums.encode()
             if self.tamper_manifest:
-                (output / "release-manifest.json").write_bytes(encoded + b"\n")
-            if self.omit_asset:
-                (output / self.omit_asset).unlink()
+                encoded = materials["release-manifest.json"]
+                materials["release-manifest.json"] = b"[" + encoded[1:]
+            logical_name = argv[argv.index("--pattern") + 1]
+            if self.omit_asset != logical_name:
+                (output / logical_name).write_bytes(materials[logical_name])
             return type("Result", (), {"stdout": ""})()
         if argv[1:3] == ["attestation", "verify"]:
             if self.fail_attestation:
@@ -264,12 +322,7 @@ class FakePublicRest:
             "draft": False,
             "prerelease": manifest["release"]["channel"] != "stable",
             "published_at": manifest["release"]["createdAt"],
-            "assets": [
-                {"name": "checksums.txt", "state": "uploaded"},
-                {"name": "deployment-contract.json", "state": "uploaded"},
-                {"name": "installer-materials.tar", "state": "uploaded"},
-                {"name": "release-manifest.json", "state": "uploaded"},
-            ],
+            "assets": _release_asset_metadata(manifest),
         }
         self.tag_commit = tag_commit or manifest["release"]["commit"]
         self.attestations = attestations if attestations is not None else [
@@ -308,6 +361,44 @@ class FakePublicRest:
     def get_attestation_bundle(self, url, *, repository_id):
         self.bundle_calls.append((url, repository_id))
         return self.bundle_payload
+
+
+class RecordingOfficialMirrorTransport:
+    transport_id = TransportSourceId.OFFICIAL_MIRROR
+
+    def __init__(self, manifest) -> None:
+        self.materials = _release_materials(manifest)
+        self.requests = []
+
+    def acquire(self, request, private_staging):
+        self.requests.append(request)
+        receipts = []
+        for plan in request.object_plans:
+            content = self.materials[plan.logical_name]
+            if len(content) != plan.expected_size:
+                raise AssertionError(plan.logical_name)
+            destination = private_staging / plan.logical_name
+            destination.write_bytes(content)
+            receipts.append(
+                TransportObjectReceipt(
+                    logical_name=plan.logical_name,
+                    relative_path=plan.logical_name,
+                    sha256=hashlib.sha256(content).hexdigest(),
+                    size=len(content),
+                )
+            )
+        objects = tuple(receipts)
+        receipt = TransportReceipt(
+            transport_id=self.transport_id,
+            request_identity=request.identity,
+            objects=objects,
+            identity="mirror-transport-receipt-test-fixture",
+        )
+        return AcquiredTransportSet(
+            root=private_staging,
+            objects=objects,
+            receipt=receipt,
+        )
 
 
 class FakeHttpResponse:
@@ -545,9 +636,10 @@ class GitHubReleaseSourceTests(unittest.TestCase):
                 for call, options in zip(runner.calls, runner.call_options, strict=True)
                 if call[1:3] == ("release", "download")
             ]
-            self.assertEqual(len(downloads), 2)
-            self.assertNotIn("GH_TOKEN", downloads[0])
-            self.assertEqual(downloads[1]["GH_TOKEN"], token)
+            self.assertEqual(len(downloads), 8)
+            for index in range(0, len(downloads), 2):
+                self.assertNotIn("GH_TOKEN", downloads[index])
+                self.assertEqual(downloads[index + 1]["GH_TOKEN"], token)
 
     def test_public_release_authority_uses_anonymous_rest_and_offline_attestation_bundles(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -795,13 +887,6 @@ class GitHubReleaseSourceTests(unittest.TestCase):
             manifest["release"]["promotedFrom"] = "v1.1.0-rc.1"
             manifest["releaseNotes"]["tag"] = "v1.1.0"
             metadata = dict(FakePublicRest(manifest).exact_release)
-            metadata["assets"] = [
-                *metadata["assets"],
-                {
-                    "name": "animemo-v1.1.0-portable.tar",
-                    "state": "uploaded",
-                },
-            ]
             source = GitHubReleaseSource(
                 Path(directory),
                 runner=FakeRunner(manifest),
@@ -811,6 +896,52 @@ class GitHubReleaseSourceTests(unittest.TestCase):
             verified = source.fetch_verified_materials("v1.1.0")
 
             self.assertEqual(verified.manifest["release"]["version"], "v1.1.0")
+
+    def test_official_mirror_transport_cannot_replace_github_release_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = stable_manifest()
+            manifest["release"]["version"] = "v1.1.0"
+            manifest["release"]["promotedFrom"] = "v1.1.0-rc.1"
+            manifest["releaseNotes"]["tag"] = "v1.1.0"
+            runner = FakeRunner(manifest)
+            rest = FakePublicRest(manifest)
+            transport = RecordingOfficialMirrorTransport(manifest)
+            policy = ExplicitTransportPolicy.official_mirror()
+            source = GitHubReleaseSource(
+                Path(directory),
+                runner=runner,
+                rest=rest,
+                policy=policy,
+                transports={TransportSourceId.OFFICIAL_MIRROR: transport},
+            )
+
+            verified = source.fetch_verified_materials("v1.1.0")
+
+            self.assertEqual(verified.manifest, manifest)
+            self.assertEqual(len(transport.requests), 1)
+            self.assertEqual(
+                transport.requests[0].exact_version,
+                "1.1.0",
+            )
+            github_calls = [path for path, _label in rest.calls]
+            self.assertIn(
+                "/repos/yanyuhanyue/AniMemo/releases/tags/v1.1.0",
+                github_calls,
+            )
+            self.assertIn(
+                "/repos/yanyuhanyue/AniMemo/git/ref/tags/v1.1.0",
+                github_calls,
+            )
+            self.assertEqual(
+                sum(path.startswith("/repos/yanyuhanyue/AniMemo/attestations/") for path in github_calls),
+                5,
+            )
+            command_lines = [" ".join(call) for call in runner.calls]
+            self.assertEqual(
+                sum("attestation verify" in call for call in command_lines),
+                5,
+            )
+            self.assertFalse(any("release download" in call for call in command_lines))
 
     def test_v1_1_release_rejects_portable_transport_asset_lookalike(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -824,6 +955,7 @@ class GitHubReleaseSourceTests(unittest.TestCase):
                 {
                     "name": "animemo-v1.1.0-lookalike-portable.tar",
                     "state": "uploaded",
+                    "size": 1,
                 },
             ]
             source = GitHubReleaseSource(
@@ -862,10 +994,24 @@ class GitHubReleaseSourceTests(unittest.TestCase):
     def test_duplicate_checksum_entries_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             manifest = stable_manifest()
+            metadata = dict(FakePublicRest(manifest).exact_release)
+            extra = (
+                f"{hashlib.sha256(_release_materials(manifest)['release-manifest.json']).hexdigest()}"
+                "  release-manifest.json\n"
+            ).encode()
+            metadata["assets"] = [
+                {
+                    **item,
+                    "size": item["size"] + len(extra),
+                }
+                if item["name"] == "checksums.txt"
+                else item
+                for item in metadata["assets"]
+            ]
             source = GitHubReleaseSource(
                 Path(directory),
                 runner=FakeRunner(manifest, duplicate_checksum=True),
-                rest=FakePublicRest(manifest),
+                rest=FakePublicRest(manifest, exact_release=metadata),
             )
 
             with self.assertRaisesRegex(RequestRejected, "checksums"):
@@ -892,7 +1038,7 @@ class GitHubReleaseSourceTests(unittest.TestCase):
                 rest=FakePublicRest(manifest),
             )
 
-            with self.assertRaisesRegex(RequestRejected, "asset"):
+            with self.assertRaisesRegex(RequestRejected, "object|asset|unexpected"):
                 source.fetch_verified("v1.0.0")
 
     def test_tampered_manifest_is_rejected_by_checksum(self):
@@ -1016,6 +1162,77 @@ class GitHubReleaseSourceTests(unittest.TestCase):
 
             self.assertEqual(runner.calls, [])
             self.assertEqual(list(outside.iterdir()), [])
+
+
+class ReleaseAssetInventoryTests(unittest.TestCase):
+    def test_exact_v1_1_inventory_is_the_single_source_for_four_transport_plans(self):
+        manifest = stable_manifest()
+        manifest["release"]["version"] = "v1.1.0-rc.10"
+        manifest["release"]["channel"] = "rc"
+        metadata = dict(FakePublicRest(manifest).exact_release)
+
+        inventory = _validate_release_asset_inventory(metadata, "v1.1.0-rc.10")
+
+        self.assertEqual(len(inventory.assets), 5)
+        self.assertEqual(
+            [item.logical_name for item in inventory.transport_object_plans],
+            [
+                "checksums.txt",
+                "deployment-contract.json",
+                "installer-materials.tar",
+                "release-manifest.json",
+            ],
+        )
+        self.assertNotIn(
+            "animemo-v1.1.0-rc.10-portable.tar",
+            [item.logical_name for item in inventory.transport_object_plans],
+        )
+        expected_sizes = {item["name"]: item["size"] for item in metadata["assets"]}
+        self.assertEqual(
+            [item.expected_size for item in inventory.transport_object_plans],
+            [expected_sizes[item.logical_name] for item in inventory.transport_object_plans],
+        )
+
+    def test_inventory_rejects_missing_nonpositive_noninteger_and_duplicate_sizes(self):
+        manifest = stable_manifest()
+        base = FakePublicRest(manifest).exact_release
+        cases = {}
+        for name, value in (
+            ("missing", None),
+            ("zero", 0),
+            ("negative", -1),
+            ("non-integer", "1"),
+        ):
+            assets = [dict(item) for item in base["assets"]]
+            if value is None:
+                assets[0].pop("size")
+            else:
+                assets[0]["size"] = value
+            cases[name] = assets
+        cases["duplicate"] = [*base["assets"], dict(base["assets"][0])]
+
+        for name, assets in cases.items():
+            with self.subTest(name=name):
+                metadata = {**base, "assets": assets}
+                with self.assertRaisesRegex(RequestRejected, "assets differ"):
+                    _validate_release_asset_inventory(metadata, "v1.0.0")
+
+    def test_inventory_enforces_object_and_total_resource_limits_before_transport(self):
+        manifest = stable_manifest()
+        metadata = FakePublicRest(manifest).exact_release
+
+        with self.assertRaisesRegex(RequestRejected, "assets differ"):
+            _validate_release_asset_inventory(
+                metadata,
+                "v1.0.0",
+                max_object_bytes=1,
+            )
+        with self.assertRaisesRegex(RequestRejected, "resource limit"):
+            _validate_release_asset_inventory(
+                metadata,
+                "v1.0.0",
+                max_total_bytes=1,
+            )
 
 
 if __name__ == "__main__":
