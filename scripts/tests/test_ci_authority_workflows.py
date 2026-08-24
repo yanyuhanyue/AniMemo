@@ -18,6 +18,32 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             next_job = source.find("\n  ", next_job + 1)
         return source[start:] if next_job == -1 else source[start:next_job]
 
+    def test_release_mirror_never_executes_pull_request_code_or_writes_github(self):
+        source = self.source("release-mirror.yml")
+        header = source[: source.index("jobs:")]
+        mirror = self.job(source, "mirror")
+
+        self.assertIn("release:\n    types:\n      - published", header)
+        self.assertIn("workflow_dispatch:", header)
+        self.assertNotIn("pull_request:", header)
+        self.assertNotIn("push:", header)
+        self.assertIn("contents: read", header)
+        self.assertIn("actions: read", header)
+        self.assertIn("attestations: read", header)
+        self.assertNotIn(": write", header)
+        self.assertIn("ref: refs/heads/main", mirror)
+        self.assertIn("persist-credentials: false", mirror)
+        self.assertIn(
+            "release-mirror.yml@refs/heads/main",
+            mirror,
+        )
+        self.assertNotIn("github.event.release.body", source)
+        self.assertNotIn("github.event.release.name", source)
+        self.assertNotIn("github.event.pull_request", source)
+        self.assertNotIn("gh api --method POST", source)
+        self.assertNotIn("gh api --method PATCH", source)
+        self.assertNotIn("gh api --method DELETE", source)
+
     def test_pre_merge_workflow_binds_pr_head_base_and_both_full_gates(self):
         source = self.source("pre-merge-full.yml")
         self.assertIn("workflow_dispatch:", source)

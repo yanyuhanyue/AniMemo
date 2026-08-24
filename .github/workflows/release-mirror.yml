@@ -1,0 +1,107 @@
+name: Release Mirror
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 要核对的精确不可变发行标签
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  attestations: read
+
+env:
+  GH_REQUIRED_VERSION: 2.97.0
+
+concurrency:
+  group: release-mirror-${{ github.event.release.tag_name || inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: 发布不可变发行镜像
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: refs/heads/main
+          fetch-depth: 1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: 验证固定 GitHub CLI 安全基线
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(gh --version | sed -nE 's/^gh version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1)"
+          test "$version" = "$GH_REQUIRED_VERSION"
+      - name: 绑定默认分支工作流与精确发行
+        id: release
+        env:
+          DISPATCH_TAG: ${{ inputs.release_tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "yanyuhanyue/AniMemo"
+          test "$GITHUB_WORKFLOW_REF" = \
+            "yanyuhanyue/AniMemo/.github/workflows/release-mirror.yml@refs/heads/main"
+          git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          if [[ "$GITHUB_EVENT_NAME" = "release" ]]; then
+            test -z "$DISPATCH_TAG"
+            release_tag="$EVENT_TAG"
+            test "$GITHUB_REF" = "refs/tags/$release_tag"
+          else
+            test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+            test -z "$EVENT_TAG"
+            release_tag="$DISPATCH_TAG"
+            test "$GITHUB_REF" = "refs/heads/main"
+            test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          fi
+          [[ "$release_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]
+          metadata="$RUNNER_TEMP/release-metadata.json"
+          gh api --method GET \
+            "repos/yanyuhanyue/AniMemo/releases/tags/$release_tag" > "$metadata"
+          jq -e --arg tag "$release_tag" '
+            type == "object" and
+            .tag_name == $tag and
+            .name == $tag and
+            .draft == false and
+            .immutable == true and
+            (.id | type) == "number"
+          ' "$metadata" >/dev/null
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "release_id=$(jq -r '.id' "$metadata")" >> "$GITHUB_OUTPUT"
+      - name: 安装固定发行验证依赖
+        run: python -m pip install -r release/requirements.txt
+      - name: 发布并匿名回读精确镜像
+        env:
+          ANIMEMO_RELEASE_MIRROR_ACCOUNT_ID: ${{ secrets.ANIMEMO_RELEASE_MIRROR_ACCOUNT_ID }}
+          ANIMEMO_RELEASE_MIRROR_ACCESS_KEY_ID: ${{ secrets.ANIMEMO_RELEASE_MIRROR_ACCESS_KEY_ID }}
+          ANIMEMO_RELEASE_MIRROR_SECRET_ACCESS_KEY: ${{ secrets.ANIMEMO_RELEASE_MIRROR_SECRET_ACCESS_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$RUNNER_TEMP/release-mirror-evidence"
+          python -m release.mirror --release-tag "$RELEASE_TAG" \
+            > "$RUNNER_TEMP/release-mirror-evidence/release-mirror.json"
+          chmod 0600 "$RUNNER_TEMP/release-mirror-evidence/release-mirror.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-mirror-${{ steps.release.outputs.release_id }}
+          path: ${{ runner.temp }}/release-mirror-evidence/release-mirror.json
+          if-no-files-found: error
+          retention-days: 14
