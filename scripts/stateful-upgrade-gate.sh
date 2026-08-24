@@ -488,7 +488,7 @@ run_compose current_effective_config "$CURRENT_ROOT" "$COMMAND_TIMEOUT_SECONDS" 
   config --format json >"$CURRENT_EFFECTIVE_CONFIG"
 chmod 600 "$BASE_EFFECTIVE_CONFIG" "$CURRENT_EFFECTIVE_CONFIG"
 python3 - \
-  "$CURRENT_ROOT/release/dependency-images.json" \
+  "$CURRENT_ROOT" \
   "$DEPENDENCY_ENV_FILE" \
   "$BASE_EFFECTIVE_CONFIG" \
   "$CURRENT_EFFECTIVE_CONFIG" \
@@ -498,12 +498,11 @@ python3 - \
   "$PROJECT_NAME" <<'PY'
 import hashlib
 import json
-import re
 import sys
 from pathlib import Path
 
 (
-    authority_path,
+    current_root,
     projection_path,
     base_config_path,
     current_config_path,
@@ -513,15 +512,10 @@ from pathlib import Path
     project_name,
 ) = sys.argv[1:]
 
-authority = json.loads(Path(authority_path).read_text(encoding="utf-8"))
-canonical_authority = (
-    json.dumps(authority, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    + "\n"
-).encode("utf-8")
-authority_identity = "sha256:" + hashlib.sha256(canonical_authority).hexdigest()
-images = authority.get("images")
-if authority.get("schemaVersion") != 1 or not isinstance(images, dict):
-    raise SystemExit("Stateful dependency authority schema is invalid")
+sys.path.insert(0, current_root)
+from release.dependency_images import AUTHORITY  # noqa: E402
+
+authority_identity = AUTHORITY.identity
 
 projection = {}
 for raw_line in Path(projection_path).read_text(encoding="utf-8").splitlines():
@@ -541,16 +535,14 @@ if projection["DEPENDENCY_IMAGE_AUTHORITY_SHA256"] != authority_identity:
     raise SystemExit("Stateful dependency projection authority identity differs")
 
 expected = {}
+expected_platform = {}
 for role in ("postgres", "redis"):
-    image = images.get(role)
-    if not isinstance(image, dict) or image.get("platform") != "linux/amd64":
-        raise SystemExit(f"Stateful {role} platform authority is invalid")
-    reference = f"{image.get('repository')}@{image.get('digest')}"
-    if not re.fullmatch(r"[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}", reference):
-        raise SystemExit(f"Stateful {role} canonical reference is invalid")
+    image = AUTHORITY.image(role)
+    reference = image.reference
     if projection[f"ANIMEMO_{role.upper()}_IMAGE"] != reference:
         raise SystemExit(f"Stateful {role} projection differs from authority")
     expected[role] = reference
+    expected_platform[role] = image.platform
 
 base_bytes = Path(base_config_path).read_bytes()
 current_bytes = Path(current_config_path).read_bytes()
@@ -566,6 +558,10 @@ for label, config in (("Base", base), ("Current", current)):
             raise SystemExit(f"{label} effective {role} image differs from authority")
         if "${" in service["image"]:
             raise SystemExit(f"{label} effective {role} image remains unresolved")
+        if service.get("platform") != expected_platform[role]:
+            raise SystemExit(
+                f"{label} effective {role} platform differs from authority"
+            )
 
 for role in ("postgres", "redis"):
     base_service = base["services"][role]
@@ -588,6 +584,7 @@ receipt = {
     "authorityIdentity": authority_identity,
     "postgresReference": expected["postgres"],
     "redisReference": expected["redis"],
+    "platformAuthority": expected_platform["postgres"],
     "baseConfigIdentity": "sha256:" + hashlib.sha256(base_bytes).hexdigest(),
     "currentConfigIdentity": "sha256:" + hashlib.sha256(current_bytes).hexdigest(),
     "persistentDependencyMatch": True,

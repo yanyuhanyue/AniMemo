@@ -156,21 +156,19 @@ def _read_private_text(root: Path, path: Path) -> str:
         attempt: int,
         *,
         unavailable: OSError | None = None,
-        delay: bool = True,
     ) -> None:
         if attempt == 19:
             if unavailable is not None:
                 raise unavailable
             raise StateError("PRIVATE_STATE_CHANGED_REPEATEDLY_DURING_READ")
-        if delay:
-            time.sleep(0.005)
+        time.sleep(0.005)
 
     for attempt in range(20):
         _validate_private_directory(root, path.parent)
         try:
             metadata = path.lstat()
         except (FileNotFoundError, PermissionError) as error:
-            retry_or_fail(attempt, unavailable=error, delay=False)
+            retry_or_fail(attempt, unavailable=error)
             continue
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             raise StateError("Private state file must be a single-link regular file")
@@ -185,7 +183,7 @@ def _read_private_text(root: Path, path: Path) -> str:
         try:
             descriptor = os.open(path, flags)
         except (FileNotFoundError, PermissionError) as error:
-            retry_or_fail(attempt, unavailable=error, delay=False)
+            retry_or_fail(attempt, unavailable=error)
             continue
         try:
             opened = os.fstat(descriptor)
@@ -240,22 +238,12 @@ class OperationStore:
     def get(self, operation_id: str) -> dict[str, object]:
         _validate_private_directory(self.root, self.operations)
         path = self._path(operation_id)
-        error = None
-        for attempt in range(20):
-            try:
-                payload = json.loads(_read_private_text(self.root, path))
-                break
-            except (
-                FileNotFoundError,
-                PermissionError,
-                json.JSONDecodeError,
-            ) as current_error:
-                error = current_error
-                if attempt == 19:
-                    raise StateError(
-                        f"Operation state is unavailable: {operation_id}"
-                    ) from error
-                time.sleep(0.005)
+        try:
+            payload = json.loads(_read_private_text(self.root, path))
+        except (FileNotFoundError, PermissionError, json.JSONDecodeError) as error:
+            raise StateError(
+                f"Operation state is unavailable: {operation_id}"
+            ) from error
         if not isinstance(payload, dict) or payload.get("id") != operation_id:
             raise StateError(f"Operation state is invalid: {operation_id}")
         return payload

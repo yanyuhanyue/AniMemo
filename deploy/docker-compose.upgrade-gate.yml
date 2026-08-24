@@ -1,12 +1,14 @@
 services:
   postgres:
     image: ${ANIMEMO_POSTGRES_IMAGE:?ANIMEMO_POSTGRES_IMAGE is required}
+    platform: linux/amd64
     container_name: ${COMPOSE_PROJECT_NAME}-postgres
     networks: !override
       - upgrade-gate
 
   redis:
     image: ${ANIMEMO_REDIS_IMAGE:?ANIMEMO_REDIS_IMAGE is required}
+    platform: linux/amd64
     container_name: ${COMPOSE_PROJECT_NAME}-redis
     networks: !override
       - upgrade-gate

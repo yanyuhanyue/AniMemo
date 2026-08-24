@@ -461,9 +461,11 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             "image: ${ANIMEMO_REDIS_IMAGE:?ANIMEMO_REDIS_IMAGE is required}",
             overlay,
         )
+        self.assertEqual(overlay.count("platform: linux/amd64"), 2)
         self.assertIn("config --format json", gate)
         self.assertIn("STATEFUL_DEPENDENCY_PROJECTION_RECEIPT", gate)
         self.assertIn("persistentDependencyMatch", gate)
+        self.assertIn('service.get("platform") != expected_platform[role]', gate)
         self.assertLess(
             gate.index("config --format json"),
             gate.index("up -d --wait --wait-timeout 120 postgres redis"),

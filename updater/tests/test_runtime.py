@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 
 from updater.background import BackgroundOperationManager
 from updater.errors import StateError
-from updater.runtime import HostAgentRuntime
 from updater.protocol import OPERATION_FIELDS
+from updater.runtime import HostAgentRuntime
 
 
 class BackgroundOperationManagerTests(unittest.TestCase):
@@ -129,6 +130,32 @@ class BackgroundOperationManagerTests(unittest.TestCase):
 
         self.assertFalse(closer.is_alive())
         self.assertTrue(close_returned.is_set())
+
+    def test_close_timeout_includes_blocked_mutation_admission(self):
+        manager = BackgroundOperationManager()
+        admitted = threading.Event()
+        release = threading.Event()
+
+        def hold_admission():
+            with manager.mutation_start():
+                admitted.set()
+                release.wait(2)
+
+        starter = threading.Thread(target=hold_admission)
+        starter.start()
+        self.assertTrue(admitted.wait(1))
+        before = time.monotonic()
+        with self.assertRaisesRegex(
+            StateError, "BACKGROUND_WORKERS_DID_NOT_STOP_BEFORE_TIMEOUT"
+        ):
+            manager.close(timeout=0.02)
+        elapsed = time.monotonic() - before
+
+        self.assertLess(elapsed, 0.5)
+        release.set()
+        starter.join(2)
+        self.assertFalse(starter.is_alive())
+        manager.close(timeout=0)
 
     def test_background_lifecycle_does_not_expand_rpc_protocol(self):
         self.assertNotIn("wait_for_background_operation", OPERATION_FIELDS)

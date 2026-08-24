@@ -16,16 +16,30 @@ class BackgroundOperationManager:
         self._thread_factory = thread_factory
         self._active: dict[str, object] = {}
         self._completed: dict[str, bool] = {}
+        self._admitted_threads: dict[int, int] = {}
         self._closing = False
 
     @contextmanager
     def mutation_start(self):
         """Linearize mutation admission with close and worker registration."""
 
+        thread_id = threading.get_ident()
         with self._condition:
             if self._closing:
                 raise StateError("BACKGROUND_OPERATION_MANAGER_CLOSED")
+            self._admitted_threads[thread_id] = (
+                self._admitted_threads.get(thread_id, 0) + 1
+            )
+        try:
             yield
+        finally:
+            with self._condition:
+                remaining = self._admitted_threads[thread_id] - 1
+                if remaining:
+                    self._admitted_threads[thread_id] = remaining
+                else:
+                    del self._admitted_threads[thread_id]
+                self._condition.notify_all()
 
     def start(
         self,
@@ -40,8 +54,8 @@ class BackgroundOperationManager:
             if cleanup is not None:
                 try:
                     cleanup()
-                except BaseException:
-                    pass
+                except BaseException:  # noqa: BLE001 - preserve the original start error
+                    return
 
         if not isinstance(operation_id, str) or not operation_id:
             cleanup_failed_start()
@@ -54,13 +68,13 @@ class BackgroundOperationManager:
             failed = False
             try:
                 target(*args, **kwargs)
-            except BaseException:  # worker failures are observed by wait, never leaked
+            except BaseException:  # noqa: BLE001 - wait must observe every worker exit
                 failed = True
             finally:
                 if cleanup is not None:
                     try:
                         cleanup()
-                    except BaseException:
+                    except BaseException:  # noqa: BLE001 - wait reports cleanup failure
                         failed = True
                 with self._condition:
                     self._active.pop(operation_id, None)
@@ -77,7 +91,8 @@ class BackgroundOperationManager:
             cleanup_failed_start()
             raise
         with self._condition:
-            if self._closing:
+            admitted = self._admitted_threads.get(threading.get_ident(), 0) > 0
+            if self._closing and not admitted:
                 rejection = StateError("BACKGROUND_OPERATION_MANAGER_CLOSED")
             elif operation_id in self._active or operation_id in self._completed:
                 rejection = StateError("BACKGROUND_OPERATION_ALREADY_REGISTERED")
@@ -121,7 +136,7 @@ class BackgroundOperationManager:
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
         with self._condition:
             self._closing = True
-            while self._active:
+            while self._active or self._admitted_threads:
                 remaining = (
                     None if deadline is None else max(0.0, deadline - time.monotonic())
                 )
