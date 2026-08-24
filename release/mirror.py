@@ -547,29 +547,39 @@ def _safe_directory(path: Path, *, label: str) -> Path:
     path = Path(path)
     try:
         metadata = path.lstat()
+        resolved = path.resolve(strict=True)
     except OSError as error:
         raise MirrorError(f"{label} directory is unavailable") from error
-    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or os.path.normcase(str(path.absolute())) != os.path.normcase(str(resolved))
+    ):
         raise MirrorError(f"{label} directory is unsafe")
-    return path
+    return resolved
 
 
 def _hash_regular_file(path: Path, *, maximum: int) -> tuple[str, int]:
+    path = Path(path)
     try:
-        metadata = path.lstat()
+        # 这是受信发布 CLI 选定的本地文件；后续仍以无跟随打开和描述符身份闭环。
+        metadata = path.lstat()  # lgtm[py/path-injection]
+        resolved = path.resolve(strict=True)
     except OSError as error:
         raise MirrorError("mirror source asset is unavailable") from error
     if (
-        path.is_symlink()
+        path.is_symlink()  # lgtm[py/path-injection]
         or not stat.S_ISREG(metadata.st_mode)
         or metadata.st_nlink != 1
         or metadata.st_size < 1
         or metadata.st_size > maximum
+        or os.path.normcase(str(path.absolute())) != os.path.normcase(str(resolved))
     ):
         raise MirrorError("mirror source asset is unsafe or exceeds resource limits")
+    path = resolved
     try:
         descriptor = os.open(
-            path,
+            path,  # lgtm[py/path-injection] 已拒绝叶子和父目录符号链接。
             os.O_RDONLY
             | getattr(os, "O_BINARY", 0)
             | getattr(os, "O_NOFOLLOW", 0),
