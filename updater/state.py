@@ -151,19 +151,42 @@ def _atomic_json(
 def _read_private_text(root: Path, path: Path) -> str:
     root = _absolute(root)
     path = _absolute(path)
+
+    def retry_or_fail(
+        attempt: int,
+        *,
+        unavailable: OSError | None = None,
+        delay: bool = True,
+    ) -> None:
+        if attempt == 19:
+            if unavailable is not None:
+                raise unavailable
+            raise StateError("PRIVATE_STATE_CHANGED_REPEATEDLY_DURING_READ")
+        if delay:
+            time.sleep(0.005)
+
     for attempt in range(20):
         _validate_private_directory(root, path.parent)
-        metadata = path.lstat()
-        if (
-            path.is_symlink()
-            or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1
-        ):
+        try:
+            metadata = path.lstat()
+        except (FileNotFoundError, PermissionError) as error:
+            retry_or_fail(attempt, unavailable=error, delay=False)
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             raise StateError("Private state file must be a single-link regular file")
+        if metadata.st_nlink > 1:
+            raise StateError("Private state file must be a single-link regular file")
+        if metadata.st_nlink == 0:
+            retry_or_fail(attempt)
+            continue
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        descriptor = os.open(path, flags)
+        try:
+            descriptor = os.open(path, flags)
+        except (FileNotFoundError, PermissionError) as error:
+            retry_or_fail(attempt, unavailable=error, delay=False)
+            continue
         try:
             opened = os.fstat(descriptor)
             if not stat.S_ISREG(opened.st_mode) or opened.st_nlink > 1:
@@ -171,11 +194,10 @@ def _read_private_text(root: Path, path: Path) -> str:
                     "Private state file must be a single-link regular file"
                 )
             if opened.st_nlink == 0:
-                if attempt == 19:
-                    raise StateError(
-                        "Private state file changed repeatedly during read"
-                    )
-                time.sleep(0.005)
+                retry_or_fail(attempt)
+                continue
+            if not os.path.samestat(metadata, opened):
+                retry_or_fail(attempt)
                 continue
             with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
                 descriptor = -1
@@ -183,7 +205,7 @@ def _read_private_text(root: Path, path: Path) -> str:
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
-    raise StateError("Private state file is unavailable")
+    raise StateError("PRIVATE_STATE_CHANGED_REPEATEDLY_DURING_READ")
 
 
 class OperationStore:

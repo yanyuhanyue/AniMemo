@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -205,6 +206,210 @@ class OperationStateTests(unittest.TestCase):
             self.assertTrue(observed_unlinked_inode)
             self.assertEqual(restored["id"], operation["id"])
             self.assertEqual(restored["status"], "idle")
+
+    def test_operation_store_retries_preopen_inode_unlinked_by_atomic_replace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = OperationStore(root / "state")
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+            real_lstat = Path.lstat
+            observed_unlinked_inode = False
+            lstat_calls = 0
+
+            def lstat_during_atomic_replace(path):
+                nonlocal observed_unlinked_inode, lstat_calls
+                metadata = real_lstat(path)
+                if path.name != f"{operation['id']}.json":
+                    return metadata
+                lstat_calls += 1
+                if not observed_unlinked_inode:
+                    observed_unlinked_inode = True
+                    values = list(metadata)
+                    values[3] = 0
+                    return os.stat_result(values)
+                return metadata
+
+            with mock.patch.object(
+                Path,
+                "lstat",
+                autospec=True,
+                side_effect=lstat_during_atomic_replace,
+            ):
+                restored = store.get(operation["id"])
+
+            self.assertTrue(observed_unlinked_inode)
+            self.assertGreaterEqual(lstat_calls, 2)
+            self.assertEqual(restored["id"], operation["id"])
+
+    def test_operation_store_retries_lstat_open_inode_substitution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = OperationStore(root / "state")
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+            real_fstat = os.fstat
+            substituted = False
+            fstat_calls = 0
+
+            def fstat_from_different_inode(descriptor):
+                nonlocal substituted, fstat_calls
+                metadata = real_fstat(descriptor)
+                fstat_calls += 1
+                if substituted:
+                    return metadata
+                substituted = True
+                values = list(metadata)
+                values[1] += 1
+                return os.stat_result(values)
+
+            with mock.patch("updater.state.os.fstat", side_effect=fstat_from_different_inode):
+                restored = store.get(operation["id"])
+
+            self.assertTrue(substituted)
+            self.assertGreaterEqual(fstat_calls, 2)
+            self.assertEqual(restored["id"], operation["id"])
+
+    def test_operation_store_fails_stably_after_repeated_namespace_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = OperationStore(root / "state")
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+            real_lstat = Path.lstat
+
+            def always_unlinked(path):
+                metadata = real_lstat(path)
+                if path.name != f"{operation['id']}.json":
+                    return metadata
+                values = list(metadata)
+                values[3] = 0
+                return os.stat_result(values)
+
+            with mock.patch.object(
+                Path,
+                "lstat",
+                autospec=True,
+                side_effect=always_unlinked,
+            ):
+                with self.assertRaisesRegex(
+                    StateError,
+                    "PRIVATE_STATE_CHANGED_REPEATEDLY_DURING_READ",
+                ):
+                    store.get(operation["id"])
+
+    def test_operation_store_retries_transient_missing_and_permission_windows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = OperationStore(root / "state")
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+            real_lstat = Path.lstat
+            failures = [FileNotFoundError("replace window"), PermissionError("replace window")]
+
+            def transient_errors(path):
+                if path.name == f"{operation['id']}.json" and failures:
+                    raise failures.pop(0)
+                return real_lstat(path)
+
+            with mock.patch.object(
+                Path,
+                "lstat",
+                autospec=True,
+                side_effect=transient_errors,
+            ):
+                restored = store.get(operation["id"])
+
+            self.assertEqual(failures, [])
+            self.assertEqual(restored["id"], operation["id"])
+
+    def test_operation_store_rejects_a_symlinked_journal_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_root = root / "state"
+            operations = state_root / "operations"
+            operations.mkdir(parents=True)
+            operation_id = "a" * 32
+            outside = root / "outside.json"
+            outside.write_text("{}\n", encoding="utf-8")
+            try:
+                (operations / f"{operation_id}.json").symlink_to(outside)
+            except OSError as error:
+                self.skipTest(f"File symlinks are unavailable: {error}")
+
+            with self.assertRaisesRegex(StateError, "single-link regular file"):
+                OperationStore(state_root).get(operation_id)
+
+    def test_operation_store_rejects_a_directory_in_place_of_a_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            operation_id = "a" * 32
+            journal = root / "state" / "operations" / f"{operation_id}.json"
+            journal.mkdir(parents=True)
+
+            with self.assertRaisesRegex(StateError, "single-link regular file"):
+                OperationStore(root / "state").get(operation_id)
+
+    @unittest.skipIf(os.name == "nt", "POSIX FIFO semantics are unavailable")
+    def test_operation_store_rejects_a_fifo_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            operation_id = "a" * 32
+            journal = root / "state" / "operations" / f"{operation_id}.json"
+            journal.parent.mkdir(parents=True)
+            os.mkfifo(journal)
+
+            with self.assertRaisesRegex(StateError, "single-link regular file"):
+                OperationStore(root / "state").get(operation_id)
+
+    def test_operation_store_does_not_mask_corrupt_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationStore(Path(directory) / "state")
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+            path = store.operations / f"{operation['id']}.json"
+            path.write_text('{"partial":', encoding="utf-8")
+
+            with self.assertRaisesRegex(StateError, "Operation state is unavailable"):
+                store.get(operation["id"])
+
+    def test_operation_store_concurrent_readers_never_observe_mixed_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationStore(Path(directory) / "state")
+            operation = store.create("apply_update", {"version": "v1.0.1"})
+            barrier = threading.Barrier(5)
+            stopped = threading.Event()
+            errors = []
+            observed = []
+
+            def read_until_complete():
+                try:
+                    barrier.wait(timeout=5)
+                    while not stopped.is_set():
+                        payload = store.get(operation["id"])
+                        observed.append(payload["status"])
+                except BaseException as error:
+                    errors.append(error)
+
+            readers = [threading.Thread(target=read_until_complete) for _ in range(4)]
+            for reader in readers:
+                reader.start()
+            barrier.wait(timeout=5)
+            for status in (
+                "preflight",
+                "fetching",
+                "verifying",
+                "pulling",
+                "migrating",
+                "bootstrapping",
+                "switching",
+                "verifying_health",
+                "succeeded",
+            ):
+                store.transition(operation["id"], status)
+            stopped.set()
+            for reader in readers:
+                reader.join(timeout=5)
+
+            self.assertTrue(all(not reader.is_alive() for reader in readers))
+            self.assertEqual(errors, [])
+            self.assertTrue(observed)
+            self.assertEqual(store.get(operation["id"])["status"], "succeeded")
 
     def test_invalid_transition_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
