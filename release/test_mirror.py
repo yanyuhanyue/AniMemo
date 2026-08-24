@@ -390,6 +390,16 @@ class MirrorPublisherTests(MirrorReceiptTests):
         self.assertEqual(result["publicReadback"], "PASS")
 
     def test_publisher_accepts_bound_206_without_optional_accept_ranges(self) -> None:
+        large_name = "installer-materials.tar"
+        self.contents[large_name] = b"x" * (1024 * 1024 + 17)
+        self.assets = [
+            {
+                "name": name,
+                "size": len(self.contents[name]),
+                "sha256": identity(self.contents[name]),
+            }
+            for name in mirror_release_assets(TAG)
+        ]
         store = MemoryStore()
         reader = CloudflareRangeMemoryPublicReader(store)
         publisher = OfficialReleaseMirrorPublisher(store=store, public_reader=reader)
@@ -402,12 +412,20 @@ class MirrorPublisherTests(MirrorReceiptTests):
         self.assertEqual(result["rangeStatus"], "PASS")
 
     def test_publisher_rejects_unbound_or_inconsistent_206_response(self) -> None:
+        first_name = mirror_release_assets(TAG)[0]
+        first_size = len(self.contents[first_name])
+        valid_length = str(first_size)
+        valid_range = f"bytes 0-{first_size - 1}/{first_size}"
         cases = (
-            {"Content-Length": "1"},
-            {"Content-Length": "5", "Content-Range": "bytes 1-5/5"},
+            {"Content-Length": "1", "Content-Range": valid_range},
+            {"Content-Length": valid_length},
             {
-                "Content-Length": "5",
-                "Content-Range": "bytes 0-4/5",
+                "Content-Length": valid_length,
+                "Content-Range": f"bytes 1-{first_size}/{first_size}",
+            },
+            {
+                "Content-Length": valid_length,
+                "Content-Range": valid_range,
                 "Accept-Ranges": "none",
             },
         )
