@@ -1567,15 +1567,33 @@ def _verify_github_release_authority(
     ):
         raise MirrorError("Release authority documents differ from the exact tag")
 
-    signer = f"{REPOSITORY}/.github/workflows/release.yml"
+    application_signer = f"{REPOSITORY}/.github/workflows/release.yml"
+    file_signer = f"{REPOSITORY}/{manifest['provenance']['workflow']}"
+    provenance_commit = manifest["provenance"]["sourceCommit"]
     subjects = (
-        f"oci://{API_REPOSITORY}@{manifest['images']['api']['digest']}",
-        f"oci://{WEB_REPOSITORY}@{manifest['images']['web']['digest']}",
-        str(directory / "release-manifest.json"),
-        str(directory / "deployment-contract.json"),
-        str(directory / "installer-materials.tar"),
+        (
+            f"oci://{API_REPOSITORY}@{manifest['images']['api']['digest']}",
+            application_signer,
+            commit,
+        ),
+        (
+            f"oci://{WEB_REPOSITORY}@{manifest['images']['web']['digest']}",
+            application_signer,
+            commit,
+        ),
+        (str(directory / "release-manifest.json"), file_signer, provenance_commit),
+        (
+            str(directory / "deployment-contract.json"),
+            file_signer,
+            provenance_commit,
+        ),
+        (
+            str(directory / "installer-materials.tar"),
+            file_signer,
+            provenance_commit,
+        ),
     )
-    for subject in subjects:
+    for subject, signer, source_commit in subjects:
         _run_gh(
             (
                 "attestation",
@@ -1586,7 +1604,7 @@ def _verify_github_release_authority(
                 "--signer-workflow",
                 signer,
                 "--source-digest",
-                commit,
+                source_commit,
             )
         )
     return metadata, commit

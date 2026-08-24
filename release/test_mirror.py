@@ -18,6 +18,7 @@ from release.mirror import (
     OfficialMirrorPublicReader,
     OfficialReleaseMirrorPublisher,
     R2S3ObjectStore,
+    _verify_github_release_authority,
     _gh_environment,
     build_mirror_receipt,
     load_mirror_receipt_bytes,
@@ -110,6 +111,99 @@ class MirrorWorkflowIdentityTests(unittest.TestCase):
             self.assertRaisesRegex(MirrorError, "workflow identity"),
         ):
             publish_release_mirror(TAG)
+
+
+class MirrorReleaseAuthorityTests(unittest.TestCase):
+    def test_stable_file_attestations_use_promotion_provenance(self) -> None:
+        tag = "v1.1.0"
+        application_commit = "1" * 40
+        provenance_commit = "2" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            names = mirror_release_assets(tag)
+            inventory = []
+            for name in names:
+                content = ("stable:" + name).encode()
+                (directory / name).write_bytes(content)
+                inventory.append(
+                    {
+                        "name": name,
+                        "state": "uploaded",
+                        "size": len(content),
+                        "digest": identity(content),
+                    }
+                )
+            metadata = {
+                "tag_name": tag,
+                "name": tag,
+                "draft": False,
+                "immutable": True,
+                "id": 123,
+                "assets": inventory,
+            }
+            manifest = {
+                "release": {"version": tag, "commit": application_commit},
+                "images": {
+                    "api": {"digest": "sha256:" + "a" * 64},
+                    "web": {"digest": "sha256:" + "b" * 64},
+                },
+                "deployment": {"contractSha256": "sha256:" + "c" * 64},
+                "provenance": {
+                    "workflow": ".github/workflows/promote-release.yml",
+                    "sourceCommit": provenance_commit,
+                },
+            }
+            deployment = {}
+            portable = directory / names[-1]
+            portable_digest = identity(portable.read_bytes())
+            calls: list[tuple[str, ...]] = []
+
+            def github_json(arguments: tuple[str, ...]):
+                endpoint = arguments[-1]
+                if endpoint.endswith(f"releases/tags/{tag}"):
+                    return metadata
+                if endpoint.endswith(f"git/ref/tags/{tag}"):
+                    return {"object": {"type": "tag", "sha": "3" * 40}}
+                if endpoint.endswith("git/tags/" + "3" * 40):
+                    return {
+                        "tag": tag,
+                        "message": tag + "\n",
+                        "object": {"type": "commit", "sha": application_commit},
+                    }
+                raise AssertionError(arguments)
+
+            def strict_json(path: Path, *, label: str):
+                return manifest if path.name == "release-manifest.json" else deployment
+
+            inspection = mock.Mock(
+                archive_sha256=portable_digest,
+                archive_size=portable.stat().st_size,
+            )
+            with (
+                mock.patch("release.mirror._gh_json", side_effect=github_json),
+                mock.patch("release.mirror._run_gh", side_effect=calls.append),
+                mock.patch("release.mirror._verify_checksums"),
+                mock.patch("release.mirror._strict_json_file", side_effect=strict_json),
+                mock.patch("release.contract.validate_manifest"),
+                mock.patch("release.contract.validate_deployment_contract"),
+                mock.patch(
+                    "release.contract.deployment_contract_digest",
+                    return_value=manifest["deployment"]["contractSha256"],
+                ),
+                mock.patch("release.portable.inspect_portable_archive", return_value=inspection),
+            ):
+                _verify_github_release_authority(tag, directory)
+
+        attestation_calls = [call for call in calls if call[:2] == ("attestation", "verify")]
+        self.assertEqual(len(attestation_calls), 5)
+        for call in attestation_calls[:2]:
+            self.assertIn("yanyuhanyue/AniMemo/.github/workflows/release.yml", call)
+            self.assertEqual(call[call.index("--source-digest") + 1], application_commit)
+        for call in attestation_calls[2:]:
+            self.assertIn(
+                "yanyuhanyue/AniMemo/.github/workflows/promote-release.yml", call
+            )
+            self.assertEqual(call[call.index("--source-digest") + 1], provenance_commit)
 
 
 class MirrorReceiptTests(unittest.TestCase):
