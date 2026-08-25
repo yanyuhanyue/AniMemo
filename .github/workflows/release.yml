@@ -927,11 +927,13 @@ jobs:
             local role="$1"
             local reference="$2"
             [[ "$reference" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
-            local archive="$RUNNER_TEMP/$role.oci.tar"
-            crane pull "$reference" "$archive" --format=oci
-            python -m release.cli extract-candidate-oci-archive \
-              --archive "$archive" --destination "$root/oci/$role"
-            rm -- "$archive"
+            local layout="$root/oci/$role"
+            test ! -e "$layout" && test ! -L "$layout"
+            crane pull "$reference" "$layout" --format=oci
+            test -d "$layout" && test ! -L "$layout"
+            test -f "$layout/oci-layout" && test ! -L "$layout/oci-layout"
+            test -f "$layout/index.json" && test ! -L "$layout/index.json"
+            test -d "$layout/blobs" && test ! -L "$layout/blobs"
           }
           materialize_dependency postgres "$POSTGRES_IMAGE"
           materialize_dependency redis "$REDIS_IMAGE"
