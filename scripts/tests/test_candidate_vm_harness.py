@@ -330,7 +330,10 @@ class CandidateVmHarnessTests(unittest.TestCase):
         urls = [url for url, _ in transport.calls]
         self.assertEqual(sum(url.startswith("https://ghcr.io/token?") for url in urls), 2)
         self.assertEqual(
-            sum("https://download.animemo.cc/" in url for url in urls),
+            sum(
+                url.startswith(harness.PUBLIC_MIRROR_ORIGIN + "/")
+                for url in urls
+            ),
             len(harness.R2_RC14_EXPECTED_KEYS),
         )
         self.assertTrue(

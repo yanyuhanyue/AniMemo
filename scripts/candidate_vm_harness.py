@@ -646,27 +646,73 @@ class ClosedVmwareProvider:
             raise CandidateHarnessError("CANDIDATE_VM_SHARED_DISK_REJECTED")
         return absolute
 
+    @staticmethod
+    def _setting_value(line: str, expected_key: str) -> str | None:
+        if "=" not in line:
+            return None
+        key, raw_value = line.split("=", 1)
+        if key.strip().casefold() != expected_key.casefold():
+            return None
+        value = raw_value.strip()
+        if len(value) < 2 or value[0] != '"' or value[-1] != '"':
+            raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
+        result = value[1:-1]
+        if '"' in result or "\r" in result or "\n" in result:
+            raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
+        return result
+
+    @staticmethod
+    def _disk_slot_key(key: str) -> bool:
+        lowered = key.casefold()
+        suffix = ".filename"
+        if not lowered.endswith(suffix):
+            return False
+        slot = lowered[: -len(suffix)]
+        if slot.count(":") != 1:
+            return False
+        bus, unit = slot.split(":", 1)
+        if not unit.isdecimal():
+            return False
+        for prefix in ("scsi", "sata", "ide", "nvme"):
+            if bus.startswith(prefix) and bus[len(prefix) :].isdecimal():
+                return True
+        return False
+
     @classmethod
     def _validate_clone_disk_graph(cls, clone_root: Path, clone_vmx: Path) -> None:
         vmx_text = cls._configuration_text(
             cls._configuration_prefix(clone_vmx, complete=True)
         )
-        if re.search(
-            r"(?im)^\s*(?:disk\.locking\s*=\s*\"?false|"
-            r"[^\r\n=]+\.sharing\s*=\s*\"?multi-writer|"
-            r"[^\r\n=]+\.sharedBus\s*=\s*\"?(?:virtual|physical)|"
-            r"[^\r\n=]+\.deviceType\s*=\s*\"?(?:rawDisk|physicalDrive))",
-            vmx_text,
-        ):
-            raise CandidateHarnessError("CANDIDATE_VM_SHARED_DISK_REJECTED")
-        disk_references = [
-            value
-            for value in re.findall(
-                r'(?im)^\s*(?:scsi|sata|ide|nvme)\d+:\d+\.fileName\s*=\s*"([^"\r\n]+)"\s*$',
-                vmx_text,
-            )
-            if value.lower().endswith(".vmdk")
-        ]
+        disk_references: list[str] = []
+        seen_settings: set[str] = set()
+        for raw_line in vmx_text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            raw_key, raw_value = line.split("=", 1)
+            key = raw_key.strip()
+            setting = key.casefold()
+            if not key or setting in seen_settings:
+                raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
+            seen_settings.add(setting)
+            value = raw_value.strip().strip('"').casefold()
+            if (
+                (setting == "disk.locking" and value == "false")
+                or (setting.endswith(".sharing") and value == "multi-writer")
+                or (
+                    setting.endswith(".sharedbus")
+                    and value in {"virtual", "physical"}
+                )
+                or (
+                    setting.endswith(".devicetype")
+                    and value in {"rawdisk", "physicaldrive"}
+                )
+            ):
+                raise CandidateHarnessError("CANDIDATE_VM_SHARED_DISK_REJECTED")
+            if cls._disk_slot_key(key):
+                reference = cls._setting_value(line, key)
+                if reference is not None and reference.casefold().endswith(".vmdk"):
+                    disk_references.append(reference)
         if not disk_references:
             raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
         for reference in disk_references:
@@ -681,21 +727,51 @@ class ClosedVmwareProvider:
             text = cls._configuration_text(
                 cls._configuration_prefix(vmdk, complete=False)
             )
-            parent_references = re.findall(
-                r'(?im)^\s*parentFileNameHint\s*=\s*"([^"\r\n]+)"\s*$',
-                text,
-            )
-            if text.lower().count("parentfilenamehint") != len(parent_references):
-                raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
-            extent_references = re.findall(
-                r'(?im)^\s*(?:RW|RDONLY|NOACCESS)\s+[0-9]+\s+[^\s"\r\n]+\s+"([^"\r\n]+)"',
-                text,
-            )
+            parent_references: list[str] = []
+            extent_references: list[str] = []
+            parent_ids: list[str] = []
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                lowered = line.casefold()
+                if lowered.startswith("parentfilenamehint"):
+                    parent = cls._setting_value(line, "parentFileNameHint")
+                    if parent is None:
+                        raise CandidateHarnessError(
+                            "CANDIDATE_VM_DISK_GRAPH_INVALID"
+                        )
+                    parent_references.append(parent)
+                    continue
+                if lowered.startswith("parentcid"):
+                    if "=" not in line:
+                        raise CandidateHarnessError(
+                            "CANDIDATE_VM_DISK_GRAPH_INVALID"
+                        )
+                    key, value = line.split("=", 1)
+                    candidate = value.strip().casefold()
+                    if (
+                        key.strip().casefold() != "parentcid"
+                        or len(candidate) != 8
+                        or any(character not in "0123456789abcdef" for character in candidate)
+                    ):
+                        raise CandidateHarnessError(
+                            "CANDIDATE_VM_DISK_GRAPH_INVALID"
+                        )
+                    parent_ids.append(candidate)
+                    continue
+                if '"' not in line:
+                    continue
+                pieces = line.split('"')
+                prefix_fields = pieces[0].split()
+                if (
+                    len(pieces) == 3
+                    and len(prefix_fields) == 3
+                    and prefix_fields[0].upper() in {"RW", "RDONLY", "NOACCESS"}
+                    and prefix_fields[1].isdecimal()
+                    and pieces[2].strip() == ""
+                ):
+                    extent_references.append(pieces[1])
             for reference in (*parent_references, *extent_references):
                 cls._closed_disk_reference(clone_root, reference)
-            parent_ids = re.findall(
-                r"(?im)^\s*parentCID\s*=\s*([0-9a-f]{8})\s*$", text
-            )
             if parent_ids and parent_ids[-1].lower() != "ffffffff" and len(parent_references) != 1:
                 raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
 
