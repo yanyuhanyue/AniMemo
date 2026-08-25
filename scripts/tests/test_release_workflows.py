@@ -2085,11 +2085,15 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             production.split("workflow_dispatch:", 1)[1].split("jobs:", 1)[0],
         )
 
-    def test_metadata_freshness_workflow_has_two_inputs_and_read_only_permissions(self):
+    def test_metadata_freshness_workflow_has_three_inputs_and_read_only_permissions(self):
         freshness = workflow("release-metadata-freshness.yml")
         inputs = freshness["on"]["workflow_dispatch"]["inputs"]
         self.assertEqual(
-            set(inputs), {"qualification_run_id", "intended_main_sha"}
+            set(inputs), {
+                "qualification_run_id",
+                "intended_main_sha",
+                "candidate_acceptance_receipt_b64url",
+            }
         )
         self.assertEqual(
             freshness["permissions"],
@@ -2169,7 +2173,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn('snapshot_label="B"', module)
         self.assertIn("runtime_clock.sleep(MINIMUM_SNAPSHOT_INTERVAL_SECONDS)", module)
         self.assertIn("release-metadata-freshness-${{ github.run_id }}", source)
-        self.assertIn('test "$(find "$directory" -mindepth 1 -maxdepth 1 -type f | wc -l)" = "9"', source)
+        self.assertIn('test "$(find "$directory" -mindepth 1 -maxdepth 1 -type f | wc -l)" = "10"', source)
+        self.assertIn("candidate-acceptance-receipt.json", source)
+        self.assertIn("--candidate-acceptance-receipt-sha256", source)
         self.assertIn("credential-shaped material detected", source)
 
     def test_publish_authenticates_freshness_producer_bindings_and_ttl(self):
@@ -2199,6 +2205,39 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         publish = source[source.index("  publish:\n") :]
         self.assertEqual(publish.count("verify-metadata-freshness"), 2)
         self.assertIn("METADATA_FRESHNESS_EXPIRED", module)
+
+    def test_candidate_runtime_bytes_and_publish_receipt_are_fail_closed(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        dry_run = source[source.index("  dry-run:\n") : source.index("  qualification-evidence:\n")]
+        qualification = source[
+            source.index("  qualification-evidence:\n") : source.index("  publish:\n")
+        ]
+        publish = source[source.index("  publish:\n") :]
+        self.assertEqual(dry_run.count("outputs: type=oci"), 2)
+        self.assertEqual(dry_run.count("normalize-candidate-oci-layout"), 4)
+        self.assertIn('crane pull "$reference" "$archive" --format=oci', dry_run)
+        self.assertIn("extract-candidate-oci-archive", dry_run)
+        self.assertIn('--destination "$root/oci/$role"', dry_run)
+        self.assertIn('rm -- "$archive"', dry_run)
+        self.assertIn("build-prepublication-candidate-input", qualification)
+        self.assertIn("PLATFORM_ARTIFACT_DIGEST", qualification)
+        self.assertIn("DRY_RUN_ARTIFACT_DIGEST", qualification)
+        self.assertIn("release-qualification/candidate-runtime", qualification)
+        self.assertNotIn(".dockerbuild", qualification)
+        self.assertEqual(source.count("--require-candidate-contract"), 1)
+        freshness_source = (
+            ROOT / ".github" / "workflows" / "release-metadata-freshness.yml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(freshness_source.count("--require-candidate-contract"), 1)
+        self.assertIn("candidate_acceptance_receipt_b64url", source[: source.index("jobs:")])
+        self.assertIn('test -n "$CANDIDATE_ACCEPTANCE_RECEIPT_B64URL"', source)
+        self.assertEqual(
+            publish.count("--expected-candidate-acceptance-receipt-sha256"), 2
+        )
+        self.assertEqual(publish.count("--expected-candidate-version"), 2)
+        self.assertNotIn("continue-on-error", publish)
 
     def test_every_external_release_mutation_is_after_the_freshness_gate(self):
         release = workflow("release.yml")

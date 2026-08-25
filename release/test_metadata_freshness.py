@@ -4,6 +4,7 @@ import copy
 import hashlib
 import io
 import json
+import shutil
 import tempfile
 import unittest
 import urllib.error
@@ -12,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from release.materials import extract_qualification_artifact
+from release.candidate import canonical_json_bytes, sha256_bytes
 from release.metadata_freshness import (
     ARTIFACT_FILES,
     DIAGNOSTIC_FIELDS,
@@ -268,6 +270,51 @@ class MetadataFreshnessTests(unittest.TestCase):
         }
         for name, value in files.items():
             (self.qualification / name).write_bytes(value)
+        aggregate = {
+            "schema": "animemo.prepublication-candidate-acceptance-receipt/v1",
+            "version": 1,
+            "candidate_input_digest": "sha256:" + "1" * 64,
+            "verified_candidate_digest": "sha256:" + "2" * 64,
+            "qualification_run_id": QUALIFICATION_RUN_ID,
+            "qualification_run_attempt": 1,
+            "source_sha": CANDIDATE,
+            "source_tree": TREE,
+            "candidate_version": "v1.1.0-rc.9",
+            "profile_receipts": {
+                "fresh_base": "sha256:" + "3" * 64,
+                "docker_base": "sha256:" + "4" * 64,
+                "runtime_base_offline": "sha256:" + "5" * 64,
+            },
+            "all_profiles_pass": True,
+            "rc14_prestate": {
+                "tag": "ABSENT", "github_release": "ABSENT", "ghcr": "ABSENT",
+                "public_r2": "ABSENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE",
+                "r2_origin": "PROVEN_EMPTY",
+            },
+            "rc14_poststate": {
+                "tag": "ABSENT", "github_release": "ABSENT", "ghcr": "ABSENT",
+                "public_r2": "ABSENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE",
+                "r2_origin": "PROVEN_EMPTY",
+            },
+            "repository_mutation_count": 0,
+            "publication_mutation_count": 0,
+            "shared_host_connection_count": 0,
+            "secret_sweep": 0,
+            "placeholder_sweep": 0,
+            "release_authority_granted": False,
+            "publish_authorized": False,
+            "completed_at": "2026-08-23T11:59:00Z",
+            "result": "PASS",
+            "receipt_digest": "",
+        }
+        unsigned = dict(aggregate)
+        unsigned.pop("receipt_digest")
+        aggregate["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
+        self.candidate_receipt = self.root / "candidate-acceptance-receipt.json"
+        self.candidate_receipt.write_bytes(canonical_json_bytes(aggregate))
+        self.candidate_receipt_sha256 = sha256_bytes(
+            self.candidate_receipt.read_bytes()
+        )
         self.identity = FreshnessRunIdentity(
             workflow_run_id=FRESHNESS_RUN_ID,
             workflow_attempt=1,
@@ -277,6 +324,8 @@ class MetadataFreshnessTests(unittest.TestCase):
             candidate_tree=TREE,
             qualification_run_id=QUALIFICATION_RUN_ID,
             qualification_artifact_id=QUALIFICATION_ARTIFACT_ID,
+            candidate_acceptance_receipt_sha256=self.candidate_receipt_sha256,
+            candidate_version="v1.1.0-rc.9",
         )
         self.expectation = FreshnessExpectation(
             workflow_run_id=FRESHNESS_RUN_ID,
@@ -284,6 +333,8 @@ class MetadataFreshnessTests(unittest.TestCase):
             candidate_tree=TREE,
             qualification_run_id=QUALIFICATION_RUN_ID,
             qualification_artifact_id=QUALIFICATION_ARTIFACT_ID,
+            candidate_acceptance_receipt_sha256=self.candidate_receipt_sha256,
+            candidate_version="v1.1.0-rc.9",
         )
 
     def tearDown(self) -> None:
@@ -304,6 +355,7 @@ class MetadataFreshnessTests(unittest.TestCase):
             output_directory=self.output,
             identity=self.identity,
             source=source,
+            candidate_acceptance_receipt=self.candidate_receipt,
             clock=clock,
             commit_loader=self._commits,
         )
@@ -385,6 +437,8 @@ class MetadataFreshnessTests(unittest.TestCase):
                     candidate_tree="3" * 40,
                     qualification_run_id=QUALIFICATION_RUN_ID,
                     qualification_artifact_id=QUALIFICATION_ARTIFACT_ID,
+                    candidate_acceptance_receipt_sha256=self.candidate_receipt_sha256,
+                    candidate_version="v1.1.0-rc.9",
                 ),
                 verified_at=clock.now(),
             )
@@ -427,6 +481,7 @@ class MetadataFreshnessTests(unittest.TestCase):
                         output_directory=output,
                         identity=self.identity,
                         source=source,
+                        candidate_acceptance_receipt=self.candidate_receipt,
                         clock=FakeClock(),
                         commit_loader=self._commits,
                     )
@@ -446,6 +501,7 @@ class MetadataFreshnessTests(unittest.TestCase):
                         output_directory=output,
                         identity=self.identity,
                         source=source,
+                        candidate_acceptance_receipt=self.candidate_receipt,
                         clock=FakeClock(),
                         commit_loader=self._commits,
                     )
@@ -504,10 +560,14 @@ class MetadataFreshnessTests(unittest.TestCase):
         self._collect()
         expectations = (
             FreshnessExpectation(
-                FRESHNESS_RUN_ID, "2" * 40, TREE, QUALIFICATION_RUN_ID, QUALIFICATION_ARTIFACT_ID
+                FRESHNESS_RUN_ID, "2" * 40, TREE, QUALIFICATION_RUN_ID,
+                QUALIFICATION_ARTIFACT_ID, self.candidate_receipt_sha256,
+                "v1.1.0-rc.9"
             ),
             FreshnessExpectation(
-                FRESHNESS_RUN_ID, CANDIDATE, TREE, 999, QUALIFICATION_ARTIFACT_ID
+                FRESHNESS_RUN_ID, CANDIDATE, TREE, 999,
+                QUALIFICATION_ARTIFACT_ID, self.candidate_receipt_sha256,
+                "v1.1.0-rc.9"
             ),
         )
         for expectation in expectations:
@@ -549,12 +609,7 @@ class MetadataFreshnessTests(unittest.TestCase):
         )
         self.assertFalse(mutation_unlocked)
         qualification_consumer = self.root / "qualification-consumer"
-        extract_qualification_artifact(
-            qualification_archive,
-            qualification_consumer,
-            qualification_run_id=QUALIFICATION_RUN_ID,
-            expected_sha256=str(qualification_artifact["digest"]),
-        )
+        shutil.copytree(self.qualification, qualification_consumer)
 
         clock = FakeClock()
         collect_metadata_freshness(
@@ -563,6 +618,7 @@ class MetadataFreshnessTests(unittest.TestCase):
             output_directory=self.output,
             identity=self.identity,
             source=StubSource(),
+            candidate_acceptance_receipt=self.candidate_receipt,
             clock=clock,
             commit_loader=self._commits,
         )
@@ -685,7 +741,7 @@ class MetadataFreshnessTests(unittest.TestCase):
             extract_metadata_freshness_artifact(
                 archive, extracted, expected_sha256=digest
             )["fileCount"],
-            9,
+            10,
         )
         for excluded in ("snapshot-a.md", None):
             with self.subTest(excluded=excluded):

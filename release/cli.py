@@ -21,6 +21,15 @@ from .acceptance import (
     validate_rc_live_acceptance,
     validate_stable_promotion_acceptance,
 )
+from .candidate import (
+    CandidateContractError,
+    build_candidate_input,
+    decode_aggregate_receipt_b64url,
+    extract_candidate_oci_archive,
+    normalize_candidate_oci_layout,
+    verify_prepublication_candidate,
+    verify_rc14_r2_origin_from_environment,
+)
 from .contract import (
     ReleaseContractError,
     build_deployment_contract,
@@ -446,12 +455,90 @@ def _verify_prepublication_materials(args) -> dict[str, object]:
     )
 
 
+def _normalize_candidate_oci_layout(args) -> dict[str, object]:
+    return normalize_candidate_oci_layout(
+        source_root=args.source_root,
+        layout=args.layout,
+        role=args.role,
+        repository=args.repository,
+        expected_digest=args.expected_digest,
+    )
+
+
+def _extract_candidate_oci_archive(args) -> dict[str, object]:
+    return extract_candidate_oci_archive(
+        archive=args.archive,
+        destination=args.destination,
+    )
+
+
+def _build_prepublication_candidate_input(args) -> dict[str, object]:
+    return build_candidate_input(
+        root=args.root,
+        qualification_run_id=args.qualification_run_id,
+        qualification_run_attempt=args.qualification_run_attempt,
+        source_sha=args.source_sha,
+        source_tree=args.source_tree,
+        artifact_ids={
+            "platform_qualification": args.platform_artifact_id,
+            "release_dry_run": args.dry_run_artifact_id,
+        },
+        artifact_api_digests={
+            "platform_qualification": args.platform_artifact_digest,
+            "release_dry_run": args.dry_run_artifact_digest,
+        },
+        generated_at=args.generated_at,
+        output=args.output,
+    )
+
+
+def _verify_prepublication_candidate(args) -> dict[str, object]:
+    return verify_prepublication_candidate(
+        archive=args.archive,
+        run_metadata=_read_json(args.run_metadata),
+        jobs_metadata=_read_json(args.jobs_metadata),
+        artifacts_metadata=_read_json(args.artifacts_metadata),
+        containing_artifact_id=args.containing_artifact_id,
+        containing_artifact_api_digest=args.containing_artifact_api_digest,
+        expected_run_id=args.expected_run_id,
+        expected_source_sha=args.expected_source_sha,
+        expected_source_tree=args.expected_source_tree,
+        expected_candidate_version=args.expected_candidate_version,
+        verified_at=args.verified_at,
+    )
+
+
+def _decode_candidate_acceptance_receipt(args) -> dict[str, object]:
+    receipt, encoded = decode_aggregate_receipt_b64url(args.value)
+    if args.output.exists() or args.output.is_symlink():
+        raise CandidateContractError("CANDIDATE_RECEIPT_OUTPUT_EXISTS")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with args.output.open("xb") as output:
+        output.write(encoded)
+        output.flush()
+        os.fsync(output.fileno())
+    os.chmod(args.output, 0o600)
+    return {
+        "status": "PASS",
+        "output": str(args.output),
+        "qualificationRunId": receipt["qualification_run_id"],
+        "candidateVersion": receipt["candidate_version"],
+        "sha256": f"sha256:{hashlib.sha256(encoded).hexdigest()}",
+    }
+
+
+def _verify_rc14_r2_origin(args) -> dict[str, object]:
+    del args
+    return verify_rc14_r2_origin_from_environment()
+
+
 def _extract_qualification_artifact(args) -> dict[str, object]:
     return extract_qualification_artifact(
         args.archive,
         args.destination,
         qualification_run_id=args.qualification_run_id,
         expected_sha256=args.expected_sha256,
+        require_candidate_contract=args.require_candidate_contract,
     )
 
 
@@ -466,6 +553,10 @@ def _collect_metadata_freshness(args) -> dict[str, object]:
         candidate_tree=args.candidate_tree,
         qualification_run_id=args.qualification_run_id,
         qualification_artifact_id=args.qualification_artifact_id,
+        candidate_acceptance_receipt_sha256=(
+            args.candidate_acceptance_receipt_sha256
+        ),
+        candidate_version=args.candidate_version,
     )
     return collect_metadata_freshness(
         repository_root=args.repository_root,
@@ -473,6 +564,7 @@ def _collect_metadata_freshness(args) -> dict[str, object]:
         output_directory=args.output_directory,
         identity=identity,
         source=GitHubAssociatedPullSource(token),
+        candidate_acceptance_receipt=args.candidate_acceptance_receipt,
     )
 
 
@@ -494,6 +586,10 @@ def _verify_metadata_freshness(args) -> dict[str, object]:
             candidate_tree=args.expected_candidate_tree,
             qualification_run_id=args.expected_qualification_run_id,
             qualification_artifact_id=args.expected_qualification_artifact_id,
+            candidate_acceptance_receipt_sha256=(
+                args.expected_candidate_acceptance_receipt_sha256
+            ),
+            candidate_version=args.expected_candidate_version,
         ),
     )
 
@@ -1007,6 +1103,63 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify_prepublication.set_defaults(handler=_verify_prepublication_materials)
 
+    candidate_oci = subparsers.add_parser("normalize-candidate-oci-layout")
+    candidate_oci.add_argument("--source-root", type=Path, required=True)
+    candidate_oci.add_argument("--layout", type=Path, required=True)
+    candidate_oci.add_argument("--role", required=True)
+    candidate_oci.add_argument("--repository", required=True)
+    candidate_oci.add_argument("--expected-digest", required=True)
+    candidate_oci.set_defaults(handler=_normalize_candidate_oci_layout)
+
+    candidate_oci_extract = subparsers.add_parser("extract-candidate-oci-archive")
+    candidate_oci_extract.add_argument("--archive", type=Path, required=True)
+    candidate_oci_extract.add_argument("--destination", type=Path, required=True)
+    candidate_oci_extract.set_defaults(handler=_extract_candidate_oci_archive)
+
+    candidate_input = subparsers.add_parser(
+        "build-prepublication-candidate-input"
+    )
+    candidate_input.add_argument("--root", type=Path, required=True)
+    candidate_input.add_argument("--qualification-run-id", type=int, required=True)
+    candidate_input.add_argument(
+        "--qualification-run-attempt", type=int, required=True
+    )
+    candidate_input.add_argument("--source-sha", required=True)
+    candidate_input.add_argument("--source-tree", required=True)
+    candidate_input.add_argument("--platform-artifact-id", type=int, required=True)
+    candidate_input.add_argument("--platform-artifact-digest", required=True)
+    candidate_input.add_argument("--dry-run-artifact-id", type=int, required=True)
+    candidate_input.add_argument("--dry-run-artifact-digest", required=True)
+    candidate_input.add_argument("--generated-at", required=True)
+    candidate_input.add_argument("--output", type=Path, required=True)
+    candidate_input.set_defaults(handler=_build_prepublication_candidate_input)
+
+    candidate_verify = subparsers.add_parser("verify-prepublication-candidate")
+    candidate_verify.add_argument("--archive", type=Path, required=True)
+    candidate_verify.add_argument("--run-metadata", type=Path, required=True)
+    candidate_verify.add_argument("--jobs-metadata", type=Path, required=True)
+    candidate_verify.add_argument("--artifacts-metadata", type=Path, required=True)
+    candidate_verify.add_argument("--containing-artifact-id", type=int, required=True)
+    candidate_verify.add_argument(
+        "--containing-artifact-api-digest", required=True
+    )
+    candidate_verify.add_argument("--expected-run-id", type=int, required=True)
+    candidate_verify.add_argument("--expected-source-sha", required=True)
+    candidate_verify.add_argument("--expected-source-tree", required=True)
+    candidate_verify.add_argument("--expected-candidate-version", required=True)
+    candidate_verify.add_argument("--verified-at", required=True)
+    candidate_verify.set_defaults(handler=_verify_prepublication_candidate)
+
+    candidate_receipt = subparsers.add_parser(
+        "decode-candidate-acceptance-receipt"
+    )
+    candidate_receipt.add_argument("--value", required=True)
+    candidate_receipt.add_argument("--output", type=Path, required=True)
+    candidate_receipt.set_defaults(handler=_decode_candidate_acceptance_receipt)
+
+    r2_precheck = subparsers.add_parser("verify-rc14-r2-origin-empty")
+    r2_precheck.set_defaults(handler=_verify_rc14_r2_origin)
+
     qualification_artifact = subparsers.add_parser(
         "extract-qualification-artifact"
     )
@@ -1016,6 +1169,9 @@ def _parser() -> argparse.ArgumentParser:
         "--qualification-run-id", type=int, required=True
     )
     qualification_artifact.add_argument("--expected-sha256", required=True)
+    qualification_artifact.add_argument(
+        "--require-candidate-contract", action="store_true"
+    )
     qualification_artifact.set_defaults(handler=_extract_qualification_artifact)
 
     freshness_collection = subparsers.add_parser("collect-metadata-freshness")
@@ -1035,6 +1191,13 @@ def _parser() -> argparse.ArgumentParser:
     freshness_collection.add_argument(
         "--qualification-artifact-id", type=int, required=True
     )
+    freshness_collection.add_argument(
+        "--candidate-acceptance-receipt", type=Path, required=True
+    )
+    freshness_collection.add_argument(
+        "--candidate-acceptance-receipt-sha256", required=True
+    )
+    freshness_collection.add_argument("--candidate-version", required=True)
     freshness_collection.set_defaults(handler=_collect_metadata_freshness)
 
     freshness_artifact = subparsers.add_parser(
@@ -1063,6 +1226,10 @@ def _parser() -> argparse.ArgumentParser:
     freshness_verify.add_argument(
         "--expected-qualification-artifact-id", type=int, required=True
     )
+    freshness_verify.add_argument(
+        "--expected-candidate-acceptance-receipt-sha256", required=True
+    )
+    freshness_verify.add_argument("--expected-candidate-version", required=True)
     freshness_verify.set_defaults(handler=_verify_metadata_freshness)
 
     qualification_metadata = subparsers.add_parser(
@@ -1267,6 +1434,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     except MetadataFreshnessError as error:
+        print(
+            json.dumps(
+                {"code": error.code, "detail": str(error)},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    except CandidateContractError as error:
         print(
             json.dumps(
                 {"code": error.code, "detail": str(error)},
