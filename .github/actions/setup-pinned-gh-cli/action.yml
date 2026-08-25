@@ -1,20 +1,12 @@
 name: Setup pinned GitHub CLI
 description: Install and verify the exact GitHub CLI used by release authority jobs
 
-inputs:
-  version:
-    description: Exact GitHub CLI semantic version
-    required: true
-  linux-amd64-sha256:
-    description: SHA-256 of the official linux-amd64 archive
-    required: true
-
 runs:
   using: composite
   steps:
     - name: Install and verify pinned GitHub CLI
       shell: bash
       env:
-        GH_CLI_VERSION: ${{ inputs.version }}
-        GH_CLI_LINUX_AMD64_SHA256: ${{ inputs.linux-amd64-sha256 }}
+        GH_CLI_VERSION: 2.97.0
+        GH_CLI_LINUX_AMD64_SHA256: a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112
       run: bash "$GITHUB_ACTION_PATH/setup.sh"

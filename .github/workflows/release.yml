@@ -59,8 +59,6 @@ permissions:
   contents: read
 
 env:
-  GH_REQUIRED_VERSION: 2.97.0
-  GH_REQUIRED_LINUX_AMD64_SHA256: a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112
   CRANE_REQUIRED_VERSION: 0.21.9
   API_REPOSITORY: ghcr.io/yanyuhanyue/animemo-api
   WEB_REPOSITORY: ghcr.io/yanyuhanyue/animemo-web
@@ -144,9 +142,6 @@ jobs:
           fetch-depth: 0
       - name: Gate exact GitHub CLI security baseline
         uses: ./.github/actions/setup-pinned-gh-cli
-        with:
-          version: ${{ env.GH_REQUIRED_VERSION }}
-          linux-amd64-sha256: ${{ env.GH_REQUIRED_LINUX_AMD64_SHA256 }}
       - name: Verify immutable-release administration-read credential
         if: ${{ inputs.operation == 'publish' }}
         env:
@@ -463,9 +458,6 @@ jobs:
           fetch-depth: 0
       - name: Gate exact GitHub CLI security baseline
         uses: ./.github/actions/setup-pinned-gh-cli
-        with:
-          version: ${{ env.GH_REQUIRED_VERSION }}
-          linux-amd64-sha256: ${{ env.GH_REQUIRED_LINUX_AMD64_SHA256 }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
@@ -1093,9 +1085,6 @@ jobs:
           fetch-depth: 0
       - name: Gate exact GitHub CLI security baseline
         uses: ./.github/actions/setup-pinned-gh-cli
-        with:
-          version: ${{ env.GH_REQUIRED_VERSION }}
-          linux-amd64-sha256: ${{ env.GH_REQUIRED_LINUX_AMD64_SHA256 }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
@@ -1214,9 +1203,6 @@ jobs:
           fetch-depth: 0
       - name: Gate exact GitHub CLI security baseline
         uses: ./.github/actions/setup-pinned-gh-cli
-        with:
-          version: ${{ env.GH_REQUIRED_VERSION }}
-          linux-amd64-sha256: ${{ env.GH_REQUIRED_LINUX_AMD64_SHA256 }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"

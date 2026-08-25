@@ -112,13 +112,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(mirror["concurrency"]["cancel-in-progress"], "false")
         self.assertEqual(set(mirror["jobs"]), {"mirror"})
         self.assertEqual(mirror["jobs"]["mirror"]["runs-on"], "ubuntu-24.04")
-        self.assertEqual(
-            mirror["env"],
-            {
-                "GH_REQUIRED_VERSION": PINNED_GH_VERSION,
-                "GH_REQUIRED_LINUX_AMD64_SHA256": PINNED_GH_LINUX_AMD64_SHA256,
-            },
-        )
+        self.assertNotIn("env", mirror)
         self.assertIn("验证固定 GitHub CLI 安全基线", source)
         self.assertIn(f"uses: {PINNED_GH_ACTION}", source)
         self.assertIn(
@@ -1599,16 +1593,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         gate = "Gate exact GitHub CLI security baseline"
 
-        self.assertIn("GH_REQUIRED_VERSION: 2.97.0", release)
-        self.assertIn("GH_REQUIRED_VERSION: 2.97.0", promotion)
-        self.assertIn(
-            f"GH_REQUIRED_LINUX_AMD64_SHA256: {PINNED_GH_LINUX_AMD64_SHA256}",
-            release,
-        )
-        self.assertIn(
-            f"GH_REQUIRED_LINUX_AMD64_SHA256: {PINNED_GH_LINUX_AMD64_SHA256}",
-            promotion,
-        )
+        self.assertNotIn("GH_REQUIRED_VERSION", release)
+        self.assertNotIn("GH_REQUIRED_VERSION", promotion)
+        self.assertNotIn("GH_REQUIRED_LINUX_AMD64_SHA256", release)
+        self.assertNotIn("GH_REQUIRED_LINUX_AMD64_SHA256", promotion)
         self.assertEqual(release.count(gate), 4)
         self.assertEqual(promotion.count(gate), 2)
         self.assertEqual(release.count(f"uses: {PINNED_GH_ACTION}"), 4)
@@ -1626,8 +1614,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertEqual(action["runs"]["using"], "composite")
+        self.assertNotIn("inputs", action)
+        install_step = action["runs"]["steps"][0]
+        self.assertEqual(install_step["env"]["GH_CLI_VERSION"], PINNED_GH_VERSION)
         self.assertEqual(
-            set(action["inputs"]), {"version", "linux-amd64-sha256"}
+            install_step["env"]["GH_CLI_LINUX_AMD64_SHA256"],
+            PINNED_GH_LINUX_AMD64_SHA256,
         )
         self.assertIn('test "${RUNNER_OS:-}" = "Linux"', source)
         self.assertIn('test "${RUNNER_ARCH:-}" = "X64"', source)

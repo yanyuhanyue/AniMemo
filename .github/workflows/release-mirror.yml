@@ -16,10 +16,6 @@ permissions:
   actions: read
   attestations: read
 
-env:
-  GH_REQUIRED_VERSION: 2.97.0
-  GH_REQUIRED_LINUX_AMD64_SHA256: a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112
-
 concurrency:
   group: release-mirror-${{ github.event.release.tag_name || inputs.release_tag }}
   cancel-in-progress: false
@@ -40,9 +36,6 @@ jobs:
           python-version: "3.12"
       - name: 验证固定 GitHub CLI 安全基线
         uses: ./.github/actions/setup-pinned-gh-cli
-        with:
-          version: ${{ env.GH_REQUIRED_VERSION }}
-          linux-amd64-sha256: ${{ env.GH_REQUIRED_LINUX_AMD64_SHA256 }}
       - name: 绑定默认分支工作流与精确发行
         id: release
         env:
