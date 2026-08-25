@@ -53,7 +53,7 @@ Official Mirror 的固定身份如下；它只运输原始字节，不发布 Rel
 - prefix：`yanyuhanyue/AniMemo/releases/download`；
 - 完整性 marker：`<prefix>/<EXACT_TAG>/mirror-receipt.json`，且只能在五项资产完成后写入。
 
-下列 Ubuntu 24.04 Stage‑0 是正式的 Official Mirror 首装入口。它从 GitHub 官方签名 APT 源安装精确 `/usr/bin/gh` 2.97.0，先验证 GitHub Immutable Release，再以固定 URL 下载 installer materials。`curl --location --max-redirs 0` 明确拒绝任何重定向；retry、连接时间和总时间均有上限。APT 和 Python 运行时依赖属于主机前置条件，不是 AniMemo 产品 mutation。
+下列 Ubuntu 24.04 Stage‑0 是正式的 Official Mirror 首装入口。它从 GitHub 官方固定 v2.97.0 Release 下载 checksum manifest 与 amd64 Debian package，先将 manifest 和 package 分别绑定到仓库内冻结的 SHA256，再用 manifest 对 package 做第二次交叉校验，随后安装精确 `/usr/bin/gh` 2.97.0。这样不会依赖 GitHub CLI 滚动 APT 仓库继续保留旧版本。GitHub Release 资产端点只允许一次 HTTPS 重定向；重定向目标返回的字节仍必须通过上述固定摘要。Stage‑0 先验证 GitHub Immutable Release，再以固定 URL 下载 installer materials；Official Mirror 的 `curl --location --max-redirs 0` 继续拒绝任何重定向。所有 retry、连接时间和总时间均有上限。APT 和 Python 运行时依赖属于主机前置条件，不是 AniMemo 产品 mutation。
 
 ```sh
 # OFFICIAL_MIRROR_STAGE0_BEGIN
@@ -63,17 +63,32 @@ EXACT_TAG='<EXACT_TAG>'
 
 sudo /usr/bin/apt-get update
 sudo /usr/bin/apt-get install --yes --no-install-recommends ca-certificates curl python3-venv
-/usr/bin/curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
-  https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-  --output /tmp/githubcli-archive-keyring.gpg
-sudo /usr/bin/install -o root -g root -m 0644 /tmp/githubcli-archive-keyring.gpg \
-  /usr/share/keyrings/githubcli-archive-keyring.gpg
-printf 'deb [arch=%s signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' \
-  "$(/usr/bin/dpkg --print-architecture)" | \
-  sudo /usr/bin/tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-sudo /usr/bin/apt-get update
-sudo /usr/bin/apt-get install --yes --no-install-recommends gh=2.97.0
-test "$(/usr/bin/gh --version | /usr/bin/sed -nE 's/^gh version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | /usr/bin/head -n 1)" = 2.97.0
+test "$(/usr/bin/dpkg --print-architecture)" = amd64
+GH_VERSION=2.97.0
+GH_CHECKSUMS_SHA256=61905c69ec8660f310814ec98395cdd0c2d07aabf024c597ec45813984a02334
+GH_DEB_SHA256=7c7fa3bb890db0934baf65910d97b8c0fa437b2e590f7f7daf6bdf82c5c486d7
+GH_BOOTSTRAP_DIRECTORY="$(/usr/bin/mktemp -d)"
+GH_CHECKSUMS="$GH_BOOTSTRAP_DIRECTORY/gh_${GH_VERSION}_checksums.txt"
+GH_DEB="$GH_BOOTSTRAP_DIRECTORY/gh_${GH_VERSION}_linux_amd64.deb"
+cleanup_gh_bootstrap() {
+  /usr/bin/rm -f -- "$GH_CHECKSUMS" "$GH_DEB"
+  /usr/bin/rmdir -- "$GH_BOOTSTRAP_DIRECTORY"
+}
+trap cleanup_gh_bootstrap EXIT
+for name in "gh_${GH_VERSION}_checksums.txt" "gh_${GH_VERSION}_linux_amd64.deb"; do
+  /usr/bin/curl --proto '=https' --proto-redir '=https' --tlsv1.2 --location --max-redirs 1 \
+    --fail --silent --show-error --connect-timeout 30 --max-time 300 \
+    --retry 2 --retry-delay 10 --retry-max-time 240 \
+    --output "$GH_BOOTSTRAP_DIRECTORY/$name" \
+    "https://github.com/cli/cli/releases/download/v${GH_VERSION}/$name"
+done
+test "$(/usr/bin/sha256sum "$GH_CHECKSUMS" | /usr/bin/awk '{print $1}')" = "$GH_CHECKSUMS_SHA256"
+/usr/bin/grep -Fxq "$GH_DEB_SHA256  gh_${GH_VERSION}_linux_amd64.deb" "$GH_CHECKSUMS"
+test "$(/usr/bin/sha256sum "$GH_DEB" | /usr/bin/awk '{print $1}')" = "$GH_DEB_SHA256"
+sudo /usr/bin/apt-get install --yes --no-install-recommends "$GH_DEB"
+test "$(/usr/bin/gh --version | /usr/bin/sed -nE 's/^gh version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | /usr/bin/head -n 1)" = "$GH_VERSION"
+cleanup_gh_bootstrap
+trap - EXIT
 
 STAGE0_DIRECTORY="$(/usr/bin/mktemp -d)"
 MIRROR_CANDIDATE="$STAGE0_DIRECTORY/installer-materials.tar"

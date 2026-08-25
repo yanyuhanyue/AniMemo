@@ -138,9 +138,32 @@ class GitHubCliVersionOutputContractTests(unittest.TestCase):
 class OfficialMirrorStage0ContractTests(unittest.TestCase):
     def test_github_authority_precedes_fixed_mirror_acquisition_and_execution(self) -> None:
         stage0 = _official_mirror_stage0_contract()
+        architecture_gate = stage0.index(
+            'test "$(/usr/bin/dpkg --print-architecture)" = amd64'
+        )
+        gh_download = stage0.index(
+            "/usr/bin/curl --proto '=https' --proto-redir '=https' "
+            "--tlsv1.2 --location --max-redirs 1"
+        )
+        gh_checksums_download = stage0.index(
+            '"https://github.com/cli/cli/releases/download/v${GH_VERSION}/$name"'
+        )
+        gh_checksums_verify = stage0.index(
+            'test "$(/usr/bin/sha256sum "$GH_CHECKSUMS"'
+        )
+        gh_manifest_binding = stage0.index(
+            '/usr/bin/grep -Fxq "$GH_DEB_SHA256  gh_${GH_VERSION}_linux_amd64.deb"'
+        )
+        gh_deb_verify = stage0.index(
+            'test "$(/usr/bin/sha256sum "$GH_DEB"'
+        )
+        gh_install = stage0.index(
+            'sudo /usr/bin/apt-get install --yes --no-install-recommends "$GH_DEB"'
+        )
         release_verify = stage0.index('/usr/bin/gh release verify "$EXACT_TAG"')
         mirror_download = stage0.index(
-            '/usr/bin/curl --proto \'=https\' --tlsv1.2 --location --max-redirs 0'
+            '/usr/bin/curl --proto \'=https\' --tlsv1.2 --location --max-redirs 0',
+            release_verify,
         )
         candidate_verify = stage0.index(
             '/usr/bin/gh release verify-asset "$EXACT_TAG" "$MIRROR_CANDIDATE"'
@@ -154,6 +177,13 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
         extraction = stage0.index('/usr/bin/tar -xf "$PROTECTED"')
         execution = stage0.index("-m installer \\")
 
+        self.assertLess(architecture_gate, gh_download)
+        self.assertLess(gh_download, gh_checksums_download)
+        self.assertLess(gh_checksums_download, gh_checksums_verify)
+        self.assertLess(gh_checksums_verify, gh_manifest_binding)
+        self.assertLess(gh_manifest_binding, gh_deb_verify)
+        self.assertLess(gh_deb_verify, gh_install)
+        self.assertLess(gh_install, release_verify)
         self.assertLess(release_verify, mirror_download)
         self.assertLess(mirror_download, candidate_verify)
         self.assertLess(candidate_verify, protected_copy)
@@ -165,6 +195,16 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
             stage0,
         )
         self.assertIn("--source official-mirror", stage0)
+        self.assertIn(
+            "GH_CHECKSUMS_SHA256=61905c69ec8660f310814ec98395cdd0c2d07aabf024c597ec45813984a02334",
+            stage0,
+        )
+        self.assertIn(
+            "GH_DEB_SHA256=7c7fa3bb890db0934baf65910d97b8c0fa437b2e590f7f7daf6bdf82c5c486d7",
+            stage0,
+        )
+        self.assertNotIn("cli.github.com/packages", stage0)
+        self.assertNotIn("gh=2.97.0", stage0)
         self.assertIn('/usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"', stage0)
         self.assertIn(
             "/usr/bin/timeout --signal=TERM --kill-after=5s 30s \\\n"
@@ -326,7 +366,9 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
             ),
             stage0.index("completed=1"),
         )
+        self.assertEqual(stage0.count("--max-redirs 1"), 1)
         self.assertEqual(stage0.count("--max-redirs 0"), 1)
+        self.assertEqual(stage0.count("--proto-redir '=https'"), 1)
         self.assertIn("--connect-timeout 30 --max-time 900", stage0)
         self.assertIn("--retry 2 --retry-delay 10 --retry-max-time 600", stage0)
 
