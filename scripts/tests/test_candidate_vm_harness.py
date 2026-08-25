@@ -434,13 +434,21 @@ class CandidateVmHarnessTests(unittest.TestCase):
             ),
             "vmdk-parent": (
                 'scsi0:0.fileName = "disk.vmdk"\n',
-                b'# Disk DescriptorFile\nparentCID=00000001\n'
+                b'# Disk DescriptorFile\ncreateType="twoGbMaxExtentSparse"\n'
+                b'parentCID=00000001\n'
                 b'parentFileNameHint="../shared.vmdk"\n',
             ),
             "vmdk-flat-offset": (
                 'scsi0:0.fileName = "disk.vmdk"\n',
-                b'# Disk DescriptorFile\nparentCID=ffffffff\n'
+                b'# Disk DescriptorFile\ncreateType="twoGbMaxExtentFlat"\n'
+                b'parentCID=ffffffff\n'
                 b'RW 100 FLAT "../shared-flat.vmdk" 0\n',
+            ),
+            "vmdk-raw-device-map": (
+                'scsi0:0.fileName = "disk.vmdk"\n',
+                b'# Disk DescriptorFile\ncreateType="vmfsRawDeviceMap"\n'
+                b'parentCID=ffffffff\n'
+                b'RW 100 VMFSRDM "inside-rdmp.vmdk"\n',
             ),
         }
         for name, (vmx_text, descriptor) in fixtures.items():
@@ -450,6 +458,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 vmx = clone / "Ubuntu 64 位.vmx"
                 vmx.write_text(vmx_text, encoding="utf-8")
                 (clone / "disk.vmdk").write_bytes(descriptor)
+                (clone / "inside-rdmp.vmdk").write_bytes(b"raw-device-map")
                 with self.assertRaisesRegex(
                     harness.CandidateHarnessError, "SHARED_DISK_REJECTED"
                 ):
@@ -465,7 +474,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
             'scsi0:0.fileName = "disk.vmdk"\n', encoding="utf-8"
         )
         (clone / "disk.vmdk").write_bytes(
-            b'# Disk DescriptorFile\nparentCID=ffffffff\n'
+            b'# Disk DescriptorFile\ncreateType="twoGbMaxExtentFlat"\n'
+            b'parentCID=ffffffff\n'
             b'RW 100 FLAT "disk-flat.vmdk" 0\n'
         )
         (clone / "disk-flat.vmdk").write_bytes(b"local-flat")

@@ -88,6 +88,10 @@ MAX_PUBLIC_RESPONSE_BYTES = 1024 * 1024
 MAX_VM_CONFIGURATION_BYTES = 4 * 1024 * 1024
 MAX_VM_FILES = 8192
 MAX_VM_TOTAL_BYTES = 1024 * 1024 * 1024 * 1024
+ALLOWED_VMDK_CREATE_TYPES = frozenset(
+    {"twogbmaxextentflat", "twogbmaxextentsparse"}
+)
+ALLOWED_VMDK_EXTENT_TYPES = frozenset({"FLAT", "SPARSE"})
 SAFE_HOST_ENVIRONMENT_NAMES = frozenset(
     {
         "APPDATA",
@@ -739,9 +743,21 @@ class ClosedVmwareProvider:
             parent_references: list[str] = []
             extent_references: list[str] = []
             parent_ids: list[str] = []
+            create_types: list[str] = []
             for raw_line in text.splitlines():
                 line = raw_line.strip()
                 lowered = line.casefold()
+                if lowered.startswith("createtype"):
+                    create_type = cls._setting_value(line, "createType")
+                    if (
+                        create_type is None
+                        or create_type.casefold() not in ALLOWED_VMDK_CREATE_TYPES
+                    ):
+                        raise CandidateHarnessError(
+                            "CANDIDATE_VM_SHARED_DISK_REJECTED"
+                        )
+                    create_types.append(create_type.casefold())
+                    continue
                 if lowered.startswith("parentfilenamehint"):
                     parent = cls._setting_value(line, "parentFileNameHint")
                     if parent is None:
@@ -775,12 +791,7 @@ class ClosedVmwareProvider:
                 suffix_fields = pieces[2].split() if len(pieces) == 3 else []
                 valid_type = (
                     len(prefix_fields) == 3
-                    and prefix_fields[2]
-                    and all(
-                        character.isascii()
-                        and (character.isalnum() or character in {"_", "-"})
-                        for character in prefix_fields[2]
-                    )
+                    and prefix_fields[2].upper() in ALLOWED_VMDK_EXTENT_TYPES
                 )
                 if (
                     len(pieces) != 3
@@ -791,9 +802,15 @@ class ClosedVmwareProvider:
                     or (suffix_fields and not suffix_fields[0].isdecimal())
                 ):
                     raise CandidateHarnessError(
-                        "CANDIDATE_VM_DISK_GRAPH_INVALID"
+                        "CANDIDATE_VM_SHARED_DISK_REJECTED"
+                        if len(prefix_fields) == 3
+                        and prefix_fields[2].upper()
+                        not in ALLOWED_VMDK_EXTENT_TYPES
+                        else "CANDIDATE_VM_DISK_GRAPH_INVALID"
                     )
                 extent_references.append(pieces[1])
+            if len(create_types) != 1:
+                raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
             for reference in parent_references:
                 descriptor_queue.append(
                     cls._closed_disk_reference(
