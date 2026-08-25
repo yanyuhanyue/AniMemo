@@ -852,6 +852,74 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                     expected_digest=manifest,
                 )
 
+    def test_buildx_directory_descriptor_is_closed_without_rewriting_dag(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            layout = source / "oci" / "api"
+            manifest = _layout(layout, "api")
+            index_path = layout / "index.json"
+            index = json.loads(index_path.read_text())
+            index["manifests"][0]["annotations"] = {
+                "org.opencontainers.image.created": "2026-08-25T17:09:53Z",
+                "org.opencontainers.image.ref.name": "animemo-release-api:candidate",
+            }
+            index_path.write_bytes(canonical_json_bytes(index))
+            blobs_before = {
+                path.name: _digest(path.read_bytes())
+                for path in (layout / "blobs" / "sha256").iterdir()
+            }
+
+            result = normalize_candidate_oci_layout(
+                source_root=source,
+                layout=layout,
+                role="api",
+                repository="ghcr.io/yanyuhanyue/animemo-api",
+                expected_digest=manifest,
+            )
+
+            self.assertTrue(result["changed"])
+            self.assertEqual(result["digest"], manifest)
+            self.assertEqual(
+                set(json.loads(index_path.read_text())["manifests"][0]),
+                {"digest", "mediaType", "platform", "size"},
+            )
+            self.assertEqual(
+                blobs_before,
+                {
+                    path.name: _digest(path.read_bytes())
+                    for path in (layout / "blobs" / "sha256").iterdir()
+                },
+            )
+
+    def test_buildx_directory_descriptor_rejects_platform_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            layout = source / "oci" / "api"
+            manifest = _layout(layout, "api")
+            index_path = layout / "index.json"
+            index = json.loads(index_path.read_text())
+            index["manifests"][0]["annotations"] = {
+                "org.opencontainers.image.ref.name": "animemo-release-api:candidate"
+            }
+            index["manifests"][0]["platform"] = {
+                "architecture": "arm64",
+                "os": "linux",
+            }
+            encoded = canonical_json_bytes(index)
+            index_path.write_bytes(encoded)
+
+            with self.assertRaisesRegex(
+                CandidateContractError, "CANDIDATE_OCI_DESCRIPTOR_INVALID"
+            ):
+                normalize_candidate_oci_layout(
+                    source_root=source,
+                    layout=layout,
+                    role="api",
+                    repository="ghcr.io/yanyuhanyue/animemo-api",
+                    expected_digest=manifest,
+                )
+            self.assertEqual(index_path.read_bytes(), encoded)
+
     def test_containing_artifact_requires_exact_id_and_api_digest(self):
         with tempfile.TemporaryDirectory() as temporary:
             archive = Path(temporary) / "artifact.zip"
