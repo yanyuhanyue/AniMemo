@@ -145,6 +145,33 @@ duplicates, uncontracted members, and size/count excess fail closed. The
 Installer never resolves packages online or fills missing bytes from a source
 checkout.
 
+The material profile includes `installer/platform_bootstrap.py`. The formal
+online Stage0 may call that module only after the exact GitHub Immutable Release,
+mirror candidate, root-owned protected copy, and loaded module bytes have all
+been verified against the same `installer-materials.tar`. It then accepts and
+executes one digest-bound host-platform plan, validates its non-authoritative
+Receipt, and runs strict observed platform qualification before entering
+`Installer.plan`. This ordering does not add a Release Authority: the Official
+Mirror remains transport only, the platform Receipt is neither release nor
+qualification evidence, and the canonical Installer repeats strict platform
+assessment before instance mutation.
+
+Host package policy has exactly one production authority in
+`installer/platform_bootstrap.py`; Release workflow, shell, documentation and
+tests may assert its identity but do not carry a second package list. Online
+Fresh hosts may receive only the closed Ubuntu 24.04 amd64 Docker, Compose v2,
+and PostgreSQL 16 client packages. Existing Docker is preserved without daemon
+restart or configuration change. Local-bundle remains offline validate-only.
+Platform preparation produces no image publication, tag, GitHub Release,
+Mirror object, qualification, freshness, VM Acceptance or Stable authority.
+
+All formal Docker image acquisition, offline import/readback, Compose, Doctor,
+Target, Fresh, and streaming-backup processes are pinned to the local Unix
+socket by one shared runner. That boundary strips Docker environment overrides,
+uses a non-user HOME and system PATH, and rejects local Compose plugin shadows;
+the plugin identity qualified before instance mutation is therefore the plugin
+that production executes.
+
 Manifest v2 binds four exact images: API, Web, PostgreSQL, and Redis. The
 qualified PostgreSQL/Redis repository, digest, and platform values have one
 data authority: `release/dependency-images.json`. Consumers must load that

@@ -184,13 +184,13 @@ def _write(value: object, *, json_output: bool) -> None:
 
 def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> int:
     args = _parser().parse_args(argv)
-    production_composition = runtime is None
+    composition = None
     try:
         request = _request(args)
         if runtime is None:
-            from .production import build_runtime
+            from .production import build_production_composition
 
-            runtime = build_runtime(
+            composition = build_production_composition(
                 instance_name=request.instance_name,
                 transport_source=request.transport_source,
                 transport_policy=explicit_transport_policy(request.transport_source),
@@ -198,6 +198,51 @@ def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> 
                 local_bundle_release_attestation=(
                     request.local_bundle_release_attestation
                 ),
+            )
+            runtime = composition.runtime
+            platform_session = composition.plan_platform(
+                request,
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            if not args.accept:
+                if args.dry_run:
+                    _write(
+                        {
+                            "operation": "platform-bootstrap",
+                            "plan": platform_session.plan.as_dict(),
+                        },
+                        json_output=args.json_output,
+                    )
+                    return EXIT_SUCCESS
+                if args.non_interactive:
+                    _write(
+                        {
+                            "outcome": "VALIDATION_FAILED",
+                            "reasonCode": "PLATFORM_BOOTSTRAP_PLAN_NOT_ACCEPTED",
+                            "planDigest": platform_session.plan.plan_digest,
+                        },
+                        json_output=args.json_output,
+                    )
+                    return EXIT_VALIDATION
+                print(
+                    f"Platform bootstrap plan digest: {platform_session.plan.plan_digest}"
+                )
+                answer = input(
+                    "Type ACCEPT to execute this exact platform bootstrap plan: "
+                ).strip()
+                if answer != "ACCEPT":
+                    _write(
+                        {
+                            "outcome": "VALIDATION_FAILED",
+                            "reasonCode": "PLATFORM_BOOTSTRAP_PLAN_NOT_ACCEPTED",
+                            "planDigest": platform_session.plan.plan_digest,
+                        },
+                        json_output=args.json_output,
+                    )
+                    return EXIT_VALIDATION
+            composition.execute_platform(
+                platform_session,
+                platform_session.plan.plan_digest,
             )
         plan = runtime.plan(request)
         if args.dry_run:
@@ -226,20 +271,6 @@ def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> 
                     json_output=args.json_output,
                 )
                 return EXIT_VALIDATION
-        if (
-            production_composition
-            and request.transport_source is not InstallTransportSource.LOCAL_BUNDLE
-            and plan.action.value not in {"NO_CHANGE", "UPDATER_HANDOFF"}
-        ):
-            from .bootstrap import authorize_online_stage0
-
-            authorize_online_stage0(
-                tag=plan.release.version,
-                release_commit=plan.release.commit,
-                verified_at=datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                ),
-            )
         result = runtime.execute(plan, accepted_plan_digest=plan.plan_digest)
         _write(result.as_dict(), json_output=args.json_output)
         if result.outcome.value in {"SUCCEEDED", "NO_CHANGE"}:
@@ -270,6 +301,36 @@ def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> 
             json_output=bool(getattr(args, "json_output", False)),
         )
         return EXIT_ENVIRONMENT
+    except Exception as error:
+        from .platform_bootstrap import PlatformBootstrapError
+
+        if not isinstance(error, PlatformBootstrapError):
+            raise
+        outcome = (
+            "VALIDATION_FAILED"
+            if error.code
+            in {
+                "PLATFORM_BOOTSTRAP_PLAN_NOT_ACCEPTED",
+                "PLATFORM_BOOTSTRAP_PLAN_CHANGED",
+                "PLATFORM_BOOTSTRAP_RECEIPT_INVALID",
+            }
+            else "COMPATIBILITY_BLOCKED"
+            if error.code
+            in {
+                "PLATFORM_BOOTSTRAP_OFFLINE_CAPABILITY_MISSING",
+                "PLATFORM_BOOTSTRAP_POST_QUALIFICATION_FAILED",
+            }
+            else "ENVIRONMENT_FAILED"
+        )
+        _write(
+            {"outcome": outcome, "reasonCode": error.code},
+            json_output=bool(getattr(args, "json_output", False)),
+        )
+        return {
+            "VALIDATION_FAILED": EXIT_VALIDATION,
+            "COMPATIBILITY_BLOCKED": EXIT_COMPATIBILITY,
+            "ENVIRONMENT_FAILED": EXIT_ENVIRONMENT,
+        }[outcome]
 
 
 if __name__ == "__main__":

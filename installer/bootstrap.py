@@ -42,6 +42,7 @@ _REQUIRED_RUNTIME_MODULES = frozenset(
     {
         "installer.bootstrap",
         "installer.cli",
+        "installer.platform_bootstrap",
         "installer.production",
         "installer.runtime",
         "updater.offline",
@@ -81,8 +82,7 @@ def parse_gh_cli_version_output(stdout: bytes) -> GhCliVersionOutput:
     except UnicodeDecodeError as error:
         raise GhVersionOutputError("GH_VERSION_OUTPUT_INVALID_UTF8") from error
     if any(
-        unicodedata.category(character) == "Cc"
-        and character not in {"\r", "\n", "\t"}
+        unicodedata.category(character) == "Cc" and character not in {"\r", "\n", "\t"}
         for character in output
     ):
         raise GhVersionOutputError("GH_VERSION_OUTPUT_CONTROL_CHARACTER")
@@ -140,7 +140,9 @@ def _safe_root() -> Path:
     return root
 
 
-def _validate_mode_owner(path: Path, metadata: os.stat_result, *, directory: bool) -> None:
+def _validate_mode_owner(
+    path: Path, metadata: os.stat_result, *, directory: bool
+) -> None:
     if directory and not stat.S_ISDIR(metadata.st_mode):
         _reject("BOOTSTRAP_AUTHORITY_ROOT_INVALID")
     if not directory and not stat.S_ISREG(metadata.st_mode):
@@ -202,11 +204,12 @@ def _protected_material_bytes(path: Path) -> bytes:
                 _reject("BOOTSTRAP_PROTECTED_MATERIAL_TOO_LARGE")
             chunks.append(chunk)
         after = os.fstat(descriptor)
-        if (
-            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
-            or size != opened.st_size
-        ):
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ) or size != opened.st_size:
             _reject("BOOTSTRAP_PROTECTED_MATERIAL_RACE")
         return b"".join(chunks)
     finally:
@@ -251,11 +254,12 @@ def _regular_file_identity(path: Path) -> tuple[int, str]:
                 _reject("BOOTSTRAP_RUNTIME_SOURCE_INVALID")
             digest.update(chunk)
         after = os.fstat(descriptor)
-        if (
-            size != opened.st_size
-            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
-        ):
+        if size != opened.st_size or (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns):
             _reject("BOOTSTRAP_RUNTIME_SOURCE_RACE")
         return size, "sha256:" + digest.hexdigest()
     finally:
@@ -268,10 +272,12 @@ def _archive_python_identities(archive_path: Path) -> dict[str, tuple[int, str]]
         with tarfile.open(archive_path, mode="r:") as archive:
             for member in archive:
                 pure = PurePosixPath(member.name)
-                if (
-                    pure.suffix != ".py"
-                    or pure.parts[0] not in {"durability", "installer", "release", "updater"}
-                ):
+                if pure.suffix != ".py" or pure.parts[0] not in {
+                    "durability",
+                    "installer",
+                    "release",
+                    "updater",
+                }:
                     continue
                 if (
                     pure.is_absolute()
@@ -336,9 +342,7 @@ def _validate_protected_runtime_sources(
     if frozenset(module_files) != _REQUIRED_RUNTIME_MODULES:
         _reject("BOOTSTRAP_RUNTIME_MODULE_SET_INVALID")
 
-    archive_identities = _archive_python_identities(
-        authorization.materials_path
-    )
+    archive_identities = _archive_python_identities(authorization.materials_path)
     for name, candidate in module_files.items():
         expected_relative = name.replace(".", "/") + ".py"
         if expected_relative not in archive_identities:
@@ -582,10 +586,26 @@ class BootstrapPrivilegeGate:
 class ProductionBootstrapPrivilegeGate:
     """生产组合根：先消费 Stage-0 capability，再原子预置离线信任。"""
 
-    def consume(self, *, version: str, release_commit: str) -> AuthorizedBootstrap:
+    def verify_runtime_source(
+        self,
+        *,
+        version: str,
+        release_commit: str,
+    ) -> AuthorizedBootstrap:
+        """Verify loaded core modules against the protected installer archive."""
+
         authorization = BootstrapPrivilegeGate().consume(
             version=version,
             release_commit=release_commit,
+        )
+        runtime_root = _safe_root() / _PROTECTED_RUNTIME_DIRECTORY
+        expected_module_files = {
+            module_name: runtime_root / (module_name.replace(".", "/") + ".py")
+            for module_name in _REQUIRED_RUNTIME_MODULES
+        }
+        _validate_protected_runtime_sources(
+            authorization,
+            module_files=expected_module_files,
         )
         try:
             for module_name in sorted(_REQUIRED_RUNTIME_MODULES):
@@ -593,6 +613,13 @@ class ProductionBootstrapPrivilegeGate:
         except Exception:  # noqa: BLE001 - privileged boundary stays redacted
             _reject("BOOTSTRAP_RUNTIME_MODULE_IMPORT_FAILED")
         _validate_protected_runtime_sources(authorization)
+        return authorization
+
+    def consume(self, *, version: str, release_commit: str) -> AuthorizedBootstrap:
+        authorization = self.verify_runtime_source(
+            version=version,
+            release_commit=release_commit,
+        )
         try:
             from updater.trust_lifecycle import (
                 ProductionTrustLifecycle,
@@ -627,7 +654,9 @@ def _run_stage0_gh(arguments: tuple[str, ...]) -> object:
         if (
             not token
             or len(token) > 4096
-            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in token)
+            or any(
+                ord(character) < 0x21 or ord(character) > 0x7E for character in token
+            )
         ):
             _reject("BOOTSTRAP_STAGE0_GH_CREDENTIAL_INVALID")
         environment["GH_TOKEN"] = token

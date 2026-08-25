@@ -18,8 +18,10 @@ import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from durability.canonical import canonical_json_bytes, sha256_identity
 from durability.compatibility import (
@@ -118,6 +120,7 @@ from .runtime import (
     InstallOutcome,
     InstallPhase,
     InstallPlan,
+    InstallRequest,
     InstallTransportSource,
     ListenRequest,
     PlatformEvidence,
@@ -128,7 +131,85 @@ from .runtime import (
     explicit_transport_policy,
 )
 
+if TYPE_CHECKING:
+    from .platform_bootstrap import (
+        PlatformBootstrapPlan,
+        PlatformBootstrapReceipt,
+        ProductionPlatformBootstrap,
+    )
+
 _PLATFORM_EVIDENCE_MATERIAL = "release/platform-qualification.json"
+_PLATFORM_PROBE_ENVIRONMENT = {
+    "HOME": "/nonexistent",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+}
+_LOCAL_DOCKER_HOST = "unix:///var/run/docker.sock"
+
+
+class LocalDockerCommandRunner(CommandRunner):
+    """Force every production Docker/Compose subprocess onto the local socket."""
+
+    def __init__(self, delegate: CommandRunner | None = None) -> None:
+        self._delegate = delegate or CommandRunner()
+
+    @staticmethod
+    def _closed_command(
+        argv: list[str], env: dict[str, str] | None
+    ) -> tuple[list[str], dict[str, str] | None]:
+        closed_argv = list(argv)
+        if closed_argv[:1] != ["/usr/bin/docker"]:
+            return closed_argv, env
+        if closed_argv[1:2] != ["--host"]:
+            closed_argv[1:1] = ["--host", _LOCAL_DOCKER_HOST]
+        closed_env = dict(os.environ if env is None else env)
+        for name in tuple(closed_env):
+            if name.startswith("DOCKER_"):
+                closed_env.pop(name)
+        closed_env.update(
+            {
+                "HOME": "/nonexistent",
+                "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            }
+        )
+        return closed_argv, closed_env
+
+    def run(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        timeout: int = 300,
+    ):
+        closed_argv, closed_env = self._closed_command(argv, env)
+        return self._delegate.run(
+            closed_argv,
+            cwd=cwd,
+            env=closed_env,
+            timeout=timeout,
+        )
+
+    def write_gzip(
+        self,
+        argv: list[str],
+        path: Path,
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        timeout: int = 600,
+        root: Path | None = None,
+    ) -> dict[str, object]:
+        closed_argv, closed_env = self._closed_command(argv, env)
+        return self._delegate.write_gzip(
+            closed_argv,
+            path,
+            cwd=cwd,
+            env=closed_env,
+            timeout=timeout,
+            root=root,
+        )
 
 
 def _utc_now() -> str:
@@ -148,9 +229,7 @@ def _safe_adapter_error(code: str, *, mutation: bool, recovery: bool):
 
 
 def _linklike(path: Path) -> bool:
-    return path.is_symlink() or (
-        hasattr(path, "is_junction") and path.is_junction()
-    )
+    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
 
 
 class ProductionReleasePort:
@@ -277,7 +356,9 @@ class ProductionReleasePort:
         self.source = source
         self.transport_source = transport_source
         self.transport_policy = selected_policy
-        self.image_acquirer = image_acquirer or ImageAcquirer()
+        self.image_acquirer = image_acquirer or ImageAcquirer(
+            runner=LocalDockerCommandRunner()
+        )
         self._materials: dict[str, VerifiedReleaseMaterials] = {}
         self._latest: VerifiedReleaseMaterials | None = None
         self._latest_evidence: ReleaseEvidence | None = None
@@ -483,7 +564,7 @@ class ProductionCompatibilityPort:
 
 def _command_available(runner: CommandRunner, argv: list[str]) -> bool:
     try:
-        runner.run(argv, timeout=30)
+        runner.run(argv, timeout=30, env=dict(_PLATFORM_PROBE_ENVIRONMENT))
     except Exception:  # noqa: BLE001 - capability probe returns only a boolean
         return False
     return True
@@ -529,17 +610,35 @@ def collect_host_capabilities(
     *,
     runner: CommandRunner | None = None,
 ) -> HostCapabilityEvidence:
-    runner = runner or CommandRunner()
+    runner = runner or LocalDockerCommandRunner()
     machine = host_platform.machine().lower()
     architecture = "amd64" if machine in {"x86_64", "amd64"} else machine
     filesystem = _filesystem_capabilities()
     compose_version = _command_available(
-        runner, ["/usr/bin/docker", "compose", "version"]
+        runner,
+        [
+            "/usr/bin/docker",
+            "--host",
+            "unix:///var/run/docker.sock",
+            "compose",
+            "version",
+        ],
     )
     compose_help = _command_available(
-        runner, ["/usr/bin/docker", "compose", "up", "--help"]
+        runner,
+        [
+            "/usr/bin/docker",
+            "--host",
+            "unix:///var/run/docker.sock",
+            "compose",
+            "up",
+            "--help",
+        ],
     )
-    docker = _command_available(runner, ["/usr/bin/docker", "info"])
+    docker = _command_available(
+        runner,
+        ["/usr/bin/docker", "--host", "unix:///var/run/docker.sock", "info"],
+    )
     systemd = _command_available(runner, ["/usr/bin/systemctl", "--version"])
     pg_dump = _command_available(runner, ["/usr/bin/pg_dump", "--version"])
     psql = _command_available(runner, ["/usr/bin/psql", "--version"])
@@ -633,7 +732,7 @@ class ProductionTargetPort:
         self.releases = releases
         self.platform = platform
         self.doctor = doctor
-        self.runner = runner or CommandRunner()
+        self.runner = runner or LocalDockerCommandRunner()
         self.namespace = namespace or instance_namespace()
 
     def _installed_material_exact(self, materials: VerifiedReleaseMaterials) -> bool:
@@ -685,7 +784,7 @@ class ProductionTargetPort:
                         kind,
                         "ls",
                         "--all" if kind == "container" else "--quiet",
-                        *(('--quiet',) if kind == "container" else ()),
+                        *(("--quiet",) if kind == "container" else ()),
                         "--filter",
                         f"label=com.docker.compose.project={self.namespace.compose_project}",
                     ),
@@ -715,8 +814,7 @@ class ProductionTargetPort:
             except OSError:
                 return True
             if any(
-                candidate != root.name
-                and candidate.casefold() == root.name.casefold()
+                candidate != root.name and candidate.casefold() == root.name.casefold()
                 for candidate in names
             ):
                 return True
@@ -732,7 +830,9 @@ class ProductionTargetPort:
         if locator_path.exists() or locator_path.is_symlink():
             try:
                 snapshot = load_instance_snapshot(instance_name=self.namespace.name)
-                config = LocalManagedConfigStore(instance_name=self.namespace.name).read()
+                config = LocalManagedConfigStore(
+                    instance_name=self.namespace.name
+                ).read()
                 locator = snapshot.locator
                 receipt = LocalOwnershipReceiptStore(
                     instance_name=self.namespace.name
@@ -873,9 +973,7 @@ class ProductionManagedConfigurationPort:
         namespace: InstanceNamespace | None = None,
     ) -> None:
         self.namespace = namespace or instance_namespace()
-        self.store = store or LocalManagedConfigStore(
-            instance_name=self.namespace.name
-        )
+        self.store = store or LocalManagedConfigStore(instance_name=self.namespace.name)
         self._planned: dict[str, ManagedConfig] = {}
         self._existing: dict[str, bool] = {}
 
@@ -1098,9 +1196,7 @@ class ProductionOperationPort:
         namespace: InstanceNamespace | None = None,
     ) -> None:
         self.namespace = namespace or instance_namespace()
-        selected_state_root = state_root or Path(
-            str(self.namespace.updater_state_root)
-        )
+        selected_state_root = state_root or Path(str(self.namespace.updater_state_root))
         self.journal = FreshInstallOperationJournal(selected_state_root)
         self.lock_path = selected_state_root / "update.lock"
         self.current: FreshInstallOperation | None = None
@@ -1199,7 +1295,7 @@ class ProductionDoctorAcceptance:
     ) -> None:
         self.releases = releases
         self.compatibility = compatibility
-        self.runner = runner or CommandRunner()
+        self.runner = runner or LocalDockerCommandRunner()
         self.namespace = namespace or instance_namespace()
 
     @staticmethod
@@ -1503,7 +1599,7 @@ class ProductionFreshInstallPort:
     ) -> None:
         self.releases = releases
         self.configuration = configuration
-        self.runner = runner or CommandRunner()
+        self.runner = runner or LocalDockerCommandRunner()
         self.doctor_acceptor = doctor_acceptor
         self.namespace = namespace or instance_namespace()
         self._deployment: ImmutableComposeDeployment | None = None
@@ -1704,7 +1800,7 @@ class ProductionFreshInstallPort:
             os.chown(self.configuration.store.authority_path, uid, gid)
             self.configuration.store.rebuild_runtime_env(
                 locator_digest=instance_locator_digest(self._locator(plan)),
-                expected_revision=plan.configuration.config_revision
+                expected_revision=plan.configuration.config_revision,
             )
             deployment = self._compose(plan)
             manifest = self._manifest(plan)
@@ -1719,6 +1815,8 @@ class ProductionFreshInstallPort:
                 uid_result = self.runner.run(
                     [
                         "/usr/bin/docker",
+                        "--host",
+                        _LOCAL_DOCKER_HOST,
                         "run",
                         "--rm",
                         "--network",
@@ -1733,6 +1831,8 @@ class ProductionFreshInstallPort:
                 gid_result = self.runner.run(
                     [
                         "/usr/bin/docker",
+                        "--host",
+                        _LOCAL_DOCKER_HOST,
                         "run",
                         "--rm",
                         "--network",
@@ -1860,7 +1960,101 @@ class ProductionFreshInstallPort:
                 )
 
 
-def build_runtime(
+@dataclass(frozen=True)
+class VerifiedPlatformBootstrapSession:
+    """Exact verified Release and its host-platform plan/executor binding."""
+
+    release: ReleaseEvidence
+    plan: PlatformBootstrapPlan
+    bootstrap: ProductionPlatformBootstrap
+
+
+@dataclass(frozen=True)
+class ProductionInstallerComposition:
+    """Formal Stage0 composition before the canonical Installer interface."""
+
+    runtime: Installer
+    releases: ProductionReleasePort
+    platform: ProductionPlatformPort
+
+    def plan_platform(
+        self,
+        request: InstallRequest,
+        verified_at: str,
+    ) -> VerifiedPlatformBootstrapSession:
+        if (
+            request.transport_source is not self.releases.transport_source
+            or request.transport_policy_identity
+            != self.releases.transport_policy.identity
+        ):
+            raise InstallerError(
+                "INSTALL_RELEASE_TRANSPORT_POLICY_MISMATCH",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        release = self.releases.resolve(request.selector, refresh=False)
+        if request.transport_source is not InstallTransportSource.LOCAL_BUNDLE:
+            from .bootstrap import authorize_online_stage0
+
+            authorize_online_stage0(
+                tag=release.version,
+                release_commit=release.commit,
+                verified_at=verified_at,
+            )
+        # Online Stage0 has just committed this capability. Offline execution
+        # must consume an already provisioned, release-bound protected archive;
+        # neither path may import the platform module before its fixed bytes are
+        # checked against that archive.
+        ProductionBootstrapPrivilegeGate().verify_runtime_source(
+            version=release.version,
+            release_commit=release.commit,
+        )
+        from .platform_bootstrap import ProductionPlatformBootstrap
+
+        bootstrap = ProductionPlatformBootstrap()
+        plan = bootstrap.plan(transport_source=request.transport_source)
+        return VerifiedPlatformBootstrapSession(
+            release=release,
+            plan=plan,
+            bootstrap=bootstrap,
+        )
+
+    def execute_platform(
+        self,
+        session: VerifiedPlatformBootstrapSession,
+        accepted_plan_digest: str,
+    ) -> PlatformBootstrapReceipt:
+        from .platform_bootstrap import (
+            PlatformBootstrapError,
+            ProductionPlatformBootstrap,
+        )
+
+        if (
+            type(session) is not VerifiedPlatformBootstrapSession
+            or type(session.bootstrap) is not ProductionPlatformBootstrap
+        ):
+            raise PlatformBootstrapError("PLATFORM_BOOTSTRAP_PLAN_CHANGED")
+        refreshed = self.releases.resolve(
+            ReleaseSelector(version=session.release.version),
+            refresh=True,
+        )
+        if refreshed.as_dict() != session.release.as_dict():
+            raise PlatformBootstrapError("PLATFORM_BOOTSTRAP_PLAN_CHANGED")
+        receipt = session.bootstrap.execute(
+            session.plan,
+            accepted_plan_digest=accepted_plan_digest,
+        )
+        try:
+            assessment = self.platform.assess(session.release.platform_profile)
+        except InstallerError:
+            raise PlatformBootstrapError(
+                "PLATFORM_BOOTSTRAP_POST_QUALIFICATION_FAILED"
+            ) from None
+        if not assessment.compatible:
+            raise PlatformBootstrapError("PLATFORM_BOOTSTRAP_POST_QUALIFICATION_FAILED")
+        return receipt
+
+
+def build_production_composition(
     *,
     instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
     transport_source: InstallTransportSource = InstallTransportSource.GITHUB,
@@ -1869,13 +2063,15 @@ def build_runtime(
     | None = None,
     local_bundle_payload: Path | None = None,
     local_bundle_release_attestation: Path | None = None,
-) -> Installer:
+) -> ProductionInstallerComposition:
     namespace = instance_namespace(instance_name)
+    runner = LocalDockerCommandRunner()
     releases = ProductionReleasePort(
         transport_source=transport_source,
         transport_policy=transport_policy,
         local_bundle_payload=local_bundle_payload,
         local_bundle_release_attestation=local_bundle_release_attestation,
+        image_acquirer=ImageAcquirer(runner=runner),
     )
     configuration = ProductionManagedConfigurationPort(namespace=namespace)
     compatibility = ProductionCompatibilityPort(releases)
@@ -1883,20 +2079,23 @@ def build_runtime(
     doctor = ProductionDoctorAcceptance(
         releases=releases,
         compatibility=compatibility,
+        runner=runner,
         namespace=namespace,
     )
     fresh = ProductionFreshInstallPort(
         releases=releases,
         configuration=configuration,
         doctor_acceptor=doctor,
+        runner=runner,
         namespace=namespace,
     )
-    return Installer(
+    runtime = Installer(
         releases=releases,
         target=ProductionTargetPort(
             releases=releases,
             platform=platform,
             doctor=doctor,
+            runner=runner,
             namespace=namespace,
         ),
         platform=platform,
@@ -1912,6 +2111,30 @@ def build_runtime(
         bootstrap_privilege_gate=ProductionBootstrapPrivilegeGate(),
         namespace=namespace,
     )
+    return ProductionInstallerComposition(
+        runtime=runtime,
+        releases=releases,
+        platform=platform,
+    )
+
+
+def build_runtime(
+    *,
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+    transport_source: InstallTransportSource = InstallTransportSource.GITHUB,
+    transport_policy: ExplicitTransportPolicy
+    | LocalBundleTransportPolicy
+    | None = None,
+    local_bundle_payload: Path | None = None,
+    local_bundle_release_attestation: Path | None = None,
+) -> Installer:
+    return build_production_composition(
+        instance_name=instance_name,
+        transport_source=transport_source,
+        transport_policy=transport_policy,
+        local_bundle_payload=local_bundle_payload,
+        local_bundle_release_attestation=local_bundle_release_attestation,
+    ).runtime
 
 
 def production_configuration_doctor(
@@ -1921,7 +2144,8 @@ def production_configuration_doctor(
 ) -> None:
     """Reacquire exact Release authority and run complete config acceptance."""
 
-    releases = ProductionReleasePort()
+    runner = LocalDockerCommandRunner()
+    releases = ProductionReleasePort(image_acquirer=ImageAcquirer(runner=runner))
     release = releases.resolve(
         ReleaseSelector(version=str(manifest["release"]["version"])),
         refresh=True,
@@ -1944,6 +2168,7 @@ def production_configuration_doctor(
         )
     deployment = ImmutableComposeDeployment(
         HostPaths.production(snapshot),
+        runner=runner,
         managed_environment=dict(
             derive_runtime_environment(
                 config,
@@ -1955,6 +2180,7 @@ def production_configuration_doctor(
     ProductionDoctorAcceptance(
         releases=releases,
         compatibility=compatibility,
+        runner=runner,
         namespace=instance_namespace(snapshot.locator.instance_name),
     ).accept_existing(
         expected_instance_id=config.instance_id,
@@ -1968,12 +2194,15 @@ __all__ = [
     "ProductionCompatibilityPort",
     "ProductionDoctorAcceptance",
     "ProductionFreshInstallPort",
+    "ProductionInstallerComposition",
     "ProductionManagedConfigurationPort",
     "ProductionOperationPort",
     "ProductionPlatformPort",
     "ProductionReleasePort",
     "ProductionRestoreRuntimePort",
     "ProductionTargetPort",
+    "VerifiedPlatformBootstrapSession",
+    "build_production_composition",
     "build_runtime",
     "collect_host_capabilities",
     "production_configuration_doctor",

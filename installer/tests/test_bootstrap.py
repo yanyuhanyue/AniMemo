@@ -28,9 +28,7 @@ from installer.bootstrap import (
 from scripts.tests.trust_kit_fixture import authority_test_namespace
 from updater.trust_lifecycle import TrustCommitReceipt
 
-GH_VERSION_FIXTURE = (
-    Path(__file__).with_name("fixtures") / "gh-version-2.97.0.txt"
-)
+GH_VERSION_FIXTURE = Path(__file__).with_name("fixtures") / "gh-version-2.97.0.txt"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -137,7 +135,56 @@ class GitHubCliVersionOutputContractTests(unittest.TestCase):
 
 
 class OfficialMirrorStage0ContractTests(unittest.TestCase):
-    def test_github_authority_precedes_fixed_mirror_acquisition_and_execution(self) -> None:
+    def test_verified_platform_bootstrap_precedes_canonical_installer_plan(
+        self,
+    ) -> None:
+        cli = (PROJECT_ROOT / "installer" / "cli.py").read_text(encoding="utf-8")
+        production = (PROJECT_ROOT / "installer" / "production.py").read_text(
+            encoding="utf-8"
+        )
+        stage0 = _official_mirror_stage0_contract()
+
+        release_resolve = production.index(
+            "release = self.releases.resolve(request.selector, refresh=False)"
+        )
+        release_verify = production.index("authorize_online_stage0(", release_resolve)
+        source_verify = production.index(
+            "ProductionBootstrapPrivilegeGate().verify_runtime_source(",
+            release_verify,
+        )
+        platform_import = production.index(
+            "from .platform_bootstrap import ProductionPlatformBootstrap",
+            source_verify,
+        )
+        platform_plan = production.index(
+            "plan = bootstrap.plan(transport_source=request.transport_source)",
+            platform_import,
+        )
+        cli_platform_plan = cli.index("platform_session = composition.plan_platform(")
+        cli_platform_execute = cli.index(
+            "composition.execute_platform(", cli_platform_plan
+        )
+        installer_plan = cli.index("plan = runtime.plan(request)", cli_platform_execute)
+
+        self.assertLess(
+            stage0.index('/usr/bin/gh release verify "$EXACT_TAG"'),
+            stage0.index('/usr/bin/tar -xf "$PROTECTED"'),
+        )
+        self.assertLess(
+            stage0.index('/usr/bin/tar -xf "$PROTECTED"'),
+            stage0.index("-m installer \\"),
+        )
+        self.assertLess(release_resolve, release_verify)
+        self.assertLess(release_verify, source_verify)
+        self.assertLess(source_verify, platform_import)
+        self.assertLess(platform_import, platform_plan)
+        self.assertLess(cli_platform_plan, cli_platform_execute)
+        self.assertLess(cli_platform_execute, installer_plan)
+        self.assertIn("installer.platform_bootstrap", _REQUIRED_RUNTIME_MODULES)
+
+    def test_github_authority_precedes_fixed_mirror_acquisition_and_execution(
+        self,
+    ) -> None:
         stage0 = _official_mirror_stage0_contract()
         architecture_gate = stage0.index(
             'test "$(/usr/bin/dpkg --print-architecture)" = amd64'
@@ -149,21 +196,17 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
         gh_checksums_download = stage0.index(
             '"https://api.github.com/repos/cli/cli/releases/assets/$asset_id"'
         )
-        gh_checksums_verify = stage0.index(
-            'test "$(/usr/bin/sha256sum "$GH_CHECKSUMS"'
-        )
+        gh_checksums_verify = stage0.index('test "$(/usr/bin/sha256sum "$GH_CHECKSUMS"')
         gh_manifest_binding = stage0.index(
             '/usr/bin/grep -Fxq "$GH_DEB_SHA256  gh_${GH_VERSION}_linux_amd64.deb"'
         )
-        gh_deb_verify = stage0.index(
-            'test "$(/usr/bin/sha256sum "$GH_DEB"'
-        )
+        gh_deb_verify = stage0.index('test "$(/usr/bin/sha256sum "$GH_DEB"')
         gh_install = stage0.index(
             '/usr/bin/apt-get install --yes --no-install-recommends "$GH_DEB"'
         )
         release_verify = stage0.index('/usr/bin/gh release verify "$EXACT_TAG"')
         mirror_download = stage0.index(
-            '/usr/bin/curl --proto \'=https\' --tlsv1.2 --location --max-redirs 0',
+            "/usr/bin/curl --proto '=https' --tlsv1.2 --location --max-redirs 0",
             release_verify,
         )
         candidate_verify = stage0.index(
@@ -207,8 +250,8 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
             stage0,
         )
         self.assertIn(
-            "GH_BOOTSTRAP_DIRECTORY=\"$(/usr/bin/mktemp -d "
-            "/var/tmp/animemo-gh-bootstrap.XXXXXXXX)\"",
+            'GH_BOOTSTRAP_DIRECTORY="$(/usr/bin/mktemp -d '
+            '/var/tmp/animemo-gh-bootstrap.XXXXXXXX)"',
             stage0,
         )
         self.assertIn(
@@ -217,15 +260,14 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
             stage0,
         )
         self.assertIn(
-            'test "$(/usr/bin/stat -c "%u:%g:%a:%h" -- "$GH_DEB")" '
-            "= 0:0:600:1",
+            'test "$(/usr/bin/stat -c "%u:%g:%a:%h" -- "$GH_DEB")" = 0:0:600:1',
             stage0,
         )
         self.assertNotIn("cli.github.com/packages", stage0)
         self.assertNotIn("gh=2.97.0", stage0)
         self.assertNotIn("github.com/cli/cli/releases/download", stage0)
-        self.assertIn('--retry 5 --retry-all-errors --retry-connrefused', stage0)
-        self.assertIn('--retry-delay 10 --retry-max-time 840 --continue-at -', stage0)
+        self.assertIn("--retry 5 --retry-all-errors --retry-connrefused", stage0)
+        self.assertIn("--retry-delay 10 --retry-max-time 840 --continue-at -", stage0)
         self.assertIn(
             'download_gh_asset "$GH_CHECKSUMS_ASSET_ID" "$GH_CHECKSUMS"',
             stage0,
@@ -259,8 +301,8 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
         self.assertIn(
             "/usr/bin/timeout --signal=TERM --kill-after=5s 35s \\\n"
             "    /bin/bash --noprofile --norc -c \\\n"
-            "    'set -euo pipefail; IFS= read -r -t 30 token <\"$1\"; "
-            "test -n \"$token\"; printf \"%s\" \"$token\"' \\\n"
+            '    \'set -euo pipefail; IFS= read -r -t 30 token <"$1"; '
+            'test -n "$token"; printf "%s" "$token"\' \\\n'
             '    animemo-gh-token-reader "$GH_TOKEN_PIPE"',
             stage0,
         )
@@ -382,7 +424,9 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
 
-    def test_failed_protected_reverification_rolls_back_only_this_invocation(self) -> None:
+    def test_failed_protected_reverification_rolls_back_only_this_invocation(
+        self,
+    ) -> None:
         stage0 = _official_mirror_stage0_contract()
         self.assertIn("created_protected=0", stage0)
         self.assertIn("created_protected_root=0", stage0)
@@ -404,9 +448,7 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
             stage0.index('/usr/bin/ln "$HANDOFF" "$PROTECTED"'),
         )
         self.assertLess(
-            stage0.index(
-                '/usr/bin/gh release verify-asset "$EXACT_TAG" "$PROTECTED"'
-            ),
+            stage0.index('/usr/bin/gh release verify-asset "$EXACT_TAG" "$PROTECTED"'),
             stage0.index("completed=1"),
         )
         self.assertEqual(stage0.count("--max-redirs 1"), 1)
@@ -446,13 +488,19 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
             self.assertEqual(list(root.iterdir()), [])
 
     @unittest.skipUnless(os.name == "posix", "Stage-0 root transaction requires POSIX")
-    def test_protected_reverification_failure_rolls_back_created_root_tree(self) -> None:
+    def test_protected_reverification_failure_rolls_back_created_root_tree(
+        self,
+    ) -> None:
         sudo = Path("/usr/bin/sudo")
-        if not sudo.exists() or subprocess.run(
-            [str(sudo), "-n", "/bin/true"],
-            check=False,
-            capture_output=True,
-        ).returncode != 0:
+        if (
+            not sudo.exists()
+            or subprocess.run(
+                [str(sudo), "-n", "/bin/true"],
+                check=False,
+                capture_output=True,
+            ).returncode
+            != 0
+        ):
             self.skipTest("passwordless sudo is required for the root transaction test")
 
         stage0 = _official_mirror_stage0_contract()
@@ -478,17 +526,21 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_gh.chmod(0o755)
-            body = body.replace(
-                "ANIMEMO_ROOT=/var/lib/animemo",
-                'ANIMEMO_ROOT="$TEST_ROOT/animemo"',
-            ).replace(
-                "PROTECTED_ROOT=/var/lib/animemo/bootstrap-authority/v1",
-                'PROTECTED_ROOT="$AUTHORITY_PARENT/v1"',
-            ).replace(
-                "assert_safe_root_directory /var/lib ''",
-                ": # /var/lib is outside the isolated test namespace",
-            ).replace('test -p "$GH_TOKEN_PIPE"', 'test -f "$GH_TOKEN_PIPE"').replace(
-                "/usr/bin/gh", fake_gh.as_posix()
+            body = (
+                body.replace(
+                    "ANIMEMO_ROOT=/var/lib/animemo",
+                    'ANIMEMO_ROOT="$TEST_ROOT/animemo"',
+                )
+                .replace(
+                    "PROTECTED_ROOT=/var/lib/animemo/bootstrap-authority/v1",
+                    'PROTECTED_ROOT="$AUTHORITY_PARENT/v1"',
+                )
+                .replace(
+                    "assert_safe_root_directory /var/lib ''",
+                    ": # /var/lib is outside the isolated test namespace",
+                )
+                .replace('test -p "$GH_TOKEN_PIPE"', 'test -f "$GH_TOKEN_PIPE"')
+                .replace("/usr/bin/gh", fake_gh.as_posix())
             )
             result = subprocess.run(
                 [
@@ -521,11 +573,15 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "Stage-0 root transaction requires POSIX")
     def test_partial_directory_creation_failure_removes_earlier_parents(self) -> None:
         sudo = Path("/usr/bin/sudo")
-        if not sudo.exists() or subprocess.run(
-            [str(sudo), "-n", "/bin/true"],
-            check=False,
-            capture_output=True,
-        ).returncode != 0:
+        if (
+            not sudo.exists()
+            or subprocess.run(
+                [str(sudo), "-n", "/bin/true"],
+                check=False,
+                capture_output=True,
+            ).returncode
+            != 0
+        ):
             self.skipTest("passwordless sudo is required for the root transaction test")
 
         stage0 = _official_mirror_stage0_contract()
@@ -552,17 +608,21 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_install.chmod(0o755)
-            body = body.replace(
-                "ANIMEMO_ROOT=/var/lib/animemo",
-                'ANIMEMO_ROOT="$TEST_ROOT/animemo"',
-            ).replace(
-                "PROTECTED_ROOT=/var/lib/animemo/bootstrap-authority/v1",
-                'PROTECTED_ROOT="$AUTHORITY_PARENT/v1"',
-            ).replace(
-                "assert_safe_root_directory /var/lib ''",
-                ": # /var/lib is outside the isolated test namespace",
-            ).replace('test -p "$GH_TOKEN_PIPE"', 'test -f "$GH_TOKEN_PIPE"').replace(
-                "/usr/bin/install", fake_install.as_posix()
+            body = (
+                body.replace(
+                    "ANIMEMO_ROOT=/var/lib/animemo",
+                    'ANIMEMO_ROOT="$TEST_ROOT/animemo"',
+                )
+                .replace(
+                    "PROTECTED_ROOT=/var/lib/animemo/bootstrap-authority/v1",
+                    'PROTECTED_ROOT="$AUTHORITY_PARENT/v1"',
+                )
+                .replace(
+                    "assert_safe_root_directory /var/lib ''",
+                    ": # /var/lib is outside the isolated test namespace",
+                )
+                .replace('test -p "$GH_TOKEN_PIPE"', 'test -f "$GH_TOKEN_PIPE"')
+                .replace("/usr/bin/install", fake_install.as_posix())
             )
             result = subprocess.run(
                 [
@@ -655,14 +715,18 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
                     generation=1,
                     authorization_identity=authorization.identity,
                 )
-                with mock.patch(
-                    "updater.trust_lifecycle.ProductionTrustLifecycle.production",
-                    return_value=lifecycle,
-                ), mock.patch(
-                    "installer.bootstrap._validate_protected_runtime_sources"
-                ) as runtime_binding, mock.patch(
-                    "installer.bootstrap.importlib.import_module"
-                ) as import_module:
+                with (
+                    mock.patch(
+                        "updater.trust_lifecycle.ProductionTrustLifecycle.production",
+                        return_value=lifecycle,
+                    ),
+                    mock.patch(
+                        "installer.bootstrap._validate_protected_runtime_sources"
+                    ) as runtime_binding,
+                    mock.patch(
+                        "installer.bootstrap.importlib.import_module"
+                    ) as import_module,
+                ):
                     capability = ProductionBootstrapPrivilegeGate().consume(
                         version="v1.1.0-rc.1",
                         release_commit="1" * 40,
@@ -677,15 +741,23 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
                 [call.args[0] for call in import_module.call_args_list],
                 sorted(_REQUIRED_RUNTIME_MODULES),
             )
-            runtime_binding.assert_called_once_with(capability)
+            self.assertEqual(runtime_binding.call_count, 2)
+            self.assertEqual(runtime_binding.call_args_list[-1], mock.call(capability))
+            self.assertEqual(
+                set(runtime_binding.call_args_list[0].kwargs["module_files"]),
+                _REQUIRED_RUNTIME_MODULES,
+            )
 
-    def test_production_gate_fails_closed_when_a_required_module_cannot_load(self) -> None:
+    def test_production_gate_fails_closed_when_a_required_module_cannot_load(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             protected = root / "installer-materials.tar"
             protected.write_bytes(b"verified materials")
             with (
                 authority_test_namespace(root),
+                mock.patch("installer.bootstrap._validate_protected_runtime_sources"),
                 mock.patch(
                     "installer.bootstrap.importlib.import_module",
                     side_effect=ImportError("redacted fixture"),
@@ -713,7 +785,9 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             )
             with (
                 authority_test_namespace(root),
-                mock.patch("installer.bootstrap.subprocess.run", side_effect=completed) as run,
+                mock.patch(
+                    "installer.bootstrap.subprocess.run", side_effect=completed
+                ) as run,
             ):
                 receipt = authorize_online_stage0(
                     tag="v1.1.0-rc.1",
@@ -746,22 +820,33 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
         with (
             mock.patch.dict(
                 os.environ,
-                {"GH_TOKEN": "github_pat_ephemeral", "GITHUB_TOKEN": "must-not-forward"},
+                {
+                    "GH_TOKEN": "github_pat_ephemeral",
+                    "GITHUB_TOKEN": "must-not-forward",
+                },
                 clear=True,
             ),
-            mock.patch("installer.bootstrap.subprocess.run", return_value=completed) as run,
+            mock.patch(
+                "installer.bootstrap.subprocess.run", return_value=completed
+            ) as run,
         ):
             from installer.bootstrap import _run_stage0_gh
 
             _run_stage0_gh(("version",))
 
-        self.assertEqual(run.call_args.kwargs["env"]["GH_TOKEN"], "github_pat_ephemeral")
+        self.assertEqual(
+            run.call_args.kwargs["env"]["GH_TOKEN"], "github_pat_ephemeral"
+        )
         self.assertNotIn("GITHUB_TOKEN", run.call_args.kwargs["env"])
         self.assertNotIn("github_pat_ephemeral", run.call_args.args[0])
 
-    def test_online_stage0_rejects_malformed_ephemeral_credential_before_exec(self) -> None:
+    def test_online_stage0_rejects_malformed_ephemeral_credential_before_exec(
+        self,
+    ) -> None:
         with (
-            mock.patch.dict(os.environ, {"GH_TOKEN": "invalid\ncredential"}, clear=True),
+            mock.patch.dict(
+                os.environ, {"GH_TOKEN": "invalid\ncredential"}, clear=True
+            ),
             mock.patch("installer.bootstrap.subprocess.run") as run,
             self.assertRaisesRegex(
                 BootstrapAuthorityError,
@@ -806,7 +891,9 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             old = subprocess.CompletedProcess([], 0, b"gh version 2.96.0\n", b"")
             with (
                 authority_test_namespace(root),
-                mock.patch("installer.bootstrap.subprocess.run", return_value=old) as run,
+                mock.patch(
+                    "installer.bootstrap.subprocess.run", return_value=old
+                ) as run,
                 self.assertRaisesRegex(
                     BootstrapAuthorityError,
                     "BOOTSTRAP_STAGE0_GH_VERSION_INVALID",
@@ -879,10 +966,14 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             ),
         )
         for completed, reason in failures:
-            with self.subTest(reason=reason), mock.patch(
-                "installer.bootstrap.subprocess.run",
-                return_value=completed,
-            ), self.assertRaises(BootstrapAuthorityError) as raised:
+            with (
+                self.subTest(reason=reason),
+                mock.patch(
+                    "installer.bootstrap.subprocess.run",
+                    return_value=completed,
+                ),
+                self.assertRaises(BootstrapAuthorityError) as raised,
+            ):
                 _run_stage0_gh(("version",))
             self.assertEqual(
                 raised.exception.code,
@@ -893,10 +984,13 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
     def test_stage0_records_version_process_timeout(self) -> None:
         from installer.bootstrap import _run_stage0_gh
 
-        with mock.patch(
-            "installer.bootstrap.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(["/usr/bin/gh", "version"], 120),
-        ), self.assertRaises(BootstrapAuthorityError) as raised:
+        with (
+            mock.patch(
+                "installer.bootstrap.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["/usr/bin/gh", "version"], 120),
+            ),
+            self.assertRaises(BootstrapAuthorityError) as raised,
+        ):
             _run_stage0_gh(("version",))
 
         self.assertEqual(
@@ -923,7 +1017,9 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
 
             self.assertEqual(receipt.identity, again.identity)
             self.assertEqual(authorized.authorization_identity, receipt.identity)
-            self.assertEqual(authorized.materials_sha256, _digest(b"verified materials"))
+            self.assertEqual(
+                authorized.materials_sha256, _digest(b"verified materials")
+            )
 
     def test_different_second_authorization_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1002,9 +1098,7 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
             protected.write_bytes(b"verified materials")
             payload = _payload(protected)
             payload["stage0"] = dict(payload["stage0"])
-            payload["stage0"]["carrier"] = (
-                "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT"
-            )
+            payload["stage0"]["carrier"] = "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT"
 
             payload_bytes = (
                 json.dumps(

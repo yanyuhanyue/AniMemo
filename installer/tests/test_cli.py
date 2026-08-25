@@ -6,9 +6,11 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from installer.cli import EXIT_SUCCESS, EXIT_VALIDATION, _listen, main
+from installer.platform_bootstrap import PlatformBootstrapError
 from installer.runtime import (
     Installer,
     InstallerError,
@@ -55,15 +57,141 @@ class _Runtime:
 
 
 class InstallerCliTests(unittest.TestCase):
-    def test_production_online_execution_authorizes_stage0_before_runtime(self) -> None:
+    def test_platform_failure_stops_before_installer_plan_and_instance_mutation(
+        self,
+    ) -> None:
         holder = _Runtime()
         output = io.StringIO()
+        platform_plan = SimpleNamespace(
+            plan_digest=digest("7"),
+            as_dict=lambda: {"planDigest": digest("7")},
+        )
+        composition = SimpleNamespace(
+            runtime=holder.runtime,
+            plan_platform=lambda request, verified_at: SimpleNamespace(
+                plan=platform_plan
+            ),
+            execute_platform=mock.Mock(
+                side_effect=PlatformBootstrapError(
+                    "PLATFORM_BOOTSTRAP_DOCKER_INSTALL_FAILED"
+                )
+            ),
+        )
         with (
             mock.patch(
-                "installer.production.build_runtime",
-                return_value=holder.runtime,
+                "installer.production.build_production_composition",
+                return_value=composition,
             ),
-            mock.patch("installer.bootstrap.authorize_online_stage0") as authorize,
+            mock.patch.object(holder.runtime, "plan") as installer_plan,
+            mock.patch.object(holder.runtime, "execute") as installer_execute,
+            redirect_stdout(output),
+        ):
+            code = main(
+                [
+                    "install",
+                    "--channel",
+                    "rc",
+                    "--public-origin",
+                    "https://anime.example",
+                    "--non-interactive",
+                    "--accept",
+                    "--json",
+                ]
+            )
+
+        self.assertNotEqual(code, EXIT_SUCCESS)
+        self.assertIn("PLATFORM_BOOTSTRAP_DOCKER_INSTALL_FAILED", output.getvalue())
+        installer_plan.assert_not_called()
+        installer_execute.assert_not_called()
+        self.assertEqual(holder.runtime._operations.events, [])
+        self.assertEqual(holder.runtime._fresh.calls, [])
+
+    def test_accepted_platform_plan_can_continue_to_installer_dry_run_only(
+        self,
+    ) -> None:
+        holder = _Runtime()
+        output = io.StringIO()
+        platform_plan = SimpleNamespace(
+            plan_digest=digest("6"),
+            as_dict=lambda: {"planDigest": digest("6")},
+        )
+        composition = SimpleNamespace(
+            runtime=holder.runtime,
+            plan_platform=lambda request, verified_at: SimpleNamespace(
+                plan=platform_plan
+            ),
+            execute_platform=mock.Mock(),
+        )
+        original_plan = holder.runtime.plan
+        with (
+            mock.patch(
+                "installer.production.build_production_composition",
+                return_value=composition,
+            ),
+            mock.patch.object(
+                holder.runtime, "plan", side_effect=original_plan
+            ) as plan,
+            mock.patch.object(holder.runtime, "execute") as execute,
+            redirect_stdout(output),
+        ):
+            code = main(
+                [
+                    "install",
+                    "--channel",
+                    "rc",
+                    "--public-origin",
+                    "https://anime.example",
+                    "--dry-run",
+                    "--accept",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(code, EXIT_SUCCESS)
+        composition.execute_platform.assert_called_once()
+        plan.assert_called_once()
+        execute.assert_not_called()
+        self.assertIn('"operationId"', output.getvalue())
+
+    def test_production_online_execution_bootstraps_and_qualifies_before_installer_plan(
+        self,
+    ) -> None:
+        holder = _Runtime()
+        output = io.StringIO()
+        events: list[str] = []
+        original_plan = holder.runtime.plan
+        original_execute = holder.runtime.execute
+        platform_plan = SimpleNamespace(
+            plan_digest=digest("9"),
+            actions=(SimpleNamespace(kind=SimpleNamespace(value="VALIDATE_ONLY")),),
+            as_dict=lambda: {"planDigest": digest("9")},
+        )
+        session = SimpleNamespace(plan=platform_plan)
+        composition = SimpleNamespace(
+            runtime=holder.runtime,
+            plan_platform=lambda request, verified_at: (
+                events.extend(("release-verify", "platform-plan")) or session
+            ),
+            execute_platform=lambda value, accepted_plan_digest: events.extend(
+                ("platform-execute", "strict-qualification")
+            ),
+        )
+
+        def installer_plan(request):
+            events.append("installer-plan")
+            return original_plan(request)
+
+        def installer_execute(plan, *, accepted_plan_digest):
+            events.append("installer-execute")
+            return original_execute(plan, accepted_plan_digest=accepted_plan_digest)
+
+        with (
+            mock.patch(
+                "installer.production.build_production_composition",
+                return_value=composition,
+            ),
+            mock.patch.object(holder.runtime, "plan", side_effect=installer_plan),
+            mock.patch.object(holder.runtime, "execute", side_effect=installer_execute),
             redirect_stdout(output),
         ):
             code = main(
@@ -80,14 +208,16 @@ class InstallerCliTests(unittest.TestCase):
             )
 
         self.assertEqual(code, EXIT_SUCCESS)
-        authorize.assert_called_once()
         self.assertEqual(
-            authorize.call_args.kwargs["tag"],
-            holder.runtime._releases.evidence.version,
-        )
-        self.assertEqual(
-            authorize.call_args.kwargs["release_commit"],
-            holder.runtime._releases.evidence.commit,
+            events,
+            [
+                "release-verify",
+                "platform-plan",
+                "platform-execute",
+                "strict-qualification",
+                "installer-plan",
+                "installer-execute",
+            ],
         )
 
     def test_release_source_has_no_auto_url_or_fallback_value(self) -> None:
@@ -156,10 +286,23 @@ class InstallerCliTests(unittest.TestCase):
         payload = offline_root / "payload.tar"
         sidecar = offline_root / "release-attestation.sigstore.json"
         output = io.StringIO()
+        platform_plan = SimpleNamespace(
+            plan_digest=digest("8"),
+            as_dict=lambda: {
+                "planDigest": digest("8"),
+                "transportSource": "local-bundle",
+            },
+        )
+        composition = SimpleNamespace(
+            runtime=holder.runtime,
+            plan_platform=lambda request, verified_at: SimpleNamespace(
+                plan=platform_plan
+            ),
+        )
         with (
             mock.patch(
-                "installer.production.build_runtime",
-                return_value=holder.runtime,
+                "installer.production.build_production_composition",
+                return_value=composition,
             ) as factory,
             redirect_stdout(output),
         ):
