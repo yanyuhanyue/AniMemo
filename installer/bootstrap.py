@@ -21,7 +21,8 @@ _AUTHORIZATION_FILE = "bootstrap-authorization.json"
 _MATERIALS_FILE = "installer-materials.tar"
 _REPOSITORY = "yanyuhanyue/AniMemo"
 _STAGE0_MODEL = "GITHUB_IMMUTABLE_RELEASE_SIGSTORE_TUF_SINGLE_AUTHORITY"
-_ONLINE_CARRIER = "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT"
+_ONLINE_CARRIER = "GH_2_97_0_EXACT_FROM_OFFICIAL_RELEASE_ASSETS_SHA256_BOUND"
+_LEGACY_ONLINE_CARRIER = "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT"
 _OFFLINE_CARRIER = "OPERATOR_PRETRUSTED_PINNED_LINUX_VERIFIER_AND_TWO_TUF_ROOTS"
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -441,7 +442,8 @@ def close_bootstrap_authorization(value: object) -> BootstrapAuthorization:
     )
     if (
         stage0["model"] != _STAGE0_MODEL
-        or stage0["carrier"] not in {_ONLINE_CARRIER, _OFFLINE_CARRIER}
+        or stage0["carrier"]
+        not in {_ONLINE_CARRIER, _LEGACY_ONLINE_CARRIER, _OFFLINE_CARRIER}
         or type(stage0["verifierIdentity"]) is not str
         or not stage0["verifierIdentity"]
         or "TEST" in stage0["verifierIdentity"].upper()

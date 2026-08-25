@@ -41,7 +41,7 @@ bundle 内自带 checksum、公钥或自声明 trust root 不构成 Release Auth
 
 ## 安装入口
 
-公共入口组件源代码位于与域名无关的 `sites/install-portal/`。当前公开入口仍为 `https://install.animemo.cc`。页面不是 Release Authority，也不得提供在权威验证前执行的 AniMemo 脚本。历史 `install.sh` 已退役并固定 fail closed。在线 Stage‑0 必须先从 GitHub 官方签名 APT 仓库安装固定版本的 GitHub CLI，再对 exact tag 与本地资产执行 GitHub Immutable Release 验证；离线 Stage‑0 必须由 operator 或可信镜像独立预置信任材料。
+公共入口组件源代码位于与域名无关的 `sites/install-portal/`。当前公开入口仍为 `https://install.animemo.cc`。页面不是 Release Authority，也不得提供在权威验证前执行的 AniMemo 脚本。历史 `install.sh` 已退役并固定 fail closed。在线 Stage‑0 必须从 GitHub 官方固定 Release assets 获取并以冻结摘要绑定精确版本的 GitHub CLI，再对 exact tag 与本地资产执行 GitHub Immutable Release 验证；离线 Stage‑0 必须由 operator 或可信镜像独立预置信任材料。
 
 本安全边界由 `docs/installer-contract-v2.md` 冻结；原 `docs/installer-contract-v1.md` 保持其历史冻结字节不变。
 
@@ -53,7 +53,7 @@ Official Mirror 的固定身份如下；它只运输原始字节，不发布 Rel
 - prefix：`yanyuhanyue/AniMemo/releases/download`；
 - 完整性 marker：`<prefix>/<EXACT_TAG>/mirror-receipt.json`，且只能在五项资产完成后写入。
 
-下列 Ubuntu 24.04 Stage‑0 是正式的 Official Mirror 首装入口。它从 GitHub 官方固定 v2.97.0 Release 下载 checksum manifest 与 amd64 Debian package，先将 manifest 和 package 分别绑定到仓库内冻结的 SHA256，再用 manifest 对 package 做第二次交叉校验，随后安装精确 `/usr/bin/gh` 2.97.0。这样不会依赖 GitHub CLI 滚动 APT 仓库继续保留旧版本。GitHub Release 资产端点只允许一次 HTTPS 重定向；重定向目标返回的字节仍必须通过上述固定摘要。Stage‑0 先验证 GitHub Immutable Release，再以固定 URL 下载 installer materials；Official Mirror 的 `curl --location --max-redirs 0` 继续拒绝任何重定向。所有 retry、连接时间和总时间均有上限。APT 和 Python 运行时依赖属于主机前置条件，不是 AniMemo 产品 mutation。
+下列 Ubuntu 24.04 Stage‑0 是正式的 Official Mirror 首装入口。它从 GitHub 官方 REST asset endpoint 按固定 asset ID 获取 v2.97.0 Release 的 checksum manifest 与 amd64 Debian package，先将 manifest 和 package 分别绑定到仓库内冻结的 SHA256，再用 manifest 对 package 做第二次交叉校验，随后安装精确 `/usr/bin/gh` 2.97.0。这样不会依赖 GitHub CLI 滚动 APT 仓库继续保留旧版本，也不依赖目标网络能够访问 GitHub 页面主机。GitHub Release 资产端点只允许一次 HTTPS 重定向，并使用有界断点续传；重定向目标返回的完整字节仍必须通过上述固定摘要。Stage‑0 先验证 GitHub Immutable Release，再以固定 URL 下载 installer materials；Official Mirror 的 `curl --location --max-redirs 0` 继续拒绝任何重定向。所有 retry、连接时间和总时间均有上限。APT 和 Python 运行时依赖属于主机前置条件，不是 AniMemo 产品 mutation。
 
 ```sh
 # OFFICIAL_MIRROR_STAGE0_BEGIN
@@ -64,10 +64,17 @@ EXACT_TAG='<EXACT_TAG>'
 sudo /usr/bin/apt-get update
 sudo /usr/bin/apt-get install --yes --no-install-recommends ca-certificates curl python3-venv
 test "$(/usr/bin/dpkg --print-architecture)" = amd64
+sudo /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  /bin/bash --noprofile --norc -c '
+set -euo pipefail
+umask 077
 GH_VERSION=2.97.0
+GH_CHECKSUMS_ASSET_ID=496108250
+GH_DEB_ASSET_ID=496108248
 GH_CHECKSUMS_SHA256=61905c69ec8660f310814ec98395cdd0c2d07aabf024c597ec45813984a02334
 GH_DEB_SHA256=7c7fa3bb890db0934baf65910d97b8c0fa437b2e590f7f7daf6bdf82c5c486d7
-GH_BOOTSTRAP_DIRECTORY="$(/usr/bin/mktemp -d)"
+GH_BOOTSTRAP_DIRECTORY="$(/usr/bin/mktemp -d /var/tmp/animemo-gh-bootstrap.XXXXXXXX)"
 GH_CHECKSUMS="$GH_BOOTSTRAP_DIRECTORY/gh_${GH_VERSION}_checksums.txt"
 GH_DEB="$GH_BOOTSTRAP_DIRECTORY/gh_${GH_VERSION}_linux_amd64.deb"
 cleanup_gh_bootstrap() {
@@ -75,20 +82,32 @@ cleanup_gh_bootstrap() {
   /usr/bin/rmdir -- "$GH_BOOTSTRAP_DIRECTORY"
 }
 trap cleanup_gh_bootstrap EXIT
-for name in "gh_${GH_VERSION}_checksums.txt" "gh_${GH_VERSION}_linux_amd64.deb"; do
-  /usr/bin/curl --proto '=https' --proto-redir '=https' --tlsv1.2 --location --max-redirs 1 \
-    --fail --silent --show-error --connect-timeout 30 --max-time 300 \
-    --retry 2 --retry-delay 10 --retry-max-time 240 \
-    --output "$GH_BOOTSTRAP_DIRECTORY/$name" \
-    "https://github.com/cli/cli/releases/download/v${GH_VERSION}/$name"
-done
-test "$(/usr/bin/sha256sum "$GH_CHECKSUMS" | /usr/bin/awk '{print $1}')" = "$GH_CHECKSUMS_SHA256"
+test "$(/usr/bin/stat -c "%u:%g:%a" -- "$GH_BOOTSTRAP_DIRECTORY")" = 0:0:700
+download_gh_asset() {
+  local asset_id="$1"
+  local output="$2"
+  /usr/bin/curl --proto "=https" --proto-redir "=https" --tlsv1.2 --location --max-redirs 1 \
+    --fail --silent --show-error --connect-timeout 30 --max-time 900 \
+    --retry 5 --retry-all-errors --retry-connrefused \
+    --retry-delay 10 --retry-max-time 840 --continue-at - \
+    --header "Accept: application/octet-stream" \
+    --header "X-GitHub-Api-Version: 2022-11-28" \
+    --header "User-Agent: AniMemo-Stage0/1.1" \
+    --output "$output" \
+    "https://api.github.com/repos/cli/cli/releases/assets/$asset_id"
+}
+download_gh_asset "$GH_CHECKSUMS_ASSET_ID" "$GH_CHECKSUMS"
+download_gh_asset "$GH_DEB_ASSET_ID" "$GH_DEB"
+test "$(/usr/bin/stat -c "%u:%g:%a:%h" -- "$GH_CHECKSUMS")" = 0:0:600:1
+test "$(/usr/bin/stat -c "%u:%g:%a:%h" -- "$GH_DEB")" = 0:0:600:1
+test "$(/usr/bin/sha256sum "$GH_CHECKSUMS" | /usr/bin/awk "{print \$1}")" = "$GH_CHECKSUMS_SHA256"
 /usr/bin/grep -Fxq "$GH_DEB_SHA256  gh_${GH_VERSION}_linux_amd64.deb" "$GH_CHECKSUMS"
-test "$(/usr/bin/sha256sum "$GH_DEB" | /usr/bin/awk '{print $1}')" = "$GH_DEB_SHA256"
-sudo /usr/bin/apt-get install --yes --no-install-recommends "$GH_DEB"
-test "$(/usr/bin/gh --version | /usr/bin/sed -nE 's/^gh version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | /usr/bin/head -n 1)" = "$GH_VERSION"
+test "$(/usr/bin/sha256sum "$GH_DEB" | /usr/bin/awk "{print \$1}")" = "$GH_DEB_SHA256"
+/usr/bin/apt-get install --yes --no-install-recommends "$GH_DEB"
+test "$(/usr/bin/gh --version | /usr/bin/sed -nE "s/^gh version ([0-9]+\\.[0-9]+\\.[0-9]+).*/\\1/p" | /usr/bin/head -n 1)" = "$GH_VERSION"
 cleanup_gh_bootstrap
 trap - EXIT
+'
 
 STAGE0_DIRECTORY="$(/usr/bin/mktemp -d)"
 MIRROR_CANDIDATE="$STAGE0_DIRECTORY/installer-materials.tar"

@@ -57,7 +57,7 @@
               <code id="run-command">验证命令将在正式 Release 获得完整证明后生成。</code>
               <button type="button" data-copy-target="run-command" disabled>复制</button>
             </div>
-            <p class="command-note">先下载 GitHub 官方固定 v2.97.0 Release 的 checksum manifest 与 amd64 Debian package，仅允许一次 HTTPS 重定向，并分别核对冻结 SHA256、交叉校验 package 后安装 gh 2.97.0。三步必须全部通过；随后按项目文档用系统工具把同一 tar 复制并解包到固定 root-only staging，再从该受保护目录以闭合环境启动 canonical Installer。Installer 会把所有已载入的核心模块逐字节绑定回已验证 tar，随后先预置信任状态，再开始系统安装。本站不再提供可直接 sudo 的远程脚本。</p>
+            <p class="command-note">先在 root-only 临时目录从 GitHub 官方 REST asset endpoint 按固定 ID 下载 v2.97.0 Release 的 checksum manifest 与 amd64 Debian package，仅允许一次 HTTPS 重定向和有界断点续传，并由同一 root 进程分别核对冻结 SHA256、交叉校验 package 后安装 gh 2.97.0。三步必须全部通过；随后按项目文档用系统工具把同一 tar 复制并解包到固定 root-only staging，再从该受保护目录以闭合环境启动 canonical Installer。Installer 会把所有已载入的核心模块逐字节绑定回已验证 tar，随后先预置信任状态，再开始系统安装。本站不再提供可直接 sudo 的远程脚本。</p>
           </div>
         </div>
 
