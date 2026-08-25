@@ -18,6 +18,7 @@ from installer.bootstrap import (
     BootstrapPrivilegeGate,
     GhVersionOutputError,
     ProductionBootstrapPrivilegeGate,
+    _load_record,
     _validate_protected_runtime_sources,
     authorize_online_stage0,
     close_bootstrap_authorization,
@@ -240,8 +241,10 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
                 if "/usr/bin/apt-get install " in line
             ],
             [
-                "sudo /usr/bin/apt-get install --yes --no-install-recommends "
-                "ca-certificates curl python3-venv",
+                (
+                    "sudo /usr/bin/apt-get install --yes --no-install-recommends "
+                    "ca-certificates curl python3-venv"
+                ),
                 '/usr/bin/apt-get install --yes --no-install-recommends "$GH_DEB"',
             ],
         )
@@ -1003,8 +1006,41 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
                 "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT"
             )
 
+            payload_bytes = (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
+            record = dict(payload)
+            record["authorizationIdentity"] = _digest(payload_bytes)
+            record_bytes = (
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
+            authorization_path = root / "bootstrap-authorization.json"
+            authorization_path.write_bytes(record_bytes)
+
             with authority_test_namespace(root):
-                legacy = close_bootstrap_authorization(payload)
+                legacy = _load_record(authorization_path)
+                with self.assertRaisesRegex(
+                    BootstrapAuthorityError,
+                    "BOOTSTRAP_STAGE0_INVALID",
+                ):
+                    close_bootstrap_authorization(payload)
+                with self.assertRaisesRegex(
+                    BootstrapAuthorityError,
+                    "BOOTSTRAP_STAGE0_INVALID",
+                ):
+                    commit_bootstrap_authorization(payload)
 
             self.assertEqual(
                 legacy.payload["stage0"]["carrier"],
