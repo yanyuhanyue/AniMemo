@@ -21,8 +21,11 @@ _AUTHORIZATION_FILE = "bootstrap-authorization.json"
 _MATERIALS_FILE = "installer-materials.tar"
 _REPOSITORY = "yanyuhanyue/AniMemo"
 _STAGE0_MODEL = "GITHUB_IMMUTABLE_RELEASE_SIGSTORE_TUF_SINGLE_AUTHORITY"
-_ONLINE_CARRIER = "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT"
+_ONLINE_CARRIER = "GH_2_97_0_EXACT_FROM_OFFICIAL_RELEASE_ASSETS_SHA256_BOUND"
+_LEGACY_ONLINE_CARRIER = "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT"
 _OFFLINE_CARRIER = "OPERATOR_PRETRUSTED_PINNED_LINUX_VERIFIER_AND_TWO_TUF_ROOTS"
+_WRITABLE_CARRIERS = frozenset({_ONLINE_CARRIER, _OFFLINE_CARRIER})
+_READABLE_CARRIERS = _WRITABLE_CARRIERS | {_LEGACY_ONLINE_CARRIER}
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?\Z")
@@ -385,7 +388,11 @@ class AuthorizedBootstrap:
         self.version = version
 
 
-def close_bootstrap_authorization(value: object) -> BootstrapAuthorization:
+def _close_bootstrap_authorization(
+    value: object,
+    *,
+    accepted_carriers: frozenset[str],
+) -> BootstrapAuthorization:
     payload = _closed_mapping(
         value,
         keys=frozenset(
@@ -441,7 +448,7 @@ def close_bootstrap_authorization(value: object) -> BootstrapAuthorization:
     )
     if (
         stage0["model"] != _STAGE0_MODEL
-        or stage0["carrier"] not in {_ONLINE_CARRIER, _OFFLINE_CARRIER}
+        or stage0["carrier"] not in accepted_carriers
         or type(stage0["verifierIdentity"]) is not str
         or not stage0["verifierIdentity"]
         or "TEST" in stage0["verifierIdentity"].upper()
@@ -453,6 +460,13 @@ def close_bootstrap_authorization(value: object) -> BootstrapAuthorization:
     return BootstrapAuthorization(
         payload=immutable,
         identity=_sha256_identity(_canonical_json_bytes(canonical)),
+    )
+
+
+def close_bootstrap_authorization(value: object) -> BootstrapAuthorization:
+    return _close_bootstrap_authorization(
+        value,
+        accepted_carriers=_WRITABLE_CARRIERS,
     )
 
 
@@ -482,7 +496,10 @@ def _load_record(path: Path) -> BootstrapAuthorization:
     }:
         _reject("BOOTSTRAP_AUTHORIZATION_INVALID")
     recorded_identity = value.pop("authorizationIdentity")
-    authorization = close_bootstrap_authorization(value)
+    authorization = _close_bootstrap_authorization(
+        value,
+        accepted_carriers=_READABLE_CARRIERS,
+    )
     if recorded_identity != authorization.identity or raw != _record(authorization):
         _reject("BOOTSTRAP_AUTHORIZATION_IDENTITY_MISMATCH")
     return authorization

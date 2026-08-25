@@ -18,6 +18,7 @@ from installer.bootstrap import (
     BootstrapPrivilegeGate,
     GhVersionOutputError,
     ProductionBootstrapPrivilegeGate,
+    _load_record,
     _validate_protected_runtime_sources,
     authorize_online_stage0,
     close_bootstrap_authorization,
@@ -62,7 +63,7 @@ def _payload(archive: Path) -> dict[str, object]:
         },
         "stage0": {
             "model": "GITHUB_IMMUTABLE_RELEASE_SIGSTORE_TUF_SINGLE_AUTHORITY",
-            "carrier": "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT",
+            "carrier": "GH_2_97_0_EXACT_FROM_OFFICIAL_RELEASE_ASSETS_SHA256_BOUND",
             "verifierIdentity": "gh:2.97.0",
         },
         "verifiedAt": "2026-08-19T00:00:00Z",
@@ -138,9 +139,32 @@ class GitHubCliVersionOutputContractTests(unittest.TestCase):
 class OfficialMirrorStage0ContractTests(unittest.TestCase):
     def test_github_authority_precedes_fixed_mirror_acquisition_and_execution(self) -> None:
         stage0 = _official_mirror_stage0_contract()
+        architecture_gate = stage0.index(
+            'test "$(/usr/bin/dpkg --print-architecture)" = amd64'
+        )
+        gh_download = stage0.index(
+            '/usr/bin/curl --proto "=https" --proto-redir "=https" '
+            "--tlsv1.2 --location --max-redirs 1"
+        )
+        gh_checksums_download = stage0.index(
+            '"https://api.github.com/repos/cli/cli/releases/assets/$asset_id"'
+        )
+        gh_checksums_verify = stage0.index(
+            'test "$(/usr/bin/sha256sum "$GH_CHECKSUMS"'
+        )
+        gh_manifest_binding = stage0.index(
+            '/usr/bin/grep -Fxq "$GH_DEB_SHA256  gh_${GH_VERSION}_linux_amd64.deb"'
+        )
+        gh_deb_verify = stage0.index(
+            'test "$(/usr/bin/sha256sum "$GH_DEB"'
+        )
+        gh_install = stage0.index(
+            '/usr/bin/apt-get install --yes --no-install-recommends "$GH_DEB"'
+        )
         release_verify = stage0.index('/usr/bin/gh release verify "$EXACT_TAG"')
         mirror_download = stage0.index(
-            '/usr/bin/curl --proto \'=https\' --tlsv1.2 --location --max-redirs 0'
+            '/usr/bin/curl --proto \'=https\' --tlsv1.2 --location --max-redirs 0',
+            release_verify,
         )
         candidate_verify = stage0.index(
             '/usr/bin/gh release verify-asset "$EXACT_TAG" "$MIRROR_CANDIDATE"'
@@ -154,6 +178,13 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
         extraction = stage0.index('/usr/bin/tar -xf "$PROTECTED"')
         execution = stage0.index("-m installer \\")
 
+        self.assertLess(architecture_gate, gh_download)
+        self.assertLess(gh_download, gh_checksums_download)
+        self.assertLess(gh_checksums_download, gh_checksums_verify)
+        self.assertLess(gh_checksums_verify, gh_manifest_binding)
+        self.assertLess(gh_manifest_binding, gh_deb_verify)
+        self.assertLess(gh_deb_verify, gh_install)
+        self.assertLess(gh_install, release_verify)
         self.assertLess(release_verify, mirror_download)
         self.assertLess(mirror_download, candidate_verify)
         self.assertLess(candidate_verify, protected_copy)
@@ -165,6 +196,58 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
             stage0,
         )
         self.assertIn("--source official-mirror", stage0)
+        self.assertIn(
+            "GH_CHECKSUMS_SHA256=61905c69ec8660f310814ec98395cdd0c2d07aabf024c597ec45813984a02334",
+            stage0,
+        )
+        self.assertIn("GH_CHECKSUMS_ASSET_ID=496108250", stage0)
+        self.assertIn("GH_DEB_ASSET_ID=496108248", stage0)
+        self.assertIn(
+            "GH_DEB_SHA256=7c7fa3bb890db0934baf65910d97b8c0fa437b2e590f7f7daf6bdf82c5c486d7",
+            stage0,
+        )
+        self.assertIn(
+            "GH_BOOTSTRAP_DIRECTORY=\"$(/usr/bin/mktemp -d "
+            "/var/tmp/animemo-gh-bootstrap.XXXXXXXX)\"",
+            stage0,
+        )
+        self.assertIn(
+            'test "$(/usr/bin/stat -c "%u:%g:%a" -- '
+            '"$GH_BOOTSTRAP_DIRECTORY")" = 0:0:700',
+            stage0,
+        )
+        self.assertIn(
+            'test "$(/usr/bin/stat -c "%u:%g:%a:%h" -- "$GH_DEB")" '
+            "= 0:0:600:1",
+            stage0,
+        )
+        self.assertNotIn("cli.github.com/packages", stage0)
+        self.assertNotIn("gh=2.97.0", stage0)
+        self.assertNotIn("github.com/cli/cli/releases/download", stage0)
+        self.assertIn('--retry 5 --retry-all-errors --retry-connrefused', stage0)
+        self.assertIn('--retry-delay 10 --retry-max-time 840 --continue-at -', stage0)
+        self.assertIn(
+            'download_gh_asset "$GH_CHECKSUMS_ASSET_ID" "$GH_CHECKSUMS"',
+            stage0,
+        )
+        self.assertIn(
+            'download_gh_asset "$GH_DEB_ASSET_ID" "$GH_DEB"',
+            stage0,
+        )
+        self.assertEqual(
+            [
+                line.strip()
+                for line in stage0.splitlines()
+                if "/usr/bin/apt-get install " in line
+            ],
+            [
+                (
+                    "sudo /usr/bin/apt-get install --yes --no-install-recommends "
+                    "ca-certificates curl python3-venv"
+                ),
+                '/usr/bin/apt-get install --yes --no-install-recommends "$GH_DEB"',
+            ],
+        )
         self.assertIn('/usr/bin/mkfifo -m 0600 -- "$GH_TOKEN_PIPE"', stage0)
         self.assertIn(
             "/usr/bin/timeout --signal=TERM --kill-after=5s 30s \\\n"
@@ -326,7 +409,9 @@ class OfficialMirrorStage0ContractTests(unittest.TestCase):
             ),
             stage0.index("completed=1"),
         )
+        self.assertEqual(stage0.count("--max-redirs 1"), 1)
         self.assertEqual(stage0.count("--max-redirs 0"), 1)
+        self.assertEqual(stage0.count('--proto-redir "=https"'), 1)
         self.assertIn("--connect-timeout 30 --max-time 900", stage0)
         self.assertIn("--retry 2 --retry-delay 10 --retry-max-time 600", stage0)
 
@@ -637,6 +722,10 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
                 )
 
             self.assertTrue(receipt.identity.startswith("sha256:"))
+            self.assertEqual(
+                receipt.payload["stage0"]["carrier"],
+                "GH_2_97_0_EXACT_FROM_OFFICIAL_RELEASE_ASSETS_SHA256_BOUND",
+            )
             self.assertEqual(run.call_count, 3)
             for call in run.call_args_list:
                 self.assertEqual(call.args[0][0], "/usr/bin/gh")
@@ -905,6 +994,58 @@ class BootstrapPrivilegeGateTests(unittest.TestCase):
                 ),
             ):
                 close_bootstrap_authorization(payload)
+
+    def test_legacy_signed_apt_carrier_remains_readable_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            protected = root / "installer-materials.tar"
+            protected.write_bytes(b"verified materials")
+            payload = _payload(protected)
+            payload["stage0"] = dict(payload["stage0"])
+            payload["stage0"]["carrier"] = (
+                "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT"
+            )
+
+            payload_bytes = (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
+            record = dict(payload)
+            record["authorizationIdentity"] = _digest(payload_bytes)
+            record_bytes = (
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
+            authorization_path = root / "bootstrap-authorization.json"
+            authorization_path.write_bytes(record_bytes)
+
+            with authority_test_namespace(root):
+                legacy = _load_record(authorization_path)
+                with self.assertRaisesRegex(
+                    BootstrapAuthorityError,
+                    "BOOTSTRAP_STAGE0_INVALID",
+                ):
+                    close_bootstrap_authorization(payload)
+                with self.assertRaisesRegex(
+                    BootstrapAuthorityError,
+                    "BOOTSTRAP_STAGE0_INVALID",
+                ):
+                    commit_bootstrap_authorization(payload)
+
+            self.assertEqual(
+                legacy.payload["stage0"]["carrier"],
+                "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT",
+            )
 
     def test_receipt_is_canonical_and_secret_free(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

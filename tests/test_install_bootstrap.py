@@ -17,19 +17,18 @@ class InstallBootstrapRetirementTests(unittest.TestCase):
     def test_root_owned_copy_is_independently_reverified_before_extraction(self) -> None:
         source = TRANSPORT_DOC.read_text(encoding="utf-8")
         copied = source.index(
-            "sudo /usr/bin/install -o root -g root -m 0600"
+            '/usr/bin/install -o root -g root -m 0600 "$MIRROR_CANDIDATE" "$HANDOFF"'
         )
         protected_verification = source.index(
-            "/usr/bin/gh release verify-asset <EXACT_TAG> "
-            "/var/lib/animemo/bootstrap-authority/v1/installer-materials.tar"
+            '/usr/bin/gh release verify-asset "$EXACT_TAG" "$PROTECTED"'
         )
-        extracted = source.index("sudo /usr/bin/tar -xf")
-        runtime_created = source.index("/usr/bin/python3 -P -B -m venv")
+        extracted = source.index('/usr/bin/tar -xf "$PROTECTED"')
+        runtime_created = source.index('/usr/bin/python3 -P -B -m venv "$RUNTIME"')
         dependencies_installed = source.index(
-            "/installer-runtime/bin/python -P -B -m pip install"
+            '"$RUNTIME/bin/python" -P -B -m pip install'
         )
         python_started = source.index(
-            "/installer-runtime/bin/python -P -B -m installer"
+            '"$RUNTIME/bin/python" -P -B -m installer'
         )
 
         self.assertLess(copied, protected_verification)
@@ -45,9 +44,9 @@ class InstallBootstrapRetirementTests(unittest.TestCase):
             "--no-cache-dir",
             "--no-index",
             "--only-binary=:all:",
-            "--find-links /var/lib/animemo/bootstrap-authority/v1/materials/wheelhouse",
-            "materials/release/requirements.txt",
-            "materials/durability/requirements.txt",
+            '--find-links "$MATERIALS/wheelhouse"',
+            '"$MATERIALS/release/requirements.txt"',
+            '"$MATERIALS/durability/requirements.txt"',
         ):
             self.assertIn(required, source)
         self.assertNotIn(
