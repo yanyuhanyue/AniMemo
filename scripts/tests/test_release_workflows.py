@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +37,12 @@ PINNED_RELEASE_ACTIONS = {
     "actions/setup-node": "820762786026740c76f36085b0efc47a31fe5020",
     "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02",
 }
+
+PINNED_GH_VERSION = "2.97.0"
+PINNED_GH_LINUX_AMD64_SHA256 = (
+    "a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112"
+)
+PINNED_GH_ACTION = "./.github/actions/setup-pinned-gh-cli"
 
 
 def _bash_path() -> str | None:
@@ -104,9 +112,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(mirror["concurrency"]["cancel-in-progress"], "false")
         self.assertEqual(set(mirror["jobs"]), {"mirror"})
         self.assertEqual(mirror["jobs"]["mirror"]["runs-on"], "ubuntu-24.04")
-        self.assertEqual(mirror["env"], {"GH_REQUIRED_VERSION": "2.97.0"})
+        self.assertNotIn("env", mirror)
         self.assertIn("验证固定 GitHub CLI 安全基线", source)
-        self.assertIn('test "$version" = "$GH_REQUIRED_VERSION"', source)
+        self.assertIn(f"uses: {PINNED_GH_ACTION}", source)
         self.assertIn(
             "yanyuhanyue/AniMemo/.github/workflows/release-mirror.yml@refs/heads/main",
             source,
@@ -183,7 +191,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             for step in mirror["jobs"]["mirror"]["steps"]
             if step.get("shell") == "bash" and "run" in step
         ]
-        self.assertEqual(len(scripts), 3)
+        self.assertEqual(len(scripts), 2)
         for script in scripts:
             with self.subTest(first_line=script.splitlines()[0]):
                 syntax = subprocess.run(
@@ -1585,10 +1593,130 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         gate = "Gate exact GitHub CLI security baseline"
 
-        self.assertIn("GH_REQUIRED_VERSION: 2.97.0", release)
-        self.assertIn("GH_REQUIRED_VERSION: 2.97.0", promotion)
+        self.assertNotIn("GH_REQUIRED_VERSION", release)
+        self.assertNotIn("GH_REQUIRED_VERSION", promotion)
+        self.assertNotIn("GH_REQUIRED_LINUX_AMD64_SHA256", release)
+        self.assertNotIn("GH_REQUIRED_LINUX_AMD64_SHA256", promotion)
         self.assertEqual(release.count(gate), 4)
         self.assertEqual(promotion.count(gate), 2)
+        self.assertEqual(release.count(f"uses: {PINNED_GH_ACTION}"), 4)
+        self.assertEqual(promotion.count(f"uses: {PINNED_GH_ACTION}"), 2)
+
+    def test_pinned_github_cli_action_is_digest_bound_and_fail_closed(self):
+        action = yaml.load(
+            (
+                ROOT / ".github" / "actions" / "setup-pinned-gh-cli" / "action.yml"
+            ).read_text(encoding="utf-8"),
+            Loader=UniqueKeyLoader,
+        )
+        source = (
+            ROOT / ".github" / "actions" / "setup-pinned-gh-cli" / "setup.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(action["runs"]["using"], "composite")
+        self.assertNotIn("inputs", action)
+        install_step = action["runs"]["steps"][0]
+        self.assertEqual(install_step["env"]["GH_CLI_VERSION"], PINNED_GH_VERSION)
+        self.assertEqual(
+            install_step["env"]["GH_CLI_LINUX_AMD64_SHA256"],
+            PINNED_GH_LINUX_AMD64_SHA256,
+        )
+        self.assertIn('test "${RUNNER_OS:-}" = "Linux"', source)
+        self.assertIn('test "${RUNNER_ARCH:-}" = "X64"', source)
+        self.assertIn("--proto '=https'", source)
+        self.assertIn("sha256sum --check --strict", source)
+        self.assertIn('test "$actual_version" = "$GH_CLI_VERSION"', source)
+        self.assertNotIn("sudo", source)
+
+        bash = _bash_path()
+        self.assertIsNotNone(bash, "Pinned GitHub CLI setup requires bash")
+        syntax = subprocess.run(
+            [bash, "-n", str(ROOT / ".github/actions/setup-pinned-gh-cli/setup.sh")],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX archive fixture is validated in CI")
+    def test_pinned_github_cli_action_accepts_only_the_bound_archive(self):
+        bash = _bash_path()
+        self.assertIsNotNone(bash, "Pinned GitHub CLI setup requires bash")
+        setup = ROOT / ".github/actions/setup-pinned-gh-cli/setup.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            fixture_root = temp / f"gh_{PINNED_GH_VERSION}_linux_amd64"
+            fixture_bin = fixture_root / "bin"
+            fixture_bin.mkdir(parents=True)
+            fixture_gh = fixture_bin / "gh"
+            fixture_gh.write_text(
+                f"#!/usr/bin/env bash\nprintf 'gh version {PINNED_GH_VERSION} (fixture)\\n'\n",
+                encoding="utf-8",
+            )
+            fixture_gh.chmod(0o755)
+
+            archive = temp / "fixture.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                tar.add(fixture_root, arcname=fixture_root.name)
+            archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+
+            fake_bin = temp / "fake-bin"
+            fake_bin.mkdir()
+            fake_curl = fake_bin / "curl"
+            fake_curl.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while (( $# )); do
+  if [[ "$1" = "--output" ]]; then
+    output="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+test -n "$output"
+cp "$FIXTURE_ARCHIVE" "$output"
+""",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+
+            def run_setup(expected_sha256: str, runner_temp: Path, github_path: Path):
+                env = os.environ.copy()
+                env.update(
+                    {
+                        "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
+                        "RUNNER_OS": "Linux",
+                        "RUNNER_ARCH": "X64",
+                        "RUNNER_TEMP": str(runner_temp),
+                        "GITHUB_PATH": str(github_path),
+                        "GH_CLI_VERSION": PINNED_GH_VERSION,
+                        "GH_CLI_LINUX_AMD64_SHA256": expected_sha256,
+                        "FIXTURE_ARCHIVE": str(archive),
+                    }
+                )
+                runner_temp.mkdir()
+                github_path.touch()
+                return subprocess.run(
+                    [bash, str(setup)],
+                    env=env,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+            valid_path = temp / "github-path-valid"
+            valid = run_setup(archive_sha256, temp / "runner-valid", valid_path)
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            installed_bin = Path(valid_path.read_text(encoding="utf-8").strip())
+            self.assertTrue((installed_bin / "gh").is_file())
+
+            invalid_path = temp / "github-path-invalid"
+            invalid = run_setup("0" * 64, temp / "runner-invalid", invalid_path)
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertEqual(invalid_path.read_text(encoding="utf-8"), "")
 
     def test_platform_qualification_is_hosted_scoped_and_injected_exactly(self):
         release = workflow("release.yml")
