@@ -115,7 +115,9 @@ def _authorization(authority_root: Path, archive: Path):
         },
         "stage0": {
             "model": "GITHUB_IMMUTABLE_RELEASE_SIGSTORE_TUF_SINGLE_AUTHORITY",
-            "carrier": "GH_2_97_0_EXACT_FROM_OFFICIAL_SIGNED_APT",
+            "carrier": (
+                "GH_2_97_0_EXACT_FROM_OFFICIAL_RELEASE_ASSETS_SHA256_BOUND"
+            ),
             "verifierIdentity": "gh:2.97.0",
         },
         "verifiedAt": "2026-08-19T00:00:00Z",
