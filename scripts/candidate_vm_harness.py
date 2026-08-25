@@ -617,7 +617,13 @@ class ClosedVmwareProvider:
         raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
 
     @classmethod
-    def _closed_disk_reference(cls, clone_root: Path, value: str) -> Path:
+    def _closed_disk_reference(
+        cls,
+        clone_root: Path,
+        value: str,
+        *,
+        base: Path | None = None,
+    ) -> Path:
         normalized = value.replace("\\", "/")
         parts = normalized.split("/")
         if (
@@ -630,7 +636,7 @@ class ClosedVmwareProvider:
             or any(part in {"", ".", ".."} for part in parts)
         ):
             raise CandidateHarnessError("CANDIDATE_VM_SHARED_DISK_REJECTED")
-        target = clone_root.joinpath(*parts)
+        target = (base or clone_root).joinpath(*parts)
         try:
             absolute = target.resolve(strict=True)
             absolute.relative_to(clone_root.resolve(strict=True))
@@ -715,18 +721,21 @@ class ClosedVmwareProvider:
                     disk_references.append(reference)
         if not disk_references:
             raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
-        for reference in disk_references:
+        descriptor_queue = [
             cls._closed_disk_reference(clone_root, reference)
-        try:
-            vmdk_paths = sorted(clone_root.rglob("*.vmdk"), key=lambda item: item.as_posix())
-        except OSError as error:
-            raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID") from error
-        if not vmdk_paths:
-            raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
-        for vmdk in vmdk_paths:
+            for reference in disk_references
+        ]
+        seen_descriptors: set[Path] = set()
+        while descriptor_queue:
+            vmdk = descriptor_queue.pop()
+            if vmdk in seen_descriptors:
+                continue
+            seen_descriptors.add(vmdk)
             text = cls._configuration_text(
                 cls._configuration_prefix(vmdk, complete=False)
             )
+            if not text.lstrip("\ufeff \t\r\n").startswith("# Disk DescriptorFile"):
+                raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
             parent_references: list[str] = []
             extent_references: list[str] = []
             parent_ids: list[str] = []
@@ -758,20 +767,47 @@ class ClosedVmwareProvider:
                         )
                     parent_ids.append(candidate)
                     continue
-                if '"' not in line:
+                first_field = line.split(None, 1)[0].upper() if line else ""
+                if first_field not in {"RW", "RDONLY", "NOACCESS"}:
                     continue
                 pieces = line.split('"')
                 prefix_fields = pieces[0].split()
+                suffix_fields = pieces[2].split() if len(pieces) == 3 else []
+                valid_type = (
+                    len(prefix_fields) == 3
+                    and prefix_fields[2]
+                    and all(
+                        character.isascii()
+                        and (character.isalnum() or character in {"_", "-"})
+                        for character in prefix_fields[2]
+                    )
+                )
                 if (
-                    len(pieces) == 3
-                    and len(prefix_fields) == 3
-                    and prefix_fields[0].upper() in {"RW", "RDONLY", "NOACCESS"}
-                    and prefix_fields[1].isdecimal()
-                    and pieces[2].strip() == ""
+                    len(pieces) != 3
+                    or not valid_type
+                    or not prefix_fields[1].isdecimal()
+                    or not pieces[1]
+                    or len(suffix_fields) > 1
+                    or (suffix_fields and not suffix_fields[0].isdecimal())
                 ):
-                    extent_references.append(pieces[1])
-            for reference in (*parent_references, *extent_references):
-                cls._closed_disk_reference(clone_root, reference)
+                    raise CandidateHarnessError(
+                        "CANDIDATE_VM_DISK_GRAPH_INVALID"
+                    )
+                extent_references.append(pieces[1])
+            for reference in parent_references:
+                descriptor_queue.append(
+                    cls._closed_disk_reference(
+                        clone_root,
+                        reference,
+                        base=vmdk.parent,
+                    )
+                )
+            for reference in extent_references:
+                cls._closed_disk_reference(
+                    clone_root,
+                    reference,
+                    base=vmdk.parent,
+                )
             if parent_ids and parent_ids[-1].lower() != "ffffffff" and len(parent_references) != 1:
                 raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
 

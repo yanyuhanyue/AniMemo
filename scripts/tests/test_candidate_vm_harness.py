@@ -426,6 +426,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
     def test_shared_writable_vmx_and_vmdk_references_are_rejected(self):
         outside = self.root / "shared.vmdk"
         outside.write_bytes(b"shared")
+        (self.root / "shared-flat.vmdk").write_bytes(b"shared-flat")
         fixtures = {
             "vmx-parent": (
                 'scsi0:0.fileName = "../shared.vmdk"\n',
@@ -435,6 +436,11 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 'scsi0:0.fileName = "disk.vmdk"\n',
                 b'# Disk DescriptorFile\nparentCID=00000001\n'
                 b'parentFileNameHint="../shared.vmdk"\n',
+            ),
+            "vmdk-flat-offset": (
+                'scsi0:0.fileName = "disk.vmdk"\n',
+                b'# Disk DescriptorFile\nparentCID=ffffffff\n'
+                b'RW 100 FLAT "../shared-flat.vmdk" 0\n',
             ),
         }
         for name, (vmx_text, descriptor) in fixtures.items():
@@ -450,6 +456,20 @@ class CandidateVmHarnessTests(unittest.TestCase):
                     harness.ClosedVmwareProvider._validate_clone_disk_graph(
                         clone, vmx
                     )
+
+    def test_clone_local_flat_extent_with_offset_is_accepted(self):
+        clone = self.root / "local-flat"
+        clone.mkdir()
+        vmx = clone / "Ubuntu 64 位.vmx"
+        vmx.write_text(
+            'scsi0:0.fileName = "disk.vmdk"\n', encoding="utf-8"
+        )
+        (clone / "disk.vmdk").write_bytes(
+            b'# Disk DescriptorFile\nparentCID=ffffffff\n'
+            b'RW 100 FLAT "disk-flat.vmdk" 0\n'
+        )
+        (clone / "disk-flat.vmdk").write_bytes(b"local-flat")
+        harness.ClosedVmwareProvider._validate_clone_disk_graph(clone, vmx)
 
     def test_partial_start_failure_is_contained_before_quarantine(self):
         plan = self._plan()
