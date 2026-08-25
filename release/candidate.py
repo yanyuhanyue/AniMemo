@@ -402,13 +402,21 @@ def normalize_candidate_oci_layout(
     if type(descriptor) is not dict:
         _reject("CANDIDATE_OCI_DESCRIPTOR_INVALID")
     canonical_fields = {"digest", "mediaType", "platform", "size"}
+    required_fields = {"digest", "mediaType", "size"}
+    optional_fields = {"annotations", "artifactType", "platform"}
     before_fields = set(descriptor)
     if before_fields == canonical_fields:
         changed = False
     else:
-        allowed = {"digest", "mediaType", "size"}
-        optional = {"annotations", "artifactType"}
-        if not allowed.issubset(before_fields) or not before_fields.issubset(allowed | optional):
+        if not required_fields.issubset(before_fields) or not before_fields.issubset(
+            required_fields | optional_fields
+        ):
+            _reject("CANDIDATE_OCI_DESCRIPTOR_INVALID")
+        platform = descriptor.get("platform")
+        if platform is not None and platform != {
+            "architecture": "amd64",
+            "os": "linux",
+        }:
             _reject("CANDIDATE_OCI_DESCRIPTOR_INVALID")
         annotations = descriptor.get("annotations", {})
         if type(annotations) is not dict or any(
@@ -419,6 +427,13 @@ def normalize_candidate_oci_layout(
             or len(key) > 256
             or len(value) > 4096
             for key, value in annotations.items()
+        ):
+            _reject("CANDIDATE_OCI_DESCRIPTOR_INVALID")
+        artifact_type = descriptor.get("artifactType")
+        if artifact_type is not None and (
+            type(artifact_type) is not str
+            or not artifact_type
+            or len(artifact_type) > 256
         ):
             _reject("CANDIDATE_OCI_DESCRIPTOR_INVALID")
         descriptor = {
