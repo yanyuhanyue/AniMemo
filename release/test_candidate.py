@@ -857,6 +857,7 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
             source = Path(temporary)
             layout = source / "oci" / "api"
             manifest = _layout(layout, "api")
+            (layout / "ingest").mkdir()
             index_path = layout / "index.json"
             index = json.loads(index_path.read_text())
             index["manifests"][0]["annotations"] = {
@@ -878,6 +879,8 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
             )
 
             self.assertTrue(result["changed"])
+            self.assertTrue(result["ingestDirectoryRemoved"])
+            self.assertFalse((layout / "ingest").exists())
             self.assertEqual(result["digest"], manifest)
             self.assertEqual(
                 set(json.loads(index_path.read_text())["manifests"][0]),
@@ -890,6 +893,88 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                     for path in (layout / "blobs" / "sha256").iterdir()
                 },
             )
+
+    def test_buildx_nonempty_ingest_directory_is_rejected_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            layout = source / "oci" / "api"
+            manifest = _layout(layout, "api")
+            ingest = layout / "ingest"
+            ingest.mkdir()
+            marker = ingest / "active"
+            marker.write_text("not exporter scratch")
+            index_path = layout / "index.json"
+            original_index = index_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                CandidateContractError, "CANDIDATE_OCI_INGEST_NOT_EMPTY"
+            ):
+                normalize_candidate_oci_layout(
+                    source_root=source,
+                    layout=layout,
+                    role="api",
+                    repository="ghcr.io/yanyuhanyue/animemo-api",
+                    expected_digest=manifest,
+                )
+
+            self.assertEqual(index_path.read_bytes(), original_index)
+            self.assertEqual(marker.read_text(), "not exporter scratch")
+
+    def test_buildx_ingest_regular_file_is_rejected_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            layout = source / "oci" / "api"
+            manifest = _layout(layout, "api")
+            ingest = layout / "ingest"
+            ingest.write_text("not a directory")
+            index_path = layout / "index.json"
+            original_index = index_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                CandidateContractError, "CANDIDATE_OCI_INGEST_INVALID"
+            ):
+                normalize_candidate_oci_layout(
+                    source_root=source,
+                    layout=layout,
+                    role="api",
+                    repository="ghcr.io/yanyuhanyue/animemo-api",
+                    expected_digest=manifest,
+                )
+
+            self.assertEqual(index_path.read_bytes(), original_index)
+            self.assertEqual(ingest.read_text(), "not a directory")
+
+    def test_buildx_ingest_cleanup_rolls_back_when_dag_is_invalid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            layout = source / "oci" / "api"
+            manifest = _layout(layout, "api")
+            ingest = layout / "ingest"
+            ingest.mkdir()
+            index_path = layout / "index.json"
+            index = json.loads(index_path.read_text())
+            index["manifests"][0]["annotations"] = {
+                "org.opencontainers.image.ref.name": "animemo-release-api:candidate"
+            }
+            original_index = canonical_json_bytes(index)
+            index_path.write_bytes(original_index)
+            config = json.loads(
+                (layout / "blobs" / "sha256" / manifest[7:]).read_text()
+            )["config"]["digest"]
+            (layout / "blobs" / "sha256" / config[7:]).unlink()
+
+            with self.assertRaises(OCIContractError):
+                normalize_candidate_oci_layout(
+                    source_root=source,
+                    layout=layout,
+                    role="api",
+                    repository="ghcr.io/yanyuhanyue/animemo-api",
+                    expected_digest=manifest,
+                )
+
+            self.assertEqual(index_path.read_bytes(), original_index)
+            self.assertTrue(ingest.is_dir())
+            self.assertEqual(list(ingest.iterdir()), [])
 
     def test_buildx_directory_descriptor_rejects_platform_drift(self):
         with tempfile.TemporaryDirectory() as temporary:

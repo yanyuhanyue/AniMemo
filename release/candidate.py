@@ -370,6 +370,37 @@ def _verify_runtime(root: Path, manifest: Mapping[str, Any]) -> VerifiedOCIImage
         raise CandidateContractError(error.args[0] if error.args else "CANDIDATE_OCI_INVALID") from error
 
 
+def _remove_empty_buildx_ingest_directory(layout: Path) -> bool:
+    """Remove only BuildKit's observed empty directory-export scratch root."""
+
+    ingest = layout / "ingest"
+    try:
+        metadata = ingest.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise CandidateContractError("CANDIDATE_OCI_INGEST_UNAVAILABLE") from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or bool(getattr(ingest, "is_junction", lambda: False)())
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
+        _reject("CANDIDATE_OCI_INGEST_INVALID")
+    try:
+        os.rmdir(ingest)
+    except OSError as error:
+        raise CandidateContractError("CANDIDATE_OCI_INGEST_NOT_EMPTY") from error
+    return True
+
+
+def _restore_empty_buildx_ingest_directory(layout: Path) -> None:
+    ingest = layout / "ingest"
+    try:
+        ingest.mkdir(mode=0o700)
+    except OSError as error:
+        raise CandidateContractError("CANDIDATE_OCI_ROLLBACK_FAILED") from error
+
+
 def normalize_candidate_oci_layout(
     *,
     source_root: Path,
@@ -378,7 +409,7 @@ def normalize_candidate_oci_layout(
     repository: str,
     expected_digest: str,
 ) -> dict[str, object]:
-    """Close a Buildx/OCI exporter root descriptor without touching its DAG."""
+    """Close Buildx's root wrapper without changing the authoritative image DAG."""
 
     if role not in OCI_ROLES or not _DIGEST.fullmatch(expected_digest):
         _reject("CANDIDATE_OCI_EXPECTATION_INVALID")
@@ -455,10 +486,14 @@ def normalize_candidate_oci_layout(
     )
     replacement = canonical_json_bytes(index)
     temporary: Path | None = None
-    if changed:
-        descriptor_fd, temporary_name = tempfile.mkstemp(prefix=".candidate-index-", dir=layout)
-        temporary = Path(temporary_name)
-        try:
+    index_replaced = False
+    ingest_removed = _remove_empty_buildx_ingest_directory(layout)
+    try:
+        if changed:
+            descriptor_fd, temporary_name = tempfile.mkstemp(
+                prefix=".candidate-index-", dir=layout
+            )
+            temporary = Path(temporary_name)
             os.chmod(temporary, 0o600)
             with os.fdopen(descriptor_fd, "wb", closefd=True) as output:
                 output.write(replacement)
@@ -466,19 +501,25 @@ def normalize_candidate_oci_layout(
                 os.fsync(output.fileno())
             os.replace(temporary, index_path)
             temporary = None
-            try:
-                verify_oci_image(layout, expectation)
-            except Exception:
+            index_replaced = True
+        verified = verify_oci_image(layout, expectation)
+    except Exception:
+        try:
+            if index_replaced:
                 index_path.write_bytes(original)
-                raise
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-    verified = verify_oci_image(layout, expectation)
+            if ingest_removed:
+                _restore_empty_buildx_ingest_directory(layout)
+        except Exception as rollback_error:
+            raise CandidateContractError("CANDIDATE_OCI_ROLLBACK_FAILED") from rollback_error
+        raise
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return {
-        "changed": changed,
+        "changed": changed or ingest_removed,
         "configDigest": verified.config_digest,
         "digest": verified.digest,
+        "ingestDirectoryRemoved": ingest_removed,
         "layerCount": len(verified.layer_digests),
         "role": role,
     }
