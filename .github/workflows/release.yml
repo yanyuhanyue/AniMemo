@@ -256,7 +256,7 @@ jobs:
       contents: read
     outputs:
       artifact_id: ${{ steps.platform_artifact.outputs.artifact-id }}
-      artifact_digest: ${{ steps.platform_artifact.outputs.artifact-digest }}
+      artifact_digest: ${{ format('sha256:{0}', steps.platform_artifact.outputs.artifact-digest) }}
     env:
       CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
       QUALIFICATION_POSTGRES_NAME: animemo-platform-postgres-${{ github.run_id }}-${{ github.run_attempt }}
@@ -784,7 +784,7 @@ jobs:
       pull-requests: read
     outputs:
       artifact_id: ${{ steps.dry_run_artifact.outputs.artifact-id }}
-      artifact_digest: ${{ steps.dry_run_artifact.outputs.artifact-digest }}
+      artifact_digest: ${{ format('sha256:{0}', steps.dry_run_artifact.outputs.artifact-digest) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

@@ -2378,6 +2378,34 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertEqual(publish.count("--expected-candidate-version"), 2)
         self.assertNotIn("continue-on-error", publish)
 
+    def test_qualification_artifact_outputs_use_canonical_sha256_identity(self):
+        release = workflow("release.yml")
+
+        self.assertEqual(
+            release["jobs"]["platform-qualification"]["outputs"]["artifact_digest"],
+            "${{ format('sha256:{0}', "
+            "steps.platform_artifact.outputs.artifact-digest) }}",
+        )
+        self.assertEqual(
+            release["jobs"]["dry-run"]["outputs"]["artifact_digest"],
+            "${{ format('sha256:{0}', "
+            "steps.dry_run_artifact.outputs.artifact-digest) }}",
+        )
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        qualification = source[
+            source.index("  qualification-evidence:\n") : source.index("  publish:\n")
+        ]
+        self.assertIn(
+            '[[ "$PLATFORM_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
+            qualification,
+        )
+        self.assertIn(
+            '[[ "$DRY_RUN_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
+            qualification,
+        )
+
     def test_every_external_release_mutation_is_after_the_freshness_gate(self):
         release = workflow("release.yml")
         publish = release["jobs"]["publish"]
