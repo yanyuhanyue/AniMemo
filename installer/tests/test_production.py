@@ -638,13 +638,14 @@ class ProductionInstallerCompositionTests(unittest.TestCase):
             releases=releases,
             platform=PlatformFixture(events),
         )
+        offline_root = Path(tempfile.gettempdir()).resolve() / "animemo-offline-fixture"
         request = InstallRequest(
             mode=InstallerMode.FRESH,
             selector=ReleaseSelector(version="v1.1.0-rc.13"),
             public_origin="https://anime.example",
             transport_source=InstallTransportSource.LOCAL_BUNDLE,
-            local_bundle_payload=Path("C:/offline/payload.tar"),
-            local_bundle_release_attestation=Path("C:/offline/attestation.json"),
+            local_bundle_payload=offline_root / "payload.tar",
+            local_bundle_release_attestation=offline_root / "attestation.json",
         )
         PlatformBootstrapFixture.events = events
         gate = SimpleNamespace(

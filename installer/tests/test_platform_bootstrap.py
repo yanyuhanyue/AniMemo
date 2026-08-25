@@ -34,6 +34,14 @@ from installer.platform_bootstrap import (
 )
 from installer.runtime import InstallTransportSource
 
+_ORIGINAL_PATH_LSTAT = Path.lstat
+
+
+def _root_owned_fixture_lstat(path: Path) -> os.stat_result:
+    values = list(_ORIGINAL_PATH_LSTAT(path))
+    values[4] = 0
+    return os.stat_result(values)
+
 
 def fresh_base_facts() -> BootstrapHostFacts:
     return BootstrapHostFacts(
@@ -747,7 +755,15 @@ class PlatformBootstrapExecutionTests(unittest.TestCase):
 
 class PlatformBootstrapInvariantTests(unittest.TestCase):
     def test_apt_source_set_is_closed_and_has_a_stable_identity(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(
+                Path,
+                "lstat",
+                autospec=True,
+                side_effect=_root_owned_fixture_lstat,
+            ),
+        ):
             root = Path(directory)
             sources = root / "sources.list.d"
             sources.mkdir()
@@ -786,7 +802,15 @@ class PlatformBootstrapInvariantTests(unittest.TestCase):
     def test_apt_sources_reject_signature_bypass_and_commands_bind_fixed_paths(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(
+                Path,
+                "lstat",
+                autospec=True,
+                side_effect=_root_owned_fixture_lstat,
+            ),
+        ):
             root = Path(directory)
             sources = root / "sources.list.d"
             sources.mkdir()
