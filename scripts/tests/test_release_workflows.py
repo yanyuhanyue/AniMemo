@@ -2345,10 +2345,21 @@ cp "$FIXTURE_ARCHIVE" "$output"
         publish = source[source.index("  publish:\n") :]
         self.assertEqual(dry_run.count("outputs: type=oci"), 2)
         self.assertEqual(dry_run.count("normalize-candidate-oci-layout"), 4)
-        self.assertIn('crane pull "$reference" "$archive" --format=oci', dry_run)
-        self.assertIn("extract-candidate-oci-archive", dry_run)
-        self.assertIn('--destination "$root/oci/$role"', dry_run)
-        self.assertIn('rm -- "$archive"', dry_run)
+        self.assertIn('local layout="$root/oci/$role"', dry_run)
+        self.assertIn('test ! -e "$layout" && test ! -L "$layout"', dry_run)
+        self.assertIn('crane pull "$reference" "$layout" --format=oci', dry_run)
+        self.assertIn('test -d "$layout" && test ! -L "$layout"', dry_run)
+        self.assertIn(
+            'test -f "$layout/oci-layout" && test ! -L "$layout/oci-layout"',
+            dry_run,
+        )
+        self.assertIn(
+            'test -f "$layout/index.json" && test ! -L "$layout/index.json"',
+            dry_run,
+        )
+        self.assertIn('test -d "$layout/blobs" && test ! -L "$layout/blobs"', dry_run)
+        self.assertNotIn('local archive="$RUNNER_TEMP/$role.oci.tar"', dry_run)
+        self.assertNotIn("extract-candidate-oci-archive", dry_run)
         self.assertIn("build-prepublication-candidate-input", qualification)
         self.assertIn("PLATFORM_ARTIFACT_DIGEST", qualification)
         self.assertIn("DRY_RUN_ARTIFACT_DIGEST", qualification)
