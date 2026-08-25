@@ -18,6 +18,7 @@ from .runtime import (
     InstallerError,
     InstallerMode,
     InstallRequest,
+    InstallOutcome,
     InstallTransportSource,
     ListenRequest,
     ReleaseSelector,
@@ -114,6 +115,23 @@ def _parser() -> argparse.ArgumentParser:
             help="explicitly accept the displayed plan in this invocation",
         )
         child.add_argument("--json", action="store_true", dest="json_output")
+    candidate = subparsers.add_parser("candidate")
+    candidate.add_argument("--verified-candidate-digest", required=True)
+    candidate.add_argument(
+        "--profile",
+        choices=("ONLINE_FRESH", "ONLINE_EXISTING_DOCKER", "OFFLINE_VALIDATE_ONLY"),
+        required=True,
+    )
+    candidate.add_argument("--public-origin", required=True)
+    candidate.add_argument(
+        "--instance", type=_instance, default=DEFAULT_INSTANCE_NAME
+    )
+    candidate.add_argument("--listen", type=_listen, default=ListenRequest())
+    candidate.add_argument("--accept-direct-exposure", action="store_true")
+    candidate.add_argument("--accept-insecure-http", action="store_true")
+    candidate.add_argument("--execute", action="store_true")
+    candidate.add_argument("--accept", action="store_true")
+    candidate.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
 
@@ -162,6 +180,27 @@ def _request(args: argparse.Namespace) -> InstallRequest:
     )
 
 
+def _candidate_request(args: argparse.Namespace) -> InstallRequest:
+    source = (
+        InstallTransportSource.LOCAL_BUNDLE
+        if args.profile == "OFFLINE_VALIDATE_ONLY"
+        else InstallTransportSource.GITHUB
+    )
+    return InstallRequest(
+        mode=InstallerMode.FRESH,
+        selector=ReleaseSelector(channel="rc"),
+        public_origin=args.public_origin,
+        instance_name=args.instance,
+        transport_source=source,
+        listen=replace(
+            args.listen,
+            direct_exposure_accepted=args.accept_direct_exposure,
+        ),
+        non_interactive=True,
+        insecure_http_accepted=args.accept_insecure_http,
+    )
+
+
 def _exit_code(error: InstallerError) -> int:
     if error.outcome.value == "COMPATIBILITY_BLOCKED":
         return EXIT_COMPATIBILITY
@@ -182,10 +221,92 @@ def _write(value: object, *, json_output: bool) -> None:
         print(value)
 
 
+def _run_candidate(args: argparse.Namespace) -> int:
+    from .production import build_candidate_composition
+
+    request = _candidate_request(args)
+    composition = build_candidate_composition(
+        args.verified_candidate_digest,
+        profile=args.profile,
+        instance_name=request.instance_name,
+    )
+    session = composition.plan_platform(
+        request,
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    if session.plan.mode.value != args.profile:
+        raise InstallerError(
+            "INSTALL_CANDIDATE_PLATFORM_PROFILE_MISMATCH",
+            outcome=InstallOutcome.COMPATIBILITY_BLOCKED,
+        )
+    if not args.execute:
+        _write(
+            {
+                "mode": "PLAN_ONLY",
+                "operation": "prepublication-candidate-install",
+                "profile": args.profile,
+                "verifiedCandidateDigest": args.verified_candidate_digest,
+                "platformPlan": session.plan.as_dict(),
+                "release": session.release.as_dict(),
+                "releaseAuthorityGranted": False,
+                "publishAuthorized": False,
+            },
+            json_output=args.json_output,
+        )
+        return EXIT_SUCCESS
+    if not args.accept:
+        _write(
+            {
+                "outcome": "VALIDATION_FAILED",
+                "reasonCode": "CANDIDATE_EXECUTION_ACCEPTANCE_REQUIRED",
+                "platformPlanDigest": session.plan.plan_digest,
+            },
+            json_output=args.json_output,
+        )
+        return EXIT_VALIDATION
+    platform_receipt = composition.execute_platform(
+        session,
+        session.plan.plan_digest,
+    )
+    plan = composition.runtime.plan(request)
+    result = composition.runtime.execute(
+        plan,
+        accepted_plan_digest=plan.plan_digest,
+    )
+    _write(
+        {
+            "mode": "EXECUTE",
+            "profile": args.profile,
+            "platformPlan": session.plan.as_dict(),
+            "platformBootstrapReceipt": platform_receipt.as_dict(),
+            "strictPostProvisionQualification": True,
+            "installerPlanDigest": plan.plan_digest,
+            "installerResult": result.as_dict(),
+            "releaseAuthorityGranted": False,
+            "publishAuthorized": False,
+        },
+        json_output=args.json_output,
+    )
+    if result.outcome.value in {"SUCCEEDED", "NO_CHANGE"}:
+        return EXIT_SUCCESS
+    return {
+        "RECOVERY_REQUIRED": EXIT_RECOVERY,
+        "COMPATIBILITY_BLOCKED": EXIT_COMPATIBILITY,
+        "ENVIRONMENT_FAILED": EXIT_ENVIRONMENT,
+    }.get(result.outcome.value, EXIT_VALIDATION)
+
+
 def main(argv: list[str] | None = None, *, runtime: Installer | None = None) -> int:
     args = _parser().parse_args(argv)
     composition = None
     try:
+        if args.command == "candidate":
+            if runtime is not None:
+                raise InstallerError(
+                    "INSTALL_CANDIDATE_RUNTIME_INJECTION_FORBIDDEN",
+                    outcome=InstallOutcome.VALIDATION_FAILED,
+                )
+            return _run_candidate(args)
         request = _request(args)
         if runtime is None:
             from .production import build_production_composition

@@ -21,7 +21,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from durability.canonical import canonical_json_bytes, sha256_identity
 from durability.compatibility import (
@@ -78,7 +78,11 @@ from durability.platform import (
     assess_platform,
     parse_platform_qualification,
 )
-from installer.bootstrap import ProductionBootstrapPrivilegeGate
+from installer.bootstrap import (
+    CandidateBootstrapPrivilegeGate,
+    ProductionBootstrapPrivilegeGate,
+    verified_prepublication_candidate_capability,
+)
 from installer.operations import (
     FreshInstallOperation,
     FreshInstallOperationJournal,
@@ -504,6 +508,120 @@ class ProductionReleasePort:
                 outcome=InstallOutcome.ENVIRONMENT_FAILED,
             )
         return self._latest_evidence
+
+
+class CandidateReleasePort:
+    """Serve one verifier-owned Candidate without discovery or fallback."""
+
+    def __init__(
+        self,
+        loaded,
+        *,
+        transport_source: InstallTransportSource,
+        image_acquirer: ImageAcquirer,
+    ) -> None:
+        if type(transport_source) is not InstallTransportSource:
+            raise InstallerError(
+                "INSTALL_CANDIDATE_PROFILE_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        self._loaded = loaded
+        self._verified_digest = loaded.verified_digest
+        self.transport_source = transport_source
+        self.transport_policy = explicit_transport_policy(transport_source)
+        self.image_acquirer = image_acquirer
+        self._evidence = self._build_evidence()
+
+    def _build_evidence(self) -> ReleaseEvidence:
+        manifest = self._loaded.materials.manifest
+        validate_manifest(manifest, updater_version=updater_version)
+        return ReleaseEvidence(
+            version=str(manifest["release"]["version"]),
+            channel=str(manifest["release"]["channel"]),
+            commit=str(manifest["release"]["commit"]),
+            manifest_digest=_manifest_digest(manifest),
+            material_identity_digest=self._loaded.materials.identity_digest,
+            deployment_identity_digest=str(
+                manifest["deployment"]["contractSha256"]
+            ),
+            deployment_profile=str(manifest["deployment"]["profile"]),
+            platform_profile="v1.1-standard-linux-amd64",
+            transport_source=self.transport_source,
+            transport_policy_identity=self.transport_policy.identity,
+        )
+
+    def _reload(self) -> None:
+        from release.candidate import load_verified_candidate
+
+        loaded = load_verified_candidate(self._verified_digest)
+        if (
+            loaded.verified != self._loaded.verified
+            or loaded.candidate_input != self._loaded.candidate_input
+        ):
+            raise InstallerError(
+                "INSTALL_CANDIDATE_CHANGED",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        self._loaded = loaded
+
+    def resolve(self, selector: ReleaseSelector, *, refresh: bool) -> ReleaseEvidence:
+        if refresh:
+            self._reload()
+        if (
+            selector.version is not None
+            and selector.version != self._evidence.version
+        ) or (
+            selector.channel is not None
+            and selector.channel != self._evidence.channel
+        ):
+            raise InstallerError(
+                "INSTALL_CANDIDATE_SELECTOR_MISMATCH",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        return self._evidence
+
+    def materials_for(self, evidence: ReleaseEvidence) -> VerifiedReleaseMaterials:
+        if evidence.as_dict() != self._evidence.as_dict():
+            raise InstallerError(
+                "INSTALL_CANDIDATE_EVIDENCE_MISMATCH",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        for identity in self._loaded.materials.verified.files:
+            self._loaded.materials.material(identity.path)
+        return self._loaded.materials
+
+    def acquire_images(self, evidence: ReleaseEvidence) -> ImageAcquisitionReceipt:
+        materials = self.materials_for(evidence)
+        try:
+            receipt = self.image_acquirer.acquire_local(
+                materials,
+                self._loaded.images,
+                LocalBundleTransportPolicy(),
+            )
+        except Exception:  # noqa: BLE001 - local importer boundary is redacted
+            raise InstallerError(
+                "INSTALL_CANDIDATE_IMAGE_IMPORT_FAILED",
+                outcome=InstallOutcome.ENVIRONMENT_FAILED,
+            ) from None
+        if (
+            type(receipt) is not ImageAcquisitionReceipt
+            or receipt.verified_release_identity != materials.identity_digest
+            or receipt.transport_policy_identity
+            != LocalBundleTransportPolicy().identity
+            or tuple(item.role for item in receipt.images)
+            != ("api", "postgres", "redis", "web")
+        ):
+            raise InstallerError(
+                "INSTALL_CANDIDATE_IMAGE_RECEIPT_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        return receipt
+
+    def latest_materials(self) -> VerifiedReleaseMaterials:
+        return self._loaded.materials
+
+    def latest_evidence(self) -> ReleaseEvidence:
+        return self._evidence
 
 
 class ProductionCompatibilityPort:
@@ -1969,13 +2087,22 @@ class VerifiedPlatformBootstrapSession:
     bootstrap: ProductionPlatformBootstrap
 
 
+class PlatformBootstrapPrivilegeGate(Protocol):
+    def verify_runtime_source(
+        self, *, version: str, release_commit: str
+    ) -> object: ...
+
+    def consume(self, *, version: str, release_commit: str) -> object: ...
+
+
 @dataclass(frozen=True)
 class ProductionInstallerComposition:
     """Formal Stage0 composition before the canonical Installer interface."""
 
     runtime: Installer
-    releases: ProductionReleasePort
+    releases: ProductionReleasePort | CandidateReleasePort
     platform: ProductionPlatformPort
+    bootstrap_privilege_gate: PlatformBootstrapPrivilegeGate | None = None
 
     def plan_platform(
         self,
@@ -1992,7 +2119,10 @@ class ProductionInstallerComposition:
                 outcome=InstallOutcome.VALIDATION_FAILED,
             )
         release = self.releases.resolve(request.selector, refresh=False)
-        if request.transport_source is not InstallTransportSource.LOCAL_BUNDLE:
+        if (
+            type(self.releases) is not CandidateReleasePort
+            and request.transport_source is not InstallTransportSource.LOCAL_BUNDLE
+        ):
             from .bootstrap import authorize_online_stage0
 
             authorize_online_stage0(
@@ -2004,10 +2134,16 @@ class ProductionInstallerComposition:
         # must consume an already provisioned, release-bound protected archive;
         # neither path may import the platform module before its fixed bytes are
         # checked against that archive.
-        ProductionBootstrapPrivilegeGate().verify_runtime_source(
-            version=release.version,
-            release_commit=release.commit,
-        )
+        if self.bootstrap_privilege_gate is None:
+            ProductionBootstrapPrivilegeGate().verify_runtime_source(
+                version=release.version,
+                release_commit=release.commit,
+            )
+        else:
+            self.bootstrap_privilege_gate.verify_runtime_source(
+                version=release.version,
+                release_commit=release.commit,
+            )
         from .platform_bootstrap import ProductionPlatformBootstrap
 
         bootstrap = ProductionPlatformBootstrap()
@@ -2089,6 +2225,7 @@ def build_production_composition(
         runner=runner,
         namespace=namespace,
     )
+    bootstrap_privilege_gate = ProductionBootstrapPrivilegeGate()
     runtime = Installer(
         releases=releases,
         target=ProductionTargetPort(
@@ -2108,13 +2245,101 @@ def build_production_composition(
             configuration=configuration,
             fresh=fresh,
         ),
-        bootstrap_privilege_gate=ProductionBootstrapPrivilegeGate(),
+        bootstrap_privilege_gate=bootstrap_privilege_gate,
         namespace=namespace,
     )
     return ProductionInstallerComposition(
         runtime=runtime,
         releases=releases,
         platform=platform,
+        bootstrap_privilege_gate=bootstrap_privilege_gate,
+    )
+
+
+def build_candidate_composition(
+    verified_candidate_digest: str,
+    *,
+    profile: str,
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+) -> ProductionInstallerComposition:
+    """Compose the Installer around one local Candidate capability only."""
+
+    if profile not in {
+        "ONLINE_FRESH",
+        "ONLINE_EXISTING_DOCKER",
+        "OFFLINE_VALIDATE_ONLY",
+    }:
+        raise InstallerError(
+            "INSTALL_CANDIDATE_PROFILE_INVALID",
+            outcome=InstallOutcome.VALIDATION_FAILED,
+        )
+    from release.candidate import load_verified_candidate
+
+    try:
+        loaded = load_verified_candidate(verified_candidate_digest)
+    except Exception:  # noqa: BLE001 - verifier boundary stays redacted
+        raise InstallerError(
+            "INSTALL_VERIFIED_CANDIDATE_REQUIRED",
+            outcome=InstallOutcome.VALIDATION_FAILED,
+        ) from None
+    namespace = instance_namespace(instance_name)
+    runner = LocalDockerCommandRunner()
+    transport_source = (
+        InstallTransportSource.LOCAL_BUNDLE
+        if profile == "OFFLINE_VALIDATE_ONLY"
+        else InstallTransportSource.GITHUB
+    )
+    releases = CandidateReleasePort(
+        loaded,
+        transport_source=transport_source,
+        image_acquirer=ImageAcquirer(runner=runner),
+    )
+    configuration = ProductionManagedConfigurationPort(namespace=namespace)
+    compatibility = ProductionCompatibilityPort(releases)
+    platform = ProductionPlatformPort(releases)
+    doctor = ProductionDoctorAcceptance(
+        releases=releases,
+        compatibility=compatibility,
+        runner=runner,
+        namespace=namespace,
+    )
+    fresh = ProductionFreshInstallPort(
+        releases=releases,
+        configuration=configuration,
+        doctor_acceptor=doctor,
+        runner=runner,
+        namespace=namespace,
+    )
+    gate = CandidateBootstrapPrivilegeGate(
+        verified_prepublication_candidate_capability(verified_candidate_digest)
+    )
+    runtime = Installer(
+        releases=releases,
+        target=ProductionTargetPort(
+            releases=releases,
+            platform=platform,
+            doctor=doctor,
+            runner=runner,
+            namespace=namespace,
+        ),
+        platform=platform,
+        compatibility=compatibility,
+        configuration=configuration,
+        operations=ProductionOperationPort(namespace=namespace),
+        fresh=fresh,
+        restore=ProductionRestoreRuntimePort(
+            releases=releases,
+            configuration=configuration,
+            fresh=fresh,
+        ),
+        bootstrap_privilege_gate=gate,
+        namespace=namespace,
+    )
+    return ProductionInstallerComposition(
+        runtime=runtime,
+        releases=releases,
+        platform=platform,
+        bootstrap_privilege_gate=gate,
     )
 
 
@@ -2191,6 +2416,7 @@ def production_configuration_doctor(
 
 
 __all__ = [
+    "CandidateReleasePort",
     "ProductionCompatibilityPort",
     "ProductionDoctorAcceptance",
     "ProductionFreshInstallPort",
@@ -2202,6 +2428,7 @@ __all__ = [
     "ProductionRestoreRuntimePort",
     "ProductionTargetPort",
     "VerifiedPlatformBootstrapSession",
+    "build_candidate_composition",
     "build_production_composition",
     "build_runtime",
     "collect_host_capabilities",

@@ -49,6 +49,7 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 ARTIFACT_FILES = frozenset(
     {
+        "candidate-acceptance-receipt.json",
         "metadata-freshness.json",
         "snapshot-a-input.json",
         "snapshot-a.json",
@@ -72,6 +73,8 @@ RECEIPT_FIELDS = frozenset(
         "candidateTree",
         "qualificationRunId",
         "qualificationArtifactId",
+        "candidateAcceptanceReceiptSha256",
+        "candidateVersion",
         "qualifiedReleaseTag",
         "qualifiedReleaseNotesIdentity",
         "qualifiedMarkdownSha",
@@ -198,6 +201,8 @@ class FreshnessRunIdentity:
     candidate_tree: str
     qualification_run_id: int
     qualification_artifact_id: int
+    candidate_acceptance_receipt_sha256: str
+    candidate_version: str
 
     def validate(self) -> None:
         for value, label in (
@@ -222,6 +227,15 @@ class FreshnessRunIdentity:
             raise MetadataFreshnessError(
                 "freshness workflow definition differs from candidate SHA"
             )
+        if not _DIGEST.fullmatch(self.candidate_acceptance_receipt_sha256):
+            raise MetadataFreshnessError(
+                "candidate acceptance receipt digest is invalid"
+            )
+        if not re.fullmatch(
+            r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.[1-9][0-9]*",
+            self.candidate_version,
+        ):
+            raise MetadataFreshnessError("candidate version is invalid")
 
 
 @dataclass(frozen=True)
@@ -231,6 +245,8 @@ class FreshnessExpectation:
     candidate_tree: str
     qualification_run_id: int
     qualification_artifact_id: int
+    candidate_acceptance_receipt_sha256: str
+    candidate_version: str
 
     def validate(self) -> None:
         FreshnessRunIdentity(
@@ -242,6 +258,10 @@ class FreshnessExpectation:
             candidate_tree=self.candidate_tree,
             qualification_run_id=self.qualification_run_id,
             qualification_artifact_id=self.qualification_artifact_id,
+            candidate_acceptance_receipt_sha256=(
+                self.candidate_acceptance_receipt_sha256
+            ),
+            candidate_version=self.candidate_version,
         ).validate()
 
 
@@ -1026,6 +1046,62 @@ def _write_exclusive(path: Path, value: bytes) -> None:
     os.chmod(path, 0o600)
 
 
+def _load_candidate_acceptance_receipt(
+    path: Path,
+    *,
+    identity: FreshnessRunIdentity,
+    current_time: datetime,
+) -> tuple[dict[str, Any], bytes]:
+    # Imported lazily because candidate.py also reuses the Qualification
+    # metadata validator from this module.  The contract remains one-way at
+    # runtime: Freshness consumes an already-created receipt and never mints it.
+    from .candidate import (
+        CandidateContractError,
+        canonical_json_bytes,
+        validate_aggregate_receipt,
+    )
+
+    value, encoded = _strict_json_file(
+        path,
+        label="candidate acceptance receipt",
+    )
+    try:
+        receipt = validate_aggregate_receipt(value)
+    except CandidateContractError as error:
+        raise MetadataFreshnessError(
+            "candidate acceptance receipt is invalid",
+            code=error.code,
+        ) from error
+    if canonical_json_bytes(receipt) != encoded:
+        raise MetadataFreshnessError(
+            "candidate acceptance receipt JSON is not canonical"
+        )
+    if (
+        receipt["result"] != "PASS"
+        or receipt["all_profiles_pass"] is not True
+        or receipt["qualification_run_id"] != identity.qualification_run_id
+        or receipt["qualification_run_attempt"] != 1
+        or receipt["source_sha"] != identity.candidate_sha
+        or receipt["source_tree"] != identity.candidate_tree
+        or receipt["candidate_version"] != identity.candidate_version
+    ):
+        raise MetadataFreshnessError(
+            "candidate acceptance receipt authority binding differs"
+        )
+    if _digest_bytes(encoded) != identity.candidate_acceptance_receipt_sha256:
+        raise MetadataFreshnessError(
+            "candidate acceptance receipt digest differs"
+        )
+    completed_at = _parse_timestamp(
+        receipt["completed_at"], label="candidate acceptance completion timestamp"
+    )
+    if completed_at > current_time.astimezone(timezone.utc):
+        raise MetadataFreshnessError(
+            "candidate acceptance completion time is in the future"
+        )
+    return receipt, encoded
+
+
 def collect_metadata_freshness(
     *,
     identity: FreshnessRunIdentity,
@@ -1033,10 +1109,11 @@ def collect_metadata_freshness(
     output_directory: Path,
     repository_root: Path,
     source: AssociatedPullSource,
+    candidate_acceptance_receipt: Path,
     clock: FreshnessClock | None = None,
     commit_loader: Callable[[Path, str, str], list[str]] = _git_commit_range,
 ) -> dict[str, Any]:
-    """Create one exact nine-file trusted freshness transport."""
+    """Create one exact ten-file trusted freshness transport."""
 
     identity.validate()
     runtime_clock = clock or SystemFreshnessClock()
@@ -1044,6 +1121,11 @@ def collect_metadata_freshness(
         raise MetadataFreshnessError("freshness output directory must not exist")
     if not repository_root.is_dir() or repository_root.is_symlink():
         raise MetadataFreshnessError("repository root is invalid")
+    _, candidate_receipt_bytes = _load_candidate_acceptance_receipt(
+        candidate_acceptance_receipt,
+        identity=identity,
+        current_time=runtime_clock.now(),
+    )
     qualification = _load_qualification(
         qualification_directory,
         identity=identity,
@@ -1127,6 +1209,10 @@ def collect_metadata_freshness(
         "candidateTree": identity.candidate_tree,
         "qualificationRunId": identity.qualification_run_id,
         "qualificationArtifactId": identity.qualification_artifact_id,
+        "candidateAcceptanceReceiptSha256": (
+            identity.candidate_acceptance_receipt_sha256
+        ),
+        "candidateVersion": identity.candidate_version,
         "qualifiedReleaseTag": qualification["releaseTag"],
         "qualifiedReleaseNotesIdentity": qualification["notes"]["identity"],
         "qualifiedMarkdownSha": qualification["markdownSha"],
@@ -1160,6 +1246,7 @@ def collect_metadata_freshness(
 
     output_directory.mkdir(parents=False, mode=0o700)
     outputs = {
+        "candidate-acceptance-receipt.json": candidate_receipt_bytes,
         "metadata-freshness.json": _json_bytes(receipt),
         "snapshot-a-input.json": snapshot_a.input_bytes,
         "snapshot-a.json": snapshot_a.json_bytes,
@@ -1198,6 +1285,15 @@ def _validate_receipt(value: object) -> dict[str, Any]:
         value["qualifiedReleaseTag"],
     ):
         raise MetadataFreshnessError("metadata freshness release tag is invalid")
+    if (
+        not isinstance(value["candidateVersion"], str)
+        or not re.fullmatch(
+            r"v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*",
+            value["candidateVersion"],
+        )
+        or value["candidateVersion"] != value["qualifiedReleaseTag"]
+    ):
+        raise MetadataFreshnessError("metadata freshness candidate version differs")
     for field in ("workflowSha", "candidateSha", "candidateTree"):
         if not isinstance(value[field], str) or not _SHA.fullmatch(value[field]):
             raise MetadataFreshnessError(f"metadata freshness {field} is invalid")
@@ -1214,6 +1310,7 @@ def _validate_receipt(value: object) -> dict[str, Any]:
         "snapshotBMarkdownSha",
         "snapshotAJsonSha",
         "snapshotBJsonSha",
+        "candidateAcceptanceReceiptSha256",
         "receiptDigest",
     ):
         if not isinstance(value[field], str) or not _DIGEST.fullmatch(value[field]):
@@ -1385,8 +1482,36 @@ def verify_metadata_freshness_artifact(
         or receipt["qualificationRunId"] != expectation.qualification_run_id
         or receipt["qualificationArtifactId"]
         != expectation.qualification_artifact_id
+        or receipt["candidateAcceptanceReceiptSha256"]
+        != expectation.candidate_acceptance_receipt_sha256
+        or receipt["candidateVersion"] != expectation.candidate_version
     ):
         raise MetadataFreshnessError("freshness artifact authority binding differs")
+
+    _, candidate_receipt_bytes = _load_candidate_acceptance_receipt(
+        artifact_directory / "candidate-acceptance-receipt.json",
+        identity=FreshnessRunIdentity(
+            workflow_run_id=expectation.workflow_run_id,
+            workflow_attempt=1,
+            workflow_path=WORKFLOW_PATH,
+            workflow_sha=expectation.candidate_sha,
+            candidate_sha=expectation.candidate_sha,
+            candidate_tree=expectation.candidate_tree,
+            qualification_run_id=expectation.qualification_run_id,
+            qualification_artifact_id=expectation.qualification_artifact_id,
+            candidate_acceptance_receipt_sha256=(
+                expectation.candidate_acceptance_receipt_sha256
+            ),
+            candidate_version=expectation.candidate_version,
+        ),
+        current_time=verified_at or datetime.now(timezone.utc),
+    )
+    if _digest_bytes(candidate_receipt_bytes) != receipt[
+        "candidateAcceptanceReceiptSha256"
+    ]:
+        raise MetadataFreshnessError(
+            "freshness candidate acceptance receipt binding differs"
+        )
 
     qualification = _load_qualification(
         qualification_directory,
@@ -1499,6 +1624,10 @@ def verify_metadata_freshness_artifact(
         "qualificationRunId": expectation.qualification_run_id,
         "candidateSha": expectation.candidate_sha,
         "candidateTree": expectation.candidate_tree,
+        "candidateAcceptanceReceiptSha256": (
+            expectation.candidate_acceptance_receipt_sha256
+        ),
+        "candidateVersion": expectation.candidate_version,
         "releaseTag": receipt["qualifiedReleaseTag"],
         "snapshotCount": receipt["snapshotCount"],
         "snapshotIntervalSeconds": receipt["snapshotIntervalSeconds"],

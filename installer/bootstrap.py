@@ -31,6 +31,7 @@ _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?\Z")
 _UTC = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 _CAPABILITY_TOKEN = object()
+_CANDIDATE_CAPABILITY_TOKEN = object()
 _GH_EXECUTABLE = "/usr/bin/gh"
 _GH_VERSION = "2.97.0"
 _GH_VERSION_OUTPUT_LIMIT = 4096
@@ -640,6 +641,144 @@ class ProductionBootstrapPrivilegeGate:
             _reject("BOOTSTRAP_TRUST_PROVISIONING_RECEIPT_INVALID")
         return authorization
 
+
+class VerifiedPrepublicationCandidateCapability:
+    """A verified local Candidate capability with no Release authority."""
+
+    __slots__ = (
+        "candidate_input_digest",
+        "installer_materials_path",
+        "installer_materials_sha256",
+        "release_commit",
+        "verified_candidate_digest",
+        "version",
+    )
+
+    def __init__(
+        self,
+        token: object,
+        *,
+        candidate_input_digest: str,
+        installer_materials_path: Path,
+        installer_materials_sha256: str,
+        release_commit: str,
+        verified_candidate_digest: str,
+        version: str,
+    ) -> None:
+        if token is not _CANDIDATE_CAPABILITY_TOKEN:
+            _reject("CANDIDATE_BOOTSTRAP_CAPABILITY_FORGERY")
+        self.candidate_input_digest = candidate_input_digest
+        self.installer_materials_path = installer_materials_path
+        self.installer_materials_sha256 = installer_materials_sha256
+        self.release_commit = release_commit
+        self.verified_candidate_digest = verified_candidate_digest
+        self.version = version
+
+
+def verified_prepublication_candidate_capability(
+    verified_candidate_digest: str,
+) -> VerifiedPrepublicationCandidateCapability:
+    """Load only the verifier-owned digest root and close its capability."""
+
+    try:
+        from release.candidate import load_verified_candidate
+
+        loaded = load_verified_candidate(verified_candidate_digest)
+    except Exception:  # noqa: BLE001 - the verifier boundary stays redacted
+        _reject("CANDIDATE_BOOTSTRAP_VERIFIED_INPUT_REQUIRED")
+    return VerifiedPrepublicationCandidateCapability(
+        _CANDIDATE_CAPABILITY_TOKEN,
+        candidate_input_digest=loaded.verified["candidate_input_sha256"],
+        installer_materials_path=loaded.root / "installer-materials.tar",
+        installer_materials_sha256=loaded.candidate_input[
+            "installer_materials_sha256"
+        ],
+        release_commit=loaded.candidate_input["source_sha"],
+        verified_candidate_digest=loaded.verified_digest,
+        version=loaded.candidate_input["candidate_version"],
+    )
+
+
+class CandidateBootstrapPrivilegeGate:
+    """Candidate-only Stage0 gate; cannot create production Release authority."""
+
+    def __init__(self, capability: VerifiedPrepublicationCandidateCapability) -> None:
+        if type(capability) is not VerifiedPrepublicationCandidateCapability:
+            _reject("CANDIDATE_BOOTSTRAP_CAPABILITY_INVALID")
+        self._capability = capability
+
+    def verify_runtime_source(
+        self,
+        *,
+        version: str,
+        release_commit: str,
+    ) -> AuthorizedBootstrap:
+        capability = self._capability
+        if version != capability.version or release_commit != capability.release_commit:
+            _reject("CANDIDATE_BOOTSTRAP_RELEASE_BINDING_MISMATCH")
+        try:
+            material_bytes = capability.installer_materials_path.read_bytes()
+        except OSError:
+            _reject("CANDIDATE_BOOTSTRAP_MATERIAL_UNAVAILABLE")
+        if _sha256_identity(material_bytes) != capability.installer_materials_sha256:
+            _reject("CANDIDATE_BOOTSTRAP_MATERIAL_IDENTITY_MISMATCH")
+        identities = _archive_python_identities(
+            capability.installer_materials_path
+        )
+        for module_name in sorted(_REQUIRED_RUNTIME_MODULES):
+            module = importlib.import_module(module_name)
+            source = getattr(module, "__file__", None)
+            expected = module_name.replace(".", "/") + ".py"
+            if type(source) is not str or expected not in identities:
+                _reject("CANDIDATE_BOOTSTRAP_RUNTIME_MODULE_MISSING")
+            try:
+                observed = _regular_file_identity(Path(source).resolve(strict=True))
+            except (OSError, ValueError):
+                _reject("CANDIDATE_BOOTSTRAP_RUNTIME_MODULE_INVALID")
+            if observed != identities[expected]:
+                _reject("CANDIDATE_BOOTSTRAP_RUNTIME_MODULE_IDENTITY_MISMATCH")
+        identity = _sha256_identity(
+            _canonical_json_bytes(
+                {
+                    "candidateInputDigest": capability.candidate_input_digest,
+                    "purpose": "PREPUBLICATION_CANDIDATE_BOOTSTRAP_ONLY",
+                    "verifiedCandidateDigest": capability.verified_candidate_digest,
+                }
+            )
+        )
+        return AuthorizedBootstrap(
+            _CAPABILITY_TOKEN,
+            authorization_identity=identity,
+            materials_path=capability.installer_materials_path,
+            materials_sha256=capability.installer_materials_sha256,
+            release_commit=release_commit,
+            version=version,
+        )
+
+    def consume(self, *, version: str, release_commit: str) -> AuthorizedBootstrap:
+        authorization = self.verify_runtime_source(
+            version=version,
+            release_commit=release_commit,
+        )
+        try:
+            from updater.trust_lifecycle import (
+                ProductionTrustLifecycle,
+                TrustCommitReceipt,
+            )
+
+            receipt = ProductionTrustLifecycle.production().provision_initial(
+                authorization
+            )
+        except BootstrapAuthorityError:
+            raise
+        except Exception:  # noqa: BLE001 - privileged boundary stays redacted
+            _reject("CANDIDATE_BOOTSTRAP_TRUST_PROVISIONING_FAILED")
+        if (
+            type(receipt) is not TrustCommitReceipt
+            or receipt.authorization_identity != authorization.authorization_identity
+        ):
+            _reject("CANDIDATE_BOOTSTRAP_TRUST_RECEIPT_INVALID")
+        return authorization
 
 def _run_stage0_gh(arguments: tuple[str, ...]) -> object:
     environment = {

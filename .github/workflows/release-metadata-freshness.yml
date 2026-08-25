@@ -11,6 +11,10 @@ on:
         description: Exact main commit qualified for publication
         required: true
         type: string
+      candidate_acceptance_receipt_b64url:
+        description: Canonical unpadded base64url Candidate Acceptance receipt
+        required: true
+        type: string
 
 concurrency:
   group: animemo-release-metadata-freshness-${{ inputs.intended_main_sha }}-${{ inputs.qualification_run_id }}
@@ -53,6 +57,24 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -r release/requirements.txt
+      - name: Decode and bind the passed Candidate Acceptance receipt
+        id: candidate_receipt
+        env:
+          CANDIDATE_ACCEPTANCE_RECEIPT_B64URL: ${{ inputs.candidate_acceptance_receipt_b64url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CANDIDATE_ACCEPTANCE_RECEIPT_B64URL"
+          python -m release.cli decode-candidate-acceptance-receipt \
+            --value "$CANDIDATE_ACCEPTANCE_RECEIPT_B64URL" \
+            --output "$RUNNER_TEMP/candidate-acceptance-receipt.json" \
+            > "$RUNNER_TEMP/candidate-receipt-identity.json"
+          receipt_sha256="$(jq -er '.sha256' "$RUNNER_TEMP/candidate-receipt-identity.json")"
+          candidate_version="$(jq -er '.candidateVersion' "$RUNNER_TEMP/candidate-receipt-identity.json")"
+          [[ "$receipt_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$candidate_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$ ]]
+          echo "receipt_sha256=$receipt_sha256" >> "$GITHUB_OUTPUT"
+          echo "candidate_version=$candidate_version" >> "$GITHUB_OUTPUT"
       - name: Download and authenticate exact Phase A artifact
         id: qualification
         env:
@@ -96,7 +118,8 @@ jobs:
             --archive "$RUNNER_TEMP/qualification-archive/evidence.zip" \
             --destination "$RUNNER_TEMP/qualification" \
             --qualification-run-id "$QUALIFICATION_RUN_ID" \
-            --expected-sha256 "$metadata_digest"
+            --expected-sha256 "$metadata_digest" \
+            --require-candidate-contract
           evidence="$RUNNER_TEMP/qualification/release-qualification-$QUALIFICATION_RUN_ID.json"
           prepublication="$RUNNER_TEMP/qualification/prepublication-materials.json"
           candidate_tree="$(git rev-parse "$INTENDED_MAIN_SHA^{tree}")"
@@ -116,6 +139,14 @@ jobs:
             --run-id "$QUALIFICATION_RUN_ID" \
             --run-attempt 1 \
             --workflow-path .github/workflows/release.yml
+          install -d -m 0700 "$RUNNER_TEMP/freshness-qualification"
+          for name in "release-qualification-$QUALIFICATION_RUN_ID.json" \
+            platform-qualification.json release-notes.json release-notes.md \
+            prepublication-materials.json installer-materials.tar \
+            deployment-contract.json; do
+            install -m 0600 "$RUNNER_TEMP/qualification/$name" \
+              "$RUNNER_TEMP/freshness-qualification/$name"
+          done
           echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
           echo "candidate_tree=$candidate_tree" >> "$GITHUB_OUTPUT"
       - name: Collect two complete trusted metadata snapshots
@@ -125,12 +156,14 @@ jobs:
           QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
           QUALIFICATION_ARTIFACT_ID: ${{ steps.qualification.outputs.artifact_id }}
           CANDIDATE_TREE: ${{ steps.qualification.outputs.candidate_tree }}
+          CANDIDATE_ACCEPTANCE_RECEIPT_SHA256: ${{ steps.candidate_receipt.outputs.receipt_sha256 }}
+          CANDIDATE_VERSION: ${{ steps.candidate_receipt.outputs.candidate_version }}
         shell: bash
         run: |
           set -euo pipefail
           python -m release.cli collect-metadata-freshness \
             --repository-root "$GITHUB_WORKSPACE" \
-            --qualification-directory "$RUNNER_TEMP/qualification" \
+            --qualification-directory "$RUNNER_TEMP/freshness-qualification" \
             --output-directory "$RUNNER_TEMP/metadata-freshness" \
             --workflow-run-id "$GITHUB_RUN_ID" \
             --workflow-attempt "$GITHUB_RUN_ATTEMPT" \
@@ -138,17 +171,21 @@ jobs:
             --candidate-sha "$INTENDED_MAIN_SHA" \
             --candidate-tree "$CANDIDATE_TREE" \
             --qualification-run-id "$QUALIFICATION_RUN_ID" \
-            --qualification-artifact-id "$QUALIFICATION_ARTIFACT_ID"
-      - name: Enforce exact redacted nine-file output
+            --qualification-artifact-id "$QUALIFICATION_ARTIFACT_ID" \
+            --candidate-acceptance-receipt "$RUNNER_TEMP/candidate-acceptance-receipt.json" \
+            --candidate-acceptance-receipt-sha256 "$CANDIDATE_ACCEPTANCE_RECEIPT_SHA256" \
+            --candidate-version "$CANDIDATE_VERSION"
+      - name: Enforce exact redacted ten-file output
         shell: bash
         run: |
           set -euo pipefail
           directory="$RUNNER_TEMP/metadata-freshness"
-          test "$(find "$directory" -mindepth 1 -maxdepth 1 -type f | wc -l)" = "9"
+          test "$(find "$directory" -mindepth 1 -maxdepth 1 -type f | wc -l)" = "10"
           test "$(find "$directory" -mindepth 1 -maxdepth 1 ! -type f | wc -l)" = "0"
           expected="$RUNNER_TEMP/freshness-expected.txt"
           actual="$RUNNER_TEMP/freshness-actual.txt"
           printf '%s\n' \
+            candidate-acceptance-receipt.json \
             metadata-freshness.json \
             request-diagnostics.json \
             snapshot-a-input.json \

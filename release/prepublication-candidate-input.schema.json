@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://animemo.cc/schemas/prepublication-candidate-input-v1.json",
+  "title": "AniMemo prepublication candidate input v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "purpose",
+    "repository",
+    "qualification_run_id",
+    "qualification_run_attempt",
+    "qualification_workflow_identity",
+    "qualification_artifact_ids",
+    "qualification_artifact_api_digests",
+    "source_sha",
+    "source_tree",
+    "target_version",
+    "candidate_version",
+    "candidate_sequence",
+    "release_notes_json_sha256",
+    "release_notes_markdown_sha256",
+    "release_manifest_sha256",
+    "deployment_contract_sha256",
+    "installer_materials_sha256",
+    "checksums_sha256",
+    "api_oci_digest",
+    "web_oci_digest",
+    "postgres_oci_digest",
+    "redis_oci_digest",
+    "candidate_runtime_file_inventory",
+    "release_authority_granted",
+    "production_authorized",
+    "publish_authorized",
+    "generated_at"
+  ],
+  "properties": {
+    "schema": {"const": "animemo.prepublication-candidate-input/v1"},
+    "version": {"const": 1},
+    "purpose": {"const": "PREPUBLICATION_CANDIDATE_ACCEPTANCE_ONLY"},
+    "repository": {"const": "yanyuhanyue/AniMemo"},
+    "qualification_run_id": {"type": "integer", "minimum": 1},
+    "qualification_run_attempt": {"const": 1},
+    "qualification_workflow_identity": {"$ref": "#/$defs/workflowIdentity"},
+    "qualification_artifact_ids": {"$ref": "#/$defs/artifactIds"},
+    "qualification_artifact_api_digests": {"$ref": "#/$defs/artifactDigests"},
+    "source_sha": {"$ref": "#/$defs/gitSha"},
+    "source_tree": {"$ref": "#/$defs/gitSha"},
+    "target_version": {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "candidate_version": {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"},
+    "candidate_sequence": {"type": "integer", "minimum": 1},
+    "release_notes_json_sha256": {"$ref": "#/$defs/digest"},
+    "release_notes_markdown_sha256": {"$ref": "#/$defs/digest"},
+    "release_manifest_sha256": {"$ref": "#/$defs/digest"},
+    "deployment_contract_sha256": {"$ref": "#/$defs/digest"},
+    "installer_materials_sha256": {"$ref": "#/$defs/digest"},
+    "checksums_sha256": {"$ref": "#/$defs/digest"},
+    "api_oci_digest": {"$ref": "#/$defs/digest"},
+    "web_oci_digest": {"$ref": "#/$defs/digest"},
+    "postgres_oci_digest": {"$ref": "#/$defs/digest"},
+    "redis_oci_digest": {"$ref": "#/$defs/digest"},
+    "candidate_runtime_file_inventory": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 1040,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/fileIdentity"}
+    },
+    "release_authority_granted": {"const": false},
+    "production_authorized": {"const": false},
+    "publish_authorized": {"const": false},
+    "generated_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "artifactIds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform_qualification", "release_dry_run"],
+      "properties": {
+        "platform_qualification": {"type": "integer", "minimum": 1},
+        "release_dry_run": {"type": "integer", "minimum": 1}
+      }
+    },
+    "artifactDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform_qualification", "release_dry_run"],
+      "properties": {
+        "platform_qualification": {"$ref": "#/$defs/digest"},
+        "release_dry_run": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "workflowIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "ref", "sha"],
+      "properties": {
+        "name": {"const": "Release Producer"},
+        "path": {"const": ".github/workflows/release.yml"},
+        "ref": {"type": "string", "pattern": "^yanyuhanyue/AniMemo/\\.github/workflows/release\\.yml@refs/heads/main$"},
+        "sha": {"$ref": "#/$defs/gitSha"}
+      }
+    },
+    "fileIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^candidate-runtime/oci/(api|postgres|redis|web)/(index\\.json|oci-layout|blobs/sha256/[0-9a-f]{64})$"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "size": {"type": "integer", "minimum": 1, "maximum": 4294967296}
+      }
+    }
+  }
+}

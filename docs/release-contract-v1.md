@@ -273,6 +273,23 @@ is reusable. With Stable
 `v1.0.0` as the actual baseline, `bump=minor`, and `channel=rc`, the next
 candidate is therefore `v1.1.0-rc.4`.
 
+## Prepublication Candidate Acceptance
+
+新的 RC Qualification 除 BuildKit history 外，还必须冻结 API、Web、PostgreSQL、Redis
+四套完整 `linux/amd64` OCI layout。API/Web 在同一次 Buildx build 中同时提供 Docker
+rehearsal exporter 与 OCI exporter，禁止为 Acceptance 重建；依赖镜像只读取
+`release/dependency-images.json` 的不可变摘要。
+
+Qualification Artifact 是传输与资格 Evidence，不是 Release Authority。它包含 closed
+Candidate Input、四套 OCI bytes/inventory、Release Manifest、Deployment Contract、
+Installer Materials、checksums、Release Notes 和 exact Run/source identity。canonical
+verifier 与三 Profile VM 合同见 `docs/candidate-acceptance-contract-v1.md`。
+
+`Release Metadata Freshness` 必须携带并原样封存通过的 Aggregate Candidate Receipt；
+`Release Producer` 的 publish operation 必须再次验证实际 Receipt 摘要与 Freshness 绑定
+摘要相等。没有 Aggregate Receipt 时不存在 publish 旁路。Candidate PASS 仍不代表 RC
+已发布、可用于生产或可晋升 Stable。
+
 For portable publication, the Release Producer pins crane to `v0.21.9` and
 asserts that runtime version before `crane pull --format=oci`. Crane's observed
 root descriptor wrapper is normalized to the closed OCI-layout index shape

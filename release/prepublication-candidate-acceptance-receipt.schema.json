@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://animemo.cc/schemas/prepublication-candidate-acceptance-receipt-v1.json",
+  "title": "AniMemo prepublication candidate acceptance receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "candidate_input_digest", "verified_candidate_digest",
+    "qualification_run_id", "qualification_run_attempt", "source_sha", "source_tree",
+    "candidate_version", "profile_receipts", "all_profiles_pass", "rc14_prestate",
+    "rc14_poststate", "repository_mutation_count", "publication_mutation_count",
+    "shared_host_connection_count", "secret_sweep", "placeholder_sweep",
+    "release_authority_granted", "publish_authorized", "completed_at", "result",
+    "receipt_digest"
+  ],
+  "properties": {
+    "schema": {"const": "animemo.prepublication-candidate-acceptance-receipt/v1"},
+    "version": {"const": 1},
+    "candidate_input_digest": {"$ref": "#/$defs/digest"},
+    "verified_candidate_digest": {"$ref": "#/$defs/digest"},
+    "qualification_run_id": {"type": "integer", "minimum": 1},
+    "qualification_run_attempt": {"const": 1},
+    "source_sha": {"$ref": "#/$defs/gitSha"},
+    "source_tree": {"$ref": "#/$defs/gitSha"},
+    "candidate_version": {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"},
+    "profile_receipts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["fresh_base", "docker_base", "runtime_base_offline"],
+      "properties": {
+        "fresh_base": {"$ref": "#/$defs/digest"},
+        "docker_base": {"$ref": "#/$defs/digest"},
+        "runtime_base_offline": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "all_profiles_pass": {"type": "boolean"},
+    "rc14_prestate": {"$ref": "#/$defs/prestate"},
+    "rc14_poststate": {"$ref": "#/$defs/prestate"},
+    "repository_mutation_count": {"const": 0},
+    "publication_mutation_count": {"const": 0},
+    "shared_host_connection_count": {"const": 0},
+    "secret_sweep": {"const": 0},
+    "placeholder_sweep": {"const": 0},
+    "release_authority_granted": {"const": false},
+    "publish_authorized": {"const": false},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "result": {"enum": ["PASS", "FAIL"]},
+    "receipt_digest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "prestate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tag", "github_release", "ghcr", "public_r2", "r2_origin"],
+      "properties": {
+        "tag": {"const": "ABSENT"},
+        "github_release": {"const": "ABSENT"},
+        "ghcr": {"const": "ABSENT"},
+        "public_r2": {"const": "ABSENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE"},
+        "r2_origin": {"const": "PROVEN_EMPTY"}
+      }
+    }
+  }
+}

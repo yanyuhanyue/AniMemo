@@ -22,7 +22,8 @@ from durability.platform import PlatformQualificationError, parse_platform_quali
 MAX_MATERIAL_FILES = 512
 MAX_MATERIAL_FILE_BYTES = 64 * 1024 * 1024
 MAX_MATERIAL_TOTAL_BYTES = 256 * 1024 * 1024
-MAX_QUALIFICATION_ARTIFACT_BYTES = 300 * 1024 * 1024
+MAX_QUALIFICATION_ARTIFACT_BYTES = 16 * 1024 * 1024 * 1024
+MAX_QUALIFICATION_MEMBER_BYTES = 4 * 1024 * 1024 * 1024
 INSTALLER_MATERIALS_NAME = "installer-materials.tar"
 PLATFORM_QUALIFICATION_MATERIAL = "release/platform-qualification.json"
 OFFLINE_RELEASE_VERIFIER_MATERIAL = (
@@ -1008,8 +1009,9 @@ def extract_qualification_artifact(
     *,
     qualification_run_id: int,
     expected_sha256: str,
+    require_candidate_contract: bool = False,
 ) -> dict[str, object]:
-    """Extract the exact seven-file qualification transport without ZIP trust."""
+    """Extract the closed Candidate qualification transport without ZIP trust."""
     if (
         not isinstance(qualification_run_id, int)
         or isinstance(qualification_run_id, bool)
@@ -1020,7 +1022,7 @@ def extract_qualification_artifact(
         r"sha256:[0-9a-f]{64}", expected_sha256
     ):
         raise MaterialContractError("Qualification artifact digest is invalid")
-    expected = {
+    legacy_expected = {
         f"release-qualification-{qualification_run_id}.json",
         "platform-qualification.json",
         "release-notes.json",
@@ -1065,11 +1067,49 @@ def extract_qualification_artifact(
                         or entry.flag_bits & 0x1
                         or file_type not in {0, stat.S_IFREG}
                         or entry.file_size < 0
-                        or entry.file_size > MAX_MATERIAL_TOTAL_BYTES
+                        or entry.file_size > MAX_QUALIFICATION_MEMBER_BYTES
                     ):
                         raise MaterialContractError(
                             "Qualification artifact ZIP entry is invalid"
                         )
+                candidate_entries = [
+                    entry for entry in entries if entry.filename == "candidate-input.json"
+                ]
+                if len(candidate_entries) > 1 or (
+                    require_candidate_contract and len(candidate_entries) != 1
+                ):
+                    raise MaterialContractError(
+                        "Qualification Candidate Input cardinality differs"
+                    )
+                if candidate_entries:
+                    candidate_entry = candidate_entries[0]
+                    if candidate_entry.file_size > MAX_MATERIAL_FILE_BYTES:
+                        raise MaterialContractError(
+                            "Qualification Candidate Input is too large"
+                        )
+                    try:
+                        candidate_value = json.loads(
+                            archive.read(candidate_entry),
+                            object_pairs_hook=reject_duplicate_json_keys,
+                        )
+                        from .candidate import validate_candidate_input
+
+                        candidate = validate_candidate_input(candidate_value)
+                    except Exception as error:
+                        raise MaterialContractError(
+                            "Qualification Candidate Input is invalid"
+                        ) from error
+                    runtime = {
+                        item["path"]
+                        for item in candidate["candidate_runtime_file_inventory"]
+                    }
+                    expected = legacy_expected | {
+                        "candidate-input.json",
+                        "checksums.txt",
+                        "release-manifest.json",
+                    } | runtime
+                else:
+                    expected = legacy_expected
                 if (
                     len(entries) != len(expected)
                     or len(names) != len(set(names))
@@ -1084,6 +1124,7 @@ def extract_qualification_artifact(
                 identities = []
                 for entry in sorted(entries, key=lambda item: item.filename):
                     target = destination / entry.filename
+                    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                     member_digest = hashlib.sha256()
                     written = 0
                     with archive.open(entry, mode="r") as source, target.open(

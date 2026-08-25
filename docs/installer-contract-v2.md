@@ -192,3 +192,16 @@ official-format fixtures, and namespace-isolated filesystem roots are allowed
 only in qualification and cannot satisfy the production privilege gate. Live
 Immutable Release acceptance remains deferred until the first separately
 authorized RC.
+
+### 7A. 发布前 Candidate capability
+
+`VerifiedPrepublicationCandidateCapability` 是独立、低权限能力，只能由 canonical
+Candidate verifier 的固定摘要目录产生。`CandidateBootstrapPrivilegeGate` 可以在一次性
+VM 内验证同一 Installer archive/module bytes 并执行既有初始信任准备，但不能提交
+production bootstrap authorization record、发现 GitHub Release 或铸造 Release
+Authority。Candidate composition 必须显式持有该 gate；不得在平台计划或 Installer
+execute 中临时回退到 `ProductionBootstrapPrivilegeGate`。
+
+Candidate Installer 的本地 OCI importer 只消费 verifier 已闭合的四镜像 DAG，禁止
+registry discovery、R2/GHCR fallback、mutable pull 和 rebuild。完整接口和 Receipt
+边界见 `docs/candidate-acceptance-contract-v1.md`。
