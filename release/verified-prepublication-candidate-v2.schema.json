@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://animemo.cc/schemas/verified-prepublication-candidate-v2.json",
+  "title": "AniMemo deterministic verified prepublication candidate identity v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "purpose",
+    "candidate_input_sha256",
+    "repository",
+    "qualification_run_id",
+    "qualification_run_attempt",
+    "qualification_workflow_identity",
+    "qualification_artifact_ids",
+    "qualification_artifact_api_digests",
+    "source_sha",
+    "source_tree",
+    "target_version",
+    "candidate_version",
+    "candidate_sequence",
+    "release_notes_json_sha256",
+    "release_notes_markdown_sha256",
+    "release_manifest_sha256",
+    "deployment_contract_sha256",
+    "installer_materials_sha256",
+    "checksums_sha256",
+    "api_oci_digest",
+    "web_oci_digest",
+    "postgres_oci_digest",
+    "redis_oci_digest",
+    "containing_artifact",
+    "safe_extraction",
+    "internal_checksums_result",
+    "runtime_file_inventory",
+    "runtime_inventory_sha256",
+    "oci_runtime_inventory_sha256",
+    "oci_verification",
+    "verifier_contract_version",
+    "release_authority_granted",
+    "production_authorized",
+    "publish_authorized"
+  ],
+  "properties": {
+    "schema": {"const": "animemo.verified-prepublication-candidate/v2"},
+    "version": {"const": 2},
+    "purpose": {"const": "VERIFIED_LOCAL_PREPUBLICATION_INPUT"},
+    "candidate_input_sha256": {"$ref": "#/$defs/digest"},
+    "repository": {"const": "yanyuhanyue/AniMemo"},
+    "qualification_run_id": {"type": "integer", "minimum": 1},
+    "qualification_run_attempt": {"const": 1},
+    "qualification_workflow_identity": {"$ref": "#/$defs/workflowIdentity"},
+    "qualification_artifact_ids": {"$ref": "#/$defs/artifactIds"},
+    "qualification_artifact_api_digests": {"$ref": "#/$defs/artifactDigests"},
+    "source_sha": {"$ref": "#/$defs/gitSha"},
+    "source_tree": {"$ref": "#/$defs/gitSha"},
+    "target_version": {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "candidate_version": {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"},
+    "candidate_sequence": {"type": "integer", "minimum": 1},
+    "release_notes_json_sha256": {"$ref": "#/$defs/digest"},
+    "release_notes_markdown_sha256": {"$ref": "#/$defs/digest"},
+    "release_manifest_sha256": {"$ref": "#/$defs/digest"},
+    "deployment_contract_sha256": {"$ref": "#/$defs/digest"},
+    "installer_materials_sha256": {"$ref": "#/$defs/digest"},
+    "checksums_sha256": {"$ref": "#/$defs/digest"},
+    "api_oci_digest": {"$ref": "#/$defs/digest"},
+    "web_oci_digest": {"$ref": "#/$defs/digest"},
+    "postgres_oci_digest": {"$ref": "#/$defs/digest"},
+    "redis_oci_digest": {"$ref": "#/$defs/digest"},
+    "containing_artifact": {"$ref": "#/$defs/containingArtifact"},
+    "safe_extraction": {"$ref": "#/$defs/safeExtraction"},
+    "internal_checksums_result": {"const": "PASS"},
+    "runtime_file_inventory": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 1040,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/fileIdentity"}
+    },
+    "runtime_inventory_sha256": {"$ref": "#/$defs/digest"},
+    "oci_runtime_inventory_sha256": {"$ref": "#/$defs/ociRoleDigests"},
+    "oci_verification": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/ociVerification"}
+    },
+    "verifier_contract_version": {"const": "2"},
+    "release_authority_granted": {"const": false},
+    "production_authorized": {"const": false},
+    "publish_authorized": {"const": false}
+  },
+  "$defs": {
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "workflowIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "ref", "sha"],
+      "properties": {
+        "name": {"const": "Release Producer"},
+        "path": {"const": ".github/workflows/release.yml"},
+        "ref": {"type": "string", "pattern": "^yanyuhanyue/AniMemo/\\.github/workflows/release\\.yml@refs/heads/main$"},
+        "sha": {"$ref": "#/$defs/gitSha"}
+      }
+    },
+    "artifactIds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform_qualification", "release_dry_run"],
+      "properties": {
+        "platform_qualification": {"type": "integer", "minimum": 1},
+        "release_dry_run": {"type": "integer", "minimum": 1}
+      }
+    },
+    "artifactDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform_qualification", "release_dry_run"],
+      "properties": {
+        "platform_qualification": {"$ref": "#/$defs/digest"},
+        "release_dry_run": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "ociRoleDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "postgres", "redis", "web"],
+      "properties": {
+        "api": {"$ref": "#/$defs/digest"},
+        "postgres": {"$ref": "#/$defs/digest"},
+        "redis": {"$ref": "#/$defs/digest"},
+        "web": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "fileIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^candidate-runtime/oci/(api|postgres|redis|web)/(index\\.json|oci-layout|blobs/sha256/[0-9a-f]{64})$"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "size": {"type": "integer", "minimum": 1, "maximum": 4294967296}
+      }
+    },
+    "containingArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "api_digest", "archive_sha256", "file_count"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "api_digest": {"$ref": "#/$defs/digest"},
+        "archive_sha256": {"$ref": "#/$defs/digest"},
+        "file_count": {"type": "integer", "minimum": 13, "maximum": 1050}
+      }
+    },
+    "safeExtraction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["absolute_path_count", "case_collision_count", "duplicate_path_count", "hardlink_count", "parent_escape_count", "special_file_count", "symlink_count"],
+      "properties": {
+        "absolute_path_count": {"const": 0},
+        "case_collision_count": {"const": 0},
+        "duplicate_path_count": {"const": 0},
+        "hardlink_count": {"const": 0},
+        "parent_escape_count": {"const": 0},
+        "special_file_count": {"const": 0},
+        "symlink_count": {"const": 0}
+      }
+    },
+    "ociVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "repository", "digest", "platform", "config_digest", "layer_digests", "result"],
+      "properties": {
+        "role": {"enum": ["api", "postgres", "redis", "web"]},
+        "repository": {"enum": ["ghcr.io/yanyuhanyue/animemo-api", "ghcr.io/yanyuhanyue/animemo-web", "docker.io/library/postgres", "docker.io/library/redis"]},
+        "digest": {"$ref": "#/$defs/digest"},
+        "platform": {"const": "linux/amd64"},
+        "config_digest": {"$ref": "#/$defs/digest"},
+        "layer_digests": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/digest"}},
+        "result": {"const": "PASS"}
+      }
+    }
+  }
+}

@@ -4,8 +4,11 @@ import copy
 import hashlib
 import io
 import json
+import os
 import shutil
 import stat
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -22,6 +25,7 @@ from durability.platform import (
 )
 from release.candidate import (
     CandidateContractError,
+    _build_verified_candidate_identity,
     _extract_candidate_archive,
     _verify_qualification_intrinsics,
     _verify_runtime,
@@ -35,6 +39,8 @@ from release.candidate import (
     validate_aggregate_receipt,
     validate_candidate_input,
     validate_profile_receipt,
+    validate_verification_execution_receipt,
+    validate_verified_candidate,
     verify_prepublication_candidate,
 )
 from release.contract import (
@@ -187,6 +193,79 @@ def candidate_input() -> dict[str, object]:
     }
 
 
+def verified_candidate_identity() -> dict[str, object]:
+    candidate = candidate_input()
+    repositories = {
+        "api": "ghcr.io/yanyuhanyue/animemo-api",
+        "postgres": "docker.io/library/postgres",
+        "redis": "docker.io/library/redis",
+        "web": "ghcr.io/yanyuhanyue/animemo-web",
+    }
+    runtime = SimpleNamespace(
+        images=tuple(
+            SimpleNamespace(
+                role=role,
+                repository=repositories[role],
+                digest=DIGEST,
+                platform="linux/amd64",
+                config_digest=DIGEST,
+                layer_digests=(DIGEST,),
+            )
+            for role in ("api", "postgres", "redis", "web")
+        )
+    )
+    return _build_verified_candidate_identity(
+        candidate=candidate,
+        candidate_digest=sha256_bytes(canonical_json_bytes(candidate)),
+        containing_artifact_id=99,
+        containing_artifact_api_digest=DIGEST,
+        archive_digest=DIGEST,
+        archive_file_count=22,
+        runtime=runtime,
+    )
+
+
+def verification_execution_receipt() -> dict[str, object]:
+    identity = verified_candidate_identity()
+    value = {
+        "schema": (
+            "animemo.prepublication-candidate-verification-execution-receipt/v1"
+        ),
+        "version": 1,
+        "purpose": "VERIFICATION_EXECUTION_AUDIT_ONLY",
+        "candidate_input_sha256": identity["candidate_input_sha256"],
+        "verified_candidate_digest": sha256_bytes(canonical_json_bytes(identity)),
+        "repository": identity["repository"],
+        "qualification_run_id": identity["qualification_run_id"],
+        "qualification_run_attempt": identity["qualification_run_attempt"],
+        "source_sha": identity["source_sha"],
+        "source_tree": identity["source_tree"],
+        "candidate_version": identity["candidate_version"],
+        "verifier_contract_version": "2",
+        "verified_at": "2026-08-25T04:00:00.000000Z",
+        "check_counts": {
+            "qualification_artifact_count": 2,
+            "containing_artifact_count": 1,
+            "oci_image_count": 4,
+            "oci_layer_count": 4,
+            "runtime_file_count": 12,
+            "archive_file_count": 22,
+        },
+        "environment_classification": "SANITIZED_LOCAL_VERIFIER",
+        "result": "PASS",
+        "error_code": None,
+        "identity_authority_granted": False,
+        "release_authority_granted": False,
+        "production_authorized": False,
+        "publish_authorized": False,
+        "receipt_digest": "",
+    }
+    unsigned = dict(value)
+    unsigned.pop("receipt_digest")
+    value["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
+    return value
+
+
 def _write_intrinsic_evidence(root: Path, candidate: dict[str, object]) -> Path:
     workflow = candidate["qualification_workflow_identity"]
     assert isinstance(workflow, dict)
@@ -330,6 +409,227 @@ def aggregate_receipt() -> dict[str, object]:
 
 
 class CandidateSchemaTests(unittest.TestCase):
+    def test_post_repair_loader_rejects_v1_and_receipt_substitution(self):
+        identity = verified_candidate_identity()
+        legacy = copy.deepcopy(identity)
+        legacy.update(
+            {
+                "schema": "animemo.verified-prepublication-candidate/v1",
+                "version": 1,
+                "verified_at": "2026-08-25T12:00:00Z",
+            }
+        )
+        substitutions = (legacy, verification_execution_receipt())
+        with tempfile.TemporaryDirectory() as temporary:
+            for index, value in enumerate(substitutions):
+                state = Path(temporary) / str(index)
+                candidate_root = state / ("a" * 64)
+                candidate_root.mkdir(parents=True)
+                encoded = canonical_json_bytes(value)
+                (candidate_root / "verified-candidate.json").write_bytes(encoded)
+                with self.subTest(schema=value["schema"]), self.assertRaises(
+                    CandidateContractError
+                ):
+                    load_verified_candidate(sha256_bytes(encoded), _state_root=state)
+
+    def test_verified_candidate_oci_manifest_digests_are_cross_bound(self):
+        identity = verified_candidate_identity()
+        identity["api_oci_digest"] = "sha256:" + "d" * 64
+        with self.assertRaisesRegex(
+            CandidateContractError, "VERIFIED_CANDIDATE_IDENTITY_BINDING_INVALID"
+        ):
+            validate_verified_candidate(identity)
+
+    def test_immutable_input_changes_cannot_reuse_an_identity_digest(self):
+        baseline = verified_candidate_identity()
+        baseline_digest = sha256_bytes(canonical_json_bytes(baseline))
+        mutations = {
+            "artifact_id": lambda item: item["qualification_artifact_ids"].update(
+                {"platform_qualification": 12}
+            ),
+            "artifact_api_digest": lambda item: item[
+                "qualification_artifact_api_digests"
+            ].update({"platform_qualification": "sha256:" + "d" * 64}),
+            "candidate_input_digest": lambda item: item.update(
+                {"candidate_input_sha256": "sha256:" + "d" * 64}
+            ),
+            "oci_digest": lambda item: (
+                item.update({"api_oci_digest": "sha256:" + "d" * 64}),
+                item["oci_verification"][0].update(
+                    {"digest": "sha256:" + "d" * 64}
+                ),
+            ),
+            "source_sha": lambda item: (
+                item.update({"source_sha": "d" * 40}),
+                item["qualification_workflow_identity"].update({"sha": "d" * 40}),
+            ),
+            "source_tree": lambda item: item.update({"source_tree": "d" * 40}),
+            "qualification_run_id": lambda item: item.update(
+                {"qualification_run_id": RUN_ID + 1}
+            ),
+            "candidate_version": lambda item: item.update(
+                {"candidate_version": "v1.1.0-rc.15", "candidate_sequence": 15}
+            ),
+        }
+        for name, mutate in mutations.items():
+            changed = copy.deepcopy(baseline)
+            mutate(changed)
+            with self.subTest(name=name):
+                validate_verified_candidate(changed)
+                self.assertNotEqual(
+                    sha256_bytes(canonical_json_bytes(changed)), baseline_digest
+                )
+
+        invalid_attempt = copy.deepcopy(baseline)
+        invalid_attempt["qualification_run_attempt"] = 2
+        with self.assertRaises(CandidateContractError):
+            validate_verified_candidate(invalid_attempt)
+
+    def test_identity_builder_is_stable_across_hashseed_locale_timezone_and_cwd(self):
+        repository = Path(__file__).resolve().parents[1]
+        script = r'''
+import locale
+import json
+import os
+import sys
+import time
+from types import SimpleNamespace
+from release.candidate import _build_verified_candidate_identity, canonical_json_bytes, sha256_bytes
+from release.test_candidate import DIGEST, candidate_input
+
+active_locale = locale.setlocale(
+    locale.LC_ALL, os.environ["ANIMEMO_TEST_LOCALE"]
+)
+if hasattr(time, "tzset"):
+    time.tzset()
+print(json.dumps({
+    "hashSeed": os.environ["PYTHONHASHSEED"],
+    "locale": active_locale,
+    "timezone": os.environ["TZ"],
+}, sort_keys=True), file=sys.stderr)
+candidate = candidate_input()
+repositories = {
+    "api": "ghcr.io/yanyuhanyue/animemo-api",
+    "postgres": "docker.io/library/postgres",
+    "redis": "docker.io/library/redis",
+    "web": "ghcr.io/yanyuhanyue/animemo-web",
+}
+runtime = SimpleNamespace(images=tuple(
+    SimpleNamespace(
+        role=role,
+        repository=repositories[role],
+        digest=DIGEST,
+        platform="linux/amd64",
+        config_digest=DIGEST,
+        layer_digests=(DIGEST,),
+    )
+    for role in {"web", "api", "redis", "postgres"}
+))
+identity = _build_verified_candidate_identity(
+    candidate=candidate,
+    candidate_digest=sha256_bytes(canonical_json_bytes(candidate)),
+    containing_artifact_id=99,
+    containing_artifact_api_digest=DIGEST,
+    archive_digest=DIGEST,
+    archive_file_count=22,
+    runtime=runtime,
+)
+sys.stdout.buffer.write(canonical_json_bytes(identity))
+'''
+        environments = (
+            ("0", "UTC", "C"),
+            ("1", "Asia/Shanghai", ""),
+            ("random", "UTC", "C"),
+        )
+        outputs = []
+        observations = []
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            for index, (hash_seed, timezone_name, locale_name) in enumerate(
+                environments
+            ):
+                cwd = temporary_root / str(index)
+                cwd.mkdir()
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "ANIMEMO_TEST_LOCALE": locale_name,
+                        "PYTHONHASHSEED": hash_seed,
+                        "PYTHONPATH": str(repository),
+                        "TZ": timezone_name,
+                    }
+                )
+                completed = subprocess.run(
+                    [sys.executable, "-B", "-c", script],
+                    cwd=cwd,
+                    env=environment,
+                    check=True,
+                    capture_output=True,
+                )
+                outputs.append(completed.stdout)
+                observations.append(json.loads(completed.stderr))
+        self.assertEqual(len(set(outputs)), 1)
+        self.assertEqual(
+            {item["hashSeed"] for item in observations}, {"0", "1", "random"}
+        )
+        self.assertEqual(
+            {item["timezone"] for item in observations}, {"UTC", "Asia/Shanghai"}
+        )
+        self.assertGreaterEqual(
+            len({item["locale"] for item in observations}), 2
+        )
+
+    def test_execution_receipt_is_non_authoritative_and_self_bound(self):
+        receipt = verification_execution_receipt()
+        self.assertEqual(validate_verification_execution_receipt(receipt), receipt)
+        for field, value in (
+            ("verified_candidate_digest", None),
+            ("identity_authority_granted", True),
+            ("release_authority_granted", True),
+            ("production_authorized", True),
+            ("publish_authorized", True),
+        ):
+            invalid = copy.deepcopy(receipt)
+            if value is None:
+                invalid.pop(field)
+            else:
+                invalid[field] = value
+            with self.subTest(field=field), self.assertRaises(CandidateContractError):
+                validate_verification_execution_receipt(invalid)
+
+        tampered = copy.deepcopy(receipt)
+        tampered["verified_candidate_digest"] = "sha256:" + "d" * 64
+        with self.assertRaisesRegex(
+            CandidateContractError,
+            "VERIFICATION_EXECUTION_RECEIPT_DIGEST_MISMATCH",
+        ):
+            validate_verification_execution_receipt(tampered)
+
+    def test_verified_candidate_v2_excludes_execution_metadata(self):
+        identity = verified_candidate_identity()
+        self.assertEqual(validate_verified_candidate(identity), identity)
+        for field, value in (
+            ("verified_at", "2026-08-25T12:00:00Z"),
+            ("absolute_path", "/tmp/candidate"),
+        ):
+            invalid = copy.deepcopy(identity)
+            invalid[field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(
+                CandidateContractError, "VERIFIED_CANDIDATE_SCHEMA_INVALID"
+            ):
+                validate_verified_candidate(invalid)
+        for field in (
+            "release_authority_granted",
+            "production_authorized",
+            "publish_authorized",
+        ):
+            invalid = copy.deepcopy(identity)
+            invalid[field] = True
+            with self.subTest(field=field), self.assertRaises(
+                CandidateContractError
+            ):
+                validate_verified_candidate(invalid)
+
     def test_candidate_input_is_closed_and_cross_schema_substitution_fails(self):
         valid = candidate_input()
         self.assertEqual(validate_candidate_input(valid)["candidate_sequence"], 14)
@@ -790,8 +1090,6 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 for role in ("api", "postgres", "redis", "web")
             )
             runtime = SimpleNamespace(images=images)
-            state = root / "state"
-
             def accept_candidate(value, *, root=None):
                 del root
                 return dict(value)
@@ -813,27 +1111,168 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 "release.candidate.validate_material_contract",
                 return_value=({"sha256": DIGEST}, ()),
             ):
-                result = verify_prepublication_candidate(
-                    archive=archive,
-                    run_metadata=run,
-                    jobs_metadata=jobs,
-                    artifacts_metadata=artifacts,
-                    containing_artifact_id=99,
-                    containing_artifact_api_digest=archive_digest,
-                    expected_run_id=RUN_ID,
-                    expected_source_sha=SHA,
-                    expected_source_tree=TREE,
-                    expected_candidate_version="v1.1.0-rc.14",
-                    verified_at="2026-08-25T12:00:00Z",
-                    _state_root=state,
+                def invoke(state_root: Path, verified_at: str, mtime_ns: int):
+                    os.utime(archive, ns=(mtime_ns, mtime_ns))
+                    return verify_prepublication_candidate(
+                        archive=archive,
+                        run_metadata=run,
+                        jobs_metadata=jobs,
+                        artifacts_metadata=artifacts,
+                        containing_artifact_id=99,
+                        containing_artifact_api_digest=archive_digest,
+                        expected_run_id=RUN_ID,
+                        expected_source_sha=SHA,
+                        expected_source_tree=TREE,
+                        expected_candidate_version="v1.1.0-rc.14",
+                        verified_at=verified_at,
+                        _state_root=state_root,
+                    )
+
+                states = [root / f"state-{suffix}" for suffix in "abc"]
+                times = (
+                    "2026-08-25T12:00:00.0000000+08:00",
+                    "2026-08-25T12:00:00.000000+08:00",
+                    "2026-08-25T12:00:01Z",
                 )
-                loaded = load_verified_candidate(
-                    result["verifiedCandidateDigest"], _state_root=state
+                results = [
+                    invoke(state_root, verified_at, 1_700_000_000_000_000_000 + index)
+                    for index, (state_root, verified_at) in enumerate(
+                        zip(states, times, strict=True)
+                    )
+                ]
+                loaded = [
+                    load_verified_candidate(
+                        result["verifiedCandidateDigest"], _state_root=state_root
+                    )
+                    for result, state_root in zip(results, states, strict=True)
+                ]
+                original_infolist = zipfile.ZipFile.infolist
+
+                def reversed_infolist(candidate_archive):
+                    return list(reversed(original_infolist(candidate_archive)))
+
+                with mock.patch.object(
+                    zipfile.ZipFile, "infolist", reversed_infolist
+                ):
+                    permuted = invoke(
+                        root / "state-permuted",
+                        times[2],
+                        1_750_000_000_000_000_000,
+                    )
+                original_cwd = Path.cwd()
+                alternate_cwd = root / "alternate-cwd"
+                alternate_cwd.mkdir()
+                try:
+                    os.chdir(alternate_cwd)
+                    alternate_cwd_result = invoke(
+                        root / "state-cwd",
+                        times[2],
+                        1_760_000_000_000_000_000,
+                    )
+                finally:
+                    os.chdir(original_cwd)
+                same_run = invoke(states[0], times[0], 1_800_000_000_000_000_000)
+                later_run = invoke(states[0], times[2], 1_900_000_000_000_000_000)
+
+                identity_bytes = [
+                    (item.root / "verified-candidate.json").read_bytes()
+                    for item in loaded
+                ]
+                receipt_paths = [
+                    item.root
+                    / "verification-receipts"
+                    / result["verificationExecutionReceiptDigest"][7:]
+                    / "verification-execution-receipt.json"
+                    for item, result in zip(loaded, results, strict=True)
+                ]
+                receipts = [
+                    validate_verification_execution_receipt(
+                        json.loads(path.read_text(encoding="utf-8"))
+                    )
+                    for path in receipt_paths
+                ]
+
+                self.assertEqual(len(set(identity_bytes)), 1)
+                self.assertEqual(
+                    identity_bytes[0], canonical_json_bytes(loaded[0].verified)
                 )
-            self.assertEqual(loaded.verified_digest, result["verifiedCandidateDigest"])
-            self.assertEqual(loaded.candidate_input, candidate)
-            self.assertEqual(loaded.root.name, result["candidateInputDigest"][7:])
-            self.assertFalse(result["existing"])
+                for receipt_path, receipt in zip(
+                    receipt_paths, receipts, strict=True
+                ):
+                    self.assertEqual(
+                        receipt_path.read_bytes(), canonical_json_bytes(receipt)
+                    )
+                self.assertEqual(
+                    len({result["verifiedCandidateDigest"] for result in results}),
+                    1,
+                )
+                self.assertEqual(
+                    permuted["verifiedCandidateDigest"],
+                    results[0]["verifiedCandidateDigest"],
+                )
+                self.assertEqual(
+                    alternate_cwd_result["verifiedCandidateDigest"],
+                    results[0]["verifiedCandidateDigest"],
+                )
+                self.assertNotIn("verified_at", loaded[0].verified)
+                self.assertEqual(
+                    receipts[0]["verified_candidate_digest"],
+                    results[0]["verifiedCandidateDigest"],
+                )
+                self.assertEqual(receipts[0]["verified_at"], receipts[1]["verified_at"])
+                self.assertNotEqual(receipts[0]["verified_at"], receipts[2]["verified_at"])
+                self.assertEqual(
+                    results[0]["verificationExecutionReceiptDigest"],
+                    results[1]["verificationExecutionReceiptDigest"],
+                )
+                self.assertNotEqual(
+                    results[0]["verificationExecutionReceiptDigest"],
+                    results[2]["verificationExecutionReceiptDigest"],
+                )
+                self.assertTrue(same_run["existing"])
+                self.assertTrue(same_run["verificationExecutionReceiptExisting"])
+                self.assertTrue(later_run["existing"])
+                self.assertFalse(later_run["verificationExecutionReceiptExisting"])
+
+                receipt_paths[1].write_bytes(b"{}\n")
+                with self.assertRaisesRegex(
+                    CandidateContractError,
+                    "VERIFICATION_EXECUTION_RECEIPT_OUTPUT_CONFLICT",
+                ):
+                    invoke(states[1], times[1], 2_000_000_000_000_000_000)
+
+                identity_path = loaded[2].root / "verified-candidate.json"
+                identity_path.write_text(
+                    json.dumps(loaded[2].verified, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    CandidateContractError, "VERIFIED_CANDIDATE_OUTPUT_CONFLICT"
+                ):
+                    invoke(states[2], times[2], 2_100_000_000_000_000_000)
+
+                forged = copy.deepcopy(loaded[0].verified)
+                forged["source_tree"] = "d" * 40
+                forged_bytes = canonical_json_bytes(forged)
+                (loaded[0].root / "verified-candidate.json").write_bytes(
+                    forged_bytes
+                )
+                with self.assertRaisesRegex(
+                    CandidateContractError,
+                    "VERIFIED_CANDIDATE_INPUT_BINDING_MISMATCH",
+                ):
+                    load_verified_candidate(
+                        sha256_bytes(forged_bytes), _state_root=states[0]
+                    )
+
+            self.assertEqual(
+                loaded[0].verified_digest, results[0]["verifiedCandidateDigest"]
+            )
+            self.assertEqual(loaded[0].candidate_input, candidate)
+            self.assertEqual(
+                loaded[0].root.name, results[0]["candidateInputDigest"][7:]
+            )
+            self.assertFalse(results[0]["existing"])
 
     def test_complete_layout_passes_and_missing_config_fails(self):
         with tempfile.TemporaryDirectory() as temporary:

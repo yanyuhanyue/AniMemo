@@ -14,7 +14,7 @@ exact-main Qualification
 -> 从 release/dependency-images.json 唯一权威取得 PostgreSQL/Redis OCI layout
 -> Candidate Input
 -> canonical verifier
--> verifier-owned digest root
+-> Verified Candidate Identity v2
 -> Candidate-only Installer
 -> FRESH_BASE / DOCKER_BASE / RUNTIME_BASE_OFFLINE
 -> 三份 Profile Receipt
@@ -23,6 +23,10 @@ exact-main Qualification
 -> Publish 再次验证同一摘要
 ```
 
+每次 canonical verifier 执行还会生成独立的 Verification Execution Receipt；它只单向
+引用 Identity v2，作为操作与诊断记录，不进入上述 Authority 链，也不能被 Profile、
+Aggregate、Freshness 或 Publish 当作 Candidate 身份。
+
 `.dockerbuild` 是 BuildKit history/debug 产物，不是运行时镜像字节，也不能授予 VM
 Acceptance。每个可接受 OCI layout 必须包含 index、authoritative manifest、config 和
 全部 layer blobs，并逐摘要闭合；mutable tag、`latest`、远端 registry pointer 和重建都
@@ -30,10 +34,11 @@ Acceptance。每个可接受 OCI layout 必须包含 index、authoritative manif
 
 ## 2. Candidate Input 与 canonical verifier
 
-五个 closed JSON Schema 为：
+六个 closed JSON Schema 为：
 
 - `animemo.prepublication-candidate-input/v1`
-- `animemo.verified-prepublication-candidate/v1`
+- `animemo.verified-prepublication-candidate/v2`
+- `animemo.prepublication-candidate-verification-execution-receipt/v1`
 - `animemo.prepublication-candidate-profile-receipt/v1`
 - `animemo.prepublication-candidate-acceptance-receipt/v1`
 - `animemo.r2-origin-prestate-receipt/v2`
@@ -47,12 +52,31 @@ python -m release.cli verify-prepublication-candidate
 Verifier 必须同时绑定 repository、workflow name/path/ref、Run ID、attempt 1、head SHA、
 head tree、required jobs、精确 Artifact ID/API digest、Candidate Input、Release Notes、
 Manifest、Deployment Contract、Installer Materials、checksums 与四套 OCI DAG。产物只能
-落到 `/var/lib/animemo/prepublication-candidates/v1/<candidate-input-digest-hex>/`；
+落到 `/var/lib/animemo/prepublication-candidates/v2/<candidate-input-digest-hex>/`；
 `--verified-candidate-digest` 只能在这些 verifier-owned roots 中唯一定位同摘要 Evidence，CLI 不接受任意
 本地目录。
 
+Identity v2 只包含 Candidate Input 的不可变字段及确定性派生结果，采用 UTF-8、稳定键序、
+无 BOM、末尾恰好一个 LF 的 canonical JSON。它绑定完整 runtime file inventory、其总摘要、
+每个 OCI role 的 inventory 摘要、manifest/config/layer digest，并固定所有 release、production
+和 publish authority 为 false。`generated_at` 只由 Candidate Input 自身摘要间接绑定；
+`verified_at`、当前时钟、绝对/临时路径、主机、用户、PID、UUID、mtime、locale 和 timezone
+不得进入 Identity。
+
+`--verified-at` 仅供 Execution Receipt 使用，并规范化为 UTC RFC3339、固定六位微秒、`Z`
+结尾。Receipt 绑定 Candidate Input 摘要和 Identity v2 摘要，记录非敏感检查计数，固定
+`identity_authority_granted=false`、`release_authority_granted=false`、
+`production_authorized=false`、`publish_authorized=false`，并带 canonical body 自摘要。
+完整 Receipt 文件按其 SHA256 追加到
+`<identity-root>/verification-receipts/<receipt-digest-hex>/verification-execution-receipt.json`；
+Receipt 摘要永远不能替代 `--verified-candidate-digest`。
+
 ZIP 解包拒绝绝对路径、父目录逃逸、Windows drive path、重复路径、大小写碰撞、链接、
 特殊文件、未知成员和尺寸超限。写入采用 exclusive/atomic 语义；同一摘要不同字节失败。
+Identity 目标已存在且字节相同才幂等返回 `existing=true`；不同字节继续以
+`VERIFIED_CANDIDATE_OUTPUT_CONFLICT` 失败关闭。Receipt 目标同样只允许原子新建或
+same-byte 幂等，绝不覆盖。旧 v1 Identity 仅保留为历史取证格式，新 main 的正常 loader、
+Installer 与 Harness Acceptance 路径只接受 v2 Identity。
 
 ## 3. Candidate-only Installer
 
@@ -142,4 +166,5 @@ Freshness 中绑定的摘要、Publish 期望摘要三者相同。缺失、空�
 FAIL、Run/main/tree/version 不同、Candidate Smoke 或 postpublication receipt 均失败关闭。
 
 合并本合同实现会改变 main，因此旧 Qualification 只能用于历史分析。必须在新的 exact
-main 重新 Qualification，再进行 VM Acceptance；不得复用旧 Run。
+main 重新 Qualification，生成新的 Identity v2 和 Execution Receipt，并重新完成实时 R2
+Origin prestate 后再进行 VM Acceptance；不得复用旧 Run、旧 v1 Candidate 或旧 R2 Receipt。

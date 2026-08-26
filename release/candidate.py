@@ -67,13 +67,16 @@ QUALIFICATION_WORKFLOW_REF = (
     "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main"
 )
 CANDIDATE_INPUT_SCHEMA = "animemo.prepublication-candidate-input/v1"
-VERIFIED_CANDIDATE_SCHEMA = "animemo.verified-prepublication-candidate/v1"
+VERIFIED_CANDIDATE_SCHEMA = "animemo.verified-prepublication-candidate/v2"
+VERIFICATION_EXECUTION_RECEIPT_SCHEMA = (
+    "animemo.prepublication-candidate-verification-execution-receipt/v1"
+)
 PROFILE_RECEIPT_SCHEMA = "animemo.prepublication-candidate-profile-receipt/v1"
 AGGREGATE_RECEIPT_SCHEMA = (
     "animemo.prepublication-candidate-acceptance-receipt/v1"
 )
-VERIFIER_VERSION = "1"
-VERIFIED_CANDIDATE_ROOT = Path("/var/lib/animemo/prepublication-candidates/v1")
+VERIFIER_CONTRACT_VERSION = "2"
+VERIFIED_CANDIDATE_ROOT = Path("/var/lib/animemo/prepublication-candidates/v2")
 CANDIDATE_RUNTIME_ROOT = "candidate-runtime"
 OCI_ROLES = ("api", "postgres", "redis", "web")
 PROFILE_ROLES = ("FRESH_BASE", "DOCKER_BASE", "RUNTIME_BASE_OFFLINE")
@@ -261,6 +264,10 @@ def _parse_time(value: object, *, code: str) -> datetime:
     if parsed.tzinfo is None:
         _reject(code)
     return parsed.astimezone(timezone.utc)
+
+
+def _canonical_utc_time(value: object, *, code: str) -> str:
+    return _parse_time(value, code=code).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _relative_path(value: object) -> str:
@@ -928,16 +935,319 @@ def _extract_candidate_archive(
 def validate_verified_candidate(value: object) -> dict[str, Any]:
     candidate = _validate_schema(
         value,
-        "verified-prepublication-candidate.schema.json",
+        "verified-prepublication-candidate-v2.schema.json",
         code="VERIFIED_CANDIDATE_SCHEMA_INVALID",
     )
-    roles = [item["role"] for item in candidate["verified_artifacts"]]
     oci_roles = [item["role"] for item in candidate["oci_verification"]]
-    if roles != sorted(roles) or len(set(roles)) != 2:
-        _reject("VERIFIED_CANDIDATE_ARTIFACTS_INVALID")
     if oci_roles != list(OCI_ROLES):
         _reject("VERIFIED_CANDIDATE_OCI_ROLES_INVALID")
+    if any(
+        item["digest"] != candidate[f"{item['role']}_oci_digest"]
+        for item in candidate["oci_verification"]
+    ):
+        _reject("VERIFIED_CANDIDATE_IDENTITY_BINDING_INVALID")
+    inventory = candidate["runtime_file_inventory"]
+    if [item["path"] for item in inventory] != sorted(
+        item["path"] for item in inventory
+    ):
+        _reject("VERIFIED_CANDIDATE_RUNTIME_INVENTORY_INVALID")
+    if candidate["runtime_inventory_sha256"] != sha256_bytes(
+        canonical_json_bytes(inventory)
+    ):
+        _reject("VERIFIED_CANDIDATE_RUNTIME_INVENTORY_DIGEST_MISMATCH")
+    for role in OCI_ROLES:
+        role_inventory = [
+            item
+            for item in inventory
+            if item["path"].startswith(f"candidate-runtime/oci/{role}/")
+        ]
+        if candidate["oci_runtime_inventory_sha256"][role] != sha256_bytes(
+            canonical_json_bytes(role_inventory)
+        ):
+            _reject("VERIFIED_CANDIDATE_OCI_INVENTORY_DIGEST_MISMATCH")
+    match = _RC.fullmatch(candidate["candidate_version"])
+    if (
+        match is None
+        or match.group("target") != candidate["target_version"]
+        or int(match.group("sequence")) != candidate["candidate_sequence"]
+        or candidate["qualification_workflow_identity"]["sha"]
+        != candidate["source_sha"]
+        or len(set(candidate["qualification_artifact_ids"].values())) != 2
+        or len(set(candidate["qualification_artifact_api_digests"].values())) != 2
+    ):
+        _reject("VERIFIED_CANDIDATE_IDENTITY_BINDING_INVALID")
     return candidate
+
+
+def validate_verification_execution_receipt(value: object) -> dict[str, Any]:
+    receipt = _validate_schema(
+        value,
+        "prepublication-candidate-verification-execution-receipt.schema.json",
+        code="VERIFICATION_EXECUTION_RECEIPT_SCHEMA_INVALID",
+    )
+    if receipt["verified_at"] != _canonical_utc_time(
+        receipt["verified_at"], code="VERIFICATION_EXECUTION_RECEIPT_TIME_INVALID"
+    ):
+        _reject("VERIFICATION_EXECUTION_RECEIPT_TIME_NON_CANONICAL")
+    unsigned = dict(receipt)
+    unsigned.pop("receipt_digest")
+    if receipt["receipt_digest"] != sha256_bytes(canonical_json_bytes(unsigned)):
+        _reject("VERIFICATION_EXECUTION_RECEIPT_DIGEST_MISMATCH")
+    return receipt
+
+
+def _runtime_inventory_digests(
+    inventory: list[dict[str, Any]],
+) -> tuple[str, dict[str, str]]:
+    return (
+        sha256_bytes(canonical_json_bytes(inventory)),
+        {
+            role: sha256_bytes(
+                canonical_json_bytes(
+                    [
+                        item
+                        for item in inventory
+                        if item["path"].startswith(
+                            f"candidate-runtime/oci/{role}/"
+                        )
+                    ]
+                )
+            )
+            for role in OCI_ROLES
+        },
+    )
+
+
+def _build_verified_candidate_identity(
+    *,
+    candidate: Mapping[str, Any],
+    candidate_digest: str,
+    containing_artifact_id: int,
+    containing_artifact_api_digest: str,
+    archive_digest: str,
+    archive_file_count: int,
+    runtime: VerifiedOCIImageSet,
+) -> dict[str, Any]:
+    inventory = list(candidate["candidate_runtime_file_inventory"])
+    inventory_digest, role_inventory_digests = _runtime_inventory_digests(inventory)
+    identity = {
+        "schema": VERIFIED_CANDIDATE_SCHEMA,
+        "version": 2,
+        "purpose": "VERIFIED_LOCAL_PREPUBLICATION_INPUT",
+        "candidate_input_sha256": candidate_digest,
+        "repository": candidate["repository"],
+        "qualification_run_id": candidate["qualification_run_id"],
+        "qualification_run_attempt": candidate["qualification_run_attempt"],
+        "qualification_workflow_identity": candidate[
+            "qualification_workflow_identity"
+        ],
+        "qualification_artifact_ids": candidate["qualification_artifact_ids"],
+        "qualification_artifact_api_digests": candidate[
+            "qualification_artifact_api_digests"
+        ],
+        "source_sha": candidate["source_sha"],
+        "source_tree": candidate["source_tree"],
+        "target_version": candidate["target_version"],
+        "candidate_version": candidate["candidate_version"],
+        "candidate_sequence": candidate["candidate_sequence"],
+        "release_notes_json_sha256": candidate["release_notes_json_sha256"],
+        "release_notes_markdown_sha256": candidate[
+            "release_notes_markdown_sha256"
+        ],
+        "release_manifest_sha256": candidate["release_manifest_sha256"],
+        "deployment_contract_sha256": candidate["deployment_contract_sha256"],
+        "installer_materials_sha256": candidate["installer_materials_sha256"],
+        "checksums_sha256": candidate["checksums_sha256"],
+        "api_oci_digest": candidate["api_oci_digest"],
+        "web_oci_digest": candidate["web_oci_digest"],
+        "postgres_oci_digest": candidate["postgres_oci_digest"],
+        "redis_oci_digest": candidate["redis_oci_digest"],
+        "containing_artifact": {
+            "id": containing_artifact_id,
+            "api_digest": containing_artifact_api_digest,
+            "archive_sha256": archive_digest,
+            "file_count": archive_file_count,
+        },
+        "safe_extraction": {
+            "absolute_path_count": 0,
+            "case_collision_count": 0,
+            "duplicate_path_count": 0,
+            "hardlink_count": 0,
+            "parent_escape_count": 0,
+            "special_file_count": 0,
+            "symlink_count": 0,
+        },
+        "internal_checksums_result": "PASS",
+        "runtime_file_inventory": inventory,
+        "runtime_inventory_sha256": inventory_digest,
+        "oci_runtime_inventory_sha256": role_inventory_digests,
+        "oci_verification": [
+            {
+                "role": image.role,
+                "repository": image.repository,
+                "digest": image.digest,
+                "platform": image.platform,
+                "config_digest": image.config_digest,
+                "layer_digests": list(image.layer_digests),
+                "result": "PASS",
+            }
+            for image in sorted(runtime.images, key=lambda item: item.role)
+        ],
+        "verifier_contract_version": VERIFIER_CONTRACT_VERSION,
+        "release_authority_granted": False,
+        "production_authorized": False,
+        "publish_authorized": False,
+    }
+    return validate_verified_candidate(identity)
+
+
+def _build_verification_execution_receipt(
+    *,
+    identity: Mapping[str, Any],
+    identity_digest: str,
+    verified_at: str,
+) -> dict[str, Any]:
+    receipt = {
+        "schema": VERIFICATION_EXECUTION_RECEIPT_SCHEMA,
+        "version": 1,
+        "purpose": "VERIFICATION_EXECUTION_AUDIT_ONLY",
+        "candidate_input_sha256": identity["candidate_input_sha256"],
+        "verified_candidate_digest": identity_digest,
+        "repository": identity["repository"],
+        "qualification_run_id": identity["qualification_run_id"],
+        "qualification_run_attempt": identity["qualification_run_attempt"],
+        "source_sha": identity["source_sha"],
+        "source_tree": identity["source_tree"],
+        "candidate_version": identity["candidate_version"],
+        "verifier_contract_version": identity["verifier_contract_version"],
+        "verified_at": _canonical_utc_time(
+            verified_at, code="CANDIDATE_VERIFICATION_TIME_INVALID"
+        ),
+        "check_counts": {
+            "qualification_artifact_count": len(
+                identity["qualification_artifact_ids"]
+            ),
+            "containing_artifact_count": 1,
+            "oci_image_count": len(identity["oci_verification"]),
+            "oci_layer_count": sum(
+                len(image["layer_digests"])
+                for image in identity["oci_verification"]
+            ),
+            "runtime_file_count": len(identity["runtime_file_inventory"]),
+            "archive_file_count": identity["containing_artifact"]["file_count"],
+        },
+        "environment_classification": "SANITIZED_LOCAL_VERIFIER",
+        "result": "PASS",
+        "error_code": None,
+        "identity_authority_granted": False,
+        "release_authority_granted": False,
+        "production_authorized": False,
+        "publish_authorized": False,
+        "receipt_digest": "",
+    }
+    unsigned = dict(receipt)
+    unsigned.pop("receipt_digest")
+    receipt["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
+    return validate_verification_execution_receipt(receipt)
+
+
+def _ensure_private_directory(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        metadata = path.lstat()
+    except OSError as error:
+        raise CandidateContractError(
+            "VERIFICATION_EXECUTION_RECEIPT_OUTPUT_UNAVAILABLE"
+        ) from error
+    if (
+        path.is_symlink()
+        or bool(getattr(path, "is_junction", lambda: False)())
+        or not stat.S_ISDIR(metadata.st_mode)
+        or (os.name == "posix" and metadata.st_uid != os.geteuid())
+        or (os.name == "posix" and metadata.st_mode & 0o077)
+    ):
+        _reject("VERIFICATION_EXECUTION_RECEIPT_OUTPUT_INVALID")
+
+
+def _write_append_only_receipt(root: Path, encoded: bytes, digest: str) -> bool:
+    if not _DIGEST.fullmatch(digest) or sha256_bytes(encoded) != digest:
+        _reject("VERIFICATION_EXECUTION_RECEIPT_OUTPUT_DIGEST_INVALID")
+    receipts_root = root / "verification-receipts"
+    receipt_root = receipts_root / digest.removeprefix("sha256:")
+    _ensure_private_directory(receipts_root)
+    _ensure_private_directory(receipt_root)
+    target = receipt_root / "verification-execution-receipt.json"
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".verification-execution-receipt-", dir=receipt_root
+        )
+    except OSError as error:
+        raise CandidateContractError(
+            "VERIFICATION_EXECUTION_RECEIPT_OUTPUT_UNAVAILABLE"
+        ) from error
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o600)
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            try:
+                existing = _read_regular_file(target, maximum=MAX_JSON_BYTES)
+            except CandidateContractError as error:
+                raise CandidateContractError(
+                    "VERIFICATION_EXECUTION_RECEIPT_OUTPUT_CONFLICT"
+                ) from error
+            if existing != encoded:
+                _reject("VERIFICATION_EXECUTION_RECEIPT_OUTPUT_CONFLICT")
+            return True
+        return False
+    except CandidateContractError:
+        raise
+    except OSError as error:
+        raise CandidateContractError(
+            "VERIFICATION_EXECUTION_RECEIPT_OUTPUT_UNAVAILABLE"
+        ) from error
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _validate_identity_candidate_binding(
+    identity: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> None:
+    bound_fields = (
+        "repository",
+        "qualification_run_id",
+        "qualification_run_attempt",
+        "qualification_workflow_identity",
+        "qualification_artifact_ids",
+        "qualification_artifact_api_digests",
+        "source_sha",
+        "source_tree",
+        "target_version",
+        "candidate_version",
+        "candidate_sequence",
+        "release_notes_json_sha256",
+        "release_notes_markdown_sha256",
+        "release_manifest_sha256",
+        "deployment_contract_sha256",
+        "installer_materials_sha256",
+        "checksums_sha256",
+        "api_oci_digest",
+        "web_oci_digest",
+        "postgres_oci_digest",
+        "redis_oci_digest",
+    )
+    if any(identity[field] != candidate[field] for field in bound_fields) or identity[
+        "runtime_file_inventory"
+    ] != candidate["candidate_runtime_file_inventory"]:
+        _reject("VERIFIED_CANDIDATE_INPUT_BINDING_MISMATCH")
 
 
 def _verify_qualification_intrinsics(
@@ -1059,7 +1369,7 @@ def verify_prepublication_candidate(
 ) -> dict[str, Any]:
     if not _DIGEST.fullmatch(containing_artifact_api_digest):
         _reject("CANDIDATE_ARTIFACT_DIGEST_INVALID")
-    _parse_time(verified_at, code="CANDIDATE_VERIFICATION_TIME_INVALID")
+    _canonical_utc_time(verified_at, code="CANDIDATE_VERIFICATION_TIME_INVALID")
     selected = validate_qualification_run_metadata(
         run_metadata=run_metadata,
         jobs_metadata=jobs_metadata,
@@ -1112,7 +1422,7 @@ def verify_prepublication_candidate(
         ):
             _reject("CANDIDATE_EXPECTATION_MISMATCH")
         validate_candidate_input(candidate, root=staging)
-        artifacts = _validate_bound_artifacts(candidate, artifacts_metadata)
+        _validate_bound_artifacts(candidate, artifacts_metadata)
         runtime = _verify_runtime(staging, _strict_json_file(
             staging / "release-manifest.json", code="CANDIDATE_MANIFEST_INVALID"
         )[0])
@@ -1132,57 +1442,24 @@ def verify_prepublication_candidate(
             staging / "installer-root",
         )
         _verify_qualification_intrinsics(staging, candidate)
-        verified = {
-            "schema": VERIFIED_CANDIDATE_SCHEMA,
-            "version": 1,
-            "purpose": "VERIFIED_LOCAL_PREPUBLICATION_INPUT",
-            "candidate_input_sha256": candidate_digest,
-            "repository": REPOSITORY,
-            "qualification_run_id": expected_run_id,
-            "qualification_run_attempt": 1,
-            "qualification_workflow_identity": candidate["qualification_workflow_identity"],
-            "source_sha": expected_source_sha,
-            "source_tree": expected_source_tree,
-            "candidate_version": expected_candidate_version,
-            "verified_artifacts": artifacts,
-            "containing_artifact": {
-                "id": containing_artifact_id,
-                "api_digest": containing_artifact_api_digest,
-                "archive_sha256": archive_digest,
-                "file_count": file_count,
-            },
-            "safe_extraction": {
-                "absolute_path_count": 0,
-                "case_collision_count": 0,
-                "duplicate_path_count": 0,
-                "hardlink_count": 0,
-                "parent_escape_count": 0,
-                "special_file_count": 0,
-                "symlink_count": 0,
-            },
-            "internal_checksums_result": "PASS",
-            "runtime_file_inventory": candidate["candidate_runtime_file_inventory"],
-            "oci_verification": [
-                {
-                    "role": image.role,
-                    "repository": image.repository,
-                    "digest": image.digest,
-                    "platform": image.platform,
-                    "config_digest": image.config_digest,
-                    "layer_digests": list(image.layer_digests),
-                    "result": "PASS",
-                }
-                for image in runtime.images
-            ],
-            "verifier_version": VERIFIER_VERSION,
-            "release_authority_granted": False,
-            "production_authorized": False,
-            "publish_authorized": False,
-            "verified_at": verified_at,
-        }
-        validate_verified_candidate(verified)
+        verified = _build_verified_candidate_identity(
+            candidate=candidate,
+            candidate_digest=candidate_digest,
+            containing_artifact_id=containing_artifact_id,
+            containing_artifact_api_digest=containing_artifact_api_digest,
+            archive_digest=archive_digest,
+            archive_file_count=file_count,
+            runtime=runtime,
+        )
         encoded = canonical_json_bytes(verified)
         verified_digest = sha256_bytes(encoded)
+        receipt = _build_verification_execution_receipt(
+            identity=verified,
+            identity_digest=verified_digest,
+            verified_at=verified_at,
+        )
+        receipt_encoded = canonical_json_bytes(receipt)
+        receipt_digest = sha256_bytes(receipt_encoded)
         with (staging / "verified-candidate.json").open("xb") as output:
             output.write(encoded)
             output.flush()
@@ -1202,18 +1479,33 @@ def verify_prepublication_candidate(
             if existing.verified["candidate_input_sha256"] != candidate_digest:
                 _reject("VERIFIED_CANDIDATE_OUTPUT_CONFLICT")
             shutil.rmtree(staging)
+            staging = None
+            receipt_existing = _write_append_only_receipt(
+                target, receipt_encoded, receipt_digest
+            )
             return {
                 "status": "PASS",
                 "candidateInputDigest": candidate_digest,
                 "verifiedCandidateDigest": verified_digest,
+                "verifiedCandidateIdentityDigest": verified_digest,
+                "verificationExecutionReceiptDigest": receipt_digest,
+                "verificationExecutionReceiptContentDigest": receipt[
+                    "receipt_digest"
+                ],
+                "verificationExecutionReceiptExisting": receipt_existing,
                 "existing": True,
             }
+        _write_append_only_receipt(staging, receipt_encoded, receipt_digest)
         os.replace(staging, target)
         staging = None
         return {
             "status": "PASS",
             "candidateInputDigest": candidate_digest,
             "verifiedCandidateDigest": verified_digest,
+            "verifiedCandidateIdentityDigest": verified_digest,
+            "verificationExecutionReceiptDigest": receipt_digest,
+            "verificationExecutionReceiptContentDigest": receipt["receipt_digest"],
+            "verificationExecutionReceiptExisting": False,
             "existing": False,
         }
     except BaseException:
@@ -1296,6 +1588,8 @@ def load_verified_candidate(
     if sha256_bytes(verified_bytes) != digest:
         _reject("VERIFIED_CANDIDATE_DIGEST_MISMATCH")
     validate_verified_candidate(verified)
+    if verified_bytes != canonical_json_bytes(verified):
+        _reject("VERIFIED_CANDIDATE_JSON_NON_CANONICAL")
     candidate, candidate_bytes = _strict_json_file(
         root / "candidate-input.json", code="CANDIDATE_INPUT_INVALID"
     )
@@ -1304,6 +1598,7 @@ def load_verified_candidate(
     if root.name != verified["candidate_input_sha256"].removeprefix("sha256:"):
         _reject("CANDIDATE_INPUT_ROOT_IDENTITY_MISMATCH")
     validate_candidate_input(candidate, root=root)
+    _validate_identity_candidate_binding(verified, candidate)
     manifest = _strict_json_file(
         root / "release-manifest.json", code="CANDIDATE_MANIFEST_INVALID"
     )[0]
@@ -1326,6 +1621,20 @@ def load_verified_candidate(
     for identity in material_files:
         verified_materials.material(identity.path)
     images = _verify_runtime(root, manifest)
+    observed_oci = [
+        {
+            "role": image.role,
+            "repository": image.repository,
+            "digest": image.digest,
+            "platform": image.platform,
+            "config_digest": image.config_digest,
+            "layer_digests": list(image.layer_digests),
+            "result": "PASS",
+        }
+        for image in sorted(images.images, key=lambda item: item.role)
+    ]
+    if observed_oci != verified["oci_verification"]:
+        _reject("VERIFIED_CANDIDATE_OCI_BINDING_MISMATCH")
     materials = VerifiedReleaseMaterials(
         manifest=dict(manifest),
         deployment_contract=dict(deployment),
@@ -1429,6 +1738,7 @@ __all__ = [
     "CANDIDATE_INPUT_SCHEMA",
     "INSTALLER_PROFILES",
     "PROFILE_RECEIPT_SCHEMA",
+    "VERIFICATION_EXECUTION_RECEIPT_SCHEMA",
     "VERIFIED_CANDIDATE_ROOT",
     "VERIFIED_CANDIDATE_SCHEMA",
     "CandidateContractError",
@@ -1444,6 +1754,7 @@ __all__ = [
     "validate_aggregate_receipt",
     "validate_candidate_input",
     "validate_profile_receipt",
+    "validate_verification_execution_receipt",
     "validate_verified_candidate",
     "verify_prepublication_candidate",
 ]
