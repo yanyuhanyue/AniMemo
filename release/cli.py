@@ -1150,7 +1150,13 @@ def _parser() -> argparse.ArgumentParser:
     candidate_input.add_argument("--output", type=Path, required=True)
     candidate_input.set_defaults(handler=_build_prepublication_candidate_input)
 
-    candidate_verify = subparsers.add_parser("verify-prepublication-candidate")
+    candidate_verify = subparsers.add_parser(
+        "verify-prepublication-candidate",
+        description=(
+            "Create a deterministic Candidate Identity v2 and an append-only "
+            "non-authoritative verification execution receipt."
+        ),
+    )
     candidate_verify.add_argument("--archive", type=Path, required=True)
     candidate_verify.add_argument("--run-metadata", type=Path, required=True)
     candidate_verify.add_argument("--jobs-metadata", type=Path, required=True)
@@ -1163,7 +1169,14 @@ def _parser() -> argparse.ArgumentParser:
     candidate_verify.add_argument("--expected-source-sha", required=True)
     candidate_verify.add_argument("--expected-source-tree", required=True)
     candidate_verify.add_argument("--expected-candidate-version", required=True)
-    candidate_verify.add_argument("--verified-at", required=True)
+    candidate_verify.add_argument(
+        "--verified-at",
+        required=True,
+        help=(
+            "verification execution receipt timestamp only; this value never "
+            "enters Candidate Identity bytes"
+        ),
+    )
     candidate_verify.set_defaults(handler=_verify_prepublication_candidate)
 
     candidate_receipt = subparsers.add_parser(

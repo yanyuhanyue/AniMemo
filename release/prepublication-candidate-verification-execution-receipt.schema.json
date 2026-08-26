@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://animemo.cc/schemas/prepublication-candidate-verification-execution-receipt-v1.json",
+  "title": "AniMemo prepublication candidate verification execution receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "purpose",
+    "candidate_input_sha256",
+    "verified_candidate_digest",
+    "repository",
+    "qualification_run_id",
+    "qualification_run_attempt",
+    "source_sha",
+    "source_tree",
+    "candidate_version",
+    "verifier_contract_version",
+    "verified_at",
+    "check_counts",
+    "environment_classification",
+    "result",
+    "error_code",
+    "identity_authority_granted",
+    "release_authority_granted",
+    "production_authorized",
+    "publish_authorized",
+    "receipt_digest"
+  ],
+  "properties": {
+    "schema": {"const": "animemo.prepublication-candidate-verification-execution-receipt/v1"},
+    "version": {"const": 1},
+    "purpose": {"const": "VERIFICATION_EXECUTION_AUDIT_ONLY"},
+    "candidate_input_sha256": {"$ref": "#/$defs/digest"},
+    "verified_candidate_digest": {"$ref": "#/$defs/digest"},
+    "repository": {"const": "yanyuhanyue/AniMemo"},
+    "qualification_run_id": {"type": "integer", "minimum": 1},
+    "qualification_run_attempt": {"const": 1},
+    "source_sha": {"$ref": "#/$defs/gitSha"},
+    "source_tree": {"$ref": "#/$defs/gitSha"},
+    "candidate_version": {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"},
+    "verifier_contract_version": {"const": "2"},
+    "verified_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$", "format": "date-time"},
+    "check_counts": {"$ref": "#/$defs/checkCounts"},
+    "environment_classification": {"const": "SANITIZED_LOCAL_VERIFIER"},
+    "result": {"const": "PASS"},
+    "error_code": {"type": "null"},
+    "identity_authority_granted": {"const": false},
+    "release_authority_granted": {"const": false},
+    "production_authorized": {"const": false},
+    "publish_authorized": {"const": false},
+    "receipt_digest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "checkCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "qualification_artifact_count",
+        "containing_artifact_count",
+        "oci_image_count",
+        "oci_layer_count",
+        "runtime_file_count",
+        "archive_file_count"
+      ],
+      "properties": {
+        "qualification_artifact_count": {"const": 2},
+        "containing_artifact_count": {"const": 1},
+        "oci_image_count": {"const": 4},
+        "oci_layer_count": {"type": "integer", "minimum": 4, "maximum": 1024},
+        "runtime_file_count": {"type": "integer", "minimum": 12, "maximum": 1040},
+        "archive_file_count": {"type": "integer", "minimum": 13, "maximum": 1050}
+      }
+    }
+  }
+}
