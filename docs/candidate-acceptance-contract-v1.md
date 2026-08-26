@@ -30,12 +30,13 @@ Acceptance。每个可接受 OCI layout 必须包含 index、authoritative manif
 
 ## 2. Candidate Input 与 canonical verifier
 
-四个 closed JSON Schema 为：
+五个 closed JSON Schema 为：
 
 - `animemo.prepublication-candidate-input/v1`
 - `animemo.verified-prepublication-candidate/v1`
 - `animemo.prepublication-candidate-profile-receipt/v1`
 - `animemo.prepublication-candidate-acceptance-receipt/v1`
+- `animemo.r2-origin-prestate-receipt/v2`
 
 唯一验证入口为：
 
@@ -86,16 +87,38 @@ python scripts/candidate_vm_harness.py
 Harness 默认 `PLAN_ONLY`。只允许固定 `FRESH_BASE`、`DOCKER_BASE`、
 `RUNTIME_BASE_OFFLINE` 及其固定 VMware snapshot 名；不接受 VM path、snapshot path、
 shell、package list 或安全策略覆盖。`--execute` 还必须给出完全相同的 aggregate plan
-digest，并在任何 clone 前通过 Cloudflare R2 Objects REST API 对固定 account hash、
-bucket、RC.14 prefix 和六个 expected keys 的只读 empty 证明。
+digest，并在任何 clone 前通过固定 Account、Bucket、RC.14 Prefix 和六个 expected keys 的
+S3 只读 empty 证明。
 
-公共 CDN 404 不是 R2 Origin 权威。缺少短期只读凭据时必须在 clone 前失败。Harness
-实现不暴露 R2 写、删、复制、Bucket、DNS、Cache、Worker 或 Route 方法，也不记录 token
-或 Authorization header。
+其中 R2 Origin 的 canonical acceptance 入口只允许显式的 S3 Object Read only 模式：
+
+```text
+python -m release.cli verify-rc14-r2-origin-empty \
+  --auth-method s3-object-read-only \
+  --expected-source-sha <exact-sha> \
+  --expected-source-tree <exact-tree> \
+  --output <new-receipt-path>
+```
+
+它使用 `ListObjectsV2` 枚举固定 Prefix，并对六个 expected keys 执行 `HeadObject`；客户端
+接口只暴露 `ListObjectsV2`、`HeadObject`、`GetObject` 三个读取方法。Account、Bucket、
+jurisdiction、endpoint host、Prefix 和 source SHA/tree 全部进入 closed Receipt。REST Bearer
+Token、公共 CDN、GitHub Release 和其他 transport 均不是 fallback，也不能产生 Candidate
+Acceptance 所需的 R2 Receipt。
+
+公共 CDN 404 不是 R2 Origin 权威。缺少专用 S3 只读凭据、Receipt schema/auth method 不符、
+Receipt 被篡改或 source SHA/tree 不匹配时，必须在读取 Candidate、公共回查和 clone 前失败。
+专用凭据只从当前进程的 `ANIMEMO_R2_S3_ACCESS_KEY_ID`、
+`ANIMEMO_R2_S3_SECRET_ACCESS_KEY` 与可选的 `ANIMEMO_R2_S3_SESSION_TOKEN` 读取；不使用
+AWS profile、metadata 或通用 `AWS_*` ambient chain。Harness 实现不暴露 R2 写、删、复制、
+multipart、Bucket、DNS、Cache、Worker 或 Route 方法，也不记录 Access Key、Secret、Session
+Token、Authorization header、签名或 signed URL。操作员边界见
+[`R2 S3 只读凭据处理合同`](r2-s3-readonly-credential-handling.md)。
 
 每个 Profile Receipt 必须回绑 Candidate/Run/SHA/tree/version、base/snapshot/clone、平台
 与 Installer plan/receipt、四个 OCI digest、Doctor、canonical tests、网络计数和原始 VM
-前后 hashes。Aggregate Receipt 要求三份不同 Profile digest、全部 PASS、RC.14 前后仍为空、
+前后 hashes。Aggregate Receipt 绑定已验证 R2 prestate Receipt 的摘要，并要求三份不同
+Profile digest、全部 PASS、RC.14 前后仍为空、
 repository/publication/shared-host mutation 为零，并固定
 `release_authority_granted=false`、`publish_authorized=false`。
 

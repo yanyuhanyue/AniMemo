@@ -9,7 +9,6 @@ import stat
 import tarfile
 import tempfile
 import unittest
-import urllib.request
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +22,6 @@ from durability.platform import (
 )
 from release.candidate import (
     CandidateContractError,
-    CloudflareR2ReadonlyAdapter,
     _extract_candidate_archive,
     _verify_qualification_intrinsics,
     _verify_runtime,
@@ -38,7 +36,6 @@ from release.candidate import (
     validate_candidate_input,
     validate_profile_receipt,
     verify_prepublication_candidate,
-    verify_r2_origin_empty,
 )
 from release.contract import (
     POSTGRES_DIGEST,
@@ -1039,74 +1036,6 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                     expected_candidate_version="v1.1.0-rc.14",
                     verified_at="2026-08-25T12:00:00Z", _state_root=Path(temporary) / "state",
                 )
-
-    def test_r2_adapter_is_read_only_and_requires_exact_origin(self):
-        class Transport:
-            def __init__(self):
-                self.calls = []
-
-            def get(self, url, headers):
-                self.calls.append((url, set(headers)))
-                if "?" in url:
-                    return 200, (
-                        b'{"result":[],"result_info":{"is_truncated":false},'
-                        b'"success":true}'
-                    )
-                return 404, b"{}"
-
-        transport = Transport()
-        with mock.patch(
-            "release.candidate.R2_ACCOUNT_ID_SHA256", _digest(b"account")
-        ):
-            result = verify_r2_origin_empty(
-                account_id="account", token="readonly-token", transport=transport
-            )
-        self.assertEqual(result["writeMethodCount"], 0)
-        self.assertEqual(len(transport.calls), 7)
-        self.assertTrue(all("Authorization" in headers for _, headers in transport.calls))
-        object_urls = [url for url, _ in transport.calls if "?" not in url]
-        self.assertTrue(
-            all(
-                "/objects/yanyuhanyue/AniMemo/releases/download/"
-                "v1.1.0-rc.14/" in url
-                for url in object_urls
-            )
-        )
-        self.assertTrue(all("%2F" not in url.upper() for url in object_urls))
-
-    def test_r2_production_adapter_disables_environment_proxies(self):
-        class Response:
-            status = 404
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self, _maximum):
-                return b"{}"
-
-        opener = SimpleNamespace(open=lambda *_args, **_kwargs: Response())
-        with mock.patch(
-            "release.candidate.urllib.request.build_opener",
-            return_value=opener,
-        ) as build_opener:
-            status, _ = CloudflareR2ReadonlyAdapter().get(
-                "https://api.cloudflare.com/client/v4/accounts/account/"
-                "r2/buckets/animemo-release-mirror/objects/key",
-                {"Authorization": "Bearer test-only-token"},
-            )
-        self.assertEqual(status, 404)
-        handlers = build_opener.call_args.args
-        proxy_handlers = [
-            handler
-            for handler in handlers
-            if isinstance(handler, urllib.request.ProxyHandler)
-        ]
-        self.assertEqual(len(proxy_handlers), 1)
-        self.assertEqual(proxy_handlers[0].proxies, {})
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://animemo.cc/schemas/r2-origin-prestate-receipt-v2.json",
+  "title": "AniMemo R2 origin prestate receipt v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "repository", "source_sha", "source_tree",
+    "target_version", "target_rc", "account_id", "bucket", "jurisdiction",
+    "endpoint_host", "auth_method", "prefix", "list_objects_v2_request_count",
+    "head_object_request_count", "get_object_request_count", "write_request_count",
+    "object_count", "completion_marker_count", "temporary_object_count",
+    "object_inventory", "started_at", "completed_at", "result", "error_code",
+    "release_authority_granted", "publish_authorized", "receipt_digest"
+  ],
+  "properties": {
+    "schema": {"const": "animemo.r2-origin-prestate-receipt/v2"},
+    "version": {"const": 2},
+    "repository": {"const": "yanyuhanyue/AniMemo"},
+    "source_sha": {"$ref": "#/$defs/gitSha"},
+    "source_tree": {"$ref": "#/$defs/gitSha"},
+    "target_version": {"const": "v1.1.0"},
+    "target_rc": {"const": "v1.1.0-rc.14"},
+    "account_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "bucket": {"const": "animemo-release-mirror"},
+    "jurisdiction": {"enum": ["default", "eu", "fedramp", "us"]},
+    "endpoint_host": {"type": "string", "pattern": "^[0-9a-f]{32}(\\.(eu|fedramp|us))?\\.r2\\.cloudflarestorage\\.com$"},
+    "auth_method": {"const": "R2_S3_OBJECT_READ_ONLY"},
+    "prefix": {"const": "yanyuhanyue/AniMemo/releases/download/v1.1.0-rc.14/"},
+    "list_objects_v2_request_count": {"type": "integer", "minimum": 1, "maximum": 64},
+    "head_object_request_count": {"const": 6},
+    "get_object_request_count": {"const": 0},
+    "write_request_count": {"const": 0},
+    "object_count": {"const": 0},
+    "completion_marker_count": {"const": 0},
+    "temporary_object_count": {"const": 0},
+    "object_inventory": {"type": "array", "maxItems": 0},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "result": {"const": "PROVEN_EMPTY"},
+    "error_code": {"type": "null"},
+    "release_authority_granted": {"const": false},
+    "publish_authorized": {"const": false},
+    "receipt_digest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
