@@ -1204,7 +1204,24 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                     )
                 finally:
                     os.chdir(original_cwd)
-                same_run = invoke(states[0], times[0], 1_800_000_000_000_000_000)
+                same_receipt_path = (
+                    states[0]
+                    / results[0]["candidateInputDigest"][7:]
+                    / "verification-receipts"
+                    / results[0]["verificationExecutionReceiptDigest"][7:]
+                    / "verification-execution-receipt.json"
+                )
+                publication_window_link = (
+                    same_receipt_path.parent
+                    / ".verification-execution-receipt-publication-window"
+                )
+                os.link(same_receipt_path, publication_window_link)
+                try:
+                    same_run = invoke(
+                        states[0], times[0], 1_800_000_000_000_000_000
+                    )
+                finally:
+                    publication_window_link.unlink()
                 later_run = invoke(states[0], times[2], 1_900_000_000_000_000_000)
 
                 identity_bytes = [

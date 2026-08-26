@@ -99,6 +99,8 @@ _RC = re.compile(
     r"(?:0|[1-9][0-9]*))-rc\.(?P<sequence>[1-9][0-9]*)\Z"
 )
 _WINDOWS_DRIVE = re.compile(r"[A-Za-z]:")
+_SINGLE_LINK_COUNT = frozenset({1})
+_RECEIPT_PUBLICATION_LINK_COUNTS = frozenset({1, 2})
 
 _QUALIFICATION_ROOT_FILES = frozenset(
     {
@@ -154,7 +156,12 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
 
 
 @contextmanager
-def _open_regular_file(path: Path, *, maximum: int) -> Iterator[BinaryIO]:
+def _open_regular_file(
+    path: Path,
+    *,
+    maximum: int,
+    allowed_link_counts: frozenset[int] = _SINGLE_LINK_COUNT,
+) -> Iterator[BinaryIO]:
     try:
         before = path.lstat()
     except OSError as error:
@@ -163,7 +170,7 @@ def _open_regular_file(path: Path, *, maximum: int) -> Iterator[BinaryIO]:
         path.is_symlink()
         or bool(getattr(path, "is_junction", lambda: False)())
         or not stat.S_ISREG(before.st_mode)
-        or before.st_nlink != 1
+        or before.st_nlink not in allowed_link_counts
         or before.st_size < 0
         or before.st_size > maximum
     ):
@@ -177,7 +184,7 @@ def _open_regular_file(path: Path, *, maximum: int) -> Iterator[BinaryIO]:
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
-            or opened.st_nlink != 1
+            or opened.st_nlink not in allowed_link_counts
             or opened.st_size < 0
             or opened.st_size > maximum
             or _file_identity(opened) != _file_identity(before)
@@ -186,7 +193,10 @@ def _open_regular_file(path: Path, *, maximum: int) -> Iterator[BinaryIO]:
         with os.fdopen(descriptor, "rb", closefd=False) as source:
             yield source
             after = os.fstat(descriptor)
-            if _file_identity(after) != _file_identity(opened):
+            if (
+                after.st_nlink not in allowed_link_counts
+                or _file_identity(after) != _file_identity(opened)
+            ):
                 _reject("CANDIDATE_FILE_CHANGED_DURING_READ")
     finally:
         os.close(descriptor)
@@ -207,9 +217,18 @@ def _sha256_file(path: Path, *, maximum: int = MAX_ARCHIVE_MEMBER_BYTES) -> tupl
     return "sha256:" + digest.hexdigest(), size
 
 
-def _read_regular_file(path: Path, *, maximum: int) -> bytes:
+def _read_regular_file(
+    path: Path,
+    *,
+    maximum: int,
+    allowed_link_counts: frozenset[int] = _SINGLE_LINK_COUNT,
+) -> bytes:
     try:
-        with _open_regular_file(path, maximum=maximum) as source:
+        with _open_regular_file(
+            path,
+            maximum=maximum,
+            allowed_link_counts=allowed_link_counts,
+        ) as source:
             value = source.read(maximum + 1)
     except OSError as error:
         raise CandidateContractError("CANDIDATE_FILE_UNREADABLE") from error
@@ -1196,7 +1215,11 @@ def _write_append_only_receipt(root: Path, encoded: bytes, digest: str) -> bool:
             os.link(temporary, target)
         except FileExistsError:
             try:
-                existing = _read_regular_file(target, maximum=MAX_JSON_BYTES)
+                existing = _read_regular_file(
+                    target,
+                    maximum=MAX_JSON_BYTES,
+                    allowed_link_counts=_RECEIPT_PUBLICATION_LINK_COUNTS,
+                )
             except CandidateContractError as error:
                 raise CandidateContractError(
                     "VERIFICATION_EXECUTION_RECEIPT_OUTPUT_CONFLICT"
