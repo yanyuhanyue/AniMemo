@@ -23,7 +23,7 @@ v1.1.0         GitHub Release，只能从同版本 RC 晋升
 
 日常 manual release workflow 接受 `patch|minor|major` 和 `beta|rc`。工具以最新 Stable 为基线计算目标版本，再对目标版本与通道选择最大现有序号加一，因此 `rc.10` 后是 `rc.11`，不做字符串排序。
 
-仓库当前没有 Stable tag。首条发布线必须显式使用严格 SemVer `target_version_override`（预期 `v1.0.0`）；已有任意 Stable tag 后该 override 永久拒绝。创建 tag 前必须再次查询远端并确认目标 tag 与 Release 均不存在，以覆盖两个 manual run 的竞态窗口；任何碰撞都失败，不覆盖历史。
+首条发布线的离线 resolver 引导流程必须显式使用严格 SemVer `target_version_override`；已有任意 Stable tag 后该 override 永久拒绝。Canonical Release Producer workflow 不暴露也不转发该引导专用参数，完整 Qualification 只能通过 `version_bump` 选择现有 Stable 之后的目标发布线。创建 tag 前必须再次查询远端并确认目标 tag 与 Release 均不存在，以覆盖两个 manual run 的竞态窗口；任何碰撞都失败，不覆盖历史。
 
 ## Build once, promote many
 

@@ -25,10 +25,6 @@ on:
         description: Optional exact candidate commit for a read-only dry-run; forbidden for publish
         required: false
         type: string
-      target_version_override:
-        description: Bootstrap-only vMAJOR.MINOR.PATCH when no Stable tag exists
-        required: false
-        type: string
       intended_main_sha:
         description: Exact main commit intended for this release
         required: true
@@ -177,7 +173,6 @@ jobs:
         env:
           VERSION_BUMP: ${{ inputs.version_bump }}
           RELEASE_CHANNEL: ${{ inputs.channel }}
-          TARGET_VERSION_OVERRIDE: ${{ inputs.target_version_override }}
         shell: bash
         run: |
           set -euo pipefail
@@ -187,7 +182,6 @@ jobs:
             --publication-reservations-file release/publication-reservations.json \
             --bump "$VERSION_BUMP" \
             --channel "$RELEASE_CHANNEL" \
-            --target-version-override "$TARGET_VERSION_OVERRIDE" \
             --github-output "$GITHUB_OUTPUT"
       - name: Resolve the exact previous Stable notes boundary
         id: previous
