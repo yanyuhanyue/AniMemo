@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import logging
 import os
 import tempfile
 import traceback
@@ -456,6 +457,58 @@ class R2S3PrestateTests(unittest.TestCase):
                 credentials=R2S3Credentials(ACCESS, SECRET, SESSION),
             )
         self.assertIsInstance(client, Boto3R2ReadonlyClient)
+
+    def test_real_sdk_debug_logging_is_suppressed_before_signed_request_output(self):
+        from botocore.awsrequest import AWSResponse
+
+        class RawResponse:
+            def stream(self, _amount=None, decode_content=False):
+                del decode_content
+                yield (
+                    b'<?xml version="1.0" encoding="UTF-8"?>'
+                    b'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                    b'<Name>animemo-release-mirror</Name><Prefix></Prefix>'
+                    b'<KeyCount>0</KeyCount><MaxKeys>1000</MaxKeys>'
+                    b'<IsTruncated>false</IsTruncated></ListBucketResult>'
+                )
+
+        def fake_send(_session, request):
+            return AWSResponse(
+                request.url,
+                200,
+                {"content-type": "application/xml"},
+                RawResponse(),
+            )
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        root = logging.getLogger()
+        previous_level = root.level
+        previous_disable = logging.root.manager.disable
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
+        try:
+            with mock.patch(
+                "botocore.httpsession.URLLib3Session.send", autospec=True
+            ) as send:
+                send.side_effect = fake_send
+                client = Boto3R2ReadonlyClient(
+                    account_id=ACCOUNT_ID,
+                    jurisdiction="default",
+                    credentials=R2S3Credentials(ACCESS, SECRET, SESSION),
+                )
+                response = client.list_objects_v2()
+                self.assertEqual(response.get("Contents", []), [])
+                self.assertEqual(send.call_count, 1)
+        finally:
+            root.removeHandler(handler)
+            root.setLevel(previous_level)
+        self.assertEqual(logging.root.manager.disable, previous_disable)
+        output = stream.getvalue()
+        for sentinel in (ACCESS, SECRET, SESSION, SIGNATURE):
+            self.assertEqual(output.count(sentinel), 0)
+        self.assertEqual(output.count("CanonicalRequest"), 0)
+        self.assertEqual(output.count("Signature:"), 0)
 
     def test_receipt_is_deterministic_stable_closed_and_immutable(self):
         first = self.verify()

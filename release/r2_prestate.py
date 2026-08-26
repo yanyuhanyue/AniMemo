@@ -9,10 +9,14 @@ fallback in this module.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import sys
 import tempfile
+import threading
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -56,6 +60,7 @@ MAX_METADATA_BYTES = 16 * 1024
 MAX_KEYS_PER_PAGE = 1000
 READ_METHOD_COUNT = 3
 WRITE_METHOD_COUNT = 0
+_SDK_LOGGING_LOCK = threading.RLock()
 
 _ACCOUNT_ID = re.compile(r"[0-9a-f]{32}\Z")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -127,6 +132,19 @@ def _raise(
     code: str, *, safe_diagnostic: Mapping[str, object] | None = None
 ) -> None:
     raise R2S3PrecheckError(code, safe_diagnostic=safe_diagnostic)
+
+
+@contextmanager
+def _opaque_sdk_logging_boundary():
+    """Prevent opaque SDK internals from logging signed request material."""
+
+    with _SDK_LOGGING_LOCK:
+        previous = logging.root.manager.disable
+        logging.disable(sys.maxsize)
+        try:
+            yield
+        finally:
+            logging.disable(previous)
 
 
 def _utc_now() -> datetime:
@@ -281,42 +299,43 @@ class Boto3R2ReadonlyClient:
     ) -> None:
         _, endpoint = build_r2_s3_endpoint(account_id, jurisdiction)
         failed = False
-        try:
-            import boto3
-            from botocore.config import Config
-            from botocore.session import Session as BotocoreSession
+        with _opaque_sdk_logging_boundary():
+            try:
+                import boto3
+                from botocore.config import Config
+                from botocore.session import Session as BotocoreSession
 
-            botocore_session = BotocoreSession(
-                session_vars={
-                    "profile": (None, [], None, None),
-                    "config_file": (None, None, os.devnull, None),
-                    "credentials_file": (None, None, os.devnull, None),
-                }
-            )
-            session = boto3.Session(
-                botocore_session=botocore_session,
-                aws_access_key_id=credentials.access_key_id,
-                aws_secret_access_key=credentials.secret_access_key,
-                aws_session_token=credentials.session_token,
-                region_name="auto",
-            )
-            self.__client = session.client(
-                "s3",
-                endpoint_url=endpoint,
-                region_name="auto",
-                use_ssl=True,
-                verify=True,
-                config=Config(
-                    signature_version="s3v4",
-                    connect_timeout=5,
-                    read_timeout=15,
-                    retries={"max_attempts": 3, "mode": "standard"},
-                    proxies={},
-                    s3={"addressing_style": "path"},
-                ),
-            )
-        except Exception:  # noqa: BLE001 - suppress all SDK/config detail
-            failed = True
+                botocore_session = BotocoreSession(
+                    session_vars={
+                        "profile": (None, [], None, None),
+                        "config_file": (None, None, os.devnull, None),
+                        "credentials_file": (None, None, os.devnull, None),
+                    }
+                )
+                session = boto3.Session(
+                    botocore_session=botocore_session,
+                    aws_access_key_id=credentials.access_key_id,
+                    aws_secret_access_key=credentials.secret_access_key,
+                    aws_session_token=credentials.session_token,
+                    region_name="auto",
+                )
+                self.__client = session.client(
+                    "s3",
+                    endpoint_url=endpoint,
+                    region_name="auto",
+                    use_ssl=True,
+                    verify=True,
+                    config=Config(
+                        signature_version="s3v4",
+                        connect_timeout=5,
+                        read_timeout=15,
+                        retries={"max_attempts": 3, "mode": "standard"},
+                        proxies={},
+                        s3={"addressing_style": "path"},
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - suppress all SDK/config detail
+                failed = True
         if failed:
             _raise("R2_S3_RESPONSE_INVALID")
 
@@ -337,10 +356,11 @@ class Boto3R2ReadonlyClient:
         if continuation_token is not None:
             request["ContinuationToken"] = continuation_token
         failure_code: str | None = None
-        try:
-            response = self.__client.list_objects_v2(**request)
-        except Exception as error:  # noqa: BLE001 - normalize SDK exceptions
-            failure_code = _classify_client_error(error)
+        with _opaque_sdk_logging_boundary():
+            try:
+                response = self.__client.list_objects_v2(**request)
+            except Exception as error:  # noqa: BLE001 - normalize SDK exceptions
+                failure_code = _classify_client_error(error)
         if failure_code is not None:
             _raise(failure_code)
         if not isinstance(response, Mapping):
@@ -350,16 +370,17 @@ class Boto3R2ReadonlyClient:
     def head_object(self, *, key: str) -> Mapping[str, object]:
         failure_code: str | None = None
         missing = False
-        try:
-            response = self.__client.head_object(
-                Bucket=R2_BUCKET,
-                Key=self._bound_key(key),
-            )
-        except Exception as error:  # noqa: BLE001 - normalize SDK exceptions
-            if _is_missing_object(error):
-                missing = True
-            else:
-                failure_code = _classify_client_error(error)
+        with _opaque_sdk_logging_boundary():
+            try:
+                response = self.__client.head_object(
+                    Bucket=R2_BUCKET,
+                    Key=self._bound_key(key),
+                )
+            except Exception as error:  # noqa: BLE001 - normalize SDK exceptions
+                if _is_missing_object(error):
+                    missing = True
+                else:
+                    failure_code = _classify_client_error(error)
         if missing:
             raise _R2ObjectNotFound
         if failure_code is not None:
@@ -370,13 +391,14 @@ class Boto3R2ReadonlyClient:
 
     def get_object(self, *, key: str) -> Mapping[str, object]:
         failure_code: str | None = None
-        try:
-            response = self.__client.get_object(
-                Bucket=R2_BUCKET,
-                Key=self._bound_key(key),
-            )
-        except Exception as error:  # noqa: BLE001 - normalize SDK exceptions
-            failure_code = _classify_client_error(error)
+        with _opaque_sdk_logging_boundary():
+            try:
+                response = self.__client.get_object(
+                    Bucket=R2_BUCKET,
+                    Key=self._bound_key(key),
+                )
+            except Exception as error:  # noqa: BLE001 - normalize SDK exceptions
+                failure_code = _classify_client_error(error)
         if failure_code is not None:
             _raise(failure_code)
         if not isinstance(response, Mapping):

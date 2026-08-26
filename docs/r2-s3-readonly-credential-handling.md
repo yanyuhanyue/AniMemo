@@ -49,7 +49,9 @@ AWS profile、`~/.aws/credentials`、EC2/ECS metadata 和通用 `AWS_*` 凭据�
 Access Key ID 与 Secret Access Key 同等敏感。Receipt、stdout、stderr、异常、日志、诊断
 JSON、测试报告和 Evidence 均不得包含 Access Key、Secret、Session Token、Authorization、
 Cookie、签名、canonical request、SDK credential repr 或 signed URL。统一 sanitizer 在输出前
-移除这些值和不可信请求/响应诊断；禁止显示前后字符、长度组合或凭据哈希。
+移除这些值和不可信请求/响应诊断；不透明 SDK 的构造与请求调用在串行 logging boundary 内
+完全抑制第三方日志，随后恢复调用前的日志级别，因此开启 DEBUG 也不能绕过该边界。禁止显示
+前后字符、长度组合或凭据哈希。
 
 使用完成后按后续获授权的操作员流程撤销凭据，并从临时进程环境和 Secret Store 的临时槽位
 清除。本合同本身不授权创建、调用或撤销任何真实凭据。
