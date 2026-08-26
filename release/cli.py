@@ -28,7 +28,6 @@ from .candidate import (
     extract_candidate_oci_archive,
     normalize_candidate_oci_layout,
     verify_prepublication_candidate,
-    verify_rc14_r2_origin_from_environment,
 )
 from .contract import (
     ReleaseContractError,
@@ -98,6 +97,12 @@ from .publication import (
     PublicationError,
     build_publication_plan,
     validate_publication_plan,
+)
+from .r2_prestate import (
+    R2_AUTH_METHOD_ARGUMENT,
+    sanitize_r2_diagnostic,
+    verify_rc14_r2_origin_from_environment,
+    write_r2_origin_receipt,
 )
 from .trust_bootstrap import TrustBootstrapError, build_initial_trust_kit
 
@@ -528,8 +533,19 @@ def _decode_candidate_acceptance_receipt(args) -> dict[str, object]:
 
 
 def _verify_rc14_r2_origin(args) -> dict[str, object]:
-    del args
-    return verify_rc14_r2_origin_from_environment()
+    receipt = verify_rc14_r2_origin_from_environment(
+        source_sha=args.expected_source_sha,
+        source_tree=args.expected_source_tree,
+        auth_method=args.auth_method,
+        environment=os.environ,
+    )
+    digest = write_r2_origin_receipt(args.output, receipt)
+    return {
+        "status": "PASS",
+        "authMethod": receipt["auth_method"],
+        "result": receipt["result"],
+        "sha256": digest,
+    }
 
 
 def _extract_qualification_artifact(args) -> dict[str, object]:
@@ -1158,6 +1174,14 @@ def _parser() -> argparse.ArgumentParser:
     candidate_receipt.set_defaults(handler=_decode_candidate_acceptance_receipt)
 
     r2_precheck = subparsers.add_parser("verify-rc14-r2-origin-empty")
+    r2_precheck.add_argument(
+        "--auth-method",
+        choices=(R2_AUTH_METHOD_ARGUMENT,),
+        required=True,
+    )
+    r2_precheck.add_argument("--expected-source-sha", required=True)
+    r2_precheck.add_argument("--expected-source-tree", required=True)
+    r2_precheck.add_argument("--output", type=Path, required=True)
     r2_precheck.set_defaults(handler=_verify_rc14_r2_origin)
 
     qualification_artifact = subparsers.add_parser(
@@ -1443,9 +1467,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     except CandidateContractError as error:
+        diagnostic = getattr(error, "safe_diagnostic", None)
+        value: dict[str, object] = {"code": error.code, "detail": str(error)}
+        if diagnostic:
+            value["diagnostic"] = diagnostic
         print(
             json.dumps(
-                {"code": error.code, "detail": str(error)},
+                sanitize_r2_diagnostic(value, environment=os.environ),
                 ensure_ascii=False,
             ),
             file=sys.stderr,

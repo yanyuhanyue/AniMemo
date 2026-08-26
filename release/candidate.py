@@ -17,16 +17,13 @@ import stat
 import tarfile
 import tempfile
 import unicodedata
-import urllib.error
-import urllib.parse
-import urllib.request
 import zipfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Protocol
+from typing import Any, BinaryIO
 
 from jsonschema import Draft202012Validator, FormatChecker
 
@@ -86,27 +83,12 @@ INSTALLER_PROFILES = (
     "OFFLINE_VALIDATE_ONLY",
 )
 
-R2_ACCOUNT_ID_SHA256 = (
-    "sha256:c5afddc36ea670626be71b625029128a3381d836807378da8eada702bef541e1"
-)
-R2_BUCKET = "animemo-release-mirror"
-R2_RC14_PREFIX = "yanyuhanyue/AniMemo/releases/download/v1.1.0-rc.14/"
-R2_RC14_EXPECTED_KEYS = (
-    "animemo-v1.1.0-rc.14-portable.tar",
-    "checksums.txt",
-    "deployment-contract.json",
-    "installer-materials.tar",
-    "mirror-receipt.json",
-    "release-manifest.json",
-)
-
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_ARCHIVE_MEMBER_BYTES = 4 * 1024 * 1024 * 1024
 MAX_ARCHIVE_FILE_COUNT = 1100
 MAX_RUNTIME_BYTES = 16 * 1024 * 1024 * 1024
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_RECEIPT_B64URL_BYTES = 512 * 1024
-MAX_R2_RESPONSE_BYTES = 4 * 1024 * 1024
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 _RC = re.compile(
@@ -1442,149 +1424,6 @@ def decode_aggregate_receipt_b64url(value: str) -> tuple[dict[str, Any], bytes]:
     return receipt, encoded
 
 
-class R2ReadonlyTransport(Protocol):
-    def get(self, url: str, headers: Mapping[str, str]) -> tuple[int, bytes]: ...
-
-
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *_args, **_kwargs):
-        return None
-
-
-class CloudflareR2ReadonlyAdapter:
-    def get(self, url: str, headers: Mapping[str, str]) -> tuple[int, bytes]:
-        try:
-            parsed = urllib.parse.urlsplit(url)
-            port = parsed.port
-        except ValueError:
-            _reject("R2_RESPONSE_UNVERIFIED")
-        if (
-            parsed.scheme != "https"
-            or parsed.hostname != "api.cloudflare.com"
-            or port is not None
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.fragment
-            or not parsed.path.startswith("/client/v4/accounts/")
-            or "/r2/buckets/" not in parsed.path
-            or set(headers) - {"Accept", "Authorization", "Range"}
-        ):
-            _reject("R2_RESPONSE_UNVERIFIED")
-        request = urllib.request.Request(  # noqa: S310 - fixed HTTPS host above
-            url, headers=dict(headers), method="GET"
-        )
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}),
-            _NoRedirectHandler(),
-        )
-        try:
-            with opener.open(request, timeout=30) as response:  # noqa: S310 - fixed HTTPS host above
-                body = response.read(MAX_R2_RESPONSE_BYTES + 1)
-                if len(body) > MAX_R2_RESPONSE_BYTES:
-                    _reject("R2_RESPONSE_UNVERIFIED")
-                return response.status, body
-        except urllib.error.HTTPError as error:
-            body = error.read(MAX_R2_RESPONSE_BYTES + 1)
-            if len(body) > MAX_R2_RESPONSE_BYTES:
-                _reject("R2_RESPONSE_UNVERIFIED")
-            return error.code, body
-        except (OSError, urllib.error.URLError) as error:
-            raise CandidateContractError("R2_RESPONSE_UNVERIFIED") from error
-
-
-def verify_r2_origin_empty(
-    *,
-    account_id: str,
-    token: str,
-    bucket: str = R2_BUCKET,
-    prefix: str = R2_RC14_PREFIX,
-    transport: R2ReadonlyTransport | None = None,
-) -> dict[str, object]:
-    try:
-        account_identity = sha256_bytes(account_id.encode("ascii"))
-    except UnicodeEncodeError:
-        _reject("R2_ACCOUNT_IDENTITY_MISMATCH")
-    if not account_id or account_identity != R2_ACCOUNT_ID_SHA256:
-        _reject("R2_ACCOUNT_IDENTITY_MISMATCH")
-    if bucket != R2_BUCKET:
-        _reject("R2_BUCKET_IDENTITY_MISMATCH")
-    if prefix != R2_RC14_PREFIX:
-        _reject("R2_PREFIX_IDENTITY_MISMATCH")
-    if (
-        not token
-        or len(token) > 4096
-        or any(ord(character) < 0x21 or ord(character) > 0x7E for character in token)
-    ):
-        _reject("R2_READONLY_CREDENTIAL_UNAVAILABLE")
-    adapter = transport or CloudflareR2ReadonlyAdapter()
-    base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/r2/buckets/{bucket}/objects"
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {token}",
-    }
-    query = urllib.parse.urlencode(
-        {"per_page": len(R2_RC14_EXPECTED_KEYS) + 1, "prefix": prefix}
-    )
-    status_code, body = adapter.get(f"{base}?{query}", headers)
-    if status_code in {401, 403}:
-        _reject("R2_READONLY_CREDENTIAL_UNAVAILABLE")
-    if status_code != 200:
-        _reject("R2_RESPONSE_UNVERIFIED")
-    document = _strict_json_bytes(body, code="R2_RESPONSE_UNVERIFIED")
-    objects = document.get("result")
-    result_info = document.get("result_info")
-    if (
-        document.get("success") is not True
-        or type(objects) is not list
-        or type(result_info) is not dict
-        or result_info.get("is_truncated") is not False
-    ):
-        _reject("R2_RESPONSE_UNVERIFIED")
-    if objects:
-        _reject("R2_PREFIX_NOT_EMPTY")
-    for key in R2_RC14_EXPECTED_KEYS:
-        object_url = base + "/" + urllib.parse.quote(prefix + key, safe="/")
-        object_status, _ = adapter.get(
-            object_url,
-            {**headers, "Range": "bytes=0-0"},
-        )
-        if object_status != 404:
-            if object_status in {401, 403}:
-                _reject("R2_READONLY_CREDENTIAL_UNAVAILABLE")
-            _reject("R2_PREFIX_NOT_EMPTY" if object_status in {200, 206} else "R2_RESPONSE_UNVERIFIED")
-    return {
-        "status": "PASS",
-        "method": "CLOUDFLARE_R2_OBJECTS_REST_API",
-        "accountIdentity": R2_ACCOUNT_ID_SHA256,
-        "bucket": R2_BUCKET,
-        "prefix": R2_RC14_PREFIX,
-        "expectedKeyCount": len(R2_RC14_EXPECTED_KEYS),
-        "result": "PROVEN_EMPTY",
-        "writeMethodCount": 0,
-    }
-
-
-def verify_rc14_r2_origin_from_environment(
-    *,
-    environment: Mapping[str, str] | None = None,
-    transport: R2ReadonlyTransport | None = None,
-) -> dict[str, object]:
-    values = os.environ if environment is None else environment
-    account_id = values.get("ANIMEMO_R2_ACCOUNT_ID", "")
-    token = values.get("ANIMEMO_R2_READONLY_API_TOKEN", "")
-    bucket = values.get("ANIMEMO_R2_BUCKET", "")
-    prefix = values.get("ANIMEMO_R2_EXACT_PREFIX", "")
-    if not token:
-        _reject("R2_READONLY_CREDENTIAL_UNAVAILABLE")
-    return verify_r2_origin_empty(
-        account_id=account_id,
-        token=token,
-        bucket=bucket,
-        prefix=prefix,
-        transport=transport,
-    )
-
-
 __all__ = [
     "AGGREGATE_RECEIPT_SCHEMA",
     "CANDIDATE_INPUT_SCHEMA",
@@ -1607,6 +1446,4 @@ __all__ = [
     "validate_profile_receipt",
     "validate_verified_candidate",
     "verify_prepublication_candidate",
-    "verify_r2_origin_empty",
-    "verify_rc14_r2_origin_from_environment",
 ]

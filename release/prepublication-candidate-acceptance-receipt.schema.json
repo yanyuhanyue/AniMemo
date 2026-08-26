@@ -23,6 +23,7 @@
     "source_sha": {"$ref": "#/$defs/gitSha"},
     "source_tree": {"$ref": "#/$defs/gitSha"},
     "candidate_version": {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"},
+    "r2_origin_prestate_receipt_digest": {"$ref": "#/$defs/digest"},
     "profile_receipts": {
       "type": "object", "additionalProperties": false,
       "required": ["fresh_base", "docker_base", "runtime_base_offline"],
@@ -46,6 +47,15 @@
     "result": {"enum": ["PASS", "FAIL"]},
     "receipt_digest": {"$ref": "#/$defs/digest"}
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"candidate_version": {"const": "v1.1.0-rc.14"}},
+        "required": ["candidate_version"]
+      },
+      "then": {"required": ["r2_origin_prestate_receipt_digest"]}
+    }
+  ],
   "$defs": {
     "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},

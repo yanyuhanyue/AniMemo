@@ -22,24 +22,29 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Protocol
 
 from release.candidate import (
     CandidateContractError,
-    R2_RC14_EXPECTED_KEYS,
     aggregate_receipt_digest,
     canonical_json_bytes,
     load_verified_candidate,
     sha256_bytes,
     validate_aggregate_receipt,
     validate_profile_receipt,
-    verify_rc14_r2_origin_from_environment,
 )
 from release.materials import reject_duplicate_json_keys
+from release.r2_prestate import (
+    R2_AUTH_METHOD_ARGUMENT,
+    R2_RC14_EXPECTED_KEYS,
+    r2_origin_receipt_digest,
+    validate_r2_origin_receipt,
+    verify_rc14_r2_origin_from_environment,
+)
 
 PROFILES = ("FRESH_BASE", "DOCKER_BASE", "RUNTIME_BASE_OFFLINE")
 INSTALLER_PROFILES = {
@@ -115,7 +120,6 @@ EXPECTED_RC14_EXTERNAL_STATE = {
     "github_release": "ABSENT",
     "ghcr": "ABSENT",
     "public_r2": "ABSENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE",
-    "r2_origin": "PROVEN_EMPTY",
 }
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -1323,7 +1327,6 @@ class ClosedVmwareProvider:
             ),
             "ghcr": ghcr,
             "public_r2": self._public_r2_state(),
-            "r2_origin": "PROVEN_EMPTY",
         }
 
 
@@ -1468,7 +1471,7 @@ def execute_harness_plan(
     accepted_plan_digest: str,
     provider: CandidateVmProvider,
     environment: Mapping[str, str] | None = None,
-    r2_transport=None,
+    r2_client=None,
     _state_root: Path | None = None,
 ) -> dict[str, Any]:
     if (
@@ -1479,9 +1482,17 @@ def execute_harness_plan(
     ):
         raise CandidateHarnessError("CANDIDATE_HARNESS_PLAN_NOT_ACCEPTED")
     try:
-        verify_rc14_r2_origin_from_environment(
+        r2_receipt = verify_rc14_r2_origin_from_environment(
+            source_sha=plan.source_sha,
+            source_tree=plan.source_tree,
+            auth_method=R2_AUTH_METHOD_ARGUMENT,
             environment=environment,
-            transport=r2_transport,
+            client=r2_client,
+        )
+        r2_receipt = validate_r2_origin_receipt(
+            r2_receipt,
+            expected_source_sha=plan.source_sha,
+            expected_source_tree=plan.source_tree,
         )
         loaded = load_verified_candidate(
             plan.verified_candidate_digest,
@@ -1489,7 +1500,10 @@ def execute_harness_plan(
         )
     except CandidateContractError as error:
         raise CandidateHarnessError(error.code) from error
-    rc14_prestate = _read_expected_external_state(provider)
+    rc14_prestate = {
+        **_read_expected_external_state(provider),
+        "r2_origin": r2_receipt["result"],
+    }
     receipts: dict[str, dict[str, Any]] = {}
     for item in plan.profiles:
         expected_initial_state = _initial_platform_state(item.profile)
@@ -1532,7 +1546,10 @@ def execute_harness_plan(
     final_hashes = dict(provider.inspect_original_hashes())
     if final_hashes != dict(plan.original_vm_hashes):
         raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
-    rc14_poststate = _read_expected_external_state(provider)
+    rc14_poststate = {
+        **_read_expected_external_state(provider),
+        "r2_origin": r2_receipt["result"],
+    }
     if rc14_poststate != rc14_prestate:
         raise CandidateHarnessError("CANDIDATE_RC14_STATE_DRIFT")
     completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1546,6 +1563,7 @@ def execute_harness_plan(
         "source_sha": plan.source_sha,
         "source_tree": plan.source_tree,
         "candidate_version": plan.candidate_version,
+        "r2_origin_prestate_receipt_digest": r2_origin_receipt_digest(r2_receipt),
         "profile_receipts": {
             "fresh_base": _profile_digest(receipts["FRESH_BASE"]),
             "docker_base": _profile_digest(receipts["DOCKER_BASE"]),
@@ -1578,6 +1596,7 @@ def execute_harness_plan(
         "status": "PASS",
         "aggregateReceipt": aggregate,
         "aggregateReceiptSha256": aggregate_receipt_digest(aggregate),
+        "r2OriginPrestateReceipt": r2_receipt,
         "profileReceipts": receipts,
     }
 

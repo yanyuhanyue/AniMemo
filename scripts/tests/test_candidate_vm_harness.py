@@ -7,12 +7,22 @@ from types import SimpleNamespace
 from unittest import mock
 
 from release.candidate import canonical_json_bytes, sha256_bytes
+from release.r2_prestate import (
+    ACCESS_KEY_ENV,
+    ACCOUNT_ID_ENV,
+    JURISDICTION_ENV,
+    R2_AUTH_METHOD_ARGUMENT,
+    R2_RC14_PREFIX,
+    SECRET_KEY_ENV,
+    verify_rc14_r2_origin_from_environment,
+)
 from scripts import candidate_vm_harness as harness
 
 DIGEST = "sha256:" + "a" * 64
 SHA = "b" * 40
 TREE = "c" * 40
 RUN_ID = 1234
+ACCOUNT_ID = "d" * 32
 
 
 def _loaded(root: Path):
@@ -129,15 +139,45 @@ class RecordingRunner:
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
 
-class R2Transport:
-    def get(self, url, headers):
-        del headers
-        if "?" in url:
-            return 200, (
-                b'{"result":[],"result_info":{"is_truncated":false},'
-                b'"success":true}'
-            )
-        return 404, b"{}"
+class R2ClientError(Exception):
+    def __init__(self, code="NoSuchKey", status=404):
+        self.response = {
+            "Error": {"Code": code},
+            "ResponseMetadata": {"HTTPStatusCode": status},
+        }
+        super().__init__(code)
+
+
+class R2Client:
+    def __init__(self, *, non_empty=False):
+        self.non_empty = non_empty
+        self.operations = []
+
+    def list_objects_v2(self, *, continuation_token=None):
+        self.operations.append(
+            ("ListObjectsV2", {"continuation_token": continuation_token})
+        )
+        contents = []
+        if self.non_empty:
+            contents = [{"Key": R2_RC14_PREFIX + "unexpected", "Size": 1}]
+        return {"Contents": contents, "IsTruncated": False}
+
+    def head_object(self, *, key):
+        self.operations.append(("HeadObject", {"key": key}))
+        raise R2ClientError()
+
+    def get_object(self, *, key):
+        self.operations.append(("GetObject", {"key": key}))
+        return {}
+
+
+def _r2_environment():
+    return {
+        ACCOUNT_ID_ENV: ACCOUNT_ID,
+        JURISDICTION_ENV: "default",
+        ACCESS_KEY_ENV: "test-only-access-key",
+        SECRET_KEY_ENV: "test-only-secret-key",
+    }
 
 
 class CandidateVmHarnessTests(unittest.TestCase):
@@ -161,6 +201,19 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 expected_source_sha=SHA,
                 expected_source_tree=TREE,
                 provider=self.provider,
+            )
+
+    def _r2_receipt(self):
+        with mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ):
+            return verify_rc14_r2_origin_from_environment(
+                source_sha=SHA,
+                source_tree=TREE,
+                auth_method=R2_AUTH_METHOD_ARGUMENT,
+                environment=_r2_environment(),
+                client=R2Client(),
             )
 
     def test_default_mode_only_plans_all_three_fixed_profiles(self):
@@ -193,7 +246,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
             "scripts.candidate_vm_harness.load_verified_candidate",
             return_value=self.loaded,
         ), self.assertRaisesRegex(
-            harness.CandidateHarnessError, "R2_READONLY_CREDENTIAL_UNAVAILABLE"
+            harness.CandidateHarnessError, "R2_S3_CREDENTIAL_MISSING"
         ):
             harness.execute_harness_plan(
                 plan,
@@ -203,26 +256,120 @@ class CandidateVmHarnessTests(unittest.TestCase):
             )
         self.assertEqual(self.provider.execute_calls, 0)
 
-    def test_three_receipts_close_one_aggregate_without_publication_authority(self):
+    def test_missing_rest_public_or_tampered_r2_receipt_fails_before_clone(self):
         plan = self._plan()
-        environment = {
-            "ANIMEMO_R2_ACCOUNT_ID": "account",
-            "ANIMEMO_R2_READONLY_API_TOKEN": "readonly-token",
-            "ANIMEMO_R2_BUCKET": "animemo-release-mirror",
-            "ANIMEMO_R2_EXACT_PREFIX": "yanyuhanyue/AniMemo/releases/download/v1.1.0-rc.14/",
+        valid = self._r2_receipt()
+        wrong_prefix = dict(valid)
+        wrong_prefix["prefix"] = R2_RC14_PREFIX + "other/"
+        wrong_bucket = dict(valid)
+        wrong_bucket["bucket"] = "other-bucket"
+        write_receipt = dict(valid)
+        write_receipt["write_request_count"] = 1
+        object_receipt = dict(valid)
+        object_receipt["object_count"] = 1
+        wrong_source = dict(valid)
+        wrong_source["source_sha"] = "e" * 40
+        no_auth_method = dict(valid)
+        no_auth_method.pop("auth_method")
+        cases = {
+            "missing": None,
+            "rest": {
+                "schema": "animemo.r2-rest-prestate-receipt/v1",
+                "auth_method": "CLOUDFLARE_REST_BEARER",
+            },
+            "public-cdn": {
+                "schema": "animemo.public-cdn-readback/v1",
+                "result": "HTTP_404",
+            },
+            "wrong-prefix": wrong_prefix,
+            "wrong-bucket": wrong_bucket,
+            "write": write_receipt,
+            "object-count": object_receipt,
+            "wrong-source": wrong_source,
+            "no-auth-method": no_auth_method,
         }
+        for name, receipt in cases.items():
+            self.provider.execute_calls = 0
+            self.provider.external_calls = 0
+            with self.subTest(name=name), mock.patch(
+                "scripts.candidate_vm_harness.verify_rc14_r2_origin_from_environment",
+                return_value=receipt,
+            ), mock.patch(
+                "scripts.candidate_vm_harness.load_verified_candidate",
+                return_value=self.loaded,
+            ), self.assertRaisesRegex(
+                harness.CandidateHarnessError, "R2_S3_RECEIPT_INVALID"
+            ):
+                harness.execute_harness_plan(
+                    plan,
+                    accepted_plan_digest=plan.plan_digest,
+                    provider=self.provider,
+                    environment={},
+                )
+            self.assertEqual(self.provider.execute_calls, 0)
+            self.assertEqual(self.provider.external_calls, 0)
+
+    def test_non_empty_s3_prefix_fails_before_public_readback_or_clone(self):
+        plan = self._plan()
         with mock.patch(
             "scripts.candidate_vm_harness.load_verified_candidate",
             return_value=self.loaded,
         ), mock.patch(
-            "release.candidate.R2_ACCOUNT_ID_SHA256", sha256_bytes(b"account")
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ), self.assertRaisesRegex(
+            harness.CandidateHarnessError, "R2_S3_PREFIX_NON_EMPTY"
+        ):
+            harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
+                r2_client=R2Client(non_empty=True),
+            )
+        self.assertEqual(self.provider.execute_calls, 0)
+        self.assertEqual(self.provider.external_calls, 0)
+
+    def test_harness_selects_only_the_explicit_s3_acceptance_method(self):
+        plan = self._plan()
+        receipt = self._r2_receipt()
+        with mock.patch(
+            "scripts.candidate_vm_harness.verify_rc14_r2_origin_from_environment",
+            return_value=receipt,
+        ) as verify, mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ):
+            harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment={},
+            )
+        self.assertEqual(verify.call_count, 1)
+        self.assertEqual(
+            verify.call_args.kwargs["auth_method"], R2_AUTH_METHOD_ARGUMENT
+        )
+
+    def test_three_receipts_close_one_aggregate_without_publication_authority(self):
+        plan = self._plan()
+        environment = _r2_environment()
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
         ):
             result = harness.execute_harness_plan(
                 plan,
                 accepted_plan_digest=plan.plan_digest,
                 provider=self.provider,
                 environment=environment,
-                r2_transport=R2Transport(),
+                r2_client=R2Client(),
             )
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(len(result["profileReceipts"]), 3)
@@ -232,10 +379,22 @@ class CandidateVmHarnessTests(unittest.TestCase):
         self.assertFalse(aggregate["publish_authorized"])
         self.assertEqual(self.provider.external_calls, 2)
         self.assertEqual(
-            aggregate["rc14_prestate"], harness.EXPECTED_RC14_EXTERNAL_STATE
+            aggregate["rc14_prestate"],
+            {**harness.EXPECTED_RC14_EXTERNAL_STATE, "r2_origin": "PROVEN_EMPTY"},
         )
         self.assertEqual(
-            aggregate["rc14_poststate"], harness.EXPECTED_RC14_EXTERNAL_STATE
+            aggregate["rc14_poststate"],
+            {**harness.EXPECTED_RC14_EXTERNAL_STATE, "r2_origin": "PROVEN_EMPTY"},
+        )
+        self.assertEqual(
+            result["r2OriginPrestateReceipt"]["auth_method"],
+            "R2_S3_OBJECT_READ_ONLY",
+        )
+        self.assertEqual(
+            aggregate["r2_origin_prestate_receipt_digest"],
+            sha256_bytes(
+                canonical_json_bytes(result["r2OriginPrestateReceipt"])
+            ),
         )
         unsigned = dict(aggregate)
         receipt_digest = unsigned.pop("receipt_digest")
@@ -256,12 +415,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
 
     def test_original_vm_hash_drift_stops_before_the_next_profile(self):
         plan = self._plan()
-        environment = {
-            "ANIMEMO_R2_ACCOUNT_ID": "account",
-            "ANIMEMO_R2_READONLY_API_TOKEN": "readonly-token",
-            "ANIMEMO_R2_BUCKET": "animemo-release-mirror",
-            "ANIMEMO_R2_EXACT_PREFIX": "yanyuhanyue/AniMemo/releases/download/v1.1.0-rc.14/",
-        }
+        environment = _r2_environment()
         original_execute = self.provider.execute_profile
 
         def mutate_source(**kwargs):
@@ -277,7 +431,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
             "scripts.candidate_vm_harness.load_verified_candidate",
             return_value=self.loaded,
         ), mock.patch(
-            "release.candidate.R2_ACCOUNT_ID_SHA256", sha256_bytes(b"account")
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
         ), self.assertRaisesRegex(
             harness.CandidateHarnessError, "PROFILE_SAFETY_MISMATCH"
         ):
@@ -286,24 +441,20 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 accepted_plan_digest=plan.plan_digest,
                 provider=self.provider,
                 environment=environment,
-                r2_transport=R2Transport(),
+                r2_client=R2Client(),
             )
         self.assertEqual(self.provider.execute_calls, 1)
 
     def test_rc14_presence_fails_before_the_first_profile(self):
         plan = self._plan()
         self.provider.external_state["tag"] = "PRESENT"
-        environment = {
-            "ANIMEMO_R2_ACCOUNT_ID": "account",
-            "ANIMEMO_R2_READONLY_API_TOKEN": "readonly-token",
-            "ANIMEMO_R2_BUCKET": "animemo-release-mirror",
-            "ANIMEMO_R2_EXACT_PREFIX": "yanyuhanyue/AniMemo/releases/download/v1.1.0-rc.14/",
-        }
+        environment = _r2_environment()
         with mock.patch(
             "scripts.candidate_vm_harness.load_verified_candidate",
             return_value=self.loaded,
         ), mock.patch(
-            "release.candidate.R2_ACCOUNT_ID_SHA256", sha256_bytes(b"account")
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
         ), self.assertRaisesRegex(
             harness.CandidateHarnessError, "RC14_NOT_EMPTY"
         ):
@@ -312,7 +463,29 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 accepted_plan_digest=plan.plan_digest,
                 provider=self.provider,
                 environment=environment,
-                r2_transport=R2Transport(),
+                r2_client=R2Client(),
+            )
+        self.assertEqual(self.provider.external_calls, 1)
+        self.assertEqual(self.provider.execute_calls, 0)
+
+    def test_public_cdn_readback_cannot_replace_or_override_s3_receipt(self):
+        plan = self._plan()
+        self.provider.external_state["public_r2"] = "PRESENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE"
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ), self.assertRaisesRegex(
+            harness.CandidateHarnessError, "CANDIDATE_RC14_NOT_EMPTY"
+        ):
+            harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
+                r2_client=R2Client(),
             )
         self.assertEqual(self.provider.external_calls, 1)
         self.assertEqual(self.provider.execute_calls, 0)
@@ -400,7 +573,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 "USERPROFILE": "C:/Users/tester",
                 "PATH": "C:/attacker-controlled",
                 harness.GUEST_SUDO_PASSWORD_ENV: "test-only-password",
-                "ANIMEMO_R2_READONLY_API_TOKEN": "test-only-r2-token",
+                ACCESS_KEY_ENV: "test-only-r2-access",
+                SECRET_KEY_ENV: "test-only-r2-secret",
             },
         )
         password = provider._sudo_password()
@@ -412,14 +586,17 @@ class CandidateVmHarnessTests(unittest.TestCase):
         self.assertEqual(len(runner.calls), 1)
         call = runner.calls[0]
         self.assertNotIn("test-only-password", call["argv"])
-        self.assertNotIn("test-only-r2-token", call["argv"])
+        self.assertNotIn("test-only-r2-access", call["argv"])
+        self.assertNotIn("test-only-r2-secret", call["argv"])
         self.assertEqual(call["input_bytes"], b"test-only-password\n")
         self.assertNotIn(harness.GUEST_SUDO_PASSWORD_ENV, call["environment"])
         self.assertNotIn(
-            "ANIMEMO_R2_READONLY_API_TOKEN", call["environment"]
+            ACCESS_KEY_ENV, call["environment"]
         )
+        self.assertNotIn(SECRET_KEY_ENV, call["environment"])
         self.assertNotIn("test-only-password", call["environment"].values())
-        self.assertNotIn("test-only-r2-token", call["environment"].values())
+        self.assertNotIn("test-only-r2-access", call["environment"].values())
+        self.assertNotIn("test-only-r2-secret", call["environment"].values())
         self.assertNotIn("C:/attacker-controlled", call["environment"]["PATH"])
         self.assertEqual(call["environment"]["SYSTEMROOT"], "C:/Windows")
 
