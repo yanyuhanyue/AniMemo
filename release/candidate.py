@@ -1466,7 +1466,8 @@ def verify_prepublication_candidate(
             os.fsync(output.fileno())
         os.chmod(staging / "verified-candidate.json", 0o600)
         target = state_root / candidate_digest.removeprefix("sha256:")
-        if target.exists() or target.is_symlink():
+
+        def accept_existing_target() -> dict[str, Any]:
             try:
                 existing = load_verified_candidate(
                     verified_digest,
@@ -1478,8 +1479,6 @@ def verify_prepublication_candidate(
                 ) from error
             if existing.verified["candidate_input_sha256"] != candidate_digest:
                 _reject("VERIFIED_CANDIDATE_OUTPUT_CONFLICT")
-            shutil.rmtree(staging)
-            staging = None
             receipt_existing = _write_append_only_receipt(
                 target, receipt_encoded, receipt_digest
             )
@@ -1495,8 +1494,22 @@ def verify_prepublication_candidate(
                 "verificationExecutionReceiptExisting": receipt_existing,
                 "existing": True,
             }
+
+        if target.exists() or target.is_symlink():
+            shutil.rmtree(staging)
+            staging = None
+            return accept_existing_target()
         _write_append_only_receipt(staging, receipt_encoded, receipt_digest)
-        os.replace(staging, target)
+        try:
+            os.replace(staging, target)
+        except OSError as error:
+            if not target.exists() and not target.is_symlink():
+                raise CandidateContractError(
+                    "VERIFIED_CANDIDATE_OUTPUT_UNAVAILABLE"
+                ) from error
+            shutil.rmtree(staging)
+            staging = None
+            return accept_existing_target()
         staging = None
         return {
             "status": "PASS",

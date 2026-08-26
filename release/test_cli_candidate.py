@@ -45,14 +45,13 @@ class CandidateVerifierCliTests(unittest.TestCase):
 
     def test_verified_at_is_documented_as_execution_receipt_only(self):
         parser = cli._parser()
-        command = parser._subparsers._group_actions[0].choices[
-            "verify-prepublication-candidate"
-        ]
-        action = next(
-            item for item in command._actions if item.dest == "verified_at"
-        )
-        self.assertIn("execution receipt", action.help.lower())
-        help_text = command.format_help()
+        with contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(
+            SystemExit
+        ) as exit_status:
+            parser.parse_args(["verify-prepublication-candidate", "--help"])
+        self.assertEqual(exit_status.exception.code, 0)
+        help_text = output.getvalue().lower()
+        self.assertIn("execution receipt timestamp only", help_text)
         self.assertNotIn("--force", help_text)
         self.assertNotIn("--overwrite", help_text)
 

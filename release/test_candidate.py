@@ -1146,6 +1146,39 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                     )
                     for result, state_root in zip(results, states, strict=True)
                 ]
+                winner_state = root / "state-winner"
+                winner = invoke(
+                    winner_state, times[0], 1_740_000_000_000_000_000
+                )
+                winner_root = winner_state / winner["candidateInputDigest"][7:]
+                racing_state = root / "state-race"
+
+                def publish_competing_identity(_source, target):
+                    shutil.copytree(winner_root, target)
+                    raise FileExistsError("simulated concurrent publication")
+
+                with mock.patch(
+                    "release.candidate.os.replace",
+                    side_effect=publish_competing_identity,
+                ):
+                    raced = invoke(
+                        racing_state,
+                        times[2],
+                        1_745_000_000_000_000_000,
+                    )
+                self.assertTrue(raced["existing"])
+                self.assertFalse(
+                    raced["verificationExecutionReceiptExisting"]
+                )
+                self.assertTrue(
+                    (
+                        racing_state
+                        / raced["candidateInputDigest"][7:]
+                        / "verification-receipts"
+                        / raced["verificationExecutionReceiptDigest"][7:]
+                        / "verification-execution-receipt.json"
+                    ).is_file()
+                )
                 original_infolist = zipfile.ZipFile.infolist
 
                 def reversed_infolist(candidate_archive):
