@@ -914,7 +914,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("candidate_sha", inputs)
         self.assertEqual(inputs["candidate_sha"]["required"], "false")
         self.assertIn("upgrade_base_sha", inputs)
-        self.assertIn("target_version_override", inputs)
+        self.assertNotIn("target_version_override", inputs)
         self.assertIn("metadata_freshness_run_id", inputs)
         self.assertEqual(inputs["metadata_freshness_run_id"]["required"], "false")
         self.assertEqual(release["jobs"]["full-ci"]["uses"], "./.github/workflows/ci.yml")
@@ -931,6 +931,17 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(release["jobs"]["full-release-gate"]["with"]["upgrade_base_sha"], "${{ inputs.upgrade_base_sha }}")
         self.assertTrue(release["jobs"]["full-release-gate"]["with"]["force_full"])
+
+    def test_full_release_workflow_cannot_forward_bootstrap_override(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        header = source[: source.index("jobs:")]
+
+        self.assertNotIn("target_version_override:", header)
+        self.assertNotIn("inputs.target_version_override", source)
+        self.assertNotIn("TARGET_VERSION_OVERRIDE", source)
+        self.assertNotIn("--target-version-override", source)
 
     def test_performance_workflow_is_reusable_and_binds_every_runner_to_exact_main(self):
         performance = workflow("performance.yml")
