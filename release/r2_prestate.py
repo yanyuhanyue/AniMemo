@@ -90,11 +90,13 @@ _SENSITIVE_ASSIGNMENT = re.compile(
 class R2S3ReadonlyApi(Protocol):
     """The complete production-facing capability surface: three reads only."""
 
-    def list_objects_v2(self, **kwargs: object) -> Mapping[str, object]: ...
+    def list_objects_v2(
+        self, *, continuation_token: str | None = None
+    ) -> Mapping[str, object]: ...
 
-    def head_object(self, **kwargs: object) -> Mapping[str, object]: ...
+    def head_object(self, *, key: str) -> Mapping[str, object]: ...
 
-    def get_object(self, **kwargs: object) -> Mapping[str, object]: ...
+    def get_object(self, *, key: str) -> Mapping[str, object]: ...
 
 
 class R2S3PrecheckError(CandidateContractError):
@@ -278,17 +280,30 @@ class Boto3R2ReadonlyClient:
         credentials: R2S3Credentials,
     ) -> None:
         _, endpoint = build_r2_s3_endpoint(account_id, jurisdiction)
+        failed = False
         try:
             import boto3
             from botocore.config import Config
+            from botocore.session import Session as BotocoreSession
 
-            self.__client = boto3.client(
-                "s3",
-                endpoint_url=endpoint,
-                region_name="auto",
+            botocore_session = BotocoreSession(
+                session_vars={
+                    "profile": (None, [], None, None),
+                    "config_file": (None, None, os.devnull, None),
+                    "credentials_file": (None, None, os.devnull, None),
+                }
+            )
+            session = boto3.Session(
+                botocore_session=botocore_session,
                 aws_access_key_id=credentials.access_key_id,
                 aws_secret_access_key=credentials.secret_access_key,
                 aws_session_token=credentials.session_token,
+                region_name="auto",
+            )
+            self.__client = session.client(
+                "s3",
+                endpoint_url=endpoint,
+                region_name="auto",
                 use_ssl=True,
                 verify=True,
                 config=Config(
@@ -301,33 +316,69 @@ class Boto3R2ReadonlyClient:
                 ),
             )
         except Exception:  # noqa: BLE001 - suppress all SDK/config detail
+            failed = True
+        if failed:
             _raise("R2_S3_RESPONSE_INVALID")
 
-    def list_objects_v2(self, **kwargs: object) -> Mapping[str, object]:
+    @staticmethod
+    def _bound_key(key: str) -> str:
+        if key not in {R2_RC14_PREFIX + name for name in R2_RC14_EXPECTED_KEYS}:
+            _raise("R2_S3_RESPONSE_INVALID")
+        return key
+
+    def list_objects_v2(
+        self, *, continuation_token: str | None = None
+    ) -> Mapping[str, object]:
+        request: dict[str, object] = {
+            "Bucket": R2_BUCKET,
+            "Prefix": R2_RC14_PREFIX,
+            "MaxKeys": MAX_KEYS_PER_PAGE,
+        }
+        if continuation_token is not None:
+            request["ContinuationToken"] = continuation_token
+        failure_code: str | None = None
         try:
-            response = self.__client.list_objects_v2(**dict(kwargs))
+            response = self.__client.list_objects_v2(**request)
         except Exception as error:  # noqa: BLE001 - normalize SDK exceptions
-            _raise(_classify_client_error(error))
+            failure_code = _classify_client_error(error)
+        if failure_code is not None:
+            _raise(failure_code)
         if not isinstance(response, Mapping):
             _raise("R2_S3_RESPONSE_INVALID")
         return response
 
-    def head_object(self, **kwargs: object) -> Mapping[str, object]:
+    def head_object(self, *, key: str) -> Mapping[str, object]:
+        failure_code: str | None = None
+        missing = False
         try:
-            response = self.__client.head_object(**dict(kwargs))
+            response = self.__client.head_object(
+                Bucket=R2_BUCKET,
+                Key=self._bound_key(key),
+            )
         except Exception as error:  # noqa: BLE001 - normalize SDK exceptions
             if _is_missing_object(error):
-                raise _R2ObjectNotFound from None
-            _raise(_classify_client_error(error))
+                missing = True
+            else:
+                failure_code = _classify_client_error(error)
+        if missing:
+            raise _R2ObjectNotFound
+        if failure_code is not None:
+            _raise(failure_code)
         if not isinstance(response, Mapping):
             _raise("R2_S3_RESPONSE_INVALID")
         return response
 
-    def get_object(self, **kwargs: object) -> Mapping[str, object]:
+    def get_object(self, *, key: str) -> Mapping[str, object]:
+        failure_code: str | None = None
         try:
-            response = self.__client.get_object(**dict(kwargs))
+            response = self.__client.get_object(
+                Bucket=R2_BUCKET,
+                Key=self._bound_key(key),
+            )
         except Exception as error:  # noqa: BLE001 - normalize SDK exceptions
-            _raise(_classify_client_error(error))
+            failure_code = _classify_client_error(error)
+        if failure_code is not None:
+            _raise(failure_code)
         if not isinstance(response, Mapping):
             _raise("R2_S3_RESPONSE_INVALID")
         return response
@@ -412,19 +463,15 @@ def verify_r2_origin_empty(
     while True:
         if list_count >= MAX_LIST_PAGES:
             _raise("R2_S3_RESPONSE_INVALID")
-        request: dict[str, object] = {
-            "Bucket": R2_BUCKET,
-            "Prefix": R2_RC14_PREFIX,
-            "MaxKeys": MAX_KEYS_PER_PAGE,
-        }
-        if continuation is not None:
-            request["ContinuationToken"] = continuation
+        failure_code: str | None = None
         try:
-            page = adapter.list_objects_v2(**request)
+            page = adapter.list_objects_v2(continuation_token=continuation)
         except R2S3PrecheckError:
             raise
         except Exception as error:  # noqa: BLE001 - fake/SDK seam is intentionally closed
-            _raise(_classify_client_error(error))
+            failure_code = _classify_client_error(error)
+        if failure_code is not None:
+            _raise(failure_code)
         list_count += 1
         if not isinstance(page, Mapping):
             _raise("R2_S3_RESPONSE_INVALID")
@@ -476,16 +523,23 @@ def verify_r2_origin_empty(
     for name in R2_RC14_EXPECTED_KEYS:
         key = R2_RC14_PREFIX + name
         head_count += 1
+        failure_code = None
+        missing = False
         try:
-            metadata = adapter.head_object(Bucket=R2_BUCKET, Key=key)
+            metadata = adapter.head_object(key=key)
         except _R2ObjectNotFound:
-            continue
+            missing = True
         except R2S3PrecheckError:
             raise
         except Exception as error:  # noqa: BLE001 - fake/SDK seam is intentionally closed
             if _is_missing_object(error):
-                continue
-            _raise(_classify_client_error(error))
+                missing = True
+            else:
+                failure_code = _classify_client_error(error)
+        if missing:
+            continue
+        if failure_code is not None:
+            _raise(failure_code)
         if not isinstance(metadata, Mapping):
             _raise("R2_S3_RESPONSE_INVALID")
         item = _head_inventory(key, metadata)

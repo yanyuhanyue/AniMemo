@@ -153,19 +153,21 @@ class R2Client:
         self.non_empty = non_empty
         self.operations = []
 
-    def list_objects_v2(self, **kwargs):
-        self.operations.append(("ListObjectsV2", dict(kwargs)))
+    def list_objects_v2(self, *, continuation_token=None):
+        self.operations.append(
+            ("ListObjectsV2", {"continuation_token": continuation_token})
+        )
         contents = []
         if self.non_empty:
             contents = [{"Key": R2_RC14_PREFIX + "unexpected", "Size": 1}]
         return {"Contents": contents, "IsTruncated": False}
 
-    def head_object(self, **kwargs):
-        self.operations.append(("HeadObject", dict(kwargs)))
+    def head_object(self, *, key):
+        self.operations.append(("HeadObject", {"key": key}))
         raise R2ClientError()
 
-    def get_object(self, **kwargs):
-        self.operations.append(("GetObject", dict(kwargs)))
+    def get_object(self, *, key):
+        self.operations.append(("GetObject", {"key": key}))
         return {}
 
 
@@ -259,10 +261,16 @@ class CandidateVmHarnessTests(unittest.TestCase):
         valid = self._r2_receipt()
         wrong_prefix = dict(valid)
         wrong_prefix["prefix"] = R2_RC14_PREFIX + "other/"
+        wrong_bucket = dict(valid)
+        wrong_bucket["bucket"] = "other-bucket"
         write_receipt = dict(valid)
         write_receipt["write_request_count"] = 1
+        object_receipt = dict(valid)
+        object_receipt["object_count"] = 1
         wrong_source = dict(valid)
         wrong_source["source_sha"] = "e" * 40
+        no_auth_method = dict(valid)
+        no_auth_method.pop("auth_method")
         cases = {
             "missing": None,
             "rest": {
@@ -274,8 +282,11 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 "result": "HTTP_404",
             },
             "wrong-prefix": wrong_prefix,
+            "wrong-bucket": wrong_bucket,
             "write": write_receipt,
+            "object-count": object_receipt,
             "wrong-source": wrong_source,
+            "no-auth-method": no_auth_method,
         }
         for name, receipt in cases.items():
             self.provider.execute_calls = 0
@@ -452,6 +463,28 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 accepted_plan_digest=plan.plan_digest,
                 provider=self.provider,
                 environment=environment,
+                r2_client=R2Client(),
+            )
+        self.assertEqual(self.provider.external_calls, 1)
+        self.assertEqual(self.provider.execute_calls, 0)
+
+    def test_public_cdn_readback_cannot_replace_or_override_s3_receipt(self):
+        plan = self._plan()
+        self.provider.external_state["public_r2"] = "PRESENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE"
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ), self.assertRaisesRegex(
+            harness.CandidateHarnessError, "CANDIDATE_RC14_NOT_EMPTY"
+        ):
+            harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
                 r2_client=R2Client(),
             )
         self.assertEqual(self.provider.external_calls, 1)

@@ -303,6 +303,7 @@ def aggregate_receipt() -> dict[str, object]:
         "source_sha": SHA,
         "source_tree": TREE,
         "candidate_version": "v1.1.0-rc.14",
+        "r2_origin_prestate_receipt_digest": "sha256:" + "6" * 64,
         "profile_receipts": {
             "fresh_base": "sha256:" + "3" * 64,
             "docker_base": "sha256:" + "4" * 64,
@@ -362,6 +363,17 @@ class CandidateSchemaTests(unittest.TestCase):
             CandidateContractError, "CANDIDATE_ACCEPTANCE_RECEIPT_DIGEST_MISMATCH"
         ):
             validate_aggregate_receipt(tampered)
+
+    def test_rc14_aggregate_requires_r2_prestate_receipt_digest(self):
+        receipt = aggregate_receipt()
+        receipt.pop("r2_origin_prestate_receipt_digest")
+        unsigned = dict(receipt)
+        unsigned.pop("receipt_digest")
+        receipt["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
+        with self.assertRaisesRegex(
+            CandidateContractError, "CANDIDATE_ACCEPTANCE_RECEIPT_INVALID"
+        ):
+            validate_aggregate_receipt(receipt)
 
     def test_offline_profile_rejects_any_network_apt_or_pull(self):
         receipt = {

@@ -47,6 +47,15 @@
     "result": {"enum": ["PASS", "FAIL"]},
     "receipt_digest": {"$ref": "#/$defs/digest"}
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"candidate_version": {"const": "v1.1.0-rc.14"}},
+        "required": ["candidate_version"]
+      },
+      "then": {"required": ["r2_origin_prestate_receipt_digest"]}
+    }
+  ],
   "$defs": {
     "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},

@@ -3,7 +3,9 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import tempfile
+import traceback
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,17 +62,18 @@ class RecordingS3Client:
         self.list_error = list_error
         self.operations: list[tuple[str, dict[str, object]]] = []
 
-    def list_objects_v2(self, **kwargs):
-        self.operations.append(("ListObjectsV2", dict(kwargs)))
+    def list_objects_v2(self, *, continuation_token=None):
+        self.operations.append(
+            ("ListObjectsV2", {"continuation_token": continuation_token})
+        )
         if self.list_error is not None:
             raise self.list_error
         if not self.pages:
             raise AssertionError("unexpected ListObjectsV2 page")
         return self.pages.pop(0)
 
-    def head_object(self, **kwargs):
-        self.operations.append(("HeadObject", dict(kwargs)))
-        key = kwargs["Key"]
+    def head_object(self, *, key):
+        self.operations.append(("HeadObject", {"key": key}))
         if key not in self.heads:
             raise FakeClientError("NoSuchKey", 404)
         value = self.heads[key]
@@ -78,8 +81,8 @@ class RecordingS3Client:
             raise value
         return value
 
-    def get_object(self, **kwargs):
-        self.operations.append(("GetObject", dict(kwargs)))
+    def get_object(self, *, key):
+        self.operations.append(("GetObject", {"key": key}))
         return {"Body": io.BytesIO(b"test-only")}
 
 
@@ -143,12 +146,18 @@ class R2S3PrestateTests(unittest.TestCase):
             [name for name, _ in client.operations],
             ["ListObjectsV2"] + ["HeadObject"] * 6,
         )
-        for _, request in client.operations:
-            self.assertEqual(request["Bucket"], R2_BUCKET)
-        self.assertEqual(client.operations[0][1]["Prefix"], R2_RC14_PREFIX)
+        self.assertIsNone(client.operations[0][1]["continuation_token"])
         self.assertTrue(
             all(
-                request["Key"].startswith(R2_RC14_PREFIX)
+                request["key"]
+                == R2_RC14_PREFIX + R2_RC14_EXPECTED_KEYS[index]
+                for index, (name, request) in enumerate(client.operations[1:])
+                if name == "HeadObject"
+            )
+        )
+        self.assertTrue(
+            all(
+                request["key"].startswith(R2_RC14_PREFIX)
                 for name, request in client.operations
                 if name == "HeadObject"
             )
@@ -183,7 +192,7 @@ class R2S3PrestateTests(unittest.TestCase):
             raised.exception.safe_diagnostic["object_inventory"][0]["key"],
             unicode_key,
         )
-        self.assertEqual(client.operations[1][1]["ContinuationToken"], "page-2")
+        self.assertEqual(client.operations[1][1]["continuation_token"], "page-2")
         self.assertNotEqual(unicode_key, unicode_key.lower())
         self.assertEqual(len(client.operations), 2)
 
@@ -358,33 +367,62 @@ class R2S3PrestateTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, expected)
             self.assertEqual(str(raised.exception), expected)
             self.assertEqual(str(raised.exception).count(detail), 0)
+            self.assertIsNone(raised.exception.__context__)
+            formatted = "".join(traceback.format_exception(raised.exception))
+            for sentinel in (ACCESS, SECRET, SESSION, SIGNATURE):
+                self.assertEqual(formatted.count(sentinel), 0)
 
     def test_boto_client_is_explicit_tls_s3v4_without_proxy_or_write_surface(self):
         sdk = mock.Mock()
         sdk.list_objects_v2.return_value = {"Contents": [], "IsTruncated": False}
         sdk.head_object.side_effect = FakeClientError("NoSuchKey", 404)
         sdk.get_object.return_value = {"Body": io.BytesIO(b"test")}
-        with mock.patch("boto3.client", return_value=sdk) as create:
+        boto3_session = mock.Mock()
+        boto3_session.client.return_value = sdk
+        key = R2_RC14_PREFIX + R2_RC14_EXPECTED_KEYS[0]
+        with mock.patch("boto3.Session", return_value=boto3_session) as create:
             client = Boto3R2ReadonlyClient(
                 account_id=ACCOUNT_ID,
                 jurisdiction="us",
                 credentials=R2S3Credentials(ACCESS, SECRET, SESSION),
             )
-            client.list_objects_v2(Bucket=R2_BUCKET, Prefix=R2_RC14_PREFIX)
+            client.list_objects_v2()
             with self.assertRaises(Exception) as missing:
-                client.head_object(Bucket=R2_BUCKET, Key=R2_RC14_PREFIX + "missing")
+                client.head_object(key=key)
             self.assertEqual(type(missing.exception).__name__, "_R2ObjectNotFound")
-            client.get_object(Bucket=R2_BUCKET, Key=R2_RC14_PREFIX + "fixture")
-        kwargs = create.call_args.kwargs
-        self.assertEqual(create.call_args.args, ("s3",))
+            self.assertIsNone(missing.exception.__context__)
+            client.get_object(key=key)
+            with self.assertRaisesRegex(R2S3PrecheckError, "R2_S3_RESPONSE_INVALID"):
+                client.get_object(key=R2_RC14_PREFIX + "outside-contract")
+            sdk.list_objects_v2.side_effect = FakeClientError(
+                "SignatureDoesNotMatch",
+                403,
+                f"{ACCESS} {SECRET} {SESSION} {SIGNATURE}",
+            )
+            with self.assertRaises(R2S3PrecheckError) as sdk_failure:
+                client.list_objects_v2()
+            self.assertIsNone(sdk_failure.exception.__context__)
+            formatted = "".join(traceback.format_exception(sdk_failure.exception))
+            for sentinel in (ACCESS, SECRET, SESSION, SIGNATURE):
+                self.assertEqual(formatted.count(sentinel), 0)
+        session_kwargs = create.call_args.kwargs
+        self.assertEqual(session_kwargs["aws_access_key_id"], ACCESS)
+        self.assertEqual(session_kwargs["aws_secret_access_key"], SECRET)
+        self.assertEqual(session_kwargs["aws_session_token"], SESSION)
+        self.assertEqual(session_kwargs["region_name"], "auto")
+        closed_session = session_kwargs["botocore_session"]
+        self.assertIsNone(closed_session.get_config_variable("profile"))
+        self.assertEqual(closed_session.get_config_variable("config_file"), os.devnull)
+        self.assertEqual(
+            closed_session.get_config_variable("credentials_file"), os.devnull
+        )
+        kwargs = boto3_session.client.call_args.kwargs
+        self.assertEqual(boto3_session.client.call_args.args, ("s3",))
         self.assertEqual(kwargs["region_name"], "auto")
         self.assertEqual(
             kwargs["endpoint_url"],
             f"https://{ACCOUNT_ID}.us.r2.cloudflarestorage.com",
         )
-        self.assertEqual(kwargs["aws_access_key_id"], ACCESS)
-        self.assertEqual(kwargs["aws_secret_access_key"], SECRET)
-        self.assertEqual(kwargs["aws_session_token"], SESSION)
         self.assertTrue(kwargs["use_ssl"])
         self.assertTrue(kwargs["verify"])
         self.assertEqual(kwargs["config"].proxies, {})
@@ -399,6 +437,25 @@ class R2S3PrestateTests(unittest.TestCase):
             "abort_multipart_upload",
         ):
             self.assertFalse(hasattr(Boto3R2ReadonlyClient, forbidden))
+
+    def test_production_session_ignores_profile_files_metadata_and_generic_credentials(self):
+        ambient = {
+            "AWS_PROFILE": "definitely-does-not-exist",
+            "AWS_DEFAULT_PROFILE": "also-does-not-exist",
+            "AWS_CONFIG_FILE": str(Path("Z:/missing-aws-config")),
+            "AWS_SHARED_CREDENTIALS_FILE": str(Path("Z:/missing-aws-credentials")),
+            "AWS_ACCESS_KEY_ID": "generic-access",
+            "AWS_SECRET_ACCESS_KEY": "generic-secret",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": "/ambient-ecs",
+            "AWS_EC2_METADATA_DISABLED": "false",
+        }
+        with mock.patch.dict(os.environ, ambient, clear=False):
+            client = Boto3R2ReadonlyClient(
+                account_id=ACCOUNT_ID,
+                jurisdiction="default",
+                credentials=R2S3Credentials(ACCESS, SECRET, SESSION),
+            )
+        self.assertIsInstance(client, Boto3R2ReadonlyClient)
 
     def test_receipt_is_deterministic_stable_closed_and_immutable(self):
         first = self.verify()
@@ -455,6 +512,9 @@ class R2S3PrestateTests(unittest.TestCase):
                 "SignatureDoesNotMatch", 403, f"{ACCESS} {SECRET} {SIGNATURE}"
             ),
             "subprocess_stderr": f"debug {ACCESS} {SECRET} {SESSION} {SIGNATURE}",
+            "http_response_body": f"error {ACCESS} {SECRET} {SIGNATURE}",
+            "traceback": f"trace {ACCESS} {SECRET} {SESSION} {SIGNATURE}",
+            "stdout": f"debug {ACCESS} {SECRET} {SESSION} {SIGNATURE}",
             "debug_logger": f"Authorization=Bearer {SECRET}",
         }
         encoded = json.dumps(
