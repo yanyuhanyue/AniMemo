@@ -1,6 +1,6 @@
 # AniMemo Third-Party Notices
 
-Inventory snapshot: 2026-08-13 (Asia/Shanghai).
+Inventory snapshot: 2026-08-26 (Asia/Shanghai).
 
 This file is a reproducible attribution and license-metadata index for dependencies declared or locked in this repository. It does not replace upstream license texts, alter third-party terms, or provide a legal guarantee. Upstream terms apply only to their respective components. No AniMemo legal rights-holder name is inferred here.
 
@@ -12,7 +12,7 @@ Run `python scripts/check_license_docs.py` to verify this snapshot without chang
 |---|---|---|
 | `package-lock.json` | `c0aaa71bff7997dcaf6047f565e0764d3b98e2f072a77bb1d1a246f46259a1e2` | Exact Node dependency graph, versions, package license metadata, and registry tarballs |
 | `backend/requirements.txt` | `31206537e99d46777c1a73152fe7514bb88036219814cdc11cae6f1719724c8a` | 44 exact Python production pins |
-| `release/requirements.txt` | `dc33c76807b0f3672bd53d14a3916350ba5a876cced309d009caed2c630853fd` | Release updater Python pins |
+| `release/requirements.txt` | `9bb353ade1f549ca5c68ea08f7c3de3d1465864151bf6eb149705d5a06c4c363` | 11 exact release tooling pins; the S3 client chain reuses versions already fixed in the production lock |
 | `bridges/astrbot_plugin_animemo_bridge/requirements.txt` | `9d25b578e8e7489ee686d0eabaf1b2b2444b3b0761ac3d55548f9e00c99fb2de` | AstrBot bridge constraint |
 | `scripts/requirements-tools.txt` | `2e917dd15d56e2b6f7b32550e7a8a592c7f2e6c2cd69d3942b688511980ddfb2` | Dependency-maintenance tooling |
 
@@ -108,6 +108,8 @@ The complete lock contains 287 versioned package entries. Every entry has licens
 ## Python production lock
 
 All 44 entries below are exact pins from `backend/requirements.txt`. License metadata is tied to the exact package version through the linked PyPI record or the license files in that version's source distribution.
+
+The release tooling lock reuses the production versions of `boto3`, `botocore`, `jmespath`, `python-dateutil`, `s3transfer`, `six`, and `urllib3`; their exact versions and license evidence are listed in the table below. It does not introduce a second S3 SDK or an unpinned transitive version.
 
 <!-- BEGIN GENERATED: PYTHON PRODUCTION DEPENDENCIES -->
 | Package | Locked | License metadata | Evidence |

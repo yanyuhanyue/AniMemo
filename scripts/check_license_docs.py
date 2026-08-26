@@ -47,7 +47,7 @@ RELEASE_DOCUMENTS = (
 EVIDENCE_SHA256 = {
     "package-lock.json": "c0aaa71bff7997dcaf6047f565e0764d3b98e2f072a77bb1d1a246f46259a1e2",
     "backend/requirements.txt": "31206537e99d46777c1a73152fe7514bb88036219814cdc11cae6f1719724c8a",
-    "release/requirements.txt": "dc33c76807b0f3672bd53d14a3916350ba5a876cced309d009caed2c630853fd",
+    "release/requirements.txt": "9bb353ade1f549ca5c68ea08f7c3de3d1465864151bf6eb149705d5a06c4c363",
     "bridges/astrbot_plugin_animemo_bridge/requirements.txt": (
         "9d25b578e8e7489ee686d0eabaf1b2b2444b3b0761ac3d55548f9e00c99fb2de"
     ),
@@ -382,10 +382,17 @@ def validate_python_inventory() -> None:
     _require(
         _read_text("release/requirements.txt").splitlines()
         == [
+            "boto3==1.43.75",
+            "botocore==1.43.75",
             "cramjam==2.11.0",
+            "jmespath==1.1.0",
             "jsonschema==4.26.0",
             "packaging==25.0",
+            "python-dateutil==2.9.0.post0",
             "pyyaml==6.0.3",
+            "s3transfer==0.19.2",
+            "six==1.17.0",
+            "urllib3==2.7.0",
         ],
         "release requirements changed",
     )
