@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import traceback
 import unittest
 from datetime import datetime, timezone
@@ -20,7 +21,6 @@ from release.r2_prestate import (
     JURISDICTION_ENV,
     R2_AUTH_METHOD,
     R2_AUTH_METHOD_ARGUMENT,
-    R2_BUCKET,
     R2_RC14_EXPECTED_KEYS,
     R2_RC14_PREFIX,
     R2_RECEIPT_SCHEMA,
@@ -473,6 +473,12 @@ class R2S3PrestateTests(unittest.TestCase):
                 )
 
         def fake_send(_session, request):
+            audit_thread = threading.Thread(
+                target=logging.getLogger("animemo.security.audit").warning,
+                args=("UNRELATED_SECURITY_EVENT",),
+            )
+            audit_thread.start()
+            audit_thread.join()
             return AWSResponse(
                 request.url,
                 200,
@@ -509,6 +515,7 @@ class R2S3PrestateTests(unittest.TestCase):
             self.assertEqual(output.count(sentinel), 0)
         self.assertEqual(output.count("CanonicalRequest"), 0)
         self.assertEqual(output.count("Signature:"), 0)
+        self.assertEqual(output.count("UNRELATED_SECURITY_EVENT"), 1)
 
     def test_receipt_is_deterministic_stable_closed_and_immutable(self):
         first = self.verify()

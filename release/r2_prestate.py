@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import re
-import sys
 import tempfile
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -61,6 +60,7 @@ MAX_KEYS_PER_PAGE = 1000
 READ_METHOD_COUNT = 3
 WRITE_METHOD_COUNT = 0
 _SDK_LOGGING_LOCK = threading.RLock()
+_SENSITIVE_SDK_LOGGER_NAMESPACES = ("boto3", "botocore")
 
 _ACCOUNT_ID = re.compile(r"[0-9a-f]{32}\Z")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -136,15 +136,40 @@ def _raise(
 
 @contextmanager
 def _opaque_sdk_logging_boundary():
-    """Prevent opaque SDK internals from logging signed request material."""
+    """Suppress only SDK namespaces that can log signed request material."""
 
     with _SDK_LOGGING_LOCK:
-        previous = logging.root.manager.disable
-        logging.disable(sys.maxsize)
+        namespace_loggers = {
+            name: logging.getLogger(name)
+            for name in _SENSITIVE_SDK_LOGGER_NAMESPACES
+        }
+        known_loggers = {
+            logger
+            for name, logger in logging.root.manager.loggerDict.items()
+            if isinstance(logger, logging.Logger)
+            and any(
+                name == namespace or name.startswith(f"{namespace}.")
+                for namespace in _SENSITIVE_SDK_LOGGER_NAMESPACES
+            )
+        }
+        disabled_states = {logger: logger.disabled for logger in known_loggers}
+        namespace_states = {
+            logger: (tuple(logger.handlers), logger.propagate)
+            for logger in namespace_loggers.values()
+        }
+        for logger in known_loggers:
+            logger.disabled = True
+        for logger in namespace_loggers.values():
+            logger.handlers = [logging.NullHandler()]
+            logger.propagate = False
         try:
             yield
         finally:
-            logging.disable(previous)
+            for logger, (handlers, propagate) in namespace_states.items():
+                logger.handlers = list(handlers)
+                logger.propagate = propagate
+            for logger, disabled in disabled_states.items():
+                logger.disabled = disabled
 
 
 def _utc_now() -> datetime:
