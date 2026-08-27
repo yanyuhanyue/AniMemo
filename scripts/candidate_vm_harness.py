@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import hashlib
 import json
 import locale
+import ntpath
 import os
 import re
 import shutil
@@ -64,7 +66,13 @@ ROBOCOPY = Path("C:/Windows/System32/robocopy.exe")
 SSH = Path("C:/Windows/System32/OpenSSH/ssh.exe")
 SCP = Path("C:/Windows/System32/OpenSSH/scp.exe")
 SSH_ALIAS = "animemo-test"
+SSH_HOST = "192.168.64.10"
+SSH_USER = "animemo"
+SSH_HOST_KEY_ALIAS = SSH_ALIAS
 VM_WORK_ROOT = Path("E:/番剧记录/.animemo-vm-work/rc14-candidate-acceptance")
+OPENSSH_SESSION_ROOT = VM_WORK_ROOT / "provider-session"
+OPENSSH_IDENTITY = OPENSSH_SESSION_ROOT / "id_ed25519"
+OPENSSH_KNOWN_HOSTS = OPENSSH_SESSION_ROOT / "known_hosts"
 SOURCE_VM_HASH_FILES = (
     "Ubuntu 64 位-000001.vmdk",
     "Ubuntu 64 位-000003.vmdk",
@@ -115,12 +123,40 @@ SAFE_HOST_ENVIRONMENT_NAMES = frozenset(
         "WINDIR",
     }
 )
+OPENSSH_EXCLUDED_AMBIENT_NAMES = frozenset({"HOME", "USERPROFILE"})
 EXPECTED_RC14_EXTERNAL_STATE = {
     "tag": "ABSENT",
     "github_release": "ABSENT",
     "ghcr": "ABSENT",
     "public_r2": "ABSENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE",
 }
+EXPECTED_SSH_SHA256 = (
+    "sha256:6250fd52163fe99a0dc49403ed1b4bbef9b764bdb7bada017a93d057d9376a42"
+)
+EXPECTED_SCP_SHA256 = (
+    "sha256:63b7118d8e1a8a84398cf4ce1584dc6b146606092fe9c68bbaf110bbdcfb480a"
+)
+EXPECTED_OPENSSH_PE_MACHINE = 0x8664
+OPENSSH_REQUIRED_OPTIONS = (
+    "BatchMode=yes",
+    "IdentitiesOnly=yes",
+    "IdentityAgent=none",
+    "ProxyCommand=none",
+    "ProxyJump=none",
+    "PermitLocalCommand=no",
+    "ClearAllForwardings=yes",
+    "ForwardAgent=no",
+    "PasswordAuthentication=no",
+    "KbdInteractiveAuthentication=no",
+    "PreferredAuthentications=publickey",
+    "RequestTTY=no",
+    "StrictHostKeyChecking=yes",
+    f"UserKnownHostsFile={OPENSSH_KNOWN_HOSTS}",
+    "GlobalKnownHostsFile=none",
+    f"IdentityFile={OPENSSH_IDENTITY}",
+    f"HostKeyAlias={SSH_HOST_KEY_ALIAS}",
+    f"User={SSH_USER}",
+)
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 
@@ -129,6 +165,351 @@ class CandidateHarnessError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+class WindowsPlatformAuthority(Protocol):
+    def resolve_program_data(self) -> str: ...
+
+    def is_directory(self, path: str) -> bool: ...
+
+    def has_reparse_component(self, path: str) -> bool: ...
+
+    def is_fixed_drive(self, path: str) -> bool: ...
+
+    def is_file(self, path: Path) -> bool: ...
+
+    def inspect_binary(self, path: Path) -> WindowsBinaryIdentity: ...
+
+    def is_controlled_file(
+        self,
+        path: Path,
+        *,
+        root: Path,
+        private: bool,
+    ) -> bool: ...
+
+
+class _WindowsGuid(ctypes.Structure):
+    _fields_ = (
+        ("data1", ctypes.c_ulong),
+        ("data2", ctypes.c_ushort),
+        ("data3", ctypes.c_ushort),
+        ("data4", ctypes.c_ubyte * 8),
+    )
+
+
+_FOLDERID_PROGRAM_DATA = _WindowsGuid(
+    0x62AB5D82,
+    0xFDC1,
+    0x4DC3,
+    (ctypes.c_ubyte * 8)(0xA9, 0xDD, 0x07, 0x0D, 0x1D, 0x49, 0x5D, 0x97),
+)
+
+
+class NativeWindowsPlatformAuthority:
+    """Read non-secret Windows platform capabilities without ambient overrides."""
+
+    @staticmethod
+    def resolve_program_data() -> str:
+        if os.name != "nt":
+            raise OSError("Windows Known Folder API is unavailable")
+        value = ctypes.c_wchar_p()
+        result = ctypes.windll.shell32.SHGetKnownFolderPath(  # type: ignore[attr-defined]
+            ctypes.byref(_FOLDERID_PROGRAM_DATA),
+            0,
+            None,
+            ctypes.byref(value),
+        )
+        if result != 0 or value.value is None:
+            raise OSError("FOLDERID_ProgramData is unavailable")
+        try:
+            return value.value
+        finally:
+            ctypes.windll.ole32.CoTaskMemFree(value)  # type: ignore[attr-defined]
+
+    @staticmethod
+    def is_directory(path: str) -> bool:
+        return Path(path).is_dir()
+
+    @staticmethod
+    def has_reparse_component(path: str) -> bool:
+        candidate = Path(Path(path).anchor)
+        try:
+            for component in Path(path).parts[1:]:
+                candidate /= component
+                metadata = candidate.stat(follow_symlinks=False)
+                attributes = getattr(metadata, "st_file_attributes", 0)
+                if attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    return True
+        except OSError:
+            return True
+        return False
+
+    @staticmethod
+    def is_fixed_drive(path: str) -> bool:
+        if os.name != "nt":
+            return False
+        drive, _ = ntpath.splitdrive(path)
+        if re.fullmatch(r"[A-Za-z]:", drive) is None:
+            return False
+        return (
+            ctypes.windll.kernel32.GetDriveTypeW(drive + "\\")  # type: ignore[attr-defined]
+            == 3
+        )
+
+    @staticmethod
+    def is_file(path: Path) -> bool:
+        return path.is_file()
+
+    def inspect_binary(self, path: Path) -> WindowsBinaryIdentity:
+        if os.name != "nt" or not path.is_absolute() or not path.is_file():
+            raise OSError("binary unavailable")
+        if self.has_reparse_component(str(path)):
+            raise OSError("binary path is a reparse point")
+        try:
+            with path.open("rb") as handle:
+                header = handle.read(64)
+                if len(header) != 64 or header[:2] != b"MZ":
+                    raise OSError("invalid PE header")
+                pe_offset = int.from_bytes(header[0x3C:0x40], "little")
+                handle.seek(pe_offset)
+                pe_header = handle.read(6)
+                if len(pe_header) != 6 or pe_header[:4] != b"PE\0\0":
+                    raise OSError("invalid PE signature")
+                machine = int.from_bytes(pe_header[4:6], "little")
+            return WindowsBinaryIdentity(
+                sha256=_hash_regular_file(path),
+                pe_machine=machine,
+            )
+        except (OSError, ValueError) as error:
+            raise OSError("binary identity unavailable") from error
+
+    def is_controlled_file(
+        self,
+        path: Path,
+        *,
+        root: Path,
+        private: bool,
+    ) -> bool:
+        if os.name != "nt" or not path.is_absolute() or not root.is_absolute():
+            return False
+        try:
+            if self.has_reparse_component(str(root)) or self.has_reparse_component(
+                str(path)
+            ):
+                return False
+            resolved_root = root.resolve(strict=True)
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(resolved_root)
+            if resolved == resolved_root or not resolved.is_file():
+                return False
+            if private and not _windows_file_acl_is_private(resolved):
+                return False
+        except (OSError, ValueError):
+            return False
+        return True
+
+
+@dataclass(frozen=True)
+class WindowsProviderEnvironments:
+    generic: Mapping[str, str]
+    openssh: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class WindowsBinaryIdentity:
+    sha256: str
+    pe_machine: int
+
+
+def _hash_regular_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _windows_file_acl_is_private(path: Path) -> bool:
+    """Require current-user ownership and no broad effective NTFS access."""
+
+    if os.name != "nt":
+        return False
+
+    class _Trustee(ctypes.Structure):
+        _fields_ = (
+            ("multiple_trustee", ctypes.c_void_p),
+            ("multiple_trustee_operation", ctypes.c_int),
+            ("trustee_form", ctypes.c_int),
+            ("trustee_type", ctypes.c_int),
+            ("name", ctypes.c_void_p),
+        )
+
+    advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    owner = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    token = ctypes.c_void_p()
+    try:
+        result = advapi32.GetNamedSecurityInfoW(
+            str(path),
+            1,
+            0x00000001 | 0x00000004,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
+        )
+        if result != 0 or not owner.value or not dacl.value:
+            return False
+        if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)
+        ):
+            return False
+        required = ctypes.c_ulong()
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(required))
+        if required.value == 0:
+            return False
+        token_user = ctypes.create_string_buffer(required.value)
+        if not advapi32.GetTokenInformation(
+            token,
+            1,
+            token_user,
+            required,
+            ctypes.byref(required),
+        ):
+            return False
+        current_user_sid = ctypes.cast(token_user, ctypes.POINTER(ctypes.c_void_p))[0]
+        if not current_user_sid or not advapi32.EqualSid(owner, current_user_sid):
+            return False
+
+        for well_known_sid_type in (1, 17, 27):
+            sid_size = ctypes.c_ulong(68)
+            sid = ctypes.create_string_buffer(sid_size.value)
+            if not advapi32.CreateWellKnownSid(
+                well_known_sid_type,
+                None,
+                sid,
+                ctypes.byref(sid_size),
+            ):
+                return False
+            trustee = _Trustee(
+                None,
+                0,
+                0,
+                0,
+                ctypes.cast(sid, ctypes.c_void_p),
+            )
+            effective_access = ctypes.c_ulong()
+            if advapi32.GetEffectiveRightsFromAclW(
+                dacl,
+                ctypes.byref(trustee),
+                ctypes.byref(effective_access),
+            ) != 0:
+                return False
+            if effective_access.value != 0:
+                return False
+        return True
+    except (OSError, ValueError):
+        return False
+    finally:
+        if token.value:
+            kernel32.CloseHandle(token)
+        if descriptor.value:
+            kernel32.LocalFree(descriptor)
+
+
+def _canonical_windows_path(value: str) -> str:
+    return ntpath.normcase(ntpath.normpath(value))
+
+
+def build_windows_provider_environments(
+    source: Mapping[str, str],
+    *,
+    platform: WindowsPlatformAuthority | None = None,
+) -> WindowsProviderEnvironments:
+    """Build separate generic and OpenSSH environments from fixed authority."""
+
+    logical_values: dict[str, str] = {}
+    for name, value in source.items():
+        if (
+            type(name) is not str
+            or type(value) is not str
+            or not name
+            or "=" in name
+            or "\0" in name
+            or "\0" in value
+        ):
+            raise CandidateHarnessError("CANDIDATE_VM_HOST_ENVIRONMENT_INVALID")
+        canonical_name = name.upper()
+        prior = logical_values.get(canonical_name)
+        if prior is not None and prior != value:
+            raise CandidateHarnessError("WINDOWS_OPENSSH_ENVIRONMENT_CONFLICT")
+        logical_values[canonical_name] = value
+
+    generic = {
+        name: value
+        for name, value in logical_values.items()
+        if name in SAFE_HOST_ENVIRONMENT_NAMES
+    }
+    fixed_path = os.pathsep.join(
+        dict.fromkeys(
+            (
+                str(VMRUN.parent),
+                str(SSH.parent),
+                str(ROBOCOPY.parent),
+                str(Path(generic.get("SYSTEMROOT", "C:/Windows")) / "System32"),
+                generic.get("SYSTEMROOT", "C:/Windows"),
+            )
+        )
+    )
+    generic["PATH"] = fixed_path
+
+    authority = platform or NativeWindowsPlatformAuthority()
+    try:
+        program_data = authority.resolve_program_data()
+    except (OSError, RuntimeError) as error:
+        raise CandidateHarnessError(
+            "WINDOWS_OPENSSH_PROGRAMDATA_UNAVAILABLE"
+        ) from error
+    if (
+        type(program_data) is not str
+        or not program_data
+        or "\0" in program_data
+        or program_data.startswith(("\\\\", "//"))
+        or re.match(r"^[\\/]{2}[?.][\\/]", program_data) is not None
+        or ntpath.isabs(program_data) is False
+        or re.fullmatch(r"[A-Za-z]:", ntpath.splitdrive(program_data)[0]) is None
+    ):
+        raise CandidateHarnessError("WINDOWS_OPENSSH_PROGRAMDATA_INVALID")
+    canonical_program_data = ntpath.normpath(program_data)
+    try:
+        valid_path = (
+            authority.is_directory(canonical_program_data)
+            and not authority.has_reparse_component(canonical_program_data)
+            and authority.is_fixed_drive(canonical_program_data)
+        )
+    except OSError as error:
+        raise CandidateHarnessError("WINDOWS_OPENSSH_PROGRAMDATA_INVALID") from error
+    if not valid_path:
+        raise CandidateHarnessError("WINDOWS_OPENSSH_PROGRAMDATA_INVALID")
+    ambient_program_data = logical_values.get("PROGRAMDATA")
+    if (
+        ambient_program_data is not None
+        and _canonical_windows_path(ambient_program_data)
+        != _canonical_windows_path(canonical_program_data)
+    ):
+        raise CandidateHarnessError("WINDOWS_OPENSSH_PROGRAMDATA_INVALID")
+
+    openssh = {
+        name: value
+        for name, value in generic.items()
+        if name not in OPENSSH_EXCLUDED_AMBIENT_NAMES
+    }
+    openssh["PROGRAMDATA"] = canonical_program_data
+    return WindowsProviderEnvironments(generic=generic, openssh=openssh)
 
 
 class HostCommandRunner(Protocol):
@@ -279,12 +660,72 @@ class SourceVmEvidence:
 
 
 @dataclass(frozen=True)
+class ProviderReadinessReceipt:
+    schema: str
+    version: int
+    environment_policy: str
+    program_data_authority: str
+    config_authority: str
+    ssh_digest: str
+    scp_digest: str
+    architecture: str
+    result: str
+    receipt_digest: str
+
+    @classmethod
+    def issue(
+        cls,
+        *,
+        ssh_digest: str,
+        scp_digest: str,
+    ) -> ProviderReadinessReceipt:
+        body = {
+            "schema": "animemo.candidate-vm-provider-readiness/v1",
+            "version": 1,
+            "environmentPolicy": "EXECUTABLE_SCOPED",
+            "programDataAuthority": "WINDOWS_KNOWN_FOLDER_FID_PROGRAMDATA",
+            "configAuthority": "PROVIDER_OWNED_CLOSED_OPENSSH",
+            "sshDigest": ssh_digest,
+            "scpDigest": scp_digest,
+            "architecture": "AMD64",
+            "result": "PASS",
+        }
+        return cls(
+            schema=body["schema"],
+            version=body["version"],
+            environment_policy=body["environmentPolicy"],
+            program_data_authority=body["programDataAuthority"],
+            config_authority=body["configAuthority"],
+            ssh_digest=body["sshDigest"],
+            scp_digest=body["scpDigest"],
+            architecture=body["architecture"],
+            result=body["result"],
+            receipt_digest=sha256_bytes(canonical_json_bytes(body)),
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "version": self.version,
+            "environmentPolicy": self.environment_policy,
+            "programDataAuthority": self.program_data_authority,
+            "configAuthority": self.config_authority,
+            "sshDigest": self.ssh_digest,
+            "scpDigest": self.scp_digest,
+            "architecture": self.architecture,
+            "result": self.result,
+            "receiptDigest": self.receipt_digest,
+        }
+
+
+@dataclass(frozen=True)
 class CandidateProfilePlan:
     profile: str
     installer_profile: str
     snapshot_name: str
     snapshot_identity: str
     clone_identity: str
+    provider_readiness_receipt_digest: str
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -308,6 +749,7 @@ class CandidateHarnessPlan:
     source_vm_digest: str
     original_vm_hashes: Mapping[str, str]
     profiles: tuple[CandidateProfilePlan, ...]
+    provider_readiness_receipt_digest: str
     plan_digest: str
 
     def identity_body(self) -> dict[str, object]:
@@ -335,6 +777,8 @@ class CandidateHarnessPlan:
 
 
 class CandidateVmProvider(Protocol):
+    def inspect_readiness(self) -> ProviderReadinessReceipt: ...
+
     def inspect_source(self) -> SourceVmEvidence: ...
 
     def execute_profile(
@@ -366,11 +810,15 @@ class ClosedVmwareProvider:
         runner: HostCommandRunner | None = None,
         public_transport: PublicReadonlyTransport | None = None,
         environment: Mapping[str, str] | None = None,
+        windows_platform: WindowsPlatformAuthority | None = None,
     ) -> None:
         self._runner = runner or SubprocessHostCommandRunner()
         self._public = public_transport or FixedPublicReadonlyAdapter()
         self._environment = environment if environment is not None else os.environ
+        self._windows_platform = windows_platform or NativeWindowsPlatformAuthority()
         self._host_environment = self._sanitized_host_environment(self._environment)
+        self._openssh_host_environment: Mapping[str, str] | None = None
+        self._readiness: ProviderReadinessReceipt | None = None
 
     @staticmethod
     def _sanitized_host_environment(
@@ -436,11 +884,24 @@ class ClosedVmwareProvider:
         input_bytes: bytes | None = None,
         timeout: int = 300,
         allowed: frozenset[int] = frozenset({0}),
+        openssh: bool = False,
     ) -> subprocess.CompletedProcess[bytes]:
+        if not argv:
+            raise CandidateHarnessError("WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE")
+        executable = _canonical_windows_path(str(argv[0]))
+        is_openssh_executable = executable in {
+            _canonical_windows_path(str(SSH)),
+            _canonical_windows_path(str(SCP)),
+        }
+        if openssh is not is_openssh_executable:
+            raise CandidateHarnessError("WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE")
+        environment = self._host_environment
+        if openssh:
+            environment = self._openssh_environment()
         try:
             completed = self._runner.run(
                 tuple(argv),
-                environment=self._host_environment,
+                environment=environment,
                 input_bytes=input_bytes,
                 timeout=timeout,
             )
@@ -449,6 +910,86 @@ class ClosedVmwareProvider:
         if completed.returncode not in allowed:
             raise CandidateHarnessError(code)
         return completed
+
+    def _openssh_environment(self) -> Mapping[str, str]:
+        if self._openssh_host_environment is None:
+            environments = build_windows_provider_environments(
+                self._environment,
+                platform=self._windows_platform,
+            )
+            self._openssh_host_environment = dict(environments.openssh)
+        return self._openssh_host_environment
+
+    def inspect_readiness(self) -> ProviderReadinessReceipt:
+        if self._readiness is not None:
+            return self._readiness
+
+        runner_path = Path(__file__).resolve().with_name("candidate_profile_runner.py")
+        for path in (VMRUN, ROBOCOPY, runner_path):
+            try:
+                available = self._windows_platform.is_file(path)
+            except OSError as error:
+                raise CandidateHarnessError(
+                    "CANDIDATE_VM_TOOLCHAIN_UNAVAILABLE"
+                ) from error
+            if not available:
+                raise CandidateHarnessError("CANDIDATE_VM_TOOLCHAIN_UNAVAILABLE")
+
+        try:
+            ssh_identity = self._windows_platform.inspect_binary(SSH)
+            scp_identity = self._windows_platform.inspect_binary(SCP)
+        except OSError as error:
+            raise CandidateHarnessError(
+                "WINDOWS_OPENSSH_BINARY_UNAVAILABLE"
+            ) from error
+        if (
+            ssh_identity
+            != WindowsBinaryIdentity(
+                sha256=EXPECTED_SSH_SHA256,
+                pe_machine=EXPECTED_OPENSSH_PE_MACHINE,
+            )
+            or scp_identity
+            != WindowsBinaryIdentity(
+                sha256=EXPECTED_SCP_SHA256,
+                pe_machine=EXPECTED_OPENSSH_PE_MACHINE,
+            )
+        ):
+            raise CandidateHarnessError("WINDOWS_OPENSSH_IDENTITY_MISMATCH")
+
+        try:
+            identity_safe = self._windows_platform.is_controlled_file(
+                OPENSSH_IDENTITY,
+                root=OPENSSH_SESSION_ROOT,
+                private=True,
+            )
+            known_hosts_safe = self._windows_platform.is_controlled_file(
+                OPENSSH_KNOWN_HOSTS,
+                root=OPENSSH_SESSION_ROOT,
+                private=True,
+            )
+        except OSError as error:
+            raise CandidateHarnessError(
+                "WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE"
+            ) from error
+        if not identity_safe:
+            raise CandidateHarnessError("WINDOWS_OPENSSH_IDENTITY_MISMATCH")
+        if not known_hosts_safe:
+            raise CandidateHarnessError("WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE")
+
+        self._openssh_environment()
+        if self._openssh_closed_options()[1::2] != OPENSSH_REQUIRED_OPTIONS:
+            raise CandidateHarnessError("WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE")
+        self._run(
+            (str(SSH), "-V"),
+            code="WINDOWS_OPENSSH_READINESS_FAILED",
+            timeout=15,
+            openssh=True,
+        )
+        self._readiness = ProviderReadinessReceipt.issue(
+            ssh_digest=ssh_identity.sha256,
+            scp_digest=scp_identity.sha256,
+        )
+        return self._readiness
 
     @staticmethod
     def _decode_output(value: bytes, *, code: str) -> list[str]:
@@ -910,18 +1451,50 @@ class ClosedVmwareProvider:
         )
 
     @staticmethod
-    def _ssh_argv(command: str) -> tuple[str, ...]:
+    def _openssh_closed_options() -> tuple[str, ...]:
+        return tuple(
+            item for value in OPENSSH_REQUIRED_OPTIONS for item in ("-o", value)
+        )
+
+    @classmethod
+    def _ssh_argv(cls, command: str) -> tuple[str, ...]:
         return (
             str(SSH),
-            "-o",
-            "BatchMode=yes",
+            "-F",
+            "none",
+            *cls._openssh_closed_options(),
             "-o",
             "ConnectTimeout=10",
             "-o",
-            "StrictHostKeyChecking=yes",
+            "ConnectionAttempts=1",
             "--",
-            SSH_ALIAS,
+            SSH_HOST,
             command,
+        )
+
+    @classmethod
+    def _scp_argv(
+        cls,
+        *,
+        source: str,
+        destination: str,
+        recursive: bool,
+    ) -> tuple[str, ...]:
+        recursion = ("-r",) if recursive else ()
+        return (
+            str(SCP),
+            "-F",
+            "none",
+            "-q",
+            *recursion,
+            *cls._openssh_closed_options(),
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ConnectionAttempts=1",
+            "--",
+            source,
+            f"{SSH_HOST}:{destination}",
         )
 
     def _wait_for_ssh(self) -> None:
@@ -929,7 +1502,7 @@ class ClosedVmwareProvider:
             try:
                 completed = self._runner.run(
                     self._ssh_argv("/usr/bin/true"),
-                    environment=self._host_environment,
+                    environment=self._openssh_environment(),
                     timeout=15,
                 )
             except (OSError, subprocess.SubprocessError):
@@ -968,6 +1541,7 @@ class ClosedVmwareProvider:
             code=code,
             input_bytes=sudo_password,
             timeout=timeout,
+            openssh=True,
         )
 
     def _stage_candidate(self, candidate_root: Path, candidate_digest: str) -> str:
@@ -982,36 +1556,25 @@ class ClosedVmwareProvider:
             code="CANDIDATE_VM_STAGE_FAILED",
         )
         self._run(
-            (
-                str(SCP),
-                "-q",
-                "-r",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "StrictHostKeyChecking=yes",
-                "--",
-                str(candidate_root),
-                f"{SSH_ALIAS}:/tmp/animemo-candidate-stage",
+            self._scp_argv(
+                source=str(candidate_root),
+                destination="/tmp/animemo-candidate-stage",
+                recursive=True,
             ),
             code="CANDIDATE_VM_STAGE_FAILED",
             timeout=60 * 60,
+            openssh=True,
         )
         runner_path = Path(__file__).resolve().with_name("candidate_profile_runner.py")
         self._run(
-            (
-                str(SCP),
-                "-q",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "StrictHostKeyChecking=yes",
-                "--",
-                str(runner_path),
-                f"{SSH_ALIAS}:/tmp/animemo-candidate-profile-runner.py",
+            self._scp_argv(
+                source=str(runner_path),
+                destination="/tmp/animemo-candidate-profile-runner.py",
+                recursive=False,
             ),
             code="CANDIDATE_VM_STAGE_FAILED",
             timeout=300,
+            openssh=True,
         )
         fixed_commands = (
             f"/usr/bin/test ! -e {guest_root}",
@@ -1160,6 +1723,7 @@ class ClosedVmwareProvider:
         shutil.move(str(source), str(target))
 
     def inspect_source(self) -> SourceVmEvidence:
+        self.inspect_readiness()
         self._assert_tools()
         self._assert_source_stopped()
         if self._snapshot_names() != frozenset(SNAPSHOT_ALLOWLIST.values()):
@@ -1181,10 +1745,15 @@ class ClosedVmwareProvider:
         candidate_root: Path,
         initial_platform_state: Mapping[str, bool],
     ) -> Mapping[str, Any]:
+        readiness = self.inspect_readiness()
         if (
             plan not in harness_plan.profiles
             or plan.profile not in PROFILES
             or plan.snapshot_name != SNAPSHOT_ALLOWLIST[plan.profile]
+            or plan.provider_readiness_receipt_digest
+            != readiness.receipt_digest
+            or harness_plan.provider_readiness_receipt_digest
+            != readiness.receipt_digest
             or dict(initial_platform_state) != _initial_platform_state(plan.profile)
         ):
             raise CandidateHarnessError("CANDIDATE_VM_PROFILE_PLAN_INVALID")
@@ -1385,6 +1954,13 @@ def build_harness_plan(
         or candidate["candidate_version"] != RC14_VERSION
     ):
         raise CandidateHarnessError("CANDIDATE_HARNESS_AUTHORITY_MISMATCH")
+    readiness = provider.inspect_readiness()
+    expected_readiness = ProviderReadinessReceipt.issue(
+        ssh_digest=EXPECTED_SSH_SHA256,
+        scp_digest=EXPECTED_SCP_SHA256,
+    )
+    if readiness != expected_readiness:
+        raise CandidateHarnessError("WINDOWS_OPENSSH_READINESS_FAILED")
     source = _validate_source_evidence(provider.inspect_source())
     source_vm_digest = sha256_bytes(
         canonical_json_bytes(dict(sorted(source.original_hashes.items())))
@@ -1396,6 +1972,7 @@ def build_harness_plan(
             "profile": profile,
             "snapshotIdentity": source.snapshot_identities[profile],
             "sourceVmDigest": source_vm_digest,
+            "providerReadinessReceiptDigest": readiness.receipt_digest,
         }
         profiles.append(
             CandidateProfilePlan(
@@ -1404,6 +1981,7 @@ def build_harness_plan(
                 snapshot_name=SNAPSHOT_ALLOWLIST[profile],
                 snapshot_identity=source.snapshot_identities[profile],
                 clone_identity=sha256_bytes(canonical_json_bytes(body)),
+                provider_readiness_receipt_digest=readiness.receipt_digest,
             )
         )
     provisional = CandidateHarnessPlan(
@@ -1417,6 +1995,7 @@ def build_harness_plan(
         source_vm_digest=source_vm_digest,
         original_vm_hashes=dict(source.original_hashes),
         profiles=tuple(profiles),
+        provider_readiness_receipt_digest=readiness.receipt_digest,
         plan_digest="",
     )
     return CandidateHarnessPlan(

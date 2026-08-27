@@ -44,6 +44,9 @@ class FakeProvider:
     def __init__(self):
         self.execute_calls = 0
         self.external_calls = 0
+        self.readiness_calls = 0
+        self.events = []
+        self.readiness_error = None
         self.external_state = dict(harness.EXPECTED_RC14_EXTERNAL_STATE)
         self.hashes = {
             name: "sha256:" + "3" * 64 for name in harness.SOURCE_VM_HASH_FILES
@@ -54,10 +57,21 @@ class FakeProvider:
         }
 
     def inspect_source(self):
+        self.events.append("source")
         return harness.SourceVmEvidence(
             vm_identity=harness.SOURCE_VM_IDENTITY,
             snapshot_identities=self.snapshots,
             original_hashes=self.hashes,
+        )
+
+    def inspect_readiness(self):
+        self.readiness_calls += 1
+        self.events.append("readiness")
+        if self.readiness_error is not None:
+            raise self.readiness_error
+        return harness.ProviderReadinessReceipt.issue(
+            ssh_digest=harness.EXPECTED_SSH_SHA256,
+            scp_digest=harness.EXPECTED_SCP_SHA256,
         )
 
     def execute_profile(
@@ -124,8 +138,9 @@ class PublicTransport:
 
 
 class RecordingRunner:
-    def __init__(self):
+    def __init__(self, *, returncodes=None):
         self.calls = []
+        self.returncodes = dict(returncodes or {})
 
     def run(self, argv, *, environment, input_bytes=None, timeout=300):
         self.calls.append(
@@ -136,7 +151,74 @@ class RecordingRunner:
                 "timeout": timeout,
             }
         )
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        return SimpleNamespace(
+            returncode=self.returncodes.get(tuple(argv), 0), stdout=b"", stderr=b""
+        )
+
+
+class FakeWindowsPlatform:
+    def __init__(
+        self,
+        *,
+        program_data: str = r"C:\ProgramData",
+        directory_exists: bool = True,
+        contains_reparse_point: bool = False,
+        fixed_drive: bool = True,
+        binary_available: bool = True,
+        ssh_digest: str | None = None,
+        scp_digest: str | None = None,
+        machine: int = 0x8664,
+        identity_safe: bool = True,
+        known_hosts_safe: bool = True,
+    ):
+        self.program_data = program_data
+        self.directory_exists = directory_exists
+        self.contains_reparse_point = contains_reparse_point
+        self.fixed_drive = fixed_drive
+        self.binary_available = binary_available
+        self.ssh_digest = ssh_digest or harness.EXPECTED_SSH_SHA256
+        self.scp_digest = scp_digest or harness.EXPECTED_SCP_SHA256
+        self.machine = machine
+        self.identity_safe = identity_safe
+        self.known_hosts_safe = known_hosts_safe
+        self.resolve_calls = 0
+
+    def resolve_program_data(self):
+        self.resolve_calls += 1
+        return self.program_data
+
+    def is_directory(self, path):
+        del path
+        return self.directory_exists
+
+    def has_reparse_component(self, path):
+        del path
+        return self.contains_reparse_point
+
+    def is_fixed_drive(self, path):
+        del path
+        return self.fixed_drive
+
+    def is_file(self, path):
+        del path
+        return True
+
+    def inspect_binary(self, path):
+        if not self.binary_available:
+            raise OSError("binary unavailable")
+        digest = self.ssh_digest if path == harness.SSH else self.scp_digest
+        return harness.WindowsBinaryIdentity(
+            sha256=digest,
+            pe_machine=self.machine,
+        )
+
+    def is_controlled_file(self, path, *, root, private):
+        self.last_controlled_file_check = (path, root, private)
+        if path == harness.OPENSSH_IDENTITY:
+            return self.identity_safe
+        if path == harness.OPENSSH_KNOWN_HOSTS:
+            return self.known_hosts_safe
+        return False
 
 
 class R2ClientError(Exception):
@@ -526,6 +608,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
         plan = self._plan()
         profile = plan.profiles[0]
         provider = harness.ClosedVmwareProvider(
+            runner=RecordingRunner(),
+            windows_platform=FakeWindowsPlatform(),
             environment={harness.GUEST_SUDO_PASSWORD_ENV: "test-only-password"}
         )
         receipt = self.provider.execute_profile(
@@ -568,6 +652,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
         runner = RecordingRunner()
         provider = harness.ClosedVmwareProvider(
             runner=runner,
+            windows_platform=FakeWindowsPlatform(),
             environment={
                 "SystemRoot": "C:/Windows",
                 "USERPROFILE": "C:/Users/tester",
@@ -599,6 +684,335 @@ class CandidateVmHarnessTests(unittest.TestCase):
         self.assertNotIn("test-only-r2-secret", call["environment"].values())
         self.assertNotIn("C:/attacker-controlled", call["environment"]["PATH"])
         self.assertEqual(call["environment"]["SYSTEMROOT"], "C:/Windows")
+
+    def test_ssh_and_scp_use_equivalent_closed_configuration_authority(self):
+        provider = harness.ClosedVmwareProvider(
+            windows_platform=FakeWindowsPlatform(),
+            environment={
+                "HOME": "C:/Users/tester",
+                "USERPROFILE": "C:/Users/tester",
+                "SSH_AUTH_SOCK": "test-agent-endpoint",
+            },
+        )
+        ssh_argv = provider._ssh_argv("/usr/bin/true")
+        scp_argv = provider._scp_argv(
+            source="C:/safe/source",
+            destination="/tmp/safe-destination",
+            recursive=True,
+        )
+        required_options = {
+            "BatchMode=yes",
+            "IdentitiesOnly=yes",
+            "IdentityAgent=none",
+            "ProxyCommand=none",
+            "ProxyJump=none",
+            "PermitLocalCommand=no",
+            "ClearAllForwardings=yes",
+            "ForwardAgent=no",
+            "PasswordAuthentication=no",
+            "KbdInteractiveAuthentication=no",
+            "PreferredAuthentications=publickey",
+            "RequestTTY=no",
+            "StrictHostKeyChecking=yes",
+            "GlobalKnownHostsFile=none",
+            f"UserKnownHostsFile={harness.OPENSSH_KNOWN_HOSTS}",
+            f"IdentityFile={harness.OPENSSH_IDENTITY}",
+            f"HostKeyAlias={harness.SSH_HOST_KEY_ALIAS}",
+            f"User={harness.SSH_USER}",
+        }
+        for argv in (ssh_argv, scp_argv):
+            self.assertEqual(argv[1:3], ("-F", "none"))
+            self.assertTrue(required_options.issubset(set(argv)))
+            self.assertNotIn("test-agent-endpoint", argv)
+            self.assertNotIn("C:/Users/tester", argv)
+        self.assertEqual(ssh_argv[-2], harness.SSH_HOST)
+        self.assertEqual(scp_argv[-1], f"{harness.SSH_HOST}:/tmp/safe-destination")
+
+    def test_openssh_environment_is_not_shared_with_generic_provider_commands(self):
+        runner = RecordingRunner()
+        provider = harness.ClosedVmwareProvider(
+            runner=runner,
+            windows_platform=FakeWindowsPlatform(),
+            environment={
+                "SystemRoot": "C:/Windows",
+                "ProgramData": r"C:\ProgramData",
+                "HOME": "C:/Users/tester",
+                "USERPROFILE": "C:/Users/tester",
+            },
+        )
+        provider._run((str(harness.VMRUN), "-T", "ws", "list"), code="TEST")
+        provider._run((str(harness.ROBOCOPY), "source", "target"), code="TEST")
+        provider._ssh_checked("/usr/bin/true", code="TEST")
+        provider._run(
+            provider._scp_argv(
+                source="C:/safe/source",
+                destination="/tmp/safe-destination",
+                recursive=False,
+            ),
+            code="TEST",
+            openssh=True,
+        )
+        vmrun_environment, robocopy_environment, ssh_environment, scp_environment = (
+            call["environment"] for call in runner.calls
+        )
+        self.assertNotIn("PROGRAMDATA", vmrun_environment)
+        self.assertNotIn("PROGRAMDATA", robocopy_environment)
+        for environment in (ssh_environment, scp_environment):
+            self.assertEqual(environment["PROGRAMDATA"], r"C:\ProgramData")
+            self.assertNotIn("HOME", environment)
+            self.assertNotIn("USERPROFILE", environment)
+
+    def test_executable_scope_cannot_be_reassigned_by_an_internal_caller(self):
+        runner = RecordingRunner()
+        provider = harness.ClosedVmwareProvider(
+            runner=runner,
+            windows_platform=FakeWindowsPlatform(),
+            environment={"ProgramData": r"C:\ProgramData"},
+        )
+        cases = (
+            ((str(harness.VMRUN), "list"), True),
+            ((str(harness.ROBOCOPY), "source", "target"), True),
+            ((str(harness.SSH), "-V"), False),
+            ((str(harness.SCP), "-V"), False),
+        )
+        for argv, openssh in cases:
+            with self.subTest(argv=argv), self.assertRaisesRegex(
+                harness.CandidateHarnessError,
+                "WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE",
+            ):
+                provider._run(argv, code="TEST", openssh=openssh)
+        self.assertEqual(runner.calls, [])
+
+    def test_windows_provider_environments_use_known_folder_authority_per_scope(self):
+        platform = FakeWindowsPlatform()
+        environments = harness.build_windows_provider_environments(
+            {
+                "SystemRoot": "C:/Windows",
+                "ProgramData": r"C:\ProgramData",
+                "HOME": "C:/Users/tester",
+                "USERPROFILE": "C:/Users/tester",
+                "SSH_AUTH_SOCK": "test-agent-endpoint",
+                ACCESS_KEY_ENV: "test-only-r2-access",
+                SECRET_KEY_ENV: "test-only-r2-secret",
+            },
+            platform=platform,
+        )
+        self.assertEqual(platform.resolve_calls, 1)
+        self.assertNotIn("PROGRAMDATA", environments.generic)
+        self.assertEqual(environments.openssh["PROGRAMDATA"], r"C:\ProgramData")
+        for forbidden in (
+            "HOME",
+            "USERPROFILE",
+            "SSH_AUTH_SOCK",
+            ACCESS_KEY_ENV,
+            SECRET_KEY_ENV,
+        ):
+            self.assertNotIn(forbidden, environments.openssh)
+        self.assertEqual(
+            [name for name in environments.openssh if name.upper() == "PROGRAMDATA"],
+            ["PROGRAMDATA"],
+        )
+
+    def test_windows_provider_environment_rejects_invalid_program_data_before_use(self):
+        cases = {
+            "empty": FakeWindowsPlatform(program_data=""),
+            "nul": FakeWindowsPlatform(program_data="C:\\Program\0Data"),
+            "relative": FakeWindowsPlatform(program_data=r"relative\ProgramData"),
+            "unc": FakeWindowsPlatform(program_data=r"\\server\share"),
+            "device": FakeWindowsPlatform(program_data=r"\\?\C:\ProgramData"),
+            "missing": FakeWindowsPlatform(directory_exists=False),
+            "reparse": FakeWindowsPlatform(contains_reparse_point=True),
+            "non-fixed": FakeWindowsPlatform(fixed_drive=False),
+        }
+        for name, platform in cases.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                harness.CandidateHarnessError,
+                "WINDOWS_OPENSSH_PROGRAMDATA_INVALID",
+            ):
+                harness.build_windows_provider_environments({}, platform=platform)
+
+    def test_windows_provider_environment_rejects_unavailable_or_conflicting_authority(self):
+        unavailable = FakeWindowsPlatform()
+        unavailable.resolve_program_data = mock.Mock(side_effect=OSError("unavailable"))
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "WINDOWS_OPENSSH_PROGRAMDATA_UNAVAILABLE",
+        ):
+            harness.build_windows_provider_environments({}, platform=unavailable)
+
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "WINDOWS_OPENSSH_ENVIRONMENT_CONFLICT",
+        ):
+            harness.build_windows_provider_environments(
+                {
+                    "ProgramData": r"C:\ProgramData",
+                    "PROGRAMDATA": r"D:\Unexpected",
+                },
+                platform=FakeWindowsPlatform(),
+            )
+
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "WINDOWS_OPENSSH_PROGRAMDATA_INVALID",
+        ):
+            harness.build_windows_provider_environments(
+                {"ProgramData": r"D:\Unexpected"},
+                platform=FakeWindowsPlatform(),
+            )
+
+    def test_provider_readiness_is_secret_free_cached_and_local_only(self):
+        runner = RecordingRunner()
+        provider = harness.ClosedVmwareProvider(
+            runner=runner,
+            windows_platform=FakeWindowsPlatform(),
+            environment={
+                "ProgramData": r"C:\ProgramData",
+                "SSH_AUTH_SOCK": "test-agent-endpoint",
+                ACCESS_KEY_ENV: "test-only-r2-access",
+                SECRET_KEY_ENV: "test-only-r2-secret",
+            },
+        )
+        first = provider.inspect_readiness()
+        second = provider.inspect_readiness()
+        self.assertIs(first, second)
+        self.assertEqual(first.result, "PASS")
+        self.assertRegex(first.receipt_digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(runner.calls[0]["argv"], (str(harness.SSH), "-V"))
+        serialized = str(first.as_dict())
+        for forbidden in (
+            str(harness.OPENSSH_IDENTITY),
+            str(harness.OPENSSH_KNOWN_HOSTS),
+            r"C:\ProgramData",
+            "test-agent-endpoint",
+            "test-only-r2-access",
+            "test-only-r2-secret",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_provider_readiness_fails_closed_with_stable_classification(self):
+        cases = {
+            "binary-unavailable": (
+                FakeWindowsPlatform(binary_available=False),
+                RecordingRunner(),
+                "WINDOWS_OPENSSH_BINARY_UNAVAILABLE",
+            ),
+            "ssh-identity": (
+                FakeWindowsPlatform(ssh_digest="sha256:" + "0" * 64),
+                RecordingRunner(),
+                "WINDOWS_OPENSSH_IDENTITY_MISMATCH",
+            ),
+            "architecture": (
+                FakeWindowsPlatform(machine=0x14C),
+                RecordingRunner(),
+                "WINDOWS_OPENSSH_IDENTITY_MISMATCH",
+            ),
+            "identity-capability": (
+                FakeWindowsPlatform(identity_safe=False),
+                RecordingRunner(),
+                "WINDOWS_OPENSSH_IDENTITY_MISMATCH",
+            ),
+            "host-key-capability": (
+                FakeWindowsPlatform(known_hosts_safe=False),
+                RecordingRunner(),
+                "WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE",
+            ),
+            "version-startup": (
+                FakeWindowsPlatform(),
+                RecordingRunner(returncodes={(str(harness.SSH), "-V"): 255}),
+                "WINDOWS_OPENSSH_READINESS_FAILED",
+            ),
+        }
+        for name, (platform, runner, code) in cases.items():
+            provider = harness.ClosedVmwareProvider(
+                runner=runner,
+                windows_platform=platform,
+                environment={"ProgramData": r"C:\ProgramData"},
+            )
+            with self.subTest(name=name), self.assertRaisesRegex(
+                harness.CandidateHarnessError, code
+            ):
+                provider.inspect_readiness()
+
+    def test_readiness_precedes_source_identity_and_binds_all_profile_plans(self):
+        plan = self._plan()
+        self.assertEqual(self.provider.events[:2], ["readiness", "source"])
+        self.assertEqual(self.provider.readiness_calls, 1)
+        self.assertRegex(
+            plan.provider_readiness_receipt_digest, r"^sha256:[0-9a-f]{64}$"
+        )
+        self.assertEqual(
+            {
+                item.provider_readiness_receipt_digest
+                for item in plan.profiles
+            },
+            {plan.provider_readiness_receipt_digest},
+        )
+
+    def test_readiness_failure_stops_before_source_identity_or_clone(self):
+        self.provider.readiness_error = harness.CandidateHarnessError(
+            "WINDOWS_OPENSSH_READINESS_FAILED"
+        )
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError, "WINDOWS_OPENSSH_READINESS_FAILED"
+        ):
+            self._plan()
+        self.assertEqual(self.provider.events, ["readiness"])
+        self.assertEqual(self.provider.execute_calls, 0)
+
+    def test_every_profile_stops_before_clone_boot_or_network_on_readiness_failure(self):
+        plan = self._plan()
+        failures = {
+            "program-data": FakeWindowsPlatform(directory_exists=False),
+            "scp-identity": FakeWindowsPlatform(
+                scp_digest="sha256:" + "0" * 64
+            ),
+            "config-authority": FakeWindowsPlatform(known_hosts_safe=False),
+        }
+        for profile in plan.profiles:
+            for name, platform in failures.items():
+                provider = harness.ClosedVmwareProvider(
+                    runner=RecordingRunner(),
+                    windows_platform=platform,
+                    environment={"ProgramData": r"C:\ProgramData"},
+                )
+                with self.subTest(profile=profile.profile, failure=name), mock.patch.object(
+                    provider, "_clone_full"
+                ) as clone, mock.patch.object(
+                    provider, "_start_clone"
+                ) as boot, mock.patch.object(
+                    provider, "_wait_for_ssh"
+                ) as network, self.assertRaises(harness.CandidateHarnessError):
+                    provider.execute_profile(
+                        plan=profile,
+                        harness_plan=plan,
+                        candidate_root=self.root,
+                        initial_platform_state=harness._initial_platform_state(
+                            profile.profile
+                        ),
+                    )
+                clone.assert_not_called()
+                boot.assert_not_called()
+                network.assert_not_called()
+
+    def test_documented_windows_provider_contract_matches_closed_implementation(self):
+        contract = (
+            Path(__file__).resolve().parents[2]
+            / "docs"
+            / "candidate-acceptance-contract-v1.md"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "FOLDERID_ProgramData",
+            "Generic Provider 与 OpenSSH subprocess 环境分开",
+            "-F none",
+            "IdentitiesOnly=yes",
+            "GlobalKnownHostsFile=none",
+            "ssh.exe -V",
+            "Clone create、VM boot 和真实 SSH/SCP 计数都必须为零",
+            "WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE",
+        ):
+            self.assertIn(required, contract)
 
     def test_shared_writable_vmx_and_vmdk_references_are_rejected(self):
         outside = self.root / "shared.vmdk"
@@ -662,7 +1076,11 @@ class CandidateVmHarnessTests(unittest.TestCase):
         plan = self._plan()
         profile = plan.profiles[0]
         runner = RecordingRunner()
-        provider = harness.ClosedVmwareProvider(runner=runner, environment={})
+        provider = harness.ClosedVmwareProvider(
+            runner=runner,
+            windows_platform=FakeWindowsPlatform(),
+            environment={},
+        )
         clone_root = self.root / "partial-start"
         clone_vmx = clone_root / "Ubuntu 64 位.vmx"
         with mock.patch.object(provider, "_assert_tools"), mock.patch.object(

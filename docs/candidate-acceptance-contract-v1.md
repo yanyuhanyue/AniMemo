@@ -153,6 +153,50 @@ multi-writer 和 shared bus。宿主命令使用固定 argv 与最小环境，gu
 suspend、继而 hard suspend 作为紧急 containment（禁止 hard power-off）；只有确认副本
 不再运行后才隔离，仍然返回失败且不生成 Acceptance PASS。
 
+### 4.1 Windows Provider 与 OpenSSH readiness
+
+Windows Provider 把 Generic Provider 与 OpenSSH subprocess 环境分开。Generic scope 继续
+使用既有最小白名单，且不获得 `PROGRAMDATA`；只有固定绝对路径的 `ssh.exe`、`scp.exe`
+获得 OpenSSH scope。OpenSSH scope 的 `PROGRAMDATA` 只能来自 Windows Known Folder API
+的 `FOLDERID_ProgramData`，不得来自 CLI、配置或 ambient override。结果必须是存在的本地
+固定盘绝对目录，路径链不得含 reparse point；空值、NUL、相对路径、UNC、device path、
+不存在目录和 ambient 不一致都失败关闭。Windows 环境名按大小写不敏感语义归一化，冲突
+值以 `WINDOWS_OPENSSH_ENVIRONMENT_CONFLICT` 拒绝。OpenSSH scope 不继承 `HOME`、
+`USERPROFILE`、`SSH_AUTH_SOCK`、`AWS_*`、R2 凭据、代理变量或完整进程环境。
+
+所有 SSH 与 SCP argv 都使用同一套闭合权威：`-F none`、`BatchMode=yes`、
+`IdentitiesOnly=yes`、`IdentityAgent=none`、`ProxyCommand=none`、`ProxyJump=none`、
+`PermitLocalCommand=no`、`ClearAllForwardings=yes`、`ForwardAgent=no`、
+`PasswordAuthentication=no`、`KbdInteractiveAuthentication=no`、
+`PreferredAuthentications=publickey`、`RequestTTY=no`。Host Key 校验固定为
+`StrictHostKeyChecking=yes`，只读取 Provider session 的固定 `known_hosts`，并禁用 global
+known-hosts authority（`GlobalKnownHostsFile=none`）。连接目标固定为 `192.168.64.10`、用户固定为 `animemo`、Host Key
+别名固定为 `animemo-test`；不得从用户或系统 ssh_config 恢复别名、用户、身份、代理、
+跳板、LocalCommand 或转发语义。
+
+Provider session 固定在 VM work root 的 `provider-session` 子目录，身份文件与 known_hosts
+均须为该目录内的普通文件、路径链无 reparse point、由当前 Harness 用户所有，且不得向
+Everyone、Authenticated Users 或 Builtin Users 提供有效 NTFS 权限。身份文件必须显式
+绑定，默认 `~/.ssh/id_rsa`、`~/.ssh/id_ed25519` 和 ssh-agent 都不是 Authority。Harness
+不得读取或记录身份文件正文、用户配置正文、agent endpoint、完整环境或受控文件路径。
+
+Canonical 顺序为：Candidate Authority -> Windows Provider readiness -> VM base identity ->
+Harness plan -> Clone create -> VM boot -> SSH。readiness 在本地验证固定 ssh/scp 绝对路径、
+预期 SHA256、AMD64 PE 架构、Provider session 文件、OpenSSH scope、闭合 argv 合同，并仅
+执行不建立网络连接的 `ssh.exe -V`。成功后签发缓存的、无秘密、无发布权威 Provider
+Readiness Receipt；其摘要进入三个 Profile 的 clone identity 输入，因此三套 Profile 绑定
+同一 receipt。任一步失败时 Clone create、VM boot 和真实 SSH/SCP 计数都必须为零；稳定
+错误类别包括 `WINDOWS_OPENSSH_PROGRAMDATA_UNAVAILABLE`、
+`WINDOWS_OPENSSH_PROGRAMDATA_INVALID`、`WINDOWS_OPENSSH_ENVIRONMENT_CONFLICT`、
+`WINDOWS_OPENSSH_BINARY_UNAVAILABLE`、`WINDOWS_OPENSSH_IDENTITY_MISMATCH`、
+`WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE` 与 `WINDOWS_OPENSSH_READINESS_FAILED`。
+
+该 readiness 只修复 Host Provider 安全与顺序合同，不执行真实 VM，也不改变 Candidate
+Identity v2、Qualification、Installer、R2 或发布 Schema。修复合并改变 exact main 后，旧
+Qualification、Identity、Execution Receipt、live R2 prestate 与隔离 Clone 全部仅可取证；
+下一轮必须从新 exact-main Qualification 开始，使用未暴露的最小只读 R2 凭据并创建三套
+全新 Profile Clone。
+
 ## 5. Freshness 与 Publish
 
 Freshness workflow 必须接收非可选 `candidate_acceptance_receipt_b64url`：它是 bounded、
