@@ -10,7 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from release.candidate import canonical_json_bytes, sha256_bytes
+from release.candidate import (
+    VERIFIED_CANDIDATE_ROOT,
+    canonical_json_bytes,
+    sha256_bytes,
+)
 from release.r2_prestate import (
     ACCESS_KEY_ENV,
     ACCOUNT_ID_ENV,
@@ -128,6 +132,14 @@ class FakeProvider:
     def inspect_rc14_external_state(self):
         self.external_calls += 1
         return dict(self.external_state)
+
+
+class CandidateGuestPathContractTests(unittest.TestCase):
+    def test_guest_staging_root_matches_verified_candidate_loader_root(self):
+        self.assertEqual(
+            Path(harness.GUEST_CANDIDATE_ROOT),
+            VERIFIED_CANDIDATE_ROOT,
+        )
 
 
 class PublicTransport:
