@@ -33,6 +33,7 @@ from typing import Any, Callable, Protocol
 
 from release.candidate import (
     CandidateContractError,
+    VERIFIED_CANDIDATE_ROOT,
     aggregate_receipt_digest,
     canonical_json_bytes,
     load_verified_candidate,
@@ -94,7 +95,7 @@ PUBLIC_ORIGIN = "https://candidate.rc14.invalid"
 RC14_VERSION = "v1.1.0-rc.14"
 REPOSITORY = "yanyuhanyue/AniMemo"
 PUBLIC_MIRROR_ORIGIN = "https://download.animemo.cc"
-GUEST_CANDIDATE_ROOT = "/var/lib/animemo/prepublication-candidates/v1"
+GUEST_CANDIDATE_ROOT = VERIFIED_CANDIDATE_ROOT.as_posix()
 GUEST_PROFILE_RUNNER = "/usr/local/lib/animemo-candidate/candidate_profile_runner.py"
 GUEST_RECEIPT = "/var/lib/animemo/candidate-acceptance/profile-receipt.json"
 GUEST_SUDO_PASSWORD_ENV = "ANIMEMO_CANDIDATE_GUEST_SUDO_PASSWORD"  # noqa: S105
