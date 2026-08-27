@@ -184,7 +184,10 @@ Everyone、Authenticated Users 或 Builtin Users 提供有效 NTFS 权限。身�
 适配器访问；`advapi32`、`kernel32`、`ole32` 与 `shell32` 所有已使用函数都必须显式声明
 `argtypes` 和 `restype`，其中 HANDLE、指针及输出参数保持指针宽度安全。Known Folder
 缓冲区、进程 Token 与 Security Descriptor 必须分别成对调用 `CoTaskMemFree`、
-`CloseHandle` 与 `LocalFree`；适配器不得在非 Windows 导入路径初始化。
+`CloseHandle` 与 `LocalFree`。Token 与 Security Descriptor 仅在原生调用明确成功取得后
+释放；Known Folder 返回的非空 `PWSTR` 则按其所有权合同无论 HRESULT 成败都必须释放。
+`EqualSid` 返回 false 时必须立即读取 last-error，将真正的不相等、SID 无效与查询失败
+分别分类；适配器不得在非 Windows 导入路径初始化。
 
 Canonical 顺序为：Candidate Authority -> Windows Provider readiness -> VM base identity ->
 Harness plan -> Clone create -> VM boot -> SSH。readiness 在本地验证固定 ssh/scp 绝对路径、

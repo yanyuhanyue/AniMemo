@@ -224,14 +224,6 @@ class FakeWindowsPlatform:
             pe_machine=self.machine,
         )
 
-    def is_controlled_file(self, path, *, root, private):
-        self.last_controlled_file_check = (path, root, private)
-        if path == harness.OPENSSH_IDENTITY:
-            return self.identity_safe
-        if path == harness.OPENSSH_KNOWN_HOSTS:
-            return self.known_hosts_safe
-        return False
-
     def inspect_controlled_file(self, path, *, root, private):
         self.last_controlled_file_check = (path, root, private)
         if path == harness.OPENSSH_IDENTITY:
@@ -287,6 +279,9 @@ class RecordingWin32Loader:
     def get_last_error(self):
         return self.last_error
 
+    def set_last_error(self, value):
+        self.last_error = value
+
 
 def _acl_loader(
     *,
@@ -295,11 +290,14 @@ def _acl_loader(
     descriptor=0x3456789AA9876543,
     dacl=0x456789ABBA987654,
     named_result=0,
+    dirty_named_outputs=False,
     open_token=True,
+    dirty_token_output=False,
     token_probe_success=False,
     token_probe_error=122,
     token_query=True,
     equal_sid_result=True,
+    equal_sid_error=0,
     broad_access_index=None,
     effective_result_index=None,
     local_free_result=None,
@@ -316,20 +314,20 @@ def _acl_loader(
         ctypes.cast(pointer, ctypes.POINTER(wintypes.DWORD)).contents.value = value
 
     def get_named_security_info(*args):
-        if named_result:
-            return named_result
-        set_void_pointer(args[3], owner)
-        set_void_pointer(args[5], dacl)
-        set_void_pointer(args[7], descriptor)
-        return 0
+        if not named_result or dirty_named_outputs:
+            set_void_pointer(args[3], owner)
+            set_void_pointer(args[5], dacl)
+            set_void_pointer(args[7], descriptor)
+        return named_result
 
     def open_process_token(_process, _access, token_pointer):
+        if open_token or dirty_token_output:
+            ctypes.cast(
+                token_pointer, ctypes.POINTER(wintypes.HANDLE)
+            ).contents.value = 0x56789ABCCBA98765
         if not open_token:
             loader.last_error = 5
             return 0
-        ctypes.cast(token_pointer, ctypes.POINTER(wintypes.HANDLE)).contents.value = (
-            0x56789ABCCBA98765
-        )
         return 1
 
     def get_token_information(_token, _token_class, buffer, _size, required):
@@ -351,6 +349,8 @@ def _acl_loader(
         state["current_user_seen"] = getattr(
             current_user_pointer, "value", current_user_pointer
         )
+        if not equal_sid_result:
+            loader.last_error = equal_sid_error
         return int(equal_sid_result)
 
     def create_well_known_sid(_sid_type, _domain, _sid, _sid_size):
@@ -386,6 +386,14 @@ def _acl_loader(
         library = loader.libraries.setdefault(library_name, RecordingWin32Library())
         library.functions[function_name] = RecordingWin32Function(callback)
     return loader, state
+
+
+def _acl_adapter(loader):
+    return harness._WindowsApiAdapter(
+        dll_loader=loader,
+        last_error_reader=loader.get_last_error,
+        last_error_writer=loader.set_last_error,
+    )
 
 
 class R2ClientError(Exception):
@@ -1099,38 +1107,89 @@ class CandidateVmHarnessTests(unittest.TestCase):
     def test_win32_adapter_declares_typed_output_pointer_and_release_prototypes(self):
         loader = RecordingWin32Loader()
         harness._WindowsApiAdapter(dll_loader=loader)
-        advapi32 = loader.libraries["advapi32"].functions
-        kernel32 = loader.libraries["kernel32"].functions
-        shell32 = loader.libraries["shell32"].functions
-        ole32 = loader.libraries["ole32"].functions
-
         pointer_to_void_pointer = ctypes.POINTER(ctypes.c_void_p)
-        self.assertEqual(
-            advapi32["GetNamedSecurityInfoW"].argtypes[3:],
-            (
-                pointer_to_void_pointer,
-                pointer_to_void_pointer,
-                pointer_to_void_pointer,
-                pointer_to_void_pointer,
-                pointer_to_void_pointer,
-            ),
-        )
-        self.assertEqual(
-            advapi32["GetTokenInformation"].argtypes,
-            (
-                wintypes.HANDLE,
-                ctypes.c_int,
-                ctypes.c_void_p,
-                wintypes.DWORD,
-                ctypes.POINTER(wintypes.DWORD),
-            ),
-        )
-        self.assertEqual(
-            shell32["SHGetKnownFolderPath"].argtypes[-1],
-            ctypes.POINTER(ctypes.c_wchar_p),
-        )
-        self.assertEqual(kernel32["LocalFree"].restype, ctypes.c_void_p)
-        self.assertEqual(ole32["CoTaskMemFree"].restype, None)
+        prototypes = {
+            "advapi32": {
+                "CreateWellKnownSid": (
+                    (
+                        ctypes.c_int,
+                        ctypes.c_void_p,
+                        ctypes.c_void_p,
+                        ctypes.POINTER(wintypes.DWORD),
+                    ),
+                    wintypes.BOOL,
+                ),
+                "EqualSid": (
+                    (ctypes.c_void_p, ctypes.c_void_p),
+                    wintypes.BOOL,
+                ),
+                "GetEffectiveRightsFromAclW": (
+                    (
+                        ctypes.c_void_p,
+                        ctypes.POINTER(harness._WindowsTrustee),
+                        ctypes.POINTER(wintypes.DWORD),
+                    ),
+                    wintypes.DWORD,
+                ),
+                "GetNamedSecurityInfoW": (
+                    (
+                        wintypes.LPCWSTR,
+                        ctypes.c_int,
+                        wintypes.DWORD,
+                        pointer_to_void_pointer,
+                        pointer_to_void_pointer,
+                        pointer_to_void_pointer,
+                        pointer_to_void_pointer,
+                        pointer_to_void_pointer,
+                    ),
+                    wintypes.DWORD,
+                ),
+                "GetTokenInformation": (
+                    (
+                        wintypes.HANDLE,
+                        ctypes.c_int,
+                        ctypes.c_void_p,
+                        wintypes.DWORD,
+                        ctypes.POINTER(wintypes.DWORD),
+                    ),
+                    wintypes.BOOL,
+                ),
+                "OpenProcessToken": (
+                    (
+                        wintypes.HANDLE,
+                        wintypes.DWORD,
+                        ctypes.POINTER(wintypes.HANDLE),
+                    ),
+                    wintypes.BOOL,
+                ),
+            },
+            "kernel32": {
+                "CloseHandle": ((wintypes.HANDLE,), wintypes.BOOL),
+                "GetCurrentProcess": ((), wintypes.HANDLE),
+                "GetDriveTypeW": ((wintypes.LPCWSTR,), wintypes.UINT),
+                "LocalFree": ((ctypes.c_void_p,), ctypes.c_void_p),
+            },
+            "ole32": {
+                "CoTaskMemFree": ((ctypes.c_void_p,), None),
+            },
+            "shell32": {
+                "SHGetKnownFolderPath": (
+                    (
+                        ctypes.POINTER(harness._WindowsGuid),
+                        wintypes.DWORD,
+                        wintypes.HANDLE,
+                        ctypes.POINTER(ctypes.c_wchar_p),
+                    ),
+                    ctypes.c_long,
+                ),
+            },
+        }
+        for library_name, expected_functions in prototypes.items():
+            functions = loader.libraries[library_name].functions
+            for function_name, (argtypes, restype) in expected_functions.items():
+                with self.subTest(library=library_name, function=function_name):
+                    self.assertEqual(functions[function_name].argtypes, argtypes)
+                    self.assertEqual(functions[function_name].restype, restype)
         self.assertEqual(
             ctypes.sizeof(harness._WindowsSidAndAttributes),
             ctypes.sizeof(ctypes.c_void_p) * 2,
@@ -1157,17 +1216,30 @@ class CandidateVmHarnessTests(unittest.TestCase):
         )
 
     def test_win32_known_folder_failure_does_not_free_unacquired_memory(self):
-        loader = RecordingWin32Loader()
-        loader.libraries.setdefault("shell32", RecordingWin32Library()).functions[
-            "SHGetKnownFolderPath"
-        ] = RecordingWin32Function(lambda *_args: -2147467259)
-        adapter = harness._WindowsApiAdapter(dll_loader=loader)
+        folder = ctypes.create_unicode_buffer(r"C:\dirty-output")
+        for dirty_output in (False, True):
+            loader = RecordingWin32Loader()
 
-        with self.assertRaisesRegex(OSError, "FOLDERID_ProgramData is unavailable"):
-            adapter.resolve_program_data()
-        self.assertEqual(
-            len(loader.libraries["ole32"].functions["CoTaskMemFree"].calls), 0
-        )
+            def known_folder_failure(_folder_id, _flags, _token, output):
+                if dirty_output:
+                    ctypes.cast(
+                        output, ctypes.POINTER(ctypes.c_void_p)
+                    ).contents.value = ctypes.addressof(folder)
+                return -2147467259
+
+            loader.libraries.setdefault("shell32", RecordingWin32Library()).functions[
+                "SHGetKnownFolderPath"
+            ] = RecordingWin32Function(known_folder_failure)
+            adapter = harness._WindowsApiAdapter(dll_loader=loader)
+
+            with self.subTest(dirty_output=dirty_output), self.assertRaisesRegex(
+                OSError, "FOLDERID_ProgramData is unavailable"
+            ):
+                adapter.resolve_program_data()
+            self.assertEqual(
+                len(loader.libraries["ole32"].functions["CoTaskMemFree"].calls),
+                int(dirty_output),
+            )
 
     def test_win32_adapter_uses_pointer_sized_process_token_and_sid_prototypes(self):
         loader = RecordingWin32Loader()
@@ -1195,9 +1267,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
 
     def test_win32_acl_adapter_preserves_64_bit_pointers_and_releases_once(self):
         loader, state = _acl_loader()
-        adapter = harness._WindowsApiAdapter(
-            dll_loader=loader, last_error_reader=loader.get_last_error
-        )
+        adapter = _acl_adapter(loader)
 
         inspection = adapter.inspect_file_acl(Path("controlled-ssh.exe"))
 
@@ -1216,22 +1286,62 @@ class CandidateVmHarnessTests(unittest.TestCase):
         pointer = 0x1234567887654321
         legacy_default_c_int = ctypes.c_int(pointer).value
         self.assertNotEqual(legacy_default_c_int, pointer)
-        self.assertFalse(legacy_default_c_int == pointer)
+        legacy_open_process_token = legacy_default_c_int == pointer
+        legacy_equal_sid = legacy_default_c_int == pointer
+        legacy_private_file = legacy_open_process_token and legacy_equal_sid
+        self.assertFalse(legacy_open_process_token)
+        self.assertFalse(legacy_equal_sid)
+        self.assertFalse(legacy_private_file)
 
         loader, state = _acl_loader(owner=pointer, current_user=pointer)
-        inspection = harness._WindowsApiAdapter(
-            dll_loader=loader, last_error_reader=loader.get_last_error
-        ).inspect_file_acl(Path("controlled-ssh.exe"))
+        inspection = _acl_adapter(loader).inspect_file_acl(
+            Path("controlled-ssh.exe")
+        )
 
         self.assertEqual(state["owner_seen"], pointer)
         self.assertEqual(state["current_user_seen"], pointer)
         self.assertEqual(inspection.status, "PASS")
+
+    def test_legacy_unprototyped_surface_fixture_fails_all_13_callpoints(self):
+        callpoints = (
+            "SHGetKnownFolderPath",
+            "CoTaskMemFree",
+            "GetDriveTypeW",
+            "GetNamedSecurityInfoW",
+            "OpenProcessToken",
+            "GetCurrentProcess",
+            "GetTokenInformation",
+            "GetTokenInformation",
+            "EqualSid",
+            "CreateWellKnownSid",
+            "GetEffectiveRightsFromAclW",
+            "CloseHandle",
+            "LocalFree",
+        )
+        legacy_functions = {
+            name: RecordingWin32Function() for name in set(callpoints)
+        }
+        missing = [
+            name
+            for name in callpoints
+            if not legacy_functions[name].argtypes_assigned
+            or not legacy_functions[name].restype_assigned
+        ]
+        self.assertEqual(missing, list(callpoints))
 
     def test_win32_acl_adapter_rejects_owner_descriptor_and_dacl_anomalies(self):
         cases = {
             "owner-mismatch": (
                 {"equal_sid_result": False},
                 "OWNER_MISMATCH",
+            ),
+            "invalid-owner-sid": (
+                {"equal_sid_result": False, "equal_sid_error": 1337},
+                "SECURITY_DESCRIPTOR_INVALID",
+            ),
+            "owner-query-failure": (
+                {"equal_sid_result": False, "equal_sid_error": 5},
+                "ACL_QUERY_FAILED",
             ),
             "null-owner": ({"owner": None}, "SECURITY_DESCRIPTOR_INVALID"),
             "null-descriptor": (
@@ -1243,10 +1353,55 @@ class CandidateVmHarnessTests(unittest.TestCase):
         for name, (options, expected) in cases.items():
             loader, _ = _acl_loader(**options)
             with self.subTest(name=name):
-                inspection = harness._WindowsApiAdapter(
-                    dll_loader=loader, last_error_reader=loader.get_last_error
-                ).inspect_file_acl(Path("controlled-ssh.exe"))
+                inspection = _acl_adapter(loader).inspect_file_acl(
+                    Path("controlled-ssh.exe")
+                )
                 self.assertEqual(inspection.status, expected)
+
+    def test_win32_acl_adapter_never_releases_dirty_failure_outputs(self):
+        cases = {
+            "GetNamedSecurityInfoW": {
+                "named_result": 5,
+                "dirty_named_outputs": True,
+            },
+            "OpenProcessToken": {
+                "open_token": False,
+                "dirty_token_output": True,
+            },
+        }
+        for name, options in cases.items():
+            loader, _ = _acl_loader(**options)
+            with self.subTest(api=name):
+                inspection = _acl_adapter(loader).inspect_file_acl(
+                    Path("controlled-ssh.exe")
+                )
+                self.assertEqual(inspection.status, "ACL_QUERY_FAILED")
+                if name == "GetNamedSecurityInfoW":
+                    self.assertEqual(
+                        len(
+                            loader.libraries["kernel32"]
+                            .functions["LocalFree"]
+                            .calls
+                        ),
+                        0,
+                    )
+                else:
+                    self.assertEqual(
+                        len(
+                            loader.libraries["kernel32"]
+                            .functions["CloseHandle"]
+                            .calls
+                        ),
+                        0,
+                    )
+                    self.assertEqual(
+                        len(
+                            loader.libraries["kernel32"]
+                            .functions["LocalFree"]
+                            .calls
+                        ),
+                        1,
+                    )
 
     def test_win32_acl_adapter_rejects_each_broad_principal(self):
         for index, principal in enumerate(
@@ -1254,9 +1409,9 @@ class CandidateVmHarnessTests(unittest.TestCase):
         ):
             loader, state = _acl_loader(broad_access_index=index)
             with self.subTest(principal=principal):
-                inspection = harness._WindowsApiAdapter(
-                    dll_loader=loader, last_error_reader=loader.get_last_error
-                ).inspect_file_acl(Path("controlled-ssh.exe"))
+                inspection = _acl_adapter(loader).inspect_file_acl(
+                    Path("controlled-ssh.exe")
+                )
                 self.assertEqual(inspection.status, "ACL_UNSAFE")
                 self.assertEqual(state["effective_index"], index + 1)
 
@@ -1274,9 +1429,9 @@ class CandidateVmHarnessTests(unittest.TestCase):
         for name, options in cases.items():
             loader, _ = _acl_loader(**options)
             with self.subTest(api=name):
-                inspection = harness._WindowsApiAdapter(
-                    dll_loader=loader, last_error_reader=loader.get_last_error
-                ).inspect_file_acl(Path("controlled-ssh.exe"))
+                inspection = _acl_adapter(loader).inspect_file_acl(
+                    Path("controlled-ssh.exe")
+                )
                 self.assertEqual(inspection.status, "ACL_QUERY_FAILED")
 
     def test_win32_acl_adapter_fails_closed_on_native_release_failure(self):
@@ -1288,9 +1443,9 @@ class CandidateVmHarnessTests(unittest.TestCase):
         for name, options in cases.items():
             loader, _ = _acl_loader(**options)
             with self.subTest(release=name):
-                inspection = harness._WindowsApiAdapter(
-                    dll_loader=loader, last_error_reader=loader.get_last_error
-                ).inspect_file_acl(Path("controlled-ssh.exe"))
+                inspection = _acl_adapter(loader).inspect_file_acl(
+                    Path("controlled-ssh.exe")
+                )
                 self.assertEqual(inspection.status, "RESOURCE_RELEASE_FAILED")
 
     def test_native_windows_authority_classifies_adapter_initialization_failure(self):
@@ -1317,6 +1472,31 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 self.root / "ssh.exe", root=self.root, private=True
             )
         self.assertEqual(inspection.status, "ABI_UNSUPPORTED")
+
+    @unittest.skipUnless(harness.os.name == "nt", "Windows path authority test")
+    def test_native_windows_authority_distinguishes_path_query_and_policy_failure(self):
+        controlled = self.root / "controlled-path"
+        controlled.mkdir()
+        fixture = controlled / "ssh.exe"
+        fixture.write_bytes(b"fixture")
+        outside = self.root / "outside.exe"
+        outside.write_bytes(b"fixture")
+        authority = harness.NativeWindowsPlatformAuthority()
+
+        with mock.patch.object(
+            authority,
+            "has_reparse_component",
+            side_effect=OSError("query failed"),
+        ):
+            query_failure = authority.inspect_controlled_file(
+                fixture, root=controlled, private=False
+            )
+        containment_failure = authority.inspect_controlled_file(
+            outside, root=controlled, private=False
+        )
+
+        self.assertEqual(query_failure.status, "ACL_QUERY_FAILED")
+        self.assertEqual(containment_failure.status, "ACL_UNSAFE")
 
     @unittest.skipUnless(harness.os.name == "nt", "Windows read-only fixture test")
     def test_real_openssh_bytes_are_private_in_task_owned_readonly_fixtures(self):

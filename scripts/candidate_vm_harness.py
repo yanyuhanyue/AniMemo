@@ -251,6 +251,8 @@ class _WindowsApiAdapter:
     """Single typed Win32 FFI authority for the candidate harness."""
 
     _ERROR_INSUFFICIENT_BUFFER = 122
+    _ERROR_INVALID_SID = 1337
+    _ERROR_SUCCESS = 0
     _SE_FILE_OBJECT = 1
     _OWNER_SECURITY_INFORMATION = 0x00000001
     _DACL_SECURITY_INFORMATION = 0x00000004
@@ -265,6 +267,7 @@ class _WindowsApiAdapter:
         *,
         dll_loader: Any | None = None,
         last_error_reader: Callable[[], int] | None = None,
+        last_error_writer: Callable[[int], None] | None = None,
     ) -> None:
         if dll_loader is None:
             try:
@@ -277,11 +280,20 @@ class _WindowsApiAdapter:
             self._ole32 = dll_loader("ole32", use_last_error=True)
             self._shell32 = dll_loader("shell32", use_last_error=True)
             self._declare_prototypes()
-        except (AttributeError, OSError, TypeError, ValueError) as error:
+        except (
+            AttributeError,
+            ctypes.ArgumentError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as error:
             raise OSError("Windows Win32 ABI is unavailable") from error
         if last_error_reader is None:
             last_error_reader = getattr(ctypes, "get_last_error", lambda: 0)
+        if last_error_writer is None:
+            last_error_writer = getattr(ctypes, "set_last_error", lambda _value: None)
         self._last_error_reader = last_error_reader
+        self._last_error_writer = last_error_writer
 
     def _declare_prototypes(self) -> None:
         self._advapi32.CreateWellKnownSid.argtypes = (
@@ -347,6 +359,9 @@ class _WindowsApiAdapter:
     def _last_error(self) -> int:
         return int(self._last_error_reader())
 
+    def _set_last_error(self, value: int) -> None:
+        self._last_error_writer(value)
+
     def resolve_program_data(self) -> str:
         value = ctypes.c_wchar_p()
         result = self._shell32.SHGetKnownFolderPath(
@@ -372,6 +387,8 @@ class _WindowsApiAdapter:
         descriptor = ctypes.c_void_p()
         token = wintypes.HANDLE()
         inspection = WindowsControlledFileInspection("ACL_QUERY_FAILED")
+        descriptor_acquired = False
+        token_acquired = False
         cleanup_failed = False
         cleanup_error: int | None = None
         try:
@@ -389,35 +406,44 @@ class _WindowsApiAdapter:
                 inspection = WindowsControlledFileInspection(
                     "ACL_QUERY_FAILED", int(result)
                 )
-            elif not descriptor.value or not owner.value:
-                inspection = WindowsControlledFileInspection(
-                    "SECURITY_DESCRIPTOR_INVALID"
-                )
-            elif not dacl.value:
-                inspection = WindowsControlledFileInspection("ACL_UNSAFE")
-            elif not self._advapi32.OpenProcessToken(
-                self._kernel32.GetCurrentProcess(),
-                self._TOKEN_QUERY,
-                ctypes.byref(token),
-            ):
-                inspection = WindowsControlledFileInspection(
-                    "ACL_QUERY_FAILED", self._last_error()
-                )
             else:
-                inspection = self._inspect_acl_with_token(owner, dacl, token)
+                descriptor_acquired = bool(descriptor.value)
+                if not descriptor_acquired or not owner.value:
+                    inspection = WindowsControlledFileInspection(
+                        "SECURITY_DESCRIPTOR_INVALID"
+                    )
+                elif not dacl.value:
+                    inspection = WindowsControlledFileInspection("ACL_UNSAFE")
+                else:
+                    opened = self._advapi32.OpenProcessToken(
+                        self._kernel32.GetCurrentProcess(),
+                        self._TOKEN_QUERY,
+                        ctypes.byref(token),
+                    )
+                    if not opened:
+                        inspection = WindowsControlledFileInspection(
+                            "ACL_QUERY_FAILED", self._last_error()
+                        )
+                    elif not token.value:
+                        inspection = WindowsControlledFileInspection(
+                            "ACL_QUERY_FAILED"
+                        )
+                    else:
+                        token_acquired = True
+                        inspection = self._inspect_acl_with_token(owner, dacl, token)
         except ctypes.ArgumentError:
             inspection = WindowsControlledFileInspection("ABI_UNSUPPORTED")
         except (OSError, TypeError, ValueError):
             inspection = WindowsControlledFileInspection("ACL_QUERY_FAILED")
         finally:
-            if token.value:
+            if token_acquired:
                 try:
                     if not self._kernel32.CloseHandle(token):
                         cleanup_failed = True
                         cleanup_error = self._last_error()
                 except (ctypes.ArgumentError, OSError, TypeError, ValueError):
                     cleanup_failed = True
-            if descriptor.value:
+            if descriptor_acquired:
                 try:
                     released = self._kernel32.LocalFree(descriptor)
                     if released:
@@ -468,8 +494,16 @@ class _WindowsApiAdapter:
         current_user_sid = token_user.user.sid
         if not current_user_sid:
             return WindowsControlledFileInspection("SECURITY_DESCRIPTOR_INVALID")
+        self._set_last_error(self._ERROR_SUCCESS)
         if not self._advapi32.EqualSid(owner, current_user_sid):
-            return WindowsControlledFileInspection("OWNER_MISMATCH")
+            sid_error = self._last_error()
+            if sid_error == self._ERROR_SUCCESS:
+                return WindowsControlledFileInspection("OWNER_MISMATCH")
+            if sid_error == self._ERROR_INVALID_SID:
+                return WindowsControlledFileInspection(
+                    "SECURITY_DESCRIPTOR_INVALID", sid_error
+                )
+            return WindowsControlledFileInspection("ACL_QUERY_FAILED", sid_error)
 
         for well_known_sid_type in self._BROAD_SID_TYPES:
             sid_size = wintypes.DWORD(self._MAX_SID_SIZE)
@@ -531,15 +565,12 @@ class NativeWindowsPlatformAuthority:
     @staticmethod
     def has_reparse_component(path: str) -> bool:
         candidate = Path(Path(path).anchor)
-        try:
-            for component in Path(path).parts[1:]:
-                candidate /= component
-                metadata = candidate.stat(follow_symlinks=False)
-                attributes = getattr(metadata, "st_file_attributes", 0)
-                if attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
-                    return True
-        except OSError:
-            return True
+        for component in Path(path).parts[1:]:
+            candidate /= component
+            metadata = candidate.stat(follow_symlinks=False)
+            attributes = getattr(metadata, "st_file_attributes", 0)
+            if attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                return True
         return False
 
     def is_fixed_drive(self, path: str) -> bool:
@@ -593,30 +624,25 @@ class NativeWindowsPlatformAuthority:
                 return WindowsControlledFileInspection("ACL_UNSAFE")
             resolved_root = root.resolve(strict=True)
             resolved = path.resolve(strict=True)
-            resolved.relative_to(resolved_root)
-            if resolved == resolved_root or not resolved.is_file():
-                return WindowsControlledFileInspection("ACL_UNSAFE")
-            if private:
-                try:
-                    api = self._windows_api()
-                except OSError:
-                    return WindowsControlledFileInspection("ABI_UNSUPPORTED")
-                return api.inspect_file_acl(resolved)
-        except (OSError, ValueError):
+        except (OSError, RuntimeError):
             return WindowsControlledFileInspection("ACL_QUERY_FAILED")
+        try:
+            resolved.relative_to(resolved_root)
+        except ValueError:
+            return WindowsControlledFileInspection("ACL_UNSAFE")
+        try:
+            metadata = resolved.stat()
+        except OSError:
+            return WindowsControlledFileInspection("ACL_QUERY_FAILED")
+        if resolved == resolved_root or not stat.S_ISREG(metadata.st_mode):
+            return WindowsControlledFileInspection("ACL_UNSAFE")
+        if private:
+            try:
+                api = self._windows_api()
+            except OSError:
+                return WindowsControlledFileInspection("ABI_UNSUPPORTED")
+            return api.inspect_file_acl(resolved)
         return WindowsControlledFileInspection(_CONTROLLED_FILE_PASS)
-
-    def is_controlled_file(
-        self,
-        path: Path,
-        *,
-        root: Path,
-        private: bool,
-    ) -> bool:
-        return (
-            self.inspect_controlled_file(path, root=root, private=private).status
-            == _CONTROLLED_FILE_PASS
-        )
 
 
 @dataclass(frozen=True)
