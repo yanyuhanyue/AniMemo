@@ -84,6 +84,7 @@ class DependencySecurityContractTests(unittest.TestCase):
         self.assertIn(
             'ENTRYPOINT ["/usr/local/bin/animemo-nginx-entrypoint"]', frontend
         )
+        self.assertIn('CMD ["nginx", "-g", "daemon off;"]', frontend)
         self.assertIn("/sbin/ip -4 route show default", nginx_entrypoint)
         self.assertIn("for (octet = 1; octet <= 4; octet += 1)", nginx_entrypoint)
         self.assertNotIn("for (index =", nginx_entrypoint)

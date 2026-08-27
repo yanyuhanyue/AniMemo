@@ -51,3 +51,4 @@ COPY --from=builder /app/dist/client /usr/share/nginx/html
 EXPOSE 80
 
 ENTRYPOINT ["/usr/local/bin/animemo-nginx-entrypoint"]
+CMD ["nginx", "-g", "daemon off;"]
