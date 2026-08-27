@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 import locale
@@ -28,7 +29,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from release.candidate import (
     CandidateContractError,
@@ -167,6 +168,25 @@ class CandidateHarnessError(RuntimeError):
         super().__init__(code)
 
 
+@dataclass(frozen=True)
+class WindowsControlledFileInspection:
+    """Secret-free classification of one controlled Windows file."""
+
+    status: str
+    win32_error: int | None = None
+
+
+_CONTROLLED_FILE_PASS = "PASS"
+_CONTROLLED_FILE_ERROR_CODES = {
+    "ACL_QUERY_FAILED": "WINDOWS_OPENSSH_ACL_QUERY_FAILED",
+    "ACL_UNSAFE": "WINDOWS_OPENSSH_ACL_UNSAFE",
+    "OWNER_MISMATCH": "WINDOWS_OPENSSH_OWNER_MISMATCH",
+    "ABI_UNSUPPORTED": "WINDOWS_WIN32_ABI_UNSUPPORTED",
+    "SECURITY_DESCRIPTOR_INVALID": "WINDOWS_WIN32_SECURITY_DESCRIPTOR_INVALID",
+    "RESOURCE_RELEASE_FAILED": "WINDOWS_OPENSSH_ACL_QUERY_FAILED",
+}
+
+
 class WindowsPlatformAuthority(Protocol):
     def resolve_program_data(self) -> str: ...
 
@@ -180,20 +200,20 @@ class WindowsPlatformAuthority(Protocol):
 
     def inspect_binary(self, path: Path) -> WindowsBinaryIdentity: ...
 
-    def is_controlled_file(
+    def inspect_controlled_file(
         self,
         path: Path,
         *,
         root: Path,
         private: bool,
-    ) -> bool: ...
+    ) -> WindowsControlledFileInspection: ...
 
 
 class _WindowsGuid(ctypes.Structure):
     _fields_ = (
-        ("data1", ctypes.c_ulong),
-        ("data2", ctypes.c_ushort),
-        ("data3", ctypes.c_ushort),
+        ("data1", wintypes.DWORD),
+        ("data2", wintypes.WORD),
+        ("data3", wintypes.WORD),
         ("data4", ctypes.c_ubyte * 8),
     )
 
@@ -206,26 +226,303 @@ _FOLDERID_PROGRAM_DATA = _WindowsGuid(
 )
 
 
-class NativeWindowsPlatformAuthority:
-    """Read non-secret Windows platform capabilities without ambient overrides."""
+class _WindowsTrustee(ctypes.Structure):
+    _fields_ = (
+        ("multiple_trustee", ctypes.c_void_p),
+        ("multiple_trustee_operation", ctypes.c_int),
+        ("trustee_form", ctypes.c_int),
+        ("trustee_type", ctypes.c_int),
+        ("name", ctypes.c_void_p),
+    )
 
-    @staticmethod
-    def resolve_program_data() -> str:
-        if os.name != "nt":
-            raise OSError("Windows Known Folder API is unavailable")
+
+class _WindowsSidAndAttributes(ctypes.Structure):
+    _fields_ = (
+        ("sid", ctypes.c_void_p),
+        ("attributes", wintypes.DWORD),
+    )
+
+
+class _WindowsTokenUser(ctypes.Structure):
+    _fields_ = (("user", _WindowsSidAndAttributes),)
+
+
+class _WindowsApiAdapter:
+    """Single typed Win32 FFI authority for the candidate harness."""
+
+    _ERROR_INSUFFICIENT_BUFFER = 122
+    _SE_FILE_OBJECT = 1
+    _OWNER_SECURITY_INFORMATION = 0x00000001
+    _DACL_SECURITY_INFORMATION = 0x00000004
+    _TOKEN_QUERY = 0x0008
+    _TOKEN_USER = 1
+    _DRIVE_FIXED = 3
+    _MAX_SID_SIZE = 68
+    _BROAD_SID_TYPES = (1, 17, 27)
+
+    def __init__(
+        self,
+        *,
+        dll_loader: Any | None = None,
+        last_error_reader: Callable[[], int] | None = None,
+    ) -> None:
+        if dll_loader is None:
+            try:
+                dll_loader = ctypes.WinDLL
+            except AttributeError as error:
+                raise OSError("Windows Win32 ABI is unavailable") from error
+        try:
+            self._advapi32 = dll_loader("advapi32", use_last_error=True)
+            self._kernel32 = dll_loader("kernel32", use_last_error=True)
+            self._ole32 = dll_loader("ole32", use_last_error=True)
+            self._shell32 = dll_loader("shell32", use_last_error=True)
+            self._declare_prototypes()
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            raise OSError("Windows Win32 ABI is unavailable") from error
+        if last_error_reader is None:
+            last_error_reader = getattr(ctypes, "get_last_error", lambda: 0)
+        self._last_error_reader = last_error_reader
+
+    def _declare_prototypes(self) -> None:
+        self._advapi32.CreateWellKnownSid.argtypes = (
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        self._advapi32.CreateWellKnownSid.restype = wintypes.BOOL
+        self._advapi32.EqualSid.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+        self._advapi32.EqualSid.restype = wintypes.BOOL
+        self._advapi32.GetEffectiveRightsFromAclW.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(_WindowsTrustee),
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        self._advapi32.GetEffectiveRightsFromAclW.restype = wintypes.DWORD
+        self._advapi32.GetNamedSecurityInfoW.argtypes = (
+            wintypes.LPCWSTR,
+            ctypes.c_int,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        self._advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+        self._advapi32.GetTokenInformation.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        self._advapi32.GetTokenInformation.restype = wintypes.BOOL
+        self._advapi32.OpenProcessToken.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.HANDLE),
+        )
+        self._advapi32.OpenProcessToken.restype = wintypes.BOOL
+
+        self._kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        self._kernel32.CloseHandle.restype = wintypes.BOOL
+        self._kernel32.GetCurrentProcess.argtypes = ()
+        self._kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        self._kernel32.GetDriveTypeW.argtypes = (wintypes.LPCWSTR,)
+        self._kernel32.GetDriveTypeW.restype = wintypes.UINT
+        self._kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+        self._kernel32.LocalFree.restype = ctypes.c_void_p
+
+        self._ole32.CoTaskMemFree.argtypes = (ctypes.c_void_p,)
+        self._ole32.CoTaskMemFree.restype = None
+        self._shell32.SHGetKnownFolderPath.argtypes = (
+            ctypes.POINTER(_WindowsGuid),
+            wintypes.DWORD,
+            wintypes.HANDLE,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        )
+        self._shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+
+    def _last_error(self) -> int:
+        return int(self._last_error_reader())
+
+    def resolve_program_data(self) -> str:
         value = ctypes.c_wchar_p()
-        result = ctypes.windll.shell32.SHGetKnownFolderPath(  # type: ignore[attr-defined]
+        result = self._shell32.SHGetKnownFolderPath(
             ctypes.byref(_FOLDERID_PROGRAM_DATA),
             0,
             None,
             ctypes.byref(value),
         )
-        if result != 0 or value.value is None:
-            raise OSError("FOLDERID_ProgramData is unavailable")
         try:
+            if result != 0 or value.value is None:
+                raise OSError("FOLDERID_ProgramData is unavailable")
             return value.value
         finally:
-            ctypes.windll.ole32.CoTaskMemFree(value)  # type: ignore[attr-defined]
+            if value:
+                self._ole32.CoTaskMemFree(ctypes.cast(value, ctypes.c_void_p))
+
+    def is_fixed_drive(self, root: str) -> bool:
+        return self._kernel32.GetDriveTypeW(root) == self._DRIVE_FIXED
+
+    def inspect_file_acl(self, path: Path) -> WindowsControlledFileInspection:
+        owner = ctypes.c_void_p()
+        dacl = ctypes.c_void_p()
+        descriptor = ctypes.c_void_p()
+        token = wintypes.HANDLE()
+        inspection = WindowsControlledFileInspection("ACL_QUERY_FAILED")
+        cleanup_failed = False
+        cleanup_error: int | None = None
+        try:
+            result = self._advapi32.GetNamedSecurityInfoW(
+                str(path),
+                self._SE_FILE_OBJECT,
+                self._OWNER_SECURITY_INFORMATION | self._DACL_SECURITY_INFORMATION,
+                ctypes.byref(owner),
+                None,
+                ctypes.byref(dacl),
+                None,
+                ctypes.byref(descriptor),
+            )
+            if result != 0:
+                inspection = WindowsControlledFileInspection(
+                    "ACL_QUERY_FAILED", int(result)
+                )
+            elif not descriptor.value or not owner.value:
+                inspection = WindowsControlledFileInspection(
+                    "SECURITY_DESCRIPTOR_INVALID"
+                )
+            elif not dacl.value:
+                inspection = WindowsControlledFileInspection("ACL_UNSAFE")
+            elif not self._advapi32.OpenProcessToken(
+                self._kernel32.GetCurrentProcess(),
+                self._TOKEN_QUERY,
+                ctypes.byref(token),
+            ):
+                inspection = WindowsControlledFileInspection(
+                    "ACL_QUERY_FAILED", self._last_error()
+                )
+            else:
+                inspection = self._inspect_acl_with_token(owner, dacl, token)
+        except ctypes.ArgumentError:
+            inspection = WindowsControlledFileInspection("ABI_UNSUPPORTED")
+        except (OSError, TypeError, ValueError):
+            inspection = WindowsControlledFileInspection("ACL_QUERY_FAILED")
+        finally:
+            if token.value:
+                try:
+                    if not self._kernel32.CloseHandle(token):
+                        cleanup_failed = True
+                        cleanup_error = self._last_error()
+                except (ctypes.ArgumentError, OSError, TypeError, ValueError):
+                    cleanup_failed = True
+            if descriptor.value:
+                try:
+                    released = self._kernel32.LocalFree(descriptor)
+                    if released:
+                        cleanup_failed = True
+                        if cleanup_error is None:
+                            cleanup_error = self._last_error()
+                except (ctypes.ArgumentError, OSError, TypeError, ValueError):
+                    cleanup_failed = True
+        if cleanup_failed:
+            return WindowsControlledFileInspection(
+                "RESOURCE_RELEASE_FAILED", cleanup_error
+            )
+        return inspection
+
+    def _inspect_acl_with_token(
+        self,
+        owner: ctypes.c_void_p,
+        dacl: ctypes.c_void_p,
+        token: wintypes.HANDLE,
+    ) -> WindowsControlledFileInspection:
+        required = wintypes.DWORD()
+        first = self._advapi32.GetTokenInformation(
+            token,
+            self._TOKEN_USER,
+            None,
+            0,
+            ctypes.byref(required),
+        )
+        if first:
+            return WindowsControlledFileInspection("ACL_QUERY_FAILED")
+        size_error = self._last_error()
+        if required.value == 0 or size_error != self._ERROR_INSUFFICIENT_BUFFER:
+            return WindowsControlledFileInspection("ACL_QUERY_FAILED", size_error)
+        token_user_buffer = ctypes.create_string_buffer(required.value)
+        if not self._advapi32.GetTokenInformation(
+            token,
+            self._TOKEN_USER,
+            token_user_buffer,
+            required.value,
+            ctypes.byref(required),
+        ):
+            return WindowsControlledFileInspection(
+                "ACL_QUERY_FAILED", self._last_error()
+            )
+        token_user = ctypes.cast(
+            token_user_buffer, ctypes.POINTER(_WindowsTokenUser)
+        ).contents
+        current_user_sid = token_user.user.sid
+        if not current_user_sid:
+            return WindowsControlledFileInspection("SECURITY_DESCRIPTOR_INVALID")
+        if not self._advapi32.EqualSid(owner, current_user_sid):
+            return WindowsControlledFileInspection("OWNER_MISMATCH")
+
+        for well_known_sid_type in self._BROAD_SID_TYPES:
+            sid_size = wintypes.DWORD(self._MAX_SID_SIZE)
+            sid = ctypes.create_string_buffer(sid_size.value)
+            if not self._advapi32.CreateWellKnownSid(
+                well_known_sid_type,
+                None,
+                sid,
+                ctypes.byref(sid_size),
+            ):
+                return WindowsControlledFileInspection(
+                    "ACL_QUERY_FAILED", self._last_error()
+                )
+            trustee = _WindowsTrustee(
+                None,
+                0,
+                0,
+                0,
+                ctypes.cast(sid, ctypes.c_void_p),
+            )
+            effective_access = wintypes.DWORD()
+            result = self._advapi32.GetEffectiveRightsFromAclW(
+                dacl,
+                ctypes.byref(trustee),
+                ctypes.byref(effective_access),
+            )
+            if result != 0:
+                return WindowsControlledFileInspection(
+                    "ACL_QUERY_FAILED", int(result)
+                )
+            if effective_access.value != 0:
+                return WindowsControlledFileInspection("ACL_UNSAFE")
+        return WindowsControlledFileInspection(_CONTROLLED_FILE_PASS)
+
+
+class NativeWindowsPlatformAuthority:
+    """Read non-secret Windows platform capabilities without ambient overrides."""
+
+    def __init__(self, *, dll_loader: Any | None = None) -> None:
+        self._dll_loader = dll_loader
+        self._api: _WindowsApiAdapter | None = None
+
+    def _windows_api(self) -> _WindowsApiAdapter:
+        if os.name != "nt":
+            raise OSError("Windows Win32 ABI is unavailable")
+        if self._api is None:
+            self._api = _WindowsApiAdapter(dll_loader=self._dll_loader)
+        return self._api
+
+    def resolve_program_data(self) -> str:
+        if os.name != "nt":
+            raise OSError("Windows Known Folder API is unavailable")
+        return self._windows_api().resolve_program_data()
 
     @staticmethod
     def is_directory(path: str) -> bool:
@@ -245,17 +542,13 @@ class NativeWindowsPlatformAuthority:
             return True
         return False
 
-    @staticmethod
-    def is_fixed_drive(path: str) -> bool:
+    def is_fixed_drive(self, path: str) -> bool:
         if os.name != "nt":
             return False
         drive, _ = ntpath.splitdrive(path)
         if re.fullmatch(r"[A-Za-z]:", drive) is None:
             return False
-        return (
-            ctypes.windll.kernel32.GetDriveTypeW(drive + "\\")  # type: ignore[attr-defined]
-            == 3
-        )
+        return self._windows_api().is_fixed_drive(drive + "\\")
 
     @staticmethod
     def is_file(path: Path) -> bool:
@@ -284,6 +577,35 @@ class NativeWindowsPlatformAuthority:
         except (OSError, ValueError) as error:
             raise OSError("binary identity unavailable") from error
 
+    def inspect_controlled_file(
+        self,
+        path: Path,
+        *,
+        root: Path,
+        private: bool,
+    ) -> WindowsControlledFileInspection:
+        if os.name != "nt" or not path.is_absolute() or not root.is_absolute():
+            return WindowsControlledFileInspection("ABI_UNSUPPORTED")
+        try:
+            if self.has_reparse_component(str(root)) or self.has_reparse_component(
+                str(path)
+            ):
+                return WindowsControlledFileInspection("ACL_UNSAFE")
+            resolved_root = root.resolve(strict=True)
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(resolved_root)
+            if resolved == resolved_root or not resolved.is_file():
+                return WindowsControlledFileInspection("ACL_UNSAFE")
+            if private:
+                try:
+                    api = self._windows_api()
+                except OSError:
+                    return WindowsControlledFileInspection("ABI_UNSUPPORTED")
+                return api.inspect_file_acl(resolved)
+        except (OSError, ValueError):
+            return WindowsControlledFileInspection("ACL_QUERY_FAILED")
+        return WindowsControlledFileInspection(_CONTROLLED_FILE_PASS)
+
     def is_controlled_file(
         self,
         path: Path,
@@ -291,23 +613,10 @@ class NativeWindowsPlatformAuthority:
         root: Path,
         private: bool,
     ) -> bool:
-        if os.name != "nt" or not path.is_absolute() or not root.is_absolute():
-            return False
-        try:
-            if self.has_reparse_component(str(root)) or self.has_reparse_component(
-                str(path)
-            ):
-                return False
-            resolved_root = root.resolve(strict=True)
-            resolved = path.resolve(strict=True)
-            resolved.relative_to(resolved_root)
-            if resolved == resolved_root or not resolved.is_file():
-                return False
-            if private and not _windows_file_acl_is_private(resolved):
-                return False
-        except (OSError, ValueError):
-            return False
-        return True
+        return (
+            self.inspect_controlled_file(path, root=root, private=private).status
+            == _CONTROLLED_FILE_PASS
+        )
 
 
 @dataclass(frozen=True)
@@ -328,97 +637,6 @@ def _hash_regular_file(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return "sha256:" + digest.hexdigest()
-
-
-def _windows_file_acl_is_private(path: Path) -> bool:
-    """Require current-user ownership and no broad effective NTFS access."""
-
-    if os.name != "nt":
-        return False
-
-    class _Trustee(ctypes.Structure):
-        _fields_ = (
-            ("multiple_trustee", ctypes.c_void_p),
-            ("multiple_trustee_operation", ctypes.c_int),
-            ("trustee_form", ctypes.c_int),
-            ("trustee_type", ctypes.c_int),
-            ("name", ctypes.c_void_p),
-        )
-
-    advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-    owner = ctypes.c_void_p()
-    dacl = ctypes.c_void_p()
-    descriptor = ctypes.c_void_p()
-    token = ctypes.c_void_p()
-    try:
-        result = advapi32.GetNamedSecurityInfoW(
-            str(path),
-            1,
-            0x00000001 | 0x00000004,
-            ctypes.byref(owner),
-            None,
-            ctypes.byref(dacl),
-            None,
-            ctypes.byref(descriptor),
-        )
-        if result != 0 or not owner.value or not dacl.value:
-            return False
-        if not advapi32.OpenProcessToken(
-            kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)
-        ):
-            return False
-        required = ctypes.c_ulong()
-        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(required))
-        if required.value == 0:
-            return False
-        token_user = ctypes.create_string_buffer(required.value)
-        if not advapi32.GetTokenInformation(
-            token,
-            1,
-            token_user,
-            required,
-            ctypes.byref(required),
-        ):
-            return False
-        current_user_sid = ctypes.cast(token_user, ctypes.POINTER(ctypes.c_void_p))[0]
-        if not current_user_sid or not advapi32.EqualSid(owner, current_user_sid):
-            return False
-
-        for well_known_sid_type in (1, 17, 27):
-            sid_size = ctypes.c_ulong(68)
-            sid = ctypes.create_string_buffer(sid_size.value)
-            if not advapi32.CreateWellKnownSid(
-                well_known_sid_type,
-                None,
-                sid,
-                ctypes.byref(sid_size),
-            ):
-                return False
-            trustee = _Trustee(
-                None,
-                0,
-                0,
-                0,
-                ctypes.cast(sid, ctypes.c_void_p),
-            )
-            effective_access = ctypes.c_ulong()
-            if advapi32.GetEffectiveRightsFromAclW(
-                dacl,
-                ctypes.byref(trustee),
-                ctypes.byref(effective_access),
-            ) != 0:
-                return False
-            if effective_access.value != 0:
-                return False
-        return True
-    except (OSError, ValueError):
-        return False
-    finally:
-        if token.value:
-            kernel32.CloseHandle(token)
-        if descriptor.value:
-            kernel32.LocalFree(descriptor)
 
 
 def _canonical_windows_path(value: str) -> str:
@@ -957,24 +1175,27 @@ class ClosedVmwareProvider:
             raise CandidateHarnessError("WINDOWS_OPENSSH_IDENTITY_MISMATCH")
 
         try:
-            identity_safe = self._windows_platform.is_controlled_file(
+            identity_inspection = self._windows_platform.inspect_controlled_file(
                 OPENSSH_IDENTITY,
                 root=OPENSSH_SESSION_ROOT,
                 private=True,
             )
-            known_hosts_safe = self._windows_platform.is_controlled_file(
+            known_hosts_inspection = self._windows_platform.inspect_controlled_file(
                 OPENSSH_KNOWN_HOSTS,
                 root=OPENSSH_SESSION_ROOT,
                 private=True,
             )
         except OSError as error:
             raise CandidateHarnessError(
-                "WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE"
+                "WINDOWS_OPENSSH_ACL_QUERY_FAILED"
             ) from error
-        if not identity_safe:
-            raise CandidateHarnessError("WINDOWS_OPENSSH_IDENTITY_MISMATCH")
-        if not known_hosts_safe:
-            raise CandidateHarnessError("WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE")
+        for inspection in (identity_inspection, known_hosts_inspection):
+            if inspection.status == _CONTROLLED_FILE_PASS:
+                continue
+            code = _CONTROLLED_FILE_ERROR_CODES.get(inspection.status)
+            if code is None:
+                raise CandidateHarnessError("WINDOWS_WIN32_ABI_UNSUPPORTED")
+            raise CandidateHarnessError(code)
 
         self._openssh_environment()
         if self._openssh_closed_options()[1::2] != OPENSSH_REQUIRED_OPTIONS:
