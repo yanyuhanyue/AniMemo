@@ -180,6 +180,15 @@ Everyone、Authenticated Users 或 Builtin Users 提供有效 NTFS 权限。身�
 绑定，默认 `~/.ssh/id_rsa`、`~/.ssh/id_ed25519` 和 ssh-agent 都不是 Authority。Harness
 不得读取或记录身份文件正文、用户配置正文、agent endpoint、完整环境或受控文件路径。
 
+所有 Win32 能力只允许通过单一、延迟加载的 `ctypes.WinDLL(..., use_last_error=True)`
+适配器访问；`advapi32`、`kernel32`、`ole32` 与 `shell32` 所有已使用函数都必须显式声明
+`argtypes` 和 `restype`，其中 HANDLE、指针及输出参数保持指针宽度安全。Known Folder
+缓冲区、进程 Token 与 Security Descriptor 必须分别成对调用 `CoTaskMemFree`、
+`CloseHandle` 与 `LocalFree`。Token 与 Security Descriptor 仅在原生调用明确成功取得后
+释放；Known Folder 返回的非空 `PWSTR` 则按其所有权合同无论 HRESULT 成败都必须释放。
+`EqualSid` 返回 false 时必须立即读取 last-error，将真正的不相等、SID 无效与查询失败
+分别分类；适配器不得在非 Windows 导入路径初始化。
+
 Canonical 顺序为：Candidate Authority -> Windows Provider readiness -> VM base identity ->
 Harness plan -> Clone create -> VM boot -> SSH。readiness 在本地验证固定 ssh/scp 绝对路径、
 预期 SHA256、AMD64 PE 架构、Provider session 文件、OpenSSH scope、闭合 argv 合同，并仅
@@ -189,7 +198,12 @@ Readiness Receipt；其摘要进入三个 Profile 的 clone identity 输入，�
 错误类别包括 `WINDOWS_OPENSSH_PROGRAMDATA_UNAVAILABLE`、
 `WINDOWS_OPENSSH_PROGRAMDATA_INVALID`、`WINDOWS_OPENSSH_ENVIRONMENT_CONFLICT`、
 `WINDOWS_OPENSSH_BINARY_UNAVAILABLE`、`WINDOWS_OPENSSH_IDENTITY_MISMATCH`、
-`WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE` 与 `WINDOWS_OPENSSH_READINESS_FAILED`。
+`WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE`、`WINDOWS_OPENSSH_ACL_QUERY_FAILED`、
+`WINDOWS_OPENSSH_ACL_UNSAFE`、`WINDOWS_OPENSSH_OWNER_MISMATCH`、
+`WINDOWS_WIN32_ABI_UNSUPPORTED`、`WINDOWS_WIN32_SECURITY_DESCRIPTOR_INVALID` 与
+`WINDOWS_OPENSSH_READINESS_FAILED`。API 查询失败、策略判定不安全、所有者不匹配、
+ABI 不受支持和 Security Descriptor 无效必须保持彼此可区分，且都在任何 Clone 创建前
+fail closed。
 
 该 readiness 只修复 Host Provider 安全与顺序合同，不执行真实 VM，也不改变 Candidate
 Identity v2、Qualification、Installer、R2 或发布 Schema。修复合并改变 exact main 后，旧
