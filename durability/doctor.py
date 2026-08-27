@@ -550,7 +550,7 @@ class DoctorRunner:
         selection_origin = policy.get("selectionOrigin")
         identity = policy.get("identity")
         if (
-            source not in {"github", "official-mirror"}
+            source not in {"github", "official-mirror", "local-bundle"}
             or selection_origin
             not in {"explicit-admin-input", "persisted-instance-policy"}
             or type(policy.get("fallbackAllowed")) is not bool
@@ -559,13 +559,23 @@ class DoctorRunner:
             or _LOCAL_IDENTITY.fullmatch(identity) is None
         ):
             return ProbeResult.failed("DISTRIBUTION_TRANSPORT_POLICY_INVALID")
-        canonical = json.dumps(
+        policy_document = (
             {
+                "authority": "github-release-attestation-sidecar",
+                "fallback": "forbidden",
+                "policyVersion": 1,
+                "source": "local-bundle",
+            }
+            if source == "local-bundle"
+            else {
                 "fallback": "forbidden",
                 "policy_version": 1,
                 "selection_origin": selection_origin,
                 "source": source,
-            },
+            }
+        )
+        canonical = json.dumps(
+            policy_document,
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
@@ -611,7 +621,8 @@ class DoctorRunner:
             or _LOCAL_IDENTITY.fullmatch(receipt["planIdentity"]) is None
             or not isinstance(receipt.get("policyIdentity"), str)
             or _LOCAL_IDENTITY.fullmatch(receipt["policyIdentity"]) is None
-            or receipt.get("source") not in {"github", "official-mirror"}
+            or receipt.get("source")
+            not in {"github", "official-mirror", "local-bundle"}
             or not isinstance(receipt.get("releaseManifestDigest"), str)
             or _SHA256_IDENTITY.fullmatch(receipt["releaseManifestDigest"]) is None
             or not cls._distribution_oci_identity(receipt.get("ociImages"))
@@ -694,7 +705,8 @@ class DoctorRunner:
             or _LOCAL_IDENTITY.fullmatch(receipt["planIdentity"]) is None
             or not isinstance(receipt.get("policyIdentity"), str)
             or _LOCAL_IDENTITY.fullmatch(receipt["policyIdentity"]) is None
-            or receipt.get("source") not in {"github", "official-mirror"}
+            or receipt.get("source")
+            not in {"github", "official-mirror", "local-bundle"}
             or not isinstance(receipt.get("releaseManifestDigest"), str)
             or _SHA256_IDENTITY.fullmatch(receipt["releaseManifestDigest"]) is None
             or not cls._distribution_oci_identity(receipt.get("ociImages"))
@@ -705,7 +717,8 @@ class DoctorRunner:
             or _LOCAL_IDENTITY.fullmatch(plan["identity"]) is None
             or not isinstance(plan.get("policyIdentity"), str)
             or _LOCAL_IDENTITY.fullmatch(plan["policyIdentity"]) is None
-            or plan.get("source") not in {"github", "official-mirror"}
+            or plan.get("source")
+            not in {"github", "official-mirror", "local-bundle"}
             or not isinstance(plan.get("releaseManifestDigest"), str)
             or _SHA256_IDENTITY.fullmatch(plan["releaseManifestDigest"]) is None
             or not cls._distribution_oci_identity(plan.get("ociImages"))

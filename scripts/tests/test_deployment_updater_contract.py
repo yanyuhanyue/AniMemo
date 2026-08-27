@@ -10,6 +10,35 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class DeploymentUpdaterContractTests(unittest.TestCase):
+    def test_offline_updater_install_does_not_require_unused_github_cli(self):
+        installer = (ROOT / "deploy/install-updater.sh").read_text(encoding="utf-8")
+        updater_launcher = (ROOT / "deploy/updater/animemo-updater").read_text(
+            encoding="utf-8"
+        )
+        operator_launcher = (ROOT / "deploy/updater/animemo").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("/usr/bin/gh", installer)
+        self.assertNotIn("python3 -m venv", installer)
+        self.assertNotIn("-m pip", installer)
+        self.assertIn("installer.offline_python_runtime", installer)
+        self.assertIn('PYTHONPATH="$STAGING/.runtime:$STAGING"', installer)
+        for launcher in (updater_launcher, operator_launcher):
+            self.assertIn("/usr/bin/python3 -P -B", launcher)
+            self.assertIn("current/.runtime", launcher)
+            self.assertNotIn(".venv", launcher)
+        for command in (
+            "/usr/bin/docker",
+            "/usr/bin/python3",
+            "runuser",
+            "systemctl",
+            "systemd-sysusers",
+            "systemd-tmpfiles",
+            "install",
+        ):
+            self.assertIn(command, installer)
+
     def test_production_backup_cli_is_installed_offline_without_rehearsal_helper(self):
         installer = (ROOT / "deploy/install-updater.sh").read_text(encoding="utf-8")
         launcher = (ROOT / "deploy/updater/animemo").read_text(encoding="utf-8")
@@ -324,8 +353,11 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
         self.assertIn(parent_modes, installer)
         self.assertIn(release_modes, installer)
         self.assertIn(service_probe, installer)
-        self.assertIn("--no-index", installer)
-        self.assertIn('--find-links "$STAGING/wheelhouse"', installer)
+        self.assertIn("-m installer.offline_python_runtime", installer)
+        self.assertIn('--wheelhouse "$STAGING/wheelhouse"', installer)
+        self.assertIn('--target "$STAGING/.runtime"', installer)
+        self.assertNotIn("ensurepip", installer)
+        self.assertNotIn("-m pip", installer)
         self.assertNotIn('systemctl enable --now "$SERVICE"', installer)
         self.assertLess(
             installer.index(parent_modes), installer.index('mkdir -p "$STAGING"')

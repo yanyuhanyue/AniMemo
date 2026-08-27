@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import json
 import os
 import platform as host_platform
 import secrets
@@ -18,7 +19,7 @@ import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -364,6 +365,7 @@ class ProductionReleasePort:
             runner=LocalDockerCommandRunner()
         )
         self._materials: dict[str, VerifiedReleaseMaterials] = {}
+        self._image_receipts: dict[str, ImageAcquisitionReceipt] = {}
         self._latest: VerifiedReleaseMaterials | None = None
         self._latest_evidence: ReleaseEvidence | None = None
 
@@ -491,6 +493,39 @@ class ProductionReleasePort:
                 "INSTALL_IMAGE_ACQUISITION_RECEIPT_INVALID",
                 outcome=InstallOutcome.VALIDATION_FAILED,
             )
+        self._image_receipts[evidence.manifest_digest] = receipt
+        return receipt
+
+    def distribution_policy_for(
+        self, evidence: ReleaseEvidence
+    ) -> tuple[str, str, str]:
+        self.materials_for(evidence)
+        selection_origin = getattr(
+            self.transport_policy,
+            "selection_origin",
+            "explicit-admin-input",
+        )
+        selection_value = getattr(selection_origin, "value", selection_origin)
+        if not isinstance(selection_value, str):
+            raise InstallerError(
+                "INSTALL_TRANSPORT_POLICY_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        return (
+            self.transport_source.value,
+            self.transport_policy.identity,
+            selection_value,
+        )
+
+    def image_receipt_for(
+        self, evidence: ReleaseEvidence
+    ) -> ImageAcquisitionReceipt:
+        receipt = self._image_receipts.get(evidence.manifest_digest)
+        if receipt is None:
+            raise InstallerError(
+                "INSTALL_IMAGE_ACQUISITION_RECEIPT_UNAVAILABLE",
+                outcome=InstallOutcome.ENVIRONMENT_FAILED,
+            )
         return receipt
 
     def latest_materials(self) -> VerifiedReleaseMaterials:
@@ -530,6 +565,7 @@ class CandidateReleasePort:
         self.transport_source = transport_source
         self.transport_policy = explicit_transport_policy(transport_source)
         self.image_acquirer = image_acquirer
+        self._image_receipts: dict[str, ImageAcquisitionReceipt] = {}
         self._evidence = self._build_evidence()
 
     def _build_evidence(self) -> ReleaseEvidence:
@@ -614,6 +650,25 @@ class CandidateReleasePort:
             raise InstallerError(
                 "INSTALL_CANDIDATE_IMAGE_RECEIPT_INVALID",
                 outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        self._image_receipts[evidence.manifest_digest] = receipt
+        return receipt
+
+    def distribution_policy_for(
+        self, evidence: ReleaseEvidence
+    ) -> tuple[str, str, str]:
+        self.materials_for(evidence)
+        policy = LocalBundleTransportPolicy()
+        return ("local-bundle", policy.identity, "explicit-admin-input")
+
+    def image_receipt_for(
+        self, evidence: ReleaseEvidence
+    ) -> ImageAcquisitionReceipt:
+        receipt = self._image_receipts.get(evidence.manifest_digest)
+        if receipt is None:
+            raise InstallerError(
+                "INSTALL_CANDIDATE_IMAGE_RECEIPT_UNAVAILABLE",
+                outcome=InstallOutcome.ENVIRONMENT_FAILED,
             )
         return receipt
 
@@ -1038,6 +1093,12 @@ class ProductionTargetPort:
                 )
 
         states: list[str] = []
+        updater_state_value = getattr(self.namespace, "updater_state_root", None)
+        updater_state_root = (
+            Path(str(updater_state_value))
+            if updater_state_value is not None
+            else None
+        )
         for root in tuple(Path(str(path)) for path in self.namespace.owned_roots):
             try:
                 metadata = root.lstat()
@@ -1055,9 +1116,34 @@ class ProductionTargetPort:
                     sha256_identity(b"canonical-root-foreign"),
                 )
             try:
-                empty = next(root.iterdir(), None) is None
+                entries = tuple(root.iterdir())
             except OSError:
-                empty = False
+                entries = ()
+                unreadable = True
+            else:
+                unreadable = False
+            empty = not entries and not unreadable
+            if (
+                updater_state_root is not None
+                and root == updater_state_root
+                and len(entries) == 1
+            ):
+                lock_path = entries[0]
+                try:
+                    lock_metadata = lock_path.lstat()
+                except OSError:
+                    lock_metadata = None
+                empty = bool(
+                    lock_path.name == "update.lock"
+                    and lock_metadata is not None
+                    and not lock_path.is_symlink()
+                    and stat.S_ISREG(lock_metadata.st_mode)
+                    and lock_metadata.st_nlink == 1
+                    and (
+                        os.name == "nt"
+                        or stat.S_IMODE(lock_metadata.st_mode) == 0o600
+                    )
+                )
             states.append("empty" if empty else "data")
         evidence_digest = sha256_identity(canonical_json_bytes(states))
         if any(item == "data" for item in states):
@@ -1093,6 +1179,9 @@ class ProductionManagedConfigurationPort:
         self.namespace = namespace or instance_namespace()
         self.store = store or LocalManagedConfigStore(instance_name=self.namespace.name)
         self._planned: dict[str, ManagedConfig] = {}
+        self._planned_evidence: dict[str, ConfigPlanEvidence] = {}
+        self._bound_proxy_evidence: dict[str, ConfigPlanEvidence] = {}
+        self._pending_proxy_revisions: set[str] = set()
         self._existing: dict[str, bool] = {}
 
     def _assert_instance_id_unbound(self, instance_id: str) -> None:
@@ -1181,6 +1270,7 @@ class ProductionManagedConfigurationPort:
                 credential_encryption_key=base64.urlsafe_b64encode(
                     secrets.token_bytes(32)
                 ).decode("ascii"),
+                trusted_proxy_ips=("127.0.0.1/32",),
             ),
             integrations=IntegrationConfig("", "", ""),
         )
@@ -1220,6 +1310,7 @@ class ProductionManagedConfigurationPort:
             for condition, warning in (
                 (not config.listen.is_loopback, "DIRECT_LISTEN_EXPOSURE"),
                 (config.public_origin.startswith("http://"), "INSECURE_HTTP_ORIGIN"),
+                (not exists, "EXACT_WEB_PROXY_BINDING_PENDING"),
             )
             if condition
         )
@@ -1234,21 +1325,29 @@ class ProductionManagedConfigurationPort:
             warnings=warnings,
         )
         self._planned[evidence.config_revision] = config
+        self._planned_evidence[evidence.config_revision] = evidence
+        if not exists:
+            self._pending_proxy_revisions.add(evidence.config_revision)
         self._existing[evidence.config_revision] = exists
         return evidence
 
     def revalidate(self, plan: ConfigPlanEvidence) -> None:
-        config = self._planned.get(plan.config_revision)
+        original = self._planned_evidence.get(plan.config_revision)
+        bound = self._bound_proxy_evidence.get(plan.config_revision)
+        if plan != original and plan != bound:
+            raise ManagedConfigError("CONFIG_PLAN_STALE")
+        effective = bound or plan
+        config = self._planned.get(effective.config_revision)
         if (
             config is None
             or sha256_identity(canonical_json_bytes(config.secret_safe_dict()))
-            != plan.non_secret_identity_digest
+            != effective.non_secret_identity_digest
         ):
             raise ManagedConfigError("CONFIG_PLAN_STALE")
         exists = (
             self.store.authority_path.exists() or self.store.authority_path.is_symlink()
         )
-        if exists != self._existing[plan.config_revision]:
+        if exists != self._existing[effective.config_revision]:
             raise ManagedConfigError("CONFIG_PLAN_STALE")
         if exists and self.store.read() != config:
             raise ManagedConfigError("CONFIG_PLAN_STALE")
@@ -1258,6 +1357,70 @@ class ProductionManagedConfigurationPort:
     def config_for(self, evidence: ConfigPlanEvidence) -> ManagedConfig:
         self.revalidate(evidence)
         return self._planned[evidence.config_revision]
+
+    def bind_exact_web_proxy(
+        self,
+        evidence: ConfigPlanEvidence,
+        trusted_proxy: str,
+    ) -> ConfigPlanEvidence:
+        """Finalize the execution-bound exact Compose Web proxy before Django runs."""
+
+        original = self._planned_evidence.get(evidence.config_revision)
+        if (
+            evidence != original
+            or evidence.config_revision not in self._pending_proxy_revisions
+            or evidence.config_revision in self._bound_proxy_evidence
+        ):
+            raise ManagedConfigError("CONFIG_PROXY_BINDING_INVALID")
+        try:
+            network = ipaddress.ip_network(trusted_proxy, strict=True)
+        except ValueError:
+            raise ManagedConfigError("CONFIG_PROXY_BINDING_INVALID") from None
+        address = network.network_address
+        if (
+            network.version != 4
+            or network.prefixlen != 32
+            or address.is_unspecified
+            or address.is_loopback
+            or address.is_multicast
+            or address.is_link_local
+            or address.is_reserved
+        ):
+            raise ManagedConfigError("CONFIG_PROXY_BINDING_INVALID")
+        current = self.config_for(evidence)
+        if current.application.trusted_proxy_ips != ("127.0.0.1/32",):
+            raise ManagedConfigError("CONFIG_PROXY_BINDING_INVALID")
+        updated = replace(
+            current,
+            application=replace(
+                current.application,
+                trusted_proxy_ips=(str(network),),
+            ),
+        )
+        self.store.write(
+            updated,
+            expected_revision=current.config_revision,
+        )
+        rebound = ConfigPlanEvidence(
+            instance_id=updated.instance_id,
+            config_revision=updated.config_revision,
+            public_origin=updated.public_origin,
+            listen_host=updated.listen.host,
+            listen_port=updated.listen.port,
+            exposure=evidence.exposure,
+            non_secret_identity_digest=sha256_identity(
+                canonical_json_bytes(updated.secret_safe_dict())
+            ),
+            warnings=tuple(
+                warning
+                for warning in evidence.warnings
+                if warning != "EXACT_WEB_PROXY_BINDING_PENDING"
+            ),
+        )
+        self._planned[updated.config_revision] = updated
+        self._bound_proxy_evidence[updated.config_revision] = rebound
+        self._pending_proxy_revisions.remove(updated.config_revision)
+        return rebound
 
     def replace_planned_config(
         self,
@@ -1400,6 +1563,21 @@ class ProductionOperationPort:
         self._persist(succeed_fresh_install(self.current, at=_utc_now()))
 
 
+@dataclass(frozen=True)
+class _InstallerDistributionReader:
+    expected_instance_id: str
+    snapshot: dict[str, object]
+
+    def read_local_snapshot(
+        self, locator: InstanceLocator
+    ) -> dict[str, object]:
+        if locator.instance_id != self.expected_instance_id:
+            raise StateError(
+                "Installer distribution evidence belongs to another Instance"
+            )
+        return json.loads(json.dumps(self.snapshot))
+
+
 class ProductionDoctorAcceptance:
     """Complete, read-only Doctor probe set for the canonical production host."""
 
@@ -1472,6 +1650,64 @@ class ProductionDoctorAcceptance:
     ) -> None:
         materials = self.releases.materials_for(release)
         manifest = materials.manifest
+        source, policy_identity, selection_origin = (
+            self.releases.distribution_policy_for(release)
+        )
+        receipt = self.releases.image_receipt_for(release)
+        images = {
+            role: str(manifest["images"][role]["digest"])
+            for role in ("api", "postgres", "redis", "web")
+        }
+        expected_references = {role: materials.image(role) for role in images}
+        if (
+            receipt.verified_release_identity != release.material_identity_digest
+            or receipt.transport_policy_identity != policy_identity
+            or {image.role for image in receipt.images} != set(images)
+            or any(
+                image.canonical_reference != expected_references[image.role]
+                for image in receipt.images
+            )
+        ):
+            raise InstallerAdapterError(
+                "INSTALL_DOCTOR_DISTRIBUTION_EVIDENCE_INVALID",
+                mutation_occurred=True,
+                recovery_required=True,
+            )
+        plan_body = {
+            "ociImages": images,
+            "policyIdentity": policy_identity,
+            "releaseManifestDigest": release.manifest_digest,
+            "source": source,
+        }
+        plan_identity = sha256_identity(canonical_json_bytes(plan_body)).removeprefix(
+            "sha256:"
+        )
+        distribution_reader = _InstallerDistributionReader(
+            expected_instance_id=expected_instance_id,
+            snapshot={
+                "schemaVersion": 1,
+                "configuredTransportPolicy": {
+                    "fallbackAllowed": False,
+                    "identity": policy_identity,
+                    "selectionOrigin": selection_origin,
+                    "source": source,
+                },
+                "recentTransportReceipt": {
+                    "identity": receipt.identity,
+                    "ociImages": images,
+                    "planIdentity": plan_identity,
+                    "policyIdentity": policy_identity,
+                    "releaseManifestDigest": release.manifest_digest,
+                    "source": source,
+                    "valid": True,
+                },
+                "verifiedReleaseIdentity": dict(
+                    release_identity_from_manifest(manifest)
+                ),
+                "verifiedOCIIdentity": images,
+                "plan": {"identity": plan_identity, **plan_body},
+            },
+        )
         config_store = LocalManagedConfigStore(instance_name=self.namespace.name)
 
         def config() -> ManagedConfig:
@@ -1692,6 +1928,7 @@ class ProductionDoctorAcceptance:
         report = DoctorRunner(
             probes=probes,
             compatibility=CompatibilityEvidence(artifact, dimensions),
+            distribution_reader=distribution_reader,
             clock=_utc_now,
         ).run()
         if report.overall_status is not DoctorStatus.PASS or any(
@@ -1827,9 +2064,13 @@ class ProductionFreshInstallPort:
     def prepare_roots(self, plan: InstallPlan) -> None:
         del plan
         try:
+            data_base = Path(str(self.namespace.data_root)).parent
+            data_anchor = data_base.parent
+            if self._mkdir_shared_base(data_anchor, 0o755):
+                self._created.add(data_anchor)
             for base, mode in (
                 (Path(str(self.namespace.app_root)).parent, 0o755),
-                (Path(str(self.namespace.data_root)).parent, 0o755),
+                (data_base, 0o755),
                 (Path(str(self.namespace.updater_state_root)).parent, 0o700),
                 (Path(str(self.namespace.updater_runtime_root)).parent, 0o750),
             ):
@@ -1997,7 +2238,31 @@ class ProductionFreshInstallPort:
 
     def start_runtime(self, plan: InstallPlan) -> None:
         try:
-            self._compose(plan).start_application(self._manifest(plan))
+            deployment = self._compose(plan)
+            manifest = self._manifest(plan)
+            deployment.start_application(manifest)
+            self.configuration.bind_exact_web_proxy(
+                plan.configuration,
+                deployment.exact_web_proxy(manifest),
+            )
+            config = self.configuration.config_for(plan.configuration)
+            locator = self._locator(plan)
+            locator_digest = instance_locator_digest(locator)
+            self.configuration.store.rebuild_runtime_env(
+                locator_digest=locator_digest,
+                expected_revision=config.config_revision,
+            )
+            deployment.refresh_binding(
+                HostPaths.initial_adoption(locator),
+                managed_environment=dict(
+                    derive_runtime_environment(
+                        config,
+                        namespace=self.namespace,
+                        locator_digest=locator_digest,
+                    )
+                ),
+            )
+            deployment.reconcile_api(manifest)
         except Exception:  # noqa: BLE001 - fixed Compose Adapter boundary
             _safe_adapter_error(
                 "INSTALL_RUNTIME_START_FAILED", mutation=True, recovery=True
@@ -2028,11 +2293,31 @@ class ProductionFreshInstallPort:
                 pwd.getpwnam("animemo-updater").pw_uid,
                 grp.getgrnam("animemo-api").gr_gid,
             )
+
+            def reverify_installer_release(version: str) -> dict[str, object]:
+                if version != plan.release.version:
+                    raise InstallerError(
+                        "INSTALL_ADOPTION_RELEASE_MISMATCH",
+                        outcome=InstallOutcome.VALIDATION_FAILED,
+                    )
+                refreshed = self.releases.resolve(
+                    ReleaseSelector(version=version),
+                    refresh=True,
+                )
+                if refreshed.as_dict() != plan.release.as_dict():
+                    raise InstallerError(
+                        "INSTALL_ADOPTION_RELEASE_CHANGED",
+                        outcome=InstallOutcome.VALIDATION_FAILED,
+                    )
+                materials = self.releases.materials_for(refreshed)
+                return json.loads(json.dumps(materials.manifest))
+
             adopt_initial_release(
                 InitialAdoptionRequest(
                     locator=self._locator(plan),
                     manifest=self._manifest(plan),
-                )
+                ),
+                verifier=reverify_installer_release,
             )
             self.runner.run(
                 [
@@ -2062,12 +2347,19 @@ class ProductionFreshInstallPort:
 
     def cleanup_owned_staging(self, plan: InstallPlan) -> None:
         del plan
+        application_root = Path(str(self.namespace.app_root))
         for path in sorted(
             self._created, key=lambda item: len(item.parts), reverse=True
         ):
             try:
                 if path.is_file() and not path.is_symlink():
                     path.unlink()
+                elif (
+                    path == application_root
+                    and path.is_dir()
+                    and not path.is_symlink()
+                ):
+                    shutil.rmtree(path)
                 elif path.is_dir() and not path.is_symlink():
                     path.rmdir()
             except FileNotFoundError:

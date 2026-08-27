@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
+from durability.managed_config import LocalManagedConfigStore
 from durability.platform import (
     REQUIRED_CAPABILITIES,
     REQUIRED_REHEARSALS,
@@ -27,7 +28,9 @@ from installer.platform_bootstrap import (
 )
 from installer.production import (
     LocalDockerCommandRunner,
+    ProductionFreshInstallPort,
     ProductionInstallerComposition,
+    ProductionManagedConfigurationPort,
     ProductionPlatformPort,
     ProductionReleasePort,
     ProductionTargetPort,
@@ -39,9 +42,11 @@ from installer.runtime import (
     InstallerMode,
     InstallRequest,
     InstallTransportSource,
+    ListenRequest,
     PlatformEvidence,
     ReleaseEvidence,
     ReleaseSelector,
+    TargetClass,
 )
 from updater.local_bundle import LocalBundleTransportPolicy
 from updater.transport import ExplicitTransportPolicy
@@ -188,6 +193,70 @@ class PlatformBootstrapFixture:
 
 
 class ProductionInstallerCompositionTests(unittest.TestCase):
+    def test_fresh_configuration_binds_only_an_exact_owned_web_proxy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_root = root / "config"
+            runtime_root = root / "runtime"
+            config_root.mkdir()
+            runtime_root.mkdir()
+            store = LocalManagedConfigStore(
+                config_root=config_root,
+                runtime_root=runtime_root,
+            )
+            port = ProductionManagedConfigurationPort(store=store)
+            with mock.patch.object(port, "_assert_instance_id_unbound"):
+                evidence = port.plan(
+                    instance_id="12345678-1234-4234-9234-123456789abc",
+                    public_origin="https://anime.example.test",
+                    listen=ListenRequest(),
+                    insecure_http_accepted=False,
+                )
+            self.assertIn("EXACT_WEB_PROXY_BINDING_PENDING", evidence.warnings)
+            port.publish(evidence)
+
+            rebound = port.bind_exact_web_proxy(evidence, "172.30.0.5/32")
+
+            self.assertNotIn("EXACT_WEB_PROXY_BINDING_PENDING", rebound.warnings)
+            self.assertEqual(
+                port.config_for(evidence).application.trusted_proxy_ips,
+                ("172.30.0.5/32",),
+            )
+            with self.assertRaisesRegex(Exception, "CONFIG_PROXY_BINDING_INVALID"):
+                port.bind_exact_web_proxy(evidence, "172.30.0.6/32")
+
+    def test_fresh_configuration_rejects_non_exact_or_non_container_proxy_ranges(
+        self,
+    ) -> None:
+        for candidate in (
+            "172.30.0.0/24",
+            "127.0.0.1/32",
+            "0.0.0.0/32",
+            "2001:db8::5/128",
+        ):
+            with self.subTest(candidate=candidate), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config_root = root / "config"
+                runtime_root = root / "runtime"
+                config_root.mkdir()
+                runtime_root.mkdir()
+                port = ProductionManagedConfigurationPort(
+                    store=LocalManagedConfigStore(
+                        config_root=config_root,
+                        runtime_root=runtime_root,
+                    )
+                )
+                with mock.patch.object(port, "_assert_instance_id_unbound"):
+                    evidence = port.plan(
+                        instance_id="12345678-1234-4234-9234-123456789abc",
+                        public_origin="https://anime.example.test",
+                        listen=ListenRequest(),
+                        insecure_http_accepted=False,
+                    )
+                port.publish(evidence)
+                with self.assertRaisesRegex(Exception, "CONFIG_PROXY_BINDING_INVALID"):
+                    port.bind_exact_web_proxy(evidence, candidate)
+
     def test_formal_composition_closes_all_docker_process_boundaries(self) -> None:
         composition = build_production_composition()
         shared = composition.releases.image_acquirer.runner
@@ -294,6 +363,88 @@ class ProductionInstallerCompositionTests(unittest.TestCase):
                 for call in docker_calls
             )
         )
+
+    def test_pre_instance_target_treats_only_the_owned_lock_as_empty(self) -> None:
+        class EmptyRunner:
+            def run(self, argv, **kwargs):
+                del argv, kwargs
+                return SimpleNamespace(stdout="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app_root = root / "app"
+            data_root = root / "data"
+            state_root = root / "state"
+            runtime_root = root / "runtime"
+            state_root.mkdir()
+            (state_root / "update.lock").write_bytes(b"")
+            (state_root / "update.lock").chmod(0o600)
+            namespace = SimpleNamespace(
+                owned_roots=(app_root, data_root, state_root, runtime_root),
+                locator_path=state_root / "instance.json",
+                updater_state_root=state_root,
+                updater_service="animemo-updater@default.service",
+                compose_project="animemo-default",
+            )
+            target = ProductionTargetPort(
+                runner=LocalDockerCommandRunner(EmptyRunner())  # type: ignore[arg-type]
+            )
+            target.namespace = namespace
+
+            self.assertEqual(target.inspect().classification, TargetClass.VERIFIED_EMPTY)
+
+            (state_root / "unexpected").write_text("foreign", encoding="utf-8")
+            self.assertEqual(
+                target.inspect().classification,
+                TargetClass.PARTIAL_AMBIGUOUS,
+            )
+
+    def test_fresh_root_preparation_creates_a_missing_data_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app_root = root / "opt" / "animemo-instances" / "default"
+            data_root = root / "data" / "animemo-instances" / "default"
+            state_root = (
+                root
+                / "var"
+                / "lib"
+                / "animemo-updater"
+                / "instances"
+                / "default"
+            )
+            runtime_root = root / "run" / "animemo-updater" / "default"
+            app_root.parent.parent.mkdir(parents=True)
+            state_root.parent.parent.mkdir(parents=True)
+            runtime_root.parent.parent.mkdir(parents=True)
+            namespace = SimpleNamespace(
+                app_root=app_root,
+                data_root=data_root,
+                updater_state_root=state_root,
+                updater_runtime_root=runtime_root,
+            )
+            fresh = object.__new__(ProductionFreshInstallPort)
+            fresh.namespace = namespace
+            fresh._created = set()
+
+            fresh.prepare_roots(None)  # type: ignore[arg-type]
+
+            self.assertTrue(data_root.is_dir())
+            self.assertIn(root / "data", fresh._created)
+
+    def test_scoped_cleanup_removes_the_new_verified_application_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app_root = Path(directory) / "app"
+            (app_root / "deploy").mkdir(parents=True)
+            (app_root / "deploy" / "material").write_text(
+                "verified", encoding="utf-8"
+            )
+            fresh = object.__new__(ProductionFreshInstallPort)
+            fresh.namespace = SimpleNamespace(app_root=app_root)
+            fresh._created = {app_root}
+
+            fresh.cleanup_owned_staging(None)  # type: ignore[arg-type]
+
+            self.assertFalse(app_root.exists())
 
     def test_rc13_fresh_fixture_is_rejected_before_bootstrap_and_plans_afterward(
         self,

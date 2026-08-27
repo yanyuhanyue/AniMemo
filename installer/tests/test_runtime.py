@@ -531,6 +531,17 @@ class InstallerRuntimeTests(unittest.TestCase):
         self.assertEqual(self.operations.events, [])
         self.assertEqual(self.fresh.calls, [])
 
+    def test_fresh_revalidation_accepts_an_equivalent_empty_target(self) -> None:
+        plan = self.runtime.plan(self.request())
+        self.target.evidence = TargetEvidence(
+            TargetClass.VERIFIED_EMPTY,
+            digest("9"),
+        )
+
+        result = self.runtime.execute(plan, accepted_plan_digest=plan.plan_digest)
+
+        self.assertEqual(result.outcome, InstallOutcome.SUCCEEDED)
+
     def test_same_exact_healthy_instance_is_no_change(self) -> None:
         release = self.releases.evidence
         self.target.evidence = TargetEvidence(

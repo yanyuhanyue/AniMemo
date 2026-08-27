@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
 set -eu
 cd /opt/animemo-updater/current
-exec /opt/animemo-updater/current/.venv/bin/python -m durability.backup_cli "$@"
+export PYTHONSAFEPATH=1
+export PYTHONPATH=/opt/animemo-updater/current/.runtime:/opt/animemo-updater/current
+exec /usr/bin/python3 -P -B -m durability.backup_cli "$@"

@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,10 +75,26 @@ def _installer_output():
 class FakeRunner:
     def __init__(self):
         self.calls = []
+        self.runtime_paths = []
+        self.runtime_dependency_visible = []
 
     def run(self, argv, environment):
         self.calls.append((argv, environment))
+        python_paths = environment["PYTHONPATH"].split(os.pathsep)
+        self.runtime_paths.append(Path(python_paths[0]))
+        self.runtime_dependency_visible.append(
+            (Path(python_paths[0]) / "offline_dependency" / "__init__.py").is_file()
+        )
         return 0, json.dumps(_installer_output()).encode(), b"secret-free"
+
+
+def _write_test_wheelhouse(root: Path) -> None:
+    wheelhouse = root / "installer-root" / "wheelhouse"
+    wheelhouse.mkdir(parents=True)
+    with zipfile.ZipFile(
+        wheelhouse / "offline_dependency-1.0-py3-none-any.whl", "w"
+    ) as archive:
+        archive.writestr("offline_dependency/__init__.py", b"VERIFIED = True\n")
 
 
 class CandidateProfileRunnerTests(unittest.TestCase):
@@ -114,6 +132,7 @@ class CandidateProfileRunnerTests(unittest.TestCase):
     def test_offline_execution_receipt_has_zero_network_apt_and_pull(self):
         with tempfile.TemporaryDirectory() as temporary:
             loaded = _loaded(Path(temporary))
+            _write_test_wheelhouse(loaded.root)
             fake = FakeRunner()
             parsed_plan = SimpleNamespace(
                 plan_digest="sha256:" + "7" * 64,
@@ -155,9 +174,33 @@ class CandidateProfileRunnerTests(unittest.TestCase):
         self.assertEqual(receipt["external_pull_count"], 0)
         self.assertFalse(receipt["release_authority_granted"])
         self.assertEqual(len(fake.calls), 1)
+        python_paths = fake.calls[0][1]["PYTHONPATH"].split(os.pathsep)
+        self.assertEqual(len(python_paths), 2)
         self.assertEqual(
-            fake.calls[0][1]["PYTHONPATH"], str(loaded.root / "installer-root")
+            python_paths[1], str(loaded.root / "installer-root")
         )
+        self.assertEqual(fake.calls[0][1]["PYTHONSAFEPATH"], "1")
+        self.assertEqual(fake.runtime_dependency_visible, [True])
+        self.assertFalse(fake.runtime_paths[0].exists())
+
+    def test_missing_wheelhouse_stops_before_installer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            loaded = _loaded(Path(temporary))
+            fake = FakeRunner()
+            with mock.patch(
+                "scripts.candidate_profile_runner.load_verified_candidate",
+                return_value=loaded,
+            ), self.assertRaisesRegex(
+                runner.ProfileRunnerError, "CANDIDATE_PROFILE_RUNTIME_INVALID"
+            ):
+                runner.execute_profile(
+                    verified_candidate_digest=loaded.verified_digest,
+                    profile="RUNTIME_BASE_OFFLINE",
+                    public_origin="https://candidate.rc14.invalid",
+                    context_b64url=_encoded_context(),
+                    runner=fake,
+                )
+        self.assertEqual(fake.calls, [])
 
     def test_profile_mismatch_stops_before_installer(self):
         fake = FakeRunner()

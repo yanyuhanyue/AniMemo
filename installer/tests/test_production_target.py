@@ -278,6 +278,11 @@ class ProductionTargetPortTests(unittest.TestCase):
         self.assertIs(acquirer.calls[0][2], policy)
         self.assertEqual(receipt.verified_release_identity, materials.identity_digest)
         self.assertEqual(receipt.transport_policy_identity, policy.identity)
+        self.assertEqual(releases.image_receipt_for(evidence), receipt)
+        self.assertEqual(
+            releases.distribution_policy_for(evidence),
+            ("local-bundle", policy.identity, "explicit-admin-input"),
+        )
 
     def test_injected_resolver_must_use_the_selected_policy(self) -> None:
         resolver = SimpleNamespace(
@@ -348,6 +353,11 @@ class ProductionTargetPortTests(unittest.TestCase):
         self.assertEqual(acquirer.calls, [(materials, policy)])
         self.assertEqual(receipt.verified_release_identity, materials.identity_digest)
         self.assertEqual(receipt.transport_policy_identity, policy.identity)
+        self.assertEqual(releases.image_receipt_for(evidence), receipt)
+        self.assertEqual(
+            releases.distribution_policy_for(evidence),
+            ("official-mirror", policy.identity, "explicit-admin-input"),
+        )
 
     def test_instance_service_without_locator_is_partial_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

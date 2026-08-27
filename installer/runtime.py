@@ -1216,7 +1216,16 @@ class Installer:
                 outcome=InstallOutcome.VALIDATION_FAILED,
             )
         current_target = self._inspect_target()
-        if current_target.as_dict() != plan.target.as_dict():
+        empty_target_classes = {TargetClass.ABSENT, TargetClass.VERIFIED_EMPTY}
+        equivalent_empty_target = (
+            plan.action in {InstallAction.INSTALL_FRESH, InstallAction.RESTORE_TO_NEW}
+            and plan.target.classification in empty_target_classes
+            and current_target.classification in empty_target_classes
+        )
+        if (
+            current_target.as_dict() != plan.target.as_dict()
+            and not equivalent_empty_target
+        ):
             raise InstallerError(
                 "INSTALL_TARGET_CHANGED",
                 outcome=InstallOutcome.VALIDATION_FAILED,

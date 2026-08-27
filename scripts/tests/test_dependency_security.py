@@ -51,6 +51,9 @@ class DependencySecurityContractTests(unittest.TestCase):
 
         backend = (ROOT / "deploy" / "backend.Dockerfile").read_text(encoding="utf-8")
         frontend = (ROOT / "deploy" / "frontend.Dockerfile").read_text(encoding="utf-8")
+        nginx_entrypoint = (ROOT / "deploy" / "nginx-entrypoint.sh").read_text(
+            encoding="utf-8"
+        )
         self.assertIn(
             "FROM python:3.12-alpine@sha256:"
             "d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31",
@@ -77,6 +80,12 @@ class DependencySecurityContractTests(unittest.TestCase):
         self.assertLess(backend.index(install_requirements), backend.index(remove_runtime_pip))
         self.assertLess(backend.index(remove_runtime_pip), backend.index("USER animemo"))
         self.assertIn("RUN npm install --global npm@12.0.2", frontend)
+        self.assertIn("apk add --no-cache iproute2 tzdata", frontend)
+        self.assertIn(
+            'ENTRYPOINT ["/usr/local/bin/animemo-nginx-entrypoint"]', frontend
+        )
+        self.assertIn("/sbin/ip -4 route show default", nginx_entrypoint)
+        self.assertIn('${gateway}/32', nginx_entrypoint)
         self.assertGreaterEqual(backend.count("apk upgrade --no-cache"), 1)
         self.assertGreaterEqual(frontend.count("apk upgrade --no-cache"), 2)
 

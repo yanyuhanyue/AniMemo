@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import stat
 import subprocess
 import tempfile
 import threading
@@ -478,6 +479,27 @@ class OperationStateTests(unittest.TestCase):
                 self.assertTrue(lock_path.is_file())
             with UpdateLock(lock_path):
                 pass
+
+    def test_global_lock_creates_a_fully_missing_private_state_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            existing_parent = Path(directory) / "var" / "lib"
+            existing_parent.mkdir(parents=True)
+            state_root = (
+                existing_parent / "animemo-updater" / "instances" / "default"
+            )
+            lock_path = state_root / "update.lock"
+
+            with UpdateLock(lock_path):
+                self.assertTrue(lock_path.is_file())
+
+            self.assertTrue(state_root.is_dir())
+            if os.name != "nt":
+                for path in (
+                    existing_parent / "animemo-updater",
+                    existing_parent / "animemo-updater" / "instances",
+                    state_root,
+                ):
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
 
     def test_global_lock_rejects_a_linked_state_root(self):
         with tempfile.TemporaryDirectory() as directory:
