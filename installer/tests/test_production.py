@@ -198,8 +198,8 @@ class ProductionInstallerCompositionTests(unittest.TestCase):
             root = Path(directory)
             config_root = root / "config"
             runtime_root = root / "runtime"
-            config_root.mkdir()
-            runtime_root.mkdir()
+            config_root.mkdir(mode=0o700)
+            runtime_root.mkdir(mode=0o750)
             store = LocalManagedConfigStore(
                 config_root=config_root,
                 runtime_root=runtime_root,
@@ -238,8 +238,8 @@ class ProductionInstallerCompositionTests(unittest.TestCase):
                 root = Path(directory)
                 config_root = root / "config"
                 runtime_root = root / "runtime"
-                config_root.mkdir()
-                runtime_root.mkdir()
+                config_root.mkdir(mode=0o700)
+                runtime_root.mkdir(mode=0o750)
                 port = ProductionManagedConfigurationPort(
                     store=LocalManagedConfigStore(
                         config_root=config_root,

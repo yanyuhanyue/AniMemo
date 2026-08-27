@@ -85,6 +85,8 @@ class DependencySecurityContractTests(unittest.TestCase):
             'ENTRYPOINT ["/usr/local/bin/animemo-nginx-entrypoint"]', frontend
         )
         self.assertIn("/sbin/ip -4 route show default", nginx_entrypoint)
+        self.assertIn("for (octet = 1; octet <= 4; octet += 1)", nginx_entrypoint)
+        self.assertNotIn("for (index =", nginx_entrypoint)
         self.assertIn('${gateway}/32', nginx_entrypoint)
         self.assertGreaterEqual(backend.count("apk upgrade --no-cache"), 1)
         self.assertGreaterEqual(frontend.count("apk upgrade --no-cache"), 2)

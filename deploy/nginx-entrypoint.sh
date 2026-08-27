@@ -34,8 +34,8 @@ gateway="$(/sbin/ip -4 route show default | /usr/bin/awk '
 if ! printf '%s\n' "$gateway" | /usr/bin/awk -F. '
   NF != 4 { exit 1 }
   {
-    for (index = 1; index <= 4; index += 1) {
-      if ($index !~ /^[0-9]+$/ || $index < 0 || $index > 255) {
+    for (octet = 1; octet <= 4; octet += 1) {
+      if ($octet !~ /^[0-9]+$/ || $octet < 0 || $octet > 255) {
         exit 1
       }
     }
