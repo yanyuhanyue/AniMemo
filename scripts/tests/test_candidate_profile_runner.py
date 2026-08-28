@@ -104,7 +104,7 @@ class CandidateProfileRunnerTests(unittest.TestCase):
             profile="FRESH_BASE",
             public_origin="https://candidate.rc14.invalid",
         )
-        self.assertEqual(argv[1:4], ("-m", "installer", "candidate"))
+        self.assertEqual(argv[1:6], ("-P", "-B", "-m", "installer", "candidate"))
         self.assertIn("--verified-candidate-digest", argv)
         self.assertNotIn("--source", argv)
         self.assertNotIn("--bundle-payload", argv)

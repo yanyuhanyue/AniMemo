@@ -463,6 +463,7 @@ class ReleaseEvidence:
 class TargetEvidence:
     classification: TargetClass
     evidence_digest: str
+    preparation_base_digests: tuple[str, ...] = ()
     instance_id: str | None = None
     release_manifest_digest: str | None = None
     material_identity_digest: str | None = None
@@ -475,6 +476,21 @@ class TargetEvidence:
 
     def __post_init__(self) -> None:
         _canonical_digest(self.evidence_digest, "INSTALL_TARGET_EVIDENCE_INVALID")
+        if (
+            type(self.preparation_base_digests) is not tuple
+            or tuple(sorted(set(self.preparation_base_digests)))
+            != self.preparation_base_digests
+            or (
+                self.preparation_base_digests
+                and self.classification is not TargetClass.VERIFIED_EMPTY
+            )
+        ):
+            raise InstallerError(
+                "INSTALL_TARGET_EVIDENCE_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        for digest in self.preparation_base_digests:
+            _canonical_digest(digest, "INSTALL_TARGET_EVIDENCE_INVALID")
         if self.classification is TargetClass.ACTIVE:
             if not self.instance_id or not self.release_manifest_digest:
                 raise InstallerError(
@@ -496,6 +512,7 @@ class TargetEvidence:
         return {
             "classification": self.classification.value,
             "evidenceDigest": self.evidence_digest,
+            "preparationBaseDigests": list(self.preparation_base_digests),
             "instanceId": self.instance_id,
             "releaseManifestDigest": self.release_manifest_digest,
             "materialIdentityDigest": self.material_identity_digest,
@@ -1216,11 +1233,13 @@ class Installer:
                 outcome=InstallOutcome.VALIDATION_FAILED,
             )
         current_target = self._inspect_target()
-        empty_target_classes = {TargetClass.ABSENT, TargetClass.VERIFIED_EMPTY}
         equivalent_empty_target = (
-            plan.action in {InstallAction.INSTALL_FRESH, InstallAction.RESTORE_TO_NEW}
-            and plan.target.classification in empty_target_classes
-            and current_target.classification in empty_target_classes
+            plan.action is InstallAction.INSTALL_FRESH
+            and plan.target.classification
+            in {TargetClass.ABSENT, TargetClass.VERIFIED_EMPTY}
+            and current_target.classification is TargetClass.VERIFIED_EMPTY
+            and plan.target.evidence_digest
+            in current_target.preparation_base_digests
         )
         if (
             current_target.as_dict() != plan.target.as_dict()

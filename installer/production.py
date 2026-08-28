@@ -1123,6 +1123,7 @@ class ProductionTargetPort:
             else:
                 unreadable = False
             empty = not entries and not unreadable
+            owned_lock_only = False
             if (
                 updater_state_root is not None
                 and root == updater_state_root
@@ -1133,7 +1134,7 @@ class ProductionTargetPort:
                     lock_metadata = lock_path.lstat()
                 except OSError:
                     lock_metadata = None
-                empty = bool(
+                owned_lock_only = bool(
                     lock_path.name == "update.lock"
                     and lock_metadata is not None
                     and not lock_path.is_symlink()
@@ -1144,7 +1145,10 @@ class ProductionTargetPort:
                         or stat.S_IMODE(lock_metadata.st_mode) == 0o600
                     )
                 )
-            states.append("empty" if empty else "data")
+                empty = owned_lock_only
+            states.append(
+                "owned-lock" if owned_lock_only else ("empty" if empty else "data")
+            )
         evidence_digest = sha256_identity(canonical_json_bytes(states))
         if any(item == "data" for item in states):
             return TargetEvidence(TargetClass.PARTIAL_AMBIGUOUS, evidence_digest)
@@ -1164,8 +1168,21 @@ class ProductionTargetPort:
             )
         if all(item == "absent" for item in states):
             return TargetEvidence(TargetClass.ABSENT, evidence_digest)
-        if all(item in {"absent", "empty"} for item in states):
-            return TargetEvidence(TargetClass.VERIFIED_EMPTY, evidence_digest)
+        if all(item in {"absent", "empty", "owned-lock"} for item in states):
+            preparation_base_digests: tuple[str, ...] = ()
+            if states.count("owned-lock") == 1:
+                lock_index = states.index("owned-lock")
+                bases: set[str] = set()
+                for prior_state in ("absent", "empty"):
+                    prior = list(states)
+                    prior[lock_index] = prior_state
+                    bases.add(sha256_identity(canonical_json_bytes(prior)))
+                preparation_base_digests = tuple(sorted(bases))
+            return TargetEvidence(
+                TargetClass.VERIFIED_EMPTY,
+                evidence_digest,
+                preparation_base_digests=preparation_base_digests,
+            )
         return TargetEvidence(TargetClass.PARTIAL_AMBIGUOUS, evidence_digest)
 
 

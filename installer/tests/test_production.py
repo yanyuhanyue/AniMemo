@@ -12,6 +12,7 @@ from typing import ClassVar
 from unittest import mock
 
 from durability.managed_config import LocalManagedConfigStore
+from durability.canonical import canonical_json_bytes, sha256_identity
 from durability.platform import (
     REQUIRED_CAPABILITIES,
     REQUIRED_REHEARSALS,
@@ -391,7 +392,21 @@ class ProductionInstallerCompositionTests(unittest.TestCase):
             )
             target.namespace = namespace
 
-            self.assertEqual(target.inspect().classification, TargetClass.VERIFIED_EMPTY)
+            inspected = target.inspect()
+            self.assertEqual(inspected.classification, TargetClass.VERIFIED_EMPTY)
+            expected_preparation_bases = tuple(
+                sorted(
+                    sha256_identity(canonical_json_bytes(states))
+                    for states in (
+                        ["absent", "absent", "absent", "absent"],
+                        ["absent", "absent", "empty", "absent"],
+                    )
+                )
+            )
+            self.assertEqual(
+                inspected.preparation_base_digests,
+                expected_preparation_bases,
+            )
 
             (state_root / "unexpected").write_text("foreign", encoding="utf-8")
             self.assertEqual(

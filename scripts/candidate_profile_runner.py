@@ -266,6 +266,8 @@ def installer_argv(
         raise ProfileRunnerError("CANDIDATE_PROFILE_ORIGIN_INVALID")
     return (
         sys.executable,
+        "-P",
+        "-B",
         "-m",
         "installer",
         "candidate",
