@@ -16,6 +16,7 @@ import shutil
 import socket
 import stat
 import tempfile
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
@@ -2293,6 +2294,23 @@ class ProductionFreshInstallPort:
                 "INSTALL_RUNNING_RELEASE_INVALID", mutation=True, recovery=True
             )
 
+    def _wait_for_updater_socket(self) -> None:
+        path = Path(str(self.namespace.updater_socket_path))
+        for attempt in range(120):
+            try:
+                metadata = path.lstat()
+            except OSError:
+                metadata = None
+            if (
+                metadata is not None
+                and stat.S_ISSOCK(metadata.st_mode)
+                and stat.S_IMODE(metadata.st_mode) == 0o660
+            ):
+                return
+            if attempt < 119:
+                time.sleep(0.25)
+        raise OSError("Updater socket did not become ready")
+
     def adopt_updater(self, plan: InstallPlan) -> None:
         try:
             receipt = self._ownership_receipt(plan)
@@ -2345,6 +2363,7 @@ class ProductionFreshInstallPort:
                 ],
                 timeout=120,
             )
+            self._wait_for_updater_socket()
         except Exception:  # noqa: BLE001 - fixed Updater Adapter boundary
             _safe_adapter_error(
                 "INSTALL_UPDATER_ADOPTION_FAILED", mutation=True, recovery=True

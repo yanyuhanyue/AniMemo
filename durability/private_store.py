@@ -146,6 +146,13 @@ class AtomicPrivateFile:
                 descriptor = -1
                 if os.name != "nt":
                     os.fchmod(handle.fileno(), 0o600)
+                preserve_owner = getattr(os, "fchown", None)
+                if existing is not None and callable(preserve_owner):
+                    preserve_owner(
+                        handle.fileno(),
+                        existing.st_uid,
+                        existing.st_gid,
+                    )
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
