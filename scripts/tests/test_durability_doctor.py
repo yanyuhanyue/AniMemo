@@ -61,6 +61,21 @@ def transport_policy_identity() -> str:
 IDENTITY = transport_policy_identity()
 
 
+def local_bundle_policy_identity() -> str:
+    payload = json.dumps(
+        {
+            "authority": "github-release-attestation-sidecar",
+            "fallback": "forbidden",
+            "policyVersion": 1,
+            "source": "local-bundle",
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def locator_payload() -> dict[str, object]:
     return {
         "schemaVersion": 2,
@@ -473,6 +488,42 @@ class DoctorBasicRuntimeTests(unittest.TestCase):
         }["distribution.transport-receipt"]
         self.assertEqual(valid_check.status, DoctorStatus.PASS)
         self.assertEqual(valid_check.code, "DISTRIBUTION_TRANSPORT_RECEIPT_VALID")
+
+        offline_snapshot = distribution_snapshot()
+        offline_identity = local_bundle_policy_identity()
+        offline_snapshot["configuredTransportPolicy"] = {
+            **offline_snapshot["configuredTransportPolicy"],
+            "identity": offline_identity,
+            "selectionOrigin": "explicit-admin-input",
+            "source": "local-bundle",
+        }
+        offline_snapshot["recentTransportReceipt"] = {
+            **offline_snapshot["recentTransportReceipt"],
+            "policyIdentity": offline_identity,
+            "source": "local-bundle",
+        }
+        offline_snapshot["plan"] = {
+            **offline_snapshot["plan"],
+            "policyIdentity": offline_identity,
+            "source": "local-bundle",
+        }
+        offline = DoctorRunner(
+            host=FakeReadOnlyHost(),
+            probes=passing_probes(),
+            compatibility=compatibility_evidence(),
+            distribution_reader=FakeDistributionReader(
+                offline_snapshot, NetworkSentinel()
+            ),
+            clock=lambda: CHECKED_AT,
+        ).run()
+        offline_by_id = {check.check_id: check for check in offline.checks}
+        self.assertEqual(offline.overall_status, DoctorStatus.PASS)
+        self.assertTrue(
+            all(
+                offline_by_id[check_id].status is DoctorStatus.PASS
+                for check_id in DISTRIBUTION_CHECK_IDS
+            )
+        )
 
         invalid_snapshot = distribution_snapshot()
         invalid_snapshot["recentTransportReceipt"] = {

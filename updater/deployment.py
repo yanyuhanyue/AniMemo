@@ -314,10 +314,19 @@ class ImmutableComposeDeployment:
             ) from error
         return result[0], restarts
 
-    def _container_id(self, manifest: dict[str, object], service: str) -> str:
-        container = self._compose(
-            manifest, "ps", "-q", service, timeout=30
-        ).stdout.strip()
+    def _container_id(
+        self,
+        manifest: dict[str, object],
+        service: str,
+        *,
+        include_stopped: bool = False,
+    ) -> str:
+        arguments = ("ps", "--all", "-q", service) if include_stopped else (
+            "ps",
+            "-q",
+            service,
+        )
+        container = self._compose(manifest, *arguments, timeout=30).stdout.strip()
         if not container:
             raise StateError(f"AniMemo {service} container is unavailable")
         expected_labels = {
@@ -334,6 +343,40 @@ class ImmutableComposeDeployment:
                     f"AniMemo {service} container ownership label is invalid"
                 )
         return container
+
+    def exact_web_proxy(self, manifest: dict[str, object]) -> str:
+        container = self._container_id(
+            manifest,
+            "web",
+            include_stopped=True,
+        )
+        raw = self._inspect_container(
+            container,
+            "{{json .NetworkSettings.Networks}}",
+        )
+        try:
+            networks = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise StateError("AniMemo Web proxy network identity is invalid") from error
+        if not isinstance(networks, dict) or len(networks) != 1:
+            raise StateError("AniMemo Web proxy network identity is invalid")
+        endpoint = next(iter(networks.values()))
+        if not isinstance(endpoint, dict):
+            raise StateError("AniMemo Web proxy network identity is invalid")
+        try:
+            address = ipaddress.ip_address(endpoint.get("IPAddress"))
+        except ValueError as error:
+            raise StateError("AniMemo Web proxy network identity is invalid") from error
+        if (
+            address.version != 4
+            or address.is_unspecified
+            or address.is_loopback
+            or address.is_multicast
+            or address.is_link_local
+            or address.is_reserved
+        ):
+            raise StateError("AniMemo Web proxy network identity is invalid")
+        return f"{address.compressed}/32"
 
     def _inspect_container(self, container: str, template: str) -> str:
         return self.runner.run(
@@ -758,6 +801,20 @@ class ImmutableComposeDeployment:
             timeout=600,
         )
 
+    def reconcile_api(self, manifest: dict[str, object]) -> None:
+        self._compose(
+            manifest,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "--wait",
+            "--wait-timeout",
+            "120",
+            "api",
+            timeout=600,
+        )
+
     def validate_compose(self, manifest: dict[str, object]) -> None:
         self._compose(manifest, "config", "--quiet", timeout=60)
 
@@ -1052,6 +1109,10 @@ class ImmutableComposeDeployment:
         live_contracts: dict[str, str] | None = None,
     ) -> None:
         self.verify_deployment_contract(manifest)
+        if self.managed_environment.get("TRUSTED_PROXY_IPS") != self.exact_web_proxy(
+            manifest
+        ):
+            raise StateError("AniMemo exact Web proxy binding is stale")
         observation_started = (
             datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         )

@@ -12,11 +12,17 @@ import base64
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import urllib.parse
+import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Protocol
 
 from installer.platform_bootstrap import (
@@ -42,6 +48,9 @@ INSTALLER_PROFILES = {
 CONTEXT_ENV = "ANIMEMO_CANDIDATE_PROFILE_CONTEXT_B64URL"
 RECEIPT_OUTPUT = Path("/var/lib/animemo/candidate-acceptance/profile-receipt.json")
 MAX_CONTEXT_BYTES = 64 * 1024
+MAX_WHEEL_COUNT = 256
+MAX_WHEEL_RUNTIME_FILES = 100_000
+MAX_WHEEL_RUNTIME_BYTES = 2 * 1024 * 1024 * 1024
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
@@ -72,6 +81,97 @@ class SubprocessCommandRunner:
             check=False,
         )
         return completed.returncode, completed.stdout, completed.stderr
+
+
+def _wheel_member_path(value: str) -> tuple[str, ...] | None:
+    if (
+        not value
+        or "\\" in value
+        or "\x00" in value
+        or value.startswith("/")
+        or re.match(r"^[A-Za-z]:", value) is not None
+    ):
+        raise ProfileRunnerError("CANDIDATE_PROFILE_RUNTIME_INVALID")
+    raw_parts = value.rstrip("/").split("/")
+    if not raw_parts or any(part in {"", ".", ".."} for part in raw_parts):
+        raise ProfileRunnerError("CANDIDATE_PROFILE_RUNTIME_INVALID")
+    path = PurePosixPath(*raw_parts)
+    parts = path.parts
+    if len(parts) >= 3 and parts[0].endswith(".data"):
+        if parts[1] not in {"purelib", "platlib"}:
+            return None
+        parts = parts[2:]
+    if not parts:
+        raise ProfileRunnerError("CANDIDATE_PROFILE_RUNTIME_INVALID")
+    return parts
+
+
+@contextmanager
+def _verified_wheel_runtime(installer_root: Path) -> Iterator[Path]:
+    wheelhouse = installer_root / "wheelhouse"
+    try:
+        wheels = sorted(wheelhouse.iterdir(), key=lambda item: item.name)
+    except OSError as error:
+        raise ProfileRunnerError("CANDIDATE_PROFILE_RUNTIME_INVALID") from error
+    if (
+        not wheels
+        or len(wheels) > MAX_WHEEL_COUNT
+        or any(
+            wheel.is_symlink() or not wheel.is_file() or wheel.suffix != ".whl"
+            for wheel in wheels
+        )
+    ):
+        raise ProfileRunnerError("CANDIDATE_PROFILE_RUNTIME_INVALID")
+
+    with tempfile.TemporaryDirectory(prefix="animemo-candidate-python-") as temporary:
+        runtime = Path(temporary)
+        seen: set[str] = set()
+        file_count = 0
+        total_bytes = 0
+        try:
+            for wheel in wheels:
+                with zipfile.ZipFile(wheel) as archive:
+                    for member in archive.infolist():
+                        parts = _wheel_member_path(member.filename)
+                        if parts is None:
+                            continue
+                        mode = member.external_attr >> 16
+                        file_type = stat.S_IFMT(mode)
+                        if member.is_dir():
+                            if file_type not in {0, stat.S_IFDIR}:
+                                raise ProfileRunnerError(
+                                    "CANDIDATE_PROFILE_RUNTIME_INVALID"
+                                )
+                            continue
+                        if file_type not in {0, stat.S_IFREG}:
+                            raise ProfileRunnerError(
+                                "CANDIDATE_PROFILE_RUNTIME_INVALID"
+                            )
+                        folded = "/".join(parts).casefold()
+                        file_count += 1
+                        total_bytes += member.file_size
+                        if (
+                            folded in seen
+                            or file_count > MAX_WHEEL_RUNTIME_FILES
+                            or total_bytes > MAX_WHEEL_RUNTIME_BYTES
+                        ):
+                            raise ProfileRunnerError(
+                                "CANDIDATE_PROFILE_RUNTIME_INVALID"
+                            )
+                        seen.add(folded)
+                        destination = runtime.joinpath(*parts)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        with archive.open(member) as source, destination.open("xb") as target:
+                            shutil.copyfileobj(source, target)
+                        if destination.stat().st_size != member.file_size:
+                            raise ProfileRunnerError(
+                                "CANDIDATE_PROFILE_RUNTIME_INVALID"
+                            )
+        except (OSError, RuntimeError, zipfile.BadZipFile) as error:
+            raise ProfileRunnerError("CANDIDATE_PROFILE_RUNTIME_INVALID") from error
+        if not seen:
+            raise ProfileRunnerError("CANDIDATE_PROFILE_RUNTIME_INVALID")
+        yield runtime
 
 
 def _decode_context(value: str) -> dict[str, Any]:
@@ -166,6 +266,8 @@ def installer_argv(
         raise ProfileRunnerError("CANDIDATE_PROFILE_ORIGIN_INVALID")
     return (
         sys.executable,
+        "-P",
+        "-B",
         "-m",
         "installer",
         "candidate",
@@ -322,20 +424,23 @@ def execute_profile(
     except CandidateContractError as error:
         raise ProfileRunnerError(error.code) from error
     started = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    environment = {
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
-        "PYTHONPATH": str(loaded.root / "installer-root"),
-    }
-    return_code, stdout, _ = (runner or SubprocessCommandRunner()).run(
-        installer_argv(
-            verified_candidate_digest=verified_candidate_digest,
-            profile=profile,
-            public_origin=public_origin,
-        ),
-        environment,
-    )
+    installer_root = loaded.root / "installer-root"
+    with _verified_wheel_runtime(installer_root) as runtime:
+        environment = {
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "PYTHONPATH": os.pathsep.join((str(runtime), str(installer_root))),
+            "PYTHONSAFEPATH": "1",
+        }
+        return_code, stdout, _ = (runner or SubprocessCommandRunner()).run(
+            installer_argv(
+                verified_candidate_digest=verified_candidate_digest,
+                profile=profile,
+                public_origin=public_origin,
+            ),
+            environment,
+        )
     output = _result_json(stdout)
     if return_code != 0:
         raise ProfileRunnerError("CANDIDATE_INSTALLER_EXECUTION_FAILED")

@@ -28,7 +28,7 @@ RUNTIME_ROOT=/run/animemo-updater/$INSTANCE
 SERVICE=animemo-updater@$INSTANCE.service
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo is fine)"
 
-for command in /usr/bin/docker /usr/bin/gh python3 runuser systemctl systemd-sysusers systemd-tmpfiles install; do
+for command in /usr/bin/docker /usr/bin/python3 runuser systemctl systemd-sysusers systemd-tmpfiles install; do
     command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"
 done
 
@@ -82,14 +82,11 @@ cp -R "$SCRIPT_ROOT/durability" "$STAGING/durability"
 cp -R "$SCRIPT_ROOT/installer" "$STAGING/installer"
 cp -R "$SCRIPT_ROOT/wheelhouse" "$STAGING/wheelhouse"
 find "$STAGING" -type d -name __pycache__ -prune -exec rm -rf {} +
-python3 -m venv "$STAGING/.venv" || die "python3-venv is required"
-"$STAGING/.venv/bin/python" -m pip install \
-    --disable-pip-version-check \
-    --no-index \
-    --find-links "$STAGING/wheelhouse" \
-    -r "$STAGING/release/requirements.txt" \
-    -r "$STAGING/durability/requirements.txt"
-(cd "$STAGING" && "$STAGING/.venv/bin/python" -m updater version >/dev/null)
+PYTHONPATH="$STAGING" PYTHONSAFEPATH=1 \
+    /usr/bin/python3 -P -B -m installer.offline_python_runtime \
+    --wheelhouse "$STAGING/wheelhouse" --target "$STAGING/.runtime"
+(cd "$STAGING" && PYTHONPATH="$STAGING/.runtime:$STAGING" PYTHONSAFEPATH=1 \
+    /usr/bin/python3 -P -B -m updater version >/dev/null)
 chmod -R a+rX,go-w "$STAGING"
 
 if [ -e "$RELEASE_ROOT" ]; then

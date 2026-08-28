@@ -103,6 +103,40 @@ class InitialAdoptionTests(unittest.TestCase):
             with self.assertRaisesRegex(StateError, "one-time"):
                 runtime.adopt_initial_release(adoption_request(target))
 
+    def test_installer_bound_verifier_avoids_a_different_public_release_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = manifest()
+            runtime, source = self.make_runtime(Path(directory), target)
+            requests: list[str] = []
+
+            def verifier(version: str) -> dict[str, object]:
+                requests.append(version)
+                return copy.deepcopy(target)
+
+            runtime.adopt_initial_release(
+                adoption_request(target),
+                verifier=verifier,
+            )
+
+            self.assertEqual(requests, ["v1.0.0"])
+            self.assertEqual(source.requests, [])
+            self.assertEqual(runtime.slots.read()["current"], target)
+
+    def test_installer_bound_verifier_must_return_the_exact_adoption_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = manifest()
+            runtime, _ = self.make_runtime(Path(directory), target)
+            different = copy.deepcopy(target)
+            different["release"]["commit"] = "f" * 40
+
+            with self.assertRaisesRegex(StateError, "differs"):
+                runtime.adopt_initial_release(
+                    adoption_request(target),
+                    verifier=lambda _version: different,
+                )
+
+            self.assertEqual(runtime.agent.operations.list(), [])
+
     def test_failure_after_current_publication_enters_manual_recovery_without_locator(
         self,
     ):

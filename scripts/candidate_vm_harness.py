@@ -1868,8 +1868,9 @@ class ClosedVmwareProvider:
         command = (
             "sudo -S -p '' -- /usr/bin/env "
             f"ANIMEMO_CANDIDATE_PROFILE_CONTEXT_B64URL={context_b64url} "
+            "PYTHONSAFEPATH=1 "
             f"PYTHONPATH={guest_root}/installer-root "
-            f"/usr/bin/python3 {GUEST_PROFILE_RUNNER} "
+            f"/usr/bin/python3 -P -B {GUEST_PROFILE_RUNNER} "
             f"--verified-candidate-digest {harness_plan.verified_candidate_digest} "
             f"--profile {plan.profile} --public-origin {PUBLIC_ORIGIN} --execute"
         )

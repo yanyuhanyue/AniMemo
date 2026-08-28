@@ -82,16 +82,41 @@ def _validate_private_directory(
         relative = directory.relative_to(root)
     except ValueError as error:
         raise StateError("Private state directory escapes its fixed root") from error
+    missing: list[Path] = []
     current = root
-    for part in (Path(), *relative.parts):
-        if part != Path():
-            current /= part
+    while not current.exists():
+        if _is_directory_link(current):
+            raise StateError("Private state directory must not be a link")
+        if not create:
+            return
+        missing.append(current)
+        parent = current.parent
+        if parent == current:
+            raise StateError("Private state directory is unavailable")
+        current = parent
+    if _is_directory_link(current) or not current.is_dir():
+        raise StateError("Private state directory is unavailable")
+    for current in reversed(missing):
+        if _is_directory_link(current):
+            raise StateError("Private state directory must not be a link")
+        try:
+            current.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        if _is_directory_link(current) or not current.is_dir():
+            raise StateError("Private state directory is unavailable")
+    current = root
+    for part in relative.parts:
+        current /= part
         if _is_directory_link(current):
             raise StateError("Private state directory must not be a link")
         if not current.exists():
             if not create:
                 return
-            current.mkdir(mode=0o700)
+            try:
+                current.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
         if _is_directory_link(current) or not current.is_dir():
             raise StateError("Private state directory is unavailable")
 

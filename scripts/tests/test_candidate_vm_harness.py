@@ -141,6 +141,44 @@ class CandidateGuestPathContractTests(unittest.TestCase):
             VERIFIED_CANDIDATE_ROOT,
         )
 
+    def test_profile_runner_uses_python_safe_path(self):
+        provider = harness.ClosedVmwareProvider(
+            runner=RecordingRunner(),
+            windows_platform=FakeWindowsPlatform(),
+            environment={harness.GUEST_SUDO_PASSWORD_ENV: "test-only-password"},
+        )
+        profile = SimpleNamespace(
+            profile="FRESH_BASE",
+            clone_identity=DIGEST,
+            snapshot_identity=DIGEST,
+        )
+        plan = SimpleNamespace(
+            source_vm_digest=DIGEST,
+            original_vm_hashes={"base.vmx": DIGEST},
+            candidate_input_digest=DIGEST,
+            verified_candidate_digest=DIGEST,
+        )
+        completed = SimpleNamespace(stdout=b"{}")
+        with mock.patch.object(
+            provider,
+            "_ssh_checked",
+            side_effect=[SimpleNamespace(stdout=b""), completed],
+        ) as ssh_checked:
+            provider._run_profile_guest(
+                plan=profile,
+                harness_plan=plan,
+                guest_root="/var/lib/animemo/prepublication-candidates/v2/candidate",
+                initial_platform_state={
+                    "docker_present": False,
+                    "network_allowed": True,
+                    "runtime_dependencies_present": False,
+                },
+            )
+
+        command = ssh_checked.call_args_list[0].args[0]
+        self.assertIn("/usr/bin/python3 -P -B ", command)
+        self.assertIn("PYTHONSAFEPATH=1", command)
+
 
 class PublicTransport:
     def __init__(self):

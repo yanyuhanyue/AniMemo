@@ -38,11 +38,17 @@ LABEL org.opencontainers.image.version=${ANIMEMO_VERSION} \
 ENV TZ=Asia/Shanghai
 
 RUN apk upgrade --no-cache \
-    && apk add --no-cache tzdata \
+    && apk add --no-cache iproute2 tzdata \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo "Asia/Shanghai" > /etc/timezone
 
-COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+RUN mkdir -p /etc/nginx/animemo
+COPY deploy/nginx.conf /etc/nginx/animemo/default.conf.template
+COPY deploy/nginx-entrypoint.sh /usr/local/bin/animemo-nginx-entrypoint
+RUN chmod 0555 /usr/local/bin/animemo-nginx-entrypoint
 COPY --from=builder /app/dist/client /usr/share/nginx/html
 
 EXPOSE 80
+
+ENTRYPOINT ["/usr/local/bin/animemo-nginx-entrypoint"]
+CMD ["nginx", "-g", "daemon off;"]

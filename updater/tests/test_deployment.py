@@ -73,6 +73,7 @@ class FakeRunner:
         self.container_images = {}
         self.container_labels = {}
         self.web_release_identity = {}
+        self.web_proxy_ip = "172.30.0.5"
         self.migration_plans = []
 
     def run(self, argv, **kwargs):
@@ -87,6 +88,14 @@ class FakeRunner:
             template = argv[3]
             if ".State.Health" in template:
                 stdout = self.service_health[service] + "\n"
+            elif ".NetworkSettings.Networks" in template:
+                stdout = json.dumps(
+                    {
+                        "animemo-default_animemo": {
+                            "IPAddress": self.web_proxy_ip,
+                        }
+                    }
+                ) + "\n"
             elif ".Config.Image" in template:
                 stdout = self.container_images[service] + "\n"
             else:
@@ -220,6 +229,7 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
                 "POSTGRES_DB": "animemo",
                 "POSTGRES_PASSWORD": "test-placeholder",
                 "ANIMEMO_DATA_ROOT": str(data),
+                "TRUSTED_PROXY_IPS": f"{runner.web_proxy_ip}/32",
             },
             runner=runner,
             stable_observations=1,
@@ -237,6 +247,68 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(StateError, "ownership label is invalid"):
                 deployment._container_id(manifest(), "api")
+
+    def test_exact_web_proxy_returns_the_running_owned_container_ipv4(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+
+            trusted_proxy = deployment.exact_web_proxy(manifest())
+
+            self.assertEqual(trusted_proxy, "172.30.0.5/32")
+            compose_calls = [call[0] for call in runner.calls if "compose" in call[0]]
+            self.assertTrue(
+                any(call[-4:] == ("ps", "--all", "-q", "web") for call in compose_calls)
+            )
+
+    def test_reconcile_api_keeps_the_web_proxy_container_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+
+            deployment.reconcile_api(manifest())
+
+            command = runner.calls[-1][0]
+            self.assertEqual(
+                command[-8:],
+                (
+                    "up",
+                    "-d",
+                    "--no-deps",
+                    "--force-recreate",
+                    "--wait",
+                    "--wait-timeout",
+                    "120",
+                    "api",
+                ),
+            )
+            self.assertNotIn("web", command)
+
+    def test_exact_web_proxy_rejects_multiple_networks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            original_run = runner.run
+
+            def run(argv, **kwargs):
+                if argv[:2] == ["/usr/bin/docker", "inspect"] and (
+                    ".NetworkSettings.Networks" in argv[3]
+                ):
+                    return type(
+                        "Result",
+                        (),
+                        {
+                            "stdout": json.dumps(
+                                {
+                                    "owned": {"IPAddress": "172.30.0.5"},
+                                    "foreign": {"IPAddress": "172.31.0.5"},
+                                }
+                            ),
+                            "stderr": "",
+                        },
+                    )()
+                return original_run(argv, **kwargs)
+
+            runner.run = run
+            with self.assertRaisesRegex(StateError, "network identity is invalid"):
+                deployment.exact_web_proxy(manifest())
 
     def test_pre_update_backup_uses_the_instance_compose_project(self):
         with tempfile.TemporaryDirectory() as directory:

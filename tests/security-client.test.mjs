@@ -19,6 +19,10 @@ const dashboardSource = [
   "../src/pages/useDashboardImport.js",
 ].map((path) => readFileSync(new URL(path, import.meta.url), "utf8")).join("\n");
 const nginxSource = readFileSync(new URL("../deploy/nginx.conf", import.meta.url), "utf8");
+const nginxEntrypointSource = readFileSync(
+  new URL("../deploy/nginx-entrypoint.sh", import.meta.url),
+  "utf8",
+);
 const removedRouteAuthField = ["route", "requires", "Auth"].join("\\.");
 const removedRouteStaffField = ["route", "requires", "Admin"].join("\\.");
 
@@ -155,5 +159,12 @@ test("overwrites forwarding headers at the trusted proxy boundary", () => {
   assert.doesNotMatch(nginxSource, /proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for/);
   assert.doesNotMatch(nginxSource, /proxy_set_header X-Forwarded-For \$http_x_forwarded_for/);
   assert.match(nginxSource, /proxy_set_header X-Forwarded-For \$remote_addr/);
-  assert.match(nginxSource, /set_real_ip_from 172\.28\.0\.0\/16/);
+  assert.doesNotMatch(nginxSource, /set_real_ip_from 172\.28\.0\.0\/16/);
+  assert.match(
+    nginxSource,
+    /set_real_ip_from __ANIMEMO_TRUSTED_EDGE_PROXY_CIDR__;/,
+  );
+  assert.match(nginxEntrypointSource, /ip -4 route show default/);
+  assert.match(nginxEntrypointSource, /\$\{gateway\}\/32/);
+  assert.match(nginxEntrypointSource, /count != 1/);
 });

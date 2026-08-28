@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,6 +65,9 @@ class _InitialAdoptionOnlyBinding:
 class InitialAdoptionRequest:
     locator: InstanceLocator
     manifest: dict[str, object]
+
+
+InitialAdoptionVerifier = Callable[[str], dict[str, object]]
 
 
 @dataclass(frozen=True)
@@ -386,14 +389,19 @@ class HostAgentRuntime:
             "webDigest": manifest["images"]["web"]["digest"],
         }
 
-    def adopt_initial_release(self, request: InitialAdoptionRequest) -> AdoptionReceipt:
+    def adopt_initial_release(
+        self,
+        request: InitialAdoptionRequest,
+        *,
+        verifier: InitialAdoptionVerifier | None = None,
+    ) -> AdoptionReceipt:
         if not isinstance(request, InitialAdoptionRequest):
             raise StateError("Initial adoption request is invalid")
         lock_lease = self.agent.executor.acquire_lock(allow_reentrant=True)
         operation = None
         try:
             expected_identity, verified, enabled_plugin_apis = (
-                self._verify_initial_adoption(request)
+                self._verify_initial_adoption(request, verifier=verifier)
             )
             self.agent.operations.require_recovery_clear()
             slots = self.slots.read()
@@ -497,6 +505,8 @@ class HostAgentRuntime:
     def _verify_initial_adoption(
         self,
         request: InitialAdoptionRequest,
+        *,
+        verifier: InitialAdoptionVerifier | None = None,
     ) -> tuple[Mapping[str, str], dict[str, object], set[int]]:
         """Reverify every adoption fact while the global operation lock is held."""
 
@@ -506,11 +516,21 @@ class HostAgentRuntime:
                 raise StateError(
                     "Initial adoption release identity differs from the locator"
                 )
-            verified = self.agent.source.fetch_verified(
-                request.manifest["release"]["version"],
-                updater_version=__version__,
-                refresh=True,
-            )
+            version = request.manifest["release"]["version"]
+            if not isinstance(version, str) or not version:
+                raise StateError("Initial adoption release version is invalid")
+            if verifier is None:
+                verified = self.agent.source.fetch_verified(
+                    version,
+                    updater_version=__version__,
+                    refresh=True,
+                )
+            else:
+                if not callable(verifier):
+                    raise StateError("Initial adoption verifier is invalid")
+                verified = verifier(version)
+                if not isinstance(verified, dict):
+                    raise StateError("Initial adoption verifier result is invalid")
             if verified != request.manifest:
                 raise StateError(
                     "Fresh verified release differs from the adoption request"
@@ -722,7 +742,11 @@ def load_initial_adoption_request(
         ) from error
 
 
-def adopt_initial_release(request: InitialAdoptionRequest) -> AdoptionReceipt:
+def adopt_initial_release(
+    request: InitialAdoptionRequest,
+    *,
+    verifier: InitialAdoptionVerifier | None = None,
+) -> AdoptionReceipt:
     """Host-only exact initial adoption; the locator is published last."""
 
     if not isinstance(request, InitialAdoptionRequest):
@@ -760,4 +784,4 @@ def adopt_initial_release(request: InitialAdoptionRequest) -> AdoptionReceipt:
         ),
         background=False,
     )
-    return runtime.adopt_initial_release(request)
+    return runtime.adopt_initial_release(request, verifier=verifier)
