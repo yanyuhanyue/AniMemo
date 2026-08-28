@@ -77,8 +77,8 @@ OPENSSH_IDENTITY = OPENSSH_SESSION_ROOT / "id_ed25519"
 OPENSSH_KNOWN_HOSTS = OPENSSH_SESSION_ROOT / "known_hosts"
 SOURCE_VM_HASH_FILES = (
     "Ubuntu 64 位-000001.vmdk",
+    "Ubuntu 64 位-000002.vmdk",
     "Ubuntu 64 位-000003.vmdk",
-    "Ubuntu 64 位-000004.vmdk",
     "Ubuntu 64 位-Snapshot3.vmsn",
     "Ubuntu 64 位-Snapshot4.vmsn",
     "Ubuntu 64 位-Snapshot6.vmsn",

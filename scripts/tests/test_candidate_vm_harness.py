@@ -490,12 +490,15 @@ def _r2_environment():
 class CandidateVmHarnessTests(unittest.TestCase):
     def test_runtime_snapshot_authority_tracks_rebuilt_leaf_state(self):
         rebuilt_state = "Ubuntu 64 位-Snapshot6.vmsn"
+        rebuilt_active_disk = "Ubuntu 64 位-000002.vmdk"
 
         self.assertEqual(
             harness.SNAPSHOT_FILES["RUNTIME_BASE_OFFLINE"], rebuilt_state
         )
         self.assertIn(rebuilt_state, harness.SOURCE_VM_HASH_FILES)
         self.assertNotIn("Ubuntu 64 位-Snapshot5.vmsn", harness.SOURCE_VM_HASH_FILES)
+        self.assertIn(rebuilt_active_disk, harness.SOURCE_VM_HASH_FILES)
+        self.assertNotIn("Ubuntu 64 位-000004.vmdk", harness.SOURCE_VM_HASH_FILES)
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
