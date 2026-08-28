@@ -4,9 +4,10 @@ import json
 import os
 import socket
 import stat
+import time
 from pathlib import Path
 
-from .errors import StateError, UpdaterError
+from .errors import OperationInProgress, StateError, UpdaterError
 from .redaction import redact
 
 MAX_REQUEST_BYTES = 64 * 1024
@@ -87,8 +88,13 @@ class UnixRpcServer:
         self._remove_stale_socket()
 
     def serve_forever(self):
-        self.agent.recover()
         with self._listen() as server:
+            while True:
+                try:
+                    self.agent.recover()
+                    break
+                except OperationInProgress:
+                    time.sleep(0.1)
             while True:
                 connection, _ = server.accept()
                 with connection:

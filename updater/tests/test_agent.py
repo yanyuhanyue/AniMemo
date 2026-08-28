@@ -13,13 +13,18 @@ from unittest import mock
 
 from release.contract import build_manifest
 from updater.agent import UpdateAgent
-from updater.errors import RecoveryRequired, RequestRejected, StateError
+from updater.errors import (
+    OperationInProgress,
+    RecoveryRequired,
+    RequestRejected,
+    StateError,
+)
 from updater.executor import UpdateExecutor
 from updater.local_bundle import LocalBundleTransportPolicy
 from updater.plans import PlanStore
 from updater.runtime_state import RuntimeState
 from updater.slots import ReleaseSlots
-from updater.state import OperationStore
+from updater.state import OperationStore, UpdateLock
 from updater.transport import ExplicitTransportPolicy
 
 
@@ -197,6 +202,27 @@ class UpdateAgentTests(unittest.TestCase):
             local_bundle_resolver_factory=local_bundle_resolver_factory,
         )
         return agent, deployment
+
+    def test_startup_recovery_refuses_to_race_the_active_global_operation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            lock_path = Path(directory) / "state" / "update.lock"
+            errors = []
+
+            def recover_from_service_thread():
+                try:
+                    agent.recover()
+                except Exception as error:  # noqa: BLE001 - asserted below
+                    errors.append(error)
+
+            with UpdateLock(lock_path):
+                thread = threading.Thread(target=recover_from_service_thread)
+                thread.start()
+                thread.join(5)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], OperationInProgress)
 
     def test_local_bundle_plan_and_apply_bind_exact_authority_without_fallback(self):
         with tempfile.TemporaryDirectory() as directory:

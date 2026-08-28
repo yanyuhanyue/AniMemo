@@ -6,12 +6,13 @@ import socket
 import tempfile
 import threading
 import unittest
+from contextlib import AbstractContextManager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from updater.client import MAX_RESPONSE_BYTES, AgentUnavailable, UnixAgentClient
-from updater.errors import StateError
+from updater.errors import OperationInProgress, StateError
 from updater.protocol import validate_request
 from updater.server import MAX_REQUEST_BYTES, UnixRpcServer
 
@@ -26,7 +27,68 @@ class ValidatingAgent:
         return validate_request(request)
 
 
+class _StopServing(RuntimeError):
+    pass
+
+
+class _ScriptedListener:
+    def __init__(self, events):
+        self.events = events
+
+    def accept(self):
+        self.events.append("accept")
+        raise _StopServing
+
+
+class _ScriptedListenerContext(AbstractContextManager):
+    def __init__(self, listener, events):
+        self.listener = listener
+        self.events = events
+
+    def __enter__(self):
+        self.events.append("listen")
+        return self.listener
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+
+class _ContendedRecoveryAgent:
+    def __init__(self, events):
+        self.events = events
+        self.attempts = 0
+
+    def recover(self):
+        self.attempts += 1
+        self.events.append("recover")
+        if self.attempts == 1:
+            raise OperationInProgress("installer still owns the global lock")
+        return []
+
+
 class UnixRpcTests(unittest.TestCase):
+    def test_forever_server_listens_before_retrying_contended_recovery(self):
+        events = []
+        agent = _ContendedRecoveryAgent(events)
+        server = UnixRpcServer(Path("/run/animemo-updater.sock"), agent)
+        listener = _ScriptedListener(events)
+        context = _ScriptedListenerContext(listener, events)
+
+        with (
+            patch.object(server, "_listen", return_value=context),
+            patch(
+                "updater.server.time.sleep",
+                side_effect=lambda _seconds: events.append("sleep"),
+            ),
+            self.assertRaises(_StopServing),
+        ):
+            server.serve_forever()
+
+        self.assertEqual(
+            events,
+            ["listen", "recover", "sleep", "recover", "accept"],
+        )
+
     def test_local_bundle_pair_is_accepted_and_missing_pair_is_rejected_over_rpc(self):
         with tempfile.TemporaryDirectory() as directory:
             server = UnixRpcServer(
