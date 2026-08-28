@@ -1124,7 +1124,10 @@ def _build_plan(
     ):
         _reject("PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID")
     _validate_common_facts(facts)
-    if transport_source is InstallTransportSource.LOCAL_BUNDLE:
+    if transport_source in {
+        InstallTransportSource.LOCAL_BUNDLE,
+        InstallTransportSource.PREPUBLICATION_CANDIDATE,
+    }:
         if not _offline_capabilities_complete(facts):
             _reject("PLATFORM_BOOTSTRAP_OFFLINE_CAPABILITY_MISSING")
         mode = PlatformBootstrapMode.OFFLINE_VALIDATE_ONLY

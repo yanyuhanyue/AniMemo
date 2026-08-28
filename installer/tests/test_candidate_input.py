@@ -71,6 +71,33 @@ class CandidateInstallerCliTests(unittest.TestCase):
         self.assertNotIn("source", candidate_help)
         self.assertIn("candidate", help_text)
 
+    def test_offline_candidate_uses_closed_prepublication_transport(self):
+        args = cli._parser().parse_args(
+            [
+                "candidate",
+                "--verified-candidate-digest",
+                DIGEST,
+                "--profile",
+                "OFFLINE_VALIDATE_ONLY",
+                "--public-origin",
+                "https://candidate.rc14.invalid",
+            ]
+        )
+
+        request = cli._candidate_request(args)
+
+        self.assertIs(
+            request.transport_source,
+            InstallTransportSource.PREPUBLICATION_CANDIDATE,
+        )
+        self.assertEqual(request.selector.channel, "rc")
+        self.assertIsNone(request.local_bundle_payload)
+        self.assertIsNone(request.local_bundle_release_attestation)
+        public_install_help = cli._parser()._subparsers._group_actions[0].choices[
+            "install"
+        ].format_help()
+        self.assertNotIn("prepublication-candidate", public_install_help)
+
     def test_candidate_is_plan_only_without_execute(self):
         composition = _Composition()
         output = io.StringIO()

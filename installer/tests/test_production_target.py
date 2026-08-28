@@ -207,6 +207,19 @@ class ProductionTargetPortTests(unittest.TestCase):
                 transport_source=InstallTransportSource.LOCAL_BUNDLE,
             )
 
+    def test_prepublication_transport_is_rejected_by_production_release_port(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            InstallerError,
+            "INSTALL_TRANSPORT_SOURCE_INVALID",
+        ):
+            ProductionReleasePort(
+                transport_source=(
+                    InstallTransportSource.PREPUBLICATION_CANDIDATE
+                ),
+            )
+
     def test_local_bundle_uses_offline_verified_source_and_local_oci_acquirer(
         self,
     ) -> None:
