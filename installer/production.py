@@ -2618,7 +2618,7 @@ def build_candidate_composition(
     namespace = instance_namespace(instance_name)
     runner = LocalDockerCommandRunner()
     transport_source = (
-        InstallTransportSource.LOCAL_BUNDLE
+        InstallTransportSource.PREPUBLICATION_CANDIDATE
         if profile == "OFFLINE_VALIDATE_ONLY"
         else InstallTransportSource.GITHUB
     )
