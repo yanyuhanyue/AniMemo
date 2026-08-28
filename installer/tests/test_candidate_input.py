@@ -12,7 +12,11 @@ from installer.bootstrap import (
     BootstrapAuthorityError,
     VerifiedPrepublicationCandidateCapability,
 )
-from installer.production import CandidateReleasePort, ProductionInstallerComposition
+from installer.production import (
+    CandidateReleasePort,
+    ProductionInstallerComposition,
+    build_candidate_composition,
+)
 from installer.runtime import InstallTransportSource, explicit_transport_policy
 
 DIGEST = "sha256:" + "a" * 64
@@ -60,6 +64,27 @@ class _CandidateGate:
 
 
 class CandidateInstallerCliTests(unittest.TestCase):
+    @mock.patch(
+        "installer.production.verified_prepublication_candidate_capability",
+        return_value=object(),
+    )
+    @mock.patch("installer.production.CandidateBootstrapPrivilegeGate")
+    @mock.patch("installer.production.CandidateReleasePort")
+    @mock.patch("release.candidate.load_verified_candidate", return_value=object())
+    def test_offline_candidate_composition_uses_closed_prepublication_transport(
+        self,
+        _load_candidate,
+        candidate_release_port,
+        _candidate_gate,
+        _candidate_capability,
+    ):
+        build_candidate_composition(DIGEST, profile="OFFLINE_VALIDATE_ONLY")
+
+        self.assertIs(
+            candidate_release_port.call_args.kwargs["transport_source"],
+            InstallTransportSource.PREPUBLICATION_CANDIDATE,
+        )
+
     def test_candidate_parser_exposes_digest_but_no_arbitrary_material_path(self):
         help_text = cli._parser().format_help()
         candidate_help = cli._parser()._subparsers._group_actions[0].choices[
