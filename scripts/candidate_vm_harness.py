@@ -81,7 +81,7 @@ SOURCE_VM_HASH_FILES = (
     "Ubuntu 64 位-000004.vmdk",
     "Ubuntu 64 位-Snapshot3.vmsn",
     "Ubuntu 64 位-Snapshot4.vmsn",
-    "Ubuntu 64 位-Snapshot5.vmsn",
+    "Ubuntu 64 位-Snapshot6.vmsn",
     "Ubuntu 64 位.vmdk",
     "Ubuntu 64 位.vmsd",
     "Ubuntu 64 位.vmx",
@@ -89,7 +89,7 @@ SOURCE_VM_HASH_FILES = (
 SNAPSHOT_FILES = {
     "FRESH_BASE": "Ubuntu 64 位-Snapshot3.vmsn",
     "DOCKER_BASE": "Ubuntu 64 位-Snapshot4.vmsn",
-    "RUNTIME_BASE_OFFLINE": "Ubuntu 64 位-Snapshot5.vmsn",
+    "RUNTIME_BASE_OFFLINE": "Ubuntu 64 位-Snapshot6.vmsn",
 }
 PUBLIC_ORIGIN = "https://candidate.rc14.invalid"
 RC14_VERSION = "v1.1.0-rc.14"

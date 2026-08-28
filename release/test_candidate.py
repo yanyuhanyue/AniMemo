@@ -720,7 +720,7 @@ sys.stdout.buffer.write(canonical_json_bytes(identity))
         }
         self.assertEqual(validate_profile_receipt(receipt)["result"], "PASS")
         receipt["original_vm_pre_hashes"] = {
-            "Ubuntu 64 位-Snapshot5.vmsn": DIGEST
+            "Ubuntu 64 位-Snapshot6.vmsn": DIGEST
         }
         receipt["original_vm_post_hashes"] = dict(
             receipt["original_vm_pre_hashes"]
