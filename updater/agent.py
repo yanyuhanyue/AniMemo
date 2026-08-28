@@ -12,7 +12,7 @@ from .errors import RequestRejected, StateError
 from .local_bundle import LocalBundleTransportPolicy
 from .protocol import validate_request
 from .redaction import redact
-from .state import PRE_SWITCH_RECOVERY, TERMINAL_STATES
+from .state import PRE_SWITCH_RECOVERY, TERMINAL_STATES, UpdateLock
 from .transport import ExplicitTransportPolicy, TransportSourceId
 
 
@@ -304,19 +304,25 @@ class UpdateAgent:
         )
 
     def recover(self) -> list[str]:
-        for operation in self.operations.list():
-            if (
-                operation.get("kind") in {"apply_update", "rollback_previous"}
-                and operation.get("status") not in TERMINAL_STATES
-            ):
-                metadata = operation.get("metadata")
-                if not isinstance(metadata, dict):
-                    raise StateError(
-                        "Incomplete update operation binding is unavailable; "
-                        "explicit migration is required"
-                    )
-                self._policy_from_binding(metadata.get("releaseBinding"))
-        return self.operations.recover_incomplete()
+        with UpdateLock(
+            self.operations.root / "update.lock", allow_reentrant=True
+        ):
+            for operation in self.operations.list():
+                if (
+                    operation.get("kind") in {
+                        "apply_update",
+                        "rollback_previous",
+                    }
+                    and operation.get("status") not in TERMINAL_STATES
+                ):
+                    metadata = operation.get("metadata")
+                    if not isinstance(metadata, dict):
+                        raise StateError(
+                            "Incomplete update operation binding is unavailable; "
+                            "explicit migration is required"
+                        )
+                    self._policy_from_binding(metadata.get("releaseBinding"))
+            return self.operations.recover_incomplete()
 
     def bind_operation_resolver(self, operation: object) -> None:
         if not isinstance(operation, dict):
