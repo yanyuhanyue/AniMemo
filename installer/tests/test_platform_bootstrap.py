@@ -534,6 +534,53 @@ class PlatformBootstrapExecutionTests(unittest.TestCase):
                 bootstrap.execute(plan, accepted_plan_digest=plan.plan_digest)
             self.assertEqual(raised.exception.code, expected)
 
+    def test_fresh_install_retries_one_bounded_apt_timeout(self) -> None:
+        class TimeoutOnceRunner(RunnerFixture):
+            def __init__(self) -> None:
+                super().__init__()
+                self.docker_install_attempts = 0
+
+            def run(self, argv, *, timeout, environment):
+                if (
+                    argv[0] == "/usr/bin/apt-get"
+                    and "install" in argv
+                    and argv[-1] == "docker.io"
+                ):
+                    self.docker_install_attempts += 1
+                    if self.docker_install_attempts == 1:
+                        self.calls.append((tuple(argv), timeout, dict(environment)))
+                        return PlatformCommandResult(124, stderr=b"command timeout")
+                return super().run(argv, timeout=timeout, environment=environment)
+
+        runner = TimeoutOnceRunner()
+        bootstrap, plan, _ = self.fresh_execution(runner=runner)
+
+        receipt = bootstrap.execute(plan, accepted_plan_digest=plan.plan_digest)
+
+        self.assertEqual(receipt.result, "PASS")
+        self.assertEqual(runner.docker_install_attempts, 2)
+        self.assertTrue(all(call[1] <= 900 for call in runner.calls))
+
+    def test_fresh_install_does_not_retry_a_non_timeout_failure(self) -> None:
+        runner = RunnerFixture(fail_token=" docker.io")
+        bootstrap, plan, _ = self.fresh_execution(runner=runner)
+
+        with self.assertRaises(PlatformBootstrapError) as raised:
+            bootstrap.execute(plan, accepted_plan_digest=plan.plan_digest)
+
+        self.assertEqual(
+            raised.exception.code,
+            "PLATFORM_BOOTSTRAP_DOCKER_INSTALL_FAILED",
+        )
+        docker_installs = [
+            call
+            for call in runner.calls
+            if call[0][0] == "/usr/bin/apt-get"
+            and "install" in call[0]
+            and call[0][-1] == "docker.io"
+        ]
+        self.assertEqual(len(docker_installs), 1)
+
     def test_untrusted_or_missing_apt_candidate_is_rejected(self) -> None:
         class UntrustedRunner(RunnerFixture):
             def run(self, argv, *, timeout, environment):
