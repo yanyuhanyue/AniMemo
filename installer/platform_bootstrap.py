@@ -47,6 +47,7 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _APT_COMMAND_TIMEOUT_SECONDS = 900
 _APT_LOCK_TIMEOUT_SECONDS = 30
 _APT_RETRIES = 2
+_APT_INSTALL_TIMEOUT_RETRIES = 1
 _COMMAND_TIMEOUT_SECONDS = 120
 _SYSTEM_COMPOSE_PLUGIN_PATHS = (
     Path("/usr/libexec/docker/cli-plugins/docker-compose"),
@@ -1525,6 +1526,14 @@ class ProductionPlatformBootstrap:
                         _apt_argv("install", action.packages),
                         timeout=_APT_COMMAND_TIMEOUT_SECONDS,
                     )
+                    for _ in range(_APT_INSTALL_TIMEOUT_RETRIES):
+                        if result.returncode != 124:
+                            break
+                        result = _command(
+                            self._runner,
+                            _apt_argv("install", action.packages),
+                            timeout=_APT_COMMAND_TIMEOUT_SECONDS,
+                        )
                     if result.returncode != 0:
                         if _apt_lock_failed(result):
                             _reject("PLATFORM_BOOTSTRAP_APT_LOCK_TIMEOUT")
