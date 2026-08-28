@@ -275,6 +275,21 @@ class PlatformBootstrapFreshPlanTests(unittest.TestCase):
             "PLATFORM_BOOTSTRAP_OFFLINE_CAPABILITY_MISSING",
         )
 
+    def test_prepublication_candidate_is_offline_validate_only(self) -> None:
+        plan = ProductionPlatformBootstrap(
+            facts_collector=qualified_existing_facts,
+            clock=lambda: "2026-08-25T04:30:00Z",
+        ).plan(
+            transport_source=InstallTransportSource.PREPUBLICATION_CANDIDATE
+        )
+
+        self.assertEqual(plan.mode, PlatformBootstrapMode.OFFLINE_VALIDATE_ONLY)
+        self.assertEqual(
+            tuple(action.kind for action in plan.actions),
+            (PlatformBootstrapActionKind.VALIDATE_ONLY,),
+        )
+        self.assertEqual(plan.network_policy, "DENY_ALL")
+
     def test_unsupported_and_inconsistent_host_facts_fail_closed(self) -> None:
         fixtures = (
             (

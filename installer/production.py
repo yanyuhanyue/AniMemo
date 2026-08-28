@@ -260,6 +260,11 @@ class ProductionReleasePort:
                 "INSTALL_TRANSPORT_SOURCE_INVALID",
                 outcome=InstallOutcome.VALIDATION_FAILED,
             )
+        if transport_source is InstallTransportSource.PREPUBLICATION_CANDIDATE:
+            raise InstallerError(
+                "INSTALL_TRANSPORT_SOURCE_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
         expected_policy = explicit_transport_policy(transport_source)
         selected_policy = transport_policy or expected_policy
         if (

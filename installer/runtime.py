@@ -61,6 +61,7 @@ class InstallTransportSource(StrEnum):
     GITHUB = "github"
     OFFICIAL_MIRROR = "official-mirror"
     LOCAL_BUNDLE = "local-bundle"
+    PREPUBLICATION_CANDIDATE = "prepublication-candidate"
 
 
 def explicit_transport_policy(
@@ -70,7 +71,10 @@ def explicit_transport_policy(
         return ExplicitTransportPolicy.github()
     if source is InstallTransportSource.OFFICIAL_MIRROR:
         return ExplicitTransportPolicy.official_mirror()
-    if source is InstallTransportSource.LOCAL_BUNDLE:
+    if source in {
+        InstallTransportSource.LOCAL_BUNDLE,
+        InstallTransportSource.PREPUBLICATION_CANDIDATE,
+    }:
         return LocalBundleTransportPolicy()
     raise InstallerError(
         "INSTALL_TRANSPORT_SOURCE_INVALID",
@@ -80,7 +84,10 @@ def explicit_transport_policy(
 
 def transport_policy_identity(source: InstallTransportSource) -> str:
     policy = explicit_transport_policy(source)
-    if source is InstallTransportSource.LOCAL_BUNDLE:
+    if source in {
+        InstallTransportSource.LOCAL_BUNDLE,
+        InstallTransportSource.PREPUBLICATION_CANDIDATE,
+    }:
         return LOCAL_BUNDLE_POLICY_IDENTITY
     return policy.identity
 

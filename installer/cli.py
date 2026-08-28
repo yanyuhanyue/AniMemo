@@ -17,8 +17,8 @@ from .runtime import (
     Installer,
     InstallerError,
     InstallerMode,
-    InstallRequest,
     InstallOutcome,
+    InstallRequest,
     InstallTransportSource,
     ListenRequest,
     ReleaseSelector,
@@ -86,7 +86,11 @@ def _parser() -> argparse.ArgumentParser:
         selector.add_argument("--version")
         child.add_argument(
             "--source",
-            choices=tuple(source.value for source in InstallTransportSource),
+            choices=(
+                InstallTransportSource.GITHUB.value,
+                InstallTransportSource.OFFICIAL_MIRROR.value,
+                InstallTransportSource.LOCAL_BUNDLE.value,
+            ),
             default=InstallTransportSource.GITHUB.value,
         )
         child.add_argument("--bundle-payload", type=Path)
@@ -182,7 +186,7 @@ def _request(args: argparse.Namespace) -> InstallRequest:
 
 def _candidate_request(args: argparse.Namespace) -> InstallRequest:
     source = (
-        InstallTransportSource.LOCAL_BUNDLE
+        InstallTransportSource.PREPUBLICATION_CANDIDATE
         if args.profile == "OFFLINE_VALIDATE_ONLY"
         else InstallTransportSource.GITHUB
     )
