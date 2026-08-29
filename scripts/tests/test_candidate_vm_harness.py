@@ -20,6 +20,7 @@ from release.r2_prestate import (
     ACCOUNT_ID_ENV,
     JURISDICTION_ENV,
     R2_AUTH_METHOD_ARGUMENT,
+    R2_RC14_EXPECTED_KEYS,
     R2_RC14_PREFIX,
     SECRET_KEY_ENV,
     verify_rc14_r2_origin_from_environment,
@@ -56,6 +57,7 @@ class FakeProvider:
         self.events = []
         self.readiness_error = None
         self.external_state = dict(harness.EXPECTED_RC14_EXTERNAL_STATE)
+        self.external_versions = []
         self.hashes = {
             name: "sha256:" + "3" * 64 for name in harness.SOURCE_VM_HASH_FILES
         }
@@ -129,8 +131,9 @@ class FakeProvider:
     def inspect_original_hashes(self):
         return dict(self.hashes)
 
-    def inspect_rc14_external_state(self):
+    def inspect_candidate_external_state(self, candidate_version):
         self.external_calls += 1
+        self.external_versions.append(candidate_version)
         return dict(self.external_state)
 
 
@@ -545,6 +548,14 @@ class CandidateVmHarnessTests(unittest.TestCase):
         self.assertEqual(self.provider.execute_calls, 0)
         self.assertRegex(plan.plan_digest, r"^sha256:[0-9a-f]{64}$")
 
+    def test_plan_accepts_the_next_rc_from_the_verified_candidate_identity(self):
+        self.loaded.candidate_input["candidate_version"] = "v1.1.0-rc.15"
+
+        plan = self._plan()
+
+        self.assertEqual(plan.candidate_version, "v1.1.0-rc.15")
+        self.assertEqual(self.provider.execute_calls, 0)
+
     def test_cli_exposes_no_vm_snapshot_shell_or_package_override(self):
         help_text = harness._parser().format_help()
         for forbidden in ("--vm-path", "--snapshot", "--command", "--package"):
@@ -611,7 +622,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
             self.provider.execute_calls = 0
             self.provider.external_calls = 0
             with self.subTest(name=name), mock.patch(
-                "scripts.candidate_vm_harness.verify_rc14_r2_origin_from_environment",
+                "scripts.candidate_vm_harness.verify_candidate_r2_origin_from_environment",
                 return_value=receipt,
             ), mock.patch(
                 "scripts.candidate_vm_harness.load_verified_candidate",
@@ -653,7 +664,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
         plan = self._plan()
         receipt = self._r2_receipt()
         with mock.patch(
-            "scripts.candidate_vm_harness.verify_rc14_r2_origin_from_environment",
+            "scripts.candidate_vm_harness.verify_candidate_r2_origin_from_environment",
             return_value=receipt,
         ) as verify, mock.patch(
             "scripts.candidate_vm_harness.load_verified_candidate",
@@ -719,6 +730,49 @@ class CandidateVmHarnessTests(unittest.TestCase):
         receipt_digest = unsigned.pop("receipt_digest")
         self.assertEqual(receipt_digest, sha256_bytes(canonical_json_bytes(unsigned)))
 
+    def test_next_rc_execution_binds_r2_and_external_reads_to_candidate_version(self):
+        candidate_version = "v1.1.0-rc.15"
+        self.loaded.candidate_input["candidate_version"] = candidate_version
+        plan = self._plan()
+        client = R2Client()
+
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ):
+            result = harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
+                r2_client=client,
+            )
+
+        self.assertEqual(
+            result["r2OriginPrestateReceipt"]["target_rc"], candidate_version
+        )
+        head_keys = [
+            request["key"]
+            for operation, request in client.operations
+            if operation == "HeadObject"
+        ]
+        self.assertEqual(len(head_keys), len(R2_RC14_EXPECTED_KEYS))
+        self.assertTrue(
+            all(
+                key.startswith(
+                    "yanyuhanyue/AniMemo/releases/download/v1.1.0-rc.15/"
+                )
+                for key in head_keys
+            )
+        )
+        self.assertEqual(
+            self.provider.external_versions,
+            [candidate_version, candidate_version],
+        )
+
     def test_wrong_plan_digest_never_starts_a_profile(self):
         plan = self._plan()
         with self.assertRaisesRegex(
@@ -764,7 +818,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
             )
         self.assertEqual(self.provider.execute_calls, 1)
 
-    def test_rc14_presence_fails_before_the_first_profile(self):
+    def test_candidate_version_presence_fails_before_the_first_profile(self):
         plan = self._plan()
         self.provider.external_state["tag"] = "PRESENT"
         environment = _r2_environment()
@@ -775,7 +829,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
             "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
             sha256_bytes(ACCOUNT_ID.encode("ascii")),
         ), self.assertRaisesRegex(
-            harness.CandidateHarnessError, "RC14_NOT_EMPTY"
+            harness.CandidateHarnessError, "VERSION_NOT_EMPTY"
         ):
             harness.execute_harness_plan(
                 plan,
@@ -797,7 +851,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
             "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
             sha256_bytes(ACCOUNT_ID.encode("ascii")),
         ), self.assertRaisesRegex(
-            harness.CandidateHarnessError, "CANDIDATE_RC14_NOT_EMPTY"
+            harness.CandidateHarnessError, "CANDIDATE_VERSION_NOT_EMPTY"
         ):
             harness.execute_harness_plan(
                 plan,
@@ -816,8 +870,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
             environment={},
         )
         self.assertEqual(
-            provider.inspect_rc14_external_state(),
-            harness.EXPECTED_RC14_EXTERNAL_STATE,
+            provider.inspect_candidate_external_state("v1.1.0-rc.14"),
+            harness.EXPECTED_CANDIDATE_EXTERNAL_STATE,
         )
         urls = [url for url, _ in transport.calls]
         self.assertEqual(sum(url.startswith("https://ghcr.io/token?") for url in urls), 2)
@@ -826,7 +880,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 url.startswith(harness.PUBLIC_MIRROR_ORIGIN + "/")
                 for url in urls
             ),
-            len(harness.R2_RC14_EXPECTED_KEYS),
+            len(R2_RC14_EXPECTED_KEYS),
         )
         self.assertTrue(
             all(
@@ -839,6 +893,30 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 )
                 for url in urls
             )
+        )
+
+    def test_public_external_readback_uses_the_verified_next_rc(self):
+        transport = PublicTransport()
+        provider = harness.ClosedVmwareProvider(
+            public_transport=transport,
+            environment={},
+        )
+
+        self.assertEqual(
+            provider.inspect_candidate_external_state("v1.1.0-rc.15"),
+            harness.EXPECTED_CANDIDATE_EXTERNAL_STATE,
+        )
+
+        urls = [url for url, _ in transport.calls]
+        self.assertTrue(any("/git/ref/tags/v1.1.0-rc.15" in url for url in urls))
+        self.assertTrue(any("/releases/tags/v1.1.0-rc.15" in url for url in urls))
+        self.assertEqual(
+            sum("/manifests/v1.1.0-rc.15" in url for url in urls),
+            2,
+        )
+        self.assertEqual(
+            sum("/releases/download/v1.1.0-rc.15/" in url for url in urls),
+            len(R2_RC14_EXPECTED_KEYS),
         )
 
     def test_closed_provider_has_a_complete_success_lifecycle(self):

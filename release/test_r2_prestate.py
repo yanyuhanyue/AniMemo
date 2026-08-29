@@ -30,6 +30,8 @@ from release.r2_prestate import (
     R2S3Credentials,
     R2S3PrecheckError,
     build_r2_s3_endpoint,
+    candidate_r2_expected_keys,
+    candidate_r2_prefix,
     r2_origin_receipt_digest,
     sanitize_r2_diagnostic,
     validate_r2_origin_receipt,
@@ -162,6 +164,28 @@ class R2S3PrestateTests(unittest.TestCase):
                 for name, request in client.operations
                 if name == "HeadObject"
             )
+        )
+
+    def test_next_rc_uses_its_own_closed_prefix_and_portable_name(self):
+        target_rc = "v1.1.0-rc.15"
+        client = RecordingS3Client()
+
+        receipt = self.verify(client, target_rc=target_rc)
+
+        prefix = candidate_r2_prefix(target_rc)
+        self.assertEqual(receipt["target_rc"], target_rc)
+        self.assertEqual(receipt["prefix"], prefix)
+        self.assertEqual(
+            [
+                request["key"]
+                for name, request in client.operations
+                if name == "HeadObject"
+            ],
+            [prefix + name for name in candidate_r2_expected_keys(target_rc)],
+        )
+        self.assertEqual(
+            candidate_r2_expected_keys(target_rc)[0],
+            "animemo-v1.1.0-rc.15-portable.tar",
         )
 
     def test_pagination_uses_continuation_token_and_stops_on_first_object(self):

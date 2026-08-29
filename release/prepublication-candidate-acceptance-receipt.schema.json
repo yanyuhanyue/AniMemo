@@ -7,7 +7,7 @@
   "required": [
     "schema", "version", "candidate_input_digest", "verified_candidate_digest",
     "qualification_run_id", "qualification_run_attempt", "source_sha", "source_tree",
-    "candidate_version", "profile_receipts", "all_profiles_pass", "rc14_prestate",
+    "candidate_version", "r2_origin_prestate_receipt_digest", "profile_receipts", "all_profiles_pass", "rc14_prestate",
     "rc14_poststate", "repository_mutation_count", "publication_mutation_count",
     "shared_host_connection_count", "secret_sweep", "placeholder_sweep",
     "release_authority_granted", "publish_authorized", "completed_at", "result",
@@ -47,15 +47,6 @@
     "result": {"enum": ["PASS", "FAIL"]},
     "receipt_digest": {"$ref": "#/$defs/digest"}
   },
-  "allOf": [
-    {
-      "if": {
-        "properties": {"candidate_version": {"const": "v1.1.0-rc.14"}},
-        "required": ["candidate_version"]
-      },
-      "then": {"required": ["r2_origin_prestate_receipt_digest"]}
-    }
-  ],
   "$defs": {
     "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},

@@ -64,6 +64,7 @@ _SENSITIVE_SDK_LOGGER_NAMESPACES = ("boto3", "botocore")
 
 _ACCOUNT_ID = re.compile(r"[0-9a-f]{32}\Z")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
+_TARGET_RC = re.compile(re.escape(TARGET_VERSION) + r"-rc\.[1-9][0-9]*\Z")
 _SENSITIVE_FIELD = re.compile(
     r"(?:authorization|cookie|set-cookie|x-amz-(?:credential|signature|security-token)|"
     r"awsaccesskeyid|access[_-]?key(?:[_-]?id)?|secret[_-]?access[_-]?key|"
@@ -313,7 +314,7 @@ def _is_missing_object(error: BaseException) -> bool:
 class Boto3R2ReadonlyClient:
     """A narrow wrapper that intentionally has no S3 write method."""
 
-    __slots__ = ("__client",)
+    __slots__ = ("__client", "__expected_keys", "__prefix")
 
     def __init__(
         self,
@@ -321,7 +322,12 @@ class Boto3R2ReadonlyClient:
         account_id: str,
         jurisdiction: str,
         credentials: R2S3Credentials,
+        target_rc: str = TARGET_RC,
     ) -> None:
+        self.__prefix = candidate_r2_prefix(target_rc)
+        self.__expected_keys = frozenset(
+            self.__prefix + name for name in candidate_r2_expected_keys(target_rc)
+        )
         _, endpoint = build_r2_s3_endpoint(account_id, jurisdiction)
         failed = False
         with _opaque_sdk_logging_boundary():
@@ -364,9 +370,8 @@ class Boto3R2ReadonlyClient:
         if failed:
             _raise("R2_S3_RESPONSE_INVALID")
 
-    @staticmethod
-    def _bound_key(key: str) -> str:
-        if key not in {R2_RC14_PREFIX + name for name in R2_RC14_EXPECTED_KEYS}:
+    def _bound_key(self, key: str) -> str:
+        if key not in self.__expected_keys:
             _raise("R2_S3_RESPONSE_INVALID")
         return key
 
@@ -375,7 +380,7 @@ class Boto3R2ReadonlyClient:
     ) -> Mapping[str, object]:
         request: dict[str, object] = {
             "Bucket": R2_BUCKET,
-            "Prefix": R2_RC14_PREFIX,
+            "Prefix": self.__prefix,
             "MaxKeys": MAX_KEYS_PER_PAGE,
         }
         if continuation_token is not None:
@@ -480,6 +485,24 @@ def _validate_source_identity(source_sha: str, source_tree: str) -> None:
         _raise("R2_S3_RESPONSE_INVALID")
 
 
+def candidate_r2_prefix(target_rc: str) -> str:
+    if type(target_rc) is not str or _TARGET_RC.fullmatch(target_rc) is None:
+        _raise("R2_S3_RESPONSE_INVALID")
+    return f"{REPOSITORY}/releases/download/{target_rc}/"
+
+
+def candidate_r2_expected_keys(target_rc: str) -> tuple[str, ...]:
+    candidate_r2_prefix(target_rc)
+    return (
+        f"animemo-{target_rc}-portable.tar",
+        "checksums.txt",
+        "deployment-contract.json",
+        "installer-materials.tar",
+        "mirror-receipt.json",
+        "release-manifest.json",
+    )
+
+
 def verify_r2_origin_empty(
     *,
     source_sha: str,
@@ -487,10 +510,13 @@ def verify_r2_origin_empty(
     account_id: str,
     jurisdiction: str,
     credentials: R2S3Credentials,
+    target_rc: str = TARGET_RC,
     client: R2S3ReadonlyApi | None = None,
     clock: Callable[[], datetime] = _utc_now,
 ) -> dict[str, object]:
     _validate_source_identity(source_sha, source_tree)
+    prefix = candidate_r2_prefix(target_rc)
+    expected_keys = candidate_r2_expected_keys(target_rc)
     endpoint_host, _ = build_r2_s3_endpoint(account_id, jurisdiction)
     adapter = (
         client
@@ -499,6 +525,7 @@ def verify_r2_origin_empty(
             account_id=account_id,
             jurisdiction=jurisdiction,
             credentials=credentials,
+            target_rc=target_rc,
         )
     )
     started_at = _timestamp(clock())
@@ -567,8 +594,8 @@ def verify_r2_origin_empty(
         seen_tokens.add(token)
         continuation = token
 
-    for name in R2_RC14_EXPECTED_KEYS:
-        key = R2_RC14_PREFIX + name
+    for name in expected_keys:
+        key = prefix + name
         head_count += 1
         failure_code = None
         missing = False
@@ -606,13 +633,13 @@ def verify_r2_origin_empty(
         "source_sha": source_sha,
         "source_tree": source_tree,
         "target_version": TARGET_VERSION,
-        "target_rc": TARGET_RC,
+        "target_rc": target_rc,
         "account_id": account_id,
         "bucket": R2_BUCKET,
         "jurisdiction": jurisdiction,
         "endpoint_host": endpoint_host,
         "auth_method": R2_AUTH_METHOD,
-        "prefix": R2_RC14_PREFIX,
+        "prefix": prefix,
         "list_objects_v2_request_count": list_count,
         "head_object_request_count": head_count,
         "get_object_request_count": 0,
@@ -636,11 +663,13 @@ def verify_r2_origin_empty(
         receipt,
         expected_source_sha=source_sha,
         expected_source_tree=source_tree,
+        expected_target_rc=target_rc,
     )
 
 
-def verify_rc14_r2_origin_from_environment(
+def verify_candidate_r2_origin_from_environment(
     *,
+    target_rc: str,
     source_sha: str,
     source_tree: str,
     auth_method: str,
@@ -660,6 +689,27 @@ def verify_rc14_r2_origin_from_environment(
         account_id=account_id,
         jurisdiction=jurisdiction,
         credentials=credentials,
+        target_rc=target_rc,
+        client=client,
+        clock=clock,
+    )
+
+
+def verify_rc14_r2_origin_from_environment(
+    *,
+    source_sha: str,
+    source_tree: str,
+    auth_method: str,
+    environment: Mapping[str, str] | None = None,
+    client: R2S3ReadonlyApi | None = None,
+    clock: Callable[[], datetime] = _utc_now,
+) -> dict[str, object]:
+    return verify_candidate_r2_origin_from_environment(
+        target_rc=TARGET_RC,
+        source_sha=source_sha,
+        source_tree=source_tree,
+        auth_method=auth_method,
+        environment=environment,
         client=client,
         clock=clock,
     )
@@ -680,6 +730,7 @@ def validate_r2_origin_receipt(
     *,
     expected_source_sha: str | None = None,
     expected_source_tree: str | None = None,
+    expected_target_rc: str | None = None,
 ) -> dict[str, object]:
     errors = tuple(_receipt_validator().iter_errors(value))
     if errors or type(value) is not dict:
@@ -695,15 +746,17 @@ def validate_r2_origin_receipt(
         expected_host, _ = build_r2_s3_endpoint(
             receipt["account_id"], receipt["jurisdiction"]
         )
+        expected_prefix = candidate_r2_prefix(receipt["target_rc"])
+        expected_keys = candidate_r2_expected_keys(receipt["target_rc"])
     except R2S3PrecheckError:
         _raise("R2_S3_RECEIPT_INVALID")
     if (
         account_hash != R2_ACCOUNT_ID_SHA256
         or receipt["repository"] != REPOSITORY
         or receipt["target_version"] != TARGET_VERSION
-        or receipt["target_rc"] != TARGET_RC
+        or not receipt["target_rc"].startswith(TARGET_VERSION + "-rc.")
         or receipt["bucket"] != R2_BUCKET
-        or receipt["prefix"] != R2_RC14_PREFIX
+        or receipt["prefix"] != expected_prefix
         or receipt["endpoint_host"] != expected_host
         or receipt["auth_method"] != R2_AUTH_METHOD
         or receipt["write_request_count"] != 0
@@ -715,9 +768,11 @@ def validate_r2_origin_receipt(
         or receipt["publish_authorized"] is not False
         or receipt["result"] != "PROVEN_EMPTY"
         or receipt["error_code"] is not None
+        or receipt["head_object_request_count"] != len(expected_keys)
         or end < start
         or (expected_source_sha is not None and receipt["source_sha"] != expected_source_sha)
         or (expected_source_tree is not None and receipt["source_tree"] != expected_source_tree)
+        or (expected_target_rc is not None and receipt["target_rc"] != expected_target_rc)
     ):
         _raise("R2_S3_RECEIPT_INVALID")
     unsigned = dict(receipt)
@@ -789,10 +844,13 @@ __all__ = [
     "R2S3PrecheckError",
     "R2S3ReadonlyApi",
     "build_r2_s3_endpoint",
+    "candidate_r2_expected_keys",
+    "candidate_r2_prefix",
     "credentials_from_environment",
     "r2_origin_receipt_digest",
     "sanitize_r2_diagnostic",
     "validate_r2_origin_receipt",
+    "verify_candidate_r2_origin_from_environment",
     "verify_r2_origin_empty",
     "verify_rc14_r2_origin_from_environment",
     "write_r2_origin_receipt",
