@@ -294,6 +294,7 @@ class _PublicationVerifier:
         expected_subjects=None,
     ):
         self.release_call = (bundle, trust_profile.identity)
+        self.release_expected_subjects = deepcopy(expected_subjects)
         return deepcopy(self.release_claim)
 
     def verify_actions_provenance(
@@ -1002,6 +1003,39 @@ class OfflineOrchestrationTests(unittest.TestCase):
             )
             self.assertTrue(
                 all(image.layout.exists() for image in verified.images.images)
+            )
+
+    def test_private_transport_filename_does_not_change_release_asset_identity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload, sidecar, release_claim, action_claims = _portable_fixture(root)
+            private_payload = root / "portable-payload.tar"
+            payload.replace(private_payload)
+            profile = _profile()
+            external = _PublicationVerifier(release_claim, action_claims)
+
+            verified = OfflineReleaseVerifier(
+                trust_profile=profile,
+                external_verifier=external,
+                oci_verifier=_qualified_oci_verifier,
+            ).verify(
+                payload=private_payload,
+                sidecar=sidecar,
+                destination=root / "verified-materials",
+                updater_version="1.0.0",
+                state=OfflineAuthorityState.initial(profile),
+            )
+
+            subject_names = {
+                subject["name"] for subject in external.release_expected_subjects
+            }
+            self.assertIn("animemo-v1.0.0-portable.tar", subject_names)
+            self.assertNotIn("portable-payload.tar", subject_names)
+            self.assertEqual(
+                verified.payload_sha256,
+                "sha256:" + hashlib.sha256(private_payload.read_bytes()).hexdigest(),
             )
 
     def test_persistent_verification_is_idempotent_without_reaccepting_release(self) -> None:

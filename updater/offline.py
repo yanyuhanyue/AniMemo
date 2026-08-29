@@ -1183,6 +1183,9 @@ class OfflineReleaseVerifier:
                 for name in sorted(EXPECTED_RELEASE_ASSETS)
             }
             authority_inputs = _manifest_authority_inputs(assets)
+            portable_asset_name = (
+                f"animemo-{authority_inputs['tag']}-portable.tar"
+            )
             expected_subjects = [
                 {
                     "name": name,
@@ -1192,7 +1195,7 @@ class OfflineReleaseVerifier:
                 for name, value in sorted(assets.items())
             ] + [
                 {
-                    "name": payload.name,
+                    "name": portable_asset_name,
                     "sha256": inspection.archive_sha256,
                     "size": payload.stat().st_size,
                 }
@@ -1218,6 +1221,7 @@ class OfflineReleaseVerifier:
             _bind_release_transport(
                 publication.transport_assets,
                 payload=payload,
+                payload_name=portable_asset_name,
                 payload_sha256=inspection.archive_sha256,
             )
             claims = tuple(
@@ -1353,14 +1357,18 @@ def _bind_release_assets(claims: Sequence[object], assets: Mapping[str, bytes]) 
 
 
 def _bind_release_transport(
-    claims: Sequence[object], *, payload: Path, payload_sha256: str
+    claims: Sequence[object],
+    *,
+    payload: Path,
+    payload_name: str,
+    payload_sha256: str,
 ) -> None:
     try:
         metadata = payload.lstat()
     except OSError as error:
         raise RequestRejected("Portable transport asset 不可读取") from error
     expected = {
-        payload.name: (
+        payload_name: (
             payload_sha256,
             metadata.st_size,
             "PORTABLE_RELEASE_BUNDLE",
