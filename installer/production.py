@@ -2060,6 +2060,7 @@ class ProductionFreshInstallPort:
                 )
             return False
         path.mkdir(mode=mode)
+        path.chmod(mode)
         return True
 
     @staticmethod
@@ -2082,6 +2083,7 @@ class ProductionFreshInstallPort:
                 recovery=False,
             )
         path.mkdir(mode=mode)
+        path.chmod(mode)
         return True
 
     def prepare_roots(self, plan: InstallPlan) -> None:
