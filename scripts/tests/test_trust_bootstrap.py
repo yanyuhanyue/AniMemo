@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -80,6 +81,32 @@ class InitialTrustBootstrapTests(unittest.TestCase):
         self.assertIn("FROZEN FOR v1.1 P1 SECURITY REPAIR", successor_text)
         self.assertIn("PYTHONSAFEPATH=1", successor_text)
         self.assertIn("SUPERSEDED`, not automatically", successor_text)
+
+    def test_offline_verifier_version_is_one_closed_surface(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        verifier_root = root / "release" / "release_attestation_verifier"
+        legacy_contract = json.loads(
+            (verifier_root / "INSTALLATION_CONTRACT.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        successor_contract = json.loads(
+            (verifier_root / "INSTALLATION_CONTRACT_V2.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        source = (verifier_root / "main.go").read_text(encoding="utf-8")
+        match = re.search(r'verifierVersion\s*=\s*"([^"]+)"', source)
+        self.assertIsNotNone(match)
+        self.assertEqual(
+            {
+                trust_bootstrap._VERIFIER_VERSION,
+                legacy_contract["verifierVersion"],
+                successor_contract["verifierVersion"],
+                match.group(1),
+            },
+            {"2.97.0+animemo.3"},
+        )
 
     def test_two_official_tuf_tracks_produce_closed_pretrust_kit(self) -> None:
         roots = {
@@ -163,7 +190,7 @@ class InitialTrustBootstrapTests(unittest.TestCase):
             runner_commands.append(command)
             if command[1:] == ("--version",):
                 return subprocess.CompletedProcess(
-                    command, 0, stdout=b"2.97.0+animemo.2\n", stderr=b""
+                    command, 0, stdout=b"2.97.0+animemo.3\n", stderr=b""
                 )
             request = json.loads(
                 Path(command[command.index("--request") + 1]).read_text()
