@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import tempfile
 import unittest
 from contextlib import nullcontext
@@ -445,6 +447,56 @@ class ProductionInstallerCompositionTests(unittest.TestCase):
 
             self.assertTrue(data_root.is_dir())
             self.assertIn(root / "data", fresh._created)
+
+    @unittest.skipUnless(os.name == "posix", "directory modes require POSIX")
+    def test_fresh_root_preparation_honors_modes_under_restrictive_umask(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app_root = root / "opt" / "animemo-instances" / "default"
+            data_root = root / "data" / "animemo-instances" / "default"
+            state_root = (
+                root
+                / "var"
+                / "lib"
+                / "animemo-updater"
+                / "instances"
+                / "default"
+            )
+            runtime_root = root / "run" / "animemo-updater" / "default"
+            app_root.parent.parent.mkdir(parents=True)
+            state_root.parent.parent.mkdir(parents=True)
+            runtime_root.parent.parent.mkdir(parents=True)
+            namespace = SimpleNamespace(
+                app_root=app_root,
+                data_root=data_root,
+                updater_state_root=state_root,
+                updater_runtime_root=runtime_root,
+            )
+            fresh = object.__new__(ProductionFreshInstallPort)
+            fresh.namespace = namespace
+            fresh._created = set()
+
+            previous_umask = os.umask(0o077)
+            try:
+                fresh.prepare_roots(None)  # type: ignore[arg-type]
+            finally:
+                os.umask(previous_umask)
+
+            expected_modes = {
+                app_root.parent: 0o755,
+                data_root: 0o755,
+                state_root: 0o700,
+                runtime_root.parent: 0o750,
+                runtime_root: 0o750,
+            }
+            for path, expected_mode in expected_modes.items():
+                with self.subTest(path=path):
+                    self.assertEqual(
+                        stat.S_IMODE(path.lstat().st_mode),
+                        expected_mode,
+                    )
 
     def test_scoped_cleanup_removes_the_new_verified_application_tree(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
