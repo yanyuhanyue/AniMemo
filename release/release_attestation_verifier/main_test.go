@@ -311,6 +311,29 @@ func TestCloseActionsStatementRequiresSignedSubjectNameAndDigest(t *testing.T) {
 	}
 }
 
+func TestActionsCertificatePolicySpecifiesIssuerOnlyInMatcher(t *testing.T) {
+	request := actionsRequest{
+		Workflow:     ".github/workflows/release.yml",
+		SourceCommit: "1111111111111111111111111111111111111111",
+	}
+	identity := "https://github.com/" + repository + "/" + request.Workflow + "@" + actionsSourceRef
+	sanMatcher, err := verify.NewSANMatcher(identity, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerMatcher, err := verify.NewIssuerMatcher(actionsOIDCIssuer, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extensions := actionsCertificateExtensions(request)
+	if extensions.Issuer != "" {
+		t.Fatal("issuer must be enforced only by IssuerMatcher")
+	}
+	if _, err := verify.NewCertificateIdentity(sanMatcher, issuerMatcher, extensions); err != nil {
+		t.Fatalf("actions certificate policy must be constructible: %v", err)
+	}
+}
+
 func TestOCISubjectMatcherRejectsLookalikeRepository(t *testing.T) {
 	digestValue := digest('a')
 	if !matchesOCISubject(

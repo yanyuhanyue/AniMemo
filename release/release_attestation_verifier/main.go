@@ -38,7 +38,7 @@ const (
 	actionsPredicateType        = "https://slsa.dev/provenance/v1"
 	actionsOIDCIssuer           = "https://token.actions.githubusercontent.com"
 	actionsSourceRef            = "refs/heads/main"
-	verifierVersion             = "2.97.0+animemo.2"
+	verifierVersion             = "2.97.0+animemo.3"
 )
 
 var (
@@ -416,6 +416,17 @@ func matchesOCISubject(name, repositoryName, digest string) bool {
 	return repositoryURL == repositoryName || repositoryURL == "https://"+repositoryName
 }
 
+func actionsCertificateExtensions(request actionsRequest) certificate.Extensions {
+	return certificate.Extensions{
+		RunnerEnvironment:        "github-hosted",
+		SourceRepositoryURI:      "https://github.com/" + repository,
+		SourceRepositoryOwnerURI: "https://github.com/yanyuhanyue",
+		BuildSignerDigest:        request.SourceCommit,
+		SourceRepositoryDigest:   request.SourceCommit,
+		SourceRepositoryRef:      actionsSourceRef,
+	}
+}
+
 func decodeClosedJSON(path string, target any) error {
 	value, err := os.ReadFile(path)
 	if err != nil {
@@ -597,15 +608,11 @@ func verifyActions(bundlePath, trustedRootPath, requestPath string) (actionsClai
 	if err != nil {
 		return actionsClaim{}, err
 	}
-	certIdentity, err := verify.NewCertificateIdentity(sanMatcher, issuerMatcher, certificate.Extensions{
-		Issuer:                   actionsOIDCIssuer,
-		RunnerEnvironment:        "github-hosted",
-		SourceRepositoryURI:      "https://github.com/" + repository,
-		SourceRepositoryOwnerURI: "https://github.com/yanyuhanyue",
-		BuildSignerDigest:        request.SourceCommit,
-		SourceRepositoryDigest:   request.SourceCommit,
-		SourceRepositoryRef:      actionsSourceRef,
-	})
+	certIdentity, err := verify.NewCertificateIdentity(
+		sanMatcher,
+		issuerMatcher,
+		actionsCertificateExtensions(request),
+	)
 	if err != nil {
 		return actionsClaim{}, err
 	}
