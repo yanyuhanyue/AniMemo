@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import base64
 import ctypes
-from ctypes import wintypes
 import hashlib
 import json
 import locale
@@ -25,11 +24,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from release.candidate import (
     CandidateContractError,
@@ -44,10 +44,10 @@ from release.candidate import (
 from release.materials import reject_duplicate_json_keys
 from release.r2_prestate import (
     R2_AUTH_METHOD_ARGUMENT,
-    R2_RC14_EXPECTED_KEYS,
+    candidate_r2_expected_keys,
     r2_origin_receipt_digest,
     validate_r2_origin_receipt,
-    verify_rc14_r2_origin_from_environment,
+    verify_candidate_r2_origin_from_environment,
 )
 
 PROFILES = ("FRESH_BASE", "DOCKER_BASE", "RUNTIME_BASE_OFFLINE")
@@ -92,7 +92,7 @@ SNAPSHOT_FILES = {
     "RUNTIME_BASE_OFFLINE": "Ubuntu 64 位-Snapshot6.vmsn",
 }
 PUBLIC_ORIGIN = "https://candidate.rc14.invalid"
-RC14_VERSION = "v1.1.0-rc.14"
+TARGET_VERSION = "v1.1.0"
 REPOSITORY = "yanyuhanyue/AniMemo"
 PUBLIC_MIRROR_ORIGIN = "https://download.animemo.cc"
 GUEST_CANDIDATE_ROOT = VERIFIED_CANDIDATE_ROOT.as_posix()
@@ -126,12 +126,14 @@ SAFE_HOST_ENVIRONMENT_NAMES = frozenset(
     }
 )
 OPENSSH_EXCLUDED_AMBIENT_NAMES = frozenset({"HOME", "USERPROFILE"})
-EXPECTED_RC14_EXTERNAL_STATE = {
+EXPECTED_CANDIDATE_EXTERNAL_STATE = {
     "tag": "ABSENT",
     "github_release": "ABSENT",
     "ghcr": "ABSENT",
     "public_r2": "ABSENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE",
 }
+# Compatibility name retained for archived RC14 evidence readers and tests.
+EXPECTED_RC14_EXTERNAL_STATE = EXPECTED_CANDIDATE_EXTERNAL_STATE
 EXPECTED_SSH_SHA256 = (
     "sha256:6250fd52163fe99a0dc49403ed1b4bbef9b764bdb7bada017a93d057d9376a42"
 )
@@ -161,6 +163,9 @@ OPENSSH_REQUIRED_OPTIONS = (
 )
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
+_CANDIDATE_VERSION = re.compile(
+    re.escape(TARGET_VERSION) + r"-rc\.[1-9][0-9]*\Z"
+)
 
 
 class CandidateHarnessError(RuntimeError):
@@ -1037,7 +1042,9 @@ class CandidateVmProvider(Protocol):
 
     def inspect_original_hashes(self) -> Mapping[str, str]: ...
 
-    def inspect_rc14_external_state(self) -> Mapping[str, str]: ...
+    def inspect_candidate_external_state(
+        self, candidate_version: str
+    ) -> Mapping[str, str]: ...
 
 
 class ClosedVmwareProvider:
@@ -2071,7 +2078,7 @@ class ClosedVmwareProvider:
         )
         return self._absent_state(status)
 
-    def _ghcr_manifest_state(self, role: str) -> str:
+    def _ghcr_manifest_state(self, role: str, candidate_version: str) -> str:
         repository = f"yanyuhanyue/animemo-{role}"
         query = urllib.parse.urlencode(
             {
@@ -2103,7 +2110,7 @@ class ClosedVmwareProvider:
         ):
             raise CandidateHarnessError("CANDIDATE_EXTERNAL_STATE_UNVERIFIED")
         status, _ = self._public.get(
-            f"https://ghcr.io/v2/{repository}/manifests/{RC14_VERSION}",
+            f"https://ghcr.io/v2/{repository}/manifests/{candidate_version}",
             {
                 "Accept": (
                     "application/vnd.oci.image.index.v1+json, "
@@ -2117,12 +2124,12 @@ class ClosedVmwareProvider:
         )
         return self._absent_state(status)
 
-    def _public_r2_state(self) -> str:
-        for key in R2_RC14_EXPECTED_KEYS:
+    def _public_r2_state(self, candidate_version: str) -> str:
+        for key in candidate_r2_expected_keys(candidate_version):
             encoded_key = urllib.parse.quote(key, safe="")
             status, _ = self._public.get(
                 f"{PUBLIC_MIRROR_ORIGIN}/{REPOSITORY}/releases/download/"
-                f"{RC14_VERSION}/{encoded_key}",
+                f"{candidate_version}/{encoded_key}",
                 {
                     "Range": "bytes=0-0",
                     "User-Agent": "AniMemo-Candidate-Acceptance/1",
@@ -2132,19 +2139,23 @@ class ClosedVmwareProvider:
                 return "PRESENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE"
         return "ABSENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE"
 
-    def inspect_rc14_external_state(self) -> Mapping[str, str]:
+    def inspect_candidate_external_state(
+        self, candidate_version: str
+    ) -> Mapping[str, str]:
+        if _CANDIDATE_VERSION.fullmatch(candidate_version) is None:
+            raise CandidateHarnessError("CANDIDATE_HARNESS_AUTHORITY_MISMATCH")
         ghcr_states = {
-            self._ghcr_manifest_state("api"),
-            self._ghcr_manifest_state("web"),
+            self._ghcr_manifest_state("api", candidate_version),
+            self._ghcr_manifest_state("web", candidate_version),
         }
         ghcr = "ABSENT" if ghcr_states == {"ABSENT"} else "PRESENT"
         return {
-            "tag": self._github_state(f"git/ref/tags/{RC14_VERSION}"),
+            "tag": self._github_state(f"git/ref/tags/{candidate_version}"),
             "github_release": self._github_state(
-                f"releases/tags/{RC14_VERSION}"
+                f"releases/tags/{candidate_version}"
             ),
             "ghcr": ghcr,
-            "public_r2": self._public_r2_state(),
+            "public_r2": self._public_r2_state(candidate_version),
         }
 
 
@@ -2200,7 +2211,7 @@ def build_harness_plan(
         or candidate["qualification_run_attempt"] != 1
         or candidate["source_sha"] != expected_source_sha
         or candidate["source_tree"] != expected_source_tree
-        or candidate["candidate_version"] != RC14_VERSION
+        or _CANDIDATE_VERSION.fullmatch(candidate["candidate_version"]) is None
     ):
         raise CandidateHarnessError("CANDIDATE_HARNESS_AUTHORITY_MISMATCH")
     readiness = provider.inspect_readiness()
@@ -2281,15 +2292,16 @@ def _profile_digest(receipt: Mapping[str, Any]) -> str:
 
 def _read_expected_external_state(
     provider: CandidateVmProvider,
+    candidate_version: str,
 ) -> dict[str, str]:
     try:
-        state = dict(provider.inspect_rc14_external_state())
+        state = dict(provider.inspect_candidate_external_state(candidate_version))
     except CandidateHarnessError:
         raise
     except (OSError, TypeError, ValueError) as error:
         raise CandidateHarnessError("CANDIDATE_EXTERNAL_STATE_UNVERIFIED") from error
-    if state != EXPECTED_RC14_EXTERNAL_STATE:
-        raise CandidateHarnessError("CANDIDATE_RC14_NOT_EMPTY")
+    if state != EXPECTED_CANDIDATE_EXTERNAL_STATE:
+        raise CandidateHarnessError("CANDIDATE_VERSION_NOT_EMPTY")
     return state
 
 
@@ -2310,7 +2322,8 @@ def execute_harness_plan(
     ):
         raise CandidateHarnessError("CANDIDATE_HARNESS_PLAN_NOT_ACCEPTED")
     try:
-        r2_receipt = verify_rc14_r2_origin_from_environment(
+        r2_receipt = verify_candidate_r2_origin_from_environment(
+            target_rc=plan.candidate_version,
             source_sha=plan.source_sha,
             source_tree=plan.source_tree,
             auth_method=R2_AUTH_METHOD_ARGUMENT,
@@ -2321,6 +2334,7 @@ def execute_harness_plan(
             r2_receipt,
             expected_source_sha=plan.source_sha,
             expected_source_tree=plan.source_tree,
+            expected_target_rc=plan.candidate_version,
         )
         loaded = load_verified_candidate(
             plan.verified_candidate_digest,
@@ -2328,8 +2342,8 @@ def execute_harness_plan(
         )
     except CandidateContractError as error:
         raise CandidateHarnessError(error.code) from error
-    rc14_prestate = {
-        **_read_expected_external_state(provider),
+    candidate_prestate = {
+        **_read_expected_external_state(provider, plan.candidate_version),
         "r2_origin": r2_receipt["result"],
     }
     receipts: dict[str, dict[str, Any]] = {}
@@ -2374,12 +2388,12 @@ def execute_harness_plan(
     final_hashes = dict(provider.inspect_original_hashes())
     if final_hashes != dict(plan.original_vm_hashes):
         raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
-    rc14_poststate = {
-        **_read_expected_external_state(provider),
+    candidate_poststate = {
+        **_read_expected_external_state(provider, plan.candidate_version),
         "r2_origin": r2_receipt["result"],
     }
-    if rc14_poststate != rc14_prestate:
-        raise CandidateHarnessError("CANDIDATE_RC14_STATE_DRIFT")
+    if candidate_poststate != candidate_prestate:
+        raise CandidateHarnessError("CANDIDATE_VERSION_STATE_DRIFT")
     completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     aggregate = {
         "schema": "animemo.prepublication-candidate-acceptance-receipt/v1",
@@ -2400,8 +2414,8 @@ def execute_harness_plan(
             ),
         },
         "all_profiles_pass": True,
-        "rc14_prestate": rc14_prestate,
-        "rc14_poststate": rc14_poststate,
+        "rc14_prestate": candidate_prestate,
+        "rc14_poststate": candidate_poststate,
         "repository_mutation_count": 0,
         "publication_mutation_count": 0,
         "shared_host_connection_count": 0,

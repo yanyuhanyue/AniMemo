@@ -280,6 +280,7 @@ class MetadataFreshnessTests(unittest.TestCase):
             "source_sha": CANDIDATE,
             "source_tree": TREE,
             "candidate_version": "v1.1.0-rc.9",
+            "r2_origin_prestate_receipt_digest": "sha256:" + "6" * 64,
             "profile_receipts": {
                 "fresh_base": "sha256:" + "3" * 64,
                 "docker_base": "sha256:" + "4" * 64,
