@@ -104,5 +104,5 @@
     "supersessionIsRevocation": false,
     "transition": "CURRENT_PROFILE_N_TO_EXACT_SUCCESSOR_N_PLUS_1"
   },
-  "verifierVersion": "2.97.0+animemo.2"
+  "verifierVersion": "2.97.0+animemo.3"
 }
