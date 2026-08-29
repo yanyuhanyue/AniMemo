@@ -53,6 +53,7 @@ from .errors import RequestRejected
 from .oci import OCIContractError, VerifiedOCIImageSet, verify_oci_image_set
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+_SHA1 = re.compile(r"[0-9a-f]{40}")
 _MAX_SIDECAR_BYTES = 64 * 1024 * 1024
 ACTIONS_EVIDENCE_NAMES = {
     "api": "api-image",
@@ -640,6 +641,7 @@ class ExternalEvidenceVerifier(Protocol):
         trust_profile: TrustProfile,
         tag: str | None = None,
         tag_commit: str | None = None,
+        tag_object: str | None = None,
         expected_subjects: Sequence[Mapping[str, object]] | None = None,
     ) -> Mapping[str, object]: ...
 
@@ -698,11 +700,13 @@ class SigstoreGoEvidenceVerifier:
         trust_profile: TrustProfile,
         tag: str | None = None,
         tag_commit: str | None = None,
+        tag_object: str | None = None,
         expected_subjects: Sequence[Mapping[str, object]] | None = None,
     ) -> Mapping[str, object]:
         if (
             tag is None
             or tag_commit is None
+            or tag_object is None
             or expected_subjects is None
             or trust_profile.identity != self._material.profile.identity
         ):
@@ -720,6 +724,7 @@ class SigstoreGoEvidenceVerifier:
                 "schemaVersion": 1,
                 "tag": tag,
                 "tagCommit": tag_commit,
+                "tagObject": tag_object,
             },
         )
 
@@ -925,6 +930,45 @@ def _extract_sigstore_bundle(sidecar: bytes, evidence_name: str) -> Mapping[str,
     if "bundle" not in attestation or not isinstance(attestation["bundle"], dict):
         raise RequestRejected("官方 attestation 不含本地 Sigstore bundle")
     return attestation["bundle"]
+
+
+def _release_tag_object_identity(sidecar: bytes, tag: str) -> str:
+    """Select the annotated tag object that the frozen verifier must authenticate."""
+
+    try:
+        sigstore_bundle = _extract_sigstore_bundle(sidecar, "github-release")
+        envelope = sigstore_bundle["dsseEnvelope"]
+        payload = base64.b64decode(envelope["payload"], validate=True)
+        statement = json.loads(payload.decode("utf-8"))
+        subjects = statement["subject"]
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        binascii.Error,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as error:
+        raise RequestRejected("GitHub Release tag object 证明不可提取") from error
+    if not isinstance(subjects, list):
+        raise RequestRejected("GitHub Release tag object subject 不唯一")
+    expected_uri = f"pkg:github/yanyuhanyue/AniMemo@{tag}"
+    matches = [
+        subject
+        for subject in subjects
+        if isinstance(subject, dict) and subject.get("uri") == expected_uri
+    ]
+    if len(matches) != 1 or set(matches[0]) != {"uri", "digest"}:
+        raise RequestRejected("GitHub Release tag object subject 不唯一")
+    digest = matches[0]["digest"]
+    if (
+        not isinstance(digest, dict)
+        or set(digest) != {"sha1"}
+        or type(digest["sha1"]) is not str
+        or _SHA1.fullmatch(digest["sha1"]) is None
+    ):
+        raise RequestRejected("GitHub Release tag object identity 无效")
+    return digest["sha1"]
 
 
 def _verifier_is_qualified(
@@ -1159,6 +1203,10 @@ class OfflineReleaseVerifier:
                     trust_profile=self._profile,
                     tag=authority_inputs["tag"],
                     tag_commit=authority_inputs["tag_commit"],
+                    tag_object=_release_tag_object_identity(
+                        sidecar_bundle,
+                        authority_inputs["tag"],
+                    ),
                     expected_subjects=expected_subjects,
                 )
                 publication = close_github_release_publication(external_release)

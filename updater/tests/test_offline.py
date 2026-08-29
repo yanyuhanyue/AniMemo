@@ -47,6 +47,7 @@ _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
 _DIGEST_C = "sha256:" + "c" * 64
 _COMMIT = "1" * 40
+_TAG_OBJECT = "2" * 40
 
 
 def _load_pretrusted_material_fixture(root: Path) -> PretrustedTrustMaterial:
@@ -73,6 +74,7 @@ def _release_claim() -> dict[str, object]:
         },
         "tag": "v1.0.0",
         "tagCommit": _COMMIT,
+        "tagObject": _TAG_OBJECT,
         "draft": False,
         "prerelease": False,
         "signedAt": "2026-08-19T00:00:00Z",
@@ -230,7 +232,7 @@ def _portable_fixture(root: Path):
         }
     ]
     sidecar = root / "release-attestation.sigstore.json"
-    sidecar.write_bytes(b"official-github-immutable-release-bundle")
+    sidecar.write_bytes(_attestation_sidecar_fixture())
     return archive, sidecar, release_claim, action_claims
 
 
@@ -288,6 +290,7 @@ class _PublicationVerifier:
         trust_profile,
         tag=None,
         tag_commit=None,
+        tag_object=None,
         expected_subjects=None,
     ):
         self.release_call = (bundle, trust_profile.identity)
@@ -416,8 +419,35 @@ def _pretrusted_material_fixture(root: Path) -> TrustProfile:
 
 
 def _attestation_sidecar_fixture() -> bytes:
+    release_statement = canonical_json_bytes(
+        {
+            "_type": "https://in-toto.io/Statement/v1",
+            "predicateType": "https://in-toto.io/attestation/release/v0.2",
+            "subject": [
+                {
+                    "uri": "pkg:github/yanyuhanyue/AniMemo@v1.0.0",
+                    "digest": {"sha1": _TAG_OBJECT},
+                }
+            ],
+        }
+    )
     bundle_set = canonical_json_bytes(
-        [{"attestation": {"bundle": {"mediaType": "test-only-bundle"}}}]
+        [
+            {
+                "attestation": {
+                    "bundle": {
+                        "dsseEnvelope": {
+                            "payload": base64.b64encode(release_statement).decode(
+                                "ascii"
+                            ),
+                            "payloadType": "application/vnd.in-toto+json",
+                            "signatures": [],
+                        },
+                        "mediaType": "test-only-bundle",
+                    }
+                }
+            }
+        ]
     )
     record = {
         "encoding": "base64",
@@ -489,6 +519,7 @@ class ClosedPublicationClaimTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first.identity, second.identity)
         self.assertEqual(first.tag_commit, _COMMIT)
+        self.assertEqual(first.tag_object, _TAG_OBJECT)
         self.assertEqual(len(first.assets), 4)
         self.assertEqual(len(first.transport_assets), 1)
         self.assertEqual(first.transport_assets[0].authority_role, "TRANSPORT_ONLY")
@@ -802,7 +833,10 @@ class SigstoreGoEvidenceVerifierTests(unittest.TestCase):
             calls = []
 
             def runner(command, **kwargs):
-                calls.append((command, kwargs))
+                request_path = Path(command[command.index("--request") + 1])
+                calls.append(
+                    (command, kwargs, json.loads(request_path.read_text("utf-8")))
+                )
                 return subprocess.CompletedProcess(
                     command,
                     0,
@@ -816,18 +850,21 @@ class SigstoreGoEvidenceVerifierTests(unittest.TestCase):
                 trust_profile=profile,
                 tag="v1.0.0",
                 tag_commit=_COMMIT,
+                tag_object=_TAG_OBJECT,
                 expected_subjects=[
                     {"name": "checksums.txt", "sha256": _DIGEST_A, "size": 1}
                 ],
             )
 
             self.assertEqual(claim, _release_claim())
-            command, kwargs = calls[0]
+            command, kwargs, request = calls[0]
             self.assertIsInstance(command, tuple)
             self.assertEqual(command[0], str(material.verifier_path))
             self.assertNotIn("shell", kwargs)
             self.assertEqual(set(kwargs["env"]) - {"SystemRoot"}, {"LANG", "LC_ALL"})
             self.assertIn(str(material.github_trusted_root_path), command)
+            self.assertEqual(request["tagCommit"], _COMMIT)
+            self.assertEqual(request["tagObject"], _TAG_OBJECT)
 
     def test_nonzero_or_stderr_external_result_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -847,12 +884,39 @@ class SigstoreGoEvidenceVerifierTests(unittest.TestCase):
                     trust_profile=profile,
                     tag="v1.0.0",
                     tag_commit=_COMMIT,
+                    tag_object=_TAG_OBJECT,
                     expected_subjects=[
                         {"name": "checksums.txt", "sha256": _DIGEST_A, "size": 1}
                     ],
                 )
 
 class OfflineOrchestrationTests(unittest.TestCase):
+    def test_release_tag_object_cannot_replace_the_peeled_source_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload, sidecar, release_claim, action_claims = _portable_fixture(root)
+            release_claim["tagCommit"] = _TAG_OBJECT
+            profile = _profile()
+
+            with self.assertRaisesRegex(
+                RequestRejected,
+                "Exact GitHub release authority evidence is invalid",
+            ):
+                OfflineReleaseVerifier(
+                    trust_profile=profile,
+                    external_verifier=_PublicationVerifier(
+                        release_claim,
+                        action_claims,
+                    ),
+                    oci_verifier=_qualified_oci_verifier,
+                ).verify(
+                    payload=payload,
+                    sidecar=sidecar,
+                    destination=root / "verified-materials",
+                    updater_version="1.0.0",
+                    state=OfflineAuthorityState.initial(profile),
+                )
+
     def test_persistent_state_migrates_only_across_verified_profile_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -924,7 +988,7 @@ class OfflineOrchestrationTests(unittest.TestCase):
             )
             self.assertEqual(
                 verified.release_attestation_identity,
-                "sha256:4843cd2f1e501c0096158c10ac21a9495384f6ee39297a5d1d687fb34ea4c445",
+                "sha256:" + hashlib.sha256(sidecar.read_bytes()).hexdigest(),
             )
             self.assertEqual(verified.trust_profile_version, 1)
             self.assertEqual(verified.trust_profile_identity, profile.identity)

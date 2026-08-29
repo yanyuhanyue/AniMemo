@@ -200,6 +200,7 @@ func TestCloseReleaseStatementRequiresExactAuthorityAndSubjects(t *testing.T) {
 		OwnerID:       ownerID,
 		Tag:           "v1.1.0-rc.1",
 		TagCommit:     "1111111111111111111111111111111111111111",
+		TagObject:     "2222222222222222222222222222222222222222",
 		ExpectedSubjects: []expectedSubject{
 			{Name: "animemo-v1.1.0-rc.1-portable.tar", SHA256: digest('a'), Size: 50},
 			{Name: "checksums.txt", SHA256: digest('b'), Size: 10},
@@ -212,7 +213,7 @@ func TestCloseReleaseStatementRequiresExactAuthorityAndSubjects(t *testing.T) {
 		Type:          "https://in-toto.io/Statement/v1",
 		PredicateType: releasePredicateType,
 		Subjects: []statementSubject{
-			{Name: "pkg:github/yanyuhanyue/AniMemo@v1.1.0-rc.1", Digest: map[string]string{"sha1": request.TagCommit}},
+			{Name: "pkg:github/yanyuhanyue/AniMemo@v1.1.0-rc.1", Digest: map[string]string{"sha1": request.TagObject}},
 			{Name: "animemo-v1.1.0-rc.1-portable.tar", Digest: map[string]string{"sha256": trimDigest(request.ExpectedSubjects[0].SHA256)}},
 			{Name: "checksums.txt", Digest: map[string]string{"sha256": trimDigest(request.ExpectedSubjects[1].SHA256)}},
 			{Name: "deployment-contract.json", Digest: map[string]string{"sha256": trimDigest(request.ExpectedSubjects[2].SHA256)}},
@@ -232,6 +233,9 @@ func TestCloseReleaseStatementRequiresExactAuthorityAndSubjects(t *testing.T) {
 	}
 	if len(claim.Assets) != 4 || claim.Assets[0].Name != "checksums.txt" {
 		t.Fatalf("unexpected closed assets: %#v", claim.Assets)
+	}
+	if claim.TagCommit != request.TagCommit || claim.TagObject != request.TagObject {
+		t.Fatalf("annotated tag identities were conflated: %#v", claim)
 	}
 	if len(claim.TransportAssets) != 1 ||
 		claim.TransportAssets[0].Name != "animemo-v1.1.0-rc.1-portable.tar" ||
@@ -254,6 +258,13 @@ func TestCloseReleaseStatementRequiresExactAuthorityAndSubjects(t *testing.T) {
 	substitutedPortable.Subjects[last].Digest = map[string]string{"sha256": trimDigest(digest('f'))}
 	if _, err := closeReleaseStatement(request, substitutedPortable, time.Now()); err == nil {
 		t.Fatal("substituted portable digest must be rejected")
+	}
+
+	substitutedTagObject := statement
+	substitutedTagObject.Subjects = append([]statementSubject(nil), statement.Subjects...)
+	substitutedTagObject.Subjects[0].Digest = map[string]string{"sha1": request.TagCommit}
+	if _, err := closeReleaseStatement(request, substitutedTagObject, time.Now()); err == nil {
+		t.Fatal("peeled commit must not substitute for the annotated tag object")
 	}
 
 	statement.Subjects = append(statement.Subjects, statementSubject{Name: "extra", Digest: map[string]string{"sha256": trimDigest(digest('f'))}})
