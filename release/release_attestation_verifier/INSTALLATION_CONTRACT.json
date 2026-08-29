@@ -48,5 +48,5 @@
     "path": "/var/lib/animemo/offline-authority-state.json",
     "writePolicy": "LOCKED_ATOMIC_REPLACE_AND_DIRECTORY_FSYNC"
   },
-  "verifierVersion": "2.97.0+animemo.1"
+  "verifierVersion": "2.97.0+animemo.2"
 }

@@ -163,7 +163,7 @@ class InitialTrustBootstrapTests(unittest.TestCase):
             runner_commands.append(command)
             if command[1:] == ("--version",):
                 return subprocess.CompletedProcess(
-                    command, 0, stdout=b"2.97.0+animemo.1\n", stderr=b""
+                    command, 0, stdout=b"2.97.0+animemo.2\n", stderr=b""
                 )
             request = json.loads(
                 Path(command[command.index("--request") + 1]).read_text()

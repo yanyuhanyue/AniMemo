@@ -38,7 +38,7 @@ const (
 	actionsPredicateType        = "https://slsa.dev/provenance/v1"
 	actionsOIDCIssuer           = "https://token.actions.githubusercontent.com"
 	actionsSourceRef            = "refs/heads/main"
-	verifierVersion             = "2.97.0+animemo.1"
+	verifierVersion             = "2.97.0+animemo.2"
 )
 
 var (
@@ -64,6 +64,7 @@ type releaseRequest struct {
 	OwnerID          string            `json:"ownerId"`
 	Tag              string            `json:"tag"`
 	TagCommit        string            `json:"tagCommit"`
+	TagObject        string            `json:"tagObject"`
 	ExpectedSubjects []expectedSubject `json:"expectedSubjects"`
 }
 
@@ -190,6 +191,7 @@ type releaseClaim struct {
 	} `json:"repository"`
 	Tag         string `json:"tag"`
 	TagCommit   string `json:"tagCommit"`
+	TagObject   string `json:"tagObject"`
 	Draft       bool   `json:"draft"`
 	Prerelease  bool   `json:"prerelease"`
 	SignedAt    string `json:"signedAt"`
@@ -232,7 +234,8 @@ func closeReleaseStatement(request releaseRequest, statement releaseStatement, s
 	if request.SchemaVersion != 1 || request.Mode != "github-release" ||
 		request.Repository != repository || request.RepositoryID != repositoryID ||
 		request.OwnerID != ownerID || !tagIdentity.MatchString(request.Tag) ||
-		!commitIdentity.MatchString(request.TagCommit) {
+		!commitIdentity.MatchString(request.TagCommit) ||
+		!commitIdentity.MatchString(request.TagObject) {
 		return claim, errors.New("发布验证请求身份未关闭")
 	}
 	if statement.Type != "https://in-toto.io/Statement/v1" ||
@@ -278,8 +281,8 @@ func closeReleaseStatement(request releaseRequest, statement releaseStatement, s
 	for _, subject := range statement.Subjects {
 		name := subject.identity()
 		if name == "pkg:github/yanyuhanyue/AniMemo@"+request.Tag {
-			if tagSeen || len(subject.Digest) != 1 || subject.Digest["sha1"] != request.TagCommit {
-				return claim, errors.New("签名发布声明 tag commit 绑定无效")
+			if tagSeen || len(subject.Digest) != 1 || subject.Digest["sha1"] != request.TagObject {
+				return claim, errors.New("签名发布声明 tag object 绑定无效")
 			}
 			tagSeen = true
 			continue
@@ -310,6 +313,7 @@ func closeReleaseStatement(request releaseRequest, statement releaseStatement, s
 	claim.Repository.OwnerID = ownerID
 	claim.Tag = request.Tag
 	claim.TagCommit = request.TagCommit
+	claim.TagObject = request.TagObject
 	claim.Draft = false
 	claim.Prerelease = strings.Contains(request.Tag, "-")
 	claim.SignedAt = signedAt.UTC().Format(time.RFC3339)
@@ -525,12 +529,12 @@ func verifyRelease(bundlePath, trustedRootPath, requestPath string) (releaseClai
 	if err != nil {
 		return releaseClaim{}, err
 	}
-	commit, err := hex.DecodeString(request.TagCommit)
+	tagObject, err := hex.DecodeString(request.TagObject)
 	if err != nil {
-		return releaseClaim{}, errors.New("tag commit 无效")
+		return releaseClaim{}, errors.New("tag object 无效")
 	}
 	result, err := verifier.Verify(entity, verify.NewPolicy(
-		verify.WithArtifactDigest("sha1", commit),
+		verify.WithArtifactDigest("sha1", tagObject),
 		verify.WithCertificateIdentity(certIdentity),
 	))
 	if err != nil {

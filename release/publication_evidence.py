@@ -77,6 +77,7 @@ class ReleaseTransportAsset:
 class GitHubReleasePublication:
     tag: str
     tag_commit: str
+    tag_object: str
     draft: bool
     prerelease: bool
     signed_at: str
@@ -112,6 +113,7 @@ class GitHubReleasePublication:
                 "signedAt": self.signed_at,
                 "tag": self.tag,
                 "tagCommit": self.tag_commit,
+                "tagObject": self.tag_object,
             }
         )
 
@@ -196,6 +198,7 @@ def close_github_release_publication(
         return GitHubReleasePublication(
             tag=tag,  # type: ignore[arg-type]
             tag_commit=payload["tagCommit"],  # type: ignore[arg-type]
+            tag_object=payload["tagObject"],  # type: ignore[arg-type]
             draft=payload["draft"],  # type: ignore[arg-type]
             prerelease=prerelease,  # type: ignore[arg-type]
             signed_at=payload["signedAt"],  # type: ignore[arg-type]

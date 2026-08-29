@@ -11,6 +11,7 @@
     "repository",
     "tag",
     "tagCommit",
+    "tagObject",
     "draft",
     "prerelease",
     "signedAt",
@@ -39,6 +40,7 @@
       "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-(?:beta|rc)\\.[1-9][0-9]*)?$"
     },
     "tagCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "tagObject": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "draft": {"const": false},
     "prerelease": {"type": "boolean"},
     "signedAt": {"type": "string", "format": "date-time"},
