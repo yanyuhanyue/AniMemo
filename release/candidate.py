@@ -33,6 +33,7 @@ from durability.platform import (
     canonical_platform_qualification_bytes,
     parse_platform_qualification,
 )
+from updater import __version__ as updater_version
 from updater.authority import VerifiedReleaseMaterials
 from updater.oci import (
     OCIContractError,
@@ -60,6 +61,7 @@ from .materials import (
 )
 from .metadata_freshness import validate_qualification_run_metadata
 from .notes import render_release_notes, validate_release_notes
+from .producer_toolchain import validate_producer_toolchain_receipt
 
 REPOSITORY = "yanyuhanyue/AniMemo"
 QUALIFICATION_WORKFLOW_NAME = "Release Producer"
@@ -111,6 +113,7 @@ _QUALIFICATION_ROOT_FILES = frozenset(
         "installer-materials.tar",
         "platform-qualification.json",
         "prepublication-materials.json",
+        "release-producer-toolchain-receipt.json",
         "release-manifest.json",
         "release-notes.json",
         "release-notes.md",
@@ -742,7 +745,7 @@ def validate_candidate_input(
         root / "prepublication-materials.json", code="CANDIDATE_MATERIALS_INVALID"
     )
     try:
-        validate_manifest(manifest, updater_version="1.0.0")
+        validate_manifest(manifest, updater_version=updater_version)
         validated_notes = validate_release_notes(notes)
         validate_deployment_contract(
             deployment,
@@ -769,6 +772,9 @@ def validate_candidate_input(
         "deployment_contract_sha256": sha256_bytes(deployment_bytes),
         "installer_materials_sha256": _sha256_file(root / "installer-materials.tar")[0],
         "checksums_sha256": _sha256_file(root / "checksums.txt")[0],
+        "producer_toolchain_receipt_sha256": _sha256_file(
+            root / "release-producer-toolchain-receipt.json"
+        )[0],
     }
     if any(candidate[field] != digest for field, digest in material_hashes.items()):
         _reject("CANDIDATE_MATERIAL_DIGEST_MISMATCH")
@@ -781,6 +787,15 @@ def validate_candidate_input(
         != candidate["installer_materials_sha256"]
     ):
         _reject("CANDIDATE_MATERIAL_IDENTITY_MISMATCH")
+    try:
+        validate_producer_toolchain_receipt(
+            root / "release-producer-toolchain-receipt.json",
+            expected_candidate_sha=candidate["source_sha"],
+        )
+    except Exception as error:
+        raise CandidateContractError(
+            "CANDIDATE_PRODUCER_TOOLCHAIN_INVALID"
+        ) from error
     runtime_inventory = _runtime_inventory(root)
     if runtime_inventory != candidate["candidate_runtime_file_inventory"]:
         _reject("CANDIDATE_RUNTIME_INVENTORY_MISMATCH")
@@ -846,6 +861,9 @@ def build_candidate_input(
         "deployment_contract_sha256": _sha256_file(root / "deployment-contract.json")[0],
         "installer_materials_sha256": _sha256_file(root / "installer-materials.tar")[0],
         "checksums_sha256": _sha256_file(root / "checksums.txt")[0],
+        "producer_toolchain_receipt_sha256": _sha256_file(
+            root / "release-producer-toolchain-receipt.json"
+        )[0],
         "api_oci_digest": by_role["api"].digest,
         "web_oci_digest": by_role["web"].digest,
         "postgres_oci_digest": by_role["postgres"].digest,

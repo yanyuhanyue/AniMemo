@@ -264,8 +264,23 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 "performance.yml:isolated-resource-load",
                 "performance.yml:isolated-long-operation-capacity",
                 "release.yml:dry-run",
+                "release.yml:qualification-evidence",
             },
         )
+
+    def test_release_producer_rebuilds_have_a_commit_bound_epoch(self):
+        release = workflow("release.yml")
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(source.count("--provenance=false"), 2)
+        self.assertEqual(
+            source.count('--build-arg "SOURCE_DATE_EPOCH=$source_date_epoch"'),
+            2,
+        )
+        self.assertEqual(source.count('git show -s --format=%ct "$GITHUB_SHA"'), 2)
+        self.assertIn("dry-run", release["jobs"])
+        self.assertIn("qualification-evidence", release["jobs"])
 
     def test_release_resolver_requires_the_candidate_bound_reservation_ledger(self):
         release = workflow("release.yml")
@@ -1211,7 +1226,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
         self.assertEqual(release.count("generate-deployment-contract"), 1)
         self.assertEqual(release.count("build-installer-materials"), 1)
-        self.assertGreaterEqual(release.count("-r durability/requirements.txt"), 1)
+        self.assertGreaterEqual(release.count("-r durability/requirements.lock"), 1)
         self.assertGreaterEqual(release.count("installer-materials.tar"), 10)
         self.assertGreaterEqual(release.count("deployment-contract.json"), 8)
         self.assertGreaterEqual(promotion.count("deployment-contract.json"), 7)
@@ -1700,7 +1715,7 @@ cp "$FIXTURE_ARCHIVE" "$output"
         )
         job = release["jobs"]["platform-qualification"]
 
-        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(job["runs-on"], "ubuntu-24.04")
         self.assertEqual(job["if"], "${{ inputs.operation == 'qualify' }}")
         self.assertEqual(
             job["needs"], ["preflight", "full-ci", "full-release-gate"]
@@ -2292,7 +2307,7 @@ cp "$FIXTURE_ARCHIVE" "$output"
             encoding="utf-8"
         )
         authority = release["jobs"]["metadata-freshness-authority"]
-        self.assertEqual(authority["runs-on"], "ubuntu-latest")
+        self.assertEqual(authority["runs-on"], "ubuntu-24.04")
         self.assertEqual(authority["permissions"], {"contents": "read", "actions": "read"})
         self.assertEqual(authority["needs"], ["preflight", "release-authority"])
         for guard in (
@@ -2357,6 +2372,28 @@ cp "$FIXTURE_ARCHIVE" "$output"
         )
         self.assertEqual(publish.count("--expected-candidate-version"), 2)
         self.assertNotIn("continue-on-error", publish)
+
+    def test_qualification_producer_uses_only_explicit_run_authority(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        qualification = source[
+            source.index("  qualification-evidence:\n") : source.index("  publish:\n")
+        ]
+
+        self.assertIn(
+            'install -m 0600 "$QUALIFICATION_ARTIFACT_PATH"', qualification
+        )
+        self.assertIn(
+            '"release-qualification/release-qualification-${RUN_ID}.json"',
+            qualification,
+        )
+        self.assertIn('--run-id "$RUN_ID"', qualification)
+        self.assertIn('--run-attempt "$RUN_ATTEMPT"', qualification)
+        self.assertIn('--qualification-run-id "$RUN_ID"', qualification)
+        self.assertIn('--qualification-run-attempt "$RUN_ATTEMPT"', qualification)
+        self.assertNotIn("$GITHUB_RUN_ID", qualification)
+        self.assertNotIn("$GITHUB_RUN_ATTEMPT", qualification)
 
     def test_publish_consumes_the_candidate_accepted_bytes_without_rebuilding(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(

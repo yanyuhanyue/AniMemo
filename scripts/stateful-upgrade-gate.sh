@@ -416,8 +416,9 @@ unset ANIMEMO_POSTGRES_IMAGE ANIMEMO_REDIS_IMAGE
   > "$DEPENDENCY_ENV_FILE"
 chmod 600 "$DEPENDENCY_ENV_FILE"
 
-mkdir -p "$DATA_ROOT"/{plugins,logs,backups,media,postgres,redis} "$META_ROOT"
+mkdir -p "$DATA_ROOT"/{logs,backups,media,postgres,redis} "$META_ROOT"
 chmod -R a+rwx "$DATA_ROOT" "$META_ROOT"
+sudo -n install -d -m 0755 -o 10001 -g 10001 "$DATA_ROOT/plugins"
 sudo install -d -m 0700 -o 10001 -g 10001 "$DATA_ROOT/private"
 cat >"$ENV_FILE" <<EOF
 DEBUG=false

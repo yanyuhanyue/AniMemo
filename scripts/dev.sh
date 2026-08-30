@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="$ROOT"
 SETUP_ONLY=0
 if [[ "${1:-}" == "--setup-only" ]]; then SETUP_ONLY=1; fi
 

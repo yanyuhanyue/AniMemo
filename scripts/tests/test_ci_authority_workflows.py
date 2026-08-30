@@ -210,10 +210,10 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(ci.count(candidate_ref), 11)
         self.assertEqual(release.count(candidate_ref), 7)
-        self.assertIn(
-            "repository: AstrBotDevs/AstrBot\n          ref: ${{ matrix.astrbot_ref }}",
-            ci,
-        )
+        self.assertEqual(ci.count("repository: AstrBotDevs/AstrBot"), 2)
+        self.assertNotIn("ref: ${{ matrix.astrbot_ref }}", ci)
+        self.assertIn("ref: ad4fbfa90ca0c4ac2b30b3250e34dbf8fe7babbf", ci)
+        self.assertIn("ref: 30e20318cbaaa2e1ba57f3e0eee265d9ee98115c", ci)
 
     def test_pr_fast_has_stable_aggregate_and_main_remains_lightweight(self):
         ci = self.source("ci.yml")

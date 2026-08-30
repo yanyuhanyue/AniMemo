@@ -64,10 +64,12 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
             str(step.get("run", "")) for step in release_gate["jobs"]["docker"]["steps"]
         )
         self.assertIn(
-            "python -m pip install -r release/requirements.txt", docker_runs
+            "python -m pip install --require-hashes -r release/requirements.lock",
+            docker_runs,
         )
         self.assertIn(
-            "python -m pip install -r durability/requirements.txt", docker_runs
+            "python -m pip install --require-hashes -r durability/requirements.lock",
+            docker_runs,
         )
 
     def test_production_compose_uses_digest_inputs_and_explicit_jobs(self):
@@ -374,7 +376,10 @@ class DeploymentUpdaterContractTests(unittest.TestCase):
 
         self.assertIn("test -f deploy/docker-compose.build.yml", workflow)
         self.assertIn("test -f updater/docker-compose.runtime.yml", workflow)
-        self.assertIn("python -m pip install -r durability/requirements.txt", workflow)
+        self.assertIn(
+            "python -m pip install --require-hashes -r durability/requirements.lock",
+            workflow,
+        )
         self.assertIn(
             'install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /run/animemo-updater',
             workflow,

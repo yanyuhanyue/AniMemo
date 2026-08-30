@@ -129,7 +129,20 @@ if not 300 <= FIRST_RUN_SETUP_CODE_TTL_SECONDS <= 86400:
     raise ImproperlyConfigured("FIRST_RUN_SETUP_CODE_TTL_SECONDS 必须介于 300 与 86400 秒。")
 if not 3 <= FIRST_RUN_SETUP_MAX_ATTEMPTS <= 20:
     raise ImproperlyConfigured("FIRST_RUN_SETUP_MAX_ATTEMPTS 必须介于 3 与 20。")
-PLUGIN_ROOT = Path(os.getenv("PLUGIN_PACKAGE_ROOT") or os.getenv("PLUGIN_ROOT") or ("/app/runtime/plugins" if not DEBUG else BASE_DIR.parent / "plugins"))
+_configured_plugin_root = (
+    os.getenv("PLUGIN_PACKAGE_ROOT") or os.getenv("PLUGIN_ROOT") or ""
+).strip()
+if _configured_plugin_root:
+    _plugin_root_candidate = Path(_configured_plugin_root)
+    PLUGIN_ROOT = (
+        _plugin_root_candidate
+        if _plugin_root_candidate.is_absolute()
+        else BASE_DIR.parent / _plugin_root_candidate
+    )
+else:
+    PLUGIN_ROOT = Path(
+        "/app/runtime/plugins" if not DEBUG else BASE_DIR.parent / "plugins"
+    )
 PLUGIN_ASSET_SESSION_SECONDS = int(os.getenv("PLUGIN_ASSET_SESSION_SECONDS", "120"))
 PLUGIN_PREVIEW_SESSION_SECONDS = int(os.getenv("PLUGIN_PREVIEW_SESSION_SECONDS", "600"))
 PLUGIN_MAX_PACKAGE_BYTES = int(os.getenv("PLUGIN_MAX_PACKAGE_BYTES", str(25 * 1024 * 1024)))

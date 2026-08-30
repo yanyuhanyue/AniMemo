@@ -2,8 +2,13 @@ FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a5
 
 WORKDIR /app
 
-RUN apk upgrade --no-cache
-RUN npm install --global npm@12.0.2
+RUN npm pack npm@12.0.2 --ignore-scripts --pack-destination /tmp \
+    && echo "b885e890b9418fa1693544d05f53e64f9a73ec194837d4258b15fecdd692347b1dd2a517b1b0cbaf9d31cd8e92c3b70956bd2ecc72833a57b4b3098f5bfa7943  /tmp/npm-12.0.2.tgz" \
+      > /tmp/npm-12.0.2.sha512 \
+    && sha512sum -c /tmp/npm-12.0.2.sha512 \
+    && npm install --global --ignore-scripts /tmp/npm-12.0.2.tgz \
+    && test "$(npm --version)" = "12.0.2" \
+    && rm -f /tmp/npm-12.0.2.tgz /tmp/npm-12.0.2.sha512
 
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -35,17 +40,14 @@ LABEL org.opencontainers.image.version=${ANIMEMO_VERSION} \
       org.opencontainers.image.revision=${ANIMEMO_COMMIT} \
       cc.animemo.release.channel=${ANIMEMO_CHANNEL}
 
-ENV TZ=Asia/Shanghai
+ENV TZ=CST-8
 
-RUN apk upgrade --no-cache \
-    && apk add --no-cache iproute2 tzdata \
-    && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
-    && echo "Asia/Shanghai" > /etc/timezone
-
-RUN mkdir -p /etc/nginx/animemo
+RUN mkdir -p /etc/nginx/animemo /usr/local/libexec/animemo
 COPY deploy/nginx.conf /etc/nginx/animemo/default.conf.template
 COPY deploy/nginx-entrypoint.sh /usr/local/bin/animemo-nginx-entrypoint
-RUN chmod 0555 /usr/local/bin/animemo-nginx-entrypoint
+COPY deploy/resolve-edge-gateway.awk /usr/local/libexec/animemo/resolve-edge-gateway.awk
+RUN chmod 0555 /usr/local/bin/animemo-nginx-entrypoint \
+    && chmod 0444 /usr/local/libexec/animemo/resolve-edge-gateway.awk
 COPY --from=builder /app/dist/client /usr/share/nginx/html
 
 EXPOSE 80

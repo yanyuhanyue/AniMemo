@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "animemo.release-producer-toolchain-lock.v1",
+  "githubHostedRunner": {
+    "label": "ubuntu-24.04",
+    "observationOnly": true
+  },
+  "byteAuthority": {
+    "buildx": {
+      "version": "v0.36.0"
+    },
+    "buildkit": {
+      "image": "moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2",
+      "version": "v0.32.0"
+    },
+    "releaseProducer": {
+      "dockerfile": "deploy/release-producer.Dockerfile",
+      "pythonBase": "python:3.12.10-bookworm@sha256:91487c05f87617b9d1165274c07a9b0040dfef21a855b5b418a0ebc6aa26c5de",
+      "goBase": "golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36",
+      "githubCliSha256": "a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112",
+      "craneSha256": "5c16d8ddb971cb1d5e6ed8b1e743da8224414eeba2c2762d8f1a61b2f095699e",
+      "jqSha256": "020468de7539ce70ef1bceaf7cde2e8c4f2ca6c3afb84642aabc5c97d9fc2a0d"
+    },
+    "python": {
+      "hostedRuntimeVersion": "3.12.10",
+      "backendImage": "python:3.12-alpine@sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31",
+      "backendRuntimeVersion": "3.12.14"
+    },
+    "go": {
+      "version": "1.26.6"
+    },
+    "node": {
+      "image": "node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43"
+    },
+    "npm": {
+      "integrity": "sha512-uIXokLlBj6FpNUTQX1PmT5pz7BlIN9QlixX+zdaSNHsd0qUXsbDLr50xzY6Sw7cJVr0uzHKDOle0swmPW/p5Qw==",
+      "version": "12.0.2"
+    },
+    "crane": {
+      "version": "v0.21.9"
+    }
+  }
+}

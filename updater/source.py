@@ -24,6 +24,7 @@ from release.contract import (
     validate_manifest,
 )
 
+from . import __version__
 from .authority import (
     AttestationEvidence,
     AttestationExecutionObservation,
@@ -635,7 +636,7 @@ class GitHubReleaseSource:
         self,
         version: str,
         *,
-        updater_version: str = "1.0.0",
+        updater_version: str = __version__,
         refresh: bool = False,
     ) -> VerifiedReleaseMaterials:
         if not isinstance(version, str) or not RELEASE_VERSION.fullmatch(version):
@@ -959,7 +960,7 @@ class GitHubReleaseSource:
         self,
         version: str,
         *,
-        updater_version: str = "1.0.0",
+        updater_version: str = __version__,
         refresh: bool = False,
     ) -> dict[str, object]:
         return self.fetch_verified_materials(

@@ -9,6 +9,7 @@ import stat
 import sys
 from pathlib import Path
 
+from updater import __version__ as UPDATER_VERSION
 from updater.oci import (
     OCIContractError,
     OCIImageExpectation,
@@ -1338,7 +1339,7 @@ def _parser() -> argparse.ArgumentParser:
 
     validate = subparsers.add_parser("validate-manifest")
     validate.add_argument("--manifest", type=Path, required=True)
-    validate.add_argument("--updater-version", default="")
+    validate.add_argument("--updater-version", default=UPDATER_VERSION)
     validate.set_defaults(handler=_validate)
 
     validate_deployment = subparsers.add_parser("validate-deployment-contract")
