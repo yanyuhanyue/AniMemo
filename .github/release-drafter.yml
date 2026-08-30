@@ -151,6 +151,8 @@ autolabeler:
       - "package.json"
       - "package-lock.json"
       - "**/requirements.in"
+      - "**/*.lock"
+      - "**/*.lock.json"
       - "**/requirements.txt"
     title:
       - "/^(?:deps|dependencies)(?:\\(.+\\))?!?:/i"

@@ -24,7 +24,7 @@ permissions:
 jobs:
   isolated-a-to-b:
     name: isolated-a-to-b
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
@@ -38,7 +38,7 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
       - name: Verify exact candidate checkout
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"

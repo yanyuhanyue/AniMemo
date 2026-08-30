@@ -47,6 +47,7 @@ from scripts.tests.formal_windows_pretrust_fixture import (
     create_test_formal_windows_pretrust_kit,
 )
 from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
+from updater import __version__ as updater_version
 
 TASK = "V1_1_DISTRIBUTION_VM_QUALIFICATION_AND_AUTOMATED_RELEASE_PIPELINE_V1_CONVERGENCE"
 REPOSITORY = "yanyuhanyue/AniMemo"
@@ -98,6 +99,11 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _fixture_notes(commit: str) -> tuple[dict[str, Any], dict[str, Any], str]:
+    compatibility = json.loads(
+        (REPO_IMPORT_ROOT / "release" / "compatibility.json").read_text(
+            encoding="utf-8"
+        )
+    )
     note_input = {
         "logical_fixture_id": LOGICAL_FIXTURE,
         "contract_valid_surrogate": FIXTURE_TAG,
@@ -108,7 +114,7 @@ def _fixture_notes(commit: str) -> tuple[dict[str, Any], dict[str, Any], str]:
             "release_tag": FIXTURE_TAG,
             "target_version": "v1.1.0",
             "channel": "rc",
-            "minimum_updater_version": "1.0.0",
+            "minimum_updater_version": compatibility["minimumUpdaterVersion"],
             "supported_os": ["Ubuntu 24.04 LTS"],
             "docker_requirement": "Docker Engine 27+ with Compose v2",
             "release_assets": list(CANONICAL_RELEASE_ASSETS),
@@ -185,7 +191,7 @@ def _synthetic_release(repo: Path, root: Path, commit: str, notes: dict[str, Any
         plugin_sdk_apis=plugin_sdk["supportedApis"],
         installer_materials_sha256=deployment["archive"]["sha256"],
     )
-    validate_manifest(manifest, updater_version="1.0.0")
+    validate_manifest(manifest, updater_version=updater_version)
     _write_json(output, "release-manifest.json", manifest, enveloped=False)
     (output / "release-notes.json").write_text(
         json.dumps(notes, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

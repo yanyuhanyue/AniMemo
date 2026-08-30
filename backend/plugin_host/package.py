@@ -12,6 +12,29 @@ from zipfile import BadZipFile, ZipFile
 from django.conf import settings
 from packaging.version import InvalidVersion, Version
 
+from installer.safe_archive import (
+    SafeArchiveError,
+    ZipExtractionLimits,
+    archive_member_path,
+    read_zip_member,
+    validate_zip_archive,
+)
+
+from .filesystem_security import (
+    PRIVATE_DIRECTORY_MODE,
+    PRIVATE_FILE_MODE,
+    RUNTIME_DIRECTORY_MODE,
+    RUNTIME_FILE_MODE,
+    PluginFilesystemSecurityError,
+    ensure_directory,
+    ensure_plugin_layout,
+    remove_secure_tree,
+    secure_file,
+    secure_tree,
+    validate_directory_chain,
+    validate_secure_tree,
+    write_secure_bytes,
+)
 from .manifest import ManifestError, validate_manifest
 
 
@@ -29,24 +52,41 @@ ALLOWED_TOP_DIRS = {"frontend", "backend"}
 
 class PackageHashLock:
     def __init__(self, root, sha256, timeout=10):
-        self.path = Path(root) / ".locks" / f"cas-{sha256}.lock"
+        self.root = Path(root)
+        self.path = self.root / ".locks" / f"cas-{sha256}.lock"
         self.timeout = timeout
         self.fd = None
         self.token = f"{os.getpid()}:{uuid4().hex}"
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_directory(
+                self.root,
+                self.path.parent,
+                mode=PRIVATE_DIRECTORY_MODE,
+            )
+        except PluginFilesystemSecurityError as error:
+            raise PluginPackageError("CAS 锁目录不安全。") from error
         deadline = time.monotonic() + self.timeout
         while True:
             try:
-                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                self.fd = os.open(self.path, flags, PRIVATE_FILE_MODE)
+                if hasattr(os, "fchmod") and os.name != "nt":
+                    os.fchmod(self.fd, PRIVATE_FILE_MODE)
                 os.write(self.fd, f"{self.token}\n".encode("ascii"))
+                os.fsync(self.fd)
+                secure_file(self.root, self.path, mode=PRIVATE_FILE_MODE)
                 return self
             except FileExistsError:
                 try:
+                    secure_file(self.root, self.path, mode=PRIVATE_FILE_MODE)
                     stale = time.time() - self.path.stat().st_mtime > 300
                 except FileNotFoundError:
                     continue
+                except PluginFilesystemSecurityError as error:
+                    raise PluginPackageError("CAS 锁文件不安全。") from error
                 if stale:
                     self.path.unlink(missing_ok=True)
                     continue
@@ -58,8 +98,14 @@ class PackageHashLock:
         if self.fd is not None:
             os.close(self.fd)
         try:
+            secure_file(self.root, self.path, mode=PRIVATE_FILE_MODE)
             owner = self.path.read_text(encoding="ascii").strip()
-        except (FileNotFoundError, OSError, UnicodeDecodeError):
+        except (
+            FileNotFoundError,
+            OSError,
+            UnicodeDecodeError,
+            PluginFilesystemSecurityError,
+        ):
             return
         if owner == self.token:
             self.path.unlink(missing_ok=True)
@@ -76,16 +122,38 @@ def package_policy():
     }
 
 
-def _safe_member(name, info):
-    if "\\" in name or "\x00" in name:
-        raise PluginPackageError("包内路径不安全")
-    path = PurePosixPath(name)
-    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} or ":" in part for part in path.parts):
-        raise PluginPackageError("包内路径包含绝对路径或父级跳转")
-    mode = info.external_attr >> 16
-    if mode and (stat.S_ISLNK(mode) or stat.S_ISDIR(mode)):
-        raise PluginPackageError("包内禁止符号链接和异常目录条目")
-    return path
+def _archive_limits(policy):
+    return ZipExtractionLimits(
+        max_archives=1,
+        max_members=policy["max_files"],
+        max_member_bytes=policy["max_uncompressed_bytes"],
+        max_total_bytes=policy["max_uncompressed_bytes"],
+        max_compression_ratio=policy["max_compression_ratio"],
+    )
+
+
+def validated_package_members(archive, policy=None):
+    policy = policy or package_policy()
+    try:
+        plans, budget = validate_zip_archive(
+            archive,
+            member_path=archive_member_path,
+            limits=_archive_limits(policy),
+        )
+    except SafeArchiveError as error:
+        raise PluginPackageError("插件包归档边界无效") from error
+    if not plans:
+        raise PluginPackageError("插件文件数量不合法")
+    return tuple(
+        (info, PurePosixPath(*parts)) for info, parts in plans
+    ), budget
+
+
+def read_validated_package_member(archive, info, budget):
+    try:
+        return read_zip_member(archive, info, budget)
+    except SafeArchiveError as error:
+        raise PluginPackageError("插件包归档内容无效") from error
 
 
 def inspect_package(payload: bytes) -> dict:
@@ -98,24 +166,16 @@ def inspect_package(payload: bytes) -> dict:
     except BadZipFile as error:
         raise PluginPackageError("不是有效的 .ajplugin ZIP 容器") from error
     with archive:
-        infos = [info for info in archive.infolist() if not info.is_dir()]
-        if not infos or len(infos) > policy["max_files"]:
-            raise PluginPackageError("插件文件数量不合法")
-        paths = [_safe_member(info.filename, info) for info in infos]
-        if len(set(paths)) != len(paths):
-            raise PluginPackageError("插件包包含重复路径")
-        folded_paths = [str(path).casefold() for path in paths]
-        if len(set(folded_paths)) != len(folded_paths):
-            raise PluginPackageError("插件包包含大小写冲突路径")
-        if sum(info.file_size for info in infos) > policy["max_uncompressed_bytes"]:
-            raise PluginPackageError("插件解压体积超过限制")
-        for info in infos:
-            if info.file_size and info.compress_size and info.file_size / info.compress_size > policy["max_compression_ratio"]:
-                raise PluginPackageError("插件包压缩比异常，疑似解压炸弹")
+        members, budget = validated_package_members(archive, policy)
+        paths = [path for _, path in members]
+        contents = {
+            str(path): read_validated_package_member(archive, info, budget)
+            for info, path in members
+        }
         if PurePosixPath("manifest.json") not in paths:
             raise PluginPackageError("插件包根目录必须包含 manifest.json")
         try:
-            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+            manifest = json.loads(contents["manifest.json"].decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise PluginPackageError(f"manifest.json 无法解析: {error}") from error
         try:
@@ -140,7 +200,9 @@ def inspect_package(payload: bytes) -> dict:
         if PurePosixPath("package-index.json") not in paths:
             raise PluginPackageError("插件包必须包含 package-index.json")
         try:
-            declared_index = json.loads(archive.read("package-index.json").decode("utf-8"))
+            declared_index = json.loads(
+                contents["package-index.json"].decode("utf-8")
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise PluginPackageError(f"package-index.json 无法解析: {error}") from error
         if not isinstance(declared_index, dict) or declared_index.get("packageVersion") != 1:
@@ -148,11 +210,12 @@ def inspect_package(payload: bytes) -> dict:
         if declared_index.get("pluginId") != manifest.get("id") or declared_index.get("slug") != manifest.get("slug") or declared_index.get("version") != manifest.get("version"):
             raise PluginPackageError("package-index.json 的插件元数据与 manifest 不一致")
         index = []
-        for info, path in zip(infos, paths):
+        for _, path in members:
             if path == PurePosixPath("package-index.json"):
                 continue
-            digest = hashlib.sha256(archive.read(info)).hexdigest()
-            index.append({"path": str(path), "size": info.file_size, "sha256": digest})
+            content = contents[str(path)]
+            digest = hashlib.sha256(content).hexdigest()
+            index.append({"path": str(path), "size": len(content), "sha256": digest})
         declared_files = declared_index.get("files")
         if not isinstance(declared_files, list):
             raise PluginPackageError("package-index.json.files 必须是数组")
@@ -180,8 +243,10 @@ class LocalPluginPackageStorage:
         self.staging = self.root / "staging"
 
     def ensure(self):
-        for path in (self.packages / "sha256", self.runtime, self.previews, self.staging, self.root / ".locks"):
-            path.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_plugin_layout(self)
+        except PluginFilesystemSecurityError as error:
+            raise PluginPackageError("插件存储布局不安全。") from error
 
     def package_path(self, sha256):
         digest = str(sha256 or "").lower()
@@ -193,14 +258,16 @@ class LocalPluginPackageStorage:
         digest = self.package_path(sha256).stem
         return PackageHashLock(self.root, digest, timeout=timeout)
 
-    def _read_verified_cas_blob(self, sha256):
+    def _read_verified_cas_blob(self, sha256, *, inspect=True):
         source = self.package_path(sha256)
         maximum = package_policy()["max_package_bytes"]
         try:
+            validate_directory_chain(self.root, source.parent)
+            secure_file(self.root, source, mode=PRIVATE_FILE_MODE)
             before = source.lstat()
         except FileNotFoundError:
             raise
-        except OSError as error:
+        except (OSError, PluginFilesystemSecurityError) as error:
             raise PluginPackageError("CAS Package 无法读取") from error
         if (
             source.is_symlink()
@@ -274,7 +341,8 @@ class LocalPluginPackageStorage:
                 os.close(descriptor)
         if hashlib.sha256(raw).hexdigest() != source.stem:
             raise PluginPackageError("CAS Package SHA-256 校验失败")
-        inspect_package(raw)
+        if inspect:
+            inspect_package(raw)
         return raw
 
     def store_package(self, payload: bytes, *, sha256=None, minimum_free_bytes=0):
@@ -285,9 +353,17 @@ class LocalPluginPackageStorage:
             raise PluginPackageError("Package SHA-256 校验失败")
         destination = self.package_path(digest)
         with self.package_lock(digest):
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                ensure_directory(
+                    self.root,
+                    destination.parent,
+                    mode=PRIVATE_DIRECTORY_MODE,
+                )
+            except PluginFilesystemSecurityError as error:
+                raise PluginPackageError("CAS Package 目录不安全") from error
             if destination.is_file():
-                if destination.stat().st_size != len(raw) or hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
+                existing = self._read_verified_cas_blob(digest, inspect=False)
+                if len(existing) != len(raw) or hashlib.sha256(existing).hexdigest() != digest:
                     raise PluginPackageError("CAS 中存在损坏的同 SHA 文件")
                 return destination
             free = shutil.disk_usage(self.root).free
@@ -295,11 +371,15 @@ class LocalPluginPackageStorage:
                 raise PluginPackageError("插件存储空间不足，无法保存 Package。")
             temporary = destination.with_name(f".{digest}.{os.getpid()}.{uuid4().hex}.tmp")
             try:
-                with temporary.open("xb") as handle:
-                    handle.write(raw)
-                    handle.flush()
-                    os.fsync(handle.fileno())
+                write_secure_bytes(
+                    self.root,
+                    temporary,
+                    raw,
+                    directory_mode=PRIVATE_DIRECTORY_MODE,
+                    file_mode=PRIVATE_FILE_MODE,
+                )
                 os.replace(temporary, destination)
+                secure_file(self.root, destination, mode=PRIVATE_FILE_MODE)
             finally:
                 temporary.unlink(missing_ok=True)
         return destination
@@ -313,8 +393,18 @@ class LocalPluginPackageStorage:
 
     def retain_versions(self, slug, *, current=None, previous="", keep=2):
         protected = [value for value in (current, previous) if value]
+        runtime_directory = self.runtime / slug
+        if runtime_directory.is_dir():
+            try:
+                secure_tree(
+                    runtime_directory,
+                    directory_mode=RUNTIME_DIRECTORY_MODE,
+                    file_mode=RUNTIME_FILE_MODE,
+                )
+                validate_directory_chain(self.root, runtime_directory)
+            except PluginFilesystemSecurityError as error:
+                raise PluginPackageError("插件 runtime 目录不安全") from error
         if len(protected) < keep:
-            runtime_directory = self.runtime / slug
             runtime_versions = {
                 path.name
                 for path in runtime_directory.iterdir()
@@ -327,47 +417,91 @@ class LocalPluginPackageStorage:
             )
             protected.extend(value for value in candidates if value not in protected)
         retained = set(protected[:keep])
-        runtime_directory = self.runtime / slug
         if runtime_directory.is_dir():
             for path in runtime_directory.iterdir():
                 if path.is_dir() and not path.name.startswith(".") and path.name not in retained:
-                    shutil.rmtree(path, ignore_errors=True)
+                    try:
+                        remove_secure_tree(self.root, path)
+                    except PluginFilesystemSecurityError as error:
+                        raise PluginPackageError("插件 runtime 清理失败关闭") from error
         return sorted(retained, key=self._version_key, reverse=True)
 
     def list_versions(self, slug):
         directory = self.runtime / slug
         if not directory.is_dir():
             return []
+        try:
+            validate_directory_chain(self.root, directory)
+            validate_secure_tree(directory)
+        except PluginFilesystemSecurityError as error:
+            raise PluginPackageError("插件 runtime 目录不安全") from error
         return sorted((path.name for path in directory.iterdir() if path.is_dir() and not path.name.startswith(".")), key=self._version_key, reverse=True)
 
     def rollback(self, slug, version, package_sha256):
         raw = self._read_verified_cas_blob(package_sha256)
         destination = self.runtime / slug / version
         staging = self.staging / f"rollback-{slug}-{version}"
-        shutil.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True, exist_ok=False)
+        temporary = destination.with_name(f".{version}.rollback-{os.getpid()}")
+        try:
+            remove_secure_tree(self.root, staging)
+            remove_secure_tree(self.root, temporary)
+            ensure_directory(
+                self.root,
+                staging,
+                mode=PRIVATE_DIRECTORY_MODE,
+            )
+        except PluginFilesystemSecurityError as error:
+            raise PluginPackageError("插件 rollback staging 不安全") from error
         try:
             with ZipFile(BytesIO(raw)) as archive:
-                for info in archive.infolist():
-                    if info.is_dir():
-                        continue
-                    relative = _safe_member(info.filename, info)
+                members, budget = validated_package_members(
+                    archive,
+                    package_policy(),
+                )
+                for info, relative in members:
                     target = staging.joinpath(*relative.parts)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(archive.read(info))
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            temporary = destination.with_name(f".{version}.rollback-{os.getpid()}")
-            shutil.rmtree(temporary, ignore_errors=True)
+                    write_secure_bytes(
+                        staging,
+                        target,
+                        read_validated_package_member(archive, info, budget),
+                        directory_mode=RUNTIME_DIRECTORY_MODE,
+                        file_mode=RUNTIME_FILE_MODE,
+                    )
+            secure_tree(
+                staging,
+                directory_mode=RUNTIME_DIRECTORY_MODE,
+                file_mode=RUNTIME_FILE_MODE,
+            )
+            ensure_directory(
+                self.root,
+                destination.parent,
+                mode=RUNTIME_DIRECTORY_MODE,
+            )
             os.replace(staging, temporary)
-            shutil.rmtree(destination, ignore_errors=True)
+            secure_tree(
+                temporary,
+                directory_mode=RUNTIME_DIRECTORY_MODE,
+                file_mode=RUNTIME_FILE_MODE,
+            )
+            remove_secure_tree(self.root, destination)
             os.replace(temporary, destination)
+            validate_secure_tree(destination)
             return destination
+        except PluginFilesystemSecurityError as error:
+            raise PluginPackageError("插件 rollback 文件系统边界失败关闭") from error
         finally:
-            shutil.rmtree(staging, ignore_errors=True)
+            for cleanup in (staging, temporary):
+                try:
+                    remove_secure_tree(self.root, cleanup)
+                except PluginFilesystemSecurityError:
+                    pass
 
     def delete_plugin(self, slug):
-        shutil.rmtree(self.runtime / slug, ignore_errors=True)
-        shutil.rmtree(self.previews / slug, ignore_errors=True)
+        try:
+            remove_secure_tree(self.root, self.runtime / slug)
+            remove_secure_tree(self.root, self.previews / slug)
+        except PluginFilesystemSecurityError as error:
+            raise PluginPackageError("插件目录删除失败关闭") from error
 
     def cleanup_staging(self, *, older_than=None):
         if not self.staging.is_dir():
@@ -383,8 +517,20 @@ class LocalPluginPackageStorage:
                 except FileNotFoundError:
                     continue
             if path.is_dir():
-                shutil.rmtree(path, ignore_errors=True)
+                try:
+                    secure_tree(
+                        path,
+                        directory_mode=PRIVATE_DIRECTORY_MODE,
+                        file_mode=PRIVATE_FILE_MODE,
+                    )
+                    remove_secure_tree(self.root, path)
+                except PluginFilesystemSecurityError as error:
+                    raise PluginPackageError("插件 staging 清理失败关闭") from error
             else:
-                path.unlink(missing_ok=True)
+                try:
+                    secure_file(self.root, path, mode=PRIVATE_FILE_MODE)
+                    path.unlink(missing_ok=True)
+                except PluginFilesystemSecurityError as error:
+                    raise PluginPackageError("插件 staging 文件不安全") from error
             removed += 1
         return removed

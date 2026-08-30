@@ -10,15 +10,18 @@ target=/etc/nginx/conf.d/default.conf
 temporary="${target}.tmp"
 placeholder=__ANIMEMO_TRUSTED_EDGE_PROXY_CIDR__
 
-if [ ! -x /sbin/ip ]; then
-  echo "AniMemo Web IPv4 route authority is unavailable." >&2
-  exit 1
-fi
-
-gateway="$(/sbin/ip -4 route show default | /usr/bin/awk '
-  $1 == "default" && $2 == "via" {
+gateway="$(/usr/bin/awk '
+  function nibble(value) {
+    value = toupper(value)
+    return index("0123456789ABCDEF", value) - 1
+  }
+  function octet(value) {
+    return (nibble(substr(value, 1, 1)) * 16) + nibble(substr(value, 2, 1))
+  }
+  $2 == "00000000" && $3 ~ /^[[:xdigit:]]{8}$/ {
     count += 1
-    value = $3
+    value = octet(substr($3, 7, 2)) "." octet(substr($3, 5, 2)) "." \
+      octet(substr($3, 3, 2)) "." octet(substr($3, 1, 2))
   }
   END {
     if (count != 1) {
@@ -26,7 +29,7 @@ gateway="$(/sbin/ip -4 route show default | /usr/bin/awk '
     }
     print value
   }
-')" || {
+' /proc/net/route)" || {
   echo "AniMemo Web could not determine one exact IPv4 edge proxy." >&2
   exit 1
 }

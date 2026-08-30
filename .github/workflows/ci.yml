@@ -51,7 +51,7 @@ permissions:
 jobs:
   classify:
     name: changed-files
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       schema_version: ${{ steps.classify.outputs.schema_version }}
       risk_level: ${{ steps.classify.outputs.risk_level }}
@@ -91,7 +91,7 @@ jobs:
     name: ci-fast-fail
     needs: classify
     if: github.event_name != 'push' && fromJSON(needs.classify.outputs.classification_json).execution.profile != 'DOCS_ONLY'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -118,7 +118,7 @@ jobs:
     if: >-
       fromJSON(needs.classify.outputs.classification_json).execution.profile == 'DOCS_ONLY' ||
       fromJSON(needs.classify.outputs.classification_json).execution.profile == 'CONTRACT_VALIDATION_ONLY'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -147,7 +147,7 @@ jobs:
     name: frontend
     needs: [classify, fast-fail]
     if: github.event_name != 'push' && needs.classify.outputs.run_frontend == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -215,10 +215,11 @@ jobs:
     name: backend
     needs: [classify, fast-fail]
     if: github.event_name != 'push' && needs.classify.outputs.run_backend == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       DEBUG: "true"
+      PYTHONPATH: ${{ github.workspace }}
       DJANGO_SECRET_KEY: ci-only-django-secret-key-for-local-github-actions-validation
       CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
       ANIMEMO_PUBLIC_ORIGIN: ${{ inputs.public_origin || 'http://localhost:5173' }}
@@ -230,10 +231,18 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r backend/requirements.txt
-      - run: python -m pip install -r scripts/requirements-tools.txt
-      - run: python -m ruff check --select E9,F63,F7,F82 backend bridges scripts
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r backend/requirements.lock
+      - name: Install exact Python tooling in an isolated environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools_runtime="$RUNNER_TEMP/animemo-python-tools"
+          python -m venv "$tools_runtime"
+          "$tools_runtime/bin/python" -m pip install --require-hashes \
+            -r scripts/requirements-tools.lock
+          echo "ANIMEMO_TOOLS_PYTHON=$tools_runtime/bin/python" >> "$GITHUB_ENV"
+      - run: '"$ANIMEMO_TOOLS_PYTHON" -m ruff check --select E9,F63,F7,F82 backend bridges scripts'
       - run: python -m compileall -q backend
       - run: python manage.py check
         working-directory: backend
@@ -241,7 +250,7 @@ jobs:
         working-directory: backend
       - run: python manage.py spectacular --validate --fail-on-warn --file /tmp/animemo-openapi.yaml
         working-directory: backend
-      - run: python scripts/update_dependencies.py --check
+      - run: '"$ANIMEMO_TOOLS_PYTHON" scripts/update_dependencies.py --check'
       - run: python manage.py test
         working-directory: backend
 
@@ -254,7 +263,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-2025]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -265,7 +274,7 @@ jobs:
           node-version: 20
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
       - name: Run macOS/Linux setup smoke
         if: runner.os != 'Windows'
         shell: bash
@@ -279,10 +288,11 @@ jobs:
     name: postgres
     needs: [classify, fast-fail]
     if: github.event_name != 'push' && needs.classify.outputs.run_postgres == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       DEBUG: "true"
+      PYTHONPATH: ${{ github.workspace }}
       DJANGO_SECRET_KEY: ci-only-django-secret-key-for-local-github-actions-validation
       CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
       ANIMEMO_PUBLIC_ORIGIN: ${{ inputs.public_origin || 'http://localhost:5173' }}
@@ -321,8 +331,8 @@ jobs:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r backend/requirements.txt
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r backend/requirements.lock
       - run: python -c "import os, psycopg; psycopg.connect(os.environ['DATABASE_URL']).close(); print('PostgreSQL service is reachable')"
       - run: python manage.py shell -c "from django.db import connection; assert connection.vendor == 'postgresql', connection.vendor; print(connection.vendor)"
         working-directory: backend
@@ -333,7 +343,7 @@ jobs:
     name: plugins
     needs: [classify, fast-fail]
     if: github.event_name != 'push' && needs.classify.outputs.run_plugins == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -346,9 +356,9 @@ jobs:
           node-version: 20
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r release/requirements.txt
-      - run: python -m pip install -r durability/requirements.txt
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r release/requirements.lock
+      - run: python -m pip install --require-hashes -r durability/requirements.lock
       - run: npm ci
       - run: npm run test:plugins
       - run: python -m unittest discover -s scripts/tests -p "test_*.py" -v
@@ -373,7 +383,7 @@ jobs:
     name: astrbot-bridge
     needs: [classify, fast-fail]
     if: github.event_name != 'push' && needs.classify.outputs.run_bridge == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -382,8 +392,8 @@ jobs:
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r bridges/astrbot_plugin_animemo_bridge/requirements.txt
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r bridges/astrbot_plugin_animemo_bridge/requirements.lock
       - run: python -m unittest discover -s bridges/astrbot_plugin_animemo_bridge/tests -p "test_*.py" -v
       - run: python scripts/validate-astrbot-bridge.py
       - run: python scripts/package-astrbot-bridge.py
@@ -392,13 +402,13 @@ jobs:
     name: astrbot-runtime (${{ matrix.astrbot_ref }})
     needs: [classify, fast-fail]
     if: github.event_name != 'push' && needs.classify.outputs.run_runtime == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         astrbot_ref:
-          - v4.27.2
+          - ad4fbfa90ca0c4ac2b30b3250e34dbf8fe7babbf # v4.27.2 immutable commit
           - 30e20318cbaaa2e1ba57f3e0eee265d9ee98115c
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -413,9 +423,27 @@ jobs:
           path: .astrbot-runtime
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r .astrbot-runtime/requirements.txt
-      - run: python -m pip install -r bridges/astrbot_plugin_animemo_bridge/requirements.txt
+          python-version: "3.12.10"
+      - name: Verify and install the hash-locked AstrBot runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "6b5b28e189a16b8a0db4f177e32d14e39073c3e9b62ff25f9dc3515b1e232804  .astrbot-runtime/requirements.txt" | sha256sum --check -
+          sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' \
+            -e 's/\r$//' \
+            .astrbot-runtime/requirements.txt \
+            > "$RUNNER_TEMP/astrbot-upstream-requirements.txt"
+          sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' \
+            -e 's/\r$//' \
+            bridges/astrbot-runtime.requirements.in \
+            > "$RUNNER_TEMP/astrbot-authority-requirements.txt"
+          cmp "$RUNNER_TEMP/astrbot-upstream-requirements.txt" \
+            "$RUNNER_TEMP/astrbot-authority-requirements.txt"
+          python -m pip install --require-hashes \
+            -r scripts/requirements-tools.lock
+          python -m pip install --no-build-isolation --require-hashes \
+            -r bridges/astrbot-runtime.requirements.lock
+      - run: python -m pip install --require-hashes -r bridges/astrbot_plugin_animemo_bridge/requirements.lock
       - name: Smoke Bridge against the real AstrBot runtime
         env:
           PYTHONPATH: ${{ github.workspace }}/.astrbot-runtime
@@ -433,7 +461,7 @@ jobs:
     name: ci-selection-authority
     if: ${{ always() }}
     needs: [classify, fast-fail, docs-only, frontend, backend, bootstrap-smoke, postgres, plugins, astrbot-bridge, astrbot-runtime]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -451,7 +479,7 @@ jobs:
     name: pr-fast-gate
     if: ${{ always() && github.event_name == 'pull_request' && !inputs.force_full }}
     needs: selection-authority
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Require the selection-aware PR Fast authority
         env:

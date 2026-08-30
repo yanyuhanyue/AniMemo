@@ -11,6 +11,7 @@ LABEL org.opencontainers.image.version=${ANIMEMO_VERSION} \
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app \
     TZ=Asia/Shanghai \
     ANIMEMO_ARTIFACT_VERSION=${ANIMEMO_VERSION} \
     ANIMEMO_ARTIFACT_COMMIT=${ANIMEMO_COMMIT} \
@@ -19,20 +20,25 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ANIMEMO_COMMIT=${ANIMEMO_COMMIT} \
     ANIMEMO_RELEASE_CHANNEL=${ANIMEMO_CHANNEL}
 
-RUN apk upgrade --no-cache \
-    && apk add --no-cache tzdata \
-    && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
-    && echo "Asia/Shanghai" > /etc/timezone
-
 WORKDIR /app
 
-COPY backend/requirements.txt /app/requirements.txt
-RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1
-RUN python -m pip install --no-cache-dir -r /app/requirements.txt
+COPY backend/pip-bootstrap.lock /app/pip-bootstrap.lock
+COPY backend/container-requirements.lock /app/container-requirements.lock
+COPY backend/requirements.lock /app/requirements.lock
+RUN python -m pip install --no-cache-dir --no-deps --require-hashes \
+      -r /app/pip-bootstrap.lock
+RUN python -m pip install --no-cache-dir --require-hashes \
+      -r /app/requirements.lock -r /app/container-requirements.lock
+RUN zoneinfo="$(python -c 'from importlib.resources import files; print(files("tzdata.zoneinfo").joinpath("Asia", "Shanghai"))')" \
+    && test -f "$zoneinfo" \
+    && cp "$zoneinfo" /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone
 RUN python -m pip uninstall --yes pip
 
 COPY backend /app/backend
 COPY plugins /app/plugins
+COPY installer/__init__.py /app/installer/__init__.py
+COPY installer/safe_archive.py /app/installer/safe_archive.py
 RUN adduser -D -u 10001 -h /home/animemo animemo \
     && mkdir -p /app/runtime/plugins /app/logs \
     && chown -R animemo:animemo /app/runtime /app/logs /app/backend /app/plugins \

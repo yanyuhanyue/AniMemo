@@ -23,7 +23,7 @@ permissions:
 jobs:
   plan:
     name: verify-exact-rc-and-plan-stable
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -47,10 +47,10 @@ jobs:
         uses: ./.github/actions/setup-pinned-gh-cli
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
           cache: pip
-          cache-dependency-path: release/requirements.txt
-      - run: python -m pip install -r release/requirements.txt
+          cache-dependency-path: release/requirements.lock
+      - run: python -m pip install --require-hashes -r release/requirements.lock
       - name: Download exact RC release contract
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,7 +67,7 @@ jobs:
             --pattern installer-materials.tar --pattern checksums.txt \
             --pattern "$RC_PORTABLE_ASSET" --dir rc-assets
           (cd rc-assets && sha256sum --check checksums.txt)
-          python -m release.cli validate-manifest --manifest rc-assets/release-manifest.json --updater-version 1.0.0
+          python -m release.cli validate-manifest --manifest rc-assets/release-manifest.json
           python -m release.cli validate-deployment-contract \
             --contract rc-assets/deployment-contract.json \
             --installer-materials rc-assets/installer-materials.tar
@@ -177,7 +177,7 @@ jobs:
             --rc-manifest rc-assets/release-manifest.json --tags-file "$RUNNER_TEMP/tags.txt" \
             --output promotion-output/release-manifest.json
           python -m release.cli validate-manifest \
-            --manifest promotion-output/release-manifest.json --updater-version 1.0.0
+            --manifest promotion-output/release-manifest.json
           python -m release.cli validate-deployment-contract \
             --contract promotion-output/deployment-contract.json \
             --installer-materials promotion-output/installer-materials.tar
@@ -267,7 +267,7 @@ jobs:
     name: read-only-stable-promotion-dry-run
     if: ${{ inputs.dry_run }}
     needs: plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -281,19 +281,19 @@ jobs:
           path: promotion-output
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r release/requirements.txt
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r release/requirements.lock
       - name: Revalidate read-only promotion output
         shell: bash
         run: |
-          python -m release.cli validate-manifest --manifest promotion-output/release-manifest.json --updater-version 1.0.0
+          python -m release.cli validate-manifest --manifest promotion-output/release-manifest.json
           (cd promotion-output && sha256sum --check checksums.txt)
 
   publish:
     name: promote-existing-rc-artifacts
     if: ${{ !inputs.dry_run }}
     needs: plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: write
@@ -313,10 +313,10 @@ jobs:
           path: promotion-output
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
           cache: pip
-          cache-dependency-path: release/requirements.txt
-      - run: python -m pip install -r release/requirements.txt
+          cache-dependency-path: release/requirements.lock
+      - run: python -m pip install --require-hashes -r release/requirements.lock
       - name: Revalidate immutable output and publication authority
         env:
           GH_TOKEN: ${{ github.token }}
@@ -329,7 +329,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m release.cli validate-manifest \
-            --manifest promotion-output/release-manifest.json --updater-version 1.0.0
+            --manifest promotion-output/release-manifest.json
           (cd promotion-output && sha256sum --check checksums.txt)
           test "$(jq -r '.release.version' promotion-output/release-manifest.json)" = "$STABLE_TAG"
           test "$(jq -r '.release.commit' promotion-output/release-manifest.json)" = "$RC_COMMIT"

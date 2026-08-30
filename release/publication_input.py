@@ -112,6 +112,9 @@ def _build_plan(
         "verified_candidate_digest": verified_digest,
         "candidate_acceptance_receipt_digest": aggregate_receipt_digest(receipt),
         "release_manifest_digest": candidate["release_manifest_sha256"],
+        "producer_toolchain_receipt_digest": candidate[
+            "producer_toolchain_receipt_sha256"
+        ],
         "candidate_runtime_inventory_digest": sha256_bytes(
             canonical_json_bytes(inventory)
         ),
@@ -120,6 +123,9 @@ def _build_plan(
             "verified_candidate": "verified-candidate.json",
             "candidate_acceptance_receipt": "candidate-acceptance-receipt.json",
             "release_manifest": "release-manifest.json",
+            "producer_toolchain_receipt": (
+                "release-producer-toolchain-receipt.json"
+            ),
             "checksums": "checksums.txt",
             "deployment_contract": "deployment-contract.json",
             "installer_materials": "installer-materials.tar",

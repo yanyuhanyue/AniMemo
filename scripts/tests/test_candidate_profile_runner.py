@@ -251,6 +251,26 @@ def _write_test_wheelhouse(root: Path) -> None:
 
 
 class CandidateProfileRunnerTests(unittest.TestCase):
+    def test_candidate_runtime_rejects_nfc_collision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            installer_root = Path(temporary)
+            wheelhouse = installer_root / "wheelhouse"
+            wheelhouse.mkdir()
+            with zipfile.ZipFile(
+                wheelhouse / "first-1-py3-none-any.whl", "w"
+            ) as archive:
+                archive.writestr("package/caf\u00e9.py", b"first")
+            with zipfile.ZipFile(
+                wheelhouse / "second-1-py3-none-any.whl", "w"
+            ) as archive:
+                archive.writestr("package/cafe\u0301.py", b"second")
+
+            with self.assertRaisesRegex(
+                runner.ProfileRunnerError,
+                "CANDIDATE_PROFILE_RUNTIME_INVALID",
+            ), runner._verified_wheel_runtime(installer_root):
+                self.fail("unsafe runtime was exposed")
+
     def test_installer_command_is_fixed_argv_without_release_discovery(self):
         argv = runner.installer_argv(
             verified_candidate_digest=DIGEST,

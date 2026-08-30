@@ -62,7 +62,7 @@ env:
 jobs:
   preflight:
     name: release-preflight
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       target_version: ${{ steps.version.outputs.target_version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
@@ -158,8 +158,8 @@ jobs:
           printf 'Immutable Releases enabled=true enforced_by_owner=%s\n' "$enforced_by_owner"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r release/requirements.txt
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r release/requirements.lock
       - name: Prove exact clean candidate identity
         env:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.candidate_sha }}
@@ -244,7 +244,7 @@ jobs:
     name: platform-qualification-linux-amd64
     if: ${{ inputs.operation == 'qualify' }}
     needs: [preflight, full-ci, full-release-gate]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -264,7 +264,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
       - name: Prove the exact hosted qualification candidate
         shell: bash
         run: |
@@ -288,7 +288,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install -r release/requirements.txt -r durability/requirements.txt -r backend/requirements.txt
+          python -m pip install --require-hashes -r release/requirements.lock -r durability/requirements.lock -r backend/requirements.lock
           sudo apt-get update
           sudo apt-get install --yes postgresql-client-16
           test "$(pg_dump --version | sed -E 's/.* ([0-9]+).*/\1/')" = "16"
@@ -434,7 +434,7 @@ jobs:
     name: release-authority
     if: ${{ always() }}
     needs: [preflight, full-ci, full-release-gate, performance, platform-qualification]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: read
@@ -454,8 +454,8 @@ jobs:
         uses: ./.github/actions/setup-pinned-gh-cli
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r release/requirements.txt
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r release/requirements.lock
       - name: Enforce Phase A Release Producer authority
         if: ${{ inputs.operation == 'qualify' }}
         env:
@@ -731,7 +731,7 @@ jobs:
     name: metadata-freshness-authority
     if: ${{ !cancelled() && inputs.operation == 'publish' && needs.preflight.result == 'success' && needs.release-authority.result == 'success' }}
     needs: [preflight, release-authority]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: read
@@ -748,8 +748,8 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r release/requirements.txt
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r release/requirements.lock
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: validated-release-input-${{ github.run_id }}
@@ -858,7 +858,7 @@ jobs:
     name: read-only-release-dry-run
     if: ${{ inputs.operation == 'qualify' }}
     needs: [preflight, release-authority, platform-qualification]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pull-requests: read
@@ -884,14 +884,34 @@ jobs:
         run: |
           set -euo pipefail
           python -m release.registry_transport pull-all --projection github-env >> "$GITHUB_ENV"
+      - id: buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.36.0
+          driver-opts: |
+            image=moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
+          cache-binary: false
+      - name: Build the digest-pinned release byte producer
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_date_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
+          [[ "$source_date_epoch" =~ ^[1-9][0-9]*$ ]]
+          docker buildx build --load --provenance=false --platform linux/amd64 \
+            --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
+            --file deploy/release-producer.Dockerfile \
+            --tag "animemo-release-producer:$GITHUB_SHA" .
+          producer_image_id="$(docker image inspect --format '{{.Id}}' "animemo-release-producer:$GITHUB_SHA")"
+          [[ "$producer_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "ANIMEMO_RELEASE_PRODUCER_IMAGE_ID=$producer_image_id" >> "$GITHUB_ENV"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.26.6'
           cache: false
-      - run: python -m pip install -r release/requirements.txt
+      - run: python -m pip install --require-hashes -r release/requirements.lock
       - name: Freeze deterministic PR metadata and render qualified Release Notes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -902,7 +922,9 @@ jobs:
           UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}
         shell: bash
         run: |
-          set -euo pipefail
+          bash scripts/run-in-release-producer.sh \
+            GH_TOKEN CANDIDATE_SHA RELEASE_TAG TARGET_VERSION PREVIOUS_STABLE \
+            UPGRADE_BASE_SHA GITHUB_REPOSITORY -- bash -seu <<'ANIMEMO_PRODUCER'
           release_notes_base="$UPGRADE_BASE_SHA"
           if [[ -n "$PREVIOUS_STABLE" ]]; then
             release_notes_base="$(git rev-parse "$PREVIOUS_STABLE^{commit}")"
@@ -921,35 +943,90 @@ jobs:
             --output-input release-output/release-notes-input.json \
             --output-json release-output/release-notes.json \
             --output-markdown release-output/release-notes.md
+          ANIMEMO_PRODUCER
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: platform-qualification-${{ github.run_id }}
           path: platform-qualification-input
       - name: Bind the hosted platform qualification into Installer materials
+        env:
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
         shell: bash
         run: |
-          set -euo pipefail
+          bash scripts/run-in-release-producer.sh \
+            CANDIDATE_SHA GITHUB_RUN_ID GITHUB_RUN_ATTEMPT -- bash -seu <<'ANIMEMO_PRODUCER'
           python scripts/platform_qualification.py verify \
             --input platform-qualification-input/platform-qualification.json \
-            --candidate-sha "${{ needs.preflight.outputs.candidate_sha }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --workflow-path .github/workflows/release.yml
           install -m 0644 \
             platform-qualification-input/platform-qualification.json \
             release/platform-qualification.json
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-        with:
-          cache-binary: false
+          ANIMEMO_PRODUCER
+      - name: Bind the exact byte-producing toolchain
+        env:
+          BUILDX_NODES: ${{ steps.buildx.outputs.nodes }}
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker buildx version | awk '{print $2}')" = "v0.36.0"
+          test "$(jq -er 'length == 1 and .[0].buildkit == "v0.32.0"' <<<"$BUILDX_NODES")" = "true"
+          test -n "${ImageOS:-}" && test -n "${ImageVersion:-}"
+          bash scripts/run-in-release-producer.sh \
+            BUILDX_NODES CANDIDATE_SHA RUNNER_OS RUNNER_ARCH ImageOS ImageVersion \
+            -- bash -seu <<'ANIMEMO_PRODUCER'
+          test "$(python -c 'import platform; print(platform.python_version())')" = "3.12.10"
+          test "$(go version | awk '{print $3}')" = "go1.26.6"
+          test "$(gh --version | awk 'NR == 1 {print $3}')" = "2.97.0"
+          test "$(crane version)" = "0.21.9"
+          test "$(jq --version)" = "jq-1.8.1"
+          test "$(jq -er '.githubHostedRunner.label' release/producer-toolchain.lock.json)" = "ubuntu-24.04"
+          test "$(jq -er '.githubHostedRunner.observationOnly' release/producer-toolchain.lock.json)" = "true"
+          test "$(jq -er '.byteAuthority.python.hostedRuntimeVersion' release/producer-toolchain.lock.json)" = "3.12.10"
+          test "$(jq -er '.byteAuthority.go.version' release/producer-toolchain.lock.json)" = "1.26.6"
+          test "$(jq -er '.byteAuthority.buildx.version' release/producer-toolchain.lock.json)" = "v0.36.0"
+          test "$(jq -er '.byteAuthority.buildkit.version' release/producer-toolchain.lock.json)" = "v0.32.0"
+          lock_sha256="$(sha256sum release/producer-toolchain.lock.json | awk '{print $1}')"
+          dockerfile_sha256="$(sha256sum deploy/release-producer.Dockerfile | awk '{print $1}')"
+          jq -n \
+            --arg schema_version "animemo.release-producer-toolchain-receipt.v1" \
+            --arg candidate_sha "$CANDIDATE_SHA" \
+            --arg runner_label "ubuntu-24.04" \
+            --arg runner_os "$RUNNER_OS" \
+            --arg runner_arch "$RUNNER_ARCH" \
+            --arg image_os "$ImageOS" \
+            --arg image_version "$ImageVersion" \
+            --arg python_version "$(python -c 'import platform; print(platform.python_version())')" \
+            --arg go_version "$(go version | awk '{print $3}')" \
+            --arg buildx_version "$(jq -er '.byteAuthority.buildx.version' release/producer-toolchain.lock.json)" \
+            --arg buildkit_version "$(jq -er '.[0].buildkit' <<<"$BUILDX_NODES")" \
+            --arg buildkit_image "moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2" \
+            --arg backend_image "python:3.12-alpine@sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31" \
+            --arg node_image "node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43" \
+            --arg npm_version "12.0.2" \
+            --arg npm_integrity "sha512-uIXokLlBj6FpNUTQX1PmT5pz7BlIN9QlixX+zdaSNHsd0qUXsbDLr50xzY6Sw7cJVr0uzHKDOle0swmPW/p5Qw==" \
+            --arg producer_image_id "$ANIMEMO_RELEASE_PRODUCER_IMAGE_ID" \
+            --arg producer_dockerfile_sha256 "sha256:$dockerfile_sha256" \
+            --arg lock_sha256 "sha256:$lock_sha256" \
+            '{schemaVersion:$schema_version,candidateSha:$candidate_sha,runner:{label:$runner_label,os:$runner_os,arch:$runner_arch,imageOS:$image_os,imageVersion:$image_version,observationOnly:true},byteAuthority:{releaseProducer:{imageId:$producer_image_id,dockerfileSha256:$producer_dockerfile_sha256},python:$python_version,go:$go_version,buildx:$buildx_version,buildkit:$buildkit_version,buildkitImage:$buildkit_image,backendImage:$backend_image,nodeImage:$node_image,npm:{version:$npm_version,integrity:$npm_integrity}},toolchainLockSha256:$lock_sha256}' \
+            > "$RUNNER_TEMP/release-producer-toolchain-receipt.json"
+          install -d -m 0700 release-output
+          install -m 0600 "$RUNNER_TEMP/release-producer-toolchain-receipt.json" \
+            release-output/release-producer-toolchain-receipt.json
+          ANIMEMO_PRODUCER
       - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
         with:
           version: v0.21.9
       - name: Prepare closed Candidate OCI roots
         shell: bash
         run: |
-          set -euo pipefail
+          bash scripts/run-in-release-producer.sh CRANE_REQUIRED_VERSION -- bash -seu <<'ANIMEMO_PRODUCER'
           test "$(crane version)" = "$CRANE_REQUIRED_VERSION"
           install -d -m 0700 "$RUNNER_TEMP/candidate-runtime/oci"
+          ANIMEMO_PRODUCER
       - name: Build API OCI artifact without publishing
         id: api
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -1001,7 +1078,9 @@ jobs:
           WEB_DIGEST: ${{ steps.web.outputs.digest }}
         shell: bash
         run: |
-          set -euo pipefail
+          bash scripts/run-in-release-producer.sh \
+            API_DIGEST WEB_DIGEST API_REPOSITORY WEB_REPOSITORY \
+            POSTGRES_IMAGE REDIS_IMAGE -- bash -seu <<'ANIMEMO_PRODUCER'
           root="$RUNNER_TEMP/candidate-runtime"
           materialize_dependency() {
             local role="$1"
@@ -1032,15 +1111,20 @@ jobs:
             --repository "${REDIS_IMAGE%@*}" \
             --expected-digest "${REDIS_IMAGE#*@}"
           cp -a "$root" release-output/candidate-runtime
+          ANIMEMO_PRODUCER
       - name: Generate and validate manifest, checksums, and unsigned provenance input plan
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           CREATED_AT: ${{ needs.preflight.outputs.created_at }}
           API_DIGEST: ${{ steps.api.outputs.digest }}
           WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+          CHANNEL: ${{ inputs.channel }}
         shell: bash
         run: |
-          set -euo pipefail
+          bash scripts/run-in-release-producer.sh \
+            RELEASE_TAG CREATED_AT API_DIGEST WEB_DIGEST CANDIDATE_SHA CHANNEL \
+            -- bash -seu <<'ANIMEMO_PRODUCER'
           formal_pretrust_work="release-output/.formal-pretrust-work"
           rm -rf "$formal_pretrust_work"
           install -d -m 0700 "$formal_pretrust_work"
@@ -1067,8 +1151,9 @@ jobs:
             release-output/initial-trust-bootstrap.json
           rm -rf "$RUNNER_TEMP/release-wheelhouse"
           python -m pip download --disable-pip-version-check --only-binary=:all: \
+            --require-hashes \
             --dest "$RUNNER_TEMP/release-wheelhouse" \
-            -r release/requirements.txt -r durability/requirements.txt
+            -r release/requirements.lock -r durability/requirements.lock
           python -m release.cli build-installer-materials \
             --root . --wheelhouse "$RUNNER_TEMP/release-wheelhouse" \
             --initial-trust-kit "$formal_pretrust_work/initial-trust-kit" \
@@ -1096,9 +1181,10 @@ jobs:
             LANG=C.UTF-8 LC_ALL=C.UTF-8 \
             "$clean_runtime/bin/python" -P -B -m pip install \
             --disable-pip-version-check --no-cache-dir --no-index --only-binary=:all: \
+            --require-hashes \
             --find-links "$clean_materials/wheelhouse" \
-            -r "$clean_materials/release/requirements.txt" \
-            -r "$clean_materials/durability/requirements.txt"
+            -r "$clean_materials/release/requirements.lock" \
+            -r "$clean_materials/durability/requirements.lock"
           /usr/bin/env -i -C "$clean_materials" \
             HOME="$RUNNER_TEMP" PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             LANG=C.UTF-8 LC_ALL=C.UTF-8 \
@@ -1111,14 +1197,14 @@ jobs:
           python -m release.cli build-prepublication-materials \
             --installer-materials release-output/installer-materials.tar \
             --deployment-contract release-output/deployment-contract.json \
-            --candidate-sha "${{ needs.preflight.outputs.candidate_sha }}" \
+            --candidate-sha "$CANDIDATE_SHA" \
             --candidate-tree-sha "$candidate_tree" \
             --output release-output/prepublication-materials.json
           python -m release.cli verify-prepublication-materials \
             --prepublication release-output/prepublication-materials.json \
             --installer-materials release-output/installer-materials.tar \
             --deployment-contract release-output/deployment-contract.json \
-            --expected-candidate-sha "${{ needs.preflight.outputs.candidate_sha }}" \
+            --expected-candidate-sha "$CANDIDATE_SHA" \
             --expected-candidate-tree-sha "$candidate_tree"
           test "$(jq -er '.formalWindowsPretrust.kitIdentity' \
             release-output/prepublication-materials.json)" = \
@@ -1129,8 +1215,8 @@ jobs:
             "$(jq -er '.sourceProfileIdentity' \
               "$RUNNER_TEMP/formal-windows-pretrust-binding.json")"
           python -m release.cli generate-manifest \
-            --version "$RELEASE_TAG" --channel "${{ inputs.channel }}" \
-            --commit "${{ needs.preflight.outputs.candidate_sha }}" --created-at "$CREATED_AT" \
+            --version "$RELEASE_TAG" --channel "$CHANNEL" \
+            --commit "$CANDIDATE_SHA" --created-at "$CREATED_AT" \
             --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
             --compatibility-file release/compatibility.json \
             --deployment-contract-file release-output/deployment-contract.json \
@@ -1138,22 +1224,22 @@ jobs:
             --installer-materials release-output/installer-materials.tar \
             --output release-output/release-manifest.json
           python -m release.cli validate-manifest \
-            --manifest release-output/release-manifest.json --updater-version 1.0.0
+            --manifest release-output/release-manifest.json
           python -m release.cli write-checksums \
             --output release-output/checksums.txt \
             release-output/release-manifest.json release-output/deployment-contract.json \
             release-output/installer-materials.tar
           (cd release-output && sha256sum --check checksums.txt)
           python -m release.cli generate-provenance-plan \
-            --version "$RELEASE_TAG" --commit "${{ needs.preflight.outputs.candidate_sha }}" --created-at "$CREATED_AT" \
+            --version "$RELEASE_TAG" --commit "$CANDIDATE_SHA" --created-at "$CREATED_AT" \
             --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
             --output release-output/provenance-plan.unsigned.json
-          if [[ "${{ inputs.channel }}" = "rc" ]]; then
+          if [[ "$CHANNEL" = "rc" ]]; then
             git tag --list 'v*' --sort=version:refname > "$RUNNER_TEMP/tags.txt"
             python -m release.cli promote-manifest \
               --rc-manifest release-output/release-manifest.json \
               --tags-file "$RUNNER_TEMP/tags.txt" --created-at "$CREATED_AT" \
-              --provenance-source-commit "${{ needs.preflight.outputs.candidate_sha }}" \
+              --provenance-source-commit "$CANDIDATE_SHA" \
               --output release-output/stable-manifest.dry-run.json
             test "$(jq -r '.release.commit' release-output/release-manifest.json)" = \
               "$(jq -r '.release.commit' release-output/stable-manifest.dry-run.json)" # RC_COMMIT == STABLE_COMMIT
@@ -1166,6 +1252,7 @@ jobs:
             test "$(jq -cS '.artifacts.deploymentContract' release-output/release-manifest.json)" = \
               "$(jq -cS '.artifacts.deploymentContract' release-output/stable-manifest.dry-run.json)"
           fi
+          ANIMEMO_PRODUCER
       - id: dry_run_artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -1173,12 +1260,19 @@ jobs:
           path: release-output/
           if-no-files-found: error
           retention-days: 7
+      - name: Upload exact producer toolchain receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-producer-toolchain-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-producer-toolchain-receipt.json
+          if-no-files-found: error
+          retention-days: 7
 
   qualification-evidence:
     name: phase-a-qualification-evidence
     if: ${{ always() && inputs.operation == 'qualify' }}
     needs: [preflight, full-ci, full-release-gate, performance, platform-qualification, release-authority, dry-run]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -1187,12 +1281,32 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
           fetch-depth: 0
+      - id: qualification_buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.36.0
+          driver-opts: |
+            image=moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
+          cache-binary: false
+      - name: Rebuild the exact qualification byte producer
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_date_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
+          [[ "$source_date_epoch" =~ ^[1-9][0-9]*$ ]]
+          docker buildx build --load --provenance=false --platform linux/amd64 \
+            --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
+            --file deploy/release-producer.Dockerfile \
+            --tag "animemo-qualification-producer:$GITHUB_SHA" .
+          producer_image_id="$(docker image inspect --format '{{.Id}}' "animemo-qualification-producer:$GITHUB_SHA")"
+          [[ "$producer_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "ANIMEMO_RELEASE_PRODUCER_IMAGE_ID=$producer_image_id" >> "$GITHUB_ENV"
       - name: Gate exact GitHub CLI security baseline
         uses: ./.github/actions/setup-pinned-gh-cli
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r release/requirements.txt
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r release/requirements.lock
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: platform-qualification-${{ github.run_id }}
@@ -1225,7 +1339,13 @@ jobs:
           DRY_RUN_ARTIFACT_DIGEST: ${{ needs.dry-run.outputs.artifact_digest }}
         shell: bash
         run: |
-          set -euo pipefail
+          bash scripts/run-in-release-producer.sh \
+            OPERATION CHANNEL NEEDS_JSON WORKFLOW_REF WORKFLOW_SHA RUN_ID \
+            RUN_ATTEMPT EVENT_NAME CANDIDATE_SHA UPGRADE_BASE_SHA TARGET_VERSION \
+            RELEASE_TAG CREATED_AT QUALIFICATION_ARTIFACT_PATH \
+            RELEASE_NOTES_IDENTITY_FILE RELEASE_NOTES_MARKDOWN_FILE \
+            PLATFORM_ARTIFACT_ID PLATFORM_ARTIFACT_DIGEST DRY_RUN_ARTIFACT_ID \
+            DRY_RUN_ARTIFACT_DIGEST -- bash -seu <<'ANIMEMO_PRODUCER'
           export RELEASE_NOTES_IDENTITY="$(jq -r '.identity // empty' "$RELEASE_NOTES_IDENTITY_FILE")"
           export RELEASE_NOTES_MARKDOWN_SHA256="sha256:$(sha256sum "$RELEASE_NOTES_MARKDOWN_FILE" | awk '{print $1}')"
           [[ "$RELEASE_NOTES_IDENTITY" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -1236,15 +1356,18 @@ jobs:
             --deployment-contract release-dry-run-input/deployment-contract.json \
             --expected-candidate-sha "$CANDIDATE_SHA" \
             --expected-candidate-tree-sha "$candidate_tree"
+          python -c 'from pathlib import Path; from release.producer_toolchain import validate_producer_toolchain_receipt; validate_producer_toolchain_receipt(Path("release-dry-run-input/release-producer-toolchain-receipt.json"), expected_candidate_sha="'"$CANDIDATE_SHA"'")'
+          test "$(jq -er '.byteAuthority.releaseProducer.imageId' release-dry-run-input/release-producer-toolchain-receipt.json)" = \
+            "$ANIMEMO_RELEASE_PRODUCER_IMAGE_ID"
           python -m scripts.release_authority
           mkdir -p release-qualification
-          install -m 0600 "$RUNNER_TEMP/release-qualification-${GITHUB_RUN_ID}.json" \
-            "release-qualification/release-qualification-${GITHUB_RUN_ID}.json"
+          install -m 0600 "$QUALIFICATION_ARTIFACT_PATH" \
+            "release-qualification/release-qualification-${RUN_ID}.json"
           python scripts/platform_qualification.py verify \
             --input platform-qualification-input/platform-qualification.json \
             --candidate-sha "$CANDIDATE_SHA" \
-            --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
             --workflow-path .github/workflows/release.yml
           install -m 0600 platform-qualification-input/platform-qualification.json \
             release-qualification/platform-qualification.json
@@ -1262,6 +1385,9 @@ jobs:
             release-qualification/release-manifest.json
           install -m 0600 release-dry-run-input/checksums.txt \
             release-qualification/checksums.txt
+          install -m 0600 \
+            release-dry-run-input/release-producer-toolchain-receipt.json \
+            release-qualification/release-producer-toolchain-receipt.json
           cp -a release-dry-run-input/candidate-runtime \
             release-qualification/candidate-runtime
           [[ "$PLATFORM_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
@@ -1270,8 +1396,8 @@ jobs:
           [[ "$DRY_RUN_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           python -m release.cli build-prepublication-candidate-input \
             --root release-qualification \
-            --qualification-run-id "$GITHUB_RUN_ID" \
-            --qualification-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --qualification-run-id "$RUN_ID" \
+            --qualification-run-attempt "$RUN_ATTEMPT" \
             --source-sha "$CANDIDATE_SHA" --source-tree "$candidate_tree" \
             --platform-artifact-id "$PLATFORM_ARTIFACT_ID" \
             --platform-artifact-digest "$PLATFORM_ARTIFACT_DIGEST" \
@@ -1279,8 +1405,9 @@ jobs:
             --dry-run-artifact-digest "$DRY_RUN_ARTIFACT_DIGEST" \
             --generated-at "$CREATED_AT" \
             --output release-qualification/candidate-input.json
-          test "$(find release-qualification -maxdepth 1 -type f | wc -l)" = "10"
+          test "$(find release-qualification -maxdepth 1 -type f | wc -l)" = "11"
           test "$(find release-qualification/candidate-runtime -type f | wc -l)" -gt "8"
+          ANIMEMO_PRODUCER
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-qualification-${{ github.run_id }}
@@ -1292,7 +1419,7 @@ jobs:
     name: publish-immutable-prerelease
     if: ${{ !cancelled() && inputs.operation == 'publish' && needs.preflight.result == 'success' && needs.release-authority.result == 'success' && needs.metadata-freshness-authority.result == 'success' }}
     needs: [preflight, release-authority, metadata-freshness-authority]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: write
@@ -1309,8 +1436,8 @@ jobs:
         uses: ./.github/actions/setup-pinned-gh-cli
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r release/requirements.txt
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r release/requirements.lock
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: validated-release-input-${{ github.run_id }}
@@ -1584,7 +1711,7 @@ jobs:
             --contract release-output/deployment-contract.json \
             --installer-materials release-output/installer-materials.tar
           python -m release.cli validate-manifest \
-            --manifest release-output/release-manifest.json --updater-version 1.0.0
+            --manifest release-output/release-manifest.json
           test "$(jq -er '.release.version' release-output/release-manifest.json)" = \
             "$RELEASE_TAG"
           test "$(jq -er '.release.commit' release-output/release-manifest.json)" = \

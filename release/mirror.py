@@ -22,6 +22,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from updater import __version__ as updater_version
+
 from .acquisition import release_attestation_sidecar_name
 from .notes import CANONICAL_RELEASE_ASSETS
 from .portable import (
@@ -1611,7 +1613,7 @@ def _verify_github_release_authority(
         directory / "deployment-contract.json", label="Deployment Contract"
     )
     try:
-        validate_manifest(manifest, updater_version="1.0.0")
+        validate_manifest(manifest, updater_version=updater_version)
         validate_deployment_contract(
             deployment,
             installer_materials=directory / "installer-materials.tar",

@@ -53,6 +53,7 @@ from release.contract import (
     REDIS_REPOSITORY,
 )
 from release.materials import MaterialContractError, extract_qualification_artifact
+from release.producer_toolchain import DOCKERFILE_PATH, LOCK_PATH
 from scripts.release_qualification import build_qualification_evidence
 from updater.oci import (
     OCI_CONFIG_MEDIA_TYPE,
@@ -70,6 +71,39 @@ RUN_ID = 1234
 
 def _digest(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def producer_toolchain_receipt_bytes() -> bytes:
+    lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+    byte_lock = lock["byteAuthority"]
+    receipt = {
+        "schemaVersion": "animemo.release-producer-toolchain-receipt.v1",
+        "candidateSha": SHA,
+        "runner": {
+            "label": "ubuntu-24.04",
+            "os": "Linux",
+            "arch": "X64",
+            "imageOS": "ubuntu24",
+            "imageVersion": "20260820.1.0",
+            "observationOnly": True,
+        },
+        "byteAuthority": {
+            "releaseProducer": {
+                "imageId": "sha256:" + "b" * 64,
+                "dockerfileSha256": _digest(DOCKERFILE_PATH.read_bytes()),
+            },
+            "python": byte_lock["python"]["hostedRuntimeVersion"],
+            "go": "go" + byte_lock["go"]["version"],
+            "buildx": byte_lock["buildx"]["version"],
+            "buildkit": byte_lock["buildkit"]["version"],
+            "buildkitImage": byte_lock["buildkit"]["image"],
+            "backendImage": byte_lock["python"]["backendImage"],
+            "nodeImage": byte_lock["node"]["image"],
+            "npm": byte_lock["npm"],
+        },
+        "toolchainLockSha256": _digest(LOCK_PATH.read_bytes()),
+    }
+    return canonical_json_bytes(receipt)
 
 
 def _blob(root: Path, value: bytes) -> tuple[str, int]:
@@ -184,6 +218,9 @@ def candidate_input() -> dict[str, object]:
         "deployment_contract_sha256": DIGEST,
         "installer_materials_sha256": DIGEST,
         "checksums_sha256": DIGEST,
+        "producer_toolchain_receipt_sha256": _digest(
+            producer_toolchain_receipt_bytes()
+        ),
         "api_oci_digest": DIGEST,
         "web_oci_digest": DIGEST,
         "postgres_oci_digest": DIGEST,
@@ -223,7 +260,7 @@ def verified_candidate_identity() -> dict[str, object]:
         containing_artifact_id=99,
         containing_artifact_api_digest=DIGEST,
         archive_digest=DIGEST,
-        archive_file_count=22,
+        archive_file_count=23,
         runtime=runtime,
     )
 
@@ -252,7 +289,7 @@ def verification_execution_receipt() -> dict[str, object]:
             "oci_image_count": 4,
             "oci_layer_count": 4,
             "runtime_file_count": 12,
-            "archive_file_count": 22,
+            "archive_file_count": 23,
         },
         "environment_classification": "SANITIZED_LOCAL_VERIFIER",
         "result": "PASS",
@@ -606,7 +643,7 @@ identity = _build_verified_candidate_identity(
     containing_artifact_id=99,
     containing_artifact_api_digest=DIGEST,
     archive_digest=DIGEST,
-    archive_file_count=22,
+    archive_file_count=23,
     runtime=runtime,
 )
 sys.stdout.buffer.write(canonical_json_bytes(identity))
@@ -1014,6 +1051,9 @@ class CandidateArchiveTests(unittest.TestCase):
             "installer-materials.tar": b"x",
             "platform-qualification.json": b"x",
             "prepublication-materials.json": b"x",
+            "release-producer-toolchain-receipt.json": (
+                producer_toolchain_receipt_bytes()
+            ),
             "release-manifest.json": b"x",
             "release-notes.json": b"x",
             "release-notes.md": b"x",
@@ -1035,7 +1075,7 @@ class CandidateArchiveTests(unittest.TestCase):
         destination = self.root / "out"
         candidate, _, count = _extract_candidate_archive(self._archive(), destination)
         self.assertEqual(candidate["qualification_run_id"], RUN_ID)
-        self.assertEqual(count, 22)
+        self.assertEqual(count, 23)
 
     def test_zip_slip_absolute_drive_link_duplicate_and_case_collision_fail(self):
         attacks = (
@@ -1238,6 +1278,9 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 "installer-materials.tar": b"x",
                 "platform-qualification.json": b"{}\n",
                 "prepublication-materials.json": b"{}\n",
+                "release-producer-toolchain-receipt.json": (
+                    producer_toolchain_receipt_bytes()
+                ),
                 "release-manifest.json": b"{}\n",
                 "release-notes.json": b"{}\n",
                 "release-notes.md": b"x",

@@ -102,6 +102,14 @@ class PublishCandidateInputTests(unittest.TestCase):
             loaded.candidate_input["release_manifest_sha256"],
         )
         self.assertEqual(
+            plan["producer_toolchain_receipt_digest"],
+            loaded.candidate_input["producer_toolchain_receipt_sha256"],
+        )
+        self.assertEqual(
+            plan["paths"]["producer_toolchain_receipt"],
+            "release-producer-toolchain-receipt.json",
+        )
+        self.assertEqual(
             plan["candidate_runtime_inventory_digest"],
             sha256_bytes(
                 canonical_json_bytes(

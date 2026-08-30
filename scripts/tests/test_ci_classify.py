@@ -456,13 +456,26 @@ class CiClassificationTests(unittest.TestCase):
     def test_dependency_inputs_select_owning_components(self):
         cases = {
             "package-lock.json": ("HIGH", ("frontend", "plugin")),
+            "backend/pip-bootstrap.lock": ("HIGH", ("backend", "database")),
+            "backend/container-requirements.lock": (
+                "HIGH",
+                ("backend", "database"),
+            ),
+            "backend/requirements.lock": ("HIGH", ("backend", "database")),
             "backend/requirements.txt": ("HIGH", ("backend", "database")),
+            "bridges/astrbot_plugin_animemo_bridge/requirements.lock": (
+                "HIGH",
+                ("bridge", "integration"),
+            ),
             "bridges/astrbot_plugin_animemo_bridge/requirements.txt": (
                 "HIGH",
                 ("bridge", "integration"),
             ),
+            "durability/requirements.lock": ("CRITICAL", ("recovery",)),
             "durability/requirements.txt": ("CRITICAL", ("recovery",)),
+            "release/requirements.lock": ("CRITICAL", ("release",)),
             "release/requirements.txt": ("CRITICAL", ("release",)),
+            "scripts/requirements-tools.lock": ("HIGH", ("ci", "tooling")),
         }
         for path, (expected_risk, expected_signals) in cases.items():
             with self.subTest(path=path):
