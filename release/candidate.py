@@ -73,7 +73,7 @@ VERIFICATION_EXECUTION_RECEIPT_SCHEMA = (
 )
 PROFILE_RECEIPT_SCHEMA = "animemo.prepublication-candidate-profile-receipt/v1"
 AGGREGATE_RECEIPT_SCHEMA = (
-    "animemo.prepublication-candidate-acceptance-receipt/v1"
+    "animemo.prepublication-candidate-acceptance-receipt/v2"
 )
 VERIFIER_CONTRACT_VERSION = "2"
 VERIFIED_CANDIDATE_ROOT = Path("/var/lib/animemo/prepublication-candidates/v2")
@@ -1722,8 +1722,15 @@ def validate_aggregate_receipt(value: object) -> dict[str, Any]:
         code="CANDIDATE_ACCEPTANCE_RECEIPT_INVALID",
     )
     _parse_time(receipt["completed_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")
-    if receipt["rc14_prestate"] != receipt["rc14_poststate"]:
+    if receipt["candidate_prestate"] != receipt["candidate_poststate"]:
         _reject("CANDIDATE_PUBLICATION_STATE_CHANGED")
+    if (
+        receipt["r2_origin_prestate_receipt_digest"]
+        == receipt["r2_origin_poststate_receipt_digest"]
+        or receipt["r2_origin_prestate_observation_id"]
+        == receipt["r2_origin_poststate_observation_id"]
+    ):
+        _reject("CANDIDATE_R2_OBSERVATION_REUSED")
     digests = list(receipt["profile_receipts"].values())
     if len(digests) != len(set(digests)):
         _reject("CANDIDATE_PROFILE_RECEIPT_REUSE")

@@ -9,6 +9,7 @@ import tempfile
 import threading
 import traceback
 import unittest
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -133,6 +134,10 @@ class R2S3PrestateTests(unittest.TestCase):
             ),
             client=client or RecordingS3Client(),
             clock=overrides.pop("clock", fixed_clock()),
+            observation_id_factory=overrides.pop(
+                "observation_id_factory",
+                lambda: uuid.UUID("12345678-1234-4678-9234-567812345678"),
+            ),
             **overrides,
         )
 
@@ -140,6 +145,15 @@ class R2S3PrestateTests(unittest.TestCase):
         client = RecordingS3Client()
         receipt = self.verify(client)
         self.assertEqual(receipt["schema"], R2_RECEIPT_SCHEMA)
+        self.assertRegex(
+            receipt["observation_id"],
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        )
+        self.assertEqual(receipt["observation_role"], "PRESTATE")
+        self.assertEqual(
+            receipt["object_inventory_digest"],
+            sha256_bytes(canonical_json_bytes([])),
+        )
         self.assertEqual(receipt["auth_method"], R2_AUTH_METHOD)
         self.assertEqual(receipt["result"], "PROVEN_EMPTY")
         self.assertEqual(receipt["write_request_count"], 0)

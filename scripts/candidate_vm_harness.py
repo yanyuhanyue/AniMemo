@@ -2322,19 +2322,21 @@ def execute_harness_plan(
     ):
         raise CandidateHarnessError("CANDIDATE_HARNESS_PLAN_NOT_ACCEPTED")
     try:
-        r2_receipt = verify_candidate_r2_origin_from_environment(
+        r2_prestate_receipt = verify_candidate_r2_origin_from_environment(
             target_rc=plan.candidate_version,
             source_sha=plan.source_sha,
             source_tree=plan.source_tree,
             auth_method=R2_AUTH_METHOD_ARGUMENT,
+            observation_role="PRESTATE",
             environment=environment,
             client=r2_client,
         )
-        r2_receipt = validate_r2_origin_receipt(
-            r2_receipt,
+        r2_prestate_receipt = validate_r2_origin_receipt(
+            r2_prestate_receipt,
             expected_source_sha=plan.source_sha,
             expected_source_tree=plan.source_tree,
             expected_target_rc=plan.candidate_version,
+            expected_observation_role="PRESTATE",
         )
         loaded = load_verified_candidate(
             plan.verified_candidate_digest,
@@ -2344,7 +2346,7 @@ def execute_harness_plan(
         raise CandidateHarnessError(error.code) from error
     candidate_prestate = {
         **_read_expected_external_state(provider, plan.candidate_version),
-        "r2_origin": r2_receipt["result"],
+        "r2_origin": r2_prestate_receipt["result"],
     }
     receipts: dict[str, dict[str, Any]] = {}
     for item in plan.profiles:
@@ -2388,16 +2390,40 @@ def execute_harness_plan(
     final_hashes = dict(provider.inspect_original_hashes())
     if final_hashes != dict(plan.original_vm_hashes):
         raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
+    try:
+        r2_poststate_receipt = verify_candidate_r2_origin_from_environment(
+            target_rc=plan.candidate_version,
+            source_sha=plan.source_sha,
+            source_tree=plan.source_tree,
+            auth_method=R2_AUTH_METHOD_ARGUMENT,
+            observation_role="POSTSTATE",
+            environment=environment,
+            client=r2_client,
+        )
+        r2_poststate_receipt = validate_r2_origin_receipt(
+            r2_poststate_receipt,
+            expected_source_sha=plan.source_sha,
+            expected_source_tree=plan.source_tree,
+            expected_target_rc=plan.candidate_version,
+            expected_observation_role="POSTSTATE",
+        )
+    except CandidateContractError as error:
+        raise CandidateHarnessError(error.code) from error
+    if (
+        r2_prestate_receipt["observation_id"]
+        == r2_poststate_receipt["observation_id"]
+    ):
+        raise CandidateHarnessError("CANDIDATE_R2_OBSERVATION_REUSED")
     candidate_poststate = {
         **_read_expected_external_state(provider, plan.candidate_version),
-        "r2_origin": r2_receipt["result"],
+        "r2_origin": r2_poststate_receipt["result"],
     }
     if candidate_poststate != candidate_prestate:
         raise CandidateHarnessError("CANDIDATE_VERSION_STATE_DRIFT")
     completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     aggregate = {
-        "schema": "animemo.prepublication-candidate-acceptance-receipt/v1",
-        "version": 1,
+        "schema": "animemo.prepublication-candidate-acceptance-receipt/v2",
+        "version": 2,
         "candidate_input_digest": plan.candidate_input_digest,
         "verified_candidate_digest": plan.verified_candidate_digest,
         "qualification_run_id": plan.qualification_run_id,
@@ -2405,7 +2431,18 @@ def execute_harness_plan(
         "source_sha": plan.source_sha,
         "source_tree": plan.source_tree,
         "candidate_version": plan.candidate_version,
-        "r2_origin_prestate_receipt_digest": r2_origin_receipt_digest(r2_receipt),
+        "r2_origin_prestate_receipt_digest": r2_origin_receipt_digest(
+            r2_prestate_receipt
+        ),
+        "r2_origin_poststate_receipt_digest": r2_origin_receipt_digest(
+            r2_poststate_receipt
+        ),
+        "r2_origin_prestate_observation_id": r2_prestate_receipt[
+            "observation_id"
+        ],
+        "r2_origin_poststate_observation_id": r2_poststate_receipt[
+            "observation_id"
+        ],
         "profile_receipts": {
             "fresh_base": _profile_digest(receipts["FRESH_BASE"]),
             "docker_base": _profile_digest(receipts["DOCKER_BASE"]),
@@ -2414,8 +2451,8 @@ def execute_harness_plan(
             ),
         },
         "all_profiles_pass": True,
-        "rc14_prestate": candidate_prestate,
-        "rc14_poststate": candidate_poststate,
+        "candidate_prestate": candidate_prestate,
+        "candidate_poststate": candidate_poststate,
         "repository_mutation_count": 0,
         "publication_mutation_count": 0,
         "shared_host_connection_count": 0,
@@ -2438,7 +2475,8 @@ def execute_harness_plan(
         "status": "PASS",
         "aggregateReceipt": aggregate,
         "aggregateReceiptSha256": aggregate_receipt_digest(aggregate),
-        "r2OriginPrestateReceipt": r2_receipt,
+        "r2OriginPrestateReceipt": r2_prestate_receipt,
+        "r2OriginPoststateReceipt": r2_poststate_receipt,
         "profileReceipts": receipts,
     }
 

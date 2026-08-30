@@ -271,8 +271,8 @@ class MetadataFreshnessTests(unittest.TestCase):
         for name, value in files.items():
             (self.qualification / name).write_bytes(value)
         aggregate = {
-            "schema": "animemo.prepublication-candidate-acceptance-receipt/v1",
-            "version": 1,
+            "schema": "animemo.prepublication-candidate-acceptance-receipt/v2",
+            "version": 2,
             "candidate_input_digest": "sha256:" + "1" * 64,
             "verified_candidate_digest": "sha256:" + "2" * 64,
             "qualification_run_id": QUALIFICATION_RUN_ID,
@@ -281,18 +281,25 @@ class MetadataFreshnessTests(unittest.TestCase):
             "source_tree": TREE,
             "candidate_version": "v1.1.0-rc.9",
             "r2_origin_prestate_receipt_digest": "sha256:" + "6" * 64,
+            "r2_origin_poststate_receipt_digest": "sha256:" + "7" * 64,
+            "r2_origin_prestate_observation_id": (
+                "12345678-1234-4678-9234-567812345678"
+            ),
+            "r2_origin_poststate_observation_id": (
+                "87654321-4321-4765-8abc-876543210fed"
+            ),
             "profile_receipts": {
                 "fresh_base": "sha256:" + "3" * 64,
                 "docker_base": "sha256:" + "4" * 64,
                 "runtime_base_offline": "sha256:" + "5" * 64,
             },
             "all_profiles_pass": True,
-            "rc14_prestate": {
+            "candidate_prestate": {
                 "tag": "ABSENT", "github_release": "ABSENT", "ghcr": "ABSENT",
                 "public_r2": "ABSENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE",
                 "r2_origin": "PROVEN_EMPTY",
             },
-            "rc14_poststate": {
+            "candidate_poststate": {
                 "tag": "ABSENT", "github_release": "ABSENT", "ghcr": "ABSENT",
                 "public_r2": "ABSENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE",
                 "r2_origin": "PROVEN_EMPTY",

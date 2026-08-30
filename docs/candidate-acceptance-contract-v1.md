@@ -40,8 +40,8 @@ Acceptance。每个可接受 OCI layout 必须包含 index、authoritative manif
 - `animemo.verified-prepublication-candidate/v2`
 - `animemo.prepublication-candidate-verification-execution-receipt/v1`
 - `animemo.prepublication-candidate-profile-receipt/v1`
-- `animemo.prepublication-candidate-acceptance-receipt/v1`
-- `animemo.r2-origin-prestate-receipt/v2`
+- `animemo.prepublication-candidate-acceptance-receipt/v2`
+- `animemo.r2-origin-observation-receipt/v3`
 
 唯一验证入口为：
 
@@ -111,18 +111,16 @@ python scripts/candidate_vm_harness.py
 Harness 默认 `PLAN_ONLY`。只允许固定 `FRESH_BASE`、`DOCKER_BASE`、
 `RUNTIME_BASE_OFFLINE` 及其固定 VMware snapshot 名；不接受 VM path、snapshot path、
 shell、package list 或安全策略覆盖。`--execute` 还必须给出完全相同的 aggregate plan
-digest，并在任何 clone 前通过固定 Account、Bucket、RC.14 Prefix 和六个 expected keys 的
-S3 只读 empty 证明。
+digest，并在任何 clone 前通过关闭 Account、Bucket、Candidate Prefix 和 expected keys 的
+S3 只读 empty PRESTATE 证明。Account、Bucket、Prefix 与 expected keys 必须由本次
+Candidate version 的关闭计划派生，不能由旧 RC 编号恢复。
 
 其中 R2 Origin 的 canonical acceptance 入口只允许显式的 S3 Object Read only 模式：
 
-```text
-python -m release.cli verify-rc14-r2-origin-empty \
-  --auth-method s3-object-read-only \
-  --expected-source-sha <exact-sha> \
-  --expected-source-tree <exact-tree> \
-  --output <new-receipt-path>
-```
+Harness 对同一关闭计划调用 `verify_candidate_r2_origin_from_environment`：clone 前使用
+`observation_role=PRESTATE`，三个 Profile 均结束后必须再次发起新的 List/Head 调用并使用
+`observation_role=POSTSTATE`。两个 Observation 使用不同的 UUIDv4 `observation_id`，各自绑定
+完整 object inventory 及其摘要；POSTSTATE 不得复用 PRESTATE receipt、对象列表或读取结果。
 
 它使用 `ListObjectsV2` 枚举固定 Prefix，并对六个 expected keys 执行 `HeadObject`；客户端
 接口只暴露 `ListObjectsV2`、`HeadObject`、`GetObject` 三个读取方法。Account、Bucket、
@@ -141,8 +139,9 @@ Token、Authorization header、签名或 signed URL。操作员边界见
 
 每个 Profile Receipt 必须回绑 Candidate/Run/SHA/tree/version、base/snapshot/clone、平台
 与 Installer plan/receipt、四个 OCI digest、Doctor、canonical tests、网络计数和原始 VM
-前后 hashes。Aggregate Receipt 绑定已验证 R2 prestate Receipt 的摘要，并要求三份不同
-Profile digest、全部 PASS、RC.14 前后仍为空、
+前后 hashes。Aggregate Receipt 分别绑定已验证的 `candidate_prestate` 与
+`candidate_poststate` Observation Receipt 摘要，并要求二者 `observation_id` 不同、三份不同
+Profile digest、全部 PASS、执行前后 Origin 均为空、
 repository/publication/shared-host mutation 为零，并固定
 `release_authority_granted=false`、`publish_authorized=false`。
 
