@@ -3,13 +3,88 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import include, path
+from django.views.defaults import (
+    bad_request as default_bad_request,
+)
+from django.views.defaults import (
+    page_not_found as default_page_not_found,
+)
+from django.views.defaults import (
+    permission_denied as default_permission_denied,
+)
+from django.views.defaults import (
+    server_error as default_server_error,
+)
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerSplitView
-
-import config.openapi  # noqa: F401 - registers the authentication extension
 from plugin_host.runtime.dispatch import PluginDispatch
 from plugin_host.views import PluginAssetView, PluginPreviewAssetView
 
+import config.openapi  # noqa: F401 - registers the authentication extension
+
+from .api_errors import public_failure
 from .api_urls import urlpatterns as core_api_urlpatterns
+
+
+def _is_api_request(request):
+    path_info = getattr(request, "path_info", "")
+    return path_info == "/api" or path_info.startswith("/api/")
+
+
+def _api_failure_response(request, *, candidate_code, status_code):
+    failure = public_failure(
+        request=request,
+        candidate_code=candidate_code,
+        status_code=status_code,
+    )
+    response = JsonResponse(failure, status=status_code)
+    response["X-AniMemo-Correlation-ID"] = failure["correlation_id"]
+    return response
+
+
+def api_bad_request(request, exception=None):
+    if _is_api_request(request):
+        return _api_failure_response(
+            request,
+            candidate_code="invalid_request",
+            status_code=400,
+        )
+    return default_bad_request(request, exception)
+
+
+def api_permission_denied(request, exception=None):
+    if _is_api_request(request):
+        return _api_failure_response(
+            request,
+            candidate_code="permission_denied",
+            status_code=403,
+        )
+    return default_permission_denied(request, exception)
+
+
+def api_page_not_found(request, exception=None):
+    if _is_api_request(request):
+        return _api_failure_response(
+            request,
+            candidate_code="not_found",
+            status_code=404,
+        )
+    return default_page_not_found(request, exception)
+
+
+def api_server_error(request):
+    if _is_api_request(request):
+        return _api_failure_response(
+            request,
+            candidate_code="internal_error",
+            status_code=500,
+        )
+    return default_server_error(request)
+
+
+handler400 = api_bad_request
+handler403 = api_permission_denied
+handler404 = api_page_not_found
+handler500 = api_server_error
 
 
 class CSPCompatibleSwaggerView(SpectacularSwaggerSplitView):

@@ -1,15 +1,15 @@
+from accounts.models import StaffProfile, UserSecurityProfile
+from config.api_errors import public_failure
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Count
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from plugin_host.sdk import ColumnHookContext, run_hook
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
-from accounts.models import StaffProfile, UserSecurityProfile
-from plugin_host.sdk import ColumnHookContext, run_hook
 
 from .models import Column, JournalEntry, UserSettings
 from .serializers import UserSettingsSerializer
@@ -23,8 +23,7 @@ from .staff_services import (
     revoke_user_sessions,
     staff_capabilities,
 )
-from .view_helpers import _validation_detail, build_staff_user_data
-
+from .view_helpers import build_staff_user_data
 
 User = get_user_model()
 
@@ -227,8 +226,11 @@ class StaffUserPermissionsView(APIView):
         user = get_object_or_404(User, pk=pk)
         try:
             assert_can_manage_user(request, user, action="permissions")
-        except DjangoValidationError as error:
-            return Response({"detail": _validation_detail(error)}, status=status.HTTP_403_FORBIDDEN)
+        except DjangoValidationError:
+            return Response(
+                public_failure(request=request, candidate_code="staff_user_access_denied", status_code=status.HTTP_403_FORBIDDEN),
+                status=status.HTTP_403_FORBIDDEN,
+            )
         before = {"is_active": user.is_active, "is_staff": user.is_staff, "is_superuser": user.is_superuser}
         requested = {key: request.data[key] for key in ("is_active", "is_staff", "is_superuser") if key in request.data}
         if not requested:
@@ -261,8 +263,11 @@ class StaffUserPermissionsView(APIView):
                 if requested.get("is_staff") is False:
                     StaffProfile.objects.filter(user_id=user.pk).delete()
                 revoke_user_sessions(user)
-        except DjangoValidationError as error:
-            return Response({"detail": _validation_detail(error)}, status=status.HTTP_403_FORBIDDEN)
+        except DjangoValidationError:
+            return Response(
+                public_failure(request=request, candidate_code="staff_permission_change_denied", status_code=status.HTTP_403_FORBIDDEN),
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         settings_obj = UserSettings.objects.filter(user=user).first()
         if requested.get("is_staff") is True and settings_obj and settings_obj.public_status == UserSettings.PublicStatus.PENDING:

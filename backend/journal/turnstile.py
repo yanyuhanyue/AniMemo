@@ -1,9 +1,7 @@
 import logging
 
 import requests
-
 from site_config.turnstile import resolve_turnstile_config
-
 
 logger = logging.getLogger(__name__)
 TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
@@ -35,8 +33,14 @@ def verify_turnstile(token, *, remote_ip=""):
         )
         response.raise_for_status()
         payload = response.json()
-    except (requests.RequestException, ValueError, TypeError):
-        logger.warning("Turnstile siteverify request failed", exc_info=True)
+    except (requests.RequestException, ValueError, TypeError) as error:
+        logger.warning(
+            "turnstile_verification_failed",
+            extra={
+                "animemo_stage": "turnstile_siteverify",
+                "animemo_exception_class": type(error).__name__,
+            },
+        )
         return False
 
     return isinstance(payload, dict) and payload.get("success") is True

@@ -139,15 +139,21 @@ class ExternalMediaIdentityApiTests(APITestCase):
         fetch_subject.assert_not_called()
 
     @patch("journal.external_media.providers.bangumi.BangumiProvider.fetch_subject")
-    def test_same_user_duplicate_subject_is_rejected_with_entry_id(self, fetch_subject):
+    def test_same_user_duplicate_subject_uses_strict_public_failure(self, fetch_subject):
         bound_entry = JournalEntry.objects.create(user=self.user, title="已绑定")
         target_entry = JournalEntry.objects.create(user=self.user, title="目标")
         self.create_identity(bound_entry)
         fetch_subject.return_value = subject()
         response = self.client.post(self.list_url(target_entry), {"provider": "bangumi", "external_id": "1424"}, format="json")
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(set(response.data), {"code", "detail", "correlation_id"})
         self.assertEqual(response.data["code"], "subject_already_bound")
-        self.assertEqual(response.data["entry_id"], bound_entry.pk)
+        self.assertEqual(response.data["detail"], "请求与资源当前状态冲突。")
+        self.assertRegex(response.data["correlation_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(
+            response["X-AniMemo-Correlation-ID"],
+            response.data["correlation_id"],
+        )
 
     @patch("journal.external_media.providers.bangumi.BangumiProvider.fetch_subject")
     def test_different_users_can_bind_the_same_subject(self, fetch_subject):

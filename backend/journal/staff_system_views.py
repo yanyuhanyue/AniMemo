@@ -5,24 +5,23 @@ import zipfile
 from datetime import timedelta
 
 import requests
+from accounts.models import LoginEvent, StaffProfile, UserSecurityProfile
+from config.api_errors import public_failure
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import connection, transaction
 from django.http import HttpResponse
 from django.utils import timezone
+from plugin_host.models import PluginDeployment, UserPluginInstallation
+from plugin_host.registry import PluginRegistryError, discover_plugins
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
-from accounts.models import LoginEvent, StaffProfile, UserSecurityProfile
 from site_config.media_storage.pool import StoragePoolService
 from site_config.models import SiteSettings
-from plugin_host.models import PluginDeployment, UserPluginInstallation
-from plugin_host.registry import PluginRegistryError, discover_plugins
 
 from .auth_tokens import create_refresh_token
-from .web_auth_adapter import no_store, set_refresh_cookie
 from .csv_security import safe_csv_value
 from .models import AdminAuditLog, Column, JournalEntry, QuickFilter, UserSettings
 from .security import (
@@ -40,7 +39,7 @@ from .staff_services import (
     record_login_event,
     revoke_user_sessions,
 )
-
+from .web_auth_adapter import no_store, set_refresh_cookie
 
 User = get_user_model()
 
@@ -55,23 +54,33 @@ class StaffSystemHealthView(APIView):
             with connection.cursor() as cursor:
                 cursor.execute("SELECT 1")
                 cursor.fetchone()
-            services.append({"key": "database", "label": "数据库", "status": "healthy", "detail": connection.vendor})
-        except Exception as error:
-            services.append({"key": "database", "label": "数据库", "status": "down", "detail": str(error)})
+            services.append({"key": "database", "label": "数据库", "status": "healthy", "detail": "连接正常"})
+        except Exception:
+            services.append({
+                "key": "database",
+                "label": "数据库",
+                "status": "down",
+                **public_failure(request=request, candidate_code="database_unavailable", status_code=status.HTTP_200_OK),
+            })
 
         site = SiteSettings.load()
         email_ready = site.email_delivery_enabled and site.resend_api_key_source != "none"
-        services.append({"key": "email", "label": "邮件服务", "status": "healthy" if email_ready else "warning", "detail": site.get_email_from() if email_ready else "未配置可用发件密钥"})
+        services.append({"key": "email", "label": "邮件服务", "status": "healthy" if email_ready else "warning", "detail": "配置就绪" if email_ready else "未配置可用发件密钥"})
 
         try:
             response = requests.get("https://api.bgm.tv/v0/subjects/1", headers={"User-Agent": settings.BANGUMI_USER_AGENT}, timeout=3)
             response.raise_for_status()
             services.append({"key": "bangumi", "label": "Bangumi", "status": "healthy", "detail": f"HTTP {response.status_code}"})
-        except requests.RequestException as error:
-            services.append({"key": "bangumi", "label": "Bangumi", "status": "down", "detail": str(error)[:180]})
+        except requests.RequestException:
+            services.append({
+                "key": "bangumi",
+                "label": "Bangumi",
+                "status": "down",
+                **public_failure(request=request, candidate_code="bangumi_unavailable", status_code=status.HTTP_200_OK),
+            })
 
         if settings.DEBUG:
-            services.append({"key": "storage", "label": "媒体存储", "status": "healthy", "detail": str(settings.MEDIA_ROOT)})
+            services.append({"key": "storage", "label": "媒体存储", "status": "healthy", "detail": "开发存储已启用"})
         else:
             storage_states = StoragePoolService.list_backends()
             writable = [item for item, state in storage_states if state.writable]
@@ -85,8 +94,13 @@ class StaffSystemHealthView(APIView):
             plugins = discover_plugins()
             errors = sum(bool(item.get("errors")) for item in plugins)
             services.append({"key": "plugins", "label": "插件系统", "status": "warning" if errors else "healthy", "detail": f"{len(plugins)} 个插件，{errors} 个异常"})
-        except (PluginRegistryError, OSError, ValueError) as error:
-            services.append({"key": "plugins", "label": "插件系统", "status": "down", "detail": str(error)})
+        except (PluginRegistryError, OSError, ValueError):
+            services.append({
+                "key": "plugins",
+                "label": "插件系统",
+                "status": "down",
+                **public_failure(request=request, candidate_code="plugin_health_unavailable", status_code=status.HTTP_200_OK),
+            })
         return Response({"checked_at": timezone.now(), "services": services})
 
 

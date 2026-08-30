@@ -6,13 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+import requests
+from accounts.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
-from rest_framework.test import APIClient
-
-from accounts.models import User
 from integrations.authentication import sign_hmac_request
 from integrations.models import (
     ExternalIdentityBinding,
@@ -21,6 +20,8 @@ from integrations.models import (
     IntegrationEvent,
 )
 from journal.models import JournalEntry, WatchHistoryRecord
+from rest_framework.test import APIClient
+
 from plugin_host.models import PluginData, PluginProject
 from plugin_host.runtime import runtime_registry
 from plugin_host.services import install_for_user
@@ -214,6 +215,209 @@ class WatchHistoryReferenceIntegrationTests(TestCase):
         self.assertEqual(batch_too_large.data["code"], "batch_too_large")
         self.assertFalse(
             PluginData.objects.filter(plugin=self.project, namespace="batches").exists()
+        )
+
+    def test_web_import_failures_never_persist_or_return_exception_text(self):
+        marker = "WATCH-IMPORT-STACK-SENTINEL"
+        client = APIClient()
+        client.force_authenticate(self.user)
+
+        invalid = client.post(
+            "/api/plugins/watch-history-importer/preview/",
+            {"files": [SimpleUploadedFile(f"{marker}.bin", b"invalid")]},
+            format="multipart",
+        )
+        self.assertEqual(invalid.status_code, 400, invalid.data)
+        self.assertEqual(invalid.data["code"], "invalid_import_file")
+        self.assertNotIn(marker, str(invalid.data))
+
+        preview = client.post(
+            "/api/plugins/watch-history-importer/preview/",
+            {"files": [SimpleUploadedFile("2026.txt", "1月1日 首刷 测试动画 第1集".encode())]},
+            format="multipart",
+        )
+        self.assertEqual(preview.status_code, 201, preview.data)
+        batch_id = preview.data["id"]
+
+        with patch("requests.post", side_effect=requests.RequestException(marker)):
+            resolved = client.post(
+                f"/api/plugins/watch-history-importer/batches/{batch_id}/resolve-next/",
+                {},
+                format="json",
+            )
+        self.assertEqual(resolved.status_code, 200, resolved.data)
+        self.assertNotIn(marker, str(resolved.data))
+        self.assertEqual(resolved.data["error"]["code"], "bangumi_lookup_unavailable")
+        self.assertIn("correlation_id", resolved.data["error"])
+        stored = PluginData.objects.get(plugin=self.project, namespace="batches", user=self.user).value
+        self.assertNotIn(marker, str(stored))
+        self.assertEqual(stored["error"]["code"], "bangumi_lookup_unavailable")
+
+        with patch("requests.get", side_effect=requests.RequestException(marker)):
+            selected = client.post(
+                f"/api/plugins/watch-history-importer/batches/{batch_id}/select-subject/",
+                {"group_index": 0, "bangumi_id": 123},
+                format="json",
+            )
+        self.assertEqual(selected.status_code, 502, selected.data)
+        self.assertEqual(selected.data["code"], "bangumi_lookup_unavailable")
+        self.assertNotIn(marker, str(selected.data))
+
+    def test_legacy_batch_diagnostics_are_exact_projected_on_every_read(self):
+        marker = "WATCH-IMPORT-LEGACY-STACK-SENTINEL"
+        batch_id = uuid4().hex
+        PluginData.objects.create(
+            plugin=self.project,
+            namespace="batches",
+            user=self.user,
+            key=batch_id,
+            value={
+                "id": batch_id,
+                "status": "resolving",
+                "target_user_id": self.user.pk,
+                "summary": {"pending": 0, "traceback": marker},
+                "error": {
+                    "detail": f"C:\\private\\{marker}.py SELECT secret FROM table",
+                    "traceback": marker,
+                },
+                "payload": {
+                    "groups": [
+                        {
+                            "source_title": "legacy fixture",
+                            "records": [],
+                            "traceback": marker,
+                            "resolution": {
+                                "status": "network_error",
+                                "detail": marker,
+                                "sdk_error": marker,
+                                "traceback": marker,
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+        client = APIClient()
+        client.force_authenticate(self.user)
+
+        first = client.get(
+            f"/api/plugins/watch-history-importer/batches/{batch_id}/"
+        )
+        second = client.get(
+            f"/api/plugins/watch-history-importer/batches/{batch_id}/"
+        )
+
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertNotIn(marker, str([first.data, second.data]))
+        self.assertNotIn("traceback", str(first.data).lower())
+        for payload in (first.data["error"], first.data["groups"][0]["resolution"]):
+            failure = payload if "status" not in payload else {
+                key: payload[key] for key in ("code", "detail", "correlation_id")
+            }
+            self.assertEqual(set(failure), {"code", "detail", "correlation_id"})
+            self.assertEqual(failure["code"], "bangumi_lookup_unavailable")
+            self.assertRegex(failure["correlation_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(
+            first.data["error"]["correlation_id"],
+            first.data["groups"][0]["resolution"]["correlation_id"],
+        )
+        self.assertNotEqual(
+            first.data["error"]["correlation_id"],
+            second.data["error"]["correlation_id"],
+        )
+
+    def test_batch_read_recursively_projects_allowlisted_nested_values(self):
+        marker = "WATCH-IMPORT-NESTED-PROJECTION-SENTINEL"
+        batch_id = uuid4().hex
+        PluginData.objects.create(
+            plugin=self.project,
+            namespace="batches",
+            user=self.user,
+            key=batch_id,
+            value={
+                "id": batch_id,
+                "status": "ready",
+                "target_user_id": self.user.pk,
+                "target_username": {"traceback": marker},
+                "created_at": {"traceback": marker},
+                "source_names": ["legitimate.txt", {"traceback": marker}],
+                "summary": {
+                    "matched": 1,
+                    "pending": {"traceback": marker},
+                    "excluded_group_indices": [0, {"traceback": marker}],
+                },
+                "payload": {
+                    "groups": [
+                        {
+                            "source_title": "traceback command 是合法标题",
+                            "latest_watch_date": {"traceback": marker},
+                            "records": [
+                                {
+                                    "title": "合法标题",
+                                    "notes": ["traceback command 是合法备注"],
+                                    "include": True,
+                                    "source_file": {"traceback": marker},
+                                    "episode_range": {
+                                        "start": 1,
+                                        "end": 2,
+                                        "traceback": marker,
+                                    },
+                                }
+                            ],
+                            "resolution": {
+                                "status": "matched",
+                                "title": "合法匹配标题",
+                                "description": {"traceback": marker},
+                                "confidence": {"traceback": marker},
+                                "tags": ["traceback 是合法标签"],
+                                "claimed_episodes": [1, {"traceback": marker}],
+                            },
+                        }
+                    ],
+                    "excluded": [],
+                },
+            },
+        )
+        client = APIClient()
+        client.force_authenticate(self.user)
+
+        response = client.get(
+            f"/api/plugins/watch-history-importer/batches/{batch_id}/"
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertNotIn(marker, str(response.data))
+        self.assertEqual(
+            response.data["target_user"],
+            {"id": self.user.pk, "username": "", "email": ""},
+        )
+        self.assertIsNone(response.data["created_at"])
+        self.assertEqual(response.data["source_names"], [])
+        self.assertEqual(response.data["summary"], {"matched": 1})
+        group = response.data["groups"][0]
+        self.assertEqual(
+            set(group),
+            {"source_title", "records", "resolution"},
+        )
+        self.assertEqual(group["source_title"], "traceback command 是合法标题")
+        self.assertEqual(
+            group["records"],
+            [
+                {
+                    "title": "合法标题",
+                    "notes": ["traceback command 是合法备注"],
+                    "include": True,
+                }
+            ],
+        )
+        self.assertEqual(
+            group["resolution"],
+            {
+                "status": "matched",
+                "title": "合法匹配标题",
+                "tags": ["traceback 是合法标签"],
+            },
         )
 
     def test_import_commit_uses_shared_watch_history_validation(self):

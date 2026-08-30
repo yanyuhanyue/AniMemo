@@ -2,30 +2,31 @@ import os
 import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stderr
 from datetime import timedelta
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from accounts.models import PendingRegistration
 from django.conf import settings
-from django.contrib.auth.hashers import check_password
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import check_password
 from django.core.cache import cache
-from django.core.management import call_command, CommandError
+from django.core.management import CommandError, ManagementUtility, call_command
 from django.db import close_old_connections, connection, connections
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase, override_settings, skipUnlessDBFeature
 from django.urls import reverse
 from django.utils import timezone
+from journal.models import AdminAuditLog, UserSettings
+from plugin_host.models import PluginDeployment
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from .first_run import UnsafeSetupCodePath
 from .models import InstallationState, SiteSettings
-from journal.models import AdminAuditLog, UserSettings
-from accounts.models import PendingRegistration
-from plugin_host.models import PluginDeployment
-
 
 User = get_user_model()
 
@@ -74,6 +75,40 @@ class FirstRunSetupApiTests(APITestCase):
             self.assertNotIn(plaintext, output.getvalue())
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(code_path.stat().st_mode), 0o600)
+
+    def test_provision_failure_uses_real_cli_safe_stderr(self):
+        failures = (
+            UnsafeSetupCodePath(
+                r"C:\private\setup-code token=SETUP_TOKEN_CANARY Traceback"
+            ),
+            OSError(
+                r"C:\private\setup-dir token=FILESYSTEM_TOKEN_CANARY Traceback"
+            ),
+        )
+        for failure in failures:
+            errors = StringIO()
+            with (
+                self.subTest(failure_type=type(failure).__name__),
+                patch(
+                    "site_config.management.commands.provision_first_run_setup.provision_first_run_setup",
+                    side_effect=failure,
+                ),
+                redirect_stderr(errors),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                ManagementUtility(
+                    ["manage.py", "provision_first_run_setup", "--no-color"]
+                ).execute()
+
+            public_text = errors.getvalue()
+            self.assertEqual(raised.exception.code, 1)
+            self.assertRegex(
+                public_text,
+                r"^CommandError: first_run_provision_failed "
+                r"correlation_id=[0-9a-f]{32}\r?\n$",
+            )
+            self.assertNotIn(str(failure), public_text)
+            self.assertNotIn("Traceback", public_text)
 
     def test_application_bootstrap_applies_defaults_before_issuing_setup_code(self):
         SiteSettings.objects.all().delete()
@@ -136,9 +171,16 @@ class FirstRunSetupApiTests(APITestCase):
                 call_command("provision_first_run_setup", verbosity=0)
                 code = code_path.read_text(encoding="utf-8").strip()
                 csrf = self.client.get(reverse("csrf-token")).data["csrf_token"]
-                with patch(
-                    "plugin_host.hooks.run_hook",
-                    side_effect=RuntimeError("injected plugin hook failure"),
+                with (
+                    patch(
+                        "plugin_host.hooks.run_hook",
+                        side_effect=RuntimeError("injected plugin hook failure"),
+                    ),
+                    patch(
+                        "django.core.management.call_command",
+                        side_effect=RuntimeError("injected official sync failure"),
+                    ),
+                    patch("site_config.first_run.logger.warning") as warning,
                 ):
                     with self.captureOnCommitCallbacks(execute=True):
                         response = self.client.post(
@@ -153,6 +195,44 @@ class FirstRunSetupApiTests(APITestCase):
                             format="json",
                             HTTP_X_CSRFTOKEN=csrf,
                         )
+
+        self.assertEqual(len(warning.call_args_list), 2)
+        self.assertEqual(
+            [logged.args for logged in warning.call_args_list],
+            [
+                ("first_run_post_commit_failure",),
+                ("first_run_post_commit_failure",),
+            ],
+        )
+        self.assertEqual(
+            [
+                logged.kwargs["extra"]["animemo_stage"]
+                for logged in warning.call_args_list
+            ],
+            [
+                "first_run_user_after_created",
+                "first_run_official_plugin_sync",
+            ],
+        )
+        for logged in warning.call_args_list:
+            self.assertEqual(
+                set(logged.kwargs["extra"]),
+                {
+                    "animemo_stage",
+                    "correlation_id",
+                    "animemo_exception_class",
+                },
+            )
+            self.assertEqual(
+                logged.kwargs["extra"]["animemo_exception_class"],
+                "PostCommitTaskError",
+            )
+            self.assertRegex(
+                logged.kwargs["extra"]["correlation_id"],
+                r"^[0-9a-f]{32}$",
+            )
+        self.assertNotIn("injected plugin hook failure", repr(warning.call_args_list))
+        self.assertNotIn("injected official sync failure", repr(warning.call_args_list))
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(User.objects.filter(username="hook-failure-admin", is_superuser=True).exists())
@@ -455,7 +535,14 @@ class FirstRunSetupApiTests(APITestCase):
                 code_file_remains = code_path.exists()
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(set(response.data), {"code", "detail", "correlation_id"})
         self.assertEqual(response.data["code"], "admin_identity_unavailable")
+        self.assertEqual(response.data["detail"], "请求与资源当前状态冲突。")
+        self.assertRegex(response.data["correlation_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(
+            response["X-AniMemo-Correlation-ID"],
+            response.data["correlation_id"],
+        )
         existing.refresh_from_db()
         self.assertFalse(existing.is_staff)
         self.assertFalse(existing.is_superuser)

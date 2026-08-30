@@ -1,12 +1,14 @@
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from journal.analytics import build_user_analytics
+from journal.analytics.services import AnalyticsRangeError
 from journal.models import JournalEntry
 from journal.watch_history import add_history
-
 
 User = get_user_model()
 
@@ -85,3 +87,16 @@ class AnalyticsCoreTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["code"], "invalid_analytics_range")
+
+    def test_api_never_exposes_analytics_exception_text(self):
+        marker = "ANALYTICS-STACK-SENTINEL"
+        client = APIClient()
+        client.force_authenticate(self.user)
+
+        with patch("journal.analytics.views.build_user_analytics", side_effect=AnalyticsRangeError(marker)):
+            response = client.get("/api/stats/me/")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "invalid_analytics_range")
+        self.assertIn("correlation_id", response.data)
+        self.assertNotIn(marker, str(response.data))

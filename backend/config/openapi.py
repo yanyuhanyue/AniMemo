@@ -1,6 +1,10 @@
-from drf_spectacular.extensions import OpenApiAuthenticationExtension, OpenApiViewExtension
-from drf_spectacular.types import OpenApiTypes
 import re
+
+from drf_spectacular.extensions import (
+    OpenApiAuthenticationExtension,
+    OpenApiViewExtension,
+)
+from drf_spectacular.types import OpenApiTypes
 
 
 class SessionVersionJWTAuthenticationScheme(OpenApiAuthenticationExtension):
@@ -118,7 +122,7 @@ def stabilize_operation_ids(result, generator, request, public):
 
 
 def attach_error_contract(result, generator, request, public):
-    """Attach the canonical machine-readable error shape to every operation."""
+    """Attach the strict PublicFailure shape to every documented operation."""
 
     def error_response(description):
         return {

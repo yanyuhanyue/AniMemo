@@ -1,20 +1,29 @@
 import json
 import time
 
+from config.api_errors import public_failure
 from django.conf import settings
 from django.db import IntegrityError, close_old_connections, transaction
 from django.utils import timezone
-from rest_framework.response import Response
-
-from plugin_host.models import PluginDeployment, PluginProject, PluginVersion, UserPluginInstallation
+from plugin_host.models import (
+    PluginDeployment,
+    PluginProject,
+    PluginVersion,
+    UserPluginInstallation,
+)
 from plugin_host.runtime import RuntimeLoadError, RuntimeUnavailable, runtime_registry
+from rest_framework.response import Response
 
 from .models import (
     ExternalIdentityBinding,
     IntegrationActionReceipt,
     IntegrationEvent,
 )
-from .plugin_sdk import IntegrationActionContext, IntegrationConnectionMetadata, validate_integration_name
+from .plugin_sdk import (
+    IntegrationActionContext,
+    IntegrationConnectionMetadata,
+    validate_integration_name,
+)
 
 
 class IntegrationDispatchError(ValueError):
@@ -111,12 +120,24 @@ def _wait_for_receipt(receipt):
     return receipt
 
 
-def _stored_receipt_result(receipt):
+def _stored_receipt_result(request, receipt):
     if receipt.completed_at is None:
         raise IntegrationDispatchError(
             "request_in_progress",
             "同一 request_id 的动作仍在处理中。",
             409,
+        )
+    successful_status = isinstance(receipt.response_status, int) and 200 <= receipt.response_status <= 299
+    if receipt.status == IntegrationActionReceipt.Status.FAILED or not successful_status:
+        safe_payload, safe_status = _handler_failure_payload(
+            request,
+            receipt.response_payload,
+            receipt.response_status,
+        )
+        return (
+            safe_payload,
+            safe_status,
+            True,
         )
     return receipt.response_payload, receipt.response_status, True
 
@@ -135,7 +156,141 @@ def _complete_receipt(receipt, payload, status_code, *, failed=False):
     )
 
 
-def dispatch_integration_action(connection, envelope):
+def _dispatch_failure_payload(request, error):
+    if error.code == "invalid_payload":
+        status_code = 400
+        candidate_code = "invalid_payload"
+    elif error.code == "invalid_action_response":
+        status_code = 500
+        candidate_code = "invalid_action_response"
+    elif error.code == "action_response_too_large":
+        status_code = 502
+        candidate_code = "integration_action_failed"
+    elif error.code == "request_id_conflict":
+        status_code = 409
+        candidate_code = "request_id_conflict"
+    elif error.code == "request_in_progress":
+        status_code = 409
+        candidate_code = "action_in_progress"
+    elif error.code == "identity_not_bound":
+        status_code = 403
+        candidate_code = "identity_not_bound"
+    elif error.code == "plugin_not_installed":
+        status_code = 403
+        candidate_code = "permission_denied"
+    elif error.code == "invalid_action":
+        status_code = 400
+        candidate_code = "invalid_action"
+    elif error.code == "plugin_unavailable":
+        status_code = 503
+        candidate_code = "plugin_unavailable"
+    elif error.code == "action_not_declared":
+        status_code = 404
+        candidate_code = "action_not_declared"
+    elif error.code == "action_not_registered":
+        status_code = 503
+        candidate_code = "action_not_registered"
+    else:
+        status_code = 500
+        candidate_code = "integration_action_failed"
+    return public_failure(
+        request=request,
+        candidate_code=candidate_code,
+        status_code=status_code,
+    ), status_code
+
+
+def _handler_failure_payload(request, payload, status_code):
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if code == "invalid_import_batch" and status_code == 400:
+        candidate_code = "invalid_import_batch"
+        safe_status = 400
+    elif code == "batch_too_large" and status_code == 413:
+        candidate_code = "batch_too_large"
+        safe_status = 413
+    elif code == "invalid_excluded_group_indices" and status_code == 400:
+        candidate_code = "invalid_excluded_group_indices"
+        safe_status = 400
+    elif code == "empty_import_selection" and status_code == 400:
+        candidate_code = "empty_import_selection"
+        safe_status = 400
+    elif code == "resolution_pending" and status_code == 409:
+        candidate_code = "resolution_pending"
+        safe_status = 409
+    elif code == "manual_review_required" and status_code == 409:
+        candidate_code = "manual_review_required"
+        safe_status = 409
+    elif code == "batch_missing" and status_code in {400, 404}:
+        candidate_code = "batch_missing"
+        safe_status = status_code
+    elif code == "batch_owner_mismatch" and status_code == 404:
+        candidate_code = "batch_owner_mismatch"
+        safe_status = 404
+    elif code == "invalid_watch_history" and status_code == 400:
+        candidate_code = "invalid_watch_history"
+        safe_status = 400
+    elif code == "invalid_watched_on" and status_code == 400:
+        candidate_code = "invalid_watched_on"
+        safe_status = 400
+    elif code == "invalid_brush_number" and status_code == 400:
+        candidate_code = "invalid_brush_number"
+        safe_status = 400
+    elif code == "invalid_episode_start" and status_code == 400:
+        candidate_code = "invalid_episode_start"
+        safe_status = 400
+    elif code == "invalid_episode_end" and status_code == 400:
+        candidate_code = "invalid_episode_end"
+        safe_status = 400
+    elif code == "invalid_episode_range" and status_code == 400:
+        candidate_code = "invalid_episode_range"
+        safe_status = 400
+    elif code == "invalid_notes" and status_code == 400:
+        candidate_code = "invalid_notes"
+        safe_status = 400
+    elif code == "duplicate_watch_history" and status_code == 409:
+        candidate_code = "duplicate_watch_history"
+        safe_status = 409
+    elif code == "invalid_entry" and status_code == 400:
+        candidate_code = "invalid_entry"
+        safe_status = 400
+    elif code == "invalid_limit" and status_code == 400:
+        candidate_code = "invalid_limit"
+        safe_status = 400
+    elif code == "invalid_entry_id" and status_code == 400:
+        candidate_code = "invalid_entry_id"
+        safe_status = 400
+    elif code == "invalid_text" and status_code == 400:
+        candidate_code = "invalid_text"
+        safe_status = 400
+    elif code == "entry_not_found" and status_code == 404:
+        candidate_code = "entry_not_found"
+        safe_status = 404
+    elif code == "owner_required" and status_code == 403:
+        candidate_code = "owner_required"
+        safe_status = 403
+    elif code == "plugin_context_forbidden" and status_code == 403:
+        candidate_code = "plugin_context_forbidden"
+        safe_status = 403
+    elif code == "plugin_disabled" and status_code == 403:
+        candidate_code = "plugin_disabled"
+        safe_status = 403
+    elif code == "capability_not_declared" and status_code == 403:
+        candidate_code = "capability_not_declared"
+        safe_status = 403
+    elif code == "plugin_operation_failed" and status_code == 400:
+        candidate_code = "plugin_operation_failed"
+        safe_status = 400
+    else:
+        candidate_code = "integration_action_failed"
+        safe_status = status_code if status_code in {400, 409, 500, 502, 503} else 500
+    return public_failure(
+        request=request,
+        candidate_code=candidate_code,
+        status_code=safe_status,
+    ), safe_status
+
+
+def dispatch_integration_action(request, connection, envelope):
     platform = envelope["platform"]
     external_user_id = envelope["external_user_id"]
     public_action = envelope["action"]
@@ -182,7 +337,7 @@ def dispatch_integration_action(connection, envelope):
 
     receipt, created = _claim_receipt(connection, request_id, public_action)
     if not created:
-        return _stored_receipt_result(_wait_for_receipt(receipt))
+        return _stored_receipt_result(request, _wait_for_receipt(receipt))
 
     context = IntegrationActionContext(
         user=binding.user,
@@ -199,13 +354,24 @@ def dispatch_integration_action(connection, envelope):
     try:
         response_payload, response_status = _normalize_handler_result(handler(context, payload))
     except IntegrationDispatchError as error:
-        response_payload = {"code": error.code, "detail": error.detail}
-        response_status = error.status_code
+        response_payload, response_status = _dispatch_failure_payload(request, error)
         _complete_receipt(receipt, response_payload, response_status, failed=True)
         return response_payload, response_status, False
     except Exception:
-        response_payload = {"code": "action_failed", "detail": "插件动作执行失败。"}
+        response_payload = public_failure(
+            request=request,
+            candidate_code="action_failed",
+            status_code=500,
+        )
         response_status = 500
+        _complete_receipt(receipt, response_payload, response_status, failed=True)
+        return response_payload, response_status, False
+    if not 200 <= response_status <= 299:
+        response_payload, response_status = _handler_failure_payload(
+            request,
+            response_payload,
+            response_status,
+        )
         _complete_receipt(receipt, response_payload, response_status, failed=True)
         return response_payload, response_status, False
     _complete_receipt(receipt, response_payload, response_status)

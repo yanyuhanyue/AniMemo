@@ -1,17 +1,18 @@
 import base64
 import tempfile
+from unittest.mock import patch
 
+from accounts.models import StaffProfile
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
-
-from accounts.models import StaffProfile
 from site_config.models import SiteSettings
-from .models import JournalEntry
 
+from .models import JournalEntry
+from .poster_security import PosterUrlValidationError
 
 User = get_user_model()
 PNG_1X1 = base64.b64decode(
@@ -42,7 +43,24 @@ class PosterSourceTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("poster_url", response.data)
+        self.assertEqual(set(response.data), {"code", "detail", "correlation_id"})
+        self.assertEqual(response.data["code"], "validation_error")
+
+    def test_poster_validation_exception_text_is_not_public(self):
+        marker = "POSTER-VALIDATION-STACK-SENTINEL"
+        with patch(
+            "journal.serializers_entries.validate_poster_url",
+            side_effect=PosterUrlValidationError(marker),
+        ):
+            response = self.client.post(
+                reverse("entry-list"),
+                {"title": "封面异常", "poster_url": "https://lain.bgm.tv/pic/cover/l/test.jpg"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "validation_error")
+        self.assertNotIn(marker, str(response.data))
 
     def test_trusted_remote_poster_is_kept_as_the_default_source(self):
         response = self.client.post(

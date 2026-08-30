@@ -321,11 +321,11 @@ class UpdateExecutor:
                 "rolled_back",
                 detail="previous application restored; live data contracts retained",
             )
-        except Exception as error:  # noqa: BLE001 - every switch failure must enter recovery state
+        except Exception:  # noqa: BLE001 - every switch failure must enter recovery state
             self.store.transition(
                 operation_id,
                 "manual_recovery_required",
-                detail=f"application rollback failed: {error}",
+                detail="application rollback failed",
             )
 
     def apply(
@@ -470,16 +470,16 @@ class UpdateExecutor:
                 self.slots.promote(target_manifest, operation_id=operation_id)
                 try:
                     self.runtime_binding.replace_release(target_manifest)
-                except Exception as error:  # noqa: BLE001 - locator divergence is recovery state
+                except Exception:  # noqa: BLE001 - locator divergence is recovery state
                     return self.store.transition(
                         operation_id,
                         "manual_recovery_required",
-                        detail=f"CURRENT changed but locator publication failed: {error}",
+                        detail="CURRENT changed but locator publication failed",
                     )
                 return self.store.transition(
                     operation_id, "succeeded", detail="release switch completed"
                 )
-            except CompatibilityError as error:
+            except CompatibilityError:
                 status = self.store.get(operation_id)["status"]
                 target = (
                     "failed_pre_switch"
@@ -494,20 +494,26 @@ class UpdateExecutor:
                     }
                     else "manual_recovery_required"
                 )
-                return self.store.transition(operation_id, target, detail=str(error))
-            except Exception as error:  # noqa: BLE001 - every execution failure must be journaled
+                return self.store.transition(
+                    operation_id,
+                    target,
+                    detail="release compatibility validation failed",
+                )
+            except Exception:  # noqa: BLE001 - every execution failure must be journaled
                 status = self.store.get(operation_id)["status"]
                 if status in {"migrating", "bootstrapping"}:
                     return self.store.transition(
                         operation_id,
                         "manual_recovery_required",
-                        detail=f"migration or bootstrap failed; database was not reversed: {error}",
+                        detail="migration or bootstrap failed; database was not reversed",
                     )
                 if switched or status in {"switching", "verifying_health"}:
                     self._rollback_after_switch(operation_id, current)
                     return self.store.get(operation_id)
                 return self.store.transition(
-                    operation_id, "failed_pre_switch", detail=str(error)
+                    operation_id,
+                    "failed_pre_switch",
+                    detail="update operation failed before application switch",
                 )
 
     def rollback(
@@ -589,22 +595,24 @@ class UpdateExecutor:
                 self.slots.restore_previous(operation_id=operation_id)
                 try:
                     self.runtime_binding.replace_release(previous_manifest)
-                except Exception as error:  # noqa: BLE001 - locator divergence is recovery state
+                except Exception:  # noqa: BLE001 - locator divergence is recovery state
                     return self.store.transition(
                         operation_id,
                         "manual_recovery_required",
-                        detail=f"PREVIOUS restored but locator publication failed: {error}",
+                        detail="PREVIOUS restored but locator publication failed",
                     )
                 return self.store.transition(
                     operation_id,
                     "rolled_back",
                     detail="application rollback completed; live data contracts retained",
                 )
-            except CompatibilityError as error:
+            except CompatibilityError:
                 return self.store.transition(
-                    operation_id, "failed_pre_switch", detail=str(error)
+                    operation_id,
+                    "failed_pre_switch",
+                    detail="rollback compatibility validation failed",
                 )
-            except Exception as error:  # noqa: BLE001 - every execution failure must be journaled
+            except Exception:  # noqa: BLE001 - every execution failure must be journaled
                 status = self.store.get(operation_id)["status"]
                 if status in {"switching", "verifying_health"}:
                     try:
@@ -628,12 +636,14 @@ class UpdateExecutor:
                             "rolled_back",
                             detail="rollback attempt reverted to current application",
                         )
-                    except Exception as rollback_error:  # noqa: BLE001 - failed recovery requires manual state
+                    except Exception:  # noqa: BLE001 - failed recovery requires manual state
                         return self.store.transition(
                             operation_id,
                             "manual_recovery_required",
-                            detail=f"rollback recovery failed: {rollback_error}",
+                            detail="rollback recovery failed",
                         )
                 return self.store.transition(
-                    operation_id, "failed_pre_switch", detail=str(error)
+                    operation_id,
+                    "failed_pre_switch",
+                    detail="rollback operation failed before application switch",
                 )

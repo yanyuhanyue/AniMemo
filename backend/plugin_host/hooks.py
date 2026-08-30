@@ -8,21 +8,46 @@ from threading import RLock
 from time import monotonic
 from types import SimpleNamespace
 
-
-logger = logging.getLogger("animemo.plugins")
 from .hook_contract import (
     ACTION_HOOKS,
     CLOSED_HOOKS,
     FILTER_HOOKS,
-    HOOK_DEFINITIONS,
     SUPPORTED_HOOKS,
     SYSTEM_SCOPED,
     hook_scope,
     resolve_hook_target_user_id,
 )
+from .hook_contract import HOOK_DEFINITIONS as HOOK_DEFINITIONS
+
+logger = logging.getLogger("animemo.plugins")
 
 HOOK_SLOW_WARNING_SECONDS = 0.25
 KNOWN_HOOKS = SUPPORTED_HOOKS
+
+_SAFE_EXCEPTION_CLASSES = {
+    ArithmeticError: "ArithmeticError",
+    AssertionError: "AssertionError",
+    AttributeError: "AttributeError",
+    EOFError: "EOFError",
+    ImportError: "ImportError",
+    LookupError: "LookupError",
+    MemoryError: "MemoryError",
+    NameError: "NameError",
+    OSError: "OSError",
+    ReferenceError: "ReferenceError",
+    RuntimeError: "RuntimeError",
+    StopIteration: "StopIteration",
+    SyntaxError: "SyntaxError",
+    SystemError: "SystemError",
+    TypeError: "TypeError",
+    ValueError: "ValueError",
+}
+
+
+def _safe_exception_class(error):
+    """Classify only exact built-in exceptions without reading hostile names."""
+
+    return _SAFE_EXCEPTION_CLASSES.get(type(error), "PluginHookError")
 
 
 class RegistrationHookRejected(RuntimeError):
@@ -150,8 +175,15 @@ class HookRegistry:
             started = monotonic()
             try:
                 results.append(item.callback(context))
-            except Exception:
-                logger.exception("plugin=%s hook=%s failed", item.plugin_slug, hook_name)
+            except Exception as error:
+                logger.warning(
+                    "plugin_hook_callback_failed",
+                    extra={
+                        "animemo_stage": "plugin_hook_callback",
+                        "plugin": item.plugin_slug,
+                        "animemo_exception_class": _safe_exception_class(error),
+                    },
+                )
                 if item.failure_mode == "closed":
                     raise
             finally:
@@ -175,8 +207,15 @@ class HookRegistry:
                 next_value = item.callback(current, context)
                 if next_value is not None:
                     current = next_value
-            except Exception:
-                logger.exception("plugin=%s filter=%s failed", item.plugin_slug, hook_name)
+            except Exception as error:
+                logger.warning(
+                    "plugin_filter_callback_failed",
+                    extra={
+                        "animemo_stage": "plugin_filter_callback",
+                        "plugin": item.plugin_slug,
+                        "animemo_exception_class": _safe_exception_class(error),
+                    },
+                )
                 if item.failure_mode == "closed":
                     raise
             finally:
@@ -258,7 +297,13 @@ def run_registration_hook(hook_name, **kwargs):
     except Exception as error:
         if hook_failure_mode(hook_name) == "closed":
             raise RegistrationHookUnavailable("注册策略服务暂时不可用，请稍后重试。") from error
-        logger.exception("registration hook=%s failed open", hook_name)
+        logger.warning(
+            "registration_hook_failed_open",
+            extra={
+                "animemo_stage": "registration_hook_fail_open",
+                "animemo_exception_class": _safe_exception_class(error),
+            },
+        )
 
 
 def clear_hooks_for_tests():

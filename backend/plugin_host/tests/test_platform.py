@@ -1,18 +1,20 @@
 import tempfile
 from datetime import timedelta
+from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
+from journal.models import AdminAuditLog
 from rest_framework.test import APIClient, APITestCase
 
-from journal.models import AdminAuditLog
 from plugin_host.models import (
     PluginData,
     PluginDeployment,
@@ -23,8 +25,8 @@ from plugin_host.models import (
     PluginVersion,
     UserPluginInstallation,
 )
-from plugin_host.runtime import runtime_registry
 from plugin_host.package import PluginPackageError
+from plugin_host.runtime import RuntimeLoadError, runtime_registry
 from plugin_host.services import PluginWorkflowError, upload_plugin_version
 from plugin_host.tests.test_runtime_e2e import make_package
 
@@ -301,14 +303,14 @@ class PluginPlatformApiTests(APITestCase):
             "version": "4.0.0",
             "runtime_types": ["frontend"],
             "submitter": self.owner.get_username(),
-            "security_report": {"source": "submitted"},
+            "security_report": {"dangerous_findings": []},
         }])
         self.assertEqual(small_payload["approved_versions"], [{
             "id": expected["approved"].pk,
             "project": expected["project"].slug,
             "version": "3.0.0",
             "runtime_types": ["frontend"],
-            "security_report": {"source": "approved"},
+            "security_report": {"dangerous_findings": []},
         }])
         self.assertEqual(small_payload["deployments"], [{
             "slug": expected["project"].slug,
@@ -335,7 +337,7 @@ class PluginPlatformApiTests(APITestCase):
                 "runtime_types": ["frontend"],
                 "published_at": marketplace_by_version["1.0.0"]["published_at"],
                 "install_count": 2,
-                "security_report": {"source": "previous"},
+                "security_report": {"dangerous_findings": []},
             },
             "2.0.0": {
                 "id": expected["current"].pk,
@@ -345,7 +347,7 @@ class PluginPlatformApiTests(APITestCase):
                 "runtime_types": ["frontend", "backend"],
                 "published_at": marketplace_by_version["2.0.0"]["published_at"],
                 "install_count": 2,
-                "security_report": {"source": "current"},
+                "security_report": {"dangerous_findings": []},
             },
         })
 
@@ -591,7 +593,7 @@ class PluginPlatformApiTests(APITestCase):
         response = self._upload(project, valid)
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("上传过于频繁", str(response.data))
+        self.assertEqual(response.data["code"], "plugin_upload_failed")
         self.assertEqual(PluginUploadAttempt.objects.filter(user=self.owner).count(), 3)
         self.assertEqual(self._cas_files(), [])
 
@@ -677,7 +679,7 @@ class PluginPlatformApiTests(APITestCase):
             response = self._upload(project, payload)
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("存储空间不足", str(response.data))
+        self.assertEqual(response.data["code"], "plugin_upload_failed")
         self.assertEqual(self._cas_files(), [])
 
     @override_settings(PLUGIN_DRAFT_LIMIT=1)
@@ -691,7 +693,7 @@ class PluginPlatformApiTests(APITestCase):
         response = self._upload(second, second_payload)
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("草稿数量已达上限", str(response.data))
+        self.assertEqual(response.data["code"], "plugin_upload_failed")
         self.assertEqual(len(self._cas_files()), 1)
 
     def test_anonymous_marketplace_does_not_expose_deployment_or_review_diagnostics(self):
@@ -717,3 +719,382 @@ class PluginPlatformApiTests(APITestCase):
             self.assertNotIn(key, payload.get("versions", [{}])[0])
         self.assertEqual(payload["published_version"], "1.0.0")
         self.assertIn("dataPolicy", payload)
+
+    def test_revoke_failure_is_strict_and_does_not_expose_exception_text(self):
+        sentinel = "SENTINEL-PLUGIN-REVOKE-PRIVATE"
+        _project, version = self._create_and_upload()
+        admin_client = APIClient()
+        admin_client.force_authenticate(self.admin)
+
+        with patch(
+            "plugin_host.views.PluginPackageInstaller.revoke",
+            side_effect=PluginWorkflowError(sentinel),
+        ):
+            response = admin_client.post(f"/api/staff/plugins/versions/{version.pk}/revoke/")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(set(response.data), {"code", "detail", "correlation_id"})
+        self.assertEqual(response.data["code"], "plugin_revoke_failed")
+        self.assertRegex(response.data["correlation_id"], r"^[0-9a-f]{32}$")
+        self.assertNotIn(sentinel, str(response.data))
+        self.assertFalse(AdminAuditLog.objects.filter(action="plugin.version_revoke").exists())
+
+    def test_scan_parse_failure_uses_stable_code_in_http_database_and_audit(self):
+        sentinel = "SENTINEL-PLUGIN-SCAN-PRIVATE"
+        project = self._create_project("scan-redaction")
+        payload, _ = make_package(
+            project.slug,
+            "1.0.0",
+            runtimes=["frontend", "backend"],
+            backend_source=f"def broken(:\n    {sentinel}\n",
+        )
+
+        response = self._upload(project, payload)
+
+        self.assertEqual(response.status_code, 201, response.data)
+        public_item = response.data["scan"]["dangerous_findings"][0]
+        self.assertEqual(set(public_item), {"code", "detail", "correlation_id"})
+        self.assertEqual(public_item["code"], "plugin_scan_failed")
+        self.assertNotIn(sentinel, str(response.data))
+        version = project.versions.get()
+
+        submit = self.client.post(f"/api/plugins/my/versions/{version.pk}/submit/")
+
+        self.assertEqual(submit.status_code, 201, submit.data)
+        submission = PluginSubmission.objects.get(plugin_version=version)
+        self.assertEqual(
+            submission.security_report["dangerous_findings"],
+            ["plugin_scan_failed"],
+        )
+        self.assertNotIn(sentinel, str(submission.security_report))
+        audits = AdminAuditLog.objects.filter(
+            action__in=["plugin.version_upload", "plugin.version_submit"],
+        )
+        self.assertEqual(audits.count(), 2)
+        self.assertNotIn(sentinel, str([row.after for row in audits]))
+
+    def test_legacy_scan_and_runtime_text_is_redacted_from_developer_and_review_readback(self):
+        sentinel = "SENTINEL-PLUGIN-LEGACY-PRIVATE"
+        project, version = self._create_and_upload()
+        submission = PluginSubmission.objects.create(
+            plugin_version=version,
+            submitter=self.owner,
+            status=PluginSubmission.Status.SUBMITTED,
+            security_report={
+                "dangerous_findings": [sentinel],
+                "backend_imports": [f"Traceback.{sentinel}"],
+                "traceback": sentinel,
+                "sdk_error": sentinel,
+            },
+        )
+        PluginDeployment.objects.create(
+            plugin=project,
+            current_version=version,
+            last_error=sentinel,
+        )
+
+        developer = self.client.get("/api/plugins/my/")
+
+        self.assertEqual(developer.status_code, 200, developer.data)
+        self.assertNotIn(sentinel, str(developer.data))
+        developer_project = developer.data["projects"][0]
+        developer_failure = developer_project["versions"][0]["submission"]["security_report"]["dangerous_findings"][0]
+        runtime_failure = developer_project["deployment"]["last_error"]
+        self.assertEqual(developer_failure["code"], "plugin_scan_failed")
+        self.assertEqual(runtime_failure["code"], "plugin_runtime_unavailable")
+        self.assertEqual(developer_failure["correlation_id"], runtime_failure["correlation_id"])
+
+        admin_client = APIClient()
+        admin_client.force_authenticate(self.admin)
+        review = admin_client.get("/api/staff/plugins/review/")
+
+        self.assertEqual(review.status_code, 200, review.data)
+        self.assertNotIn(sentinel, str(review.data))
+        review_submission = next(item for item in review.data["submissions"] if item["id"] == submission.pk)
+        review_deployment = next(item for item in review.data["deployments"] if item["slug"] == project.slug)
+        self.assertEqual(
+            review_submission["security_report"]["dangerous_findings"][0]["code"],
+            "plugin_scan_failed",
+        )
+        self.assertEqual(review_deployment["last_error"]["code"], "plugin_runtime_unavailable")
+
+    def test_runtime_load_failure_persists_only_stable_code_and_returns_public_failure(self):
+        sentinel = "SENTINEL-PLUGIN-RUNTIME-PRIVATE"
+        project, version = self._create_and_upload()
+        PluginDeployment.objects.create(plugin=project, current_version=version, enabled=True, healthy=True)
+
+        with patch(
+            "plugin_host.runtime.dispatch.runtime_registry.ensure_current",
+            side_effect=RuntimeLoadError(sentinel),
+        ):
+            response = self.client.get(f"/api/plugins/{project.slug}/")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(set(response.data), {"code", "detail", "correlation_id"})
+        self.assertEqual(response.data["code"], "plugin_runtime_unavailable")
+        self.assertNotIn(sentinel, str(response.data))
+        deployment = PluginDeployment.objects.get(plugin=project)
+        self.assertEqual(deployment.last_error, "plugin_runtime_unavailable")
+        self.assertNotIn(sentinel, deployment.last_error)
+
+    def test_legacy_diagnostics_migration_sanitizers_are_fail_closed(self):
+        sentinel = "SENTINEL-PLUGIN-MIGRATION-PRIVATE"
+        migration = import_module(
+            "plugin_host.migrations.0004_redact_legacy_plugin_diagnostics",
+        )
+        report = {
+            "source": "legacy",
+            "file_count": 2,
+            "backend_imports": ["os.path"],
+            "dangerous_findings": [
+                f"backend/plugin.py: parse-error: {sentinel}",
+                "backend/plugin.py:7 uses eval",
+            ],
+            "traceback": sentinel,
+        }
+        sanitized_report = migration._sanitize_report(report)
+        sanitized_audit = migration._sanitize_audit_payload(
+            "plugin.version_upload",
+            "after",
+            {"scan": report},
+        )
+        preserved_config = {
+            "config": {
+                "path": "icons/a",
+                "command": "business-value",
+                "traceback": "business-setting-value",
+                "last_error": "business-setting-value",
+            }
+        }
+        self.assertEqual(
+            migration._sanitize_audit_payload(
+                "plugin.user_installation_update",
+                "after",
+                preserved_config,
+            ),
+            preserved_config,
+        )
+
+        self.assertNotIn("source", sanitized_report)
+        self.assertNotIn("traceback", sanitized_report)
+        self.assertEqual(sanitized_report["file_count"], 2)
+        self.assertEqual(sanitized_report["backend_imports"], ["os.path"])
+        self.assertEqual(
+            sanitized_report["dangerous_findings"],
+            ["plugin_scan_failed", "backend/plugin.py:7 uses eval"],
+        )
+        self.assertEqual(
+            sanitized_audit["scan"]["dangerous_findings"],
+            ["plugin_scan_failed", "backend/plugin.py:7 uses eval"],
+        )
+        self.assertNotIn(sentinel, str(sanitized_report))
+        self.assertNotIn(sentinel, str(sanitized_audit))
+
+        project, version = self._create_and_upload()
+        submission = PluginSubmission.objects.create(
+            plugin_version=version,
+            submitter=self.owner,
+            security_report=report,
+        )
+        deployment = PluginDeployment.objects.create(
+            plugin=project,
+            current_version=version,
+            last_error=sentinel,
+        )
+        upload_audit = AdminAuditLog.objects.create(
+            actor=self.admin,
+            action="plugin.version_upload",
+            after={"scan": report},
+        )
+        submit_audit = AdminAuditLog.objects.create(
+            actor=self.admin,
+            action="plugin.version_submit",
+            after={"security_report": report},
+        )
+        preview_audit = AdminAuditLog.objects.create(
+            actor=self.admin,
+            action="plugin.preview_create",
+            metadata={"path": f"C:\\private\\{sentinel}", "stage": "legacy"},
+        )
+        config_audit = AdminAuditLog.objects.create(
+            actor=self.admin,
+            action="plugin.user_installation_update",
+            after=preserved_config,
+        )
+        batch_project = self._create_project(
+            "watch-history-importer",
+            plugin_id="com.animemo.watch-history-importer",
+        )
+        batch = PluginData.objects.create(
+            plugin=batch_project,
+            namespace="batches",
+            user=self.owner,
+            key="legacy-batch",
+            value={
+                "id": "legacy-batch",
+                "status": "resolving",
+                "traceback": sentinel,
+                "summary": {"pending": 0, "sdk_error": sentinel},
+                "error": {"detail": sentinel},
+                "payload": {
+                    "path": sentinel,
+                    "summary": {"pending": 0, "stderr": sentinel},
+                    "groups": [
+                        {
+                            "source_title": "fixture",
+                            "stderr": sentinel,
+                            "records": [
+                                {
+                                    "watch_date": "2026-08-30",
+                                    "notes": ["legitimate user note"],
+                                    "traceback": sentinel,
+                                }
+                            ],
+                            "resolution": {
+                                "status": "network_error",
+                                "detail": sentinel,
+                                "traceback": sentinel,
+                            },
+                        }
+                    ],
+                    "excluded": [
+                        {
+                            "source_title": "excluded fixture",
+                            "command": sentinel,
+                        }
+                    ],
+                },
+            },
+        )
+
+        migration.redact_legacy_plugin_diagnostics(django_apps, None)
+
+        submission.refresh_from_db()
+        deployment.refresh_from_db()
+        upload_audit.refresh_from_db()
+        submit_audit.refresh_from_db()
+        preview_audit.refresh_from_db()
+        config_audit.refresh_from_db()
+        batch.refresh_from_db()
+        self.assertEqual(
+            submission.security_report["dangerous_findings"],
+            ["plugin_scan_failed", "backend/plugin.py:7 uses eval"],
+        )
+        self.assertEqual(deployment.last_error, "plugin_runtime_unavailable")
+        self.assertNotIn(sentinel, str(upload_audit.after))
+        self.assertNotIn(sentinel, str(submit_audit.after))
+        self.assertNotIn(sentinel, str(preview_audit.metadata))
+        self.assertNotIn("path", preview_audit.metadata)
+        self.assertEqual(config_audit.after, preserved_config)
+        self.assertNotIn(sentinel, str(batch.value))
+        self.assertEqual(batch.value["error"], {"code": "bangumi_lookup_unavailable"})
+        self.assertEqual(
+            batch.value["payload"]["groups"][0]["resolution"],
+            {
+                "status": "network_error",
+                "code": "bangumi_lookup_unavailable",
+            },
+        )
+        self.assertEqual(
+            batch.value["payload"]["groups"][0]["records"][0]["notes"],
+            ["legitimate user note"],
+        )
+
+    def test_legacy_batch_migration_recursively_projects_nested_canaries(self):
+        marker = "SENTINEL-PLUGIN-MIGRATION-NESTED"
+        migration = import_module(
+            "plugin_host.migrations.0004_redact_legacy_plugin_diagnostics",
+        )
+        project = self._create_project(
+            "watch-history-importer",
+            plugin_id="com.animemo.watch-history-importer",
+        )
+        batch = PluginData.objects.create(
+            plugin=project,
+            namespace="batches",
+            user=self.owner,
+            key="nested-canary",
+            value={
+                "id": "nested-canary",
+                "status": "ready",
+                "target_username": {"traceback": marker},
+                "source_names": ["legitimate.txt", {"traceback": marker}],
+                "summary": {
+                    "matched": 1,
+                    "pending": {"traceback": marker},
+                    "excluded_group_indices": [0, {"traceback": marker}],
+                },
+                "result": {
+                    "imported_entries": 1,
+                    "created": {"traceback": marker},
+                },
+                "payload": {
+                    "summary": {
+                        "matched": 1,
+                        "pending": {"traceback": marker},
+                    },
+                    "groups": [
+                        {
+                            "source_title": "traceback command 是合法标题",
+                            "latest_watch_date": {"traceback": marker},
+                            "records": [
+                                {
+                                    "title": "合法标题",
+                                    "notes": ["traceback command 是合法备注"],
+                                    "include": True,
+                                    "source_file": {"traceback": marker},
+                                    "episode_range": {
+                                        "start": 1,
+                                        "end": 2,
+                                        "traceback": marker,
+                                    },
+                                }
+                            ],
+                            "resolution": {
+                                "status": "matched",
+                                "title": "合法匹配标题",
+                                "description": {"traceback": marker},
+                                "confidence": {"traceback": marker},
+                                "tags": ["traceback 是合法标签"],
+                                "claimed_episodes": [1, {"traceback": marker}],
+                            },
+                        }
+                    ],
+                    "excluded": [],
+                },
+            },
+        )
+
+        migration.redact_legacy_plugin_diagnostics(django_apps, None)
+
+        batch.refresh_from_db()
+        self.assertNotIn(marker, str(batch.value))
+        self.assertNotIn("target_username", batch.value)
+        self.assertNotIn("source_names", batch.value)
+        self.assertEqual(batch.value["summary"], {"matched": 1})
+        self.assertEqual(batch.value["result"], {"imported_entries": 1})
+        self.assertEqual(batch.value["payload"]["summary"], {"matched": 1})
+        group = batch.value["payload"]["groups"][0]
+        self.assertEqual(
+            set(group),
+            {"source_title", "records", "resolution"},
+        )
+        self.assertEqual(group["source_title"], "traceback command 是合法标题")
+        self.assertEqual(
+            group["records"],
+            [
+                {
+                    "title": "合法标题",
+                    "notes": ["traceback command 是合法备注"],
+                    "include": True,
+                }
+            ],
+        )
+        self.assertEqual(
+            group["resolution"],
+            {
+                "status": "matched",
+                "title": "合法匹配标题",
+                "tags": ["traceback 是合法标签"],
+            },
+        )

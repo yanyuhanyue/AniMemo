@@ -539,7 +539,7 @@ function createPlugin(host) {
   const pluginApi = host.api.plugin("watch-history-importer");
   return Object.freeze({
     id: "com.animemo.watch-history-importer",
-    version: "0.4.4",
+    version: "0.4.5",
     routes: [{
       path: "/plugins/watch-history-importer",
       Component: (props) => /* @__PURE__ */ jsx3(WatchHistoryImporterPage2, { ...props, host, api: pluginApi }),

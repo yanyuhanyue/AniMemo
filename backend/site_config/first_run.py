@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
+from accounts.models import UserSecurityProfile
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.sessions.models import Session
@@ -13,10 +14,7 @@ from django.db import transaction
 from django.db.models import ExpressionWrapper, F, PositiveSmallIntegerField, Q
 from django.utils import timezone
 
-from accounts.models import UserSecurityProfile
-
 from .models import InstallationState
-
 
 logger = logging.getLogger(__name__)
 
@@ -342,11 +340,25 @@ def complete_first_run_setup(*, code, username, email, password, request):
                         UserHookContext(user_id=user_id, source="first-run"),
                     )
                 except Exception:
-                    logger.exception("User creation plugin hook failed after first-run initialization")
+                    logger.warning(
+                        "first_run_post_commit_failure",
+                        extra={
+                            "animemo_stage": "first_run_user_after_created",
+                            "correlation_id": secrets.token_hex(16),
+                            "animemo_exception_class": "PostCommitTaskError",
+                        },
+                    )
                 try:
                     call_command("sync_official_plugins", verbosity=0)
                 except Exception:
-                    logger.exception("Official plugin synchronization failed after first-run initialization")
+                    logger.warning(
+                        "first_run_post_commit_failure",
+                        extra={
+                            "animemo_stage": "first_run_official_plugin_sync",
+                            "correlation_id": secrets.token_hex(16),
+                            "animemo_exception_class": "PostCommitTaskError",
+                        },
+                    )
 
             transaction.on_commit(publish_created_user_event)
     if rejection is not None:

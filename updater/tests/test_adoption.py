@@ -167,6 +167,12 @@ class InitialAdoptionTests(unittest.TestCase):
             )
             self.assertEqual(reconciled["status"], "reconciled")
             self.assertEqual(
+                set(reconciled),
+                {"id", "kind", "status", "createdAt", "updatedAt", "events"},
+            )
+            self.assertNotIn("metadata", reconciled)
+            self.assertNotIn("recovery", reconciled)
+            self.assertEqual(
                 load_instance_locator(runtime.locator_store),
                 adoption_request(target).locator,
             )

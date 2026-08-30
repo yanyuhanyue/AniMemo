@@ -1,12 +1,12 @@
+from config.api_errors import public_failure
 from django.db import IntegrityError
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from plugin_host.sdk import ColumnHookContext, run_hook
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
 from site_config.models import TagDefinition
-from plugin_host.sdk import ColumnHookContext, run_hook
 
 from .models import Column, JournalEntry, UserSettings
 from .staff_common import _tag_definition_data, _tag_definition_values
@@ -96,8 +96,11 @@ class StaffTagDefinitionListCreateView(APIView):
     def post(self, request):
         try:
             values = _tag_definition_values(request.data)
-        except ValueError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError:
+            return Response(
+                public_failure(request=request, candidate_code="invalid_tag_definition", status_code=status.HTTP_400_BAD_REQUEST),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if TagDefinition.objects.filter(name__iexact=values["name"]).exists():
             return Response({"detail": "同名标签已经存在。"}, status=status.HTTP_400_BAD_REQUEST)
         try:
@@ -122,8 +125,11 @@ class StaffTagDefinitionDetailView(APIView):
         before = _tag_definition_data(item)
         try:
             values = _tag_definition_values(request.data, partial=True)
-        except ValueError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError:
+            return Response(
+                public_failure(request=request, candidate_code="invalid_tag_definition", status_code=status.HTTP_400_BAD_REQUEST),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not values:
             return Response(before)
         if "name" in values and TagDefinition.objects.exclude(pk=item.pk).filter(name__iexact=values["name"]).exists():

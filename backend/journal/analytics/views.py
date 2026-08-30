@@ -1,3 +1,4 @@
+from config.api_errors import public_failure
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -15,9 +16,9 @@ class MyStatsView(APIView):
                 start=request.query_params.get("start"),
                 end=request.query_params.get("end"),
             )
-        except AnalyticsRangeError as error:
+        except AnalyticsRangeError:
             return Response(
-                {"code": "invalid_analytics_range", "detail": str(error)},
+                public_failure(request=request, candidate_code="invalid_analytics_range", status_code=status.HTTP_400_BAD_REQUEST),
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response(result)

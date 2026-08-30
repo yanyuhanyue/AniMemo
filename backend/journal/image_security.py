@@ -3,11 +3,10 @@ import logging
 import secrets
 import warnings
 
+from django.core.files.base import ContentFile
 from django.db import transaction
 from PIL import Image, ImageOps, UnidentifiedImageError
-from django.core.files.base import ContentFile
 from rest_framework import serializers
-
 
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
 logger = logging.getLogger(__name__)
@@ -99,11 +98,13 @@ def delete_replaced_file(previous_file, current_file):
         def delete_after_commit():
             try:
                 storage.delete(previous_name)
-            except Exception:
-                logger.exception(
-                    "Object storage cleanup failed for replaced file name=%s storage=%s",
-                    previous_name,
-                    storage.__class__.__name__,
+            except Exception as error:
+                logger.warning(
+                    "image_cleanup_failed",
+                    extra={
+                        "animemo_stage": "replaced_image_delete",
+                        "animemo_exception_class": type(error).__name__,
+                    },
                 )
 
         transaction.on_commit(delete_after_commit)
@@ -121,13 +122,13 @@ def schedule_file_delete(file_field, *, model_name, object_id):
     def delete_after_commit():
         try:
             storage.delete(name)
-        except Exception:
-            logger.exception(
-                "Object storage cleanup failed for model=%s id=%s file_name=%s storage=%s",
-                model_name,
-                object_id,
-                name,
-                storage.__class__.__name__,
+        except Exception as error:
+            logger.warning(
+                "image_cleanup_failed",
+                extra={
+                    "animemo_stage": "model_image_delete",
+                    "animemo_exception_class": type(error).__name__,
+                },
             )
 
     transaction.on_commit(delete_after_commit)

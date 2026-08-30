@@ -4,6 +4,7 @@ import json
 import re
 import unicodedata
 
+from config.api_errors import public_failure
 from django.conf import settings
 from django.db import transaction
 from rest_framework import status
@@ -11,18 +12,54 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .data_bundle import DataBundleError, export_data_bundle, import_data_bundle, preview_data_bundle
+from .data_bundle import (
+    DataBundleError,
+    export_data_bundle,
+    import_data_bundle,
+    preview_data_bundle,
+)
 from .domain_services import JournalEntryService, JournalEntryServiceError
 from .import_parsers import LimitedImportJSONParser
 from .models import JournalEntry
 from .serializers import JournalEntrySerializer
-
 
 CSV_IMPORT_FIELDS = {
     "title", "japanese_title", "airing_period", "studio", "episodes",
     "description", "poster_url", "custom_poster_url", "baike_url", "tags",
     "tag_colors", "personal_score", "watch_status", "review", "visibility",
 }
+
+
+def _data_bundle_failure(request, error):
+    if error.code == "unsupported_import_schema":
+        candidate_code = "unsupported_import_schema"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "bundle_import_requires_empty_journal":
+        candidate_code = "bundle_import_requires_empty_journal"
+        status_code = status.HTTP_409_CONFLICT
+    elif error.code == "invalid_watch_history":
+        candidate_code = "invalid_watch_history"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "invalid_watched_on":
+        candidate_code = "invalid_watched_on"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "invalid_episode_range":
+        candidate_code = "invalid_episode_range"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "invalid_notes":
+        candidate_code = "invalid_notes"
+        status_code = status.HTTP_400_BAD_REQUEST
+    else:
+        candidate_code = "invalid_data_bundle"
+        status_code = status.HTTP_400_BAD_REQUEST
+    return Response(
+        public_failure(
+            request=request,
+            candidate_code=candidate_code,
+            status_code=status_code,
+        ),
+        status=status_code,
+    )
 
 
 class ExportEntriesView(APIView):
@@ -64,12 +101,46 @@ def _normalize_import_record(raw):
     }
 
 
-def _import_error_text(errors):
-    parts = []
-    for field, messages in errors.items():
-        values = messages if isinstance(messages, list) else [messages]
-        parts.append(f"{field}: {'、'.join(str(message) for message in values)}")
-    return "；".join(parts) or "记录格式无效"
+def _partial_import_failure(request):
+    return public_failure(
+        request=request,
+        candidate_code="import_item_invalid",
+        status_code=status.HTTP_200_OK,
+    )
+
+
+def _public_data_bundle_preview(request, result):
+    projected = dict(result)
+    projected_items = []
+    for source in result.get("items", []):
+        item = {
+            key: value
+            for key, value in source.items()
+            if key not in {"error_code", "reason"}
+        }
+        candidate_code = source.get("error_code")
+        if candidate_code:
+            item["error"] = public_failure(
+                request=request,
+                candidate_code=candidate_code,
+                status_code=status.HTTP_200_OK,
+            )
+        elif source.get("reason"):
+            item["reason"] = source["reason"]
+        projected_items.append(item)
+    projected["items"] = projected_items
+    projected["errors"] = [
+        {
+            "error": public_failure(
+                request=request,
+                candidate_code=source.get("code"),
+                status_code=status.HTTP_200_OK,
+            )
+        }
+        for source in result.get("errors", [])
+        if isinstance(source, dict)
+    ]
+    return projected
 
 
 def _contains_null(value):
@@ -183,9 +254,9 @@ class ImportEntriesView(APIView):
         for index, raw in enumerate(records):
             normalized = _normalize_import_record(raw)
             if normalized is None:
-                message = "第 %s 行不是对象记录" % (index + 1)
-                errors.append({"row": index + 1, "errors": {"record": [message]}})
-                items.append({"row": index + 1, "title": "", "status": "invalid", "reason": message})
+                failure = _partial_import_failure(request)
+                errors.append({"row": index + 1, "error": failure})
+                items.append({"row": index + 1, "title": "", "status": "invalid", "error": failure})
                 continue
             identity = _import_identity_values(normalized)
             title = str(normalized.get("title") or "")
@@ -194,9 +265,9 @@ class ImportEntriesView(APIView):
                 continue
             serializer = JournalEntrySerializer(data=normalized, context={"request": request})
             if not serializer.is_valid():
-                reason = _import_error_text(serializer.errors)
-                errors.append({"row": index + 1, "errors": serializer.errors})
-                items.append({"row": index + 1, "title": title, "status": "invalid", "reason": reason})
+                failure = _partial_import_failure(request)
+                errors.append({"row": index + 1, "error": failure})
+                items.append({"row": index + 1, "title": title, "status": "invalid", "error": failure})
                 continue
             ready_rows.append(normalized)
             seen_keys.update(identity)
@@ -213,8 +284,11 @@ class ImportEntriesView(APIView):
     def post(self, request):
         try:
             payload_kind, payload = self._read_payload(request)
-        except (ValueError, UnicodeDecodeError, OSError, json.JSONDecodeError) as error:
-            return Response({"detail": str(error) or "导入文件无法读取。"}, status=status.HTTP_400_BAD_REQUEST)
+        except (ValueError, UnicodeDecodeError, OSError, json.JSONDecodeError):
+            return Response(
+                public_failure(request=request, candidate_code="invalid_import_file", status_code=status.HTTP_400_BAD_REQUEST),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         preview_value = request.query_params.get("preview", "")
         if not preview_value and hasattr(request.data, "get"):
@@ -223,15 +297,15 @@ class ImportEntriesView(APIView):
         if payload_kind == "bundle":
             try:
                 result = (
-                    preview_data_bundle(user=request.user, payload=payload)
+                    _public_data_bundle_preview(
+                        request,
+                        preview_data_bundle(user=request.user, payload=payload),
+                    )
                     if is_preview
                     else import_data_bundle(user=request.user, payload=payload)
                 )
             except DataBundleError as error:
-                response = {"code": error.code, "detail": error.detail}
-                if error.errors is not None:
-                    response["errors"] = error.errors
-                return Response(response, status=status.HTTP_400_BAD_REQUEST)
+                return _data_bundle_failure(request, error)
             return Response(result, status=status.HTTP_200_OK if is_preview else status.HTTP_201_CREATED)
 
         prepared = self._prepare(request, payload)
@@ -247,7 +321,7 @@ class ImportEntriesView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         created = 0
-        commit_errors = list(prepared["errors"])
+        commit_failed = False
         try:
             with transaction.atomic():
                 service = JournalEntryService(request.user)
@@ -261,25 +335,22 @@ class ImportEntriesView(APIView):
                             allowed_fields=set(normalized),
                         )
                     except JournalEntryServiceError as error:
-                        raise ValueError(
-                            json.dumps(
-                                {"row": index, "errors": {"record": [error.detail]}},
-                                ensure_ascii=False,
-                            )
-                        ) from error
+                        raise RuntimeError("IMPORT_COMMIT_FAILED") from error
                     created += 1
-        except ValueError as error:
+        except RuntimeError:
             created = 0
-            try:
-                commit_errors.append(json.loads(str(error)))
-            except json.JSONDecodeError:
-                commit_errors.append({"row": 0, "errors": {"record": ["导入提交失败。"]}})
+            commit_failed = True
+        if commit_failed:
+            return Response(
+                public_failure(request=request, candidate_code="import_commit_failed", status_code=status.HTTP_400_BAD_REQUEST),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         response_data = {
             "created": created,
             "total": prepared["total"],
             "skipped_duplicates": prepared["skipped_duplicates"],
-            "errors": commit_errors,
+            "errors": [],
         }
-        response_status = status.HTTP_201_CREATED if created else (status.HTTP_400_BAD_REQUEST if commit_errors else status.HTTP_200_OK)
+        response_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return Response(response_data, status=response_status)
 

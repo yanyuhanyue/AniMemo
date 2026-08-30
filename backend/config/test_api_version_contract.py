@@ -3,10 +3,9 @@ import re
 
 from django.test import Client, SimpleTestCase
 from django.urls import resolve, reverse
-
-from config.urls import urlpatterns as root_urlpatterns
 from plugin_host.runtime.dispatch import PluginDispatch
 
+from config.urls import urlpatterns as root_urlpatterns
 
 UUID_SAMPLE = "12345678-1234-5678-1234-567812345678"
 
@@ -64,7 +63,21 @@ class ApiVersionContractTests(SimpleTestCase):
 
         self.assertEqual(canonical.status_code, 401)
         self.assertEqual(legacy.status_code, canonical.status_code)
-        self.assertEqual(legacy.json(), canonical.json())
+        canonical_failure = canonical.json()
+        legacy_failure = legacy.json()
+        canonical_correlation = canonical_failure.pop("correlation_id")
+        legacy_correlation = legacy_failure.pop("correlation_id")
+        self.assertRegex(canonical_correlation, r"^[0-9a-f]{32}$")
+        self.assertRegex(legacy_correlation, r"^[0-9a-f]{32}$")
+        self.assertEqual(
+            canonical["X-AniMemo-Correlation-ID"],
+            canonical_correlation,
+        )
+        self.assertEqual(
+            legacy["X-AniMemo-Correlation-ID"],
+            legacy_correlation,
+        )
+        self.assertEqual(legacy_failure, canonical_failure)
 
     def test_dynamic_plugin_dispatch_keeps_a_v1_and_legacy_entrypoint(self):
         canonical = resolve("/api/v1/plugins/sample-plugin/status/")

@@ -2,6 +2,7 @@ import json
 import re
 import time
 
+from config.api_errors import public_failure
 from django.conf import settings
 from django.db import close_old_connections
 from django.utils import timezone
@@ -18,9 +19,11 @@ from .pairing import (
     consume_pairing_code,
     create_pairing_code,
 )
-from .serializers import ExternalIdentityBindingSerializer, IntegrationConnectionSerializer
+from .serializers import (
+    ExternalIdentityBindingSerializer,
+    IntegrationConnectionSerializer,
+)
 from .services import IntegrationDispatchError, dispatch_integration_action
-
 
 PLATFORM_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -36,8 +39,43 @@ INTEGRATION_HMAC_PARAMETERS = [
 ]
 
 
-def _error(code, detail, status_code):
-    return Response({"code": code, "detail": detail}, status=status_code)
+def _failure(request, candidate_code, status_code):
+    return Response(
+        public_failure(request=request, candidate_code=candidate_code, status_code=status_code),
+        status=status_code,
+    )
+
+
+def _dispatch_failure(request, error):
+    if error.code == "request_too_large":
+        return _failure(request, "request_too_large", status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+    if error.code == "invalid_content_length":
+        return _failure(request, "invalid_content_length", status.HTTP_400_BAD_REQUEST)
+    if error.code == "invalid_json":
+        return _failure(request, "invalid_json", status.HTTP_400_BAD_REQUEST)
+    if error.code == "invalid_payload":
+        return _failure(request, "invalid_payload", status.HTTP_400_BAD_REQUEST)
+    if error.code == "identity_not_bound":
+        return _failure(request, "identity_not_bound", status.HTTP_403_FORBIDDEN)
+    if error.code == "plugin_not_installed":
+        return _failure(request, "permission_denied", status.HTTP_403_FORBIDDEN)
+    if error.code == "invalid_action":
+        return _failure(request, "invalid_action", status.HTTP_400_BAD_REQUEST)
+    if error.code == "invalid_action_response":
+        return _failure(request, "invalid_action_response", status.HTTP_500_INTERNAL_SERVER_ERROR)
+    if error.code == "action_response_too_large":
+        return _failure(request, "integration_action_failed", status.HTTP_502_BAD_GATEWAY)
+    if error.code == "request_id_conflict":
+        return _failure(request, "request_id_conflict", status.HTTP_409_CONFLICT)
+    if error.code == "request_in_progress":
+        return _failure(request, "action_in_progress", status.HTTP_409_CONFLICT)
+    if error.code == "plugin_unavailable":
+        return _failure(request, "plugin_unavailable", status.HTTP_503_SERVICE_UNAVAILABLE)
+    if error.code == "action_not_declared":
+        return _failure(request, "action_not_declared", status.HTTP_404_NOT_FOUND)
+    if error.code == "action_not_registered":
+        return _failure(request, "action_not_registered", status.HTTP_503_SERVICE_UNAVAILABLE)
+    return _failure(request, "integration_action_failed", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 def _parse_json_object(request, max_bytes):
@@ -87,11 +125,11 @@ class PairingCodesView(APIView):
             connection_id = _clean_string(payload, "connection_id", maximum=64)
             connection = IntegrationConnection.objects.get(pk=connection_id, enabled=True)
         except IntegrationConnection.DoesNotExist:
-            return _error("connection_not_found", "集成连接不存在或已停用。", 404)
+            return _failure(request, "connection_not_found", status.HTTP_404_NOT_FOUND)
         except (ValueError, IntegrationDispatchError) as error:
             if isinstance(error, IntegrationDispatchError):
-                return _error(error.code, error.detail, error.status_code)
-            return _error("invalid_connection", "connection_id 无效。", 400)
+                return _dispatch_failure(request, error)
+            return _failure(request, "invalid_connection", status.HTTP_400_BAD_REQUEST)
         row, plaintext = create_pairing_code(connection, request.user)
         return Response(
             {
@@ -113,7 +151,7 @@ class BindingDetailView(APIView):
     def delete(self, request, binding_id):
         deleted, _ = ExternalIdentityBinding.objects.filter(pk=binding_id, user=request.user).delete()
         if not deleted:
-            return _error("binding_not_found", "绑定不存在。", 404)
+            return _failure(request, "binding_not_found", status.HTTP_404_NOT_FOUND)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -149,12 +187,12 @@ class PairConsumeView(HMACAPIView):
                 external_user_id,
                 display_name.strip(),
             )
-        except PairingCodeInvalid as error:
-            return _error(error.code, str(error), 400)
-        except IdentityAlreadyBound as error:
-            return _error(error.code, str(error), 409)
+        except PairingCodeInvalid:
+            return _failure(request, "pairing_code_invalid", status.HTTP_400_BAD_REQUEST)
+        except IdentityAlreadyBound:
+            return _failure(request, "identity_already_bound", status.HTTP_409_CONFLICT)
         except IntegrationDispatchError as error:
-            return _error(error.code, error.detail, error.status_code)
+            return _dispatch_failure(request, error)
         return Response(
             {
                 "binding_id": binding.pk,
@@ -192,9 +230,9 @@ class ActionsView(HMACAPIView):
             }
             if not isinstance(envelope["payload"], dict):
                 raise IntegrationDispatchError("invalid_payload", "payload 必须是 JSON 对象。", 400)
-            response_payload, response_status, replayed = dispatch_integration_action(request.auth, envelope)
+            response_payload, response_status, replayed = dispatch_integration_action(request, request.auth, envelope)
         except IntegrationDispatchError as error:
-            return _error(error.code, error.detail, error.status_code)
+            return _dispatch_failure(request, error)
         response = Response(response_payload, status=response_status)
         response["X-AniMemo-Idempotent-Replay"] = "true" if replayed else "false"
         return response
@@ -213,10 +251,10 @@ class EventsView(HMACAPIView):
                 )
             )
         except (TypeError, ValueError):
-            return _error("invalid_query", "after、limit 和 wait 必须是整数。", 400)
+            return _failure(request, "invalid_query", status.HTTP_400_BAD_REQUEST)
         maximum_wait = int(getattr(settings, "INTEGRATION_EVENT_WAIT_MAX_SECONDS", 25))
         if after < 0 or not 1 <= limit <= 100 or not 0 <= wait <= maximum_wait:
-            return _error("invalid_query", "after、limit 或 wait 超出允许范围。", 400)
+            return _failure(request, "invalid_query", status.HTTP_400_BAD_REQUEST)
 
         deadline = time.monotonic() + wait
         rows = []
@@ -268,7 +306,7 @@ class EventsAckView(HMACAPIView):
             ):
                 raise IntegrationDispatchError("invalid_request", "event_ids 无效。", 400)
         except IntegrationDispatchError as error:
-            return _error(error.code, error.detail, error.status_code)
+            return _dispatch_failure(request, error)
         now = timezone.now()
         acked = IntegrationEvent.objects.filter(
             connection=request.auth,

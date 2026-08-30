@@ -1,7 +1,15 @@
+import secrets
+
 from django.core.management.base import BaseCommand, CommandError
 
-from site_config.first_run import FirstRunBootstrapError, provision_first_run_setup
-from site_config.models import InstallationState
+from site_config.first_run import provision_first_run_setup
+
+
+def _command_failure():
+    return CommandError(
+        "first_run_provision_failed "
+        f"correlation_id={secrets.token_hex(16)}"
+    )
 
 
 class Command(BaseCommand):
@@ -9,9 +17,12 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         try:
-            provisioned = provision_first_run_setup()
-        except (FirstRunBootstrapError, InstallationState.DoesNotExist) as error:
-            raise CommandError(str(error)) from error
+            return self._handle(*args, **options)
+        except Exception:
+            raise _command_failure() from None
+
+    def _handle(self, *args, **options):
+        provisioned = provision_first_run_setup()
         if provisioned is None:
             self.stdout.write("Installation is already initialized; no setup code was issued.")
             return
