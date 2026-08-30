@@ -9,10 +9,10 @@ import tempfile
 import unittest
 import urllib.error
 import zipfile
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from release.materials import extract_qualification_artifact
 from release.candidate import canonical_json_bytes, sha256_bytes
 from release.metadata_freshness import (
     ARTIFACT_FILES,
@@ -271,8 +271,8 @@ class MetadataFreshnessTests(unittest.TestCase):
         for name, value in files.items():
             (self.qualification / name).write_bytes(value)
         aggregate = {
-            "schema": "animemo.prepublication-candidate-acceptance-receipt/v2",
-            "version": 2,
+            "schema": "animemo.prepublication-candidate-acceptance-receipt/v3",
+            "version": 3,
             "candidate_input_digest": "sha256:" + "1" * 64,
             "verified_candidate_digest": "sha256:" + "2" * 64,
             "qualification_run_id": QUALIFICATION_RUN_ID,
@@ -288,10 +288,19 @@ class MetadataFreshnessTests(unittest.TestCase):
             "r2_origin_poststate_observation_id": (
                 "87654321-4321-4765-8abc-876543210fed"
             ),
-            "profile_receipts": {
-                "fresh_base": "sha256:" + "3" * 64,
-                "docker_base": "sha256:" + "4" * 64,
-                "runtime_base_offline": "sha256:" + "5" * 64,
+            "profile_results": {
+                "fresh_base": {
+                    "status": "PASS", "failure_code": None,
+                    "receipt_digest": "sha256:" + "3" * 64,
+                },
+                "docker_base": {
+                    "status": "PASS", "failure_code": None,
+                    "receipt_digest": "sha256:" + "4" * 64,
+                },
+                "runtime_base_offline": {
+                    "status": "PASS", "failure_code": None,
+                    "receipt_digest": "sha256:" + "5" * 64,
+                },
             },
             "all_profiles_pass": True,
             "candidate_prestate": {
@@ -389,6 +398,31 @@ class MetadataFreshnessTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["snapshotIntervalSeconds"], 60)
+
+    def test_valid_overall_fail_aggregate_cannot_start_freshness(self) -> None:
+        receipt = json.loads(self.candidate_receipt.read_bytes())
+        receipt["profile_results"]["fresh_base"] = {
+            "status": "FAIL",
+            "failure_code": "CANDIDATE_PROFILE_REPORTED_FAILURE",
+            "receipt_digest": "sha256:" + "8" * 64,
+        }
+        receipt["all_profiles_pass"] = False
+        receipt["result"] = "FAIL"
+        unsigned = dict(receipt)
+        unsigned.pop("receipt_digest")
+        receipt["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
+        self.candidate_receipt.write_bytes(canonical_json_bytes(receipt))
+        digest = sha256_bytes(self.candidate_receipt.read_bytes())
+        self.identity = replace(
+            self.identity,
+            candidate_acceptance_receipt_sha256=digest,
+        )
+
+        with self.assertRaisesRegex(
+            MetadataFreshnessError,
+            "authority binding differs",
+        ):
+            self._collect()
 
     def test_interval_shorter_than_sixty_seconds_fails(self) -> None:
         with self.assertRaisesRegex(MetadataFreshnessError, "shorter than 60"):

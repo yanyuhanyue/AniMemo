@@ -11,11 +11,13 @@ import argparse
 import base64
 import ctypes
 import hashlib
+import ipaddress
 import json
 import locale
 import ntpath
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -30,10 +32,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import uuid4
 
 from release.candidate import (
-    CandidateContractError,
     VERIFIED_CANDIDATE_ROOT,
+    CandidateContractError,
     aggregate_receipt_digest,
     canonical_json_bytes,
     load_verified_candidate,
@@ -51,6 +54,11 @@ from release.r2_prestate import (
 )
 
 PROFILES = ("FRESH_BASE", "DOCKER_BASE", "RUNTIME_BASE_OFFLINE")
+PROFILE_RESULT_KEYS = {
+    "FRESH_BASE": "fresh_base",
+    "DOCKER_BASE": "docker_base",
+    "RUNTIME_BASE_OFFLINE": "runtime_base_offline",
+}
 INSTALLER_PROFILES = {
     "FRESH_BASE": "ONLINE_FRESH",
     "DOCKER_BASE": "ONLINE_EXISTING_DOCKER",
@@ -67,14 +75,12 @@ VMRUN = Path("E:/VMware/vmrun.exe")
 ROBOCOPY = Path("C:/Windows/System32/robocopy.exe")
 SSH = Path("C:/Windows/System32/OpenSSH/ssh.exe")
 SCP = Path("C:/Windows/System32/OpenSSH/scp.exe")
-SSH_ALIAS = "animemo-test"
+SSH_KEYGEN = Path("C:/Windows/System32/OpenSSH/ssh-keygen.exe")
 SSH_HOST = "192.168.64.10"
 SSH_USER = "animemo"
-SSH_HOST_KEY_ALIAS = SSH_ALIAS
-VM_WORK_ROOT = Path("E:/番剧记录/.animemo-vm-work/rc14-candidate-acceptance")
-OPENSSH_SESSION_ROOT = VM_WORK_ROOT / "provider-session"
+VM_WORK_PARENT = Path("E:/番剧记录/.animemo-vm-work/candidate-acceptance")
+OPENSSH_SESSION_ROOT = Path("E:/番剧记录/.animemo-vm-provider-authority")
 OPENSSH_IDENTITY = OPENSSH_SESSION_ROOT / "id_ed25519"
-OPENSSH_KNOWN_HOSTS = OPENSSH_SESSION_ROOT / "known_hosts"
 SOURCE_VM_HASH_FILES = (
     "Ubuntu 64 位-000001.vmdk",
     "Ubuntu 64 位-000002.vmdk",
@@ -91,13 +97,20 @@ SNAPSHOT_FILES = {
     "DOCKER_BASE": "Ubuntu 64 位-Snapshot4.vmsn",
     "RUNTIME_BASE_OFFLINE": "Ubuntu 64 位-Snapshot6.vmsn",
 }
-PUBLIC_ORIGIN = "https://candidate.rc14.invalid"
+SNAPSHOT_DISK_FILES = {
+    "FRESH_BASE": "Ubuntu 64 位.vmdk",
+    "DOCKER_BASE": "Ubuntu 64 位-000003.vmdk",
+    "RUNTIME_BASE_OFFLINE": "Ubuntu 64 位-000001.vmdk",
+}
+PUBLIC_ORIGIN = "https://candidate.invalid"
 TARGET_VERSION = "v1.1.0"
 REPOSITORY = "yanyuhanyue/AniMemo"
 PUBLIC_MIRROR_ORIGIN = "https://download.animemo.cc"
 GUEST_CANDIDATE_ROOT = VERIFIED_CANDIDATE_ROOT.as_posix()
 GUEST_PROFILE_RUNNER = "/usr/local/lib/animemo-candidate/candidate_profile_runner.py"
-GUEST_RECEIPT = "/var/lib/animemo/candidate-acceptance/profile-receipt.json"
+GUEST_RECEIPT = (
+    "/var/lib/animemo/candidate-acceptance/profile-receipt-draft.json"
+)
 GUEST_SUDO_PASSWORD_ENV = "ANIMEMO_CANDIDATE_GUEST_SUDO_PASSWORD"  # noqa: S105
 MAX_PUBLIC_RESPONSE_BYTES = 1024 * 1024
 MAX_VM_CONFIGURATION_BYTES = 4 * 1024 * 1024
@@ -140,6 +153,9 @@ EXPECTED_SSH_SHA256 = (
 EXPECTED_SCP_SHA256 = (
     "sha256:63b7118d8e1a8a84398cf4ce1584dc6b146606092fe9c68bbaf110bbdcfb480a"
 )
+EXPECTED_SSH_KEYGEN_SHA256 = (
+    "sha256:44c6809b7bbc917f1310ba92857f983e2788e9b0015aa7896fa0362eddb6338b"
+)
 EXPECTED_OPENSSH_PE_MACHINE = 0x8664
 OPENSSH_REQUIRED_OPTIONS = (
     "BatchMode=yes",
@@ -154,12 +170,9 @@ OPENSSH_REQUIRED_OPTIONS = (
     "KbdInteractiveAuthentication=no",
     "PreferredAuthentications=publickey",
     "RequestTTY=no",
-    "StrictHostKeyChecking=yes",
-    f"UserKnownHostsFile={OPENSSH_KNOWN_HOSTS}",
     "GlobalKnownHostsFile=none",
-    f"IdentityFile={OPENSSH_IDENTITY}",
-    f"HostKeyAlias={SSH_HOST_KEY_ALIAS}",
     f"User={SSH_USER}",
+    "HashKnownHosts=no",
 )
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -664,11 +677,45 @@ class WindowsBinaryIdentity:
 
 
 def _hash_regular_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise CandidateHarnessError(
+            "CANDIDATE_VM_FILE_IDENTITY_UNAVAILABLE"
+        ) from error
+    if (
+        path.is_symlink()
+        or bool(getattr(path, "is_junction", lambda: False)())
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size < 1
+    ):
+        raise CandidateHarnessError("CANDIDATE_VM_FILE_IDENTITY_UNAVAILABLE")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise CandidateHarnessError(
+            "CANDIDATE_VM_FILE_IDENTITY_UNAVAILABLE"
+        ) from error
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or _file_identity(opened) != _file_identity(before)
+        ):
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_FILE_IDENTITY_UNAVAILABLE"
+            )
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
             digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+        if _file_identity(os.fstat(descriptor)) != _file_identity(opened):
+            raise CandidateHarnessError("CANDIDATE_VM_FILE_CHANGED_DURING_HASH")
+        return "sha256:" + digest.hexdigest()
+    finally:
+        os.close(descriptor)
 
 
 def _canonical_windows_path(value: str) -> str:
@@ -906,6 +953,8 @@ def _hash_original_vm_file(path: Path) -> str:
 class SourceVmEvidence:
     vm_identity: str
     snapshot_identities: Mapping[str, str]
+    snapshot_disk_graph_identities: Mapping[str, str]
+    source_disk_graph_identity: str
     original_hashes: Mapping[str, str]
 
 
@@ -918,6 +967,7 @@ class ProviderReadinessReceipt:
     config_authority: str
     ssh_digest: str
     scp_digest: str
+    ssh_keygen_digest: str
     architecture: str
     result: str
     receipt_digest: str
@@ -928,6 +978,7 @@ class ProviderReadinessReceipt:
         *,
         ssh_digest: str,
         scp_digest: str,
+        ssh_keygen_digest: str = EXPECTED_SSH_KEYGEN_SHA256,
     ) -> ProviderReadinessReceipt:
         body = {
             "schema": "animemo.candidate-vm-provider-readiness/v1",
@@ -937,6 +988,7 @@ class ProviderReadinessReceipt:
             "configAuthority": "PROVIDER_OWNED_CLOSED_OPENSSH",
             "sshDigest": ssh_digest,
             "scpDigest": scp_digest,
+            "sshKeygenDigest": ssh_keygen_digest,
             "architecture": "AMD64",
             "result": "PASS",
         }
@@ -948,6 +1000,7 @@ class ProviderReadinessReceipt:
             config_authority=body["configAuthority"],
             ssh_digest=body["sshDigest"],
             scp_digest=body["scpDigest"],
+            ssh_keygen_digest=body["sshKeygenDigest"],
             architecture=body["architecture"],
             result=body["result"],
             receipt_digest=sha256_bytes(canonical_json_bytes(body)),
@@ -962,6 +1015,7 @@ class ProviderReadinessReceipt:
             "configAuthority": self.config_authority,
             "sshDigest": self.ssh_digest,
             "scpDigest": self.scp_digest,
+            "sshKeygenDigest": self.ssh_keygen_digest,
             "architecture": self.architecture,
             "result": self.result,
             "receiptDigest": self.receipt_digest,
@@ -974,8 +1028,12 @@ class CandidateProfilePlan:
     installer_profile: str
     snapshot_name: str
     snapshot_identity: str
+    snapshot_disk_graph_identity: str
     clone_identity: str
     provider_readiness_receipt_digest: str
+    session_id: str
+    connection_nonce: str
+    ssh_host_key_alias: str
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -983,7 +1041,11 @@ class CandidateProfilePlan:
             "installerProfile": self.installer_profile,
             "snapshotName": self.snapshot_name,
             "snapshotIdentity": self.snapshot_identity,
+            "snapshotDiskGraphIdentity": self.snapshot_disk_graph_identity,
             "cloneIdentity": self.clone_identity,
+            "sessionId": self.session_id,
+            "connectionNonce": self.connection_nonce,
+            "sshHostKeyAlias": self.ssh_host_key_alias,
         }
 
 
@@ -997,9 +1059,11 @@ class CandidateHarnessPlan:
     candidate_version: str
     source_vm_identity: str
     source_vm_digest: str
+    source_disk_graph_identity: str
     original_vm_hashes: Mapping[str, str]
     profiles: tuple[CandidateProfilePlan, ...]
     provider_readiness_receipt_digest: str
+    session_id: str
     plan_digest: str
 
     def identity_body(self) -> dict[str, object]:
@@ -1013,8 +1077,10 @@ class CandidateHarnessPlan:
             "sourceSha": self.source_sha,
             "sourceTree": self.source_tree,
             "candidateVersion": self.candidate_version,
+            "sessionId": self.session_id,
             "sourceVmIdentity": self.source_vm_identity,
             "sourceVmDigest": self.source_vm_digest,
+            "sourceDiskGraphIdentity": self.source_disk_graph_identity,
             "originalVmHashes": dict(sorted(self.original_vm_hashes.items())),
             "profiles": [profile.as_dict() for profile in self.profiles],
             "r2OriginProofRequiredBeforeClone": True,
@@ -1024,6 +1090,291 @@ class CandidateHarnessPlan:
 
     def as_dict(self) -> dict[str, object]:
         return {**self.identity_body(), "planDigest": self.plan_digest}
+
+
+@dataclass(frozen=True)
+class ProfileConnectionAuthority:
+    """Plan-derived, single-profile resource and connection authority."""
+
+    session_root: Path
+    profile_root: Path
+    clone_root: Path
+    clone_vmx: Path
+    ssh_root: Path
+    identity_file: Path
+    known_hosts_file: Path
+    quarantine_root: Path
+    host_key_alias: str
+    connection_nonce: str
+    clone_identity: str
+
+
+@dataclass(frozen=True)
+class CloneRuntimeIdentity:
+    clone_root: Path
+    clone_vmx: Path
+    vmx_digest: str
+    disk_graph_digest: str
+    snapshot_name: str
+    snapshot_identity: str
+    vm_uuid: str
+    mac_address: str
+    expected_ip: str
+
+
+@dataclass(frozen=True)
+class GuestConnectionObservation:
+    machine_id: str
+    boot_id: str
+    mac_addresses: tuple[str, ...]
+    nonce: str
+    host_key_digest: str
+
+
+@dataclass(frozen=True)
+class VerifiedCloneConnection:
+    authority: ProfileConnectionAuthority
+    runtime: CloneRuntimeIdentity
+    guest: GuestConnectionObservation
+
+
+@dataclass(frozen=True)
+class ProfileContinuationReceipt:
+    profile: str
+    session_id: str
+    original_vm_hashes: Mapping[str, str]
+    active_profile_root_count: int
+    session_private_key_count: int
+    known_hosts_file_count: int
+    running_vm_count: int
+    quarantine_present: bool
+    continuation_safe: bool
+    receipt_digest: str
+
+    def identity_body(self) -> dict[str, object]:
+        return {
+            "schema": "animemo.candidate-profile-continuation-receipt/v1",
+            "version": 1,
+            "profile": self.profile,
+            "sessionId": self.session_id,
+            "originalVmHashes": dict(sorted(self.original_vm_hashes.items())),
+            "activeProfileRootCount": self.active_profile_root_count,
+            "sessionPrivateKeyCount": self.session_private_key_count,
+            "knownHostsFileCount": self.known_hosts_file_count,
+            "runningVmCount": self.running_vm_count,
+            "quarantinePresent": self.quarantine_present,
+            "continuationSafe": self.continuation_safe,
+        }
+
+    @classmethod
+    def issue(
+        cls,
+        *,
+        profile: str,
+        session_id: str,
+        original_vm_hashes: Mapping[str, str],
+        active_profile_root_count: int,
+        session_private_key_count: int,
+        known_hosts_file_count: int,
+        running_vm_count: int,
+        quarantine_present: bool,
+        continuation_safe: bool,
+    ) -> ProfileContinuationReceipt:
+        receipt = cls(
+            profile=profile,
+            session_id=session_id,
+            original_vm_hashes=dict(original_vm_hashes),
+            active_profile_root_count=active_profile_root_count,
+            session_private_key_count=session_private_key_count,
+            known_hosts_file_count=known_hosts_file_count,
+            running_vm_count=running_vm_count,
+            quarantine_present=quarantine_present,
+            continuation_safe=continuation_safe,
+            receipt_digest="",
+        )
+        return cls(
+            **{
+                **receipt.__dict__,
+                "receipt_digest": sha256_bytes(
+                    canonical_json_bytes(receipt.identity_body())
+                ),
+            }
+        )
+
+
+class CandidateProfileExecutionError(CandidateHarnessError):
+    """A profile-local failure with provider-proven safe continuation."""
+
+    def __init__(
+        self,
+        code: str,
+        continuation_receipt: ProfileContinuationReceipt,
+    ) -> None:
+        super().__init__(code)
+        self.continuation_receipt = continuation_receipt
+
+
+@dataclass(frozen=True)
+class ProviderSessionLease:
+    path: Path
+    file_identity: tuple[int, int, int, int]
+
+
+def connection_challenge(connection_nonce: str, phase: str) -> str:
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", connection_nonce) is None
+        or phase != "guestinfo"
+    ):
+        raise CandidateHarnessError("CANDIDATE_VM_CONNECTION_CHALLENGE_INVALID")
+    return sha256_bytes(f"{connection_nonce}|{phase}".encode("ascii")).removeprefix(
+        "sha256:"
+    )
+
+
+def verify_bootstrap_clone_identity(
+    *,
+    authority: ProfileConnectionAuthority,
+    plan: CandidateProfilePlan,
+    runtime: CloneRuntimeIdentity,
+    bootstrap: GuestConnectionObservation,
+    confirmation: GuestConnectionObservation,
+    known_hosts_was_absent: bool,
+    competing_vmx_paths: frozenset[str],
+) -> VerifiedCloneConnection:
+    """Read-only gate that must pass before any privileged guest mutation."""
+
+    if competing_vmx_paths:
+        raise CandidateHarnessError("CANDIDATE_VM_CONNECTION_NAMESPACE_COLLISION")
+    if not known_hosts_was_absent:
+        raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_RESIDUAL")
+    if (
+        type(authority) is not ProfileConnectionAuthority
+        or type(plan) is not CandidateProfilePlan
+        or type(runtime) is not CloneRuntimeIdentity
+        or type(bootstrap) is not GuestConnectionObservation
+        or type(confirmation) is not GuestConnectionObservation
+        or authority.clone_identity != plan.clone_identity
+        or authority.clone_root.resolve(strict=False)
+        != runtime.clone_root.resolve(strict=False)
+        or authority.clone_vmx.resolve(strict=False)
+        != runtime.clone_vmx.resolve(strict=False)
+        or runtime.snapshot_name != plan.snapshot_name
+        or runtime.snapshot_identity != plan.snapshot_identity
+        or runtime.expected_ip != SSH_HOST
+        or runtime.mac_address not in bootstrap.mac_addresses
+        or runtime.mac_address not in confirmation.mac_addresses
+        or bootstrap.machine_id != confirmation.machine_id
+        or bootstrap.boot_id != confirmation.boot_id
+        or bootstrap.mac_addresses != confirmation.mac_addresses
+        or bootstrap.host_key_digest != confirmation.host_key_digest
+        or bootstrap.nonce
+        != connection_challenge(plan.connection_nonce, "guestinfo")
+        or confirmation.nonce
+        != connection_challenge(plan.connection_nonce, "guestinfo")
+        or re.fullmatch(r"[0-9a-f]{32}", bootstrap.machine_id) is None
+        or re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            bootstrap.boot_id,
+        )
+        is None
+        or not _DIGEST.fullmatch(runtime.vmx_digest)
+        or not _DIGEST.fullmatch(runtime.disk_graph_digest)
+        or not _DIGEST.fullmatch(bootstrap.host_key_digest)
+    ):
+        raise CandidateHarnessError("CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH")
+    return VerifiedCloneConnection(
+        authority=authority,
+        runtime=runtime,
+        guest=bootstrap,
+    )
+
+
+def verify_clone_connection_identity(
+    *,
+    authority: ProfileConnectionAuthority,
+    plan: CandidateProfilePlan,
+    runtime: CloneRuntimeIdentity,
+    bootstrap: GuestConnectionObservation,
+    verified_guest: GuestConnectionObservation,
+    known_hosts_was_absent: bool,
+    competing_vmx_paths: frozenset[str],
+    prior_host_key_digests: frozenset[str],
+) -> VerifiedCloneConnection:
+    """Close the plan-to-guest identity chain before Candidate bytes move."""
+
+    digest_fields = (
+        runtime.vmx_digest,
+        runtime.disk_graph_digest,
+        runtime.snapshot_identity,
+        bootstrap.host_key_digest,
+        verified_guest.host_key_digest,
+    )
+    guest_shape_valid = all(
+        (
+            re.fullmatch(r"[0-9a-f]{32}", observation.machine_id) is not None
+            and re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                observation.boot_id,
+            )
+            is not None
+            and observation.mac_addresses
+            and all(
+                re.fullmatch(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}", value)
+                is not None
+                for value in observation.mac_addresses
+            )
+            and re.fullmatch(r"[0-9a-f]{64}", observation.nonce) is not None
+        )
+        for observation in (bootstrap, verified_guest)
+    )
+    if (
+        type(authority) is not ProfileConnectionAuthority
+        or type(plan) is not CandidateProfilePlan
+        or type(runtime) is not CloneRuntimeIdentity
+        or type(bootstrap) is not GuestConnectionObservation
+        or type(verified_guest) is not GuestConnectionObservation
+        or type(known_hosts_was_absent) is not bool
+        or any(not _DIGEST.fullmatch(value) for value in digest_fields)
+        or not guest_shape_valid
+        or authority.clone_identity != plan.clone_identity
+        or authority.clone_root.resolve(strict=False)
+        != runtime.clone_root.resolve(strict=False)
+        or authority.clone_vmx.resolve(strict=False)
+        != runtime.clone_vmx.resolve(strict=False)
+        or runtime.snapshot_name != plan.snapshot_name
+        or runtime.snapshot_identity != plan.snapshot_identity
+        or re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            runtime.vm_uuid,
+        )
+        is None
+        or re.fullmatch(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}", runtime.mac_address)
+        is None
+        or runtime.expected_ip != SSH_HOST
+        or bootstrap.machine_id != verified_guest.machine_id
+        or bootstrap.boot_id != verified_guest.boot_id
+        or runtime.mac_address not in bootstrap.mac_addresses
+        or runtime.mac_address not in verified_guest.mac_addresses
+        or bootstrap.nonce
+        != connection_challenge(plan.connection_nonce, "guestinfo")
+        or verified_guest.nonce
+        != connection_challenge(plan.connection_nonce, "guestinfo")
+    ):
+        raise CandidateHarnessError("CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH")
+    if competing_vmx_paths:
+        raise CandidateHarnessError("CANDIDATE_VM_CONNECTION_NAMESPACE_COLLISION")
+    if not known_hosts_was_absent:
+        raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_RESIDUAL")
+    if (
+        bootstrap.host_key_digest == verified_guest.host_key_digest
+        or verified_guest.host_key_digest in prior_host_key_digests
+    ):
+        raise CandidateHarnessError("CANDIDATE_VM_HOST_KEY_NOT_FRESH")
+    return VerifiedCloneConnection(
+        authority=authority,
+        runtime=runtime,
+        guest=verified_guest,
+    )
 
 
 class CandidateVmProvider(Protocol):
@@ -1041,6 +1392,13 @@ class CandidateVmProvider(Protocol):
     ) -> Mapping[str, Any]: ...
 
     def inspect_original_hashes(self) -> Mapping[str, str]: ...
+
+    def inspect_profile_continuation(
+        self,
+        *,
+        plan: CandidateProfilePlan,
+        harness_plan: CandidateHarnessPlan,
+    ) -> ProfileContinuationReceipt: ...
 
     def inspect_candidate_external_state(
         self, candidate_version: str
@@ -1071,6 +1429,7 @@ class ClosedVmwareProvider:
         self._host_environment = self._sanitized_host_environment(self._environment)
         self._openssh_host_environment: Mapping[str, str] | None = None
         self._readiness: ProviderReadinessReceipt | None = None
+        self._accepted_host_key_digests: set[str] = set()
 
     @staticmethod
     def _sanitized_host_environment(
@@ -1109,12 +1468,20 @@ class ClosedVmwareProvider:
     def _source_vmx(self) -> Path:
         return SOURCE_VM_ROOT / f"{SOURCE_VM_IDENTITY}.vmx"
 
-    @staticmethod
-    def _hashes() -> dict[str, str]:
-        return {
+    @classmethod
+    def _hashes(cls) -> dict[str, str]:
+        hashes = {
             name: _hash_original_vm_file(SOURCE_VM_ROOT / name)
             for name in SOURCE_VM_HASH_FILES
         }
+        source_root = SOURCE_VM_ROOT.resolve(strict=True)
+        for path in cls._closed_source_disk_graph_files(SOURCE_VM_ROOT):
+            name = path.relative_to(source_root).as_posix()
+            digest = _hash_original_vm_file(path)
+            if name in hashes and hashes[name] != digest:
+                raise CandidateHarnessError("CANDIDATE_VM_SOURCE_IDENTITY_INVALID")
+            hashes[name] = digest
+        return hashes
 
     @staticmethod
     def _closed_path(path: Path, *, root: Path, code: str) -> Path:
@@ -1127,6 +1494,103 @@ class ClosedVmwareProvider:
         if absolute == boundary:
             raise CandidateHarnessError(code)
         return absolute
+
+    @staticmethod
+    def _profile_authority(
+        plan: CandidateProfilePlan,
+        harness_plan: CandidateHarnessPlan,
+    ) -> ProfileConnectionAuthority:
+        if (
+            plan not in harness_plan.profiles
+            or plan.session_id != harness_plan.session_id
+            or re.fullmatch(r"[0-9a-f]{32}", harness_plan.session_id) is None
+            or re.fullmatch(r"[0-9a-f]{64}", plan.connection_nonce) is None
+            or re.fullmatch(r"animemo-[a-z0-9-]+", plan.ssh_host_key_alias) is None
+            or not _DIGEST.fullmatch(harness_plan.candidate_input_digest)
+            or not _DIGEST.fullmatch(plan.clone_identity)
+            or _CANDIDATE_VERSION.fullmatch(harness_plan.candidate_version) is None
+        ):
+            raise CandidateHarnessError("CANDIDATE_VM_PROFILE_NAMESPACE_INVALID")
+        session_root = (
+            VM_WORK_PARENT
+            / harness_plan.candidate_version
+            / harness_plan.candidate_input_digest.removeprefix("sha256:")
+            / harness_plan.session_id
+        )
+        profile_root = session_root / "profiles" / plan.profile.lower()
+        clone_root = profile_root / "clone" / plan.clone_identity.removeprefix(
+            "sha256:"
+        )
+        ssh_root = profile_root / "ssh"
+        return ProfileConnectionAuthority(
+            session_root=session_root,
+            profile_root=profile_root,
+            clone_root=clone_root,
+            clone_vmx=clone_root / f"{SOURCE_VM_IDENTITY}.vmx",
+            ssh_root=ssh_root,
+            identity_file=ssh_root / "id_ed25519",
+            known_hosts_file=ssh_root / "known_hosts",
+            quarantine_root=session_root / "quarantine" / plan.profile.lower(),
+            host_key_alias=plan.ssh_host_key_alias,
+            connection_nonce=plan.connection_nonce,
+            clone_identity=plan.clone_identity,
+        )
+
+    @classmethod
+    def _acquire_provider_lease(
+        cls, authority: ProfileConnectionAuthority
+    ) -> ProviderSessionLease:
+        if authority.session_root.parent == authority.session_root:
+            raise CandidateHarnessError("CANDIDATE_VM_PROVIDER_SESSION_INVALID")
+        try:
+            VM_WORK_PARENT.mkdir(parents=True, exist_ok=True)
+            lock_path = cls._closed_path(
+                VM_WORK_PARENT / ".active-provider-session.lock",
+                root=VM_WORK_PARENT,
+                code="CANDIDATE_VM_PROVIDER_SESSION_INVALID",
+            )
+            descriptor = os.open(
+                lock_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                stat.S_IRUSR | stat.S_IWUSR,
+            )
+            os.close(descriptor)
+            metadata = lock_path.lstat()
+        except FileExistsError as error:
+            raise CandidateHarnessError("CANDIDATE_VM_PROVIDER_SESSION_BUSY") from error
+        except CandidateHarnessError:
+            raise
+        except OSError as error:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_PROVIDER_SESSION_UNAVAILABLE"
+            ) from error
+        if lock_path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+            raise CandidateHarnessError("CANDIDATE_VM_PROVIDER_SESSION_INVALID")
+        return ProviderSessionLease(
+            path=lock_path,
+            file_identity=_file_identity(metadata),
+        )
+
+    @classmethod
+    def _release_provider_lease(cls, lease: ProviderSessionLease) -> None:
+        try:
+            path = cls._closed_path(
+                lease.path,
+                root=VM_WORK_PARENT,
+                code="CANDIDATE_VM_PROVIDER_SESSION_INVALID",
+            )
+            metadata = path.lstat()
+            if path.is_symlink() or _file_identity(metadata) != lease.file_identity:
+                raise CandidateHarnessError(
+                    "CANDIDATE_VM_PROVIDER_SESSION_OWNERSHIP_LOST"
+                )
+            path.unlink()
+        except CandidateHarnessError:
+            raise
+        except OSError as error:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_PROVIDER_SESSION_RELEASE_FAILED"
+            ) from error
 
     def _run(
         self,
@@ -1172,12 +1636,20 @@ class ClosedVmwareProvider:
             self._openssh_host_environment = dict(environments.openssh)
         return self._openssh_host_environment
 
+    def _bootstrap_identity(self) -> Path:
+        try:
+            if self._windows_platform.is_file(OPENSSH_IDENTITY):
+                return OPENSSH_IDENTITY
+        except OSError as error:
+            raise CandidateHarnessError("WINDOWS_OPENSSH_ACL_QUERY_FAILED") from error
+        raise CandidateHarnessError("WINDOWS_OPENSSH_IDENTITY_UNAVAILABLE")
+
     def inspect_readiness(self) -> ProviderReadinessReceipt:
         if self._readiness is not None:
             return self._readiness
 
         runner_path = Path(__file__).resolve().with_name("candidate_profile_runner.py")
-        for path in (VMRUN, ROBOCOPY, runner_path):
+        for path in (VMRUN, ROBOCOPY, SSH_KEYGEN, runner_path):
             try:
                 available = self._windows_platform.is_file(path)
             except OSError as error:
@@ -1190,6 +1662,7 @@ class ClosedVmwareProvider:
         try:
             ssh_identity = self._windows_platform.inspect_binary(SSH)
             scp_identity = self._windows_platform.inspect_binary(SCP)
+            ssh_keygen_identity = self._windows_platform.inspect_binary(SSH_KEYGEN)
         except OSError as error:
             raise CandidateHarnessError(
                 "WINDOWS_OPENSSH_BINARY_UNAVAILABLE"
@@ -1205,25 +1678,26 @@ class ClosedVmwareProvider:
                 sha256=EXPECTED_SCP_SHA256,
                 pe_machine=EXPECTED_OPENSSH_PE_MACHINE,
             )
+            or ssh_keygen_identity
+            != WindowsBinaryIdentity(
+                sha256=EXPECTED_SSH_KEYGEN_SHA256,
+                pe_machine=EXPECTED_OPENSSH_PE_MACHINE,
+            )
         ):
             raise CandidateHarnessError("WINDOWS_OPENSSH_IDENTITY_MISMATCH")
 
+        bootstrap_identity = self._bootstrap_identity()
         try:
             identity_inspection = self._windows_platform.inspect_controlled_file(
-                OPENSSH_IDENTITY,
-                root=OPENSSH_SESSION_ROOT,
-                private=True,
-            )
-            known_hosts_inspection = self._windows_platform.inspect_controlled_file(
-                OPENSSH_KNOWN_HOSTS,
-                root=OPENSSH_SESSION_ROOT,
+                bootstrap_identity,
+                root=bootstrap_identity.parent,
                 private=True,
             )
         except OSError as error:
             raise CandidateHarnessError(
                 "WINDOWS_OPENSSH_ACL_QUERY_FAILED"
             ) from error
-        for inspection in (identity_inspection, known_hosts_inspection):
+        for inspection in (identity_inspection,):
             if inspection.status == _CONTROLLED_FILE_PASS:
                 continue
             code = _CONTROLLED_FILE_ERROR_CODES.get(inspection.status)
@@ -1232,7 +1706,7 @@ class ClosedVmwareProvider:
             raise CandidateHarnessError(code)
 
         self._openssh_environment()
-        if self._openssh_closed_options()[1::2] != OPENSSH_REQUIRED_OPTIONS:
+        if self._openssh_closed_options(None)[1::2] != OPENSSH_REQUIRED_OPTIONS:
             raise CandidateHarnessError("WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE")
         self._run(
             (str(SSH), "-V"),
@@ -1243,6 +1717,7 @@ class ClosedVmwareProvider:
         self._readiness = ProviderReadinessReceipt.issue(
             ssh_digest=ssh_identity.sha256,
             scp_digest=scp_identity.sha256,
+            ssh_keygen_digest=ssh_keygen_identity.sha256,
         )
         return self._readiness
 
@@ -1259,7 +1734,7 @@ class ClosedVmwareProvider:
         raise CandidateHarnessError(code)
 
     def _assert_tools(self) -> None:
-        for path in (VMRUN, ROBOCOPY, SSH, SCP, self._source_vmx):
+        for path in (VMRUN, ROBOCOPY, SSH, SCP, SSH_KEYGEN, self._source_vmx):
             if not path.is_file():
                 raise CandidateHarnessError("CANDIDATE_VM_TOOLCHAIN_UNAVAILABLE")
         runner = Path(__file__).resolve().with_name("candidate_profile_runner.py")
@@ -1489,7 +1964,9 @@ class ClosedVmwareProvider:
         return False
 
     @classmethod
-    def _validate_clone_disk_graph(cls, clone_root: Path, clone_vmx: Path) -> None:
+    def _validate_clone_disk_graph(
+        cls, clone_root: Path, clone_vmx: Path
+    ) -> tuple[Path, ...]:
         vmx_text = cls._configuration_text(
             cls._configuration_prefix(clone_vmx, complete=True)
         )
@@ -1525,16 +2002,37 @@ class ClosedVmwareProvider:
                     disk_references.append(reference)
         if not disk_references:
             raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
+        graph_files = set(
+            cls._validate_closed_disk_descriptors(clone_root, disk_references)
+        )
+        graph_files.add(clone_vmx.resolve(strict=True))
+        return tuple(
+            sorted(
+                graph_files,
+                key=lambda path: path.relative_to(clone_root.resolve(strict=True)).as_posix(),
+            )
+        )
+
+    @classmethod
+    def _validate_closed_disk_descriptors(
+        cls,
+        clone_root: Path,
+        disk_references: list[str] | tuple[str, ...],
+    ) -> tuple[Path, ...]:
+        if not disk_references:
+            raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
         descriptor_queue = [
             cls._closed_disk_reference(clone_root, reference)
             for reference in disk_references
         ]
+        graph_files: set[Path] = set()
         seen_descriptors: set[Path] = set()
         while descriptor_queue:
             vmdk = descriptor_queue.pop()
             if vmdk in seen_descriptors:
                 continue
             seen_descriptors.add(vmdk)
+            graph_files.add(vmdk)
             text = cls._configuration_text(
                 cls._configuration_prefix(vmdk, complete=False)
             )
@@ -1620,26 +2118,224 @@ class ClosedVmwareProvider:
                     )
                 )
             for reference in extent_references:
-                cls._closed_disk_reference(
-                    clone_root,
-                    reference,
-                    base=vmdk.parent,
+                graph_files.add(
+                    cls._closed_disk_reference(
+                        clone_root,
+                        reference,
+                        base=vmdk.parent,
+                    )
                 )
             if parent_ids and parent_ids[-1].lower() != "ffffffff" and len(parent_references) != 1:
                 raise CandidateHarnessError("CANDIDATE_VM_DISK_GRAPH_INVALID")
+        return tuple(
+            sorted(
+                graph_files,
+                key=lambda path: path.relative_to(clone_root.resolve(strict=True)).as_posix(),
+            )
+        )
 
-    def _clone_full(self, plan: CandidateProfilePlan) -> tuple[Path, Path]:
+    @classmethod
+    def _disk_graph_content_digest(cls, clone_root: Path, clone_vmx: Path) -> str:
+        root = clone_root.resolve(strict=True)
+        content_hashes = {
+            path.relative_to(root).as_posix(): _hash_regular_file(path)
+            for path in cls._validate_clone_disk_graph(clone_root, clone_vmx)
+            if path.suffix.casefold() != ".vmx"
+        }
+        return sha256_bytes(canonical_json_bytes(content_hashes))
+
+    @classmethod
+    def _descriptor_disk_graph_content_digest(
+        cls, clone_root: Path, descriptor: str
+    ) -> str:
+        root = clone_root.resolve(strict=True)
+        content_hashes = {
+            path.relative_to(root).as_posix(): _hash_regular_file(path)
+            for path in cls._validate_closed_disk_descriptors(
+                clone_root, (descriptor,)
+            )
+        }
+        return sha256_bytes(canonical_json_bytes(content_hashes))
+
+    @classmethod
+    def _descriptor_disk_graph_digest_from_hashes(
+        cls,
+        root: Path,
+        descriptor: str,
+        hashes: Mapping[str, str],
+    ) -> str:
+        boundary = root.resolve(strict=True)
+        names = tuple(
+            path.relative_to(boundary).as_posix()
+            for path in cls._validate_closed_disk_descriptors(root, (descriptor,))
+        )
+        if any(name not in hashes or not _DIGEST.fullmatch(hashes[name]) for name in names):
+            raise CandidateHarnessError("CANDIDATE_VM_SOURCE_IDENTITY_INVALID")
+        return sha256_bytes(
+            canonical_json_bytes({name: hashes[name] for name in names})
+        )
+
+    @classmethod
+    def _closed_source_disk_graph_files(cls, root: Path) -> tuple[Path, ...]:
+        files: set[Path] = set()
+        source_vmx = root / f"{SOURCE_VM_IDENTITY}.vmx"
+        files.update(
+            path
+            for path in cls._validate_clone_disk_graph(root, source_vmx)
+            if path.suffix.casefold() != ".vmx"
+        )
+        for descriptor in SNAPSHOT_DISK_FILES.values():
+            files.update(cls._validate_closed_disk_descriptors(root, (descriptor,)))
+        boundary = root.resolve(strict=True)
+        return tuple(
+            sorted(
+                files,
+                key=lambda item: item.relative_to(boundary).as_posix(),
+            )
+        )
+
+    @classmethod
+    def _closed_source_disk_graph_content_digest(cls, root: Path) -> str:
+        boundary = root.resolve(strict=True)
+        content_hashes = {
+            path.relative_to(boundary).as_posix(): _hash_regular_file(path)
+            for path in cls._closed_source_disk_graph_files(root)
+        }
+        return sha256_bytes(canonical_json_bytes(content_hashes))
+
+    @classmethod
+    def _closed_source_disk_graph_digest_from_hashes(
+        cls, root: Path, hashes: Mapping[str, str]
+    ) -> str:
+        boundary = root.resolve(strict=True)
+        names = tuple(
+            path.relative_to(boundary).as_posix()
+            for path in cls._closed_source_disk_graph_files(root)
+        )
+        if any(name not in hashes or not _DIGEST.fullmatch(hashes[name]) for name in names):
+            raise CandidateHarnessError("CANDIDATE_VM_SOURCE_IDENTITY_INVALID")
+        return sha256_bytes(
+            canonical_json_bytes({name: hashes[name] for name in names})
+        )
+
+    @classmethod
+    def _verify_clone_authoritative_hashes(
+        cls,
+        clone_root: Path,
+        *,
+        profile: str,
+        expected_original_hashes: Mapping[str, str],
+        expected_snapshot_identity: str,
+        expected_source_disk_graph_identity: str,
+    ) -> dict[str, str]:
+        expected = dict(expected_original_hashes)
+        snapshot_name = SNAPSHOT_FILES.get(profile)
+        try:
+            boundary = clone_root.resolve(strict=True)
+            graph_names = {
+                path.relative_to(boundary).as_posix()
+                for path in cls._closed_source_disk_graph_files(clone_root)
+            }
+        except (CandidateHarnessError, OSError, ValueError) as error:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_FULL_COPY_IDENTITY_MISMATCH"
+            ) from error
+        allowed_names = set(SOURCE_VM_HASH_FILES) | graph_names
+        if (
+            set(expected) != allowed_names
+            or len(expected) > 64
+            or any(not _DIGEST.fullmatch(value) for value in expected.values())
+            or snapshot_name is None
+            or expected.get(snapshot_name) != expected_snapshot_identity
+            or not _DIGEST.fullmatch(expected_source_disk_graph_identity)
+        ):
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_FULL_COPY_IDENTITY_MISMATCH"
+            )
+        observed = {
+            name: _hash_regular_file(
+                cls._closed_disk_reference(clone_root, name)
+            )
+            for name in sorted(expected)
+        }
+        if observed != expected:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_FULL_COPY_IDENTITY_MISMATCH"
+            )
+        if (
+            cls._closed_source_disk_graph_content_digest(clone_root)
+            != expected_source_disk_graph_identity
+        ):
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_FULL_COPY_IDENTITY_MISMATCH"
+            )
+        return observed
+
+    @classmethod
+    def _clone_snapshot_identity(
+        cls,
+        clone_root: Path,
+        *,
+        profile: str,
+        expected_snapshot_identity: str,
+    ) -> str:
+        snapshot_name = SNAPSHOT_FILES.get(profile)
+        if snapshot_name is None or not _DIGEST.fullmatch(expected_snapshot_identity):
+            raise CandidateHarnessError("CANDIDATE_VM_SNAPSHOT_IDENTITY_MISMATCH")
+        observed = _hash_regular_file(
+            cls._closed_disk_reference(clone_root, snapshot_name)
+        )
+        if observed != expected_snapshot_identity:
+            raise CandidateHarnessError("CANDIDATE_VM_SNAPSHOT_IDENTITY_MISMATCH")
+        return observed
+
+    @classmethod
+    def _clone_snapshot_disk_graph_identity(
+        cls,
+        clone_root: Path,
+        *,
+        profile: str,
+        expected_snapshot_disk_graph_identity: str,
+    ) -> str:
+        descriptor = SNAPSHOT_DISK_FILES.get(profile)
+        if descriptor is None or not _DIGEST.fullmatch(
+            expected_snapshot_disk_graph_identity
+        ):
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_SNAPSHOT_DISK_GRAPH_MISMATCH"
+            )
+        observed = cls._descriptor_disk_graph_content_digest(
+            clone_root,
+            descriptor,
+        )
+        if observed != expected_snapshot_disk_graph_identity:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_SNAPSHOT_DISK_GRAPH_MISMATCH"
+            )
+        return observed
+
+    def _clone_full(
+        self,
+        plan: CandidateProfilePlan,
+        authority: ProfileConnectionAuthority,
+        *,
+        expected_original_hashes: Mapping[str, str],
+        expected_source_disk_graph_identity: str,
+    ) -> tuple[Path, Path]:
         self._assert_source_stopped()
-        suffix = plan.clone_identity.removeprefix("sha256:")
         clone_root = self._closed_path(
-            VM_WORK_ROOT / f"{plan.profile.lower()}-{suffix}",
-            root=VM_WORK_ROOT,
+            authority.clone_root,
+            root=authority.profile_root,
             code="CANDIDATE_VM_CLONE_PATH_INVALID",
         )
+        if authority.clone_identity != plan.clone_identity:
+            raise CandidateHarnessError("CANDIDATE_VM_PROFILE_NAMESPACE_INVALID")
         if clone_root.exists() or clone_root.is_symlink():
             raise CandidateHarnessError("CANDIDATE_VM_CLONE_PATH_EXISTS")
         try:
             source_hashes = self._hashes()
+            if source_hashes != dict(expected_original_hashes):
+                raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
             source_inventory = self._vm_inventory(SOURCE_VM_ROOT)
             clone_root.parent.mkdir(parents=True, exist_ok=True)
             completed = self._run(
@@ -1678,10 +2374,19 @@ class ClosedVmwareProvider:
             clone_vmx = clone_root / f"{SOURCE_VM_IDENTITY}.vmx"
             if not clone_vmx.is_file():
                 raise CandidateHarnessError("CANDIDATE_VM_FULL_COPY_MISMATCH")
+            self._verify_clone_authoritative_hashes(
+                clone_root,
+                profile=plan.profile,
+                expected_original_hashes=expected_original_hashes,
+                expected_snapshot_identity=plan.snapshot_identity,
+                expected_source_disk_graph_identity=(
+                    expected_source_disk_graph_identity
+                ),
+            )
             self._validate_clone_disk_graph(clone_root, clone_vmx)
             return clone_root, clone_vmx
         except BaseException:
-            self._quarantine_clone(clone_root, plan.clone_identity)
+            self._quarantine_clone(authority)
             raise
 
     def _revert_clone(self, clone_vmx: Path, snapshot_name: str) -> None:
@@ -1706,18 +2411,104 @@ class ClosedVmwareProvider:
         )
 
     @staticmethod
-    def _openssh_closed_options() -> tuple[str, ...]:
-        return tuple(
-            item for value in OPENSSH_REQUIRED_OPTIONS for item in ("-o", value)
+    def _inject_guestinfo_challenge(
+        authority: ProfileConnectionAuthority,
+        plan: CandidateProfilePlan,
+    ) -> None:
+        if authority.connection_nonce != plan.connection_nonce:
+            raise CandidateHarnessError("CANDIDATE_VM_CONNECTION_CHALLENGE_INVALID")
+        challenge = connection_challenge(plan.connection_nonce, "guestinfo")
+        path = ClosedVmwareProvider._closed_path(
+            authority.clone_vmx,
+            root=authority.clone_root,
+            code="CANDIDATE_VM_CONNECTION_CHALLENGE_INVALID",
         )
+        temporary = path.with_name(path.name + ".animemo-guestinfo.tmp")
+        try:
+            original = ClosedVmwareProvider._configuration_prefix(path, complete=True)
+            text = ClosedVmwareProvider._configuration_text(original)
+            if re.search(
+                r"(?im)^\s*guestinfo\.animemo\.connectionChallenge\s*=", text
+            ):
+                raise CandidateHarnessError(
+                    "CANDIDATE_VM_CONNECTION_CHALLENGE_RESIDUAL"
+                )
+            payload = original
+            if payload and not payload.endswith((b"\n", b"\r")):
+                payload += b"\n"
+            payload += (
+                f'guestinfo.animemo.connectionChallenge = "{challenge}"\n'.encode(
+                    "ascii"
+                )
+            )
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            descriptor = os.open(temporary, flags, stat.S_IRUSR | stat.S_IWUSR)
+            try:
+                with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                    descriptor = -1
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            os.replace(temporary, path)
+        except CandidateHarnessError:
+            raise
+        except OSError as error:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_CONNECTION_CHALLENGE_INJECTION_FAILED"
+            ) from error
+        finally:
+            try:
+                if temporary.exists() or temporary.is_symlink():
+                    temporary.unlink()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _openssh_closed_options(
+        authority: ProfileConnectionAuthority | None,
+        *,
+        capture_new_host_key: bool = False,
+        bootstrap_identity: bool = False,
+    ) -> tuple[str, ...]:
+        values = list(OPENSSH_REQUIRED_OPTIONS)
+        if authority is not None:
+            values.extend(
+                (
+                    "StrictHostKeyChecking="
+                    + ("accept-new" if capture_new_host_key else "yes"),
+                    f"UserKnownHostsFile={authority.known_hosts_file}",
+                    "IdentityFile="
+                    + str(
+                        OPENSSH_IDENTITY
+                        if bootstrap_identity
+                        else authority.identity_file
+                    ),
+                    f"HostKeyAlias={authority.host_key_alias}",
+                )
+            )
+        return tuple(item for value in values for item in ("-o", value))
 
     @classmethod
-    def _ssh_argv(cls, command: str) -> tuple[str, ...]:
+    def _ssh_argv(
+        cls,
+        authority: ProfileConnectionAuthority,
+        command: str,
+        *,
+        capture_new_host_key: bool = False,
+        bootstrap_identity: bool = False,
+    ) -> tuple[str, ...]:
         return (
             str(SSH),
             "-F",
             "none",
-            *cls._openssh_closed_options(),
+            *cls._openssh_closed_options(
+                authority,
+                capture_new_host_key=capture_new_host_key,
+                bootstrap_identity=bootstrap_identity,
+            ),
             "-o",
             "ConnectTimeout=10",
             "-o",
@@ -1731,6 +2522,7 @@ class ClosedVmwareProvider:
     def _scp_argv(
         cls,
         *,
+        authority: ProfileConnectionAuthority,
         source: str,
         destination: str,
         recursive: bool,
@@ -1742,7 +2534,7 @@ class ClosedVmwareProvider:
             "none",
             "-q",
             *recursion,
-            *cls._openssh_closed_options(),
+            *cls._openssh_closed_options(authority),
             "-o",
             "ConnectTimeout=10",
             "-o",
@@ -1752,11 +2544,22 @@ class ClosedVmwareProvider:
             f"{SSH_HOST}:{destination}",
         )
 
-    def _wait_for_ssh(self) -> None:
+    def _wait_for_ssh(
+        self,
+        authority: ProfileConnectionAuthority,
+        *,
+        capture_new_host_key: bool,
+        bootstrap_identity: bool = False,
+    ) -> None:
         for _ in range(60):
             try:
                 completed = self._runner.run(
-                    self._ssh_argv("/usr/bin/true"),
+                    self._ssh_argv(
+                        authority,
+                        "/usr/bin/true",
+                        capture_new_host_key=capture_new_host_key,
+                        bootstrap_identity=bootstrap_identity,
+                    ),
                     environment=self._openssh_environment(),
                     timeout=15,
                 )
@@ -1766,6 +2569,387 @@ class ClosedVmwareProvider:
                 return
             time.sleep(2)
         raise CandidateHarnessError("CANDIDATE_VM_GUEST_UNREACHABLE")
+
+    def _prepare_profile_authority(
+        self, authority: ProfileConnectionAuthority
+    ) -> None:
+        self._closed_path(
+            authority.profile_root,
+            root=VM_WORK_PARENT,
+            code="CANDIDATE_VM_PROFILE_NAMESPACE_INVALID",
+        )
+        if authority.profile_root.exists() or authority.profile_root.is_symlink():
+            raise CandidateHarnessError("CANDIDATE_VM_PROFILE_NAMESPACE_EXISTS")
+        try:
+            authority.ssh_root.mkdir(parents=True, exist_ok=False)
+            if (
+                authority.known_hosts_file.exists()
+                or authority.known_hosts_file.is_symlink()
+            ):
+                raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_RESIDUAL")
+            self._run(
+                (
+                    str(SSH_KEYGEN),
+                    "-q",
+                    "-t",
+                    "ed25519",
+                    "-N",
+                    "",
+                    "-C",
+                    authority.host_key_alias,
+                    "-f",
+                    str(authority.identity_file),
+                ),
+                code="CANDIDATE_VM_SESSION_KEY_GENERATION_FAILED",
+                timeout=30,
+            )
+            authority.identity_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            authority.identity_file.with_suffix(".pub").chmod(
+                stat.S_IRUSR | stat.S_IWUSR
+            )
+            inspection = self._windows_platform.inspect_controlled_file(
+                authority.identity_file,
+                root=authority.ssh_root,
+                private=True,
+            )
+        except CandidateHarnessError:
+            raise
+        except OSError as error:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_PROFILE_NAMESPACE_UNAVAILABLE"
+            ) from error
+        if inspection.status != _CONTROLLED_FILE_PASS:
+            code = _CONTROLLED_FILE_ERROR_CODES.get(
+                inspection.status, "WINDOWS_WIN32_ABI_UNSUPPORTED"
+            )
+            raise CandidateHarnessError(code)
+
+    @staticmethod
+    def _read_known_host_key(
+        authority: ProfileConnectionAuthority,
+    ) -> str:
+        try:
+            path = ClosedVmwareProvider._closed_path(
+                authority.known_hosts_file,
+                root=authority.ssh_root,
+                code="CANDIDATE_VM_KNOWN_HOSTS_INVALID",
+            )
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or path.stat().st_size > 64 * 1024
+            ):
+                raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_INVALID")
+            lines = [
+                line
+                for line in path.read_text(
+                    encoding="ascii", errors="strict"
+                ).splitlines()
+                if line
+            ]
+        except CandidateHarnessError:
+            raise
+        except (OSError, UnicodeError) as error:
+            raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_INVALID") from error
+        if len(lines) != 1:
+            raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_INVALID")
+        fields = lines[0].split()
+        if (
+            len(fields) != 3
+            or fields[0] != authority.host_key_alias
+            or re.fullmatch(r"(?:ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa)", fields[1])
+            is None
+            or re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", fields[2]) is None
+        ):
+            raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_INVALID")
+        try:
+            base64.b64decode(fields[2], validate=True)
+        except (ValueError, TypeError) as error:
+            raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_INVALID") from error
+        return sha256_bytes(f"{fields[1]} {fields[2]}".encode("ascii"))
+
+    @staticmethod
+    def _remove_known_hosts(authority: ProfileConnectionAuthority) -> None:
+        path = ClosedVmwareProvider._closed_path(
+            authority.known_hosts_file,
+            root=authority.ssh_root,
+            code="CANDIDATE_VM_KNOWN_HOSTS_INVALID",
+        )
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_INVALID")
+            path.unlink()
+        except CandidateHarnessError:
+            raise
+        except OSError as error:
+            raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_INVALID") from error
+
+    def _wait_for_guest_ip(self, clone_vmx: Path) -> str:
+        for _ in range(60):
+            try:
+                completed = self._run(
+                    (
+                        str(VMRUN),
+                        "-T",
+                        "ws",
+                        "getGuestIPAddress",
+                        str(clone_vmx),
+                        "-wait",
+                    ),
+                    code="CANDIDATE_VM_GUEST_IP_UNAVAILABLE",
+                    timeout=15,
+                )
+                lines = self._decode_output(
+                    completed.stdout,
+                    code="CANDIDATE_VM_GUEST_IP_UNAVAILABLE",
+                )
+                if len(lines) == 1:
+                    address = str(ipaddress.ip_address(lines[0]))
+                    if address == SSH_HOST:
+                        return address
+                    raise CandidateHarnessError(
+                        "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH"
+                    )
+            except CandidateHarnessError as error:
+                if error.code == "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH":
+                    raise
+            time.sleep(2)
+        raise CandidateHarnessError("CANDIDATE_VM_GUEST_IP_UNAVAILABLE")
+
+    @staticmethod
+    def _vmx_identity_fields(clone_vmx: Path) -> tuple[str, str]:
+        text = ClosedVmwareProvider._configuration_text(
+            ClosedVmwareProvider._configuration_prefix(clone_vmx, complete=True)
+        )
+        values: dict[str, str] = {}
+        for line in text.splitlines():
+            for key in ("uuid.bios", "ethernet0.generatedAddress", "ethernet0.address"):
+                value = ClosedVmwareProvider._setting_value(line, key)
+                if value is not None:
+                    if key in values and values[key] != value:
+                        raise CandidateHarnessError(
+                            "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH"
+                        )
+                    values[key] = value
+        uuid_hex = re.sub(r"[ -]", "", values.get("uuid.bios", "").lower())
+        mac_address = values.get(
+            "ethernet0.generatedAddress", values.get("ethernet0.address", "")
+        ).lower()
+        if (
+            re.fullmatch(r"[0-9a-f]{32}", uuid_hex) is None
+            or re.fullmatch(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}", mac_address)
+            is None
+        ):
+            raise CandidateHarnessError("CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH")
+        vm_uuid = (
+            f"{uuid_hex[:8]}-{uuid_hex[8:12]}-{uuid_hex[12:16]}-"
+            f"{uuid_hex[16:20]}-{uuid_hex[20:]}"
+        )
+        return vm_uuid, mac_address
+
+    def _read_clone_runtime_identity(
+        self,
+        authority: ProfileConnectionAuthority,
+        plan: CandidateProfilePlan,
+        *,
+        expected_ip: str,
+        preboot_disk_graph_digest: str,
+        preboot_snapshot_identity: str,
+    ) -> CloneRuntimeIdentity:
+        self._validate_clone_disk_graph(authority.clone_root, authority.clone_vmx)
+        vm_uuid, mac_address = self._vmx_identity_fields(authority.clone_vmx)
+        if (
+            not _DIGEST.fullmatch(preboot_disk_graph_digest)
+            or preboot_snapshot_identity != plan.snapshot_identity
+        ):
+            raise CandidateHarnessError("CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH")
+        return CloneRuntimeIdentity(
+            clone_root=authority.clone_root,
+            clone_vmx=authority.clone_vmx,
+            vmx_digest=_hash_regular_file(authority.clone_vmx),
+            disk_graph_digest=preboot_disk_graph_digest,
+            snapshot_name=plan.snapshot_name,
+            snapshot_identity=preboot_snapshot_identity,
+            vm_uuid=vm_uuid,
+            mac_address=mac_address,
+            expected_ip=expected_ip,
+        )
+
+    def _observe_guest_connection(
+        self,
+        authority: ProfileConnectionAuthority,
+        *,
+        host_key_digest: str,
+        bootstrap_identity: bool = False,
+    ) -> GuestConnectionObservation:
+        code = (
+            'import glob,json,subprocess;challenge=subprocess.run(['
+            '"/usr/bin/vmtoolsd","--cmd",'
+            '"info-get guestinfo.animemo.connectionChallenge"],'
+            'check=True,capture_output=True,text=True,timeout=10).stdout.strip();'
+            'print(json.dumps({'
+            '"schema":"animemo.clone-guest-identity/v1",'
+            '"nonce":challenge,'
+            '"machine_id":open("/etc/machine-id",encoding="ascii").read().strip(),'
+            '"boot_id":open("/proc/sys/kernel/random/boot_id",encoding="ascii").read().strip(),'
+            '"mac_addresses":sorted(open(value,encoding="ascii").read().strip() '
+            'for value in glob.glob("/sys/class/net/*/address"))},'
+            'sort_keys=True,separators=(",",":")))'
+        )
+        completed = self._ssh_checked(
+            authority,
+            "/usr/bin/python3 -P -B -c '" + code + "'",
+            code="CANDIDATE_VM_GUEST_IDENTITY_UNAVAILABLE",
+            timeout=30,
+            bootstrap_identity=bootstrap_identity,
+        )
+        try:
+            value = json.loads(
+                completed.stdout,
+                object_pairs_hook=reject_duplicate_json_keys,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_GUEST_IDENTITY_INVALID"
+            ) from error
+        if (
+            type(value) is not dict
+            or set(value)
+            != {"schema", "nonce", "machine_id", "boot_id", "mac_addresses"}
+            or value["schema"] != "animemo.clone-guest-identity/v1"
+            or type(value["mac_addresses"]) is not list
+            or any(type(item) is not str for item in value["mac_addresses"])
+        ):
+            raise CandidateHarnessError("CANDIDATE_VM_GUEST_IDENTITY_INVALID")
+        return GuestConnectionObservation(
+            machine_id=value["machine_id"],
+            boot_id=value["boot_id"],
+            mac_addresses=tuple(value["mac_addresses"]),
+            nonce=value["nonce"],
+            host_key_digest=host_key_digest,
+        )
+
+    @staticmethod
+    def _session_public_key(authority: ProfileConnectionAuthority) -> str:
+        path = authority.identity_file.with_suffix(".pub")
+        try:
+            value = path.read_text(encoding="ascii", errors="strict").strip()
+        except (OSError, UnicodeError) as error:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_SESSION_KEY_INVALID"
+            ) from error
+        fields = value.split()
+        if (
+            len(fields) != 3
+            or fields[0] != "ssh-ed25519"
+            or re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", fields[1]) is None
+            or fields[2] != authority.host_key_alias
+        ):
+            raise CandidateHarnessError("CANDIDATE_VM_SESSION_KEY_INVALID")
+        try:
+            base64.b64decode(fields[1], validate=True)
+        except (TypeError, ValueError) as error:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_SESSION_KEY_INVALID"
+            ) from error
+        return value
+
+    def _provision_session_key_and_rotate_host_key(
+        self, authority: ProfileConnectionAuthority
+    ) -> None:
+        public_key = self._session_public_key(authority)
+        script = (
+            "/usr/bin/install -d -o animemo -g animemo -m 0700 /home/animemo/.ssh; "
+            f'/usr/bin/printf "%s\\n" "{public_key}" '
+            "> /home/animemo/.ssh/authorized_keys; "
+            "/bin/chown animemo:animemo /home/animemo/.ssh/authorized_keys; "
+            "/bin/chmod 0600 /home/animemo/.ssh/authorized_keys; "
+            "/bin/rm -f -- /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub; "
+            "/usr/bin/ssh-keygen -A; /usr/bin/systemctl restart ssh"
+        )
+        self._ssh_checked(
+            authority,
+            "sudo -S -p '' -- /bin/sh -ceu '" + script + "'",
+            code="CANDIDATE_VM_HOST_KEY_ROTATION_FAILED",
+            sudo_password=self._sudo_password(),
+            timeout=120,
+            bootstrap_identity=True,
+        )
+
+    def _establish_clone_connection(
+        self,
+        authority: ProfileConnectionAuthority,
+        plan: CandidateProfilePlan,
+        *,
+        preboot_disk_graph_digest: str,
+        preboot_snapshot_identity: str,
+    ) -> VerifiedCloneConnection:
+        running = self._running_vmx_paths()
+        expected_vmx = os.path.normcase(str(authority.clone_vmx.resolve(strict=False)))
+        if expected_vmx not in running:
+            raise CandidateHarnessError("CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH")
+        competitors = frozenset(value for value in running if value != expected_vmx)
+        if competitors:
+            raise CandidateHarnessError("CANDIDATE_VM_CONNECTION_NAMESPACE_COLLISION")
+        expected_ip = self._wait_for_guest_ip(authority.clone_vmx)
+        runtime = self._read_clone_runtime_identity(
+            authority,
+            plan,
+            expected_ip=expected_ip,
+            preboot_disk_graph_digest=preboot_disk_graph_digest,
+            preboot_snapshot_identity=preboot_snapshot_identity,
+        )
+        known_hosts_was_absent = not (
+            authority.known_hosts_file.exists()
+            or authority.known_hosts_file.is_symlink()
+        )
+        if not known_hosts_was_absent:
+            raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_RESIDUAL")
+        self._wait_for_ssh(
+            authority,
+            capture_new_host_key=True,
+            bootstrap_identity=True,
+        )
+        bootstrap_host_key = self._read_known_host_key(authority)
+        bootstrap = self._observe_guest_connection(
+            authority,
+            host_key_digest=bootstrap_host_key,
+            bootstrap_identity=True,
+        )
+        confirmation = self._observe_guest_connection(
+            authority,
+            host_key_digest=bootstrap_host_key,
+            bootstrap_identity=True,
+        )
+        verify_bootstrap_clone_identity(
+            authority=authority,
+            plan=plan,
+            runtime=runtime,
+            bootstrap=bootstrap,
+            confirmation=confirmation,
+            known_hosts_was_absent=known_hosts_was_absent,
+            competing_vmx_paths=competitors,
+        )
+        self._provision_session_key_and_rotate_host_key(authority)
+        self._remove_known_hosts(authority)
+        self._wait_for_ssh(authority, capture_new_host_key=True)
+        verified_host_key = self._read_known_host_key(authority)
+        verified_guest = self._observe_guest_connection(
+            authority,
+            host_key_digest=verified_host_key,
+        )
+        verified = verify_clone_connection_identity(
+            authority=authority,
+            plan=plan,
+            runtime=runtime,
+            bootstrap=bootstrap,
+            verified_guest=verified_guest,
+            known_hosts_was_absent=known_hosts_was_absent,
+            competing_vmx_paths=competitors,
+            prior_host_key_digests=frozenset(self._accepted_host_key_digests),
+        )
+        self._accepted_host_key_digests.add(verified.guest.host_key_digest)
+        return verified
 
     def _sudo_password(self) -> bytes:
         value = self._environment.get(GUEST_SUDO_PASSWORD_ENV, "")
@@ -1785,33 +2969,46 @@ class ClosedVmwareProvider:
 
     def _ssh_checked(
         self,
+        authority: ProfileConnectionAuthority,
         command: str,
         *,
         code: str,
         sudo_password: bytes | None = None,
         timeout: int = 300,
+        bootstrap_identity: bool = False,
     ) -> subprocess.CompletedProcess[bytes]:
         return self._run(
-            self._ssh_argv(command),
+            self._ssh_argv(
+                authority,
+                command,
+                bootstrap_identity=bootstrap_identity,
+            ),
             code=code,
             input_bytes=sudo_password,
             timeout=timeout,
             openssh=True,
         )
 
-    def _stage_candidate(self, candidate_root: Path, candidate_digest: str) -> str:
+    def _stage_candidate(
+        self,
+        authority: ProfileConnectionAuthority,
+        candidate_root: Path,
+        candidate_digest: str,
+    ) -> str:
         if not _DIGEST.fullmatch(candidate_digest):
             raise CandidateHarnessError("CANDIDATE_VM_STAGE_IDENTITY_INVALID")
         digest_hex = candidate_digest.removeprefix("sha256:")
         guest_root = f"{GUEST_CANDIDATE_ROOT}/{digest_hex}"
         password = self._sudo_password()
         self._ssh_checked(
+            authority,
             "/bin/rm -rf -- /tmp/animemo-candidate-stage "
             "/tmp/animemo-candidate-profile-runner.py",
             code="CANDIDATE_VM_STAGE_FAILED",
         )
         self._run(
             self._scp_argv(
+                authority=authority,
                 source=str(candidate_root),
                 destination="/tmp/animemo-candidate-stage",
                 recursive=True,
@@ -1823,6 +3020,7 @@ class ClosedVmwareProvider:
         runner_path = Path(__file__).resolve().with_name("candidate_profile_runner.py")
         self._run(
             self._scp_argv(
+                authority=authority,
                 source=str(runner_path),
                 destination="/tmp/animemo-candidate-profile-runner.py",
                 recursive=False,
@@ -1845,6 +3043,7 @@ class ClosedVmwareProvider:
         )
         for command in fixed_commands:
             self._ssh_checked(
+                authority,
                 "sudo -S -p '' -- " + command,
                 code="CANDIDATE_VM_STAGE_FAILED",
                 sudo_password=password,
@@ -1854,6 +3053,7 @@ class ClosedVmwareProvider:
     def _run_profile_guest(
         self,
         *,
+        authority: ProfileConnectionAuthority,
         plan: CandidateProfilePlan,
         harness_plan: CandidateHarnessPlan,
         guest_root: str,
@@ -1883,12 +3083,14 @@ class ClosedVmwareProvider:
         )
         password = self._sudo_password()
         self._ssh_checked(
+            authority,
             command,
             code="CANDIDATE_VM_PROFILE_EXECUTION_FAILED",
             sudo_password=password,
             timeout=4 * 60 * 60,
         )
         completed = self._ssh_checked(
+            authority,
             "sudo -S -p '' -- /bin/cat " + GUEST_RECEIPT,
             code="CANDIDATE_VM_PROFILE_RECEIPT_UNAVAILABLE",
             sudo_password=password,
@@ -1943,31 +3145,81 @@ class ClosedVmwareProvider:
                 time.sleep(2)
         raise CandidateHarnessError("CANDIDATE_VM_CLONE_CONTAINMENT_FAILED")
 
+    @staticmethod
+    def _destroy_session_key(authority: ProfileConnectionAuthority) -> None:
+        for path in (
+            authority.identity_file,
+            authority.identity_file.with_suffix(".pub"),
+        ):
+            try:
+                target = ClosedVmwareProvider._closed_path(
+                    path,
+                    root=authority.ssh_root,
+                    code="CANDIDATE_VM_SESSION_KEY_INVALID",
+                )
+                if target.exists() or target.is_symlink():
+                    target.unlink()
+            except CandidateHarnessError:
+                raise
+            except OSError as error:
+                raise CandidateHarnessError(
+                    "CANDIDATE_VM_SESSION_KEY_DELETION_FAILED"
+                ) from error
+
+    @staticmethod
+    def _destroy_known_hosts(authority: ProfileConnectionAuthority) -> None:
+        try:
+            target = ClosedVmwareProvider._closed_path(
+                authority.known_hosts_file,
+                root=authority.profile_root,
+                code="CANDIDATE_VM_KNOWN_HOSTS_INVALID",
+            )
+            if target.exists() or target.is_symlink():
+                target.unlink()
+        except CandidateHarnessError:
+            raise
+        except OSError as error:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_KNOWN_HOSTS_DELETION_FAILED"
+            ) from error
+
     @classmethod
-    def _remove_clone(cls, clone_root: Path) -> None:
+    def _remove_clone(cls, verified: VerifiedCloneConnection) -> None:
+        if (
+            type(verified) is not VerifiedCloneConnection
+            or verified.authority.clone_root.resolve(strict=False)
+            != verified.runtime.clone_root.resolve(strict=False)
+            or verified.authority.clone_vmx.resolve(strict=False)
+            != verified.runtime.clone_vmx.resolve(strict=False)
+        ):
+            raise CandidateHarnessError("CANDIDATE_VM_CLEANUP_AUTHORITY_INVALID")
         target = cls._closed_path(
-            clone_root,
-            root=VM_WORK_ROOT,
+            verified.authority.profile_root,
+            root=verified.authority.session_root,
             code="CANDIDATE_VM_CLONE_PATH_INVALID",
         )
         if target.exists():
             shutil.rmtree(target)
 
     @classmethod
-    def _quarantine_clone(cls, clone_root: Path, identity: str) -> None:
+    def _quarantine_clone(cls, authority: ProfileConnectionAuthority) -> None:
         source = cls._closed_path(
-            clone_root,
-            root=VM_WORK_ROOT,
+            authority.profile_root,
+            root=authority.session_root,
             code="CANDIDATE_VM_CLONE_PATH_INVALID",
         )
         if not source.exists():
             return
-        quarantine_root = VM_WORK_ROOT / "quarantine"
+        cls._destroy_session_key(authority)
+        cls._destroy_known_hosts(authority)
+        quarantine_root = authority.quarantine_root
         quarantine_root.mkdir(parents=True, exist_ok=True)
         target = cls._closed_path(
             quarantine_root
             / (
-                identity.removeprefix("sha256:")
+                authority.clone_identity.removeprefix("sha256:")
+                + "-"
+                + authority.connection_nonce[:16]
                 + "-"
                 + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             ),
@@ -1990,6 +3242,20 @@ class ClosedVmwareProvider:
             snapshot_identities={
                 profile: hashes[SNAPSHOT_FILES[profile]] for profile in PROFILES
             },
+            snapshot_disk_graph_identities={
+                profile: self._descriptor_disk_graph_digest_from_hashes(
+                    SOURCE_VM_ROOT,
+                    SNAPSHOT_DISK_FILES[profile],
+                    hashes,
+                )
+                for profile in PROFILES
+            },
+            source_disk_graph_identity=(
+                self._closed_source_disk_graph_digest_from_hashes(
+                    SOURCE_VM_ROOT,
+                    hashes,
+                )
+            ),
             original_hashes=hashes,
         )
 
@@ -2019,46 +3285,179 @@ class ClosedVmwareProvider:
             raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
         clone_root: Path | None = None
         clone_vmx: Path | None = None
+        authority = self._profile_authority(plan, harness_plan)
+        lease = self._acquire_provider_lease(authority)
+        verified_connection: VerifiedCloneConnection | None = None
+        profile_failure: CandidateHarnessError | None = None
         start_attempted = False
         try:
-            clone_root, clone_vmx = self._clone_full(plan)
+            self._prepare_profile_authority(authority)
+            clone_root, clone_vmx = self._clone_full(
+                plan,
+                authority,
+                expected_original_hashes=harness_plan.original_vm_hashes,
+                expected_source_disk_graph_identity=(
+                    harness_plan.source_disk_graph_identity
+                ),
+            )
+            if (
+                clone_root.resolve(strict=False)
+                != authority.clone_root.resolve(strict=False)
+                or clone_vmx.resolve(strict=False)
+                != authority.clone_vmx.resolve(strict=False)
+            ):
+                raise CandidateHarnessError(
+                    "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH"
+                )
             if self._hashes() != before_hashes:
                 raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
             self._revert_clone(clone_vmx, plan.snapshot_name)
             if self._hashes() != before_hashes:
                 raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
-            self._validate_clone_disk_graph(clone_root, clone_vmx)
+            active_graph_files = self._validate_clone_disk_graph(
+                clone_root,
+                clone_vmx,
+            )
+            active_disk_names = {
+                path.relative_to(clone_root.resolve(strict=True)).as_posix()
+                for path in active_graph_files
+                if path.suffix.casefold() == ".vmdk"
+            }
+            if not active_disk_names.issubset(harness_plan.original_vm_hashes):
+                raise CandidateHarnessError(
+                    "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED"
+                )
+            self._clone_snapshot_disk_graph_identity(
+                clone_root,
+                profile=plan.profile,
+                expected_snapshot_disk_graph_identity=(
+                    plan.snapshot_disk_graph_identity
+                ),
+            )
+            self._inject_guestinfo_challenge(authority, plan)
+            preboot_snapshot_identity = self._clone_snapshot_identity(
+                clone_root,
+                profile=plan.profile,
+                expected_snapshot_identity=plan.snapshot_identity,
+            )
+            preboot_disk_graph_digest = self._disk_graph_content_digest(
+                clone_root, clone_vmx
+            )
             start_attempted = True
             self._start_clone(clone_vmx)
-            self._wait_for_ssh()
-            guest_root = self._stage_candidate(
-                candidate_root, harness_plan.candidate_input_digest
+            verified_connection = self._establish_clone_connection(
+                authority,
+                plan,
+                preboot_disk_graph_digest=preboot_disk_graph_digest,
+                preboot_snapshot_identity=preboot_snapshot_identity,
             )
-            receipt = self._run_profile_guest(
-                plan=plan,
-                harness_plan=harness_plan,
-                guest_root=guest_root,
-                initial_platform_state=initial_platform_state,
-            )
+            try:
+                guest_root = self._stage_candidate(
+                    authority,
+                    candidate_root,
+                    harness_plan.candidate_input_digest,
+                )
+                receipt = self._run_profile_guest(
+                    authority=authority,
+                    plan=plan,
+                    harness_plan=harness_plan,
+                    guest_root=guest_root,
+                    initial_platform_state=initial_platform_state,
+                )
+            except CandidateHarnessError as error:
+                profile_failure = error
+                raise
             self._stop_clone(clone_vmx)
             if self._hashes() != before_hashes:
                 raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
-            self._remove_clone(clone_root)
+            self._remove_clone(verified_connection)
             return receipt
-        except BaseException:
-            if clone_root is not None:
+        except BaseException as error:
+            if authority.profile_root.exists() or authority.profile_root.is_symlink():
                 if start_attempted and clone_vmx is not None:
                     try:
                         running = self._is_running(clone_vmx)
                     except CandidateHarnessError:
                         running = True
                     if running:
-                        self._contain_clone(clone_vmx)
-                self._quarantine_clone(clone_root, plan.clone_identity)
+                        try:
+                            self._contain_clone(clone_vmx)
+                        except BaseException:
+                            self._destroy_session_key(authority)
+                            raise
+                self._quarantine_clone(authority)
+            if profile_failure is error:
+                continuation = self.inspect_profile_continuation(
+                    plan=plan,
+                    harness_plan=harness_plan,
+                )
+                if continuation.continuation_safe:
+                    raise CandidateProfileExecutionError(
+                        profile_failure.code,
+                        continuation,
+                    ) from error
             raise
+        finally:
+            self._release_provider_lease(lease)
 
     def inspect_original_hashes(self) -> Mapping[str, str]:
         return self._hashes()
+
+    def inspect_profile_continuation(
+        self,
+        *,
+        plan: CandidateProfilePlan,
+        harness_plan: CandidateHarnessPlan,
+    ) -> ProfileContinuationReceipt:
+        authority = self._profile_authority(plan, harness_plan)
+        try:
+            original_hashes = self._hashes()
+            running_paths = self._running_vmx_paths()
+            active_profile_root_count = int(
+                authority.profile_root.exists() or authority.profile_root.is_symlink()
+            )
+            private_keys = (
+                tuple(authority.session_root.rglob("id_ed25519"))
+                if authority.session_root.exists()
+                else ()
+            )
+            session_private_key_count = sum(
+                1 for path in private_keys if path.exists() or path.is_symlink()
+            )
+            known_hosts_files = (
+                tuple(authority.session_root.rglob("known_hosts"))
+                if authority.session_root.exists()
+                else ()
+            )
+            known_hosts_file_count = sum(
+                1 for path in known_hosts_files if path.exists() or path.is_symlink()
+            )
+            quarantine_present = (
+                authority.quarantine_root.exists()
+                and any(authority.quarantine_root.iterdir())
+            )
+        except (OSError, ValueError) as error:
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_CONTINUATION_UNVERIFIED"
+            ) from error
+        continuation_safe = (
+            original_hashes == dict(harness_plan.original_vm_hashes)
+            and not running_paths
+            and active_profile_root_count == 0
+            and session_private_key_count == 0
+            and known_hosts_file_count == 0
+        )
+        return ProfileContinuationReceipt.issue(
+            profile=plan.profile,
+            session_id=harness_plan.session_id,
+            original_vm_hashes=original_hashes,
+            active_profile_root_count=active_profile_root_count,
+            session_private_key_count=session_private_key_count,
+            known_hosts_file_count=known_hosts_file_count,
+            running_vm_count=len(running_paths),
+            quarantine_present=quarantine_present,
+            continuation_safe=continuation_safe,
+        )
 
     @staticmethod
     def _absent_state(status: int) -> str:
@@ -2164,9 +3563,16 @@ def _validate_source_evidence(value: SourceVmEvidence) -> SourceVmEvidence:
         type(value) is not SourceVmEvidence
         or value.vm_identity != SOURCE_VM_IDENTITY
         or set(value.snapshot_identities) != set(PROFILES)
-        or set(value.original_hashes) != set(SOURCE_VM_HASH_FILES)
+        or set(value.snapshot_disk_graph_identities) != set(PROFILES)
+        or not _DIGEST.fullmatch(value.source_disk_graph_identity)
+        or not set(SOURCE_VM_HASH_FILES).issubset(value.original_hashes)
+        or len(value.original_hashes) > 64
         or any(
             not _DIGEST.fullmatch(value.snapshot_identities[profile])
+            for profile in PROFILES
+        )
+        or any(
+            not _DIGEST.fullmatch(value.snapshot_disk_graph_identities[profile])
             for profile in PROFILES
         )
         or not value.original_hashes
@@ -2225,23 +3631,45 @@ def build_harness_plan(
     source_vm_digest = sha256_bytes(
         canonical_json_bytes(dict(sorted(source.original_hashes.items())))
     )
+    session_id = uuid4().hex
     profiles: list[CandidateProfilePlan] = []
     for profile in PROFILES:
+        connection_nonce = secrets.token_hex(32)
         body = {
             "candidateInputDigest": loaded.verified["candidate_input_sha256"],
             "profile": profile,
             "snapshotIdentity": source.snapshot_identities[profile],
+            "snapshotDiskGraphIdentity": source.snapshot_disk_graph_identities[
+                profile
+            ],
+            "sourceDiskGraphIdentity": source.source_disk_graph_identity,
             "sourceVmDigest": source_vm_digest,
             "providerReadinessReceiptDigest": readiness.receipt_digest,
+            "sessionId": session_id,
+            "connectionNonce": connection_nonce,
         }
+        clone_identity = sha256_bytes(canonical_json_bytes(body))
         profiles.append(
             CandidateProfilePlan(
                 profile=profile,
                 installer_profile=INSTALLER_PROFILES[profile],
                 snapshot_name=SNAPSHOT_ALLOWLIST[profile],
                 snapshot_identity=source.snapshot_identities[profile],
-                clone_identity=sha256_bytes(canonical_json_bytes(body)),
+                snapshot_disk_graph_identity=(
+                    source.snapshot_disk_graph_identities[profile]
+                ),
+                clone_identity=clone_identity,
                 provider_readiness_receipt_digest=readiness.receipt_digest,
+                session_id=session_id,
+                connection_nonce=connection_nonce,
+                ssh_host_key_alias=(
+                    "animemo-"
+                    + session_id[:12]
+                    + "-"
+                    + profile.lower().replace("_", "-")
+                    + "-"
+                    + clone_identity.removeprefix("sha256:")[:12]
+                ),
             )
         )
     provisional = CandidateHarnessPlan(
@@ -2253,9 +3681,11 @@ def build_harness_plan(
         candidate_version=candidate["candidate_version"],
         source_vm_identity=source.vm_identity,
         source_vm_digest=source_vm_digest,
+        source_disk_graph_identity=source.source_disk_graph_identity,
         original_vm_hashes=dict(source.original_hashes),
         profiles=tuple(profiles),
         provider_readiness_receipt_digest=readiness.receipt_digest,
+        session_id=session_id,
         plan_digest="",
     )
     return CandidateHarnessPlan(
@@ -2290,6 +3720,31 @@ def _profile_digest(receipt: Mapping[str, Any]) -> str:
     return sha256_bytes(canonical_json_bytes(receipt))
 
 
+def _bind_host_profile_receipt(
+    value: Mapping[str, Any],
+    *,
+    plan: CandidateHarnessPlan,
+    observed_original_hashes: Mapping[str, str],
+) -> dict[str, Any]:
+    if (
+        value.get("schema")
+        != "animemo.prepublication-candidate-profile-receipt-draft/v1"
+        or "original_vm_pre_hashes" in value
+        or "original_vm_post_hashes" in value
+    ):
+        raise CandidateHarnessError("CANDIDATE_PROFILE_RECEIPT_DRAFT_INVALID")
+    final = {
+        **dict(value),
+        "schema": "animemo.prepublication-candidate-profile-receipt/v1",
+        "original_vm_pre_hashes": dict(plan.original_vm_hashes),
+        "original_vm_post_hashes": dict(observed_original_hashes),
+    }
+    try:
+        return validate_profile_receipt(final)
+    except CandidateContractError as error:
+        raise CandidateHarnessError(error.code) from error
+
+
 def _read_expected_external_state(
     provider: CandidateVmProvider,
     candidate_version: str,
@@ -2303,6 +3758,48 @@ def _read_expected_external_state(
     if state != EXPECTED_CANDIDATE_EXTERNAL_STATE:
         raise CandidateHarnessError("CANDIDATE_VERSION_NOT_EMPTY")
     return state
+
+
+def _validate_continuation_receipt(
+    value: object,
+    *,
+    profile: CandidateProfilePlan,
+    plan: CandidateHarnessPlan,
+) -> ProfileContinuationReceipt:
+    if type(value) is not ProfileContinuationReceipt:
+        raise CandidateHarnessError("CANDIDATE_VM_CONTINUATION_UNVERIFIED")
+    receipt = value
+    if (
+        receipt.profile != profile.profile
+        or receipt.session_id != plan.session_id
+        or dict(receipt.original_vm_hashes) != dict(plan.original_vm_hashes)
+        or type(receipt.active_profile_root_count) is not int
+        or receipt.active_profile_root_count != 0
+        or type(receipt.session_private_key_count) is not int
+        or receipt.session_private_key_count != 0
+        or type(receipt.known_hosts_file_count) is not int
+        or receipt.known_hosts_file_count != 0
+        or type(receipt.running_vm_count) is not int
+        or receipt.running_vm_count != 0
+        or receipt.continuation_safe is not True
+        or receipt.receipt_digest
+        != sha256_bytes(canonical_json_bytes(receipt.identity_body()))
+    ):
+        raise CandidateHarnessError("CANDIDATE_VM_CONTINUATION_UNVERIFIED")
+    return receipt
+
+
+def _profile_result(
+    status: str,
+    *,
+    failure_code: str | None = None,
+    receipt_digest: str | None = None,
+) -> dict[str, str | None]:
+    return {
+        "status": status,
+        "failure_code": failure_code,
+        "receipt_digest": receipt_digest,
+    }
 
 
 def execute_harness_plan(
@@ -2349,21 +3846,104 @@ def execute_harness_plan(
         "r2_origin": r2_prestate_receipt["result"],
     }
     receipts: dict[str, dict[str, Any]] = {}
+    profile_results: dict[str, dict[str, str | None]] = {}
+    shared_blocker_code: str | None = None
     for item in plan.profiles:
+        result_key = PROFILE_RESULT_KEYS[item.profile]
+        if shared_blocker_code is not None:
+            profile_results[result_key] = _profile_result(
+                "NOT_RUN_SHARED_BLOCKER",
+                failure_code=shared_blocker_code,
+            )
+            continue
         expected_initial_state = _initial_platform_state(item.profile)
-        value = dict(
-            provider.execute_profile(
+        try:
+            value = dict(
+                provider.execute_profile(
+                    plan=item,
+                    harness_plan=plan,
+                    candidate_root=loaded.root,
+                    initial_platform_state=expected_initial_state,
+                )
+            )
+        except CandidateProfileExecutionError as error:
+            try:
+                _validate_continuation_receipt(
+                    error.continuation_receipt,
+                    profile=item,
+                    plan=plan,
+                )
+            except CandidateHarnessError as continuation_error:
+                shared_blocker_code = continuation_error.code
+                profile_results[result_key] = _profile_result(
+                    "ERROR",
+                    failure_code=shared_blocker_code,
+                )
+            else:
+                profile_results[result_key] = _profile_result(
+                    "ERROR",
+                    failure_code=error.code,
+                )
+            continue
+        except CandidateHarnessError as error:
+            shared_blocker_code = error.code
+            profile_results[result_key] = _profile_result(
+                "ERROR",
+                failure_code=shared_blocker_code,
+            )
+            continue
+        except Exception:
+            shared_blocker_code = "CANDIDATE_PROFILE_UNCLASSIFIED_ERROR"
+            profile_results[result_key] = _profile_result(
+                "ERROR",
+                failure_code=shared_blocker_code,
+            )
+            continue
+        try:
+            observed_original_hashes = dict(provider.inspect_original_hashes())
+        except (CandidateHarnessError, OSError, TypeError, ValueError):
+            shared_blocker_code = "CANDIDATE_ORIGINAL_VM_STATE_UNVERIFIED"
+            profile_results[result_key] = _profile_result(
+                "ERROR",
+                failure_code=shared_blocker_code,
+            )
+            continue
+        if observed_original_hashes != dict(plan.original_vm_hashes):
+            shared_blocker_code = "CANDIDATE_ORIGINAL_VM_MUTATED"
+            profile_results[result_key] = _profile_result(
+                "ERROR",
+                failure_code=shared_blocker_code,
+            )
+            continue
+        try:
+            continuation = provider.inspect_profile_continuation(
                 plan=item,
                 harness_plan=plan,
-                candidate_root=loaded.root,
-                initial_platform_state=expected_initial_state,
             )
-        )
-        observed_original_hashes = dict(provider.inspect_original_hashes())
+            _validate_continuation_receipt(
+                continuation,
+                profile=item,
+                plan=plan,
+            )
+        except (CandidateHarnessError, OSError, TypeError, ValueError):
+            shared_blocker_code = "CANDIDATE_VM_CONTINUATION_UNVERIFIED"
+            profile_results[result_key] = _profile_result(
+                "ERROR",
+                failure_code=shared_blocker_code,
+            )
+            continue
         try:
-            receipt = validate_profile_receipt(value)
-        except CandidateContractError as error:
-            raise CandidateHarnessError(error.code) from error
+            receipt = _bind_host_profile_receipt(
+                value,
+                plan=plan,
+                observed_original_hashes=observed_original_hashes,
+            )
+        except CandidateHarnessError as error:
+            profile_results[result_key] = _profile_result(
+                "ERROR",
+                failure_code=error.code,
+            )
+            continue
         if (
             receipt["profile"] != item.profile
             or receipt["candidate_input_digest"] != plan.candidate_input_digest
@@ -2382,14 +3962,48 @@ def execute_harness_plan(
             != dict(plan.original_vm_hashes)
             or receipt["original_vm_post_hashes"]
             != observed_original_hashes
-            or observed_original_hashes != dict(plan.original_vm_hashes)
-            or receipt["result"] != "PASS"
         ):
-            raise CandidateHarnessError("CANDIDATE_PROFILE_RECEIPT_BINDING_MISMATCH")
+            profile_results[result_key] = _profile_result(
+                "ERROR",
+                failure_code="CANDIDATE_PROFILE_RECEIPT_BINDING_MISMATCH",
+            )
+            continue
         receipts[item.profile] = receipt
-    final_hashes = dict(provider.inspect_original_hashes())
+        digest = _profile_digest(receipt)
+        if receipt["result"] == "PASS":
+            profile_results[result_key] = _profile_result(
+                "PASS",
+                receipt_digest=digest,
+            )
+        else:
+            profile_results[result_key] = _profile_result(
+                "FAIL",
+                failure_code="CANDIDATE_PROFILE_REPORTED_FAILURE",
+                receipt_digest=digest,
+            )
+    try:
+        final_hashes = dict(provider.inspect_original_hashes())
+    except (CandidateHarnessError, OSError, TypeError, ValueError) as error:
+        raise CandidateHarnessError(
+            "CANDIDATE_ORIGINAL_VM_STATE_UNVERIFIED"
+        ) from error
     if final_hashes != dict(plan.original_vm_hashes):
-        raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
+        if not any(
+            result["failure_code"] == "CANDIDATE_ORIGINAL_VM_MUTATED"
+            for result in profile_results.values()
+        ):
+            receipts.pop("RUNTIME_BASE_OFFLINE", None)
+            profile_results["runtime_base_offline"] = _profile_result(
+                "ERROR",
+                failure_code="CANDIDATE_ORIGINAL_VM_MUTATED",
+            )
+        for item in plan.profiles:
+            key = PROFILE_RESULT_KEYS[item.profile]
+            if key not in profile_results:
+                profile_results[key] = _profile_result(
+                    "NOT_RUN_SHARED_BLOCKER",
+                    failure_code="CANDIDATE_ORIGINAL_VM_MUTATED",
+                )
     try:
         r2_poststate_receipt = verify_candidate_r2_origin_from_environment(
             target_rc=plan.candidate_version,
@@ -2421,9 +4035,13 @@ def execute_harness_plan(
     if candidate_poststate != candidate_prestate:
         raise CandidateHarnessError("CANDIDATE_VERSION_STATE_DRIFT")
     completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    all_profiles_pass = all(
+        profile_results[PROFILE_RESULT_KEYS[profile]]["status"] == "PASS"
+        for profile in PROFILES
+    )
     aggregate = {
-        "schema": "animemo.prepublication-candidate-acceptance-receipt/v2",
-        "version": 2,
+        "schema": "animemo.prepublication-candidate-acceptance-receipt/v3",
+        "version": 3,
         "candidate_input_digest": plan.candidate_input_digest,
         "verified_candidate_digest": plan.verified_candidate_digest,
         "qualification_run_id": plan.qualification_run_id,
@@ -2443,14 +4061,8 @@ def execute_harness_plan(
         "r2_origin_poststate_observation_id": r2_poststate_receipt[
             "observation_id"
         ],
-        "profile_receipts": {
-            "fresh_base": _profile_digest(receipts["FRESH_BASE"]),
-            "docker_base": _profile_digest(receipts["DOCKER_BASE"]),
-            "runtime_base_offline": _profile_digest(
-                receipts["RUNTIME_BASE_OFFLINE"]
-            ),
-        },
-        "all_profiles_pass": True,
+        "profile_results": profile_results,
+        "all_profiles_pass": all_profiles_pass,
         "candidate_prestate": candidate_prestate,
         "candidate_poststate": candidate_poststate,
         "repository_mutation_count": 0,
@@ -2461,7 +4073,7 @@ def execute_harness_plan(
         "release_authority_granted": False,
         "publish_authorized": False,
         "completed_at": completed,
-        "result": "PASS",
+        "result": "PASS" if all_profiles_pass else "FAIL",
         "receipt_digest": "",
     }
     unsigned = dict(aggregate)
@@ -2472,7 +4084,7 @@ def execute_harness_plan(
     except CandidateContractError as error:
         raise CandidateHarnessError(error.code) from error
     return {
-        "status": "PASS",
+        "status": aggregate["result"],
         "aggregateReceipt": aggregate,
         "aggregateReceiptSha256": aggregate_receipt_digest(aggregate),
         "r2OriginPrestateReceipt": r2_prestate_receipt,
@@ -2515,7 +4127,7 @@ def main(argv: list[str] | None = None) -> int:
             environment=os.environ,
         )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        return 0
+        return 0 if result["status"] == "PASS" else 2
     except (CandidateHarnessError, CandidateContractError) as error:
         print(json.dumps({"code": getattr(error, "code", str(error))}), file=sys.stderr)
         return 2

@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from durability.canonical import canonical_json_bytes as canonical_identity_bytes
 from durability.platform import (
     REQUIRED_CAPABILITIES,
     REQUIRED_REHEARSALS,
@@ -24,12 +25,14 @@ from durability.platform import (
     finalize_platform_qualification,
 )
 from release.candidate import (
+    _CANDIDATE_COMMAND_OBSERVER_IDENTITY,
     CandidateContractError,
     _build_verified_candidate_identity,
     _extract_candidate_archive,
     _verify_qualification_intrinsics,
     _verify_runtime,
     aggregate_receipt_digest,
+    apt_network_sequence_matches,
     canonical_json_bytes,
     decode_aggregate_receipt_b64url,
     extract_candidate_oci_archive,
@@ -373,8 +376,8 @@ def aggregate_receipt() -> dict[str, object]:
         "r2_origin": "PROVEN_EMPTY",
     }
     value = {
-        "schema": "animemo.prepublication-candidate-acceptance-receipt/v2",
-        "version": 2,
+        "schema": "animemo.prepublication-candidate-acceptance-receipt/v3",
+        "version": 3,
         "candidate_input_digest": "sha256:" + "1" * 64,
         "verified_candidate_digest": "sha256:" + "2" * 64,
         "qualification_run_id": RUN_ID,
@@ -390,10 +393,22 @@ def aggregate_receipt() -> dict[str, object]:
         "r2_origin_poststate_observation_id": (
             "87654321-4321-4765-8abc-876543210fed"
         ),
-        "profile_receipts": {
-            "fresh_base": "sha256:" + "3" * 64,
-            "docker_base": "sha256:" + "4" * 64,
-            "runtime_base_offline": "sha256:" + "5" * 64,
+        "profile_results": {
+            "fresh_base": {
+                "status": "PASS",
+                "failure_code": None,
+                "receipt_digest": "sha256:" + "3" * 64,
+            },
+            "docker_base": {
+                "status": "PASS",
+                "failure_code": None,
+                "receipt_digest": "sha256:" + "4" * 64,
+            },
+            "runtime_base_offline": {
+                "status": "PASS",
+                "failure_code": None,
+                "receipt_digest": "sha256:" + "5" * 64,
+            },
         },
         "all_profiles_pass": True,
         "candidate_prestate": dict(state),
@@ -416,6 +431,42 @@ def aggregate_receipt() -> dict[str, object]:
 
 
 class CandidateSchemaTests(unittest.TestCase):
+    def test_apt_network_sequence_allows_only_one_explicit_install_retry(self):
+        update = "sha256:" + "1" * 64
+        install = "sha256:" + "2" * 64
+        expected = [update, install]
+        retryable = [install]
+
+        self.assertTrue(
+            apt_network_sequence_matches(
+                [(update, 0), (install, 0)],
+                expected_digests=expected,
+                retryable_digests=retryable,
+            )
+        )
+        self.assertTrue(
+            apt_network_sequence_matches(
+                [(update, 0), (install, 124), (install, 0)],
+                expected_digests=expected,
+                retryable_digests=retryable,
+            )
+        )
+        rejected = (
+            [(update, 0), (update, 0), (install, 0)],
+            [(update, 124), (update, 0), (install, 0)],
+            [(update, 0), (install, 124), (install, 124), (install, 0)],
+            [(install, 0), (update, 0)],
+        )
+        for observed in rejected:
+            with self.subTest(observed=observed):
+                self.assertFalse(
+                    apt_network_sequence_matches(
+                        observed,
+                        expected_digests=expected,
+                        retryable_digests=retryable,
+                    )
+                )
+
     def test_post_repair_loader_rejects_v1_and_receipt_substitution(self):
         identity = verified_candidate_identity()
         legacy = copy.deepcopy(identity)
@@ -749,16 +800,71 @@ sys.stdout.buffer.write(canonical_json_bytes(identity))
             "strict_platform_qualification": True,
             "instance_mutation_before_platform_qualification": 0,
             "installer_plan_digest": "sha256:" + "8" * 64,
+            "installer_execution_receipt_digest": "sha256:" + "9" * 64,
             "installer_execution_result": "PASS",
             "api_digest": DIGEST,
             "web_digest": DIGEST,
             "postgres_digest": DIGEST,
             "redis_digest": DIGEST,
-            "doctor_result": "PASS",
-            "canonical_test_results": [{"name": "doctor", "result": "PASS"}],
-            "network_request_count": 0,
-            "apt_command_count": 0,
-            "external_pull_count": 0,
+            "doctor_execution_identity": "sha256:" + "a" * 64,
+            "doctor_receipt_digest": "sha256:" + "b" * 64,
+            "canonical_acceptance_tests": [
+                {"name": name, "result": "PASS", "receiptDigest": digest}
+                for name, digest in (
+                    ("application.journal-crud", "sha256:" + "d" * 64),
+                    ("service.api.health", "sha256:" + "e" * 64),
+                    ("service.web.health", "sha256:" + "f" * 64),
+                )
+            ],
+            "completed_steps": ["runtime.validate", "doctor.accept"],
+            "network_observation": {
+                "authority": "PRODUCTION_EXECUTION_WITH_OS_EGRESS_ISOLATION",
+                "completed_command_inventory_digest": sha256_bytes(
+                    canonical_json_bytes([])
+                ),
+                "completed_commands": [],
+                "destination_authority": "NONE",
+                "egress_isolation": {
+                    "authority": "OS_ENFORCED_CANDIDATE_EGRESS_ISOLATION",
+                    "container_network": "animemo_animemo",
+                    "container_network_internal": True,
+                    "service": "animemo-updater.service",
+                    "service_address_families": ["AF_UNIX", "AF_NETLINK"],
+                    "receipt_digest": sha256_bytes(
+                        canonical_identity_bytes(
+                            {
+                                "authority": "OS_ENFORCED_CANDIDATE_EGRESS_ISOLATION",
+                                "containerNetwork": "animemo_animemo",
+                                "containerNetworkInternal": True,
+                                "service": "animemo-updater.service",
+                                "serviceAddressFamilies": ["AF_UNIX", "AF_NETLINK"],
+                            }
+                        )
+                    ),
+                },
+                "expected_network_command_digests": [],
+                "observer_identities": {
+                    "platform": _CANDIDATE_COMMAND_OBSERVER_IDENTITY,
+                    "runtime": _CANDIDATE_COMMAND_OBSERVER_IDENTITY,
+                },
+                "platform_plan_digest": "sha256:" + "6" * 64,
+                "policy": "DENY_ALL",
+                "retryable_network_command_digests": [],
+                "result": "PASS",
+            },
+            "external_pull_observation": {
+                "authority": "PRODUCTION_EXECUTION_COMMAND_BOUNDARY",
+                "inventory": [],
+                "observed_count": 0,
+                "observer_identity": _CANDIDATE_COMMAND_OBSERVER_IDENTITY,
+                "pull_denied_command_digests": [],
+                "result": "PASS",
+                "runtime_command_inventory_digest": sha256_bytes(
+                    canonical_json_bytes([])
+                ),
+            },
+            "image_acquisition_receipt_digest": "sha256:" + "1" * 64,
+            "image_runtime_readback_receipt_digest": "sha256:" + "2" * 64,
             "original_vm_pre_hashes": {"base.vmx": DIGEST},
             "original_vm_post_hashes": {"base.vmx": DIGEST},
             "release_authority_granted": False,
@@ -775,9 +881,72 @@ sys.stdout.buffer.write(canonical_json_bytes(identity))
             receipt["original_vm_pre_hashes"]
         )
         self.assertEqual(validate_profile_receipt(receipt)["result"], "PASS")
-        receipt["network_request_count"] = 1
-        with self.assertRaisesRegex(CandidateContractError, "OFFLINE_NETWORK"):
-            validate_profile_receipt(receipt)
+        networked = copy.deepcopy(receipt)
+        command = {
+            "argv_digest": "sha256:" + "3" * 64,
+            "boundary": "PLATFORM",
+            "classification": "APT_NETWORK",
+            "external_pull_disposition": "NOT_APPLICABLE",
+            "operation": "apt-get",
+            "return_code": 0,
+        }
+        networked["network_observation"]["completed_commands"] = [command]
+        networked["network_observation"]["expected_network_command_digests"] = [
+            command["argv_digest"]
+        ]
+        networked["network_observation"][
+            "completed_command_inventory_digest"
+        ] = sha256_bytes(canonical_json_bytes([command]))
+        with self.assertRaisesRegex(
+            CandidateContractError, "CANDIDATE_PROFILE_NETWORK_OBSERVATION_INVALID"
+        ):
+            validate_profile_receipt(networked)
+
+        duplicate_success = copy.deepcopy(receipt)
+        duplicate_success["profile"] = "FRESH_BASE"
+        duplicate_success["initial_platform_state"]["network_allowed"] = True
+        duplicate_success["network_observation"][
+            "policy"
+        ] = "APT_UBUNTU_ARCHIVE_ONLY"
+        duplicate_success["network_observation"][
+            "destination_authority"
+        ] = "UBUNTU_ARCHIVE_VERIFIED_APT_SOURCES"
+        duplicate_success["network_observation"]["completed_commands"] = [
+            command,
+            copy.deepcopy(command),
+        ]
+        duplicate_success["network_observation"][
+            "expected_network_command_digests"
+        ] = [command["argv_digest"]]
+        duplicate_success["network_observation"][
+            "retryable_network_command_digests"
+        ] = []
+        duplicate_success["network_observation"][
+            "completed_command_inventory_digest"
+        ] = sha256_bytes(
+            canonical_json_bytes(
+                duplicate_success["network_observation"]["completed_commands"]
+            )
+        )
+        with self.assertRaisesRegex(
+            CandidateContractError, "CANDIDATE_PROFILE_NETWORK_OBSERVATION_INVALID"
+        ):
+            validate_profile_receipt(duplicate_success)
+
+        pulled = copy.deepcopy(receipt)
+        pulled["external_pull_observation"]["inventory"] = [
+            {
+                "argv_digest": "sha256:" + "4" * 64,
+                "operation": "docker-pull",
+                "reference_digest": DIGEST,
+                "return_code": 0,
+            }
+        ]
+        pulled["external_pull_observation"]["observed_count"] = 1
+        with self.assertRaisesRegex(
+            CandidateContractError, "CANDIDATE_PROFILE_EXTERNAL_PULL_ACTIVITY"
+        ):
+            validate_profile_receipt(pulled)
 
 
 class CandidateArchiveTests(unittest.TestCase):

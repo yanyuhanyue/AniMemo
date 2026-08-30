@@ -60,6 +60,7 @@ CRITICAL_LOG = re.compile(
 MIGRATION_PLAN_LINE = re.compile(
     r"^\s*\[(?P<state>[ X])\]\s+(?P<name>[A-Za-z0-9_]+\.[^\s]+)\s*$"
 )
+CANDIDATE_NETWORK_OVERRIDE_TEXT = "networks:\n  animemo:\n    internal: true\n"
 
 
 class _InitialHttpTransportUnavailable(StateError):
@@ -196,6 +197,7 @@ class ImmutableComposeDeployment:
         http_probe=None,
         release_probe=None,
         managed_environment: Mapping[str, str] | None = None,
+        candidate_network_override: Path | None = None,
     ):
         self.paths = paths
         self.runner = runner or CommandRunner()
@@ -205,6 +207,7 @@ class ImmutableComposeDeployment:
         self.http_probe = http_probe or self._http_probe
         self.release_probe = release_probe or self._release_probe
         self.managed_environment = dict(managed_environment or {})
+        self.candidate_network_override = candidate_network_override
         if any(
             not isinstance(key, str) or not key or not isinstance(value, str)
             for key, value in self.managed_environment.items()
@@ -498,6 +501,30 @@ class ImmutableComposeDeployment:
         if self.runtime_env.exists() or self.runtime_env.is_symlink():
             _read_private_text(self.paths.state_root, self.runtime_env)
             env_files.extend(["--env-file", str(self.runtime_env)])
+        compose_files = [
+            "-f",
+            str(self.compose_file),
+            "-f",
+            str(self.updater_compose_file),
+        ]
+        if self.candidate_network_override is not None:
+            override = self.candidate_network_override
+            try:
+                metadata = override.lstat()
+                expected_parent = self.paths.data_root / "private"
+                resolved_parent = override.parent.resolve(strict=True)
+                override_text = _read_private_text(self.paths.data_root, override)
+            except OSError as error:
+                raise StateError("Candidate network override is unavailable") from error
+            if (
+                override.is_symlink()
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or resolved_parent != expected_parent.resolve(strict=True)
+                or override_text != CANDIDATE_NETWORK_OVERRIDE_TEXT
+            ):
+                raise StateError("Candidate network override is unsafe")
+            compose_files.extend(["-f", str(override)])
         return self.runner.run(
             [
                 "/usr/bin/docker",
@@ -505,10 +532,7 @@ class ImmutableComposeDeployment:
                 "--project-name",
                 self.paths.compose_project,
                 *env_files,
-                "-f",
-                str(self.compose_file),
-                "-f",
-                str(self.updater_compose_file),
+                *compose_files,
                 *args,
             ],
             cwd=self.paths.app_root,
@@ -781,6 +805,8 @@ class ImmutableComposeDeployment:
         self._compose(
             manifest,
             "up",
+            "--pull",
+            "never",
             "-d",
             "--wait",
             "--wait-timeout",
@@ -794,6 +820,8 @@ class ImmutableComposeDeployment:
         self._compose(
             manifest,
             "up",
+            "--pull",
+            "never",
             "-d",
             "--no-deps",
             "--wait",
@@ -808,6 +836,8 @@ class ImmutableComposeDeployment:
         self._compose(
             manifest,
             "up",
+            "--pull",
+            "never",
             "-d",
             "--no-deps",
             "--force-recreate",
@@ -823,6 +853,8 @@ class ImmutableComposeDeployment:
         self._compose(
             manifest,
             "up",
+            "--pull",
+            "never",
             "-d",
             "--no-deps",
             "--force-recreate",
@@ -889,10 +921,28 @@ class ImmutableComposeDeployment:
             raise StateError("AniMemo Web health probe failed")
 
     def migrate(self, manifest: dict[str, object]) -> None:
-        self._compose(manifest, "run", "--rm", "--no-deps", "migration", timeout=600)
+        self._compose(
+            manifest,
+            "run",
+            "--pull",
+            "never",
+            "--rm",
+            "--no-deps",
+            "migration",
+            timeout=600,
+        )
 
     def bootstrap(self, manifest: dict[str, object]) -> None:
-        self._compose(manifest, "run", "--rm", "--no-deps", "bootstrap", timeout=600)
+        self._compose(
+            manifest,
+            "run",
+            "--pull",
+            "never",
+            "--rm",
+            "--no-deps",
+            "bootstrap",
+            timeout=600,
+        )
 
     def rotate_restored_authentication_epoch(
         self, manifest: dict[str, object]
@@ -925,6 +975,8 @@ class ImmutableComposeDeployment:
             raise StateError("Restore secret disposition is invalid")
         argv = [
             "run",
+            "--pull",
+            "never",
             "--rm",
             "--no-deps",
             "api",
@@ -979,6 +1031,8 @@ class ImmutableComposeDeployment:
         result = self._compose(
             manifest,
             "run",
+            "--pull",
+            "never",
             "--rm",
             "--no-deps",
             "api",
@@ -1046,6 +1100,8 @@ class ImmutableComposeDeployment:
         result = self._compose(
             manifest,
             "run",
+            "--pull",
+            "never",
             "--rm",
             "--no-deps",
             "api",
@@ -1108,6 +1164,8 @@ class ImmutableComposeDeployment:
         self._compose(
             manifest,
             "up",
+            "--pull",
+            "never",
             "-d",
             "--no-deps",
             "--force-recreate",

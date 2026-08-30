@@ -12,12 +12,22 @@ from installer.bootstrap import (
     BootstrapAuthorityError,
     VerifiedPrepublicationCandidateCapability,
 )
+from installer.platform_bootstrap import _apt_argv
 from installer.production import (
+    CandidatePlatformCommandObserver,
     CandidateReleasePort,
+    LocalDockerCommandRunner,
+    ProductionDoctorAcceptance,
     ProductionInstallerComposition,
     build_candidate_composition,
 )
-from installer.runtime import InstallTransportSource, explicit_transport_policy
+from installer.runtime import (
+    InstallerError,
+    InstallOutcome,
+    InstallTransportSource,
+    explicit_transport_policy,
+)
+from updater.oci import AcquiredRuntimeImage, ImageAcquisitionReceipt
 
 DIGEST = "sha256:" + "a" * 64
 
@@ -49,6 +59,43 @@ class _Composition:
     def execute_platform(self, *args, **kwargs):
         self.execute_calls += 1
         raise AssertionError("plan-only must not execute")
+
+
+class _ExecutingComposition:
+    def __init__(self):
+        self.session = SimpleNamespace(plan=_Plan(), release=_Release())
+        self.platform_receipt = SimpleNamespace(
+            as_dict=lambda: {"result": "PASS"}
+        )
+        self.plan = SimpleNamespace(plan_digest="sha256:" + "c" * 64)
+        self.result = SimpleNamespace(
+            outcome=SimpleNamespace(value="SUCCEEDED"),
+            as_dict=lambda: {
+                "outcome": "SUCCEEDED",
+                "completedSteps": ["runtime.validate", "doctor.accept"],
+            },
+        )
+        self.runtime = SimpleNamespace(
+            plan=mock.Mock(return_value=self.plan),
+            execute=mock.Mock(return_value=self.result),
+        )
+
+    def plan_platform(self, request, verified_at):
+        return self.session
+
+    def execute_platform(self, session, accepted_plan_digest):
+        return self.platform_receipt
+
+    def candidate_profile_execution_observation(
+        self, *, platform_plan, platform_receipt, installer_plan, installer_result
+    ):
+        self.observation_inputs = (
+            platform_plan,
+            platform_receipt,
+            installer_plan,
+            installer_result,
+        )
+        return {"schema": "production-observation-test"}
 
 
 class _CandidateGate:
@@ -178,6 +225,43 @@ class CandidateInstallerCliTests(unittest.TestCase):
             "CANDIDATE_EXECUTION_ACCEPTANCE_REQUIRED",
         )
 
+    def test_execute_exports_observation_from_the_production_composition(self):
+        composition = _ExecutingComposition()
+        output = io.StringIO()
+        with mock.patch(
+            "installer.production.build_candidate_composition",
+            return_value=composition,
+        ), redirect_stdout(output):
+            code = cli.main(
+                [
+                    "candidate",
+                    "--verified-candidate-digest",
+                    DIGEST,
+                    "--profile",
+                    "ONLINE_FRESH",
+                    "--public-origin",
+                    "https://candidate.rc14.invalid",
+                    "--execute",
+                    "--accept",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(code, cli.EXIT_SUCCESS)
+        self.assertEqual(
+            json.loads(output.getvalue())["productionExecutionObservation"],
+            {"schema": "production-observation-test"},
+        )
+        self.assertEqual(
+            composition.observation_inputs,
+            (
+                composition.session.plan,
+                composition.platform_receipt,
+                composition.plan,
+                composition.result,
+            ),
+        )
+
     def test_online_candidate_platform_plan_never_discovers_a_release(self):
         args = cli._parser().parse_args(
             [
@@ -228,6 +312,327 @@ class CandidateInstallerCliTests(unittest.TestCase):
         self.assertIs(session.bootstrap.transport_source, InstallTransportSource.GITHUB)
         self.assertEqual(gate.verify_calls, 1)
         self.assertEqual(gate.binding, (release.version, release.commit))
+
+    def test_real_candidate_composition_builds_execution_bound_observation(self):
+        releases = CandidateReleasePort.__new__(CandidateReleasePort)
+        image_receipt = ImageAcquisitionReceipt(
+            verified_release_identity="sha256:" + "1" * 64,
+            transport_policy_identity="2" * 64,
+            images=tuple(
+                AcquiredRuntimeImage(
+                    role=role,
+                    canonical_reference=f"example.invalid/{role}@sha256:" + "3" * 64,
+                    observed_reference=f"example.invalid/{role}@sha256:" + "3" * 64,
+                )
+                for role in ("api", "postgres", "redis", "web")
+            ),
+            identity="4" * 64,
+        )
+        releases.image_receipt_for = lambda _release: image_receipt
+        doctor = ProductionDoctorAcceptance(
+            releases=mock.Mock(), compatibility=mock.Mock()
+        )
+        doctor._latest_report = SimpleNamespace(
+            as_dict=lambda: {
+                "doctorIdentity": {
+                    "format": "animemo-doctor-runtime",
+                    "version": 1,
+                },
+                "overallStatus": "PASS",
+            }
+        )
+        doctor._latest_canonical_acceptance = tuple(
+            {
+                "evidence": {
+                    "adapter": adapter,
+                    "observationDigest": "sha256:" + "5" * 64,
+                },
+                "name": name,
+                "receiptDigest": "sha256:" + digit * 64,
+                "result": "PASS",
+            }
+            for name, adapter, digit in (
+                (
+                    "application.journal-crud",
+                    "django-domain-service-transaction-rollback",
+                    "6",
+                ),
+                ("service.api.health", "immutable-compose-api-health", "7"),
+                ("service.web.health", "immutable-compose-web-health", "8"),
+            )
+        )
+        command_delegate = mock.Mock()
+        egress_readbacks = [
+            SimpleNamespace(returncode=0, stdout="true"),
+            SimpleNamespace(
+                returncode=0,
+                stdout="AF_UNIX AF_NETLINK\n",
+            ),
+        ]
+        command_delegate.run.side_effect = [
+            *egress_readbacks,
+            *[
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps([image.canonical_reference]),
+                )
+                for image in image_receipt.images
+            ],
+        ]
+        platform_delegate = mock.Mock()
+        platform_delegate.run.return_value = SimpleNamespace(returncode=0)
+        platform_observer = CandidatePlatformCommandObserver(platform_delegate)
+        composition = ProductionInstallerComposition(
+            runtime=object(),
+            releases=releases,
+            platform=object(),
+            candidate_doctor=doctor,
+            candidate_platform_observer=platform_observer,
+            candidate_command_runner=LocalDockerCommandRunner(command_delegate),
+        )
+        completed_steps = ["runtime.validate", "doctor.accept"]
+        result = SimpleNamespace(
+            outcome=InstallOutcome.SUCCEEDED,
+            as_dict=lambda: {
+                "outcome": "SUCCEEDED",
+                "completedSteps": completed_steps,
+            },
+        )
+
+        observation = composition.candidate_profile_execution_observation(
+            platform_plan=SimpleNamespace(
+                actions=(),
+                mode=SimpleNamespace(value="OFFLINE_VALIDATE_ONLY"),
+                network_policy="DENY_ALL",
+                plan_digest="sha256:" + "9" * 64,
+            ),
+            platform_receipt=SimpleNamespace(result="PASS"),
+            installer_plan=SimpleNamespace(
+                plan_digest="sha256:" + "a" * 64,
+                release=object(),
+            ),
+            installer_result=result,
+        )
+
+        self.assertEqual(observation["networkObservation"]["result"], "PASS")
+        self.assertEqual(
+            len(observation["networkObservation"]["completedCommands"]), 6
+        )
+        self.assertTrue(
+            observation["networkObservation"]["egressIsolation"][
+                "containerNetworkInternal"
+            ]
+        )
+        self.assertEqual(
+            observation["imageRuntimeReadbackReceipt"]["result"], "PASS"
+        )
+        self.assertEqual(observation["externalPullObservation"]["inventory"], [])
+        self.assertEqual(len(observation["canonicalAcceptanceTests"]), 3)
+        self.assertNotEqual(
+            observation["doctorExecutionIdentity"],
+            observation["doctorReceiptDigest"],
+        )
+
+        for name, readbacks in (
+            (
+                "container-network-not-internal",
+                [
+                    SimpleNamespace(returncode=0, stdout="false"),
+                    SimpleNamespace(returncode=0, stdout="AF_UNIX AF_NETLINK\n"),
+                ],
+            ),
+            (
+                "service-allows-inet",
+                [
+                    SimpleNamespace(returncode=0, stdout="true"),
+                    SimpleNamespace(returncode=0, stdout="AF_UNIX AF_INET\n"),
+                ],
+            ),
+        ):
+            command_delegate.run.side_effect = readbacks
+            before = len(composition.candidate_command_runner._completed_commands)
+            with self.subTest(name=name), self.assertRaisesRegex(
+                InstallerError,
+                "INSTALL_CANDIDATE_EGRESS_ISOLATION_UNVERIFIED",
+            ):
+                composition.candidate_profile_execution_observation(
+                    platform_plan=SimpleNamespace(
+                        actions=(),
+                        mode=SimpleNamespace(value="OFFLINE_VALIDATE_ONLY"),
+                        network_policy="DENY_ALL",
+                        plan_digest="sha256:" + "9" * 64,
+                    ),
+                    platform_receipt=SimpleNamespace(result="PASS"),
+                    installer_plan=SimpleNamespace(
+                        plan_digest="sha256:" + "a" * 64,
+                        release=object(),
+                    ),
+                    installer_result=result,
+                )
+            del composition.candidate_command_runner._completed_commands[before:]
+
+        platform_observer.run(
+            ("/usr/bin/curl", "https://hidden.invalid"),
+            timeout=30,
+            environment={"PATH": "/usr/bin"},
+        )
+        command_delegate.run.side_effect = [
+            *egress_readbacks,
+            *[
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps([image.canonical_reference]),
+                )
+                for image in image_receipt.images
+            ],
+        ]
+        with self.assertRaisesRegex(
+            InstallerError, "INSTALL_CANDIDATE_COMMAND_OBSERVATION_FAILED"
+        ):
+            composition.candidate_profile_execution_observation(
+                platform_plan=SimpleNamespace(
+                    actions=(),
+                    mode=SimpleNamespace(value="OFFLINE_VALIDATE_ONLY"),
+                    network_policy="DENY_ALL",
+                    plan_digest="sha256:" + "9" * 64,
+                ),
+                platform_receipt=SimpleNamespace(result="PASS"),
+                installer_plan=SimpleNamespace(
+                    plan_digest="sha256:" + "a" * 64,
+                    release=object(),
+                ),
+                installer_result=result,
+            )
+
+        platform_observer._completed_commands.pop()
+        command_delegate.run.side_effect = [
+            SimpleNamespace(returncode=0),
+            *[
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps([image.canonical_reference]),
+                )
+                for image in image_receipt.images
+            ],
+        ]
+        composition.candidate_command_runner.run(
+            ["/usr/bin/docker", "compose", "up", "-d"]
+        )
+        with self.assertRaisesRegex(
+            InstallerError, "INSTALL_CANDIDATE_COMMAND_OBSERVATION_FAILED"
+        ):
+            composition.candidate_profile_execution_observation(
+                platform_plan=SimpleNamespace(
+                    actions=(),
+                    mode=SimpleNamespace(value="OFFLINE_VALIDATE_ONLY"),
+                    network_policy="DENY_ALL",
+                    plan_digest="sha256:" + "9" * 64,
+                ),
+                platform_receipt=SimpleNamespace(result="PASS"),
+                installer_plan=SimpleNamespace(
+                    plan_digest="sha256:" + "a" * 64,
+                    release=object(),
+                ),
+                installer_result=result,
+            )
+
+        composition.candidate_command_runner._completed_commands.pop()
+        platform_observer.run(
+            _apt_argv("update"),
+            timeout=30,
+            environment={"PATH": "/usr/bin"},
+        )
+        platform_observer.run(
+            _apt_argv("update"),
+            timeout=30,
+            environment={"PATH": "/usr/bin"},
+        )
+        command_delegate.run.side_effect = [
+            *egress_readbacks,
+            *[
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps([image.canonical_reference]),
+                )
+                for image in image_receipt.images
+            ],
+        ]
+        with self.assertRaisesRegex(
+            InstallerError, "INSTALL_CANDIDATE_NETWORK_OBSERVATION_FAILED"
+        ):
+            composition.candidate_profile_execution_observation(
+                platform_plan=SimpleNamespace(
+                    actions=(
+                        SimpleNamespace(
+                            kind=SimpleNamespace(value="APT_UPDATE"),
+                            packages=(),
+                        ),
+                    ),
+                    mode=SimpleNamespace(value="ONLINE_FRESH"),
+                    network_policy="APT_UBUNTU_ARCHIVE_ONLY",
+                    plan_digest="sha256:" + "9" * 64,
+                ),
+                platform_receipt=SimpleNamespace(result="PASS"),
+                installer_plan=SimpleNamespace(
+                    plan_digest="sha256:" + "a" * 64,
+                    release=object(),
+                ),
+                installer_result=result,
+            )
+
+        platform_observer._completed_commands.clear()
+        packages = ("docker.io",)
+        platform_delegate.run.side_effect = [
+            SimpleNamespace(returncode=124),
+            SimpleNamespace(returncode=0),
+        ]
+        platform_observer.run(
+            _apt_argv("install", packages),
+            timeout=30,
+            environment={"PATH": "/usr/bin"},
+        )
+        platform_observer.run(
+            _apt_argv("install", packages),
+            timeout=30,
+            environment={"PATH": "/usr/bin"},
+        )
+        command_delegate.run.side_effect = [
+            *egress_readbacks,
+            *[
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps([image.canonical_reference]),
+                )
+                for image in image_receipt.images
+            ],
+        ]
+        retry_observation = composition.candidate_profile_execution_observation(
+            platform_plan=SimpleNamespace(
+                actions=(
+                    SimpleNamespace(
+                        kind=SimpleNamespace(value="INSTALL_DOCKER"),
+                        packages=packages,
+                    ),
+                ),
+                mode=SimpleNamespace(value="ONLINE_FRESH"),
+                network_policy="APT_UBUNTU_ARCHIVE_ONLY",
+                plan_digest="sha256:" + "9" * 64,
+            ),
+            platform_receipt=SimpleNamespace(result="PASS"),
+            installer_plan=SimpleNamespace(
+                plan_digest="sha256:" + "a" * 64,
+                release=object(),
+            ),
+            installer_result=result,
+        )
+        self.assertEqual(
+            retry_observation["networkObservation"][
+                "retryableNetworkCommandDigests"
+            ],
+            retry_observation["networkObservation"][
+                "expectedNetworkCommandDigests"
+            ],
+        )
 
     def test_candidate_capability_cannot_be_forged(self):
         with self.assertRaisesRegex(

@@ -27,6 +27,7 @@ from typing import Any, BinaryIO
 
 from jsonschema import Draft202012Validator, FormatChecker
 
+from durability.canonical import canonical_json_bytes as canonical_identity_bytes
 from durability.platform import (
     PlatformQualificationError,
     canonical_platform_qualification_bytes,
@@ -73,7 +74,7 @@ VERIFICATION_EXECUTION_RECEIPT_SCHEMA = (
 )
 PROFILE_RECEIPT_SCHEMA = "animemo.prepublication-candidate-profile-receipt/v1"
 AGGREGATE_RECEIPT_SCHEMA = (
-    "animemo.prepublication-candidate-acceptance-receipt/v2"
+    "animemo.prepublication-candidate-acceptance-receipt/v3"
 )
 VERIFIER_CONTRACT_VERSION = "2"
 VERIFIED_CANDIDATE_ROOT = Path("/var/lib/animemo/prepublication-candidates/v2")
@@ -144,6 +145,61 @@ def canonical_json_bytes(value: object) -> bytes:
 
 def sha256_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def apt_network_sequence_matches(
+    observed_commands: list[tuple[str, int]],
+    *,
+    expected_digests: list[str],
+    retryable_digests: list[str],
+) -> bool:
+    """Match the exact planned APT sequence, including its one allowed retry."""
+
+    if (
+        len(expected_digests) != len(set(expected_digests))
+        or len(retryable_digests) != len(set(retryable_digests))
+        or not set(retryable_digests).issubset(expected_digests)
+    ):
+        return False
+    observed_index = 0
+    retryable = set(retryable_digests)
+    for expected_digest in expected_digests:
+        if observed_index >= len(observed_commands):
+            return False
+        observed_digest, return_code = observed_commands[observed_index]
+        if observed_digest != expected_digest:
+            return False
+        observed_index += 1
+        if return_code == 124:
+            if expected_digest not in retryable or observed_index >= len(
+                observed_commands
+            ):
+                return False
+            retry_digest, retry_return_code = observed_commands[observed_index]
+            if retry_digest != expected_digest or retry_return_code != 0:
+                return False
+            observed_index += 1
+        elif return_code != 0:
+            return False
+    return observed_index == len(observed_commands)
+
+
+_CANDIDATE_COMMAND_OBSERVER_IDENTITY = sha256_bytes(
+    canonical_identity_bytes(
+        {
+            "boundaries": ["PLATFORM", "RUNTIME"],
+            "externalPullDispositions": [
+                "EXPLICIT_NEVER",
+                "FORBIDDEN_DETECTED",
+                "NOT_APPLICABLE",
+            ],
+            "networkClassification": "APT_NETWORK",
+            "localClassifications": ["LOCAL_DOCKER_SOCKET", "LOCAL_ONLY"],
+            "unknownClassification": "UNKNOWN_NETWORK_CAPABILITY",
+            "version": 1,
+        }
+    )
+)
 
 
 def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
@@ -1697,18 +1753,104 @@ def validate_profile_receipt(value: object) -> dict[str, Any]:
     )
     started = _parse_time(receipt["started_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")
     completed = _parse_time(receipt["completed_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")
-    tests_pass = all(item["result"] == "PASS" for item in receipt["canonical_test_results"])
+    tests = receipt["canonical_acceptance_tests"]
+    test_names = [item["name"] for item in tests]
+    steps = receipt["completed_steps"]
+    pulls = receipt["external_pull_observation"]
     if completed < started or receipt["original_vm_pre_hashes"] != receipt["original_vm_post_hashes"]:
         _reject("CANDIDATE_PROFILE_SAFETY_MISMATCH")
-    if receipt["profile"] == "RUNTIME_BASE_OFFLINE" and any(
-        receipt[field] != 0
-        for field in ("network_request_count", "apt_command_count", "external_pull_count")
+    if len(test_names) != len(set(test_names)):
+        _reject("CANDIDATE_PROFILE_CANONICAL_TEST_DUPLICATE")
+    if test_names != [
+        "application.journal-crud",
+        "service.api.health",
+        "service.web.health",
+    ]:
+        _reject("CANDIDATE_PROFILE_CANONICAL_TEST_INVENTORY_MISMATCH")
+    if not steps or steps[-1] != "doctor.accept":
+        _reject("CANDIDATE_PROFILE_COMPLETED_STEPS_MISMATCH")
+    if pulls["observed_count"] != len(pulls["inventory"]) or pulls["result"] != "PASS":
+        _reject("CANDIDATE_PROFILE_EXTERNAL_PULL_OBSERVATION_MISMATCH")
+    if pulls["inventory"]:
+        _reject("CANDIDATE_PROFILE_EXTERNAL_PULL_ACTIVITY")
+    network = receipt["network_observation"]
+    egress = network["egress_isolation"]
+    egress_body = {
+        "authority": egress["authority"],
+        "containerNetwork": egress["container_network"],
+        "containerNetworkInternal": egress["container_network_internal"],
+        "service": egress["service"],
+        "serviceAddressFamilies": egress["service_address_families"],
+    }
+    expected_policy = (
+        "DENY_ALL"
+        if receipt["profile"] == "RUNTIME_BASE_OFFLINE"
+        else "APT_UBUNTU_ARCHIVE_ONLY"
+    )
+    completed_commands = network["completed_commands"]
+    runtime_commands = [
+        item for item in completed_commands if item["boundary"] == "RUNTIME"
+    ]
+    pull_denied_digests = sorted(
+        item["argv_digest"]
+        for item in runtime_commands
+        if item["external_pull_disposition"] == "EXPLICIT_NEVER"
+    )
+    observed_network_commands = [
+        (item["argv_digest"], item["return_code"])
+        for item in completed_commands
+        if item["classification"] == "APT_NETWORK"
+    ]
+    if (
+        network["authority"]
+        != "PRODUCTION_EXECUTION_WITH_OS_EGRESS_ISOLATION"
+        or egress["authority"] != "OS_ENFORCED_CANDIDATE_EGRESS_ISOLATION"
+        or egress["container_network_internal"] is not True
+        or egress["service_address_families"] != ["AF_UNIX", "AF_NETLINK"]
+        or egress["receipt_digest"]
+        != sha256_bytes(canonical_identity_bytes(egress_body))
+        or network["policy"] != expected_policy
+        or network["destination_authority"]
+        != (
+            "NONE"
+            if expected_policy == "DENY_ALL"
+            else "UBUNTU_ARCHIVE_VERIFIED_APT_SOURCES"
+        )
+        or network["platform_plan_digest"]
+        != receipt["platform_bootstrap_plan_digest"]
+        or network["result"] != "PASS"
+        or network["completed_command_inventory_digest"]
+        != sha256_bytes(canonical_json_bytes(completed_commands))
+        or network["observer_identities"]
+        != {
+            "platform": _CANDIDATE_COMMAND_OBSERVER_IDENTITY,
+            "runtime": _CANDIDATE_COMMAND_OBSERVER_IDENTITY,
+        }
+        or not apt_network_sequence_matches(
+            observed_network_commands,
+            expected_digests=network["expected_network_command_digests"],
+            retryable_digests=network["retryable_network_command_digests"],
+        )
+        or expected_policy == "DENY_ALL"
+        and observed_network_commands
+        or any(
+            item["operation"]
+            in {"docker-compose-run", "docker-compose-up", "docker-run"}
+            and item["external_pull_disposition"] != "EXPLICIT_NEVER"
+            or item["operation"]
+            not in {"docker-compose-run", "docker-compose-up", "docker-run"}
+            and item["external_pull_disposition"] != "NOT_APPLICABLE"
+            for item in completed_commands
+        )
+        or pulls["observer_identity"] != _CANDIDATE_COMMAND_OBSERVER_IDENTITY
+        or pulls["pull_denied_command_digests"] != pull_denied_digests
+        or pulls["runtime_command_inventory_digest"]
+        != sha256_bytes(canonical_json_bytes(runtime_commands))
     ):
-        _reject("CANDIDATE_OFFLINE_NETWORK_ACTIVITY")
+        _reject("CANDIDATE_PROFILE_NETWORK_OBSERVATION_INVALID")
     expected_pass = (
         receipt["installer_execution_result"] == "PASS"
-        and receipt["doctor_result"] == "PASS"
-        and tests_pass
+        and all(item["result"] == "PASS" for item in tests)
     )
     if (receipt["result"] == "PASS") is not expected_pass:
         _reject("CANDIDATE_PROFILE_RESULT_MISMATCH")
@@ -1731,11 +1873,21 @@ def validate_aggregate_receipt(value: object) -> dict[str, Any]:
         == receipt["r2_origin_poststate_observation_id"]
     ):
         _reject("CANDIDATE_R2_OBSERVATION_REUSED")
-    digests = list(receipt["profile_receipts"].values())
+    profile_results = receipt["profile_results"]
+    digests = [
+        result["receipt_digest"]
+        for result in profile_results.values()
+        if result["receipt_digest"] is not None
+    ]
     if len(digests) != len(set(digests)):
         _reject("CANDIDATE_PROFILE_RECEIPT_REUSE")
-    expected_pass = receipt["all_profiles_pass"] is True
-    if (receipt["result"] == "PASS") is not expected_pass:
+    expected_pass = all(
+        result["status"] == "PASS" for result in profile_results.values()
+    )
+    if (
+        receipt["all_profiles_pass"] is not expected_pass
+        or (receipt["result"] == "PASS") is not expected_pass
+    ):
         _reject("CANDIDATE_AGGREGATE_RESULT_MISMATCH")
     unsigned = dict(receipt)
     unsigned.pop("receipt_digest")

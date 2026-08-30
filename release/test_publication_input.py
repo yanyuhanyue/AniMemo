@@ -120,6 +120,24 @@ class PublishCandidateInputTests(unittest.TestCase):
         self.assertFalse(plan["mutation_authorized"])
         self.assertRegex(plan["plan_digest"], r"^sha256:[0-9a-f]{64}$")
 
+    def test_valid_overall_fail_aggregate_cannot_authorize_publication(self):
+        loaded = _loaded()
+        receipt = _receipt(loaded)
+        receipt["profile_results"]["fresh_base"] = {
+            "status": "FAIL",
+            "failure_code": "CANDIDATE_PROFILE_REPORTED_FAILURE",
+            "receipt_digest": "sha256:" + "8" * 64,
+        }
+        receipt["all_profiles_pass"] = False
+        receipt["result"] = "FAIL"
+        _resign_receipt(receipt)
+
+        with self.assertRaisesRegex(
+            PublicationInputError,
+            "PUBLISH_CANDIDATE_BYTE_MISMATCH",
+        ):
+            build_publish_candidate_plan(loaded, receipt)
+
     def test_any_identity_or_acceptance_substitution_fails_closed(self):
         loaded = _loaded()
         cases = {}

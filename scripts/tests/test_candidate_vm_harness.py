@@ -3,14 +3,21 @@ from __future__ import annotations
 import ast
 import copy
 import ctypes
+import hashlib
+import io
+import json
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from ctypes import wintypes
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from durability.canonical import canonical_json_bytes as canonical_identity_bytes
+from release import candidate as candidate_contract
 from release.candidate import (
     VERIFIED_CANDIDATE_ROOT,
     canonical_json_bytes,
@@ -59,6 +66,11 @@ class FakeProvider:
         self.readiness_error = None
         self.external_state = dict(harness.EXPECTED_RC14_EXTERNAL_STATE)
         self.external_versions = []
+        self.continuation_calls = []
+        self.continuation_safe = True
+        self.continuation_known_hosts_file_count = 0
+        self.profile_errors = {}
+        self.profile_results = {}
         self.hashes = {
             name: "sha256:" + "3" * 64 for name in harness.SOURCE_VM_HASH_FILES
         }
@@ -66,12 +78,19 @@ class FakeProvider:
             profile: "sha256:" + character * 64
             for profile, character in zip(harness.PROFILES, "456", strict=True)
         }
+        self.snapshot_disk_graphs = {
+            profile: "sha256:" + character * 64
+            for profile, character in zip(harness.PROFILES, "789", strict=True)
+        }
+        self.source_disk_graph = "sha256:" + "d" * 64
 
     def inspect_source(self):
         self.events.append("source")
         return harness.SourceVmEvidence(
             vm_identity=harness.SOURCE_VM_IDENTITY,
             snapshot_identities=self.snapshots,
+            snapshot_disk_graph_identities=self.snapshot_disk_graphs,
+            source_disk_graph_identity=self.source_disk_graph,
             original_hashes=self.hashes,
         )
 
@@ -90,8 +109,14 @@ class FakeProvider:
     ):
         del candidate_root
         self.execute_calls += 1
-        return {
-            "schema": "animemo.prepublication-candidate-profile-receipt/v1",
+        self.events.append(f"profile:{plan.profile}")
+        error = self.profile_errors.get(plan.profile)
+        if error is not None:
+            if callable(error):
+                raise error(plan, harness_plan)
+            raise error
+        receipt = {
+            "schema": "animemo.prepublication-candidate-profile-receipt-draft/v1",
             "version": 1,
             "candidate_input_digest": harness_plan.candidate_input_digest,
             "verified_candidate_digest": harness_plan.verified_candidate_digest,
@@ -110,30 +135,110 @@ class FakeProvider:
             "strict_platform_qualification": True,
             "instance_mutation_before_platform_qualification": 0,
             "installer_plan_digest": "sha256:" + "9" * 64,
+            "installer_execution_receipt_digest": DIGEST,
             "installer_execution_result": "PASS",
             "api_digest": DIGEST,
             "web_digest": DIGEST,
             "postgres_digest": DIGEST,
             "redis_digest": DIGEST,
-            "doctor_result": "PASS",
-            "canonical_test_results": [{"name": "acceptance", "result": "PASS"}],
-            "network_request_count": 0,
-            "apt_command_count": 0,
-            "external_pull_count": 0,
-            "original_vm_pre_hashes": dict(self.hashes),
-            "original_vm_post_hashes": dict(self.hashes),
+            "doctor_execution_identity": DIGEST,
+            "doctor_receipt_digest": DIGEST,
+            "canonical_acceptance_tests": [
+                {"name": name, "result": "PASS", "receiptDigest": DIGEST}
+                for name in (
+                    "application.journal-crud",
+                    "service.api.health",
+                    "service.web.health",
+                )
+            ],
+            "completed_steps": ["runtime.validate", "doctor.accept"],
+            "network_observation": {
+                "authority": "PRODUCTION_EXECUTION_WITH_OS_EGRESS_ISOLATION",
+                "completed_command_inventory_digest": sha256_bytes(
+                    canonical_json_bytes([])
+                ),
+                "completed_commands": [],
+                "destination_authority": (
+                    "NONE"
+                    if plan.profile == "RUNTIME_BASE_OFFLINE"
+                    else "UBUNTU_ARCHIVE_VERIFIED_APT_SOURCES"
+                ),
+                "egress_isolation": {
+                    "authority": "OS_ENFORCED_CANDIDATE_EGRESS_ISOLATION",
+                    "container_network": "animemo_animemo",
+                    "container_network_internal": True,
+                    "service": "animemo-updater.service",
+                    "service_address_families": ["AF_UNIX", "AF_NETLINK"],
+                    "receipt_digest": sha256_bytes(
+                        canonical_identity_bytes(
+                            {
+                                "authority": "OS_ENFORCED_CANDIDATE_EGRESS_ISOLATION",
+                                "containerNetwork": "animemo_animemo",
+                                "containerNetworkInternal": True,
+                                "service": "animemo-updater.service",
+                                "serviceAddressFamilies": ["AF_UNIX", "AF_NETLINK"],
+                            }
+                        )
+                    ),
+                },
+                "expected_network_command_digests": [],
+                "observer_identities": {
+                    "platform": candidate_contract._CANDIDATE_COMMAND_OBSERVER_IDENTITY,
+                    "runtime": candidate_contract._CANDIDATE_COMMAND_OBSERVER_IDENTITY,
+                },
+                "platform_plan_digest": "sha256:" + "7" * 64,
+                "policy": (
+                    "DENY_ALL"
+                    if plan.profile == "RUNTIME_BASE_OFFLINE"
+                    else "APT_UBUNTU_ARCHIVE_ONLY"
+                ),
+                "retryable_network_command_digests": [],
+                "result": "PASS",
+            },
+            "external_pull_observation": {
+                "authority": "PRODUCTION_EXECUTION_COMMAND_BOUNDARY",
+                "inventory": [],
+                "observed_count": 0,
+                "observer_identity": candidate_contract._CANDIDATE_COMMAND_OBSERVER_IDENTITY,
+                "pull_denied_command_digests": [],
+                "result": "PASS",
+                "runtime_command_inventory_digest": sha256_bytes(
+                    canonical_json_bytes([])
+                ),
+            },
+            "image_acquisition_receipt_digest": DIGEST,
+            "image_runtime_readback_receipt_digest": DIGEST,
             "release_authority_granted": False,
             "publish_authorized": False,
             "started_at": "2026-08-25T12:00:00Z",
             "completed_at": "2026-08-25T12:01:00Z",
             "result": "PASS",
         }
+        if plan.profile in self.profile_results:
+            receipt["installer_execution_result"] = self.profile_results[plan.profile]
+            receipt["result"] = self.profile_results[plan.profile]
+        return receipt
 
     def inspect_original_hashes(self):
         return dict(self.hashes)
 
+    def inspect_profile_continuation(self, *, plan, harness_plan):
+        self.continuation_calls.append(plan.profile)
+        return harness.ProfileContinuationReceipt.issue(
+            profile=plan.profile,
+            session_id=harness_plan.session_id,
+            original_vm_hashes=self.hashes,
+            active_profile_root_count=0,
+            session_private_key_count=0,
+            known_hosts_file_count=self.continuation_known_hosts_file_count,
+            running_vm_count=0,
+            quarantine_present=False,
+            continuation_safe=self.continuation_safe,
+        )
+
     def inspect_candidate_external_state(self, candidate_version):
         self.external_calls += 1
+        self.events.append(f"external:{self.external_calls}")
         self.external_versions.append(candidate_version)
         return dict(self.external_state)
 
@@ -169,6 +274,7 @@ class CandidateGuestPathContractTests(unittest.TestCase):
             side_effect=[SimpleNamespace(stdout=b""), completed],
         ) as ssh_checked:
             provider._run_profile_guest(
+                authority=mock.sentinel.profile_authority,
                 plan=profile,
                 harness_plan=plan,
                 guest_root="/var/lib/animemo/prepublication-candidates/v2/candidate",
@@ -179,7 +285,7 @@ class CandidateGuestPathContractTests(unittest.TestCase):
                 },
             )
 
-        command = ssh_checked.call_args_list[0].args[0]
+        command = ssh_checked.call_args_list[0].args[1]
         self.assertIn("/usr/bin/python3 -P -B ", command)
         self.assertIn("PYTHONSAFEPATH=1", command)
 
@@ -272,7 +378,12 @@ class FakeWindowsPlatform:
     def inspect_binary(self, path):
         if not self.binary_available:
             raise OSError("binary unavailable")
-        digest = self.ssh_digest if path == harness.SSH else self.scp_digest
+        if path == harness.SSH:
+            digest = self.ssh_digest
+        elif path == harness.SCP:
+            digest = self.scp_digest
+        else:
+            digest = harness.EXPECTED_SSH_KEYGEN_SHA256
         return harness.WindowsBinaryIdentity(
             sha256=digest,
             pe_machine=self.machine,
@@ -280,9 +391,9 @@ class FakeWindowsPlatform:
 
     def inspect_controlled_file(self, path, *, root, private):
         self.last_controlled_file_check = (path, root, private)
-        if path == harness.OPENSSH_IDENTITY:
+        if path.name == "id_ed25519":
             status = self.identity_status
-        elif path == harness.OPENSSH_KNOWN_HOSTS:
+        elif path.name == "known_hosts":
             status = self.known_hosts_status
         else:
             status = "ACL_UNSAFE"
@@ -510,6 +621,66 @@ def _r2_environment():
 
 
 class CandidateVmHarnessTests(unittest.TestCase):
+    @staticmethod
+    def _write_closed_source_disk_graph(root: Path) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        descriptors = {
+            *harness.SNAPSHOT_DISK_FILES.values(),
+            "Ubuntu 64 位-000002.vmdk",
+        }
+        selected_extent: Path | None = None
+        for index, descriptor_name in enumerate(sorted(descriptors)):
+            extent_name = descriptor_name.removesuffix(".vmdk") + "-s001.vmdk"
+            (root / descriptor_name).write_bytes(
+                b'# Disk DescriptorFile\ncreateType="twoGbMaxExtentFlat"\n'
+                b"parentCID=ffffffff\n"
+                + f'RW 100 FLAT "{extent_name}" 0\n'.encode()
+            )
+            extent = root / extent_name
+            extent.write_bytes((f"extent-{index:04d}").encode("ascii"))
+            selected_extent = selected_extent or extent
+        for name in harness.SOURCE_VM_HASH_FILES:
+            path = root / name
+            if path.suffix.casefold() == ".vmdk" or path.name == f"{harness.SOURCE_VM_IDENTITY}.vmx":
+                continue
+            path.write_bytes(("source:" + name).encode("utf-8"))
+        (root / f"{harness.SOURCE_VM_IDENTITY}.vmx").write_text(
+            'scsi0:0.fileName = "Ubuntu 64 位-000002.vmdk"\n',
+            encoding="utf-8",
+        )
+        assert selected_extent is not None
+        return selected_extent
+
+    def test_execute_cli_returns_controlled_nonzero_for_valid_fail_aggregate(self):
+        plan = SimpleNamespace(plan_digest=DIGEST)
+        result = {"status": "FAIL", "aggregateReceipt": {"result": "FAIL"}}
+        output = io.StringIO()
+        with mock.patch(
+            "scripts.candidate_vm_harness.build_harness_plan",
+            return_value=plan,
+        ), mock.patch(
+            "scripts.candidate_vm_harness.execute_harness_plan",
+            return_value=result,
+        ), redirect_stdout(output):
+            code = harness.main(
+                [
+                    "--verified-candidate-digest",
+                    DIGEST,
+                    "--expected-qualification-run-id",
+                    str(RUN_ID),
+                    "--expected-source-sha",
+                    SHA,
+                    "--expected-source-tree",
+                    TREE,
+                    "--execute",
+                    "--accept-plan-digest",
+                    DIGEST,
+                ]
+            )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(output.getvalue()), result)
+
     def test_runtime_snapshot_authority_tracks_rebuilt_leaf_state(self):
         rebuilt_state = "Ubuntu 64 位-Snapshot6.vmsn"
         rebuilt_active_disk = "Ubuntu 64 位-000002.vmdk"
@@ -544,6 +715,124 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 provider=self.provider,
             )
 
+    def _connection_fixture(self):
+        plan = self._plan()
+        profile = plan.profiles[0]
+        authority = harness.ClosedVmwareProvider._profile_authority(profile, plan)
+        runtime = harness.CloneRuntimeIdentity(
+            clone_root=authority.clone_root,
+            clone_vmx=authority.clone_vmx,
+            vmx_digest="sha256:" + "7" * 64,
+            disk_graph_digest="sha256:" + "8" * 64,
+            snapshot_name=profile.snapshot_name,
+            snapshot_identity=profile.snapshot_identity,
+            vm_uuid="564dc3d2-a6b3-0874-ec40-345e9f2e79ad",
+            mac_address="00:0c:29:2e:79:ad",
+            expected_ip=harness.SSH_HOST,
+        )
+        bootstrap = harness.GuestConnectionObservation(
+            machine_id="1" * 32,
+            boot_id="11111111-2222-4333-8444-555555555555",
+            mac_addresses=("00:0c:29:2e:79:ad",),
+            nonce=harness.connection_challenge(profile.connection_nonce, "guestinfo"),
+            host_key_digest="sha256:" + "9" * 64,
+        )
+        verified_guest = harness.GuestConnectionObservation(
+            machine_id=bootstrap.machine_id,
+            boot_id=bootstrap.boot_id,
+            mac_addresses=bootstrap.mac_addresses,
+            nonce=harness.connection_challenge(profile.connection_nonce, "guestinfo"),
+            host_key_digest="sha256:" + "a" * 64,
+        )
+        return plan, profile, authority, runtime, bootstrap, verified_guest
+
+    def test_host_binds_independently_observed_vm_hashes_to_guest_draft(self):
+        plan = self._plan()
+        profile = plan.profiles[0]
+        draft = self.provider.execute_profile(
+            plan=profile,
+            harness_plan=plan,
+            candidate_root=self.root,
+            initial_platform_state=harness._initial_platform_state(profile.profile),
+        )
+
+        receipt = harness._bind_host_profile_receipt(
+            draft,
+            plan=plan,
+            observed_original_hashes=self.provider.inspect_original_hashes(),
+        )
+
+        self.assertEqual(
+            receipt["schema"],
+            "animemo.prepublication-candidate-profile-receipt/v1",
+        )
+        self.assertEqual(receipt["original_vm_pre_hashes"], plan.original_vm_hashes)
+        self.assertEqual(
+            receipt["original_vm_post_hashes"],
+            self.provider.inspect_original_hashes(),
+        )
+
+    def test_guest_draft_cannot_supply_host_vm_hash_authority(self):
+        plan = self._plan()
+        profile = plan.profiles[0]
+        draft = self.provider.execute_profile(
+            plan=profile,
+            harness_plan=plan,
+            candidate_root=self.root,
+            initial_platform_state=harness._initial_platform_state(profile.profile),
+        )
+        for field in ("original_vm_pre_hashes", "original_vm_post_hashes"):
+            with self.subTest(field=field):
+                forged = {**draft, field: dict(plan.original_vm_hashes)}
+                with self.assertRaisesRegex(
+                    harness.CandidateHarnessError,
+                    "CANDIDATE_PROFILE_RECEIPT_DRAFT_INVALID",
+                ):
+                    harness._bind_host_profile_receipt(
+                        forged,
+                        plan=plan,
+                        observed_original_hashes=self.provider.inspect_original_hashes(),
+                    )
+
+    def test_host_binding_rejects_observed_original_vm_drift(self):
+        plan = self._plan()
+        profile = plan.profiles[0]
+        draft = self.provider.execute_profile(
+            plan=profile,
+            harness_plan=plan,
+            candidate_root=self.root,
+            initial_platform_state=harness._initial_platform_state(profile.profile),
+        )
+        drifted = self.provider.inspect_original_hashes()
+        first = next(iter(drifted))
+        drifted[first] = "sha256:" + "f" * 64
+
+        with self.assertRaises(harness.CandidateHarnessError):
+            harness._bind_host_profile_receipt(
+                draft,
+                plan=plan,
+                observed_original_hashes=drifted,
+            )
+
+    def _temporary_authority(self, authority):
+        session_root = self.root / "session"
+        profile_root = session_root / "profiles" / "fresh_base"
+        clone_root = profile_root / "clone" / authority.clone_identity.removeprefix(
+            "sha256:"
+        )
+        ssh_root = profile_root / "ssh"
+        return replace(
+            authority,
+            session_root=session_root,
+            profile_root=profile_root,
+            clone_root=clone_root,
+            clone_vmx=clone_root / "Ubuntu 64 位.vmx",
+            ssh_root=ssh_root,
+            identity_file=ssh_root / "id_ed25519",
+            known_hosts_file=ssh_root / "known_hosts",
+            quarantine_root=session_root / "quarantine" / "fresh_base",
+        )
+
     def _r2_receipt(self, observation_role="PRESTATE"):
         with mock.patch(
             "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
@@ -566,6 +855,21 @@ class CandidateVmHarnessTests(unittest.TestCase):
             tuple(harness.SNAPSHOT_ALLOWLIST[item] for item in harness.PROFILES),
         )
         self.assertEqual(self.provider.execute_calls, 0)
+        self.assertEqual(
+            plan.source_disk_graph_identity,
+            self.provider.source_disk_graph,
+        )
+        self.assertEqual(
+            tuple(item.snapshot_disk_graph_identity for item in plan.profiles),
+            tuple(
+                self.provider.snapshot_disk_graphs[profile]
+                for profile in harness.PROFILES
+            ),
+        )
+        self.assertEqual(
+            plan.identity_body()["sourceDiskGraphIdentity"],
+            self.provider.source_disk_graph,
+        )
         self.assertRegex(plan.plan_digest, r"^sha256:[0-9a-f]{64}$")
 
     def test_plan_accepts_the_next_rc_from_the_verified_candidate_identity(self):
@@ -575,6 +879,414 @@ class CandidateVmHarnessTests(unittest.TestCase):
 
         self.assertEqual(plan.candidate_version, "v1.1.0-rc.15")
         self.assertEqual(self.provider.execute_calls, 0)
+
+    def test_plan_derives_isolated_rc19_session_and_profile_namespaces(self):
+        self.loaded.candidate_input["candidate_version"] = "v1.1.0-rc.19"
+        first = self._plan()
+        second = self._plan()
+
+        self.assertRegex(first.session_id, r"^[0-9a-f]{32}$")
+        self.assertNotEqual(first.session_id, second.session_id)
+        self.assertEqual(
+            len({profile.connection_nonce for profile in first.profiles}),
+            len(harness.PROFILES),
+        )
+        self.assertEqual(
+            len({profile.ssh_host_key_alias for profile in first.profiles}),
+            len(harness.PROFILES),
+        )
+        authorities = [
+            harness.ClosedVmwareProvider._profile_authority(profile, first)
+            for profile in first.profiles
+        ]
+        self.assertEqual(
+            len({authority.profile_root for authority in authorities}),
+            len(harness.PROFILES),
+        )
+        for profile, authority in zip(first.profiles, authorities, strict=True):
+            path = authority.profile_root.as_posix()
+            self.assertIn(first.candidate_version, path)
+            self.assertIn(first.candidate_input_digest.removeprefix("sha256:"), path)
+            self.assertIn(first.session_id, path)
+            self.assertIn(profile.profile.lower(), path)
+            self.assertEqual(authority.host_key_alias, profile.ssh_host_key_alias)
+            self.assertEqual(authority.connection_nonce, profile.connection_nonce)
+        self.assertNotIn("rc14-candidate-acceptance", str(harness.VM_WORK_PARENT))
+        self.assertNotIn("rc14", harness.PUBLIC_ORIGIN.lower())
+        production_tree = ast.parse(
+            Path(harness.__file__).read_text(encoding="utf-8")
+        )
+        active_rc14_literals = [
+            node.value
+            for node in ast.walk(production_tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and "rc14" in node.value.lower()
+        ]
+        self.assertEqual(active_rc14_literals, [])
+
+    def test_exact_clone_connection_chain_is_accepted_before_staging(self):
+        _, profile, authority, runtime, bootstrap, verified_guest = (
+            self._connection_fixture()
+        )
+
+        verified = harness.verify_clone_connection_identity(
+            authority=authority,
+            plan=profile,
+            runtime=runtime,
+            bootstrap=bootstrap,
+            verified_guest=verified_guest,
+            known_hosts_was_absent=True,
+            competing_vmx_paths=frozenset(),
+            prior_host_key_digests=frozenset(),
+        )
+
+        self.assertEqual(verified.authority, authority)
+        self.assertEqual(verified.runtime, runtime)
+        self.assertEqual(verified.guest, verified_guest)
+
+    def test_wrong_stale_quarantined_and_parallel_guests_fail_closed(self):
+        _, profile, authority, runtime, bootstrap, verified_guest = (
+            self._connection_fixture()
+        )
+        identity_cases = {
+            "wrong-vmx": {
+                "runtime": replace(
+                    runtime, clone_vmx=authority.clone_root / "wrong.vmx"
+                )
+            },
+            "wrong-machine-id": {
+                "verified_guest": replace(verified_guest, machine_id="2" * 32)
+            },
+            "wrong-mac": {
+                "verified_guest": replace(
+                    verified_guest, mac_addresses=("00:0c:29:ff:ff:ff",)
+                )
+            },
+            "wrong-snapshot": {
+                "runtime": replace(runtime, snapshot_name="wrong-snapshot")
+            },
+            "wrong-nonce": {
+                "verified_guest": replace(verified_guest, nonce="0" * 64)
+            },
+            "wrong-ip": {"runtime": replace(runtime, expected_ip="192.0.2.10")},
+        }
+        for name, changes in identity_cases.items():
+            with self.subTest(case=name), self.assertRaisesRegex(
+                harness.CandidateHarnessError,
+                "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH",
+            ):
+                harness.verify_clone_connection_identity(
+                    authority=authority,
+                    plan=profile,
+                    runtime=changes.get("runtime", runtime),
+                    bootstrap=bootstrap,
+                    verified_guest=changes.get("verified_guest", verified_guest),
+                    known_hosts_was_absent=True,
+                    competing_vmx_paths=frozenset(),
+                    prior_host_key_digests=frozenset(),
+                )
+
+        for name, path in {
+            "stale-clone-same-ip": "stale/session/clone.vmx",
+            "two-parallel-sessions": "parallel/session/clone.vmx",
+            "quarantine-clone-running": "quarantine/stale/clone.vmx",
+        }.items():
+            with self.subTest(case=name), self.assertRaisesRegex(
+                harness.CandidateHarnessError,
+                "CANDIDATE_VM_CONNECTION_NAMESPACE_COLLISION",
+            ):
+                harness.verify_clone_connection_identity(
+                    authority=authority,
+                    plan=profile,
+                    runtime=runtime,
+                    bootstrap=bootstrap,
+                    verified_guest=verified_guest,
+                    known_hosts_was_absent=True,
+                    competing_vmx_paths=frozenset({path}),
+                    prior_host_key_digests=frozenset(),
+                )
+
+        host_key_cases = {
+            "inherited-same-host-key": {
+                "bootstrap": replace(
+                    bootstrap, host_key_digest=verified_guest.host_key_digest
+                ),
+                "prior": frozenset(),
+            },
+            "parallel-profile-host-key-reuse": {
+                "bootstrap": bootstrap,
+                "prior": frozenset({verified_guest.host_key_digest}),
+            },
+        }
+        for name, case in host_key_cases.items():
+            with self.subTest(case=name), self.assertRaisesRegex(
+                harness.CandidateHarnessError, "CANDIDATE_VM_HOST_KEY_NOT_FRESH"
+            ):
+                harness.verify_clone_connection_identity(
+                    authority=authority,
+                    plan=profile,
+                    runtime=runtime,
+                    bootstrap=case["bootstrap"],
+                    verified_guest=verified_guest,
+                    known_hosts_was_absent=True,
+                    competing_vmx_paths=frozenset(),
+                    prior_host_key_digests=case["prior"],
+                )
+
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError, "CANDIDATE_VM_KNOWN_HOSTS_RESIDUAL"
+        ):
+            harness.verify_clone_connection_identity(
+                authority=authority,
+                plan=profile,
+                runtime=runtime,
+                bootstrap=bootstrap,
+                verified_guest=verified_guest,
+                known_hosts_was_absent=False,
+                competing_vmx_paths=frozenset(),
+                prior_host_key_digests=frozenset(),
+            )
+
+    def test_wrong_guest_fails_before_privileged_provisioning_or_staging(self):
+        _, profile, authority, runtime, bootstrap, _ = self._connection_fixture()
+        authority = self._temporary_authority(authority)
+        runtime = replace(
+            runtime,
+            clone_root=authority.clone_root,
+            clone_vmx=authority.clone_vmx,
+        )
+        wrong_guest = replace(
+            bootstrap,
+            mac_addresses=("00:0c:29:ff:ff:ff",),
+        )
+        provider = harness.ClosedVmwareProvider(
+            runner=RecordingRunner(),
+            windows_platform=FakeWindowsPlatform(),
+            environment={},
+        )
+        exact_vmx = str(authority.clone_vmx.resolve(strict=False)).lower()
+        with mock.patch.object(
+            provider, "_running_vmx_paths", return_value=frozenset({exact_vmx})
+        ), mock.patch.object(
+            provider, "_wait_for_guest_ip", return_value=harness.SSH_HOST
+        ), mock.patch.object(
+            provider, "_read_clone_runtime_identity", return_value=runtime
+        ), mock.patch.object(
+            provider, "_wait_for_ssh"
+        ), mock.patch.object(
+            provider, "_read_known_host_key", return_value=bootstrap.host_key_digest
+        ), mock.patch.object(
+            provider, "_observe_guest_connection", return_value=wrong_guest
+        ), mock.patch.object(
+            provider, "_provision_session_key_and_rotate_host_key"
+        ) as provision, mock.patch.object(
+            provider, "_stage_candidate"
+        ) as stage, self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH",
+        ):
+            provider._establish_clone_connection(
+                authority,
+                profile,
+                preboot_disk_graph_digest=runtime.disk_graph_digest,
+                preboot_snapshot_identity=runtime.snapshot_identity,
+            )
+        provision.assert_not_called()
+        stage.assert_not_called()
+
+    def test_machine_id_substitution_fails_during_readonly_bootstrap(self):
+        _, profile, authority, runtime, bootstrap, _ = self._connection_fixture()
+        authority = self._temporary_authority(authority)
+        runtime = replace(
+            runtime,
+            clone_root=authority.clone_root,
+            clone_vmx=authority.clone_vmx,
+        )
+        substituted = replace(bootstrap, machine_id="2" * 32)
+        provider = harness.ClosedVmwareProvider(
+            runner=RecordingRunner(),
+            windows_platform=FakeWindowsPlatform(),
+            environment={},
+        )
+        exact_vmx = str(authority.clone_vmx.resolve(strict=False)).lower()
+        with mock.patch.object(
+            provider, "_running_vmx_paths", return_value=frozenset({exact_vmx})
+        ), mock.patch.object(
+            provider, "_wait_for_guest_ip", return_value=harness.SSH_HOST
+        ), mock.patch.object(
+            provider, "_read_clone_runtime_identity", return_value=runtime
+        ), mock.patch.object(
+            provider, "_wait_for_ssh"
+        ), mock.patch.object(
+            provider, "_read_known_host_key", return_value=bootstrap.host_key_digest
+        ), mock.patch.object(
+            provider,
+            "_observe_guest_connection",
+            side_effect=[bootstrap, substituted],
+        ), mock.patch.object(
+            provider, "_provision_session_key_and_rotate_host_key"
+        ) as provision, mock.patch.object(
+            provider, "_stage_candidate"
+        ) as stage, self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH",
+        ):
+            provider._establish_clone_connection(
+                authority,
+                profile,
+                preboot_disk_graph_digest=runtime.disk_graph_digest,
+                preboot_snapshot_identity=runtime.snapshot_identity,
+            )
+        provision.assert_not_called()
+        stage.assert_not_called()
+
+    def test_guest_challenge_is_read_from_vmware_guestinfo_not_remote_argv(self):
+        _, _, authority, _, bootstrap, _ = self._connection_fixture()
+        provider = harness.ClosedVmwareProvider(
+            runner=RecordingRunner(),
+            windows_platform=FakeWindowsPlatform(),
+            environment={},
+        )
+        payload = {
+            "schema": "animemo.clone-guest-identity/v1",
+            "nonce": bootstrap.nonce,
+            "machine_id": bootstrap.machine_id,
+            "boot_id": bootstrap.boot_id,
+            "mac_addresses": list(bootstrap.mac_addresses),
+        }
+        with mock.patch.object(
+            provider,
+            "_ssh_checked",
+            return_value=SimpleNamespace(stdout=json.dumps(payload).encode("utf-8")),
+        ) as ssh_checked:
+            observed = provider._observe_guest_connection(
+                authority,
+                host_key_digest=bootstrap.host_key_digest,
+                bootstrap_identity=True,
+            )
+        command = ssh_checked.call_args.args[1]
+        self.assertIn("vmtoolsd", command)
+        self.assertNotIn(authority.connection_nonce, command)
+        self.assertNotIn(bootstrap.nonce, command)
+        self.assertEqual(observed, bootstrap)
+
+    def test_session_challenge_is_injected_only_into_exact_clone_vmx_before_boot(self):
+        _, profile, authority, _, bootstrap, _ = self._connection_fixture()
+        authority = self._temporary_authority(authority)
+        authority.clone_root.mkdir(parents=True)
+        authority.clone_vmx.write_text(
+            'config.version = "8"\n', encoding="utf-8"
+        )
+
+        harness.ClosedVmwareProvider._inject_guestinfo_challenge(
+            authority, profile
+        )
+
+        vmx = authority.clone_vmx.read_text(encoding="utf-8")
+        self.assertIn(
+            f'guestinfo.animemo.connectionChallenge = "{bootstrap.nonce}"',
+            vmx,
+        )
+        self.assertNotIn(authority.connection_nonce, vmx)
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_CONNECTION_CHALLENGE_RESIDUAL",
+        ):
+            harness.ClosedVmwareProvider._inject_guestinfo_challenge(
+                authority, profile
+            )
+
+    def test_profile_session_key_is_generated_locally_and_acl_checked(self):
+        _, _, authority, _, _, _ = self._connection_fixture()
+        authority = self._temporary_authority(authority)
+        provider = harness.ClosedVmwareProvider(
+            runner=RecordingRunner(),
+            windows_platform=FakeWindowsPlatform(),
+            environment={},
+        )
+        generated_argv = []
+
+        def generate(argv, **_kwargs):
+            generated_argv.append(tuple(argv))
+            authority.identity_file.write_bytes(b"ephemeral-fixture")
+            authority.identity_file.with_suffix(".pub").write_text(
+                f"ssh-ed25519 QUJD {authority.host_key_alias}\n",
+                encoding="ascii",
+            )
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        with mock.patch.object(
+            harness, "VM_WORK_PARENT", self.root
+        ), mock.patch.object(provider, "_run", side_effect=generate):
+            provider._prepare_profile_authority(authority)
+
+        self.assertEqual(generated_argv[0][0], str(harness.SSH_KEYGEN))
+        self.assertIn(str(authority.identity_file), generated_argv[0])
+        self.assertNotIn(str(harness.OPENSSH_IDENTITY), generated_argv[0])
+        self.assertTrue(authority.identity_file.is_file())
+
+    def test_bootstrap_is_one_time_then_session_key_owns_all_candidate_calls(self):
+        _, _, authority, _, _, _ = self._connection_fixture()
+        authority = self._temporary_authority(authority)
+        authority.ssh_root.mkdir(parents=True)
+        public_key = f"ssh-ed25519 QUJD {authority.host_key_alias}"
+        authority.identity_file.with_suffix(".pub").write_text(
+            public_key + "\n", encoding="ascii"
+        )
+        provider = harness.ClosedVmwareProvider(
+            runner=RecordingRunner(),
+            windows_platform=FakeWindowsPlatform(),
+            environment={harness.GUEST_SUDO_PASSWORD_ENV: "test-only-password"},
+        )
+        with mock.patch.object(provider, "_ssh_checked") as ssh_checked:
+            provider._provision_session_key_and_rotate_host_key(authority)
+        command = ssh_checked.call_args.args[1]
+        self.assertTrue(ssh_checked.call_args.kwargs["bootstrap_identity"])
+        self.assertIn(public_key, command)
+        self.assertNotIn(authority.connection_nonce, command)
+
+        session_argv = provider._ssh_argv(authority, "/usr/bin/true")
+        bootstrap_argv = provider._ssh_argv(
+            authority,
+            "/usr/bin/true",
+            bootstrap_identity=True,
+        )
+        self.assertIn(f"IdentityFile={authority.identity_file}", session_argv)
+        self.assertNotIn(f"IdentityFile={harness.OPENSSH_IDENTITY}", session_argv)
+        self.assertIn(f"IdentityFile={harness.OPENSSH_IDENTITY}", bootstrap_argv)
+
+    def test_quarantine_destroys_session_key_before_preserving_diagnostics(self):
+        _, _, authority, _, _, _ = self._connection_fixture()
+        authority = self._temporary_authority(authority)
+        authority.ssh_root.mkdir(parents=True)
+        authority.identity_file.write_bytes(b"ephemeral-fixture")
+        authority.identity_file.with_suffix(".pub").write_bytes(b"public-fixture")
+        authority.known_hosts_file.write_bytes(b"diagnostic-fixture")
+
+        harness.ClosedVmwareProvider._quarantine_clone(authority)
+
+        quarantined = list(authority.quarantine_root.iterdir())
+        self.assertEqual(len(quarantined), 1)
+        self.assertFalse((quarantined[0] / "ssh" / "id_ed25519").exists())
+        self.assertFalse((quarantined[0] / "ssh" / "id_ed25519.pub").exists())
+        self.assertFalse((quarantined[0] / "ssh" / "known_hosts").exists())
+
+    def test_global_provider_lease_rejects_parallel_or_stale_sessions(self):
+        _, _, authority, _, _, _ = self._connection_fixture()
+        authority = self._temporary_authority(authority)
+        provider_root = self.root / "provider-lock"
+        with mock.patch.object(harness, "VM_WORK_PARENT", provider_root):
+            first = harness.ClosedVmwareProvider._acquire_provider_lease(authority)
+            with self.assertRaisesRegex(
+                harness.CandidateHarnessError,
+                "CANDIDATE_VM_PROVIDER_SESSION_BUSY",
+            ):
+                harness.ClosedVmwareProvider._acquire_provider_lease(authority)
+            harness.ClosedVmwareProvider._release_provider_lease(first)
+            second = harness.ClosedVmwareProvider._acquire_provider_lease(authority)
+            harness.ClosedVmwareProvider._release_provider_lease(second)
+        self.assertFalse((provider_root / ".active-provider-session.lock").exists())
 
     def test_cli_exposes_no_vm_snapshot_shell_or_package_override(self):
         help_text = harness._parser().format_help()
@@ -733,7 +1445,19 @@ class CandidateVmHarnessTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(len(result["profileReceipts"]), 3)
         aggregate = result["aggregateReceipt"]
+        self.assertEqual(
+            aggregate["schema"],
+            "animemo.prepublication-candidate-acceptance-receipt/v3",
+        )
         self.assertTrue(aggregate["all_profiles_pass"])
+        self.assertEqual(
+            {key: value["status"] for key, value in aggregate["profile_results"].items()},
+            {
+                "fresh_base": "PASS",
+                "docker_base": "PASS",
+                "runtime_base_offline": "PASS",
+            },
+        )
         self.assertFalse(aggregate["release_authority_granted"])
         self.assertFalse(aggregate["publish_authorized"])
         self.assertEqual(self.provider.external_calls, 2)
@@ -903,7 +1627,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
             )
         self.assertEqual(self.provider.execute_calls, 0)
 
-    def test_original_vm_hash_drift_stops_before_the_next_profile(self):
+    def test_original_vm_hash_drift_marks_later_profiles_not_run(self):
         plan = self._plan()
         environment = _r2_environment()
         original_execute = self.provider.execute_profile
@@ -913,7 +1637,6 @@ class CandidateVmHarnessTests(unittest.TestCase):
             self.provider.hashes[harness.SOURCE_VM_HASH_FILES[0]] = (
                 "sha256:" + "f" * 64
             )
-            receipt["original_vm_post_hashes"] = dict(self.provider.hashes)
             return receipt
 
         self.provider.execute_profile = mutate_source
@@ -923,10 +1646,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
         ), mock.patch(
             "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
             sha256_bytes(ACCOUNT_ID.encode("ascii")),
-        ), self.assertRaisesRegex(
-            harness.CandidateHarnessError, "PROFILE_SAFETY_MISMATCH"
         ):
-            harness.execute_harness_plan(
+            result = harness.execute_harness_plan(
                 plan,
                 accepted_plan_digest=plan.plan_digest,
                 provider=self.provider,
@@ -934,6 +1655,277 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 r2_client=R2Client(),
             )
         self.assertEqual(self.provider.execute_calls, 1)
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(
+            {
+                key: value["status"]
+                for key, value in result["aggregateReceipt"]["profile_results"].items()
+            },
+            {
+                "fresh_base": "ERROR",
+                "docker_base": "NOT_RUN_SHARED_BLOCKER",
+                "runtime_base_offline": "NOT_RUN_SHARED_BLOCKER",
+            },
+        )
+
+    def test_profile_local_error_with_valid_containment_continues_series(self):
+        plan = self._plan()
+
+        def local_error(profile, harness_plan):
+            continuation = harness.ProfileContinuationReceipt.issue(
+                profile=profile.profile,
+                session_id=harness_plan.session_id,
+                original_vm_hashes=self.provider.hashes,
+                active_profile_root_count=0,
+                session_private_key_count=0,
+                known_hosts_file_count=0,
+                running_vm_count=0,
+                quarantine_present=True,
+                continuation_safe=True,
+            )
+            return harness.CandidateProfileExecutionError(
+                "CANDIDATE_PROFILE_LOCAL_FAILURE",
+                continuation,
+            )
+
+        self.provider.profile_errors["FRESH_BASE"] = local_error
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ):
+            result = harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
+                r2_client=R2Client(),
+            )
+        self.assertEqual(self.provider.execute_calls, 3)
+        self.assertEqual(
+            [
+                value["status"]
+                for value in result["aggregateReceipt"]["profile_results"].values()
+            ],
+            ["ERROR", "PASS", "PASS"],
+        )
+
+    def test_valid_fail_receipt_does_not_skip_remaining_profiles(self):
+        plan = self._plan()
+        self.provider.profile_results["FRESH_BASE"] = "FAIL"
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ):
+            result = harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
+                r2_client=R2Client(),
+            )
+        self.assertEqual(self.provider.execute_calls, 3)
+        results = result["aggregateReceipt"]["profile_results"]
+        self.assertEqual(results["fresh_base"]["status"], "FAIL")
+        self.assertIsNotNone(results["fresh_base"]["receipt_digest"])
+        self.assertEqual(results["docker_base"]["status"], "PASS")
+        self.assertEqual(results["runtime_base_offline"]["status"], "PASS")
+
+    def test_two_independent_local_errors_still_attempt_every_profile(self):
+        plan = self._plan()
+
+        def local_error(profile, harness_plan):
+            return harness.CandidateProfileExecutionError(
+                "CANDIDATE_PROFILE_LOCAL_FAILURE",
+                harness.ProfileContinuationReceipt.issue(
+                    profile=profile.profile,
+                    session_id=harness_plan.session_id,
+                    original_vm_hashes=self.provider.hashes,
+                    active_profile_root_count=0,
+                    session_private_key_count=0,
+                    known_hosts_file_count=0,
+                    running_vm_count=0,
+                    quarantine_present=True,
+                    continuation_safe=True,
+                ),
+            )
+
+        self.provider.profile_errors.update(
+            {"FRESH_BASE": local_error, "DOCKER_BASE": local_error}
+        )
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ):
+            result = harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
+                r2_client=R2Client(),
+            )
+        self.assertEqual(self.provider.execute_calls, 3)
+        self.assertEqual(
+            [value["status"] for value in result["aggregateReceipt"]["profile_results"].values()],
+            ["ERROR", "ERROR", "PASS"],
+        )
+        self.assertEqual(self.provider.external_calls, 2)
+        self.assertGreater(
+            self.provider.events.index("external:2"),
+            self.provider.events.index("profile:RUNTIME_BASE_OFFLINE"),
+        )
+
+    def test_receipt_binding_error_is_controlled_and_series_continues(self):
+        plan = self._plan()
+        original_execute = self.provider.execute_profile
+
+        def wrong_binding(**kwargs):
+            receipt = original_execute(**kwargs)
+            if kwargs["plan"].profile == "FRESH_BASE":
+                receipt["candidate_version"] = "v1.1.0-rc.999"
+            return receipt
+
+        self.provider.execute_profile = wrong_binding
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ):
+            result = harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
+                r2_client=R2Client(),
+            )
+        self.assertEqual(self.provider.execute_calls, 3)
+        results = result["aggregateReceipt"]["profile_results"]
+        self.assertEqual(results["fresh_base"]["status"], "ERROR")
+        self.assertEqual(
+            results["fresh_base"]["failure_code"],
+            "CANDIDATE_PROFILE_RECEIPT_BINDING_MISMATCH",
+        )
+        self.assertEqual(results["docker_base"]["status"], "PASS")
+
+    def test_unverified_containment_stops_remaining_profiles(self):
+        plan = self._plan()
+        self.provider.continuation_safe = False
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ):
+            result = harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
+                r2_client=R2Client(),
+            )
+        self.assertEqual(self.provider.execute_calls, 1)
+        self.assertEqual(
+            [
+                value["status"]
+                for value in result["aggregateReceipt"]["profile_results"].values()
+            ],
+            ["ERROR", "NOT_RUN_SHARED_BLOCKER", "NOT_RUN_SHARED_BLOCKER"],
+        )
+
+    def test_known_hosts_residual_stops_remaining_profiles(self):
+        plan = self._plan()
+        self.provider.continuation_known_hosts_file_count = 1
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ):
+            result = harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
+                r2_client=R2Client(),
+            )
+        self.assertEqual(self.provider.execute_calls, 1)
+        self.assertEqual(
+            [
+                value["status"]
+                for value in result["aggregateReceipt"]["profile_results"].values()
+            ],
+            ["ERROR", "NOT_RUN_SHARED_BLOCKER", "NOT_RUN_SHARED_BLOCKER"],
+        )
+        self.assertEqual(
+            result["aggregateReceipt"]["profile_results"]["fresh_base"][
+                "failure_code"
+            ],
+            "CANDIDATE_VM_CONTINUATION_UNVERIFIED",
+        )
+
+    def test_continuation_receipt_cannot_authorize_residual_known_hosts(self):
+        plan = self._plan()
+        profile = plan.profiles[0]
+        receipt = harness.ProfileContinuationReceipt.issue(
+            profile=profile.profile,
+            session_id=plan.session_id,
+            original_vm_hashes=plan.original_vm_hashes,
+            active_profile_root_count=0,
+            session_private_key_count=0,
+            known_hosts_file_count=1,
+            running_vm_count=0,
+            quarantine_present=True,
+            continuation_safe=True,
+        )
+
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_CONTINUATION_UNVERIFIED",
+        ):
+            harness._validate_continuation_receipt(
+                receipt,
+                profile=profile,
+                plan=plan,
+            )
+
+    def test_unknown_profile_exception_is_a_shared_blocker(self):
+        plan = self._plan()
+        self.provider.profile_errors["FRESH_BASE"] = RuntimeError(
+            "untrusted detail must not escape"
+        )
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ):
+            result = harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
+                r2_client=R2Client(),
+            )
+        self.assertEqual(self.provider.execute_calls, 1)
+        results = result["aggregateReceipt"]["profile_results"]
+        self.assertEqual(
+            results["fresh_base"]["failure_code"],
+            "CANDIDATE_PROFILE_UNCLASSIFIED_ERROR",
+        )
+        self.assertNotIn("untrusted detail", json.dumps(result))
 
     def test_candidate_version_presence_fails_before_the_first_profile(self):
         plan = self._plan()
@@ -1039,6 +2031,20 @@ class CandidateVmHarnessTests(unittest.TestCase):
     def test_closed_provider_has_a_complete_success_lifecycle(self):
         plan = self._plan()
         profile = plan.profiles[0]
+        authority = harness.ClosedVmwareProvider._profile_authority(profile, plan)
+        _, _, _, runtime, _, verified_guest = self._connection_fixture()
+        runtime = replace(
+            runtime,
+            clone_root=authority.clone_root,
+            clone_vmx=authority.clone_vmx,
+            snapshot_name=profile.snapshot_name,
+            snapshot_identity=profile.snapshot_identity,
+        )
+        verified = harness.VerifiedCloneConnection(
+            authority=authority,
+            runtime=runtime,
+            guest=verified_guest,
+        )
         provider = harness.ClosedVmwareProvider(
             runner=RecordingRunner(),
             windows_platform=FakeWindowsPlatform(),
@@ -1050,18 +2056,55 @@ class CandidateVmHarnessTests(unittest.TestCase):
             candidate_root=self.root,
             initial_platform_state=harness._initial_platform_state(profile.profile),
         )
-        clone_root = self.root / "closed-clone"
-        clone_vmx = clone_root / "Ubuntu 64 位.vmx"
+        events = []
         with mock.patch.object(provider, "_assert_tools"), mock.patch.object(
+            provider, "_acquire_provider_lease", return_value=mock.sentinel.lease
+        ), mock.patch.object(
+            provider, "_release_provider_lease"
+        ) as release_lease, mock.patch.object(
             provider, "_hashes", return_value=dict(plan.original_vm_hashes)
         ), mock.patch.object(
-            provider, "_clone_full", return_value=(clone_root, clone_vmx)
+            provider,
+            "_prepare_profile_authority",
+            side_effect=lambda value: events.append("prepare"),
+        ), mock.patch.object(
+            provider,
+            "_clone_full",
+            side_effect=lambda value, profile_authority, **_kwargs: (
+                events.append("clone") or (authority.clone_root, authority.clone_vmx)
+            ),
         ), mock.patch.object(provider, "_revert_clone") as revert, mock.patch.object(
             provider, "_validate_clone_disk_graph"
         ), mock.patch.object(
-            provider, "_start_clone"
-        ) as start, mock.patch.object(provider, "_wait_for_ssh"), mock.patch.object(
-            provider, "_stage_candidate", return_value="/fixed/candidate"
+            provider,
+            "_clone_snapshot_disk_graph_identity",
+            return_value=profile.snapshot_disk_graph_identity,
+        ), mock.patch.object(
+            provider,
+            "_clone_snapshot_identity",
+            return_value=profile.snapshot_identity,
+        ), mock.patch.object(
+            provider,
+            "_disk_graph_content_digest",
+            return_value=runtime.disk_graph_digest,
+        ), mock.patch.object(
+            provider,
+            "_inject_guestinfo_challenge",
+            side_effect=lambda profile_authority, item: events.append("inject"),
+        ), mock.patch.object(
+            provider, "_start_clone", side_effect=lambda _value: events.append("start")
+        ) as start, mock.patch.object(
+            provider,
+            "_establish_clone_connection",
+            side_effect=lambda profile_authority, item, **_kwargs: (
+                events.append("identity") or verified
+            ),
+        ), mock.patch.object(
+            provider,
+            "_stage_candidate",
+            side_effect=lambda profile_authority, candidate_root, digest: (
+                events.append("stage") or "/fixed/candidate"
+            ),
         ), mock.patch.object(
             provider, "_run_profile_guest", return_value=receipt
         ), mock.patch.object(provider, "_stop_clone") as stop, mock.patch.object(
@@ -1074,13 +2117,21 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 initial_platform_state=harness._initial_platform_state(profile.profile),
             )
         self.assertEqual(observed, receipt)
-        revert.assert_called_once_with(clone_vmx, profile.snapshot_name)
-        start.assert_called_once_with(clone_vmx)
-        stop.assert_called_once_with(clone_vmx)
-        remove.assert_called_once_with(clone_root)
+        self.assertLess(events.index("inject"), events.index("start"))
+        self.assertLess(events.index("start"), events.index("identity"))
+        self.assertLess(events.index("identity"), events.index("stage"))
+        revert.assert_called_once_with(authority.clone_vmx, profile.snapshot_name)
+        start.assert_called_once_with(authority.clone_vmx)
+        stop.assert_called_once_with(authority.clone_vmx)
+        remove.assert_called_once_with(verified)
         quarantine.assert_not_called()
+        release_lease.assert_called_once_with(mock.sentinel.lease)
 
     def test_host_commands_receive_only_sanitized_environment_and_stdin_secret(self):
+        plan = self._plan()
+        authority = harness.ClosedVmwareProvider._profile_authority(
+            plan.profiles[0], plan
+        )
         runner = RecordingRunner()
         provider = harness.ClosedVmwareProvider(
             runner=runner,
@@ -1096,6 +2147,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
         )
         password = provider._sudo_password()
         provider._ssh_checked(
+            authority,
             "sudo -S -p '' -- /usr/bin/true",
             code="TEST",
             sudo_password=password,
@@ -1118,6 +2170,10 @@ class CandidateVmHarnessTests(unittest.TestCase):
         self.assertEqual(call["environment"]["SYSTEMROOT"], "C:/Windows")
 
     def test_ssh_and_scp_use_equivalent_closed_configuration_authority(self):
+        plan = self._plan()
+        authority = harness.ClosedVmwareProvider._profile_authority(
+            plan.profiles[0], plan
+        )
         provider = harness.ClosedVmwareProvider(
             windows_platform=FakeWindowsPlatform(),
             environment={
@@ -1126,8 +2182,9 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 "SSH_AUTH_SOCK": "test-agent-endpoint",
             },
         )
-        ssh_argv = provider._ssh_argv("/usr/bin/true")
+        ssh_argv = provider._ssh_argv(authority, "/usr/bin/true")
         scp_argv = provider._scp_argv(
+            authority=authority,
             source="C:/safe/source",
             destination="/tmp/safe-destination",
             recursive=True,
@@ -1147,9 +2204,9 @@ class CandidateVmHarnessTests(unittest.TestCase):
             "RequestTTY=no",
             "StrictHostKeyChecking=yes",
             "GlobalKnownHostsFile=none",
-            f"UserKnownHostsFile={harness.OPENSSH_KNOWN_HOSTS}",
-            f"IdentityFile={harness.OPENSSH_IDENTITY}",
-            f"HostKeyAlias={harness.SSH_HOST_KEY_ALIAS}",
+            f"UserKnownHostsFile={authority.known_hosts_file}",
+            f"IdentityFile={authority.identity_file}",
+            f"HostKeyAlias={authority.host_key_alias}",
             f"User={harness.SSH_USER}",
         }
         for argv in (ssh_argv, scp_argv):
@@ -1161,6 +2218,10 @@ class CandidateVmHarnessTests(unittest.TestCase):
         self.assertEqual(scp_argv[-1], f"{harness.SSH_HOST}:/tmp/safe-destination")
 
     def test_openssh_environment_is_not_shared_with_generic_provider_commands(self):
+        plan = self._plan()
+        authority = harness.ClosedVmwareProvider._profile_authority(
+            plan.profiles[0], plan
+        )
         runner = RecordingRunner()
         provider = harness.ClosedVmwareProvider(
             runner=runner,
@@ -1174,9 +2235,10 @@ class CandidateVmHarnessTests(unittest.TestCase):
         )
         provider._run((str(harness.VMRUN), "-T", "ws", "list"), code="TEST")
         provider._run((str(harness.ROBOCOPY), "source", "target"), code="TEST")
-        provider._ssh_checked("/usr/bin/true", code="TEST")
+        provider._ssh_checked(authority, "/usr/bin/true", code="TEST")
         provider._run(
             provider._scp_argv(
+                authority=authority,
                 source="C:/safe/source",
                 destination="/tmp/safe-destination",
                 recursive=False,
@@ -1824,7 +2886,6 @@ class CandidateVmHarnessTests(unittest.TestCase):
         serialized = str(first.as_dict())
         for forbidden in (
             str(harness.OPENSSH_IDENTITY),
-            str(harness.OPENSSH_KNOWN_HOSTS),
             r"C:\ProgramData",
             "test-agent-endpoint",
             "test-only-r2-access",
@@ -1851,11 +2912,6 @@ class CandidateVmHarnessTests(unittest.TestCase):
             ),
             "identity-capability": (
                 FakeWindowsPlatform(identity_safe=False),
-                RecordingRunner(),
-                "WINDOWS_OPENSSH_ACL_UNSAFE",
-            ),
-            "host-key-capability": (
-                FakeWindowsPlatform(known_hosts_safe=False),
                 RecordingRunner(),
                 "WINDOWS_OPENSSH_ACL_UNSAFE",
             ),
@@ -2018,6 +3074,174 @@ class CandidateVmHarnessTests(unittest.TestCase):
         (clone / "disk-flat.vmdk").write_bytes(b"local-flat")
         harness.ClosedVmwareProvider._validate_clone_disk_graph(clone, vmx)
 
+    def test_disk_graph_identity_changes_when_extent_bytes_change_at_same_size(self):
+        clone = self.root / "content-bound-disk-graph"
+        clone.mkdir()
+        vmx = clone / "Ubuntu 64 位.vmx"
+        vmx.write_text('scsi0:0.fileName = "disk.vmdk"\n', encoding="utf-8")
+        (clone / "disk.vmdk").write_bytes(
+            b'# Disk DescriptorFile\ncreateType="twoGbMaxExtentFlat"\n'
+            b'parentCID=ffffffff\nRW 100 FLAT "disk-flat.vmdk" 0\n'
+        )
+        extent = clone / "disk-flat.vmdk"
+        extent.write_bytes(b"first-bytes")
+
+        first = harness.ClosedVmwareProvider._disk_graph_content_digest(clone, vmx)
+        extent.write_bytes(b"other-bytes")
+        second = harness.ClosedVmwareProvider._disk_graph_content_digest(clone, vmx)
+
+        self.assertNotEqual(first, second)
+
+    def test_source_host_hashes_detect_same_size_extent_drift(self):
+        source = self.root / "source-extent-drift"
+        extent = self._write_closed_source_disk_graph(source)
+        provider = harness.ClosedVmwareProvider(
+            runner=RecordingRunner(),
+            windows_platform=FakeWindowsPlatform(),
+            environment={},
+        )
+        with mock.patch.object(harness, "SOURCE_VM_ROOT", source):
+            before = provider._hashes()
+            extent.write_bytes(b"X" * extent.stat().st_size)
+            after = provider._hashes()
+
+        extent_name = extent.relative_to(source).as_posix()
+        self.assertIn(extent_name, before)
+        self.assertNotEqual(before[extent_name], after[extent_name])
+
+    def test_clone_authority_rejects_same_size_extent_tamper(self):
+        clone = self.root / "clone-extent-tamper"
+        extent = self._write_closed_source_disk_graph(clone)
+        provider = harness.ClosedVmwareProvider(
+            runner=RecordingRunner(),
+            windows_platform=FakeWindowsPlatform(),
+            environment={},
+        )
+        with mock.patch.object(harness, "SOURCE_VM_ROOT", clone):
+            expected_hashes = provider._hashes()
+        expected_graph = provider._closed_source_disk_graph_content_digest(clone)
+        self.assertEqual(
+            provider._verify_clone_authoritative_hashes(
+                clone,
+                profile="FRESH_BASE",
+                expected_original_hashes=expected_hashes,
+                expected_snapshot_identity=expected_hashes[
+                    harness.SNAPSHOT_FILES["FRESH_BASE"]
+                ],
+                expected_source_disk_graph_identity=expected_graph,
+            ),
+            expected_hashes,
+        )
+        extent.write_bytes(b"Y" * extent.stat().st_size)
+
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_FULL_COPY_IDENTITY_MISMATCH",
+        ):
+            provider._verify_clone_authoritative_hashes(
+                clone,
+                profile="FRESH_BASE",
+                expected_original_hashes=expected_hashes,
+                expected_snapshot_identity=expected_hashes[
+                    harness.SNAPSHOT_FILES["FRESH_BASE"]
+                ],
+                expected_source_disk_graph_identity=expected_graph,
+            )
+
+    def test_preboot_snapshot_graph_rejects_same_size_extent_tamper(self):
+        clone = self.root / "preboot-snapshot-extent-tamper"
+        self._write_closed_source_disk_graph(clone)
+        descriptor = harness.SNAPSHOT_DISK_FILES["FRESH_BASE"]
+        expected = harness.ClosedVmwareProvider._descriptor_disk_graph_content_digest(
+            clone,
+            descriptor,
+        )
+        extent = clone / (descriptor.removesuffix(".vmdk") + "-s001.vmdk")
+        extent.write_bytes(b"Z" * extent.stat().st_size)
+
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_SNAPSHOT_DISK_GRAPH_MISMATCH",
+        ):
+            harness.ClosedVmwareProvider._clone_snapshot_disk_graph_identity(
+                clone,
+                profile="FRESH_BASE",
+                expected_snapshot_disk_graph_identity=expected,
+            )
+
+    def test_clone_authoritative_hashes_reject_same_size_snapshot_tamper(self):
+        clone = self.root / "same-size-snapshot-tamper"
+        clone.mkdir()
+        expected_hashes = {}
+        for name in harness.SOURCE_VM_HASH_FILES:
+            payload = ("source:" + name).encode("utf-8")
+            (clone / name).write_bytes(payload)
+            expected_hashes[name] = "sha256:" + hashlib.sha256(payload).hexdigest()
+        snapshot_name = harness.SNAPSHOT_FILES["FRESH_BASE"]
+        snapshot = clone / snapshot_name
+        snapshot.write_bytes(b"X" * snapshot.stat().st_size)
+
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_FULL_COPY_IDENTITY_MISMATCH",
+        ):
+            harness.ClosedVmwareProvider._verify_clone_authoritative_hashes(
+                clone,
+                profile="FRESH_BASE",
+                expected_original_hashes=expected_hashes,
+                expected_snapshot_identity=expected_hashes[snapshot_name],
+                expected_source_disk_graph_identity=DIGEST,
+            )
+
+    def test_clone_full_rejects_same_size_snapshot_tamper_before_boot(self):
+        harness_plan = self._plan()
+        original_profile = harness_plan.profiles[0]
+        source = self.root / "source-vm"
+        source.mkdir()
+        expected_hashes = {}
+        for name in harness.SOURCE_VM_HASH_FILES:
+            payload = ("source:" + name).encode("utf-8")
+            (source / name).write_bytes(payload)
+            expected_hashes[name] = "sha256:" + hashlib.sha256(payload).hexdigest()
+        snapshot_name = harness.SNAPSHOT_FILES[original_profile.profile]
+        profile = replace(
+            original_profile,
+            snapshot_identity=expected_hashes[snapshot_name],
+        )
+        authority = self._temporary_authority(
+            harness.ClosedVmwareProvider._profile_authority(
+                original_profile, harness_plan
+            )
+        )
+        provider = harness.ClosedVmwareProvider(
+            runner=RecordingRunner(),
+            windows_platform=FakeWindowsPlatform(),
+            environment={},
+        )
+
+        def copy_then_tamper(_argv, **_kwargs):
+            shutil.copytree(source, authority.clone_root)
+            snapshot = authority.clone_root / snapshot_name
+            snapshot.write_bytes(b"X" * snapshot.stat().st_size)
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"")
+
+        with mock.patch.object(harness, "SOURCE_VM_ROOT", source), mock.patch.object(
+            provider, "_assert_source_stopped"
+        ), mock.patch.object(
+            provider, "_hashes", return_value=expected_hashes
+        ), mock.patch.object(provider, "_run", side_effect=copy_then_tamper), mock.patch.object(
+            provider, "_validate_clone_disk_graph"
+        ), self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_FULL_COPY_IDENTITY_MISMATCH",
+        ):
+            provider._clone_full(
+                profile,
+                authority,
+                expected_original_hashes=expected_hashes,
+                expected_source_disk_graph_identity=DIGEST,
+            )
+
     def test_partial_start_failure_is_contained_before_quarantine(self):
         plan = self._plan()
         profile = plan.profiles[0]
@@ -2027,14 +3251,40 @@ class CandidateVmHarnessTests(unittest.TestCase):
             windows_platform=FakeWindowsPlatform(),
             environment={},
         )
-        clone_root = self.root / "partial-start"
-        clone_vmx = clone_root / "Ubuntu 64 位.vmx"
+        authority = self._temporary_authority(
+            harness.ClosedVmwareProvider._profile_authority(profile, plan)
+        )
+        authority.profile_root.mkdir(parents=True)
+        clone_root = authority.clone_root
+        clone_vmx = authority.clone_vmx
         with mock.patch.object(provider, "_assert_tools"), mock.patch.object(
+            provider, "_acquire_provider_lease", return_value=mock.sentinel.lease
+        ), mock.patch.object(
+            provider, "_release_provider_lease"
+        ), mock.patch.object(
             provider, "_hashes", return_value=dict(plan.original_vm_hashes)
+        ), mock.patch.object(
+            provider, "_profile_authority", return_value=authority
+        ), mock.patch.object(
+            provider, "_prepare_profile_authority"
         ), mock.patch.object(
             provider, "_clone_full", return_value=(clone_root, clone_vmx)
         ), mock.patch.object(provider, "_revert_clone"), mock.patch.object(
             provider, "_validate_clone_disk_graph"
+        ), mock.patch.object(
+            provider,
+            "_clone_snapshot_disk_graph_identity",
+            return_value=profile.snapshot_disk_graph_identity,
+        ), mock.patch.object(
+            provider,
+            "_clone_snapshot_identity",
+            return_value=profile.snapshot_identity,
+        ), mock.patch.object(
+            provider,
+            "_disk_graph_content_digest",
+            return_value="sha256:" + "a" * 64,
+        ), mock.patch.object(
+            provider, "_inject_guestinfo_challenge"
         ), mock.patch.object(
             provider,
             "_start_clone",
@@ -2066,7 +3316,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
             if "suspend" in call["argv"]
         ]
         self.assertEqual(suspend_modes, ["soft", "hard"])
-        quarantine.assert_called_once_with(clone_root, profile.clone_identity)
+        quarantine.assert_called_once_with(authority)
 
     def test_soft_shutdown_failure_uses_soft_suspend(self):
         runner = RecordingRunner()

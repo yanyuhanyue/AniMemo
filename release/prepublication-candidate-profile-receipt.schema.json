@@ -10,9 +10,11 @@
     "candidate_version", "profile", "base_vm_identity", "snapshot_identity", "clone_identity",
     "initial_platform_state", "platform_bootstrap_plan_digest", "platform_bootstrap_receipt_digest",
     "strict_platform_qualification", "instance_mutation_before_platform_qualification",
-    "installer_plan_digest", "installer_execution_result", "api_digest", "web_digest",
-    "postgres_digest", "redis_digest", "doctor_result", "canonical_test_results",
-    "network_request_count", "apt_command_count", "external_pull_count",
+    "installer_plan_digest", "installer_execution_receipt_digest", "installer_execution_result",
+    "api_digest", "web_digest", "postgres_digest", "redis_digest",
+    "doctor_execution_identity", "doctor_receipt_digest", "canonical_acceptance_tests",
+    "completed_steps", "network_observation", "external_pull_observation",
+    "image_acquisition_receipt_digest", "image_runtime_readback_receipt_digest",
     "original_vm_pre_hashes", "original_vm_post_hashes", "release_authority_granted",
     "publish_authorized", "started_at", "completed_at", "result"
   ],
@@ -44,26 +46,95 @@
     "strict_platform_qualification": {"const": true},
     "instance_mutation_before_platform_qualification": {"const": 0},
     "installer_plan_digest": {"$ref": "#/$defs/digest"},
+    "installer_execution_receipt_digest": {"$ref": "#/$defs/digest"},
     "installer_execution_result": {"enum": ["PASS", "FAIL"]},
     "api_digest": {"$ref": "#/$defs/digest"},
     "web_digest": {"$ref": "#/$defs/digest"},
     "postgres_digest": {"$ref": "#/$defs/digest"},
     "redis_digest": {"$ref": "#/$defs/digest"},
-    "doctor_result": {"enum": ["PASS", "FAIL"]},
-    "canonical_test_results": {
+    "doctor_execution_identity": {"$ref": "#/$defs/digest"},
+    "doctor_receipt_digest": {"$ref": "#/$defs/digest"},
+    "canonical_acceptance_tests": {
       "type": "array", "minItems": 1, "maxItems": 128,
       "items": {
         "type": "object", "additionalProperties": false,
-        "required": ["name", "result"],
+        "required": ["name", "result", "receiptDigest"],
         "properties": {
-          "name": {"type": "string", "minLength": 1, "maxLength": 128},
-          "result": {"enum": ["PASS", "FAIL"]}
+          "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{0,127}$"},
+          "result": {"const": "PASS"},
+          "receiptDigest": {"$ref": "#/$defs/digest"}
         }
       }
     },
-    "network_request_count": {"type": "integer", "minimum": 0},
-    "apt_command_count": {"type": "integer", "minimum": 0},
-    "external_pull_count": {"type": "integer", "minimum": 0},
+    "completed_steps": {
+      "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{0,127}$"}
+    },
+    "network_observation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["authority", "completed_command_inventory_digest", "completed_commands", "destination_authority", "egress_isolation", "expected_network_command_digests", "observer_identities", "platform_plan_digest", "policy", "retryable_network_command_digests", "result"],
+      "properties": {
+        "authority": {"const": "PRODUCTION_EXECUTION_WITH_OS_EGRESS_ISOLATION"},
+        "completed_command_inventory_digest": {"$ref": "#/$defs/digest"},
+        "completed_commands": {
+          "type": "array", "maxItems": 512,
+          "items": {"$ref": "#/$defs/commandObservation"}
+        },
+        "destination_authority": {"enum": ["NONE", "UBUNTU_ARCHIVE_VERIFIED_APT_SOURCES"]},
+        "egress_isolation": {
+          "type": "object", "additionalProperties": false,
+          "required": ["authority", "container_network", "container_network_internal", "service", "service_address_families", "receipt_digest"],
+          "properties": {
+            "authority": {"const": "OS_ENFORCED_CANDIDATE_EGRESS_ISOLATION"},
+            "container_network": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"},
+            "container_network_internal": {"const": true},
+            "service": {"type": "string", "pattern": "^[a-z0-9][a-z0-9@_.-]{0,127}$"},
+            "service_address_families": {"const": ["AF_UNIX", "AF_NETLINK"]},
+            "receipt_digest": {"$ref": "#/$defs/digest"}
+          }
+        },
+        "expected_network_command_digests": {
+          "type": "array", "maxItems": 16, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/digest"}
+        },
+        "observer_identities": {
+          "type": "object", "additionalProperties": false,
+          "required": ["platform", "runtime"],
+          "properties": {
+            "platform": {"$ref": "#/$defs/digest"},
+            "runtime": {"$ref": "#/$defs/digest"}
+          }
+        },
+        "platform_plan_digest": {"$ref": "#/$defs/digest"},
+        "policy": {"enum": ["DENY_ALL", "APT_UBUNTU_ARCHIVE_ONLY"]},
+        "retryable_network_command_digests": {
+          "type": "array", "maxItems": 16, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/digest"}
+        },
+        "result": {"const": "PASS"}
+      }
+    },
+    "external_pull_observation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["authority", "inventory", "observed_count", "observer_identity", "pull_denied_command_digests", "result", "runtime_command_inventory_digest"],
+      "properties": {
+        "authority": {"const": "PRODUCTION_EXECUTION_COMMAND_BOUNDARY"},
+        "inventory": {
+          "type": "array", "maxItems": 64,
+          "items": {"$ref": "#/$defs/pullObservation"}
+        },
+        "observed_count": {"type": "integer", "minimum": 0, "maximum": 64},
+        "observer_identity": {"$ref": "#/$defs/digest"},
+        "pull_denied_command_digests": {
+          "type": "array", "maxItems": 64,
+          "items": {"$ref": "#/$defs/digest"}
+        },
+        "runtime_command_inventory_digest": {"$ref": "#/$defs/digest"},
+        "result": {"const": "PASS"}
+      }
+    },
+    "image_acquisition_receipt_digest": {"$ref": "#/$defs/digest"},
+    "image_runtime_readback_receipt_digest": {"$ref": "#/$defs/digest"},
     "original_vm_pre_hashes": {"$ref": "#/$defs/hashMap"},
     "original_vm_post_hashes": {"$ref": "#/$defs/hashMap"},
     "release_authority_granted": {"const": false},
@@ -79,6 +150,28 @@
       "type": "object", "minProperties": 1, "maxProperties": 64,
       "propertyNames": {"type": "string", "pattern": "^[^/\\\\\\u0000-\\u001f]{1,256}$"},
       "additionalProperties": {"$ref": "#/$defs/digest"}
+    },
+    "commandObservation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["argv_digest", "boundary", "classification", "external_pull_disposition", "operation", "return_code"],
+      "properties": {
+        "argv_digest": {"$ref": "#/$defs/digest"},
+        "boundary": {"enum": ["PLATFORM", "RUNTIME"]},
+        "classification": {"enum": ["APT_NETWORK", "LOCAL_DOCKER_SOCKET", "LOCAL_ONLY"]},
+        "external_pull_disposition": {"enum": ["EXPLICIT_NEVER", "NOT_APPLICABLE"]},
+        "operation": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{0,127}$"},
+        "return_code": {"type": "integer"}
+      }
+    },
+    "pullObservation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["argv_digest", "operation", "reference_digest", "return_code"],
+      "properties": {
+        "argv_digest": {"$ref": "#/$defs/digest"},
+        "operation": {"const": "docker-pull"},
+        "reference_digest": {"$ref": "#/$defs/digest"},
+        "return_code": {"const": 0}
+      }
     }
   }
 }
