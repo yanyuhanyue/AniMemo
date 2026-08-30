@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://animemo.cc/schemas/prepublication-candidate-acceptance-receipt-v2.json",
-  "title": "AniMemo prepublication candidate acceptance receipt v2",
+  "$id": "https://animemo.cc/schemas/prepublication-candidate-acceptance-receipt-v3.json",
+  "title": "AniMemo prepublication candidate acceptance receipt v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -9,7 +9,7 @@
     "qualification_run_id", "qualification_run_attempt", "source_sha", "source_tree",
     "candidate_version", "r2_origin_prestate_receipt_digest",
     "r2_origin_poststate_receipt_digest", "r2_origin_prestate_observation_id",
-    "r2_origin_poststate_observation_id", "profile_receipts", "all_profiles_pass",
+    "r2_origin_poststate_observation_id", "profile_results", "all_profiles_pass",
     "candidate_prestate", "candidate_poststate", "repository_mutation_count",
     "publication_mutation_count",
     "shared_host_connection_count", "secret_sweep", "placeholder_sweep",
@@ -17,8 +17,8 @@
     "receipt_digest"
   ],
   "properties": {
-    "schema": {"const": "animemo.prepublication-candidate-acceptance-receipt/v2"},
-    "version": {"const": 2},
+    "schema": {"const": "animemo.prepublication-candidate-acceptance-receipt/v3"},
+    "version": {"const": 3},
     "candidate_input_digest": {"$ref": "#/$defs/digest"},
     "verified_candidate_digest": {"$ref": "#/$defs/digest"},
     "qualification_run_id": {"type": "integer", "minimum": 1},
@@ -30,13 +30,13 @@
     "r2_origin_poststate_receipt_digest": {"$ref": "#/$defs/digest"},
     "r2_origin_prestate_observation_id": {"$ref": "#/$defs/observationId"},
     "r2_origin_poststate_observation_id": {"$ref": "#/$defs/observationId"},
-    "profile_receipts": {
+    "profile_results": {
       "type": "object", "additionalProperties": false,
       "required": ["fresh_base", "docker_base", "runtime_base_offline"],
       "properties": {
-        "fresh_base": {"$ref": "#/$defs/digest"},
-        "docker_base": {"$ref": "#/$defs/digest"},
-        "runtime_base_offline": {"$ref": "#/$defs/digest"}
+        "fresh_base": {"$ref": "#/$defs/profileResult"},
+        "docker_base": {"$ref": "#/$defs/profileResult"},
+        "runtime_base_offline": {"$ref": "#/$defs/profileResult"}
       }
     },
     "all_profiles_pass": {"type": "boolean"},
@@ -59,6 +59,64 @@
     "observationId": {
       "type": "string",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "failureCode": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{2,127}$"
+    },
+    "profileResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "failure_code", "receipt_digest"],
+      "properties": {
+        "status": {"enum": ["PASS", "FAIL", "ERROR", "NOT_RUN_SHARED_BLOCKER"]},
+        "failure_code": {
+          "anyOf": [{"$ref": "#/$defs/failureCode"}, {"type": "null"}]
+        },
+        "receipt_digest": {
+          "anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "PASS"}}},
+          "then": {
+            "properties": {
+              "failure_code": {"type": "null"},
+              "receipt_digest": {"$ref": "#/$defs/digest"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"status": {"const": "FAIL"}}},
+          "then": {
+            "properties": {
+              "failure_code": {"$ref": "#/$defs/failureCode"},
+              "receipt_digest": {"$ref": "#/$defs/digest"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"status": {"const": "ERROR"}}},
+          "then": {
+            "properties": {
+              "failure_code": {"$ref": "#/$defs/failureCode"},
+              "receipt_digest": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"status": {"const": "NOT_RUN_SHARED_BLOCKER"}}
+          },
+          "then": {
+            "properties": {
+              "failure_code": {"$ref": "#/$defs/failureCode"},
+              "receipt_digest": {"type": "null"}
+            }
+          }
+        }
+      ]
     },
     "prestate": {
       "type": "object", "additionalProperties": false,

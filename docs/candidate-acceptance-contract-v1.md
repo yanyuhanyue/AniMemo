@@ -40,7 +40,7 @@ Acceptance。每个可接受 OCI layout 必须包含 index、authoritative manif
 - `animemo.verified-prepublication-candidate/v2`
 - `animemo.prepublication-candidate-verification-execution-receipt/v1`
 - `animemo.prepublication-candidate-profile-receipt/v1`
-- `animemo.prepublication-candidate-acceptance-receipt/v2`
+- `animemo.prepublication-candidate-acceptance-receipt/v3`
 - `animemo.r2-origin-observation-receipt/v3`
 
 唯一验证入口为：
@@ -97,8 +97,20 @@ fallback、重新构建、重新生成 Manifest/Deployment Contract/Installer Ma
 
 固定顺序为：验证 Candidate -> Platform Bootstrap plan/execute -> strict post-provision
 qualification -> `Installer.plan` -> `Installer.execute`。平台 qualification 前的 AniMemo
-instance mutation 必须为零。离线 Profile 的 network、APT 和 external pull 计数必须全为
-零，镜像只从 verifier 已闭合的本地 OCI bytes 导入。
+instance mutation 必须为零。Production composition 必须输出独立绑定的 Doctor、canonical
+CRUD/health、completed steps、平台与运行时命令边界、network policy、external-pull inventory
+以及 OCI acquisition/runtime readback receipts；Profile Runner 不得从 Installer outcome 或计划
+action 数推导这些事实。离线 Profile 不得出现任何网络命令，在线 Profile 只接受计划绑定的
+Ubuntu APT argv。`expected_network_command_digests` 必须保留计划顺序且无重复；只有
+`retryable_network_command_digests` 显式列出的 install 才允许恰好一次 `124 -> 0`，更新、
+模拟、重复成功、重复超时、乱序、缺失或额外命令全部失败关闭。所有 Candidate 可达的
+Docker run/Compose run/up 都必须显式 `--pull never`，
+镜像只从 verifier 已闭合的本地 OCI bytes 导入。Candidate composition 还必须加载固定字节的
+Compose override，把 Profile 实例的 `animemo` network 设置为 `internal: true`；Candidate
+Updater service 必须通过独立 systemd drop-in 固定为
+`RestrictAddressFamilies=AF_UNIX AF_NETLINK`。Profile Receipt 只能在 Docker network 与
+systemd property 的真实 readback 均精确匹配后记录 OS egress isolation receipt；这不会修改
+公共 DNS、Cloudflare、主机防火墙或共享生产服务。
 
 ## 4. VM Harness 与原始 VM 保护
 
@@ -138,16 +150,26 @@ Token、Authorization header、签名或 signed URL。操作员边界见
 [`R2 S3 只读凭据处理合同`](r2-s3-readonly-credential-handling.md)。
 
 每个 Profile Receipt 必须回绑 Candidate/Run/SHA/tree/version、base/snapshot/clone、平台
-与 Installer plan/receipt、四个 OCI digest、Doctor、canonical tests、网络计数和原始 VM
-前后 hashes。Aggregate Receipt 分别绑定已验证的 `candidate_prestate` 与
-`candidate_poststate` Observation Receipt 摘要，并要求二者 `observation_id` 不同、三份不同
-Profile digest、全部 PASS、执行前后 Origin 均为空、
-repository/publication/shared-host mutation 为零，并固定
+与 Installer plan/receipt、四个 OCI digest、实际 Doctor、三项 canonical tests、completed
+steps、实际命令边界/network policy、external-pull inventory 和原始 VM 前后 hashes。Guest
+只能输出不含任何宿主 VM hash 字段的 Profile Receipt Draft；Host Harness 拒绝 Guest 注入的
+前后 hash 字段，并用计划冻结的 pre hashes 与独立重读的 post hashes 生成和校验最终 Receipt。
+Aggregate Receipt
+分别绑定已验证的 `candidate_prestate` 与 `candidate_poststate` Observation Receipt 摘要，并
+要求二者 `observation_id` 不同、执行前后 Origin 均为空、repository/publication/shared-host
+mutation 为零。v3 的 `profile_results` 对三个固定 Profile 分别表达 `PASS`、`FAIL`、`ERROR`
+或 `NOT_RUN_SHARED_BLOCKER`；只有三项全为 `PASS` 时 overall 才为 `PASS`，Freshness 与
+Publication 必须拒绝语法有效的 FAIL Aggregate，并始终固定
 `release_authority_granted=false`、`publish_authorized=false`。
 
 一次性 VM 必须在原始 VM 停机时进行全字节复制；每次启动前解析并闭合 VMX/VMDK 的
 disk、extent 与 parent backing 引用，拒绝 linked clone、clone 根外路径、raw/physical disk、
-multi-writer 和 shared bus。宿主命令使用固定 argv 与最小环境，guest sudo secret 只经 stdin
+multi-writer 和 shared bus。Plan 必须冻结当前 active graph 与三个固定 Snapshot descriptor
+祖先链的完整 descriptor/extent union：每个文件逐项 SHA-256，并同时绑定 source graph 与
+各 Profile Snapshot graph 聚合摘要。Clone copy 后必须按完整文件集合和字节摘要精确对账；
+revert 后 active VMDK 只能来自该冻结集合，所选 Snapshot graph 还必须再次与 Profile plan
+精确匹配，同尺寸 extent 漂移同样失败关闭。动态 VMX/redo 只作为运行观察，不得成为计划
+Authority。宿主命令使用固定 argv 与最小环境，guest sudo secret 只经 stdin
 传递。成功路径只允许软关机后删除；失败路径必须先软关机，软关机失败时仅允许 soft
 suspend、继而 hard suspend 作为紧急 containment（禁止 hard power-off）；只有确认副本
 不再运行后才隔离，仍然返回失败且不生成 Acceptance PASS。
@@ -170,11 +192,12 @@ Windows Provider 把 Generic Provider 与 OpenSSH subprocess 环境分开。Gene
 `PreferredAuthentications=publickey`、`RequestTTY=no`。Host Key 校验固定为
 `StrictHostKeyChecking=yes`，只读取 Provider session 的固定 `known_hosts`，并禁用 global
 known-hosts authority（`GlobalKnownHostsFile=none`）。连接目标固定为 `192.168.64.10`、用户固定为 `animemo`、Host Key
-别名固定为 `animemo-test`；不得从用户或系统 ssh_config 恢复别名、用户、身份、代理、
+别名由 Candidate version、Candidate digest、随机 session ID、Profile 与 clone identity 派生；不得从用户或系统 ssh_config 恢复别名、用户、身份、代理、
 跳板、LocalCommand 或转发语义。
 
-Provider session 固定在 VM work root 的 `provider-session` 子目录，身份文件与 known_hosts
-均须为该目录内的普通文件、路径链无 reparse point、由当前 Harness 用户所有，且不得向
+Provider session root 必须由 Candidate version、Candidate digest 和随机 session ID 动态
+派生，每个 Profile 使用独立 clone root、session key 与 known_hosts。身份文件与 known_hosts
+均须为各自 authority root 内的普通文件、路径链无 reparse point、由当前 Harness 用户所有，且不得向
 Everyone、Authenticated Users 或 Builtin Users 提供有效 NTFS 权限。身份文件必须显式
 绑定，默认 `~/.ssh/id_rsa`、`~/.ssh/id_ed25519` 和 ssh-agent 都不是 Authority。Harness
 不得读取或记录身份文件正文、用户配置正文、agent endpoint、完整环境或受控文件路径。
@@ -189,7 +212,11 @@ Everyone、Authenticated Users 或 Builtin Users 提供有效 NTFS 权限。身�
 分别分类；适配器不得在非 Windows 导入路径初始化。
 
 Canonical 顺序为：Candidate Authority -> Windows Provider readiness -> VM base identity ->
-Harness plan -> Clone create -> VM boot -> SSH。readiness 在本地验证固定 ssh/scp 绝对路径、
+Harness plan -> Clone create -> boot 前向 exact clone VMX 注入随机 challenge -> VM boot ->
+只读 bootstrap identity 两次核验 -> 独立 session key 与 Guest host key 轮换 -> session identity
+再核验 -> Candidate staging。固定 IP 只用于连通性，不能成为 Guest 身份权威；任一错误 VMX、
+disk graph、snapshot、UUID、MAC、IP、machine-id、boot-id、challenge 或 host key 都必须在 sudo、
+SCP 和 remote rm 前失败。readiness 在本地验证固定 ssh/scp 绝对路径、
 预期 SHA256、AMD64 PE 架构、Provider session 文件、OpenSSH scope、闭合 argv 合同，并仅
 执行不建立网络连接的 `ssh.exe -V`。成功后签发缓存的、无秘密、无发布权威 Provider
 Readiness Receipt；其摘要进入三个 Profile 的 clone identity 输入，因此三套 Profile 绑定
@@ -204,8 +231,18 @@ Readiness Receipt；其摘要进入三个 Profile 的 clone identity 输入，�
 ABI 不受支持和 Security Descriptor 无效必须保持彼此可区分，且都在任何 Clone 创建前
 fail closed。
 
-该 readiness 只修复 Host Provider 安全与顺序合同，不执行真实 VM，也不改变 Candidate
-Identity v2、Qualification、Installer、R2 或发布 Schema。修复合并改变 exact main 后，旧
+Source VM Authority 还必须枚举当前 VMX 与三个受控 Snapshot descriptor 可达的闭合
+VMDK parent/extent 图，并把每个 descriptor 与 extent 的实际字节 SHA256 纳入
+`originalVmHashes`（当前 56 个图文件、与静态 VMX/VMSD/VMSN 合并后 61 个键）。完整图摘要
+进入 Harness plan，每个 Snapshot 的祖先图摘要同时进入对应 Profile plan。全量复制后必须对
+所有 source-bound 文件逐字节重验；revert 后 active VMDK 节点只能来自这份 source-bound
+inventory，并且 selected Snapshot descriptor 的闭合祖先链必须与 Profile plan 摘要完全一致。
+VMware 在 revert 中产生的动态 VMX/redo 不是计划 Authority：VMX 仍由独立 runtime identity
+与 challenge 绑定，任何新增未计划 VMDK 节点、同尺寸 extent 篡改或 Source extent 漂移均
+fail closed。
+
+该合同修复不在 Repair 阶段执行真实 VM，也不改变 Candidate Identity v2、Qualification 或
+R2 Authority。修复合并改变 exact main 后，旧
 Qualification、Identity、Execution Receipt、live R2 prestate 与隔离 Clone 全部仅可取证；
 下一轮必须从新 exact-main Qualification 开始，使用未暴露的最小只读 R2 凭据并创建三套
 全新 Profile Clone。

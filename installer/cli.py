@@ -277,6 +277,12 @@ def _run_candidate(args: argparse.Namespace) -> int:
         plan,
         accepted_plan_digest=plan.plan_digest,
     )
+    production_observation = composition.candidate_profile_execution_observation(
+        platform_plan=session.plan,
+        platform_receipt=platform_receipt,
+        installer_plan=plan,
+        installer_result=result,
+    )
     _write(
         {
             "mode": "EXECUTE",
@@ -286,6 +292,7 @@ def _run_candidate(args: argparse.Namespace) -> int:
             "strictPostProvisionQualification": True,
             "installerPlanDigest": plan.plan_digest,
             "installerResult": result.as_dict(),
+            "productionExecutionObservation": production_observation,
             "releaseAuthorityGranted": False,
             "publishAuthorized": False,
         },

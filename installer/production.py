@@ -35,6 +35,7 @@ from durability.compatibility import (
 )
 from durability.doctor import (
     CompatibilityEvidence,
+    DoctorReport,
     DoctorRunner,
     DoctorStatus,
     ProbeResult,
@@ -152,6 +153,141 @@ _PLATFORM_PROBE_ENVIRONMENT = {
     "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
 }
 _LOCAL_DOCKER_HOST = "unix:///var/run/docker.sock"
+_CANDIDATE_NETWORK_OVERRIDE_BYTES = (
+    b"networks:\n  animemo:\n    internal: true\n"
+)
+_CANDIDATE_SYSTEMD_NETWORK_ISOLATION_BYTES = (
+    b"[Service]\nRestrictAddressFamilies=AF_UNIX AF_NETLINK\n"
+)
+_CANDIDATE_PLATFORM_LOCAL_EXECUTABLES = frozenset(
+    {
+        "/usr/bin/apt-cache",
+        "/usr/bin/dpkg",
+        "/usr/bin/dpkg-query",
+        "/usr/bin/pg_dump",
+        "/usr/bin/psql",
+        "/usr/bin/systemctl",
+    }
+)
+_CANDIDATE_COMMAND_OBSERVER_CONTRACT = {
+    "boundaries": ["PLATFORM", "RUNTIME"],
+    "externalPullDispositions": [
+        "EXPLICIT_NEVER",
+        "FORBIDDEN_DETECTED",
+        "NOT_APPLICABLE",
+    ],
+    "networkClassification": "APT_NETWORK",
+    "localClassifications": ["LOCAL_DOCKER_SOCKET", "LOCAL_ONLY"],
+    "unknownClassification": "UNKNOWN_NETWORK_CAPABILITY",
+    "version": 1,
+}
+_CANDIDATE_COMMAND_OBSERVER_IDENTITY = sha256_identity(
+    canonical_json_bytes(_CANDIDATE_COMMAND_OBSERVER_CONTRACT)
+)
+_CANONICAL_ACCEPTANCE_SCRIPT = """\
+import json
+import uuid
+from django.contrib.auth import get_user_model
+from django.db import transaction
+from journal.domain_services import JournalEntryService
+from journal.serializers_entries import JournalEntrySerializer
+
+with transaction.atomic():
+    marker = "animemo-candidate-" + uuid.uuid4().hex
+    user = get_user_model().objects.create_user(username=marker)
+    service = JournalEntryService(user)
+    created = service.create_from_fields(
+        {"title": marker}, serializer_class=JournalEntrySerializer
+    )
+    entry_id = created["entry_id"]
+    read = service.get(entry_id)
+    updated = service.update_from_fields(
+        entry_id,
+        {"title": marker + "-updated"},
+        serializer_class=JournalEntrySerializer,
+    )
+    deleted = service.delete(entry_id)
+    result = {
+        "create": created["title"] == marker,
+        "delete": deleted == {"entry_id": entry_id, "deleted": True},
+        "read": read["title"] == marker,
+        "update": updated["title"] == marker + "-updated",
+    }
+    transaction.set_rollback(True)
+print(json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+"""
+
+
+def _completed_command_observation(
+    argv: list[str] | tuple[str, ...], *, operation: str, return_code: int
+) -> dict[str, object]:
+    return {
+        "argvDigest": sha256_identity(canonical_json_bytes(list(argv))),
+        "operation": operation,
+        "returnCode": return_code,
+    }
+
+
+class CandidatePlatformCommandObserver:
+    """Observe completed network-capable bootstrap commands at the only Adapter."""
+
+    def __init__(self, delegate) -> None:
+        self._delegate = delegate
+        self._completed_commands: list[dict[str, object]] = []
+
+    @property
+    def observer_identity(self) -> str:
+        return _CANDIDATE_COMMAND_OBSERVER_IDENTITY
+
+    @property
+    def completed_commands(self) -> tuple[dict[str, object], ...]:
+        return tuple(dict(item) for item in self._completed_commands)
+
+    @property
+    def completed_network_commands(self) -> tuple[dict[str, object], ...]:
+        return tuple(
+            dict(item)
+            for item in self._completed_commands
+            if item["classification"] == "APT_NETWORK"
+        )
+
+    @staticmethod
+    def _classification(argv: tuple[str, ...]) -> str:
+        executable = argv[0] if argv else ""
+        if executable == "/usr/bin/apt-get":
+            return "APT_NETWORK"
+        if executable in _CANDIDATE_PLATFORM_LOCAL_EXECUTABLES:
+            return "LOCAL_ONLY"
+        if executable == "/usr/bin/docker" and (
+            argv[1:2] == ("--version",)
+            or argv[1:3] == ("--host", _LOCAL_DOCKER_HOST)
+            and "pull" not in argv
+        ):
+            return "LOCAL_DOCKER_SOCKET"
+        return "UNKNOWN_NETWORK_CAPABILITY"
+
+    def run(
+        self,
+        argv: tuple[str, ...],
+        *,
+        timeout: int,
+        environment: Mapping[str, str],
+    ):
+        result = self._delegate.run(
+            argv, timeout=timeout, environment=environment
+        )
+        classification = self._classification(argv)
+        self._completed_commands.append(
+            {
+                **_completed_command_observation(
+                    argv,
+                    operation=("apt-get" if classification == "APT_NETWORK" else "local"),
+                    return_code=int(result.returncode),
+                ),
+                "classification": classification,
+            }
+        )
+        return result
 
 
 class LocalDockerCommandRunner(CommandRunner):
@@ -159,6 +295,96 @@ class LocalDockerCommandRunner(CommandRunner):
 
     def __init__(self, delegate: CommandRunner | None = None) -> None:
         self._delegate = delegate or CommandRunner()
+        self._completed_commands: list[dict[str, object]] = []
+        self._completed_external_pulls: list[dict[str, object]] = []
+
+    @property
+    def observer_identity(self) -> str:
+        return _CANDIDATE_COMMAND_OBSERVER_IDENTITY
+
+    @property
+    def completed_commands(self) -> tuple[dict[str, object], ...]:
+        return tuple(dict(item) for item in self._completed_commands)
+
+    @property
+    def completed_external_pulls(self) -> tuple[dict[str, object], ...]:
+        return tuple(dict(item) for item in self._completed_external_pulls)
+
+    def _record_external_pull(self, argv: list[str], *, return_code: int) -> None:
+        try:
+            index = argv.index("pull")
+        except ValueError:
+            return
+        if argv[:1] != ["/usr/bin/docker"] or index + 1 >= len(argv):
+            return
+        reference = argv[index + 1]
+        digest = reference.rsplit("@", 1)[-1]
+        self._completed_external_pulls.append(
+            {
+                **_completed_command_observation(
+                    argv, operation="docker-pull", return_code=return_code
+                ),
+                "referenceDigest": digest,
+            }
+        )
+
+    @staticmethod
+    def _command_observation(
+        argv: list[str], *, return_code: int
+    ) -> dict[str, object]:
+        executable = argv[0] if argv else ""
+        operation = "local-command"
+        classification = "UNKNOWN_NETWORK_CAPABILITY"
+        pull_disposition = "NOT_APPLICABLE"
+        if executable == "/usr/bin/docker":
+            classification = "LOCAL_DOCKER_SOCKET"
+            operation = "docker-local-socket"
+            try:
+                compose = argv.index("compose")
+            except ValueError:
+                compose = -1
+            if "pull" in argv:
+                operation = "docker-pull"
+                pull_disposition = "FORBIDDEN_DETECTED"
+            elif compose >= 0 and any(
+                subcommand in argv[compose + 1 :] for subcommand in ("run", "up")
+            ) and "--help" not in argv[compose + 1 :]:
+                subcommand = next(
+                    name for name in ("run", "up") if name in argv[compose + 1 :]
+                )
+                operation = f"docker-compose-{subcommand}"
+                command_index = argv.index(subcommand, compose + 1)
+                pull_disposition = (
+                    "EXPLICIT_NEVER"
+                    if argv[command_index + 1 : command_index + 3]
+                    == ["--pull", "never"]
+                    else "FORBIDDEN_DETECTED"
+                )
+            elif "run" in argv[1:4]:
+                operation = "docker-run"
+                command_index = argv.index("run", 1)
+                pull_disposition = (
+                    "EXPLICIT_NEVER"
+                    if argv[command_index + 1 : command_index + 3]
+                    == ["--pull", "never"]
+                    else "FORBIDDEN_DETECTED"
+                )
+        elif executable in {
+            "/usr/bin/pg_dump",
+            "/usr/bin/psql",
+            "/usr/bin/systemctl",
+        } or (
+            executable.endswith("/deploy/install-updater.sh")
+            and argv[1:2] == ["--instance"]
+        ):
+            classification = "LOCAL_ONLY"
+        return {
+            **_completed_command_observation(
+                argv, operation=operation, return_code=return_code
+            ),
+            "classification": classification,
+            "externalPullDisposition": pull_disposition,
+        }
 
     @staticmethod
     def _closed_command(
@@ -190,12 +416,20 @@ class LocalDockerCommandRunner(CommandRunner):
         timeout: int = 300,
     ):
         closed_argv, closed_env = self._closed_command(argv, env)
-        return self._delegate.run(
+        result = self._delegate.run(
             closed_argv,
             cwd=cwd,
             env=closed_env,
             timeout=timeout,
         )
+        return_code = int(getattr(result, "returncode", 0))
+        self._completed_commands.append(
+            self._command_observation(closed_argv, return_code=return_code)
+        )
+        self._record_external_pull(
+            closed_argv, return_code=return_code
+        )
+        return result
 
     def write_gzip(
         self,
@@ -208,7 +442,7 @@ class LocalDockerCommandRunner(CommandRunner):
         root: Path | None = None,
     ) -> dict[str, object]:
         closed_argv, closed_env = self._closed_command(argv, env)
-        return self._delegate.write_gzip(
+        result = self._delegate.write_gzip(
             closed_argv,
             path,
             cwd=cwd,
@@ -216,6 +450,8 @@ class LocalDockerCommandRunner(CommandRunner):
             timeout=timeout,
             root=root,
         )
+        self._record_external_pull(closed_argv, return_code=0)
+        return result
 
 
 def _utc_now() -> str:
@@ -1616,6 +1852,95 @@ class ProductionDoctorAcceptance:
         self.compatibility = compatibility
         self.runner = runner or LocalDockerCommandRunner()
         self.namespace = namespace or instance_namespace()
+        self._latest_report: DoctorReport | None = None
+        self._latest_canonical_acceptance: tuple[dict[str, object], ...] = ()
+
+    @property
+    def latest_report(self) -> DoctorReport | None:
+        return self._latest_report
+
+    @property
+    def latest_canonical_acceptance(self) -> tuple[dict[str, object], ...]:
+        return tuple(dict(item) for item in self._latest_canonical_acceptance)
+
+    @staticmethod
+    def _canonical_observation(
+        *, name: str, adapter: str, observation: Mapping[str, object]
+    ) -> dict[str, object]:
+        evidence = {
+            "adapter": adapter,
+            "observationDigest": sha256_identity(
+                canonical_json_bytes(dict(observation))
+            ),
+        }
+        body = {"evidence": evidence, "name": name, "result": "PASS"}
+        return {
+            **body,
+            "receiptDigest": sha256_identity(canonical_json_bytes(body)),
+        }
+
+    def _canonical_acceptance(
+        self,
+        deployment: ImmutableComposeDeployment,
+        manifest: dict[str, object],
+    ) -> tuple[dict[str, object], ...]:
+        command = [
+            "/usr/bin/docker",
+            "exec",
+            f"{self.namespace.compose_project}-api",
+            "python",
+            "manage.py",
+            "shell",
+            "-c",
+            _CANONICAL_ACCEPTANCE_SCRIPT,
+        ]
+        try:
+            completed = self.runner.run(command, timeout=120)
+            crud = json.loads(completed.stdout)
+            if crud != {
+                "create": True,
+                "delete": True,
+                "read": True,
+                "update": True,
+            }:
+                raise ValueError("canonical CRUD result differs")
+            deployment.probe_api(manifest)
+            deployment.probe_web(manifest)
+        except Exception:  # noqa: BLE001 - fixed acceptance Adapter boundary
+            raise InstallerAdapterError(
+                "INSTALL_CANONICAL_ACCEPTANCE_FAILED",
+                mutation_occurred=True,
+                recovery_required=True,
+            ) from None
+        manifest_digest = _manifest_digest(manifest)
+        return (
+            self._canonical_observation(
+                name="application.journal-crud",
+                adapter="django-domain-service-transaction-rollback",
+                observation={
+                    "commandDigest": sha256_identity(canonical_json_bytes(command)),
+                    "outputDigest": sha256_identity(
+                        canonical_json_bytes(dict(crud))
+                    ),
+                },
+            ),
+            self._canonical_observation(
+                name="service.api.health",
+                adapter="immutable-compose-api-health",
+                observation={
+                    "manifestDigest": manifest_digest,
+                    "status": "PASS",
+                },
+            ),
+            self._canonical_observation(
+                name="service.web.health",
+                adapter="immutable-compose-web-health",
+                observation={
+                    "manifestDigest": manifest_digest,
+                    "status": "PASS",
+                },
+            ),
+        )
 
     @staticmethod
     def _guarded(
@@ -1640,13 +1965,15 @@ class ProductionDoctorAcceptance:
         self,
         plan: InstallPlan,
         deployment: ImmutableComposeDeployment,
-    ) -> None:
-        self._accept(
+    ) -> DoctorReport:
+        report = self._accept(
             expected_instance_id=plan.configuration.instance_id,
             release=plan.release,
             platform=plan.platform,
             deployment=deployment,
         )
+        self._latest_report = report
+        return report
 
     def accept_existing(
         self,
@@ -1655,13 +1982,15 @@ class ProductionDoctorAcceptance:
         release: ReleaseEvidence,
         platform: PlatformEvidence,
         deployment: ImmutableComposeDeployment,
-    ) -> None:
-        self._accept(
+    ) -> DoctorReport:
+        report = self._accept(
             expected_instance_id=expected_instance_id,
             release=release,
             platform=platform,
             deployment=deployment,
         )
+        self._latest_report = report
+        return report
 
     def _accept(
         self,
@@ -1670,7 +1999,7 @@ class ProductionDoctorAcceptance:
         release: ReleaseEvidence,
         platform: PlatformEvidence,
         deployment: ImmutableComposeDeployment,
-    ) -> None:
+    ) -> DoctorReport:
         materials = self.releases.materials_for(release)
         manifest = materials.manifest
         source, policy_identity, selection_origin = (
@@ -1962,6 +2291,10 @@ class ProductionDoctorAcceptance:
                 mutation_occurred=True,
                 recovery_required=True,
             )
+        self._latest_canonical_acceptance = self._canonical_acceptance(
+            deployment, manifest
+        )
+        return report
 
 
 class ProductionFreshInstallPort:
@@ -1974,12 +2307,14 @@ class ProductionFreshInstallPort:
         doctor_acceptor: Callable[[InstallPlan, ImmutableComposeDeployment], None]
         | None = None,
         namespace: InstanceNamespace | None = None,
+        candidate_network_isolation: bool = False,
     ) -> None:
         self.releases = releases
         self.configuration = configuration
         self.runner = runner or LocalDockerCommandRunner()
         self.doctor_acceptor = doctor_acceptor
         self.namespace = namespace or instance_namespace()
+        self.candidate_network_isolation = candidate_network_isolation
         self._deployment: ImmutableComposeDeployment | None = None
         self._created: set[Path] = set()
         self._ownership: dict[str, OwnershipReceipt] = {}
@@ -2037,6 +2372,12 @@ class ProductionFreshInstallPort:
                         namespace=self.namespace,
                         locator_digest=instance_locator_digest(self._locator(plan)),
                     )
+                ),
+                candidate_network_override=(
+                    Path(str(self.namespace.data_root / "private"))
+                    / "candidate-network-isolation.yml"
+                    if getattr(self, "candidate_network_isolation", False)
+                    else None
                 ),
             )
         return self._deployment
@@ -2116,6 +2457,17 @@ class ProductionFreshInstallPort:
             ):
                 if self._mkdir(path, mode):
                     self._created.add(path)
+            if getattr(self, "candidate_network_isolation", False):
+                override = (
+                    Path(str(self.namespace.data_root / "private"))
+                    / "candidate-network-isolation.yml"
+                )
+                with override.open("xb") as output:
+                    output.write(_CANDIDATE_NETWORK_OVERRIDE_BYTES)
+                    output.flush()
+                    os.fsync(output.fileno())
+                override.chmod(0o600)
+                self._created.add(override)
         except InstallerAdapterError:
             raise
         except OSError:
@@ -2202,6 +2554,8 @@ class ProductionFreshInstallPort:
                         "--host",
                         _LOCAL_DOCKER_HOST,
                         "run",
+                        "--pull",
+                        "never",
                         "--rm",
                         "--network",
                         "none",
@@ -2218,6 +2572,8 @@ class ProductionFreshInstallPort:
                         "--host",
                         _LOCAL_DOCKER_HOST,
                         "run",
+                        "--pull",
+                        "never",
                         "--rm",
                         "--network",
                         "none",
@@ -2361,6 +2717,28 @@ class ProductionFreshInstallPort:
                 ),
                 verifier=reverify_installer_release,
             )
+            if getattr(self, "candidate_network_isolation", False):
+                service_root = Path("/etc/systemd/system")
+                dropin = service_root / f"{self.namespace.updater_service}.d"
+                override = dropin / "10-candidate-network-isolation.conf"
+                if (
+                    dropin.exists()
+                    or dropin.is_symlink()
+                    or override.exists()
+                    or override.is_symlink()
+                ):
+                    raise OSError("Candidate systemd network authority exists")
+                dropin.mkdir(mode=0o755)
+                with override.open("xb") as output:
+                    output.write(_CANDIDATE_SYSTEMD_NETWORK_ISOLATION_BYTES)
+                    output.flush()
+                    os.fsync(output.fileno())
+                override.chmod(0o644)
+                self._created.update({dropin, override})
+                self.runner.run(
+                    ["/usr/bin/systemctl", "daemon-reload"],
+                    timeout=120,
+                )
             self.runner.run(
                 [
                     "/usr/bin/systemctl",
@@ -2438,6 +2816,351 @@ class ProductionInstallerComposition:
     releases: ProductionReleasePort | CandidateReleasePort
     platform: ProductionPlatformPort
     bootstrap_privilege_gate: PlatformBootstrapPrivilegeGate | None = None
+    candidate_doctor: ProductionDoctorAcceptance | None = None
+    candidate_platform_observer: CandidatePlatformCommandObserver | None = None
+    candidate_command_runner: LocalDockerCommandRunner | None = None
+
+    def candidate_profile_execution_observation(
+        self,
+        *,
+        platform_plan,
+        platform_receipt,
+        installer_plan,
+        installer_result,
+    ) -> dict[str, object]:
+        if (
+            type(self.releases) is not CandidateReleasePort
+            or self.candidate_doctor is None
+            or self.candidate_platform_observer is None
+            or self.candidate_command_runner is None
+            or installer_result.outcome is not InstallOutcome.SUCCEEDED
+            or platform_receipt.result != "PASS"
+            or installer_plan.plan_digest == ""
+        ):
+            raise InstallerError(
+                "INSTALL_CANDIDATE_EXECUTION_OBSERVATION_UNAVAILABLE",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        doctor_report = self.candidate_doctor.latest_report
+        canonical_acceptance = list(
+            self.candidate_doctor.latest_canonical_acceptance
+        )
+        if doctor_report is None or [
+            item.get("name") for item in canonical_acceptance
+        ] != [
+            "application.journal-crud",
+            "service.api.health",
+            "service.web.health",
+        ]:
+            raise InstallerError(
+                "INSTALL_CANDIDATE_EXECUTION_OBSERVATION_UNAVAILABLE",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        from .platform_bootstrap import _apt_argv
+
+        expected_command_digests: list[str] = []
+        retryable_command_digests: list[str] = []
+        for action in platform_plan.actions:
+            if action.kind.value == "APT_UPDATE":
+                expected_command_digests.append(
+                    sha256_identity(canonical_json_bytes(list(_apt_argv("update"))))
+                )
+            elif action.kind.value in {
+                "INSTALL_DOCKER",
+                "INSTALL_COMPOSE",
+                "INSTALL_POSTGRES_CLIENT",
+            }:
+                install_digest = sha256_identity(
+                    canonical_json_bytes(
+                        list(_apt_argv("install", action.packages))
+                    )
+                )
+                if platform_plan.mode.value == "ONLINE_EXISTING_DOCKER":
+                    expected_command_digests.append(
+                        sha256_identity(
+                            canonical_json_bytes(
+                                list(_apt_argv("simulate", action.packages))
+                            )
+                        )
+                    )
+                expected_command_digests.append(install_digest)
+                retryable_command_digests.append(install_digest)
+
+        if any(
+            item["classification"] == "UNKNOWN_NETWORK_CAPABILITY"
+            for item in self.candidate_platform_observer.completed_commands
+        ) or any(
+            item["classification"] == "UNKNOWN_NETWORK_CAPABILITY"
+            or item["externalPullDisposition"] == "FORBIDDEN_DETECTED"
+            for item in self.candidate_command_runner.completed_commands
+        ):
+            raise InstallerError(
+                "INSTALL_CANDIDATE_COMMAND_OBSERVATION_FAILED",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+
+        network_name = f"{self.candidate_doctor.namespace.compose_project}_animemo"
+        try:
+            network_readback = self.candidate_command_runner.run(
+                [
+                    "/usr/bin/docker",
+                    "network",
+                    "inspect",
+                    "--format",
+                    "{{json .Internal}}",
+                    network_name,
+                ],
+                timeout=60,
+            )
+            service_readback = self.candidate_command_runner.run(
+                [
+                    "/usr/bin/systemctl",
+                    "show",
+                    self.candidate_doctor.namespace.updater_service,
+                    "--property",
+                    "RestrictAddressFamilies",
+                    "--value",
+                ],
+                timeout=60,
+            )
+            network_internal = json.loads(network_readback.stdout)
+            service_families = service_readback.stdout.strip().split()
+        except Exception:  # noqa: BLE001 - exact OS isolation readback
+            raise InstallerError(
+                "INSTALL_CANDIDATE_EGRESS_ISOLATION_UNVERIFIED",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            ) from None
+        if network_internal is not True or service_families != [
+            "AF_UNIX",
+            "AF_NETLINK",
+        ]:
+            raise InstallerError(
+                "INSTALL_CANDIDATE_EGRESS_ISOLATION_UNVERIFIED",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        egress_isolation_body = {
+            "authority": "OS_ENFORCED_CANDIDATE_EGRESS_ISOLATION",
+            "containerNetwork": network_name,
+            "containerNetworkInternal": True,
+            "service": self.candidate_doctor.namespace.updater_service,
+            "serviceAddressFamilies": service_families,
+        }
+        egress_isolation = {
+            **egress_isolation_body,
+            "receiptDigest": sha256_identity(
+                canonical_json_bytes(egress_isolation_body)
+            ),
+        }
+
+        image_receipt = self.releases.image_receipt_for(installer_plan.release)
+        image_value = {
+            "identity": image_receipt.identity,
+            "images": [
+                {
+                    "canonicalReference": item.canonical_reference,
+                    "observedReference": item.observed_reference,
+                    "role": item.role,
+                }
+                for item in image_receipt.images
+            ],
+            "transportPolicyIdentity": image_receipt.transport_policy_identity,
+            "verifiedReleaseIdentity": image_receipt.verified_release_identity,
+        }
+        runtime_readback_images: list[dict[str, str]] = []
+        for item in image_receipt.images:
+            try:
+                completed = self.candidate_command_runner.run(
+                    [
+                        "/usr/bin/docker",
+                        "image",
+                        "inspect",
+                        "--format",
+                        "{{json .RepoDigests}}",
+                        item.canonical_reference,
+                    ],
+                    timeout=60,
+                )
+                observed = json.loads(completed.stdout)
+            except Exception:  # noqa: BLE001 - strict production Adapter receipt
+                raise InstallerError(
+                    "INSTALL_CANDIDATE_IMAGE_READBACK_FAILED",
+                    outcome=InstallOutcome.VALIDATION_FAILED,
+                ) from None
+            if (
+                type(observed) is not list
+                or item.canonical_reference not in observed
+                or any(type(reference) is not str for reference in observed)
+            ):
+                raise InstallerError(
+                    "INSTALL_CANDIDATE_IMAGE_READBACK_FAILED",
+                    outcome=InstallOutcome.VALIDATION_FAILED,
+                )
+            runtime_readback_images.append(
+                {
+                    "canonicalReference": item.canonical_reference,
+                    "observedReference": item.canonical_reference,
+                    "role": item.role,
+                }
+            )
+        runtime_readback = {
+            "images": runtime_readback_images,
+            "result": "PASS",
+        }
+
+        platform_commands = [
+            {
+                "argvDigest": item["argvDigest"],
+                "boundary": "PLATFORM",
+                "classification": item["classification"],
+                "externalPullDisposition": "NOT_APPLICABLE",
+                "operation": item["operation"],
+                "returnCode": item["returnCode"],
+            }
+            for item in self.candidate_platform_observer.completed_commands
+        ]
+        runtime_commands = [
+            {
+                "argvDigest": item["argvDigest"],
+                "boundary": "RUNTIME",
+                "classification": item["classification"],
+                "externalPullDisposition": item["externalPullDisposition"],
+                "operation": item["operation"],
+                "returnCode": item["returnCode"],
+            }
+            for item in self.candidate_command_runner.completed_commands
+        ]
+        completed_commands = [*platform_commands, *runtime_commands]
+        if any(
+            item["classification"] == "UNKNOWN_NETWORK_CAPABILITY"
+            or item["externalPullDisposition"] == "FORBIDDEN_DETECTED"
+            for item in completed_commands
+        ):
+            raise InstallerError(
+                "INSTALL_CANDIDATE_COMMAND_OBSERVATION_FAILED",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        network_commands = [
+            item
+            for item in completed_commands
+            if item["classification"] == "APT_NETWORK"
+        ]
+        invalid_network_commands = [
+            item
+            for item in network_commands
+            if item["argvDigest"] not in expected_command_digests
+            or item["returnCode"] not in {0, 124}
+            or item["returnCode"] == 124
+            and item["argvDigest"] not in retryable_command_digests
+        ]
+        from release.candidate import apt_network_sequence_matches
+
+        if (
+            not apt_network_sequence_matches(
+                [
+                    (str(item["argvDigest"]), int(item["returnCode"]))
+                    for item in network_commands
+                ],
+                expected_digests=expected_command_digests,
+                retryable_digests=retryable_command_digests,
+            )
+            or invalid_network_commands
+            or platform_plan.network_policy == "DENY_ALL"
+            and network_commands
+        ):
+            raise InstallerError(
+                "INSTALL_CANDIDATE_NETWORK_OBSERVATION_FAILED",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        completed_inventory_digest = sha256_identity(
+            canonical_json_bytes(completed_commands)
+        )
+        external_pulls = list(
+            self.candidate_command_runner.completed_external_pulls
+        )
+        if external_pulls:
+            raise InstallerError(
+                "INSTALL_CANDIDATE_EXTERNAL_PULL_DETECTED",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        result_value = installer_result.as_dict()
+        completed_steps = result_value.get("completedSteps")
+        if (
+            type(completed_steps) is not list
+            or not completed_steps
+            or completed_steps[-1] != "doctor.accept"
+        ):
+            raise InstallerError(
+                "INSTALL_CANDIDATE_EXECUTION_OBSERVATION_UNAVAILABLE",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        doctor_value = doctor_report.as_dict()
+        doctor_digest = sha256_identity(canonical_json_bytes(doctor_value))
+        installer_result_digest = sha256_identity(
+            canonical_json_bytes(result_value)
+        )
+        doctor_execution_identity = sha256_identity(
+            canonical_json_bytes(
+                {
+                    "canonicalAcceptanceReceiptDigests": [
+                        item["receiptDigest"] for item in canonical_acceptance
+                    ],
+                    "completedSteps": completed_steps,
+                    "doctorReceiptDigest": doctor_digest,
+                    "installerExecutionReceiptDigest": installer_result_digest,
+                }
+            )
+        )
+        return {
+            "schema": "animemo.candidate-profile-production-execution-observation/v1",
+            "doctorReport": doctor_value,
+            "doctorReceiptDigest": doctor_digest,
+            "doctorExecutionIdentity": doctor_execution_identity,
+            "canonicalAcceptanceTests": canonical_acceptance,
+            "completedSteps": completed_steps,
+            "networkObservation": {
+                "authority": "PRODUCTION_EXECUTION_WITH_OS_EGRESS_ISOLATION",
+                "completedCommandInventoryDigest": completed_inventory_digest,
+                "completedCommands": completed_commands,
+                "destinationAuthority": (
+                    "NONE"
+                    if platform_plan.network_policy == "DENY_ALL"
+                    else "UBUNTU_ARCHIVE_VERIFIED_APT_SOURCES"
+                ),
+                "egressIsolation": egress_isolation,
+                "expectedNetworkCommandDigests": expected_command_digests,
+                "observerIdentities": {
+                    "platform": self.candidate_platform_observer.observer_identity,
+                    "runtime": self.candidate_command_runner.observer_identity,
+                },
+                "platformPlanDigest": platform_plan.plan_digest,
+                "policy": platform_plan.network_policy,
+                "retryableNetworkCommandDigests": retryable_command_digests,
+                "result": "PASS",
+            },
+            "externalPullObservation": {
+                "authority": "PRODUCTION_EXECUTION_COMMAND_BOUNDARY",
+                "pullDeniedCommandDigests": sorted(
+                    str(item["argvDigest"])
+                    for item in runtime_commands
+                    if item["externalPullDisposition"] == "EXPLICIT_NEVER"
+                ),
+                "inventory": external_pulls,
+                "observedCount": len(external_pulls),
+                "observerIdentity": self.candidate_command_runner.observer_identity,
+                "result": "PASS",
+                "runtimeCommandInventoryDigest": sha256_identity(
+                    canonical_json_bytes(runtime_commands)
+                ),
+            },
+            "imageAcquisitionReceipt": image_value,
+            "imageAcquisitionReceiptDigest": sha256_identity(
+                canonical_json_bytes(image_value)
+            ),
+            "imageRuntimeReadbackReceipt": runtime_readback,
+            "imageRuntimeReadbackReceiptDigest": sha256_identity(
+                canonical_json_bytes(runtime_readback)
+            ),
+        }
 
     def plan_platform(
         self,
@@ -2481,7 +3204,9 @@ class ProductionInstallerComposition:
             )
         from .platform_bootstrap import ProductionPlatformBootstrap
 
-        bootstrap = ProductionPlatformBootstrap()
+        bootstrap = ProductionPlatformBootstrap(
+            runner=self.candidate_platform_observer
+        ) if self.candidate_platform_observer is not None else ProductionPlatformBootstrap()
         plan = bootstrap.plan(transport_source=request.transport_source)
         return VerifiedPlatformBootstrapSession(
             release=release,
@@ -2617,8 +3342,13 @@ def build_candidate_composition(
             "INSTALL_VERIFIED_CANDIDATE_REQUIRED",
             outcome=InstallOutcome.VALIDATION_FAILED,
         ) from None
+    from .platform_bootstrap import SubprocessPlatformCommandRunner
+
     namespace = instance_namespace(instance_name)
     runner = LocalDockerCommandRunner()
+    platform_observer = CandidatePlatformCommandObserver(
+        SubprocessPlatformCommandRunner()
+    )
     transport_source = (
         InstallTransportSource.PREPUBLICATION_CANDIDATE
         if profile == "OFFLINE_VALIDATE_ONLY"
@@ -2631,7 +3361,12 @@ def build_candidate_composition(
     )
     configuration = ProductionManagedConfigurationPort(namespace=namespace)
     compatibility = ProductionCompatibilityPort(releases)
-    platform = ProductionPlatformPort(releases)
+    platform = ProductionPlatformPort(
+        releases,
+        collector=lambda qualification: collect_host_capabilities(
+            qualification, runner=runner
+        ),
+    )
     doctor = ProductionDoctorAcceptance(
         releases=releases,
         compatibility=compatibility,
@@ -2644,6 +3379,7 @@ def build_candidate_composition(
         doctor_acceptor=doctor,
         runner=runner,
         namespace=namespace,
+        candidate_network_isolation=True,
     )
     gate = CandidateBootstrapPrivilegeGate(
         verified_prepublication_candidate_capability(verified_candidate_digest)
@@ -2675,6 +3411,9 @@ def build_candidate_composition(
         releases=releases,
         platform=platform,
         bootstrap_privilege_gate=gate,
+        candidate_doctor=doctor,
+        candidate_platform_observer=platform_observer,
+        candidate_command_runner=runner,
     )
 
 

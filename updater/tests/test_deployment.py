@@ -14,6 +14,7 @@ from unittest import mock
 from release.contract import build_manifest, deployment_contract_digest
 from scripts.tests.trust_kit_fixture import contract_only_test_pretrust_bytes
 from updater.deployment import (
+    CANDIDATE_NETWORK_OVERRIDE_TEXT,
     INITIAL_HTTP_READY_ATTEMPTS,
     INITIAL_HTTP_READY_INTERVAL_SECONDS,
     HostPaths,
@@ -274,9 +275,11 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
 
             command = runner.calls[-1][0]
             self.assertEqual(
-                command[-8:],
+                command[-10:],
                 (
                     "up",
+                    "--pull",
+                    "never",
                     "-d",
                     "--no-deps",
                     "--force-recreate",
@@ -287,6 +290,65 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
                 ),
             )
             self.assertNotIn("web", command)
+
+    def test_all_candidate_compose_up_and_run_paths_forbid_implicit_pull(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            current = manifest()
+
+            deployment.start_datastores(current)
+            deployment.start_application(current)
+            deployment.reconcile_application(current)
+            deployment.reconcile_api(current)
+            deployment.switch(current)
+            deployment.migrate(current)
+            deployment.bootstrap(current)
+
+            pull_sensitive_commands = [
+                call[0]
+                for call in runner.calls
+                if "compose" in call[0]
+                and any(command in call[0] for command in ("run", "up"))
+            ]
+            self.assertEqual(len(pull_sensitive_commands), 7)
+            for command in pull_sensitive_commands:
+                subcommand = "up" if "up" in command else "run"
+                index = command.index(subcommand)
+                self.assertEqual(
+                    command[index + 1 : index + 3], ("--pull", "never")
+                )
+
+    def test_candidate_compose_uses_only_the_exact_internal_network_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            private = deployment.paths.data_root / "private"
+            private.mkdir(mode=0o700)
+            override = private / "candidate-network-isolation.yml"
+            override.write_text(CANDIDATE_NETWORK_OVERRIDE_TEXT, encoding="utf-8")
+            deployment.candidate_network_override = override
+
+            deployment.start_datastores(manifest())
+
+            command = runner.calls[-1][0]
+            override_index = command.index(str(override))
+            self.assertEqual(command[override_index - 1], "-f")
+            self.assertLess(override_index, command.index("up"))
+
+            override.write_text("networks: {}\n", encoding="utf-8")
+            with self.assertRaisesRegex(StateError, "override is unsafe"):
+                deployment.start_datastores(manifest())
+
+    def test_candidate_compose_rejects_a_missing_network_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, _, _ = self.make(directory)
+            deployment.candidate_network_override = (
+                deployment.paths.data_root
+                / "private"
+                / "candidate-network-isolation.yml"
+            )
+
+            with self.assertRaisesRegex(StateError, "override is unavailable"):
+                deployment.start_datastores(manifest())
 
     def test_exact_web_proxy_rejects_multiple_networks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -398,9 +460,11 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             )
             switch = commands[-1]
             self.assertEqual(
-                switch[-9:],
+                switch[-11:],
                 (
                     "up",
+                    "--pull",
+                    "never",
                     "-d",
                     "--no-deps",
                     "--force-recreate",
@@ -500,10 +564,12 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
 
             commands = [call[0] for call in runner.calls]
             self.assertEqual(
-                commands[0][-4:], ("run", "--rm", "--no-deps", "migration")
+                commands[0][-6:],
+                ("run", "--pull", "never", "--rm", "--no-deps", "migration"),
             )
             self.assertEqual(
-                commands[1][-4:], ("run", "--rm", "--no-deps", "bootstrap")
+                commands[1][-6:],
+                ("run", "--pull", "never", "--rm", "--no-deps", "bootstrap"),
             )
             for _, kwargs in runner.calls:
                 self.assertEqual(
