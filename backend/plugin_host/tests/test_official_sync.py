@@ -18,6 +18,7 @@ from django.core.management.base import CommandError
 from django.db import OperationalError
 from django.test import TestCase, override_settings
 
+from plugin_host.filesystem_security import PluginFilesystemSecurityError
 from plugin_host.models import (
     PluginData,
     PluginDeployment,
@@ -419,3 +420,61 @@ class OfficialPluginSyncTests(TestCase):
             )
             self.assertNotIn(sentinel, public_text)
             self.assertNotIn("Traceback", public_text)
+
+    @override_settings(DEBUG=True)
+    def test_ci_cli_diagnostic_reports_only_package_store_and_filesystem_class(self):
+        sentinel = r"C:\private\plugin-store token=SYNC_DIAGNOSTIC_CANARY"
+        output = StringIO()
+        errors = StringIO()
+        with (
+            patch.dict(os.environ, {"CI": "true"}),
+            patch(
+                "plugin_host.management.commands.sync_official_plugins.store_package_blob",
+                side_effect=PluginFilesystemSecurityError(sentinel),
+            ),
+            patch("sys.stdout", output),
+            redirect_stderr(errors),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            ManagementUtility(
+                ["manage.py", "sync_official_plugins", "--no-color"]
+            ).execute()
+
+        diagnostic = output.getvalue()
+        public_error = errors.getvalue()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(
+            diagnostic,
+            "official_plugin_sync_internal_failure "
+            "stage=package_store class=filesystem_security\n",
+        )
+        self.assertRegex(
+            public_error,
+            r"^CommandError: official_plugin_sync_failed "
+            r"correlation_id=[0-9a-f]{32}\r?\n$",
+        )
+        self.assertNotIn(sentinel, diagnostic)
+        self.assertNotIn(sentinel, public_error)
+        self.assertNotIn("Traceback", diagnostic + public_error)
+
+    def test_ci_diagnostic_is_silent_unless_debug_and_ci_are_both_enabled(self):
+        sentinel = r"C:\private\official.sqlite token=SYNC_DIAGNOSTIC_CANARY"
+        cases = ((False, "true"), (True, "false"), (True, ""))
+        for debug, ci_value in cases:
+            output = StringIO()
+            with (
+                self.subTest(debug=debug, ci=ci_value),
+                override_settings(DEBUG=debug),
+                patch.dict(os.environ, {"CI": ci_value}),
+                patch(
+                    "plugin_host.management.commands.sync_official_plugins.get_user_model",
+                    side_effect=OperationalError(sentinel),
+                ),
+                self.assertRaisesRegex(
+                    CommandError,
+                    r"^official_plugin_sync_failed correlation_id=[0-9a-f]{32}$",
+                ),
+            ):
+                call_command("sync_official_plugins", stdout=output)
+
+            self.assertEqual(output.getvalue(), "")
