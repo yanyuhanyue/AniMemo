@@ -1,23 +1,23 @@
-from base64 import b64decode
 import io
 import json
 import time
 import zipfile
+from base64 import b64decode
 from unittest.mock import Mock, patch
 
+import requests
+from accounts.models import StaffProfile, UserSecurityProfile
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
-import requests
-
-from accounts.models import StaffProfile, UserSecurityProfile
 from site_config.models import InstallationState, SiteSettings, TagDefinition
+
 from .models import AdminAuditLog, Column, JournalEntry, UserSettings
 from .security import _totp_at
-
 
 User = get_user_model()
 
@@ -530,7 +530,8 @@ class JournalApiTests(APITestCase):
         }, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(response.data["detail"], "当前暂未开放注册。")
+        self.assertEqual(response.data["code"], "permission_denied")
+        self.assertEqual(set(response.data), {"code", "detail", "correlation_id"})
         self.assertFalse(User.objects.filter(email="closed@example.com").exists())
 
     def test_site_avatar_upload_returns_public_url(self):
@@ -664,6 +665,20 @@ class StaffControlRoomTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(TagDefinition.objects.filter(name__iexact="scifi").count(), 1)
 
+    def test_tag_validation_exception_text_is_not_public(self):
+        marker = "TAG-VALIDATION-STACK-SENTINEL"
+        with patch("journal.staff_moderation_views._tag_definition_values", side_effect=ValueError(marker)):
+            response = self.client.post(
+                reverse("staff-tag-list"),
+                {"name": "科幻"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "invalid_tag_definition")
+        self.assertIn("correlation_id", response.data)
+        self.assertNotIn(marker, str(response.data))
+
     def test_reviewer_cannot_manage_tag_definitions(self):
         reviewer = User.objects.create_user(username="tag-reviewer", password="StrongPass123!", is_staff=True)
         StaffProfile.objects.create(user=reviewer, role=StaffProfile.Role.REVIEWER)
@@ -702,6 +717,16 @@ class StaffControlRoomTests(APITestCase):
         self.assertIn("email_verified", response.data)
         self.assertEqual(len(response.data["login_events"]), 1)
 
+    def test_user_management_validation_exception_text_is_not_public(self):
+        marker = "STAFF-VALIDATION-STACK-SENTINEL"
+        with patch("journal.staff_user_views.assert_can_manage_user", side_effect=DjangoValidationError(marker)):
+            response = self.client.get(reverse("staff-user-detail", kwargs={"pk": self.member.pk}))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["code"], "staff_user_access_denied")
+        self.assertIn("correlation_id", response.data)
+        self.assertNotIn(marker, str(response.data))
+
     def test_two_factor_setup_is_enforced_during_staff_login(self):
         begin = self.client.post(reverse("staff-two-factor"), {"action": "begin", "password": "StrongPass123!"}, format="json")
         self.assertEqual(begin.status_code, status.HTTP_200_OK)
@@ -734,3 +759,22 @@ class StaffControlRoomTests(APITestCase):
         response = self.client.get(reverse("staff-system-health"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual({item["key"] for item in response.data["services"]}, {"database", "email", "bangumi", "storage", "plugins"})
+
+    def test_system_health_partial_failures_are_sanitized(self):
+        marker = "HEALTH-STACK-SENTINEL"
+        database = Mock()
+        database.cursor.side_effect = RuntimeError(marker)
+        with (
+            patch("journal.staff_system_views.connection", database),
+            patch("journal.staff_system_views.requests.get", side_effect=requests.RequestException(marker)),
+            patch("journal.staff_system_views.discover_plugins", side_effect=ValueError(marker)),
+        ):
+            response = self.client.get(reverse("staff-system-health"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn(marker, str(response.data))
+        failed = {item["key"]: item for item in response.data["services"] if item["status"] == "down"}
+        self.assertEqual(set(failed), {"database", "bangumi", "plugins"})
+        for item in failed.values():
+            self.assertIn("code", item)
+            self.assertIn("correlation_id", item)

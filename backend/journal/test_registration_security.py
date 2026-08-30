@@ -3,23 +3,22 @@ from datetime import timedelta
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from django.contrib.auth import get_user_model
+from accounts.models import PendingRegistration
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.management import call_command
 from django.test import override_settings
 from django.test.client import RequestFactory
 from django.urls import reverse
 from django.utils import timezone
+from plugin_host.hooks import RegistrationHookRejected, RegistrationHookUnavailable
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
+from site_config.models import InstallationState, SiteSettings
 
 from .emails import EmailDeliveryError
 from .registration import request_pending_registration
-from accounts.models import PendingRegistration, UserSecurityProfile
-from site_config.models import InstallationState, SiteSettings
-from .models import JournalEntry
-
 
 User = get_user_model()
 
@@ -80,6 +79,41 @@ class RegistrationFlowSecurityTests(APITestCase):
         self.assertNotEqual(raw_token, pending.token_hash)
         self.assertNotIn(raw_token, pending.token_hash)
         self.assertNotIn(self.password, pending.token_hash)
+
+    def test_registration_hook_failures_never_expose_exception_text(self):
+        marker = "REGISTRATION-HOOK-STACK-SENTINEL"
+        for exception, expected_status, expected_code in (
+            (RegistrationHookRejected(marker), status.HTTP_403_FORBIDDEN, "registration_policy_rejected"),
+            (RegistrationHookUnavailable(marker), status.HTTP_503_SERVICE_UNAVAILABLE, "registration_policy_unavailable"),
+        ):
+            with self.subTest(endpoint="request", code=expected_code), patch(
+                "journal.auth_views.request_pending_registration",
+                side_effect=exception,
+            ):
+                response = self.client.post(reverse("register-request"), {"email": "hook@example.com"}, format="json")
+                self.assertEqual(response.status_code, expected_status)
+                self.assertEqual(response.data["code"], expected_code)
+                self.assertIn("correlation_id", response.data)
+                self.assertNotIn(marker, str(response.data))
+
+            with self.subTest(endpoint="complete", code=expected_code), patch(
+                "journal.auth_views.complete_registration",
+                side_effect=exception,
+            ):
+                response = self.client.post(
+                    reverse("register-complete"),
+                    {
+                        "completion_token": "x" * 64,
+                        "username": "hook-user",
+                        "password": self.password,
+                        "password_confirm": self.password,
+                    },
+                    format="json",
+                )
+                self.assertEqual(response.status_code, expected_status)
+                self.assertEqual(response.data["code"], expected_code)
+                self.assertIn("correlation_id", response.data)
+                self.assertNotIn(marker, str(response.data))
 
     def test_repeated_request_invalidates_old_token(self):
         first_sent, _first = self._request_registration()
@@ -183,11 +217,39 @@ class RegistrationFlowSecurityTests(APITestCase):
     def test_email_failure_does_not_rollback_pending_or_create_user(
         self, _send, _submit
     ):
-        with self.captureOnCommitCallbacks(execute=True):
-            response = self.client.post(reverse("register-request"), {"email": "mail-failure@example.com"}, format="json")
+        with patch("journal.auth_views.logger.error") as error_log:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(reverse("register-request"), {"email": "mail-failure@example.com"}, format="json")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(PendingRegistration.objects.filter(email="mail-failure@example.com").exists())
         self.assertFalse(User.objects.filter(email="mail-failure@example.com").exists())
+        error_log.assert_called_once()
+        self.assertEqual(
+            error_log.call_args.args,
+            ("registration_email_delivery_failed",),
+        )
+        self.assertEqual(
+            set(error_log.call_args.kwargs["extra"]),
+            {
+                "animemo_stage",
+                "correlation_id",
+                "animemo_exception_class",
+            },
+        )
+        self.assertEqual(
+            error_log.call_args.kwargs["extra"]["animemo_stage"],
+            "registration_email_delivery",
+        )
+        self.assertEqual(
+            error_log.call_args.kwargs["extra"]["animemo_exception_class"],
+            "EmailDeliveryError",
+        )
+        self.assertRegex(
+            error_log.call_args.kwargs["extra"]["correlation_id"],
+            r"^[0-9a-f]{32}$",
+        )
+        self.assertNotIn("pending_id", repr(error_log.call_args))
+        self.assertNotIn("provider down", repr(error_log.call_args))
 
     def test_pending_cleanup_command_preserves_valid_rows(self):
         now = timezone.now()

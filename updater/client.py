@@ -5,6 +5,7 @@ import socket
 from pathlib import Path
 
 from .errors import UpdaterError
+from .public_errors import validated_public_updater_failure
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 
@@ -16,9 +17,10 @@ class AgentUnavailable(UpdaterError):
 class AgentResponseError(UpdaterError):
     code = "updater_response_error"
 
-    def __init__(self, detail, *, remote_code="updater_error"):
+    def __init__(self, detail, *, remote_code="updater_error", correlation_id=None):
         super().__init__(detail)
         self.remote_code = remote_code
+        self.correlation_id = correlation_id
 
 
 class UnixAgentClient:
@@ -47,7 +49,31 @@ class UnixAgentClient:
             decoded = json.loads(bytes(response).split(b"\n", 1)[0].decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, IndexError) as error:
             raise AgentUnavailable("AniMemo Update Agent returned an invalid response") from error
-        if not decoded.get("ok"):
-            remote = decoded.get("error") or {}
-            raise AgentResponseError(str(remote.get("detail") or "Update Agent request failed"), remote_code=str(remote.get("code") or "updater_error"))
-        return decoded.get("result")
+        if not isinstance(decoded, dict) or not isinstance(decoded.get("ok"), bool):
+            raise AgentResponseError(
+                "Update service returned an invalid response",
+                remote_code="updater_response_error",
+            )
+        if not decoded["ok"]:
+            if set(decoded) != {"ok", "error"}:
+                raise AgentResponseError(
+                    "Update service returned an invalid response",
+                    remote_code="updater_response_error",
+                )
+            remote = validated_public_updater_failure(decoded.get("error"))
+            if remote is None:
+                raise AgentResponseError(
+                    "Update service returned an invalid response",
+                    remote_code="updater_response_error",
+                )
+            raise AgentResponseError(
+                remote["detail"],
+                remote_code=remote["code"],
+                correlation_id=remote["correlation_id"],
+            )
+        if set(decoded) != {"ok", "result"}:
+            raise AgentResponseError(
+                "Update service returned an invalid response",
+                remote_code="updater_response_error",
+            )
+        return decoded["result"]

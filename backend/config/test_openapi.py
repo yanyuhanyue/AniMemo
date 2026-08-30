@@ -1,8 +1,8 @@
 import json
 import re
 
-from django.test import Client, SimpleTestCase, override_settings
 from django.contrib.staticfiles import finders
+from django.test import Client, SimpleTestCase, override_settings
 
 
 class ApiDocumentationTests(SimpleTestCase):
@@ -49,6 +49,24 @@ class ApiDocumentationTests(SimpleTestCase):
         self.assertEqual(schemes["bearerAuth"]["scheme"], "bearer")
         self.assertEqual(schemes["refreshCookie"]["in"], "cookie")
         self.assertEqual(schemes["integrationHmac"]["name"], "X-AniMemo-Key-Id")
+
+        public_failure = schema["components"]["schemas"]["ApiError"]
+        self.assertFalse(public_failure["additionalProperties"])
+        self.assertEqual(
+            set(public_failure["required"]),
+            {"code", "detail", "correlation_id"},
+        )
+        self.assertEqual(
+            set(public_failure["properties"]),
+            {"code", "detail", "correlation_id"},
+        )
+        self.assertEqual(
+            public_failure["properties"]["correlation_id"]["pattern"],
+            "^[0-9a-f]{32}$",
+        )
+        self.assertNotIn("fields", public_failure["properties"])
+        self.assertNotIn("metadata", public_failure["properties"])
+        self.assertNotIn("retry_after_seconds", public_failure["properties"])
 
         refresh = paths["/api/v1/token/refresh/"]["post"]
         self.assertNotIn("requestBody", refresh)

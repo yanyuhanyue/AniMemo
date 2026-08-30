@@ -353,3 +353,22 @@ class ExternalProviderConfigurationApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_provider_lookup_exception_text_is_not_public_for_any_method(self):
+        marker = "PROVIDER-CONFIG-STACK-SENTINEL"
+        cases = (
+            ("get", self.detail_url, None),
+            ("patch", self.detail_url, {"enabled": True}),
+            ("delete", self.secret_url, None),
+        )
+        for method, url, payload in cases:
+            with self.subTest(method=method), patch(
+                "journal.external_accounts.staff_views.get_effective_provider_configuration",
+                side_effect=ValueError(marker),
+            ):
+                caller = getattr(self.client, method)
+                response = caller(url, payload, format="json") if payload is not None else caller(url)
+                self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+                self.assertEqual(response.data["code"], "provider_not_found")
+                self.assertIn("correlation_id", response.data)
+                self.assertNotIn(marker, str(response.data))

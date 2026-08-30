@@ -6,7 +6,6 @@ from rest_framework import serializers
 from journal.models import JournalEntry
 from journal.poster_security import PosterUrlValidationError, validate_poster_url
 
-
 PROVIDER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,49}$")
 MAX_IDENTITY_METADATA_BYTES = 64 * 1024
 
@@ -66,7 +65,7 @@ class EntryDataSerializer(RejectUnknownFieldsSerializer):
         try:
             return validate_poster_url(value)
         except PosterUrlValidationError as error:
-            raise serializers.ValidationError(str(error)) from error
+            raise serializers.ValidationError("封面地址不符合安全策略。", code="invalid_poster_url") from error
 
 
 class ExternalIdentityDataSerializer(RejectUnknownFieldsSerializer):

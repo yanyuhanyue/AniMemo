@@ -6,8 +6,12 @@ from django.conf import settings
 from django.utils import timezone
 
 from .manifest import ManifestError, validate_manifest
+from .public_diagnostics import (
+    PLUGIN_RUNTIME_UNAVAILABLE,
+    stable_registry_errors,
+    stable_runtime_error,
+)
 from .runtime import RuntimeLoadError, runtime_registry
-
 
 SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 SETTING_TYPES = {"text", "textarea", "boolean", "number", "select"}
@@ -90,8 +94,8 @@ def read_runtime_manifest(plugin_directory):
         validate_manifest(manifest)
     except FileNotFoundError:
         return {}, ["缺少 manifest.json"]
-    except (OSError, json.JSONDecodeError, ManifestError) as error:
-        return {}, [str(error)]
+    except (OSError, json.JSONDecodeError, ManifestError):
+        return {}, [PLUGIN_RUNTIME_UNAVAILABLE]
     errors = []
     settings_definitions = _validate_settings(manifest.get("settings", []), errors)
     runtimes = set(manifest.get("runtimes") or [])
@@ -143,9 +147,10 @@ def _serialize_plugin(directory, deployment):
         try:
             runtime_registry.ensure_current(slug)
             active = runtime_registry.is_active(slug, version)
-        except RuntimeLoadError as error:
-            errors.append(str(error))
+        except RuntimeLoadError:
+            errors.append(PLUGIN_RUNTIME_UNAVAILABLE)
             ready = False
+    public_errors = stable_registry_errors(errors)
     enabled = bool(deployment.enabled)
     return {
         "id": manifest.get("id", ""),
@@ -182,17 +187,17 @@ def _serialize_plugin(directory, deployment):
         "discovered": True,
         "installed": True,
         "loaded": active,
-        "failed": bool(errors),
+        "failed": bool(public_errors),
         "diagnostics": {
-            "manifest": not bool(errors),
+            "manifest": not bool(public_errors),
             "sdk_compatible": bool(manifest.get("sdk_compatible", True)),
             "frontend_entry": (manifest.get("frontend") or {}).get("ready", True),
             "backend_runtime": (manifest.get("backend") or {}).get("ready", True),
             "loaded": active,
-            "last_error": errors[0] if errors else deployment.last_error,
+            "last_error": public_errors[0] if public_errors else stable_runtime_error(deployment.last_error),
         },
         "ready": ready,
-        "errors": errors,
+        "errors": public_errors,
         "updated_at": deployment.updated_at,
         "updated_by": deployment.updated_by.get_username() if deployment.updated_by else "",
         "discovered_at": timezone.now(),
@@ -201,7 +206,7 @@ def _serialize_plugin(directory, deployment):
 
 
 def _serialize_missing_plugin(deployment, errors=None):
-    errors = errors or ["当前版本 Runtime 目录不存在。"]
+    errors = stable_registry_errors(errors or [PLUGIN_RUNTIME_UNAVAILABLE])
     return {
         "id": deployment.plugin.plugin_id,
         "slug": deployment.plugin.slug,

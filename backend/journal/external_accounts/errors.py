@@ -4,6 +4,7 @@ from rest_framework.exceptions import APIException
 class ExternalAccountError(APIException):
     def __init__(self, code, detail, *, status_code, extra=None):
         self.status_code = status_code
+        self.public_code = code
         payload = {"code": code, "detail": detail}
         payload.update(extra or {})
         super().__init__(payload, code=code)

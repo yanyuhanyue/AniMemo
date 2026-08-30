@@ -318,7 +318,7 @@ class PluginPackageInstaller:
                 deployment.enabled = False
                 deployment.healthy = False
                 deployment.status = PluginDeployment.Status.REVOKED
-                deployment.last_error = "当前版本已被管理员撤销。"
+                deployment.last_error = ""
                 deployment.updated_by = actor
                 deployment.save()
         if deployment:

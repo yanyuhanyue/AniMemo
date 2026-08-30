@@ -68,35 +68,44 @@ export function parseApiError(error, fallback = "操作失败，请稍后重试�
   const payload = response?.data;
   const status = response?.status ?? error?.status ?? null;
   const headers = response?.headers || {};
-  const retryAfter = Number(payload?.retry_after_seconds ?? headers["retry-after"] ?? 0);
-  const rawDetail = payload && typeof payload === "object" ? payload.detail : undefined;
-  const fields = payload && typeof payload === "object" && payload.fields
-    ? payload.fields
-    : rawDetail && typeof rawDetail === "object"
-      ? rawDetail
-      : payload && typeof payload === "object" && !payload.detail && !payload.code
-        ? payload
-        : undefined;
-  const firstField = fields && Object.values(fields).flat(Infinity).find(Boolean);
-  const detail = typeof payload === "string"
-    ? payload
-    : typeof rawDetail === "string"
-      ? rawDetail
-      : firstField || error?.message || fallback;
-  const code = payload?.code || ({
+  const retryHeader = typeof headers.get === "function"
+    ? headers.get("retry-after")
+    : headers["retry-after"] ?? headers["Retry-After"];
+  const retryAfter = Number(retryHeader ?? 0);
+  const detail = payload && typeof payload === "object" && typeof payload.detail === "string"
+    ? payload.detail
+    : fallback;
+  const statusCode = ({
     400: "invalid_request",
     401: "authentication_required",
     403: "permission_denied",
     404: "not_found",
+    405: "method_not_allowed",
+    408: "request_timeout",
     409: "conflict",
+    410: "not_found",
+    413: "payload_too_large",
+    422: "invalid_request",
     429: "rate_limited",
+    500: "internal_error",
+    502: "service_unavailable",
     503: "service_unavailable",
+    504: "service_unavailable",
     507: "storage_exhausted",
-  }[status] || "api_error");
+  }[status] || "internal_error");
+  const code = payload && typeof payload === "object" && typeof payload.code === "string"
+    ? payload.code
+    : statusCode;
+  const correlationId = payload
+    && typeof payload === "object"
+    && typeof payload.correlation_id === "string"
+    && /^[0-9a-f]{32}$/.test(payload.correlation_id)
+    ? payload.correlation_id
+    : null;
   return {
     code,
     detail: String(detail),
-    fields,
+    correlationId,
     status,
     retryAfterSeconds: Number.isFinite(retryAfter) && retryAfter > 0 ? Math.ceil(retryAfter) : null,
   };

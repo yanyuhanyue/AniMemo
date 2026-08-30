@@ -5,6 +5,7 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from journal.domain_services import JournalEntryService
 from journal.external_media.errors import ExternalMediaError
 from journal.external_media.services import (
     bind_prepared_external_identity,
@@ -12,7 +13,6 @@ from journal.external_media.services import (
     lock_identity_owner,
     prepare_identity,
 )
-from journal.domain_services import JournalEntryService
 from journal.models import ExternalImportSession, ExternalMediaIdentity, JournalEntry
 
 from .connections import connection_token_for_use, mark_needs_reauthorization
@@ -20,9 +20,17 @@ from .errors import ExternalAccountError, import_item_invalid, import_preview_ex
 from .matching import annotate_matches, bind_targets
 from .registry import get_account_provider
 
-
 IMPORT_MODES = {"CREATE_NEW", "BIND_EXISTING", "IMPORT_SAFE_USER_FIELDS", "SKIP"}
 IMPORTABLE_USER_FIELDS = {"personal_score", "watch_status", "review"}
+
+
+def _persistent_import_error_code(error, *, default):
+    status_code = getattr(error, "status_code", None)
+    if status_code == 409:
+        return "import_conflict"
+    if status_code in {502, 503, 504}:
+        return "provider_unavailable"
+    return default
 
 
 def create_import_preview(*, user, provider_slug):
@@ -34,7 +42,7 @@ def create_import_preview(*, user, provider_slug):
             max_items=int(provider.import_max_items()),
         )
     except ExternalAccountError as error:
-        if error.detail.get("code") == "external_account_token_invalid":
+        if error.public_code == "external_account_token_invalid":
             mark_needs_reauthorization(connection)
         raise
     now = timezone.now()
@@ -283,7 +291,10 @@ def apply_import_preview(*, user, provider_slug, preview_id, items):
         try:
             prepared[action["external_id"]] = prepare_identity(provider.slug, action["external_id"])
         except ExternalMediaError as error:
-            preparation_errors[action["external_id"]] = str(error.detail.get("code") or "provider_unavailable")
+            preparation_errors[action["external_id"]] = _persistent_import_error_code(
+                error,
+                default="import_item_invalid",
+            )
 
     with transaction.atomic():
         session = ExternalImportSession.objects.select_for_update().filter(
@@ -317,11 +328,11 @@ def apply_import_preview(*, user, provider_slug, preview_id, items):
                         prepared=prepared.get(external_id),
                     ))
             except (ExternalAccountError, ExternalMediaError, IntegrityError) as error:
-                detail = getattr(error, "detail", {})
+                code = _persistent_import_error_code(error, default="import_item_invalid")
                 results.append({
                     "external_id": external_id,
-                    "status": "conflict" if getattr(error, "status_code", None) == 409 else "failed",
-                    "code": str(detail.get("code") or "import_conflict"),
+                    "status": "conflict" if code == "import_conflict" else "failed",
+                    "code": code,
                 })
         counts = {
             name: sum(1 for item in results if item["status"] == name)

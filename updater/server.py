@@ -8,7 +8,9 @@ import time
 from pathlib import Path
 
 from .errors import OperationInProgress, StateError, UpdaterError
-from .redaction import redact
+from .protocol import validate_request
+from .public_errors import public_updater_failure
+from .public_results import public_result
 
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
@@ -22,11 +24,18 @@ class UnixRpcServer:
 
     def _response(self, request):
         try:
-            return {"ok": True, "result": self.agent.dispatch(request)}
+            validated = validate_request(request)
+            result = self.agent.dispatch(validated)
+            return {
+                "ok": True,
+                "result": public_result(
+                    validated["operation"], result, validated["params"]
+                ),
+            }
         except UpdaterError as error:
-            return {"ok": False, "error": {"code": error.code, "detail": redact(error)}}
-        except Exception as error:  # noqa: BLE001 - local RPC never exposes an unframed server exception
-            return {"ok": False, "error": {"code": "internal_error", "detail": redact(error)}}
+            return {"ok": False, "error": public_updater_failure(error.code)}
+        except Exception:  # noqa: BLE001 - local RPC never exposes server exception text
+            return {"ok": False, "error": public_updater_failure("internal_error")}
 
     def _handle(self, connection):
         chunks = bytearray()
@@ -38,18 +47,24 @@ class UnixRpcServer:
             if len(chunks) > MAX_REQUEST_BYTES:
                 break
         if len(chunks) > MAX_REQUEST_BYTES:
-            response = {"ok": False, "error": {"code": "request_too_large", "detail": "Local RPC request exceeds 64 KiB"}}
+            response = {
+                "ok": False,
+                "error": public_updater_failure("request_too_large"),
+            }
         else:
             try:
                 request = json.loads(bytes(chunks).split(b"\n", 1)[0].decode("utf-8"))
                 response = self._response(request)
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-                response = {"ok": False, "error": {"code": "invalid_json", "detail": "Invalid local RPC request"}}
+                response = {
+                    "ok": False,
+                    "error": public_updater_failure("invalid_json"),
+                }
         encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
         if len(encoded) > MAX_RESPONSE_BYTES:
             encoded = json.dumps({
                 "ok": False,
-                "error": {"code": "response_too_large", "detail": "Local RPC response exceeds 1 MiB"},
+                "error": public_updater_failure("response_too_large"),
             }, separators=(",", ":")).encode("utf-8") + b"\n"
         connection.sendall(encoded)
 

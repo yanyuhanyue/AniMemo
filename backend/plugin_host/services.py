@@ -16,6 +16,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .installer import PluginInstallError, PluginPackageInstaller
+from .manifest import PLUGIN_ID_RE, SLUG_RE
 from .models import (
     PluginData,
     PluginDeployment,
@@ -26,8 +27,13 @@ from .models import (
     PluginVersion,
     UserPluginInstallation,
 )
-from .manifest import PLUGIN_ID_RE, SLUG_RE
-from .package import LocalPluginPackageStorage, PluginPackageError, inspect_package, package_policy
+from .package import (
+    LocalPluginPackageStorage,
+    PluginPackageError,
+    inspect_package,
+    package_policy,
+)
+from .public_diagnostics import PLUGIN_SCAN_FAILED, stable_security_report
 
 
 class PluginWorkflowError(ValueError):
@@ -128,8 +134,8 @@ def static_security_scan(payload, inspected):
             if path == "frontend/plugin.css":
                 try:
                     css = archive.read(path).decode("utf-8")
-                except UnicodeDecodeError as error:
-                    report["dangerous_findings"].append(f"{path}: decode-error: {error}")
+                except UnicodeDecodeError:
+                    report["dangerous_findings"].append(PLUGIN_SCAN_FAILED)
                 else:
                     for group in re.findall(r"(?:^|})\s*([^@}{]+)\{", css, flags=re.MULTILINE):
                         for selector in group.split(","):
@@ -140,8 +146,8 @@ def static_security_scan(payload, inspected):
                 continue
             try:
                 tree = ast.parse(archive.read(path).decode("utf-8"), filename=path)
-            except (SyntaxError, UnicodeDecodeError) as error:
-                report["dangerous_findings"].append(f"{path}: parse-error: {error}")
+            except (SyntaxError, UnicodeDecodeError):
+                report["dangerous_findings"].append(PLUGIN_SCAN_FAILED)
                 continue
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
@@ -161,7 +167,7 @@ def static_security_scan(payload, inspected):
     for name in report["backend_imports"]:
         if name.split(".", 1)[0] in DANGEROUS_IMPORTS:
             report["dangerous_findings"].append(f"dangerous import: {name}")
-    return report
+    return stable_security_report(report)
 
 
 def store_package_blob(payload, *, root=None, minimum_free_bytes=0):

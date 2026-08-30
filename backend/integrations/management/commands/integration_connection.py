@@ -1,10 +1,15 @@
 import secrets
 
 from django.core.management.base import BaseCommand, CommandError
-from django.core.exceptions import ValidationError
-from django.db import IntegrityError
 
 from integrations.models import IntegrationConnection
+
+_CREATE_FAILURE_CODE = "integration_connection_create_failed"
+_ROTATE_FAILURE_CODE = "integration_connection_rotate_failed"
+
+
+def _command_failure(code):
+    return CommandError(f"{code} correlation_id={secrets.token_hex(16)}")
 
 
 class Command(BaseCommand):
@@ -43,19 +48,19 @@ class Command(BaseCommand):
         if not provider or not instance_id or not name:
             raise CommandError("create 需要 --provider、--instance-id 和 --name。")
         self._require_interactive_secret_output()
-        secret = self._new_secret()
-        connection = IntegrationConnection(
-            provider=provider,
-            instance_id=instance_id,
-            name=name,
-            key_id=self._new_key_id(),
-        )
-        connection.set_secret(secret)
         try:
+            secret = self._new_secret()
+            connection = IntegrationConnection(
+                provider=provider,
+                instance_id=instance_id,
+                name=name,
+                key_id=self._new_key_id(),
+            )
+            connection.set_secret(secret)
             connection.full_clean()
             connection.save()
-        except (IntegrityError, ValidationError, ValueError) as error:
-            raise CommandError(f"无法创建集成连接：{error}") from error
+        except Exception:
+            raise _command_failure(_CREATE_FAILURE_CODE) from None
         self.stdout.write(f"connection_id: {connection.pk}")
         self.stdout.write(f"key_id: {connection.key_id}")
         self.stdout.write(f"secret: {secret}")
@@ -67,13 +72,18 @@ class Command(BaseCommand):
             raise CommandError("rotate-secret 需要 connection_id。")
         try:
             connection = IntegrationConnection.objects.get(pk=connection_id)
-        except (ValueError, IntegrationConnection.DoesNotExist) as error:
-            raise CommandError("集成连接不存在。") from error
+        except (ValueError, IntegrationConnection.DoesNotExist):
+            raise CommandError("集成连接不存在。") from None
+        except Exception:
+            raise _command_failure(_ROTATE_FAILURE_CODE) from None
         self._require_interactive_secret_output()
-        secret = self._new_secret()
-        connection.key_id = self._new_key_id()
-        connection.set_secret(secret)
-        connection.save(update_fields=("key_id", "encrypted_secret", "updated_at"))
+        try:
+            secret = self._new_secret()
+            connection.key_id = self._new_key_id()
+            connection.set_secret(secret)
+            connection.save(update_fields=("key_id", "encrypted_secret", "updated_at"))
+        except Exception:
+            raise _command_failure(_ROTATE_FAILURE_CODE) from None
         self.stdout.write(f"connection_id: {connection.pk}")
         self.stdout.write(f"key_id: {connection.key_id}")
         self.stdout.write(f"secret: {secret}")

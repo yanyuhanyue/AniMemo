@@ -1,33 +1,35 @@
-import tempfile
-import io
 import errno
+import io
 import os
-import requests
 import stat
+import tempfile
 import threading
+from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from io import StringIO
 from pathlib import Path
-from collections import namedtuple
 from unittest import skipUnless
 from unittest.mock import Mock, call, patch
 
+import requests
+from accounts.models import StaffProfile, User
+from django.contrib import admin
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.contrib import admin
 from django.core.management import call_command
 from django.db import IntegrityError, close_old_connections, connection, transaction
-from django.test import TestCase, TransactionTestCase, override_settings
-from django.test import RequestFactory
+from django.test import RequestFactory, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
-from rest_framework.test import APIClient
 from PIL import Image
-
-from accounts.models import StaffProfile
-from accounts.models import User
-from site_config.media_storage.common import MediaStorageExhausted, MediaStorageOffline, MediaStorageSetupRequired, UnsafeObjectKey
+from rest_framework.test import APIClient
+from site_config.media_storage.common import (
+    MediaStorageExhausted,
+    MediaStorageOffline,
+    MediaStorageSetupRequired,
+    UnsafeObjectKey,
+)
 from site_config.media_storage.local import DynamicLocalBackend
 from site_config.media_storage.pool import StoragePoolService
 from site_config.media_storage.r2 import DynamicR2Backend
@@ -43,13 +45,27 @@ from site_config.media_storage.usage import (
     managed_usage_bytes,
     refresh_cloudflare_usage,
 )
-from site_config.models import CloudflareR2Account, MediaObject, MediaStorageBackend, MediaStoragePoolSettings, MediaWriteReservation
+from site_config.models import (
+    CloudflareR2Account,
+    MediaObject,
+    MediaStorageBackend,
+    MediaStoragePoolSettings,
+    MediaWriteReservation,
+)
 from site_config.storage_units import BINARY_GIB_BYTES, DECIMAL_GB_BYTES
-from .models import AdminAuditLog, JournalEntry
-from .admin import CloudflareR2AccountAdmin, MediaObjectAdmin, MediaStorageBackendAdmin, MediaStoragePoolSettingsAdmin
-from .serializers_entries import JournalEntrySerializer
-from .serializers_storage import MediaStorageBackendSerializer, StoragePhysicalIdentityLocked
 
+from .admin import (
+    CloudflareR2AccountAdmin,
+    MediaObjectAdmin,
+    MediaStorageBackendAdmin,
+    MediaStoragePoolSettingsAdmin,
+)
+from .models import AdminAuditLog, JournalEntry
+from .serializers_entries import JournalEntrySerializer
+from .serializers_storage import (
+    MediaStorageBackendSerializer,
+    StoragePhysicalIdentityLocked,
+)
 
 TEST_CREDENTIAL_KEY = "media-storage-test-credential-key"
 
@@ -82,6 +98,33 @@ class MediaStorageCredentialApiTests(TestCase):
         self.superuser = User.objects.create_superuser(username="storage-root", password="StrongPass123!")
         self.client = APIClient()
         self.client.force_authenticate(self.superuser)
+
+    def test_storage_path_exceptions_are_fixed_serializer_errors(self):
+        marker = "STORAGE-PATH-STACK-SENTINEL"
+        with patch(
+            "journal.serializers_storage.validate_storage_subpath",
+            side_effect=UnsafeObjectKey(marker),
+        ):
+            serializer = MediaStorageBackendSerializer(data={"local_root": "safe"}, partial=True)
+            self.assertFalse(serializer.is_valid())
+        self.assertNotIn(marker, str(serializer.errors))
+        self.assertEqual(serializer.errors["local_root"][0].code, "unsafe_storage_path")
+
+        backend = MediaStorageBackend.objects.create(
+            slug="serializer-local-root",
+            name="Serializer Local Root",
+            backend_type=MediaStorageBackend.BackendType.LOCAL,
+            local_root="safe",
+            local_public_base_url="https://local.example.com/media",
+        )
+        with patch(
+            "journal.serializers_storage.approved_local_root",
+            side_effect=ValueError(marker),
+        ):
+            serializer = MediaStorageBackendSerializer(backend, data={"name": "Renamed"}, partial=True)
+            self.assertFalse(serializer.is_valid())
+        self.assertNotIn(marker, str(serializer.errors))
+        self.assertEqual(serializer.errors["local_root"][0].code, "storage_root_unavailable")
 
     def test_credentials_are_encrypted_preserved_replaced_cleared_and_never_returned(self):
         created = self.client.post(reverse("staff-media-storage-list"), {
@@ -583,7 +626,7 @@ class MediaIdentityAndRuntimeTests(TestCase):
         self.assertEqual(MediaStoragePoolSettings.load().preferred_write_backend_id, second.pk)
 
     def test_external_write_runs_outside_reservation_transaction_and_finalizes(self):
-        backend = r2_backend("reservation-seam", 10, used=0, warning=800, limit=900)
+        r2_backend("reservation-seam", 10, used=0, warning=800, limit=900)
         adapter = self.FakeAdapter("reservation-seam")
         observed_atomic_states = []
         baseline_atomic_depth = len(connection.atomic_blocks)
@@ -859,14 +902,10 @@ class CloudflareAnalyticsObservabilityTests(TestCase):
                 reverse("staff-media-storage-action", kwargs={"pk": self.backend.pk}),
                 {"action": "refresh-usage"},
                 format="json",
-            )
+        )
         self.assertEqual(result.status_code, 424, result.data)
+        self.assertEqual(set(result.data), {"code", "detail", "correlation_id"})
         self.assertEqual(result.data["code"], "CLOUDFLARE_ANALYTICS_TIMEOUT")
-        self.assertEqual(result.data["refresh"], {
-            "status": "FAILED",
-            "code": "CLOUDFLARE_ANALYTICS_TIMEOUT",
-        })
-        self.assertEqual(result.data["storage"]["usage"]["actual_bytes"], 150)
         audit = AdminAuditLog.objects.filter(action="storage.usage_refreshed").latest("id")
         self.assertEqual(audit.metadata, {
             "ok": False,
@@ -899,11 +938,10 @@ class CloudflareAnalyticsObservabilityTests(TestCase):
                         reverse("staff-media-storage-action", kwargs={"pk": self.backend.pk}),
                         {"action": "refresh-usage"},
                         format="json",
-                    )
+                )
                 self.assertEqual(result.status_code, 424, result.data)
+                self.assertEqual(set(result.data), {"code", "detail", "correlation_id"})
                 self.assertEqual(result.data["code"], expected_code)
-                self.assertEqual(result.data["refresh"], {"status": "FAILED", "code": expected_code})
-                self.assertEqual(result.data["storage"]["usage"]["actual_bytes"], 150)
                 audit = AdminAuditLog.objects.filter(action="storage.usage_refreshed").latest("id")
                 self.assertEqual(audit.metadata["code"], expected_code)
                 self.assertNotIn(self.secret, f"{result.data} {audit.metadata}")

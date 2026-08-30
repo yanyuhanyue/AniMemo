@@ -6,11 +6,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 ROOT_LICENSE_PATH = "LICENSE"
@@ -95,27 +95,53 @@ INTERNAL_POLYFORM_DECLARATIONS = {
     "plugins/watch-history-importer/manifest.json": ("json", "PolyForm-Noncommercial-1.0.0"),
     "bridges/astrbot_plugin_animemo_bridge/metadata.yaml": ("yaml", "PolyForm-Noncommercial-1.0.0"),
 }
-OFFICIAL_IMPORTER_VERSION = "0.4.4"
+OFFICIAL_IMPORTER_VERSION = "0.4.5"
 OFFICIAL_IMPORTER_ROOT = "plugins/watch-history-importer"
+
+_INTERNAL_REASON_CODES = frozenset(
+    {
+        "license_document_section_invalid",
+        "license_input_encoding_invalid",
+        "license_input_json_invalid",
+        "license_input_read_failed",
+        "license_repository_diff_failed",
+        "license_validation_rule_failed",
+    }
+)
+_PUBLIC_FAILURE_CODE = "license_validation_failed"
+_PUBLIC_FAILURE_DETAIL = "License documentation validation failed"
 
 
 class ValidationError(RuntimeError):
-    pass
+    """Closed internal validation failure that never carries source prose."""
+
+    def __init__(self, reason_code: str = "license_validation_rule_failed") -> None:
+        if reason_code not in _INTERNAL_REASON_CODES:
+            reason_code = "license_validation_rule_failed"
+        self.reason_code = reason_code
+        super().__init__(reason_code)
 
 
 def _read_bytes(relative: str) -> bytes:
     path = ROOT / relative
     try:
         return path.read_bytes()
-    except OSError as error:
-        raise ValidationError(f"unable to read {relative}: {error}") from error
+    except OSError:
+        raise ValidationError("license_input_read_failed") from None
 
 
 def _read_text(relative: str) -> str:
     try:
         return _read_bytes(relative).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-    except UnicodeDecodeError as error:
-        raise ValidationError(f"{relative} is not UTF-8: {error}") from error
+    except UnicodeDecodeError:
+        raise ValidationError("license_input_encoding_invalid") from None
+
+
+def _read_json(relative: str) -> object:
+    try:
+        return json.loads(_read_text(relative))
+    except json.JSONDecodeError:
+        raise ValidationError("license_input_json_invalid") from None
 
 
 def _sha256(relative: str) -> str:
@@ -137,9 +163,9 @@ def _git_blob(payload: bytes) -> str:
     return hashlib.sha1(header + payload).hexdigest()
 
 
-def _require(condition: bool, message: str) -> None:
+def _require(condition: bool, _message: str) -> None:
     if not condition:
-        raise ValidationError(message)
+        raise ValidationError("license_validation_rule_failed")
 
 
 def _section(text: str, start: str, end: str) -> str:
@@ -149,7 +175,7 @@ def _section(text: str, start: str, end: str) -> str:
     )
     match = pattern.search(text)
     if not match:
-        raise ValidationError(f"generated section is missing or malformed: {start}")
+        raise ValidationError("license_document_section_invalid")
     return match.group("body").strip("\n")
 
 
@@ -272,10 +298,10 @@ def validate_evidence_hashes() -> None:
 
 
 def _node_lock() -> dict:
-    try:
-        return json.loads(_read_text("package-lock.json"))
-    except json.JSONDecodeError as error:
-        raise ValidationError(f"package-lock.json is invalid JSON: {error}") from error
+    value = _read_json("package-lock.json")
+    if not isinstance(value, dict):
+        raise ValidationError("license_input_json_invalid")
+    return value
 
 
 def _render_node_direct(lock: dict) -> str:
@@ -406,7 +432,8 @@ def validate_python_inventory() -> None:
 def validate_internal_declarations() -> None:
     for relative, (kind, expected) in INTERNAL_POLYFORM_DECLARATIONS.items():
         if kind == "json":
-            value = json.loads(_read_text(relative)).get("license")
+            document = _read_json(relative)
+            value = document.get("license") if isinstance(document, dict) else None
         else:
             match = re.search(r"(?m)^license:\s*(\S+)\s*$", _read_text(relative))
             value = match.group(1) if match else None
@@ -435,13 +462,17 @@ def _official_runtime_paths(root: Path) -> list[Path]:
 
 def validate_official_importer_metadata() -> None:
     root = ROOT / OFFICIAL_IMPORTER_ROOT
-    manifest = json.loads(_read_text(f"{OFFICIAL_IMPORTER_ROOT}/manifest.json"))
+    manifest = _read_json(f"{OFFICIAL_IMPORTER_ROOT}/manifest.json")
+    if not isinstance(manifest, dict):
+        raise ValidationError("license_input_json_invalid")
     _require(manifest.get("version") == OFFICIAL_IMPORTER_VERSION, "watch-history-importer manifest version is stale")
     _require(
         manifest.get("license") == "PolyForm-Noncommercial-1.0.0",
         "watch-history-importer manifest does not declare PolyForm",
     )
-    index = json.loads(_read_text(f"{OFFICIAL_IMPORTER_ROOT}/package-index.json"))
+    index = _read_json(f"{OFFICIAL_IMPORTER_ROOT}/package-index.json")
+    if not isinstance(index, dict):
+        raise ValidationError("license_input_json_invalid")
     _require(index.get("packageVersion") == 1, "watch-history-importer package index version changed")
     _require(index.get("pluginId") == manifest.get("id"), "watch-history-importer package index id is stale")
     _require(index.get("slug") == manifest.get("slug"), "watch-history-importer package index slug is stale")
@@ -450,7 +481,7 @@ def validate_official_importer_metadata() -> None:
     expected = []
     for path in _official_runtime_paths(root):
         relative = path.relative_to(root).as_posix()
-        payload = path.read_bytes()
+        payload = _read_bytes(f"{OFFICIAL_IMPORTER_ROOT}/{relative}")
         expected.append({"path": relative, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()})
     _require(index.get("files") == expected, "watch-history-importer package-index.json is stale")
     _require(
@@ -468,16 +499,19 @@ def validate_official_importer_metadata() -> None:
 
 
 def _git_diff_names(base: str) -> list[str]:
-    completed = subprocess.run(
-        ["git", "diff", "--name-only", base, "--"],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
+    try:
+        completed = subprocess.run(
+            ["git", "diff", "--name-only", base, "--"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except (OSError, UnicodeError):
+        raise ValidationError("license_repository_diff_failed") from None
     if completed.returncode:
-        raise ValidationError(completed.stderr.strip() or f"git diff failed for {base}")
+        raise ValidationError("license_repository_diff_failed")
     return [line.replace("\\", "/") for line in completed.stdout.splitlines() if line]
 
 
@@ -521,8 +555,19 @@ def main() -> int:
     base = sys.argv[1] if len(sys.argv) > 1 else None
     try:
         validate_all(base=base)
-    except ValidationError as error:
-        print(f"license documentation validation: FAIL: {error}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 - CLI failures must use the closed public projection
+        print(
+            json.dumps(
+                {
+                    "code": _PUBLIC_FAILURE_CODE,
+                    "detail": _PUBLIC_FAILURE_DETAIL,
+                    "correlation_id": secrets.token_hex(16),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
         return 1
     print("license documentation validation: PASS")
     print(

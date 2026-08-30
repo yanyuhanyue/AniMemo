@@ -2,6 +2,7 @@ import mimetypes
 import re
 from pathlib import Path
 
+from config.api_errors import public_failure
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import signing
@@ -9,25 +10,45 @@ from django.db.models import Count, Prefetch
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from journal.staff_services import (
+    StaffCapabilityPermission,
+    get_security_profile,
+    record_audit,
+)
 from rest_framework import permissions, status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from journal.staff_services import StaffCapabilityPermission, get_security_profile, record_audit
-
 from .installer import PluginInstallError, PluginPackageInstaller
-from .models import PluginDeployment, PluginProject, PluginSubmission, PluginVersion, UserPluginInstallation
-from .permissions import can_access_plugin_frontend
-from .registry import PluginRegistryError, discover_plugins, get_plugin, read_runtime_manifest, validate_plugin_config
+from .models import (
+    PluginDeployment,
+    PluginProject,
+    PluginSubmission,
+    PluginVersion,
+    UserPluginInstallation,
+)
 from .package import PluginPackageError, inspect_package
+from .permissions import can_access_plugin_frontend
+from .public_diagnostics import (
+    public_plugin_payload,
+    public_runtime_error,
+    public_security_report,
+)
+from .registry import (
+    PluginRegistryError,
+    discover_plugins,
+    get_plugin,
+    read_runtime_manifest,
+    validate_plugin_config,
+)
 from .runtime import RuntimeLoadError
 from .serializers import PluginDeploymentUpdateSerializer
 from .services import (
     PluginWorkflowError,
     archive_or_delete_plugin_project,
-    create_plugin_project,
     create_frontend_preview,
+    create_plugin_project,
     install_for_user,
     plugin_upload_policy,
     review_submission,
@@ -38,9 +59,19 @@ from .services import (
     withdraw_submission,
 )
 
-
 ASSET_SESSION_SALT = "plugin-asset-session-v2"
 PREVIEW_SESSION_SALT = "plugin-preview-session-v3"
+
+
+def _failure_response(request, candidate_code, status_code=status.HTTP_400_BAD_REQUEST):
+    return Response(
+        public_failure(
+            request=request,
+            candidate_code=candidate_code,
+            status_code=status_code,
+        ),
+        status=status_code,
+    )
 
 
 def _signed_user_payload(user, **extra):
@@ -137,7 +168,7 @@ def serialize_marketplace_project(project, *, user=None):
     return payload
 
 
-def serialize_developer_project(project):
+def serialize_developer_project(project, *, request):
     versions = project.versions.order_by("-created_at")
     payload = {
         "id": project.pk,
@@ -163,7 +194,10 @@ def serialize_developer_project(project):
                         "id": version.submissions.first().pk,
                         "status": version.submissions.first().status,
                         "review_note": version.submissions.first().review_note,
-                        "security_report": version.submissions.first().security_report,
+                        "security_report": public_security_report(
+                            version.submissions.first().security_report,
+                            request=request,
+                        ),
                     }
                     if version.submissions.first()
                     else None
@@ -181,7 +215,7 @@ def serialize_developer_project(project):
             "current_version": deployment.current_version.version,
             "previous_version": deployment.previous_version.version if deployment.previous_version else None,
             "disk_bytes": deployment.disk_bytes,
-            "last_error": deployment.last_error,
+            "last_error": public_runtime_error(deployment.last_error, request=request),
         }
         if deployment
         else None
@@ -195,7 +229,7 @@ class StaffPluginListView(APIView):
     required_capability = "manage_system"
 
     def get(self, request):
-        plugins = discover_plugins()
+        plugins = [public_plugin_payload(plugin, request=request) for plugin in discover_plugins()]
         return Response({
             "plugins": plugins,
             "can_install": bool(request.user.is_superuser),
@@ -315,10 +349,15 @@ class StaffPluginInstallView(APIView):
             version.review_status = PluginVersion.ReviewStatus.APPROVED
             version.save(update_fields=["review_status"])
             result = PluginPackageInstaller().publish(version, actor=request.user)
-        except (PluginWorkflowError, PluginPackageError, PluginInstallError, RuntimeLoadError, OSError) as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except (PluginWorkflowError, PluginPackageError, PluginInstallError, RuntimeLoadError, OSError):
+            return _failure_response(request, "plugin_publish_failed")
         record_audit(request, action="plugin.staff_publish_upload", target=version, after={"sha256": version.package_blob.sha256, "runtime_types": version.runtime_types})
-        return Response({"detail": "插件已发布并部署。", "project": serialize_developer_project(project), "scan": report, **result}, status=status.HTTP_201_CREATED)
+        return Response({
+            "detail": "插件已发布并部署。",
+            "project": serialize_developer_project(project, request=request),
+            "scan": public_security_report(report, request=request),
+            **result,
+        }, status=status.HTTP_201_CREATED)
 
 
 class StaffPluginDetailView(APIView):
@@ -339,11 +378,11 @@ class StaffPluginDetailView(APIView):
                 deployment.save(update_fields=["system_config", "updated_by", "updated_at"])
             if "enabled" in serializer.validated_data:
                 PluginPackageInstaller().set_enabled(slug, serializer.validated_data["enabled"], actor=request.user)
-        except (PluginInstallError, PluginRegistryError, RuntimeLoadError) as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except (PluginInstallError, PluginRegistryError, RuntimeLoadError):
+            return _failure_response(request, "plugin_deployment_update_failed")
         deployment.refresh_from_db()
         record_audit(request, action="plugin.deployment_update", target=deployment.plugin, before=before, after={"enabled": deployment.enabled, "system_config": deployment.system_config})
-        return Response(get_plugin(slug))
+        return Response(public_plugin_payload(get_plugin(slug), request=request))
 
     def delete(self, request, slug):
         deployment = get_object_or_404(PluginDeployment, plugin__slug=slug)
@@ -362,10 +401,14 @@ class StaffPluginRollbackView(APIView):
             return Response({"detail": "只有超级管理员可以回滚插件。"}, status=status.HTTP_403_FORBIDDEN)
         try:
             result = PluginPackageInstaller().rollback(slug, actor=request.user)
-        except (PluginInstallError, RuntimeLoadError, OSError) as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except (PluginInstallError, RuntimeLoadError, OSError):
+            return _failure_response(request, "plugin_rollback_failed")
         record_audit(request, action="plugin.deployment_rollback", target_type="PluginProject", target_label=slug, after=result)
-        return Response({"detail": "插件已回滚。", "plugin": get_plugin(slug), **result})
+        return Response({
+            "detail": "插件已回滚。",
+            "plugin": public_plugin_payload(get_plugin(slug), request=request),
+            **result,
+        })
 
 
 class StaffPluginCleanupView(APIView):
@@ -375,8 +418,8 @@ class StaffPluginCleanupView(APIView):
     def post(self, request, slug=None):
         try:
             result = PluginPackageInstaller().cleanup(slug)
-        except (PluginInstallError, OSError) as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except (PluginInstallError, OSError):
+            return _failure_response(request, "plugin_cleanup_failed")
         record_audit(request, action="plugin.runtime_cleanup", target_type="PluginProject", target_label=slug or "all", after=result)
         return Response({"detail": "旧 Runtime 与 staging 已清理。", "result": result})
 
@@ -478,8 +521,8 @@ class UserPluginInstallationView(APIView):
         project = get_object_or_404(PluginProject, slug=slug)
         try:
             installation, created = __import__("plugin_host.services", fromlist=["install_for_user"]).install_for_user(project, user=request.user)
-        except PluginWorkflowError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except PluginWorkflowError:
+            return _failure_response(request, "plugin_install_failed")
         record_audit(request, action="plugin.user_install", target=project, after={"enabled": True, "created": created})
         return Response({"slug": slug, "enabled": installation.enabled, "created": created}, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
@@ -512,7 +555,7 @@ class MyPluginProjectView(APIView):
             "deployment", "deployment__current_version", "deployment__previous_version",
         ).prefetch_related("versions__package_blob", "versions__submissions", "user_installations")
         return Response({
-            "projects": [serialize_developer_project(item) for item in projects],
+            "projects": [serialize_developer_project(item, request=request) for item in projects],
             "policy": {
                 "package": plugin_upload_policy(),
                 "draft_limit": int(getattr(settings, "PLUGIN_DRAFT_LIMIT", 20)),
@@ -529,10 +572,11 @@ class MyPluginProjectView(APIView):
                 name=request.data.get("name"),
                 description=request.data.get("description"),
             )
-        except PluginWorkflowError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
-        record_audit(request, action="plugin.project_create", target=project, after=serialize_developer_project(project))
-        return Response(serialize_developer_project(project), status=status.HTTP_201_CREATED)
+        except PluginWorkflowError:
+            return _failure_response(request, "plugin_project_create_failed")
+        serialized = serialize_developer_project(project, request=request)
+        record_audit(request, action="plugin.project_create", target=project, after=serialized)
+        return Response(serialized, status=status.HTTP_201_CREATED)
 
 
 class MyPluginProjectDetailView(APIView):
@@ -547,7 +591,7 @@ class MyPluginProjectDetailView(APIView):
             pk=project_id,
             owner=request.user,
         )
-        return Response(serialize_developer_project(project))
+        return Response(serialize_developer_project(project, request=request))
 
     def patch(self, request, project_id):
         project = get_object_or_404(PluginProject, pk=project_id, owner=request.user)
@@ -559,18 +603,18 @@ class MyPluginProjectDetailView(APIView):
                 name=request.data.get("name") if "name" in request.data else None,
                 description=request.data.get("description") if "description" in request.data else None,
             )
-        except PluginWorkflowError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except PluginWorkflowError:
+            return _failure_response(request, "plugin_project_update_failed")
         record_audit(request, action="plugin.project_update", target=project, before=before, after={"name": project.name, "description": project.description})
-        return Response(serialize_developer_project(project))
+        return Response(serialize_developer_project(project, request=request))
 
     def delete(self, request, project_id):
         project = get_object_or_404(PluginProject, pk=project_id, owner=request.user)
         target_id, target_label = str(project.pk), project.slug
         try:
             result = archive_or_delete_plugin_project(project, actor=request.user)
-        except PluginWorkflowError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except PluginWorkflowError:
+            return _failure_response(request, "plugin_project_archive_failed")
         record_audit(
             request,
             action=f"plugin.project_{result}",
@@ -589,10 +633,14 @@ class MyPluginVersionUploadView(APIView):
         project = get_object_or_404(PluginProject, pk=project_id, owner=request.user)
         try:
             version, report, created = upload_plugin_version(project, request.FILES.get("archive"), actor=request.user)
-        except (PluginWorkflowError, PluginPackageError) as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except (PluginWorkflowError, PluginPackageError):
+            return _failure_response(request, "plugin_upload_failed")
         record_audit(request, action="plugin.version_upload", target=version, after={"sha256": version.package_blob.sha256, "created": created, "scan": report})
-        return Response({"version": serialize_developer_project(project), "scan": report, "created": created}, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        return Response({
+            "version": serialize_developer_project(project, request=request),
+            "scan": public_security_report(report, request=request),
+            "created": created,
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class MyPluginPreviewView(APIView):
@@ -602,10 +650,15 @@ class MyPluginPreviewView(APIView):
         version = get_object_or_404(PluginVersion, pk=version_id, plugin__owner=request.user)
         try:
             target = create_frontend_preview(version, actor=request.user)
-        except PluginWorkflowError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except PluginWorkflowError:
+            return _failure_response(request, "plugin_preview_failed")
         preview_session = _sign_preview_session(request.user, version)
-        record_audit(request, action="plugin.preview_create", target=version, metadata={"path": str(target)})
+        record_audit(
+            request,
+            action="plugin.preview_create",
+            target=version,
+            metadata={"stage": "preview_created"},
+        )
         return Response({
             "preview": f"/plugins/preview/{preview_session}",
             "expires_in": int(getattr(settings, "PLUGIN_PREVIEW_SESSION_SECONDS", 600)),
@@ -620,8 +673,8 @@ class MyPluginSubmitView(APIView):
         version = get_object_or_404(PluginVersion, pk=version_id, plugin__owner=request.user)
         try:
             submission = submit_version(version, actor=request.user)
-        except PluginWorkflowError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except PluginWorkflowError:
+            return _failure_response(request, "plugin_submission_failed")
         record_audit(request, action="plugin.version_submit", target=version, after={"submission_id": submission.pk, "security_report": submission.security_report})
         return Response({"id": submission.pk, "status": submission.status}, status=status.HTTP_201_CREATED)
 
@@ -637,8 +690,8 @@ class MyPluginSubmissionWithdrawView(APIView):
         )
         try:
             submission = withdraw_submission(submission, actor=request.user)
-        except PluginWorkflowError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except PluginWorkflowError:
+            return _failure_response(request, "plugin_submission_withdraw_failed")
         record_audit(request, action="plugin.submission_withdraw", target=submission.plugin_version, after={"submission_id": submission.pk})
         return Response({"id": submission.pk, "status": submission.status})
 
@@ -710,12 +763,15 @@ class StaffPluginReviewQueueView(APIView):
                 "project": row.plugin_version.plugin.slug, "version": row.plugin_version.version,
                 "runtime_types": row.plugin_version.runtime_types,
                 "submitter": row.submitter.get_username() if row.submitter else "",
-                "security_report": row.security_report,
+                "security_report": public_security_report(row.security_report, request=request),
             } for row in rows],
             "approved_versions": [{
                 "id": version.pk, "project": version.plugin.slug, "version": version.version,
                 "runtime_types": version.runtime_types,
-                "security_report": version.review_submissions[0].security_report if version.review_submissions else {},
+                "security_report": public_security_report(
+                    version.review_submissions[0].security_report if version.review_submissions else {},
+                    request=request,
+                ),
             } for version in approved],
             "deployments": [{
                 "slug": deployment.plugin.slug,
@@ -730,7 +786,7 @@ class StaffPluginReviewQueueView(APIView):
                 "revoked": bool(deployment.current_version.revoked_at),
                 "install_count": deployment.review_install_count,
                 "disk_bytes": deployment.disk_bytes,
-                "last_error": deployment.last_error,
+                "last_error": public_runtime_error(deployment.last_error, request=request),
             } for deployment in deployments],
             "marketplace_versions": [{
                 "id": version.pk,
@@ -740,7 +796,10 @@ class StaffPluginReviewQueueView(APIView):
                 "runtime_types": version.runtime_types,
                 "published_at": version.published_at,
                 "install_count": version.review_install_count,
-                "security_report": version.review_submissions[0].security_report if version.review_submissions else {},
+                "security_report": public_security_report(
+                    version.review_submissions[0].security_report if version.review_submissions else {},
+                    request=request,
+                ),
             } for version in market_versions],
         })
 
@@ -754,8 +813,8 @@ class StaffPluginReviewActionView(APIView):
         submission = get_object_or_404(PluginSubmission, pk=submission_id)
         try:
             result = review_submission(submission, actor=request.user, approve=bool(request.data.get("approve")), note=str(request.data.get("note", "")))
-        except PluginWorkflowError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except PluginWorkflowError:
+            return _failure_response(request, "plugin_review_failed")
         record_audit(request, action="plugin.review_approve" if result.status == PluginSubmission.Status.APPROVED else "plugin.review_reject", target=result.plugin_version, after={"submission_id": result.pk, "note": result.review_note})
         return Response({"id": result.pk, "status": result.status, "review_note": result.review_note})
 
@@ -770,8 +829,8 @@ class StaffPluginPublishView(APIView):
             return Response({"detail": "Backend Runtime 发布必须由超级管理员执行。"}, status=status.HTTP_403_FORBIDDEN)
         try:
             result = PluginPackageInstaller().publish(version, actor=request.user)
-        except (PluginInstallError, RuntimeLoadError) as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except (PluginInstallError, RuntimeLoadError):
+            return _failure_response(request, "plugin_publish_failed")
         record_audit(request, action="plugin.version_publish", target=version, after=result)
         return Response(result)
 
@@ -798,8 +857,8 @@ class StaffPluginRevokeView(APIView):
             return Response({"detail": "撤销运行时代码必须由超级管理员执行。"}, status=status.HTTP_403_FORBIDDEN)
         try:
             PluginPackageInstaller().revoke(version, actor=request.user)
-        except PluginWorkflowError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except PluginWorkflowError:
+            return _failure_response(request, "plugin_revoke_failed")
         record_audit(request, action="plugin.version_revoke", target=version)
         return Response({"detail": "版本已撤销，当前 Runtime 已停用。"})
 

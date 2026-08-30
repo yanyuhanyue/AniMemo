@@ -30,6 +30,13 @@ def env_bool(name, default=False):
     raise ImproperlyConfigured(f"{name} 必须为 true 或 false。")
 
 
+def _api_renderer_classes(debug):
+    renderers = ("config.api_renderers.CanonicalJSONRenderer",)
+    if debug:
+        renderers += ("rest_framework.renderers.BrowsableAPIRenderer",)
+    return renderers
+
+
 def env_cookie_samesite(name, default="Lax"):
     raw = os.getenv(name, default).strip().lower()
     values = {"lax": "Lax", "strict": "Strict", "none": "None"}
@@ -447,10 +454,7 @@ EXTERNAL_SYNC_CONFIRMATION_MAX_AGE_SECONDS = int(
 
 REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "config.rest_exceptions.exception_handler",
-    "DEFAULT_RENDERER_CLASSES": (
-        "config.api_renderers.CanonicalJSONRenderer",
-        "rest_framework.renderers.BrowsableAPIRenderer",
-    ),
+    "DEFAULT_RENDERER_CLASSES": _api_renderer_classes(DEBUG),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "journal.authentication.SessionVersionJWTAuthentication",
@@ -542,15 +546,18 @@ SPECTACULAR_SETTINGS = {
         "schemas": {
             "ApiError": {
                 "type": "object",
-                "required": ["code", "detail"],
+                "additionalProperties": False,
+                "required": ["code", "detail", "correlation_id"],
                 "properties": {
                     "code": {"type": "string", "description": "稳定的 machine-readable 错误码。"},
-                    "detail": {"type": "string", "description": "面向用户或调试的说明。"},
-                    "fields": {
-                        "type": "object",
-                        "additionalProperties": {"type": "array", "items": {"type": "string"}},
+                    "detail": {"type": "string", "description": "由错误码白名单绑定的通用公开文案。"},
+                    "correlation_id": {
+                        "type": "string",
+                        "minLength": 32,
+                        "maxLength": 32,
+                        "pattern": "^[0-9a-f]{32}$",
+                        "description": "由服务器生成、用于关联受控内部诊断的编号。",
                     },
-                    "retry_after_seconds": {"type": "integer", "minimum": 1},
                 },
             }
         },
@@ -732,3 +739,53 @@ _csp = (
 if CSP_REPORT_URI:
     _csp += f"; report-uri {CSP_REPORT_URI}"
 SECURE_CONTENT_SECURITY_POLICY = _csp
+
+# Django's default request/security loggers attach the original request and
+# exception traceback after the public error handler has rendered its response.
+# Every production sink therefore receives a closed, fixed-schema record and
+# never propagates an unfiltered boundary record to the root logger.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "prepare_closed_django_boundary": {
+            "()": "config.closed_logging.ClosedDjangoBoundaryFilter",
+        },
+        "finalize_closed_django_boundary": {
+            "()": "config.closed_logging.ClosedDjangoBoundaryFilter",
+            "finalize": True,
+        },
+    },
+    "formatters": {
+        "closed_django_boundary": {
+            "format": (
+                "event={event} stage={stage} status={status_code} "
+                "correlation_id={correlation_id} exception_class={exception_class}"
+            ),
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "closed_django_boundary": {
+            "class": "logging.StreamHandler",
+            "filters": ["finalize_closed_django_boundary"],
+            "formatter": "closed_django_boundary",
+        },
+    },
+    "loggers": {
+        logger_name: {
+            "handlers": ["closed_django_boundary"],
+            "filters": ["prepare_closed_django_boundary"],
+            "level": "WARNING",
+            "propagate": False,
+        }
+        for logger_name in (
+            "django.request",
+            "django.server",
+            "django.security",
+            "django.security.csrf",
+            "django.security.DisallowedHost",
+            "django.security.SuspiciousOperation",
+        )
+    },
+}

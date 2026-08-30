@@ -35,6 +35,7 @@ from .errors import StateError
 from .executor import UpdateExecutor
 from .local_bundle import LocalBundleReleaseSource
 from .plans import PlanStore
+from .public_state import public_operation
 from .runtime_state import RuntimeState
 from .server import UnixRpcServer
 from .slots import ReleaseSlots
@@ -586,7 +587,7 @@ class HostAgentRuntime:
         if operation.get("kind") == "initial_adoption":
             return self._reconcile_initial_adoption(operation)
         self.agent.bind_operation_resolver(operation)
-        return self.agent.executor.reconcile(operation_id)
+        return public_operation(self.agent.executor.reconcile(operation_id))
 
     def _reconcile_initial_adoption(
         self,
@@ -666,10 +667,15 @@ class HostAgentRuntime:
                 or dict(published.locator.release_identity) != dict(expected_identity)
             ):
                 raise StateError("Initial adoption recovery locator differs")
-            return self.agent.operations.transition(
-                operation_id,
-                "reconciled",
-                detail="initial adoption recovery reverified CURRENT, runtime, and locator",
+            return public_operation(
+                self.agent.operations.transition(
+                    operation_id,
+                    "reconciled",
+                    detail=(
+                        "initial adoption recovery reverified CURRENT, runtime, "
+                        "and locator"
+                    ),
+                )
             )
         finally:
             lock_lease.__exit__(None, None, None)

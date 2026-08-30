@@ -2,12 +2,12 @@
   "packageVersion": 1,
   "pluginId": "com.animemo.watch-history-importer",
   "slug": "watch-history-importer",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "files": [
     {
       "path": "backend/plugin.py",
-      "size": 26312,
-      "sha256": "3350acfb387c5bcfae3d1a7eb801ac72944d9e67a9575fda75d9a22879199420"
+      "size": 41070,
+      "sha256": "86ad23d48b0acc18a796e20d9e465fb33f912d0a4767f0b6ef8ac96bc551dc86"
     },
     {
       "path": "backend/src/__init__.py",
@@ -37,12 +37,12 @@
     {
       "path": "frontend/plugin.js",
       "size": 28810,
-      "sha256": "2c2cebd9c2d7223ac990672650d6d36da1cab7a942260775579c2296e5102148"
+      "sha256": "8328b728073914259f001066432604f9282b8c64fec9d5afbce60130f34e2669"
     },
     {
       "path": "manifest.json",
       "size": 2328,
-      "sha256": "aa5921e5aec58540f4b752c8f14d51eea78beb283bea0b4f9acec2076381ab62"
+      "sha256": "20d60c1f3f35e44dab9bc15637d9b5808e8111b094e9c95abf86db2d05e8d27d"
     }
   ]
 }

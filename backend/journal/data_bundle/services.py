@@ -10,7 +10,6 @@ from journal.watch_history import WatchHistoryValidationError, replace_history
 
 from .serializers import DataBundleSerializer
 
-
 DATA_BUNDLE_FORMAT = "animemo-data-bundle"
 DATA_BUNDLE_SCHEMA_VERSION = 1
 
@@ -130,15 +129,18 @@ def _normalize_history(records):
 def preview_data_bundle(*, user, payload):
     entries = _validate_bundle(payload)
     journal_empty = not JournalEntry.objects.filter(user=user, deleted_at__isnull=True).exists()
-    items = [
-        {
+    items = []
+    for index, item in enumerate(entries, start=1):
+        projected = {
             "row": index,
             "title": item["entry"]["title"],
             "status": "ready" if journal_empty else "invalid",
-            "reason": "等待恢复" if journal_empty else "Data Bundle 只能恢复到空手账",
         }
-        for index, item in enumerate(entries, start=1)
-    ]
+        if journal_empty:
+            projected["reason"] = "等待恢复"
+        else:
+            projected["error_code"] = "bundle_import_requires_empty_journal"
+        items.append(projected)
     return {
         "format": DATA_BUNDLE_FORMAT,
         "schema_version": DATA_BUNDLE_SCHEMA_VERSION,

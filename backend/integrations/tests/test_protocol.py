@@ -2,16 +2,20 @@ import hashlib
 import json
 import tempfile
 import time
+import traceback
+from contextlib import redirect_stderr
 from datetime import timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from accounts.models import User
 from django.core.cache import cache
-from django.core.management import call_command
+from django.core.management import ManagementUtility, call_command
 from django.core.management.base import CommandError
+from django.db import DataError, OperationalError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from plugin_host.installer import PluginPackageInstaller
@@ -72,6 +76,8 @@ def make_integration_package(slug, version="1.0.0"):
         host.integrations.register_action('echo', self.echo)
     def echo(self, context, payload):
         self.calls += 1
+        if payload.get('failure_detail'):
+            return {'code': 'plugin_failure', 'detail': payload['failure_detail']}, 502
         if payload.get('response_bytes'):
             return {'content': 'x' * int(payload['response_bytes'])}
         return {'user': context.user.username, 'calls': self.calls, 'version': self.host.version, 'payload': payload}
@@ -197,7 +203,10 @@ class IntegrationAPITestCase(TestCase):
             HTTP_X_ANIMEMO_SIGNATURE=sign_hmac_request(self.connection.get_secret(), stale_timestamp, "stale-nonce", "GET", path, b""),
         )
         self.assertEqual(stale.status_code, 401)
-        self.assertEqual(stale.data, unknown.data)
+        self.assertEqual(stale.data["code"], unknown.data["code"])
+        self.assertEqual(stale.data["detail"], unknown.data["detail"])
+        self.assertRegex(stale.data["correlation_id"], r"^[0-9a-f]{32}$")
+        self.assertRegex(unknown.data["correlation_id"], r"^[0-9a-f]{32}$")
 
         future_timestamp = str(int(time.time()) + 301)
         future_nonce = uuid4().hex
@@ -215,7 +224,9 @@ class IntegrationAPITestCase(TestCase):
         replay = self.signed(APIClient(), "GET", path, {}, self.connection, nonce=nonce)
         self.assertEqual(first.status_code, 200)
         self.assertEqual(replay.status_code, 401)
-        self.assertEqual(replay.data, unknown.data)
+        self.assertEqual(replay.data["code"], unknown.data["code"])
+        self.assertEqual(replay.data["detail"], unknown.data["detail"])
+        self.assertRegex(replay.data["correlation_id"], r"^[0-9a-f]{32}$")
 
         body_path = "/api/integrations/v1/pair/consume/"
         body_one = json.dumps({"code": "ABCDEFGH", "platform": "qq", "external_user_id": "1"}, separators=(",", ":")).encode()
@@ -364,6 +375,124 @@ class IntegrationAPITestCase(TestCase):
         self.assertNotEqual(created.key_id, old_key_id)
         self.assertNotEqual(created.get_secret(), first_secret)
         self.assertIn("secret:", rotated_output.getvalue())
+
+    def test_connection_create_failure_does_not_expose_hostile_diagnostics(self):
+        sentinels = (
+            r"C:\Users\hostile-user\private.sql",
+            "SELECT secret FROM integrations_connection",
+            "integration-secret-sentinel",
+            "hostile-user",
+        )
+        output = InteractiveStringIO()
+        errors = StringIO()
+        with patch.object(
+            IntegrationConnection,
+            "full_clean",
+            side_effect=OperationalError(" ".join(sentinels)),
+        ), self.assertRaises(CommandError) as raised:
+            call_command(
+                "integration_connection",
+                "create",
+                provider="provider",
+                instance_id="hostile",
+                name="Hostile",
+                stdout=output,
+                stderr=errors,
+            )
+
+        public_text = "\n".join(
+            (
+                output.getvalue(),
+                errors.getvalue(),
+                repr(raised.exception),
+                "".join(traceback.format_exception(raised.exception)),
+            )
+        )
+        for sentinel in sentinels:
+            self.assertNotIn(sentinel, public_text)
+        self.assertRegex(
+            str(raised.exception),
+            r"^integration_connection_create_failed correlation_id=[0-9a-f]{32}$",
+        )
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_connection_rotation_failure_does_not_expose_hostile_diagnostics(self):
+        sentinels = (
+            r"C:\Users\hostile-user\private.sql",
+            "UPDATE integrations_connection SET secret = leaked",
+            "rotation-secret-sentinel",
+            "hostile-user",
+        )
+        output = InteractiveStringIO()
+        errors = StringIO()
+        with patch.object(
+            IntegrationConnection,
+            "save",
+            side_effect=DataError(" ".join(sentinels)),
+        ), self.assertRaises(CommandError) as raised:
+            call_command(
+                "integration_connection",
+                "rotate-secret",
+                str(self.connection.pk),
+                stdout=output,
+                stderr=errors,
+            )
+
+        public_text = "\n".join(
+            (
+                output.getvalue(),
+                errors.getvalue(),
+                repr(raised.exception),
+                "".join(traceback.format_exception(raised.exception)),
+            )
+        )
+        for sentinel in sentinels:
+            self.assertNotIn(sentinel, public_text)
+        self.assertRegex(
+            str(raised.exception),
+            r"^integration_connection_rotate_failed correlation_id=[0-9a-f]{32}$",
+        )
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_connection_create_failure_uses_real_cli_safe_stderr(self):
+        sentinel = r"C:\private\integration.sqlite token=CLI_TOKEN_CANARY Traceback"
+        errors = StringIO()
+        with (
+            patch(
+                "integrations.management.commands.integration_connection.Command._require_interactive_secret_output"
+            ),
+            patch.object(
+                IntegrationConnection,
+                "set_secret",
+                side_effect=RuntimeError(sentinel),
+            ),
+            redirect_stderr(errors),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            ManagementUtility(
+                [
+                    "manage.py",
+                    "integration_connection",
+                    "create",
+                    "--provider",
+                    "provider",
+                    "--instance-id",
+                    "hostile",
+                    "--name",
+                    "Hostile",
+                    "--no-color",
+                ]
+            ).execute()
+
+        public_text = errors.getvalue()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertRegex(
+            public_text,
+            r"^CommandError: integration_connection_create_failed "
+            r"correlation_id=[0-9a-f]{32}\r?\n$",
+        )
+        self.assertNotIn(sentinel, public_text)
+        self.assertNotIn("Traceback", public_text)
 
     def test_events_are_private_connection_isolated_and_ack_owned(self):
         ExternalIdentityBinding.objects.create(
@@ -574,20 +703,36 @@ class IntegrationActionRuntimeTests(TestCase):
         first = self.signed_action("req-large-response", {"response_bytes": 512})
         second = self.signed_action("req-large-response", {"response_bytes": 1})
 
-        expected = {
-            "code": "action_response_too_large",
-            "detail": "插件动作响应超过允许大小。",
-        }
+        expected_code = "integration_action_failed"
         self.assertEqual(first.status_code, 502)
-        self.assertEqual(first.data, expected)
+        self.assertEqual(first.data["code"], expected_code)
+        self.assertIn("correlation_id", first.data)
         self.assertEqual(first["X-AniMemo-Idempotent-Replay"], "false")
         self.assertEqual(second.status_code, 502)
-        self.assertEqual(second.data, expected)
+        self.assertEqual(second.data["code"], expected_code)
+        self.assertIn("correlation_id", second.data)
         self.assertEqual(second["X-AniMemo-Idempotent-Replay"], "true")
         receipt = IntegrationActionReceipt.objects.get(request_id="req-large-response")
         self.assertEqual(receipt.status, IntegrationActionReceipt.Status.FAILED)
         self.assertEqual(receipt.response_status, 502)
-        self.assertEqual(receipt.response_payload, expected)
+        self.assertEqual(receipt.response_payload["code"], expected_code)
+        self.assertIn("correlation_id", receipt.response_payload)
+
+    def test_plugin_failure_is_sanitized_before_receipt_and_replay(self):
+        marker = "INTEGRATION-PLUGIN-STACK-SENTINEL"
+        first = self.signed_action("req-plugin-failure", {"failure_detail": marker})
+        second = self.signed_action("req-plugin-failure", {"failure_detail": "changed"})
+
+        self.assertEqual(first.status_code, 502)
+        self.assertEqual(second.status_code, 502)
+        self.assertEqual(first.data["code"], "integration_action_failed")
+        self.assertEqual(second.data["code"], "integration_action_failed")
+        self.assertNotIn(marker, str(first.data))
+        self.assertNotIn(marker, str(second.data))
+        receipt = IntegrationActionReceipt.objects.get(request_id="req-plugin-failure")
+        self.assertEqual(receipt.status, IntegrationActionReceipt.Status.FAILED)
+        self.assertNotIn(marker, str(receipt.response_payload))
+        self.assertIn("correlation_id", receipt.response_payload)
 
     def test_user_installation_and_connection_boundaries_are_enforced(self):
         install_for_user(self.project, user=self.other)

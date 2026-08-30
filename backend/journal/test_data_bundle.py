@@ -1,11 +1,14 @@
 import json
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from journal.data_bundle import export_data_bundle, import_data_bundle
+from journal.domain_services import JournalEntryServiceError
 from journal.models import (
     ExternalCollectionSyncState,
     ExternalImportSession,
@@ -13,6 +16,7 @@ from journal.models import (
     JournalEntry,
     UserExternalAccountConnection,
 )
+from journal.poster_security import PosterUrlValidationError
 from journal.watch_history import add_history
 
 User = get_user_model()
@@ -137,6 +141,21 @@ class DataBundleV1Tests(APITestCase):
 
         self.assertEqual(JournalEntry.objects.filter(user=self.target_user).count(), 1)
 
+    def test_bundle_preview_partial_failure_uses_exact_public_error(self):
+        JournalEntry.objects.create(user=self.target_user, title="已有记录")
+        payload = export_data_bundle(user=self.source_user)
+        self.client.force_authenticate(self.target_user)
+
+        response = self.client.post("/api/import/?preview=true", payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        outer_error = response.data["errors"][0]["error"]
+        item = response.data["items"][0]
+        self.assertEqual(set(outer_error), {"code", "detail", "correlation_id"})
+        self.assertEqual(outer_error["code"], "bundle_import_requires_empty_journal")
+        self.assertEqual(item["error"], outer_error)
+        self.assertNotIn("reason", item)
+
     def test_invalid_nested_history_rolls_back_everything(self):
         payload = export_data_bundle(user=self.source_user)
         payload["entries"][0]["watch_history"][0]["episode_start"] = 9
@@ -149,6 +168,23 @@ class DataBundleV1Tests(APITestCase):
         self.assertEqual(response.data["code"], "invalid_episode_range")
         self.assertFalse(JournalEntry.objects.filter(user=self.target_user).exists())
 
+    def test_bundle_poster_validation_exception_text_is_not_public(self):
+        marker = "BUNDLE-POSTER-STACK-SENTINEL"
+        payload = export_data_bundle(user=self.source_user)
+        self.client.force_authenticate(self.target_user)
+
+        with patch(
+            "journal.data_bundle.serializers.validate_poster_url",
+            side_effect=PosterUrlValidationError(marker),
+        ):
+            response = self.client.post("/api/import/", payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "invalid_data_bundle")
+        self.assertIn("correlation_id", response.data)
+        self.assertNotIn(marker, str(response.data))
+        self.assertFalse(JournalEntry.objects.filter(user=self.target_user).exists())
+
 
 class LossyCsvImportTests(APITestCase):
     def setUp(self):
@@ -156,8 +192,6 @@ class LossyCsvImportTests(APITestCase):
         self.client.force_authenticate(self.user)
 
     def test_csv_uses_only_canonical_snake_case_fields(self):
-        from django.core.files.uploadedfile import SimpleUploadedFile
-
         upload = SimpleUploadedFile(
             "entries.csv",
             b"title,japanese_title,watch_status\nCSV Anime,CSV Original,planned\n",
@@ -168,3 +202,51 @@ class LossyCsvImportTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["created"], 1)
         self.assertEqual(JournalEntry.objects.get(user=self.user).japanese_title, "CSV Original")
+
+    def test_csv_read_and_commit_exceptions_are_not_public(self):
+        marker = "CSV-IMPORT-STACK-SENTINEL"
+        with patch("journal.import_export_views.ImportEntriesView._read_payload", side_effect=OSError(marker)):
+            response = self.client.post("/api/import/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "invalid_import_file")
+        self.assertNotIn(marker, str(response.data))
+
+        upload = SimpleUploadedFile(
+            "entries.csv",
+            b"title,japanese_title,watch_status\nCSV Anime,CSV Original,planned\n",
+            content_type="text/csv",
+        )
+        with patch(
+            "journal.import_export_views.JournalEntryService.create_from_fields",
+            side_effect=JournalEntryServiceError("marker", marker),
+        ):
+            response = self.client.post("/api/import/", {"file": upload}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "import_commit_failed")
+        self.assertNotIn(marker, str(response.data))
+        self.assertFalse(JournalEntry.objects.filter(user=self.user).exists())
+
+    def test_csv_preview_partial_failure_discards_serializer_errors(self):
+        marker = "CSV-PREVIEW-PRIVATE-STACK-SENTINEL"
+        upload = SimpleUploadedFile(
+            "entries.csv",
+            b"title,watch_status\nCSV Anime,planned\n",
+            content_type="text/csv",
+        )
+        with patch("journal.import_export_views.JournalEntrySerializer") as serializer_class:
+            serializer_class.return_value.is_valid.return_value = False
+            serializer_class.return_value.errors = {"title": [marker]}
+            response = self.client.post(
+                "/api/import/?preview=true",
+                {"file": upload},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        outer_error = response.data["errors"][0]["error"]
+        item = response.data["items"][0]
+        self.assertEqual(set(outer_error), {"code", "detail", "correlation_id"})
+        self.assertEqual(outer_error["code"], "import_item_invalid")
+        self.assertEqual(item["error"], outer_error)
+        self.assertNotIn("reason", item)
+        self.assertNotIn(marker, str(response.data))

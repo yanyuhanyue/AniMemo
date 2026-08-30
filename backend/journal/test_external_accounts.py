@@ -25,6 +25,7 @@ from journal.external_accounts.services import (
     apply_import_preview,
     complete_oauth_authorization,
 )
+from journal.external_media.errors import ExternalMediaError
 from journal.external_media.services import PreparedIdentity
 from journal.models import (
     ExternalAccountAuthorizationState,
@@ -348,6 +349,33 @@ class ExternalAccountApiTests(APITestCase):
         self.assertIn("external_account_provider=bangumi", callback["Location"])
         self.assertIn("authorization_state_expired", callback["Location"])
 
+    @patch("journal.external_accounts.views.complete_oauth_authorization")
+    def test_oauth_error_redirect_uses_stable_code_and_correlation_only(self, complete):
+        marker = "OAUTH-PRIVATE-TRACEBACK-SENTINEL"
+        complete.side_effect = ExternalAccountError(
+            "authorization_exchange_failed",
+            marker,
+            status_code=502,
+            extra={"traceback": marker},
+        )
+
+        response = self.client.get(
+            reverse("external-account-callback", kwargs={"provider": "bangumi"}),
+            {"code": "private-code", "state": "private-state"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        query = parse_qs(urlparse(response["Location"]).query)
+        self.assertEqual(
+            set(query),
+            {"external_account_provider", "external_account_status", "code", "correlation_id"},
+        )
+        self.assertEqual(query["code"], ["authorization_exchange_failed"])
+        self.assertRegex(query["correlation_id"][0], r"^[0-9a-f]{32}$")
+        self.assertEqual(response["X-AniMemo-Correlation-ID"], query["correlation_id"][0])
+        self.assertNotIn(marker, response["Location"])
+        self.assertNotIn("detail", query)
+
     @patch("journal.external_accounts.providers.bangumi.BangumiAccountProvider.get_collections")
     def test_preview_matches_identity_authoritatively_and_title_only_as_possible(self, collections):
         self.create_connection()
@@ -401,6 +429,50 @@ class ExternalAccountApiTests(APITestCase):
         self.assertEqual(entry.watch_status, "completed")
         self.assertEqual(entry.review, "远端短评")
         self.assertTrue(ExternalMediaIdentity.objects.filter(entry=entry, external_id="1424").exists())
+
+    @patch("journal.external_accounts.imports.prepare_identity")
+    def test_apply_partial_failure_persists_code_and_reprojects_replay(self, prepare):
+        marker = "IMPORT-PRIVATE-STACK-SENTINEL"
+        session = ExternalImportSession.objects.create(
+            user=self.user,
+            provider="bangumi",
+            snapshot=[remote_row()],
+            expires_at=timezone.now() + timedelta(minutes=20),
+        )
+        prepare.side_effect = ExternalMediaError(
+            "provider_unavailable",
+            marker,
+            status_code=503,
+            extra={"traceback": marker},
+        )
+        endpoint = reverse("external-account-import-apply", kwargs={"provider": "bangumi"})
+        payload = {
+            "preview_id": str(session.pk),
+            "items": [{"external_id": "1424", "mode": "CREATE_NEW"}],
+        }
+
+        first = self.client.post(endpoint, payload, format="json")
+        replay = self.client.post(endpoint, payload, format="json")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK, first.data)
+        self.assertEqual(replay.status_code, status.HTTP_200_OK, replay.data)
+        first_item = first.data["results"][0]
+        replay_item = replay.data["results"][0]
+        self.assertEqual(set(first_item), {"external_id", "status", "error"})
+        self.assertEqual(set(first_item["error"]), {"code", "detail", "correlation_id"})
+        self.assertEqual(first_item["error"]["code"], "provider_unavailable")
+        self.assertEqual(replay_item["error"]["code"], "provider_unavailable")
+        self.assertNotEqual(
+            first_item["error"]["correlation_id"],
+            replay_item["error"]["correlation_id"],
+        )
+        self.assertNotIn(marker, str(first.data))
+        self.assertNotIn(marker, str(replay.data))
+        session.refresh_from_db()
+        stored_item = session.result["results"][0]
+        self.assertEqual(set(stored_item), {"external_id", "status", "code"})
+        self.assertEqual(stored_item["code"], "provider_unavailable")
+        self.assertNotIn(marker, str(session.result))
 
     @patch("journal.external_accounts.imports.prepare_identity")
     def test_bind_existing_preserves_local_fields_by_default_and_explicitly_overrides_selected(self, prepare):

@@ -6,26 +6,182 @@ from datetime import date
 from urllib.parse import quote
 from uuid import uuid4
 
+from config.api_errors import public_failure
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from plugin_host.sdk import HostCapabilityError, PluginStorageLimitError
 from rest_framework import status
 from rest_framework.response import Response
 
-from plugin_host.sdk import HostCapabilityError, PluginStorageLimitError
-
-from .src.animemo_watch_history_importer.bangumi import BangumiError, resolve_group, resolve_subject_id
+from .src.animemo_watch_history_importer.bangumi import (
+    BangumiError,
+    resolve_group,
+    resolve_subject_id,
+)
 from .src.animemo_watch_history_importer.parser import build_preview, normalize_title
 
-
 PLUGIN_SLUG = "watch-history-importer"
-PLUGIN_VERSION = "0.4.4"
+PLUGIN_VERSION = "0.4.5"
 MAX_FILES = 8
 MAX_FILE_BYTES = 2 * 1024 * 1024
 INTEGRATION_TEXT_MAX_BYTES = 120 * 1024
 DATE_TAG_RE = re.compile(r"^\d{4}年\d{1,2}月(?:\d{1,2}(?:日|号)?)?(?:\s*(?:-|–|—|至)\s*(?:\d{1,2}月)?\d{1,2}(?:日|号)?)?$")
 BRUSH_TAG_RE = re.compile(r"^(?:首|二|三|四|五|六|七|八|九|十|\d+|X)刷$", re.IGNORECASE)
 YEAR_TAG_RE = re.compile(r"^\d{4}年?$")
+_BATCH_ERROR_CODE = "bangumi_lookup_unavailable"
+_MAX_PUBLIC_INTEGER = 2_147_483_647
+_MAX_PUBLIC_COLLECTION_ITEMS = 10_000
+_MAX_SOURCE_NAMES = MAX_FILES
+_MISSING = object()
+_BATCH_STATUSES = frozenset({"preview", "resolving", "ready", "imported"})
+_BATCH_SUMMARY_FIELDS = frozenset(
+    {
+        "parsed",
+        "included_records",
+        "anime_groups",
+        "excluded",
+        "pending",
+        "matched",
+        "manual_review",
+        "imported_entries",
+        "imported_history_records",
+        "selected_groups",
+        "excluded_groups",
+        "excluded_group_indices",
+    }
+)
+_RESOLUTION_STATUSES = frozenset(
+    {
+        "pending",
+        "matched",
+        "season_mismatch",
+        "no_result",
+        "low_confidence",
+        "ambiguous",
+        "episode_mismatch",
+        "network_error",
+    }
+)
+_GROUP_TEXT_FIELDS = {
+    "source_key": 4096,
+    "source_title": 4096,
+    "latest_watch_date": 32,
+    "latest_watch_date_label": 128,
+}
+_RECORD_TEXT_FIELDS = {
+    "title": 4096,
+    "source_title": 4096,
+    "watch_date": 32,
+    "watch_date_label": 128,
+    "brush_label": 32,
+    "episode_claim_kind": 32,
+    "exclusion_reason": 1000,
+    "source_file": 255,
+}
+_RECORD_NULLABLE_TEXT_FIELDS = frozenset(
+    {
+        "watch_date",
+        "watch_date_label",
+        "episode_claim_kind",
+        "exclusion_reason",
+    }
+)
+_RESOLUTION_TEXT_FIELDS = {
+    "title": 4096,
+    "japanese_title": 4096,
+    "air_date": 32,
+    "studio": 2000,
+    "description": 10_000,
+    "poster_url": 1000,
+    "source_url": 1000,
+    "source_title": 4096,
+}
+
+
+def _host_failure_payload(request, error):
+    if error.code == "invalid_import_batch":
+        candidate_code = "invalid_import_batch"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "batch_too_large":
+        candidate_code = "batch_too_large"
+        status_code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+    elif error.code == "invalid_excluded_group_indices":
+        candidate_code = "invalid_excluded_group_indices"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "empty_import_selection":
+        candidate_code = "empty_import_selection"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "resolution_pending":
+        candidate_code = "resolution_pending"
+        status_code = status.HTTP_409_CONFLICT
+    elif error.code == "manual_review_required":
+        candidate_code = "manual_review_required"
+        status_code = status.HTTP_409_CONFLICT
+    elif error.code == "batch_missing":
+        candidate_code = "batch_missing"
+        status_code = status.HTTP_404_NOT_FOUND
+    elif error.code == "batch_owner_mismatch":
+        candidate_code = "batch_owner_mismatch"
+        status_code = status.HTTP_404_NOT_FOUND
+    elif error.code == "invalid_watch_history":
+        candidate_code = "invalid_watch_history"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "invalid_watched_on":
+        candidate_code = "invalid_watched_on"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "invalid_brush_number":
+        candidate_code = "invalid_brush_number"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "invalid_episode_start":
+        candidate_code = "invalid_episode_start"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "invalid_episode_end":
+        candidate_code = "invalid_episode_end"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "invalid_episode_range":
+        candidate_code = "invalid_episode_range"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "invalid_notes":
+        candidate_code = "invalid_notes"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "duplicate_watch_history":
+        candidate_code = "duplicate_watch_history"
+        status_code = status.HTTP_409_CONFLICT
+    elif error.code == "invalid_entry":
+        candidate_code = "invalid_entry"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "invalid_limit":
+        candidate_code = "invalid_limit"
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error.code == "entry_not_found":
+        candidate_code = "entry_not_found"
+        status_code = status.HTTP_404_NOT_FOUND
+    elif error.code == "owner_required":
+        candidate_code = "owner_required"
+        status_code = status.HTTP_403_FORBIDDEN
+    elif error.code == "plugin_context_forbidden":
+        candidate_code = "plugin_context_forbidden"
+        status_code = status.HTTP_403_FORBIDDEN
+    elif error.code == "plugin_disabled":
+        candidate_code = "plugin_disabled"
+        status_code = status.HTTP_403_FORBIDDEN
+    elif error.code == "capability_not_declared":
+        candidate_code = "capability_not_declared"
+        status_code = status.HTTP_403_FORBIDDEN
+    else:
+        candidate_code = "plugin_operation_failed"
+        status_code = status.HTTP_400_BAD_REQUEST
+    return public_failure(
+        request=request,
+        candidate_code=candidate_code,
+        status_code=status_code,
+    ), status_code
+
+
+def _host_failure_response(request, error):
+    payload, status_code = _host_failure_payload(request, error)
+    return Response(payload, status=status_code)
 
 
 def _store(host, user, namespace):
@@ -194,26 +350,283 @@ def _summary(payload):
     }
 
 
-def _serialize_batch(batch, include_groups=True):
-    payload = batch.get("payload") or {}
+def _public_batch_error(value, request):
+    if not value:
+        return {}
+    candidate = value.get("code") if isinstance(value, dict) else None
+    if candidate != _BATCH_ERROR_CODE:
+        candidate = _BATCH_ERROR_CODE
+    return public_failure(
+        request=request,
+        candidate_code=candidate,
+        status_code=status.HTTP_200_OK,
+    )
+
+
+def _stable_text(value, maximum_length, *, nullable=False):
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str) or len(value) > maximum_length:
+        return _MISSING
+    return value
+
+
+def _stable_integer(value, *, minimum=0, maximum=_MAX_PUBLIC_INTEGER, nullable=False):
+    if value is None and nullable:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < minimum
+        or value > maximum
+    ):
+        return _MISSING
+    return value
+
+
+def _stable_string_list(value, *, maximum_items, maximum_length):
+    if not isinstance(value, list) or len(value) > maximum_items:
+        return _MISSING
+    projected = []
+    for item in value:
+        stable = _stable_text(item, maximum_length)
+        if stable is _MISSING:
+            return _MISSING
+        projected.append(stable)
+    return projected
+
+
+def _stable_integer_list(
+    value,
+    *,
+    maximum_items,
+    minimum=0,
+    maximum=_MAX_PUBLIC_INTEGER,
+    ordered_unique=False,
+):
+    if not isinstance(value, list) or len(value) > maximum_items:
+        return _MISSING
+    projected = []
+    for item in value:
+        stable = _stable_integer(item, minimum=minimum, maximum=maximum)
+        if stable is _MISSING:
+            return _MISSING
+        projected.append(stable)
+    if ordered_unique and projected != sorted(set(projected)):
+        return _MISSING
+    return projected
+
+
+def _stable_episode_range(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"start", "end"}:
+        return _MISSING
+    start = _stable_integer(value.get("start"), minimum=1, maximum=32767)
+    end = _stable_integer(value.get("end"), minimum=1, maximum=32767)
+    if start is _MISSING or end is _MISSING or end < start:
+        return _MISSING
+    return {"start": start, "end": end}
+
+
+def _public_text_fields(value, fields, *, nullable_fields=frozenset()):
+    if not isinstance(value, dict):
+        return {}
+    projected = {}
+    for key, maximum_length in fields.items():
+        if key not in value:
+            continue
+        stable = _stable_text(
+            value[key],
+            maximum_length,
+            nullable=key in nullable_fields,
+        )
+        if stable is not _MISSING:
+            projected[key] = stable
+    return projected
+
+
+def _public_record(value):
+    if not isinstance(value, dict):
+        return {}
+    projected = _public_text_fields(
+        value,
+        _RECORD_TEXT_FIELDS,
+        nullable_fields=_RECORD_NULLABLE_TEXT_FIELDS,
+    )
+    for key, minimum, maximum, nullable in (
+        ("brush", 1, 32767, True),
+        ("claimed_episodes", 1, 32767, True),
+        ("source_line", 1, _MAX_PUBLIC_INTEGER, False),
+    ):
+        if key not in value:
+            continue
+        stable = _stable_integer(
+            value[key],
+            minimum=minimum,
+            maximum=maximum,
+            nullable=nullable,
+        )
+        if stable is not _MISSING:
+            projected[key] = stable
+    include = value.get("include", _MISSING)
+    if isinstance(include, bool):
+        projected["include"] = include
+    if "notes" in value:
+        notes = _stable_string_list(
+            value["notes"],
+            maximum_items=256,
+            maximum_length=2000,
+        )
+        if notes is not _MISSING:
+            projected["notes"] = notes
+    if "episode_range" in value:
+        episode_range = _stable_episode_range(value["episode_range"])
+        if episode_range is not _MISSING:
+            projected["episode_range"] = episode_range
+    return projected
+
+
+def _public_resolution(value, request):
+    resolution = value if isinstance(value, dict) else {}
+    candidate_status = resolution.get("status")
+    resolution_status = (
+        candidate_status
+        if isinstance(candidate_status, str) and candidate_status in _RESOLUTION_STATUSES
+        else "network_error"
+    )
+    if resolution_status == "network_error":
+        return {
+            "status": "network_error",
+            **_public_batch_error(resolution or True, request),
+        }
+    projected = _public_text_fields(resolution, _RESOLUTION_TEXT_FIELDS)
+    for key, minimum, maximum, nullable in (
+        ("bangumi_id", 1, _MAX_PUBLIC_INTEGER, False),
+        ("episodes", 0, 32767, True),
+    ):
+        if key not in resolution:
+            continue
+        stable = _stable_integer(
+            resolution[key],
+            minimum=minimum,
+            maximum=maximum,
+            nullable=nullable,
+        )
+        if stable is not _MISSING:
+            projected[key] = stable
+    for key in ("episode_exception", "manual_selection"):
+        field = resolution.get(key, _MISSING)
+        if isinstance(field, bool):
+            projected[key] = field
+    confidence = resolution.get("confidence", _MISSING)
+    if (
+        not isinstance(confidence, bool)
+        and isinstance(confidence, (int, float))
+        and 0 <= confidence <= 1
+    ):
+        projected["confidence"] = confidence
+    if "tags" in resolution:
+        tags = _stable_string_list(
+            resolution["tags"],
+            maximum_items=8,
+            maximum_length=200,
+        )
+        if tags is not _MISSING:
+            projected["tags"] = tags
+    if "claimed_episodes" in resolution:
+        claimed_episodes = _stable_integer_list(
+            resolution["claimed_episodes"],
+            maximum_items=512,
+            minimum=1,
+            maximum=32767,
+            ordered_unique=True,
+        )
+        if claimed_episodes is not _MISSING:
+            projected["claimed_episodes"] = claimed_episodes
+    projected["status"] = resolution_status
+    return projected
+
+
+def _public_group(value, request):
+    group = value if isinstance(value, dict) else {}
+    projected = _public_text_fields(group, _GROUP_TEXT_FIELDS)
+    records = group.get("records")
+    projected["records"] = [
+        _public_record(record)
+        for record in records
+    ] if isinstance(records, list) and len(records) <= _MAX_PUBLIC_COLLECTION_ITEMS else []
+    projected["resolution"] = _public_resolution(group.get("resolution"), request)
+    return projected
+
+
+def _public_summary(value):
+    summary = value if isinstance(value, dict) else {}
+    projected = {}
+    for key in _BATCH_SUMMARY_FIELDS - {"excluded_group_indices"}:
+        if key not in summary:
+            continue
+        stable = _stable_integer(summary[key])
+        if stable is not _MISSING:
+            projected[key] = stable
+    if "excluded_group_indices" in summary:
+        indices = _stable_integer_list(
+            summary["excluded_group_indices"],
+            maximum_items=_MAX_PUBLIC_COLLECTION_ITEMS,
+            ordered_unique=True,
+        )
+        if indices is not _MISSING:
+            projected["excluded_group_indices"] = indices
+    return projected
+
+
+def _serialize_batch(batch, request, include_groups=True):
+    payload = batch.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    source_names = batch.get("source_names")
+    stable_source_names = _stable_string_list(
+        source_names,
+        maximum_items=_MAX_SOURCE_NAMES,
+        maximum_length=255,
+    )
+    batch_id = _stable_text(batch.get("id"), 64)
+    batch_status = batch.get("status")
+    if not isinstance(batch_status, str) or batch_status not in _BATCH_STATUSES:
+        batch_status = "preview"
+    target_user_id = _stable_integer(
+        batch.get("target_user_id"),
+        minimum=1,
+        nullable=True,
+    )
+    target_username = _stable_text(batch.get("target_username", ""), 150)
+    target_email = _stable_text(batch.get("target_email", ""), 320)
     result = {
-        "id": batch["id"],
-        "status": batch.get("status", "preview"),
+        "id": "" if batch_id is _MISSING else batch_id,
+        "status": batch_status,
         "target_user": {
-            "id": batch.get("target_user_id"),
-            "username": batch.get("target_username", ""),
-            "email": batch.get("target_email", ""),
+            "id": None if target_user_id is _MISSING else target_user_id,
+            "username": "" if target_username is _MISSING else target_username,
+            "email": "" if target_email is _MISSING else target_email,
         },
-        "source_names": batch.get("source_names", []),
-        "summary": batch.get("summary") or payload.get("summary", {}),
-        "error": batch.get("error", ""),
-        "created_at": batch.get("created_at"),
-        "updated_at": batch.get("updated_at"),
-        "imported_at": batch.get("imported_at"),
+        "source_names": [] if stable_source_names is _MISSING else stable_source_names,
+        "summary": _public_summary(batch.get("summary") or payload.get("summary")),
+        "error": _public_batch_error(batch.get("error"), request),
     }
+    for key in ("created_at", "updated_at", "imported_at"):
+        timestamp = _stable_text(batch.get(key), 64, nullable=True)
+        result[key] = None if timestamp is _MISSING else timestamp
     if include_groups:
-        result["groups"] = payload.get("groups", [])
-        result["excluded"] = payload.get("excluded", [])
+        groups = payload.get("groups")
+        excluded = payload.get("excluded")
+        result["groups"] = [
+            _public_group(group, request)
+            for group in groups
+        ] if isinstance(groups, list) and len(groups) <= _MAX_PUBLIC_COLLECTION_ITEMS else []
+        result["excluded"] = [
+            _public_record(record)
+            for record in excluded
+        ] if isinstance(excluded, list) and len(excluded) <= _MAX_PUBLIC_COLLECTION_ITEMS else []
     return result
 
 
@@ -275,7 +688,7 @@ class WatchHistoryPlugin:
                 entry = journal.get_entry(entry_id)
                 records = history.list_history(entry["entry_id"])
             except HostCapabilityError as error:
-                return {"code": error.code, "detail": error.detail}, error.status_code
+                return _host_failure_payload(None, error)
             return {"entry_id": entry["entry_id"], "title": entry["title"], "records": records}
         try:
             rows = journal.list_entries(limit=100)
@@ -286,13 +699,17 @@ class WatchHistoryPlugin:
                 ]
             }
         except HostCapabilityError as error:
-            return {"code": error.code, "detail": error.detail}, error.status_code
+            return _host_failure_payload(None, error)
 
     def integration_history_add(self, context, payload):
         try:
             entry_id = int(payload.get("entry_id"))
         except (TypeError, ValueError):
-            return {"code": "invalid_entry_id", "detail": "entry_id 无效。"}, 400
+            return public_failure(
+                request=None,
+                candidate_code="invalid_entry_id",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            ), status.HTTP_400_BAD_REQUEST
         journal = self.host.journal.bind(context)
         history = self.host.watch_history.bind(context)
         try:
@@ -302,7 +719,7 @@ class WatchHistoryPlugin:
                 {key: value for key, value in payload.items() if key != "entry_id"},
             )
         except HostCapabilityError as error:
-            return {"code": error.code, "detail": error.detail}, error.status_code
+            return _host_failure_payload(None, error)
         if result["created"]:
             event_payload = {
                 "entry_id": entry["entry_id"],
@@ -329,7 +746,7 @@ class WatchHistoryPlugin:
         try:
             rows = journal.list_entries(query=query, limit=20)
         except HostCapabilityError as error:
-            return {"code": error.code, "detail": error.detail}, error.status_code
+            return _host_failure_payload(None, error)
         if query:
             needle = normalize_title(query)
             rows = [row for row in rows if needle in normalize_title(row["title"]) or needle in normalize_title(row["japanese_title"])]
@@ -338,14 +755,22 @@ class WatchHistoryPlugin:
     def integration_import_preview(self, context, payload):
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > INTEGRATION_TEXT_MAX_BYTES:
-            return {"code": "invalid_text", "detail": "text 必须是非空 UTF-8 文本且不超过 120 KiB。"}, 400
+            return public_failure(
+                request=None,
+                candidate_code="invalid_text",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            ), status.HTTP_400_BAD_REQUEST
         preview = build_preview([(str(payload.get("filename") or "integration.txt")[:120], text)])
         return {"summary": preview.get("summary", {}), "groups": preview.get("groups", [])}
 
     def integration_import_commit(self, context, payload):
         batch_id = str(payload.get("batch_id") or "").strip()
         if not batch_id:
-            return {"code": "batch_missing", "detail": "batch_id 必填。"}, 400
+            return public_failure(
+                request=None,
+                candidate_code="batch_missing",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            ), status.HTTP_400_BAD_REQUEST
         try:
             result, _batch = self._commit_batch(
                 context,
@@ -353,7 +778,7 @@ class WatchHistoryPlugin:
                 payload.get("excluded_group_indices", []),
             )
         except HostCapabilityError as error:
-            return {"code": error.code, "detail": error.detail}, error.status_code
+            return _host_failure_payload(None, error)
         return result
 
     def _commit_batch(self, actor, batch_id, raw_excluded):
@@ -506,19 +931,27 @@ class WatchHistoryPlugin:
             .values("value")[: _batch_max_per_user()]
         )
         values = [item["value"] for item in batches]
-        return Response({"status": "ok", "plugin": {"id": "com.animemo.watch-history-importer", "slug": PLUGIN_SLUG, "version": PLUGIN_VERSION}, "config": _config(self.host, request.user), "batches": [_serialize_batch(value, include_groups=False) for value in values]})
+        return Response({"status": "ok", "plugin": {"id": "com.animemo.watch-history-importer", "slug": PLUGIN_SLUG, "version": PLUGIN_VERSION}, "config": _config(self.host, request.user), "batches": [_serialize_batch(value, request, include_groups=False) for value in values]})
 
     def preview(self, request):
         files = request.FILES.getlist("files")
         if not files or len(files) > MAX_FILES:
-            return Response({"code": "invalid_files", "detail": f"请选择 1 至 {MAX_FILES} 个 TXT 文件。"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                public_failure(
+                    request=request,
+                    candidate_code="invalid_files",
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                ),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         total_bytes = sum(max(0, int(getattr(upload, "size", 0) or 0)) for upload in files)
         if total_bytes > _total_upload_max_bytes():
             return Response(
-                {
-                    "code": "files_too_large",
-                    "detail": f"TXT 文件总大小不能超过 {_total_upload_max_bytes() // (1024 * 1024)} MiB。",
-                },
+                public_failure(
+                    request=request,
+                    candidate_code="files_too_large",
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                ),
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
         try:
@@ -527,8 +960,11 @@ class WatchHistoryPlugin:
                 if not upload.name.lower().endswith(".txt"):
                     raise ValueError(f"{upload.name} 不是 TXT 文件。")
                 documents.append((upload.name, _read_uploaded_text(upload)))
-        except (TypeError, ValueError) as error:
-            return Response({"code": "invalid_file", "detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except (TypeError, ValueError):
+            return Response(
+                public_failure(request=request, candidate_code="invalid_import_file", status_code=status.HTTP_400_BAD_REQUEST),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         payload = build_preview(documents)
         batch = {
             "id": uuid4().hex,
@@ -540,7 +976,7 @@ class WatchHistoryPlugin:
             "source_names": [name for name, _content in documents],
             "payload": payload,
             "summary": payload.get("summary", {}),
-            "error": "",
+            "error": {},
             "created_at": timezone.now().isoformat(),
             "updated_at": timezone.now().isoformat(),
             "imported_at": None,
@@ -548,44 +984,53 @@ class WatchHistoryPlugin:
         try:
             _save_batch(self.host, request.user, batch)
         except HostCapabilityError as error:
-            return Response(
-                {"code": error.code, "detail": error.detail},
-                status=error.status_code,
-            )
-        return Response(_serialize_batch(batch), status=status.HTTP_201_CREATED)
+            return _host_failure_response(request, error)
+        return Response(_serialize_batch(batch, request), status=status.HTTP_201_CREATED)
 
     def batch(self, request, batch_id):
         batch = _get_batch(self.host, request.user, batch_id)
         if batch is None:
-            return Response({"code": "batch_missing", "detail": "导入批次不存在。"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(_serialize_batch(batch))
+            return Response(
+                public_failure(
+                    request=request,
+                    candidate_code="batch_missing",
+                    status_code=status.HTTP_404_NOT_FOUND,
+                ),
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(_serialize_batch(batch, request))
 
     def resolve_next(self, request, batch_id):
         batch = _get_batch(self.host, request.user, batch_id)
         if batch is None:
-            return Response({"code": "batch_missing", "detail": "导入批次不存在。"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                public_failure(
+                    request=request,
+                    candidate_code="batch_missing",
+                    status_code=status.HTTP_404_NOT_FOUND,
+                ),
+                status=status.HTTP_404_NOT_FOUND,
+            )
         payload = batch.get("payload") or {}
         indexes = [index for index, group in enumerate(payload.get("groups", [])) if group.get("resolution", {}).get("status") == "pending"][: max(1, min(int(_config(self.host, request.user).get("resolve_batch_size", 6)), 12))]
-        errors = []
+        failures = []
         for index in indexes:
             try:
                 payload["groups"][index]["resolution"] = resolve_group(payload["groups"][index])
-            except BangumiError as error:
-                errors.append(str(error))
-                payload["groups"][index]["resolution"] = {"status": "network_error", "detail": str(error)}
+            except BangumiError:
+                failure = {"code": _BATCH_ERROR_CODE}
+                failures.append(failure)
+                payload["groups"][index]["resolution"] = {"status": "network_error", **failure}
         batch["payload"] = payload
         batch["summary"] = _summary(payload)
         batch["status"] = "ready" if batch["summary"]["pending"] == 0 else "resolving"
-        batch["error"] = "\n".join(errors)
+        batch["error"] = failures[0] if failures else {}
         batch["updated_at"] = timezone.now().isoformat()
         try:
             _save_batch(self.host, request.user, batch)
         except HostCapabilityError as error:
-            return Response(
-                {"code": error.code, "detail": error.detail},
-                status=error.status_code,
-            )
-        return Response(_serialize_batch(batch))
+            return _host_failure_response(request, error)
+        return Response(_serialize_batch(batch, request))
 
     def select_subject(self, request, batch_id):
         batch = _get_batch(self.host, request.user, batch_id)
@@ -594,23 +1039,30 @@ class WatchHistoryPlugin:
             subject_id = int(request.data.get("bangumi_id"))
             group = batch["payload"]["groups"][index]
         except (TypeError, ValueError, IndexError, KeyError):
-            return Response({"code": "invalid_selection", "detail": "请选择有效的导入条目和 Bangumi ID。"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                public_failure(
+                    request=request,
+                    candidate_code="invalid_selection",
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                ),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             group["resolution"] = resolve_subject_id(group, subject_id)
-        except BangumiError as error:
-            return Response({"code": "bangumi_failed", "detail": str(error)}, status=status.HTTP_502_BAD_GATEWAY)
+        except BangumiError:
+            return Response(
+                public_failure(request=request, candidate_code="bangumi_lookup_unavailable", status_code=status.HTTP_502_BAD_GATEWAY),
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         batch["summary"] = _summary(batch["payload"])
         batch["status"] = "ready" if batch["summary"]["pending"] == 0 else "resolving"
-        batch["error"] = ""
+        batch["error"] = {}
         batch["updated_at"] = timezone.now().isoformat()
         try:
             _save_batch(self.host, request.user, batch)
         except HostCapabilityError as error:
-            return Response(
-                {"code": error.code, "detail": error.detail},
-                status=error.status_code,
-            )
-        return Response(_serialize_batch(batch))
+            return _host_failure_response(request, error)
+        return Response(_serialize_batch(batch, request))
 
     def commit(self, request, batch_id):
         try:
@@ -620,8 +1072,8 @@ class WatchHistoryPlugin:
                 request.data.get("excluded_group_indices", []),
             )
         except HostCapabilityError as error:
-            return Response({"code": error.code, "detail": error.detail}, status=error.status_code)
-        return Response(_serialize_batch(batch))
+            return _host_failure_response(request, error)
+        return Response(_serialize_batch(batch, request))
 
 
 def create_plugin(host):

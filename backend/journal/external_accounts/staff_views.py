@@ -1,3 +1,4 @@
+from config.api_errors import public_failure
 from config.credentials import CredentialCipherError
 from rest_framework import serializers, status
 from rest_framework.response import Response
@@ -42,8 +43,11 @@ class StaffExternalProviderConfigurationView(APIView):
     def get(self, request, provider):
         try:
             configuration = get_effective_provider_configuration(provider)
-        except ValueError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError:
+            return Response(
+                public_failure(request=request, candidate_code="provider_not_found", status_code=status.HTTP_404_NOT_FOUND),
+                status=status.HTTP_404_NOT_FOUND,
+            )
         return Response(configuration.public_data())
 
     def patch(self, request, provider):
@@ -63,8 +67,11 @@ class StaffExternalProviderConfigurationView(APIView):
             )
         except CredentialCipherError:
             return Response({"detail": "服务凭据加密不可用，请检查服务器配置。"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        except ValueError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError:
+            return Response(
+                public_failure(request=request, candidate_code="provider_not_found", status_code=status.HTTP_404_NOT_FOUND),
+                status=status.HTTP_404_NOT_FOUND,
+            )
         after = configuration.public_data()
         record_audit(
             request,
@@ -87,8 +94,11 @@ class StaffExternalProviderClientSecretView(APIView):
         try:
             before = get_effective_provider_configuration(provider).public_data()
             configuration = clear_provider_client_secret(provider)
-        except ValueError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError:
+            return Response(
+                public_failure(request=request, candidate_code="provider_not_found", status_code=status.HTTP_404_NOT_FOUND),
+                status=status.HTTP_404_NOT_FOUND,
+            )
         after = configuration.public_data()
         record_audit(
             request,

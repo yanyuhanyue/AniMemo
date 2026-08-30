@@ -1,8 +1,9 @@
+import secrets
 from pathlib import Path
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from plugin_host.installer import PluginPackageInstaller
 from plugin_host.models import PluginDeployment, PluginProject, PluginVersion
@@ -22,6 +23,14 @@ LEGACY_OFFICIAL_PLUGIN_IDS = {
     "watch-history-importer": {"com.anime-journal.watch-history-importer"},
 }
 
+_PUBLIC_FAILURE_CODE = "official_plugin_sync_failed"
+
+
+def _command_failure():
+    return CommandError(
+        f"{_PUBLIC_FAILURE_CODE} correlation_id={secrets.token_hex(16)}"
+    )
+
 
 def _existing_official_content_digest(version):
     blob = version.package_blob
@@ -29,24 +38,16 @@ def _existing_official_content_digest(version):
     expected_path = storage.package_path(blob.sha256)
     expected_storage_path = expected_path.relative_to(storage.root).as_posix()
     if blob.storage_path != expected_storage_path:
-        raise RuntimeError(
-            f"Official plugin historical PackageBlob storage path mismatch: {version.plugin.slug} {version.version}"
-        )
+        raise _command_failure() from None
     if not expected_path.is_file():
-        raise RuntimeError(
-            f"Official plugin historical package is missing from CAS: {version.plugin.slug} {version.version} {blob.sha256}"
-        )
+        raise _command_failure() from None
     try:
         payload = expected_path.read_bytes()
         inspected = inspect_package(payload)
-    except (OSError, PluginPackageError) as error:
-        raise RuntimeError(
-            f"Official plugin historical package is corrupt: {version.plugin.slug} {version.version}: {error}"
-        ) from error
+    except (OSError, PluginPackageError):
+        raise _command_failure() from None
     if len(payload) != blob.size_bytes or inspected["sha256"] != blob.sha256:
-        raise RuntimeError(
-            f"Official plugin historical PackageBlob integrity mismatch: {version.plugin.slug} {version.version} {blob.sha256}"
-        )
+        raise _command_failure() from None
     manifest = inspected["manifest"]
     if (
         manifest != version.manifest_snapshot
@@ -54,9 +55,7 @@ def _existing_official_content_digest(version):
         or manifest.get("slug") != version.plugin.slug
         or manifest.get("version") != version.version
     ):
-        raise RuntimeError(
-            f"Official plugin historical package metadata mismatch: {version.plugin.slug} {version.version}"
-        )
+        raise _command_failure() from None
     return canonical_content_digest_from_descriptor(inspected["files"])
 
 
@@ -64,6 +63,12 @@ class Command(BaseCommand):
     help = "Register and, when a superuser exists, deploy bundled official plugins."
 
     def handle(self, *args, **options):
+        try:
+            return self._handle(*args, **options)
+        except Exception:
+            raise _command_failure() from None
+
+    def _handle(self, *args, **options):
         source_base = Path(settings.BASE_DIR).parent / "plugins"
         actor = get_user_model().objects.filter(is_superuser=True, is_active=True).order_by("pk").first()
         for slug in OFFICIAL_PLUGIN_SLUGS:
@@ -71,8 +76,11 @@ class Command(BaseCommand):
             if not (source_root / "manifest.json").is_file():
                 self.stdout.write(self.style.WARNING(f"Official plugin source missing: {slug}"))
                 continue
-            package_payload = build_official_package(source_root)
-            inspected = inspect_package(package_payload)
+            try:
+                package_payload = build_official_package(source_root)
+                inspected = inspect_package(package_payload)
+            except (OSError, PluginPackageError):
+                raise _command_failure() from None
             manifest = inspected["manifest"]
             current_content_digest = canonical_content_digest_from_descriptor(inspected["files"])
             project_by_id = PluginProject.objects.filter(plugin_id=manifest["id"]).first()
@@ -82,14 +90,14 @@ class Command(BaseCommand):
                 and project_by_slug is not None
                 and project_by_id.pk != project_by_slug.pk
             ):
-                raise RuntimeError(f"Official plugin id/slug conflict: {manifest['id']}")
+                raise _command_failure() from None
             if project_by_id is not None and project_by_id.slug != manifest["slug"]:
-                raise RuntimeError(f"Official plugin id/slug conflict: {manifest['id']}")
+                raise _command_failure() from None
             project = project_by_id or project_by_slug
             if project is not None and project.plugin_id != manifest["id"]:
                 legacy_ids = LEGACY_OFFICIAL_PLUGIN_IDS.get(manifest["slug"], set())
                 if project.plugin_id not in legacy_ids:
-                    raise RuntimeError(f"Official plugin id/slug conflict: {manifest['id']}")
+                    raise _command_failure() from None
                 project.plugin_id = manifest["id"]
                 project.save(update_fields=["plugin_id", "updated_at"])
             version = None
@@ -102,17 +110,13 @@ class Command(BaseCommand):
             if version is not None:
                 existing_content_digest = _existing_official_content_digest(version)
                 if existing_content_digest != current_content_digest:
-                    raise RuntimeError(
-                        "Official plugin immutable content mismatch.\n"
-                        f"slug: {project.slug}\n"
-                        f"version: {version.version}\n"
-                        f"existing content digest: {existing_content_digest}\n"
-                        f"current content digest: {current_content_digest}\n"
-                        "Do not rewrite an already-published official plugin version."
-                    )
+                    raise _command_failure() from None
                 blob = version.package_blob
             else:
-                blob, _, _, _ = store_package_blob(package_payload)
+                try:
+                    blob, _, _, _ = store_package_blob(package_payload)
+                except (OSError, PluginPackageError):
+                    raise _command_failure() from None
             project, _ = PluginProject.objects.get_or_create(
                 plugin_id=manifest["id"],
                 defaults={
@@ -122,7 +126,7 @@ class Command(BaseCommand):
                 },
             )
             if project.slug != manifest["slug"]:
-                raise RuntimeError(f"Official plugin id/slug conflict: {manifest['id']}")
+                raise _command_failure() from None
             project_updates = []
             for field, value in (
                 ("name", manifest["name"]),
@@ -153,9 +157,7 @@ class Command(BaseCommand):
                         PluginVersion.objects.select_related("plugin", "package_blob").get(pk=version.pk)
                     )
                     if existing_content_digest != current_content_digest:
-                        raise RuntimeError(
-                            f"Official plugin immutable content mismatch after concurrent registration: {project.slug} {version.version}"
-                        )
+                        raise _command_failure() from None
             if version.review_status != PluginVersion.ReviewStatus.APPROVED:
                 version.review_status = PluginVersion.ReviewStatus.APPROVED
                 version.save(update_fields=["review_status"])
@@ -166,5 +168,8 @@ class Command(BaseCommand):
             if actor is None and "backend" in set(version.runtime_types or []):
                 self.stdout.write(self.style.WARNING(f"Registered {project.slug} {version.version}; publish waits for a superuser."))
                 continue
-            PluginPackageInstaller().publish(version, actor=actor)
+            try:
+                PluginPackageInstaller().publish(version, actor=actor)
+            except (OSError, PluginPackageError):
+                raise _command_failure() from None
             self.stdout.write(self.style.SUCCESS(f"Published official plugin: {project.slug} {version.version}"))

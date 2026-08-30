@@ -10,7 +10,7 @@ from durability.instance import DEFAULT_INSTANCE_NAME, InstanceName, LocatorErro
 from durability.managed_config import ListenConfig
 
 from .errors import UpdaterError
-from .redaction import redact
+from .public_errors import public_updater_failure
 from .runtime import (
     adopt_initial_release,
     load_initial_adoption_request,
@@ -193,7 +193,16 @@ def main(argv: list[str] | None = None) -> int:
             _print(runtime.reconcile(args.operation_id, args.confirmation))
             return 0
     except UpdaterError as error:
-        _print({"ok": False, "error": {"code": error.code, "detail": redact(error)}}, stream=sys.stderr)
+        _print(
+            {"ok": False, "error": public_updater_failure(error.code)},
+            stream=sys.stderr,
+        )
+        return 1
+    except Exception:  # noqa: BLE001 - CLI must never print an internal traceback
+        _print(
+            {"ok": False, "error": public_updater_failure("internal_error")},
+            stream=sys.stderr,
+        )
         return 1
     raise AssertionError("argparse accepted an unknown command")
 

@@ -1,29 +1,41 @@
 import hashlib
 import logging
+import secrets
 from concurrent.futures import ThreadPoolExecutor
 
+from accounts.models import LoginEvent
+from config.api_errors import public_failure
 from django.conf import settings
-from django.contrib.auth import get_user_model, login as session_login, logout as session_logout
+from django.contrib.auth import get_user_model
+from django.contrib.auth import login as session_login
+from django.contrib.auth import logout as session_logout
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.middleware.csrf import get_token, rotate_token
 from django.db import transaction
+from django.middleware.csrf import get_token, rotate_token
 from django.utils.decorators import method_decorator
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from drf_spectacular.utils import OpenApiParameter, OpenApiRequest, extend_schema
+from plugin_host.hooks import RegistrationHookRejected, RegistrationHookUnavailable
+from plugin_host.permissions import plugin_permissions_for_user
 from rest_framework import permissions, serializers, status
 from rest_framework.exceptions import AuthenticationFailed, Throttled
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView
+from site_config.models import InstallationState, SiteSettings
 
-from .emails import EmailDeliveryError, send_transactional_email
 from .account_security import AccountDeletionError, delete_current_account
+from .admin_security_middleware import (
+    clear_staff_second_factor,
+    mark_staff_second_factor_verified,
+)
+from .auth_service import authenticate_with_second_factor
 from .auth_tokens import (
     RefreshReplayError,
     create_refresh_token,
@@ -31,29 +43,9 @@ from .auth_tokens import (
     revoke_access_token,
     rotate_refresh,
 )
-from .auth_service import authenticate_with_second_factor
-from .admin_security_middleware import clear_staff_second_factor, mark_staff_second_factor_verified
-from accounts.models import LoginEvent
-from site_config.models import InstallationState, SiteSettings
-from .registration import (
-    build_verify_url,
-    complete_registration,
-    email_digest,
-    request_pending_registration,
-    verify_registration_token,
-)
-from plugin_host.hooks import RegistrationHookRejected, RegistrationHookUnavailable
-from .serializers import RegistrationCompleteSerializer, RegistrationRequestSerializer, RegistrationVerifySerializer
-from .staff_services import get_security_profile, record_audit, record_login_event, resolve_staff_role, staff_capabilities, update_user_password
-from plugin_host.permissions import plugin_permissions_for_user
-from .web_auth_adapter import (
-    access_token_from_request,
-    clear_refresh_cookie,
-    no_store,
-    require_anti_abuse_challenge,
-    set_refresh_cookie,
-)
+from .emails import EmailDeliveryError, send_transactional_email
 from .openapi_serializers import (
+    TOKEN_LOGIN_REQUEST_SCHEMA,
     AccessTokenResponseSerializer,
     AccountDeleteRequestSerializer,
     CsrfTokenResponseSerializer,
@@ -63,9 +55,34 @@ from .openapi_serializers import (
     PasswordResetConfirmRequestSerializer,
     PasswordResetRequestSerializer,
     RegistrationVerificationResponseSerializer,
-    TOKEN_LOGIN_REQUEST_SCHEMA,
 )
-
+from .registration import (
+    build_verify_url,
+    complete_registration,
+    email_digest,
+    request_pending_registration,
+    verify_registration_token,
+)
+from .serializers import (
+    RegistrationCompleteSerializer,
+    RegistrationRequestSerializer,
+    RegistrationVerifySerializer,
+)
+from .staff_services import (
+    get_security_profile,
+    record_audit,
+    record_login_event,
+    resolve_staff_role,
+    staff_capabilities,
+    update_user_password,
+)
+from .web_auth_adapter import (
+    access_token_from_request,
+    clear_refresh_cookie,
+    no_store,
+    require_anti_abuse_challenge,
+    set_refresh_cookie,
+)
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -309,20 +326,40 @@ class RegisterView(RegistrationThrottleAuditMixin, APIView):
             return turnstile_response
         site_settings = SiteSettings.load()
         if not site_settings.registration_enabled:
-            return Response({"detail": "当前暂未开放注册。"}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                public_failure(
+                    request=request,
+                    candidate_code="permission_denied",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                ),
+                status=status.HTTP_403_FORBIDDEN,
+            )
         if not site_settings.email_delivery_enabled:
-            return Response({"detail": "验证邮件服务当前不可用，请稍后再试。"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response(
+                public_failure(
+                    request=request,
+                    candidate_code="email_delivery_failed",
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                ),
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         serializer = RegistrationRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data["email"]
         try:
             pending, raw_token, should_send = request_pending_registration(request=request, email=email)
-        except RegistrationHookRejected as error:
+        except RegistrationHookRejected:
             record_audit(request, action="registration_rejected_by_policy", metadata={"email_hash": email_digest(email), "result": "rejected"})
-            return Response({"detail": str(error)}, status=status.HTTP_403_FORBIDDEN)
-        except RegistrationHookUnavailable as error:
+            return Response(
+                public_failure(request=request, candidate_code="registration_policy_rejected", status_code=status.HTTP_403_FORBIDDEN),
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        except RegistrationHookUnavailable:
             record_audit(request, action="registration_rejected_by_policy", metadata={"email_hash": email_digest(email), "result": "unavailable"})
-            return Response({"detail": str(error)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response(
+                public_failure(request=request, candidate_code="registration_policy_unavailable", status_code=status.HTTP_503_SERVICE_UNAVAILABLE),
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         record_audit(request, action="registration_requested", metadata={"email_hash": email_digest(email), "result": "accepted"})
         if should_send and pending and raw_token:
@@ -348,8 +385,15 @@ class RegisterView(RegistrationThrottleAuditMixin, APIView):
                         ),
                     )
                     record_audit(request, action="registration_email_sent", metadata={"email_hash": email_digest(email), "result": "sent"})
-                except EmailDeliveryError as error:
-                    logger.error("Registration email delivery failed for pending_id=%s: %s", pending.pk, error.__class__.__name__)
+                except EmailDeliveryError:
+                    logger.error(
+                        "registration_email_delivery_failed",
+                        extra={
+                            "animemo_stage": "registration_email_delivery",
+                            "correlation_id": secrets.token_hex(16),
+                            "animemo_exception_class": "EmailDeliveryError",
+                        },
+                    )
 
             transaction.on_commit(lambda: _submit_email_task(deliver_registration_email))
         else:
@@ -406,10 +450,16 @@ class CompleteRegistrationView(RegistrationThrottleAuditMixin, APIView):
                 username=serializer.validated_data["username"],
                 password=serializer.validated_data["password"],
             )
-        except RegistrationHookRejected as error:
-            return Response({"detail": str(error)}, status=status.HTTP_403_FORBIDDEN)
-        except RegistrationHookUnavailable as error:
-            return Response({"detail": str(error)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except RegistrationHookRejected:
+            return Response(
+                public_failure(request=request, candidate_code="registration_policy_rejected", status_code=status.HTTP_403_FORBIDDEN),
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        except RegistrationHookUnavailable:
+            return Response(
+                public_failure(request=request, candidate_code="registration_policy_unavailable", status_code=status.HTTP_503_SERVICE_UNAVAILABLE),
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         if error_code == "invalid_completion":
             return Response({"detail": "注册完成凭证无效、已过期或已经使用。"}, status=status.HTTP_400_BAD_REQUEST)
         if error_code == "email_exists":

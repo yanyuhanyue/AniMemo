@@ -5,13 +5,15 @@ import json
 import time
 from pathlib import Path
 
+from packaging.version import InvalidVersion, Version
+
 from . import __version__
 from .background import BackgroundOperationManager
 from .compatibility import DeploymentContext, plan_switch
 from .errors import RequestRejected, StateError
 from .local_bundle import LocalBundleTransportPolicy
-from .protocol import validate_request
-from .redaction import redact
+from .protocol import RELEASE_VERSION, validate_request
+from .public_state import public_operation
 from .state import PRE_SWITCH_RECOVERY, TERMINAL_STATES, UpdateLock
 from .transport import ExplicitTransportPolicy, TransportSourceId
 
@@ -26,6 +28,31 @@ def _policy_for_source(
     if source == "local-bundle":
         return LocalBundleTransportPolicy()
     raise RequestRejected("Release transport source is invalid")
+
+
+def _strict_release_version(value: object) -> Version:
+    if type(value) is not str or RELEASE_VERSION.fullmatch(value) is None:
+        raise StateError("Release discovery version set is invalid")
+    try:
+        return Version(value.removeprefix("v"))
+    except InvalidVersion as error:
+        raise StateError("Release discovery version set is invalid") from error
+
+
+def _latest_upgrade(
+    releases: object, current_version: object
+) -> dict[str, object] | None:
+    if type(releases) is not list:
+        raise StateError("Release discovery version set is invalid")
+    current = _strict_release_version(current_version)
+    upgrades: list[tuple[Version, dict[str, object]]] = []
+    for release in releases:
+        if type(release) is not dict:
+            raise StateError("Release discovery version set is invalid")
+        candidate = _strict_release_version(release.get("version"))
+        if candidate > current:
+            upgrades.append((candidate, release))
+    return max(upgrades, key=lambda item: item[0])[1] if upgrades else None
 
 
 def _verified_materials(resolver, version: str, *, refresh: bool = False):
@@ -401,6 +428,7 @@ class UpdateAgent:
         slots = self.slots.read()
         operations = sorted(self.operations.list(), key=lambda item: item["createdAt"], reverse=True)
         blocked = self.operations.recovery_block()
+        blocked_public = public_operation(blocked) if blocked is not None else None
         context = self._context(refresh_plugins=blocked is None)
         runtime = self.runtime_state.read()
         previous_compatibility = (
@@ -417,14 +445,18 @@ class UpdateAgent:
             "recoveryBlock": (
                 {
                     "required": True,
-                    "operationId": blocked["id"],
-                    "since": blocked["updatedAt"],
-                    "detail": blocked["events"][-1]["detail"],
+                    "operationId": blocked_public["id"],
+                    "since": blocked_public["updatedAt"],
+                    "detail": (
+                        blocked_public["events"][-1]["detail"]
+                        if blocked_public["events"]
+                        else "Operation state is unavailable"
+                    ),
                 }
-                if blocked is not None
+                if blocked_public is not None
                 else None
             ),
-            "operation": operations[0] if operations else None,
+            "operation": public_operation(operations[0]) if operations else None,
             "history": [
                 {
                     **self._identity(item["manifest"]),
@@ -444,7 +476,7 @@ class UpdateAgent:
                 manifest = self.source.fetch_verified(release["version"], updater_version=__version__)
                 switch = plan_switch(current, manifest, updater_version=__version__)
                 planned.append({**release, "compatibility": switch.as_dict()})
-            except Exception as error:  # noqa: BLE001 - one bad Release must not abort discovery
+            except Exception:  # noqa: BLE001 - one bad Release must not abort discovery
                 planned.append({
                     **release,
                     "compatibility": {
@@ -453,7 +485,7 @@ class UpdateAgent:
                         "rollbackMode": "blocked",
                         "migrationRequired": False,
                         "migrationPolicy": "unknown",
-                        "reasons": [redact(error)],
+                        "reasons": ["Release compatibility could not be evaluated"],
                     },
                 })
         return {"channel": params["channel"], "releases": planned}
@@ -525,7 +557,7 @@ class UpdateAgent:
     def _run_apply(self, operation_id, manifest):
         try:
             self.executor.apply(operation_id, manifest, lock_held=True)
-        except Exception as error:  # noqa: BLE001 - worker failures must become durable operation state
+        except Exception:  # noqa: BLE001 - worker failures must become durable operation state
             operation = self.operations.get(operation_id)
             if operation["status"] in TERMINAL_STATES:
                 return
@@ -537,13 +569,13 @@ class UpdateAgent:
             self.operations.transition(
                 operation_id,
                 target,
-                detail=f"background update worker failed: {redact(error)}",
+                detail="background update worker failed",
             )
 
     def _run_rollback(self, operation_id, manifest):
         try:
             self.executor.rollback(operation_id, manifest, lock_held=True)
-        except Exception as error:  # noqa: BLE001 - worker failures must become durable operation state
+        except Exception:  # noqa: BLE001 - worker failures must become durable operation state
             operation = self.operations.get(operation_id)
             if operation["status"] in TERMINAL_STATES:
                 return
@@ -555,7 +587,7 @@ class UpdateAgent:
             self.operations.transition(
                 operation_id,
                 target,
-                detail=f"background rollback worker failed: {redact(error)}",
+                detail="background rollback worker failed",
             )
 
     def wait_for_background_operation(
@@ -614,17 +646,23 @@ class UpdateAgent:
                         cleanup=lambda: lock_lease.__exit__(None, None, None),
                         name=f"animemo-update-{operation['id'][:8]}",
                     )
-                except BaseException as error:
+                except BaseException:
                     self.operations.transition(
                         operation["id"],
                         "failed_pre_switch",
-                        detail=f"background update worker failed to start: {redact(error)}",
+                        detail="background update worker failed to start",
                     )
                     raise
-                return {"operation": operation}
+                return {
+                    "planId": stored["id"],
+                    "operation": public_operation(operation),
+                }
             return {
-                "operation": self.executor.apply(
-                    operation["id"], stored["manifest"], lock_held=True
+                "planId": stored["id"],
+                "operation": public_operation(
+                    self.executor.apply(
+                        operation["id"], stored["manifest"], lock_held=True
+                    )
                 )
             }
         finally:
@@ -703,17 +741,19 @@ class UpdateAgent:
                         cleanup=lambda: lock_lease.__exit__(None, None, None),
                         name=f"animemo-rollback-{operation['id'][:8]}",
                     )
-                except BaseException as error:
+                except BaseException:
                     self.operations.transition(
                         operation["id"],
                         "failed_pre_switch",
-                        detail=f"background rollback worker failed to start: {redact(error)}",
+                        detail="background rollback worker failed to start",
                     )
                     raise
-                return {"operation": operation}
+                return {"operation": public_operation(operation)}
             return {
-                "operation": self.executor.rollback(
-                    operation["id"], previous, lock_held=True
+                "operation": public_operation(
+                    self.executor.rollback(
+                        operation["id"], previous, lock_held=True
+                    )
                 )
             }
         finally:
@@ -731,8 +771,12 @@ class UpdateAgent:
         if operation == "check_update":
             releases = self._list_releases(params)["releases"]
             current_version = self._status()["current"]["version"]
-            latest = next((item for item in releases if item["version"] != current_version), None)
-            return {"currentVersion": current_version, "latest": latest}
+            latest = _latest_upgrade(releases, current_version)
+            return {
+                "channel": params["channel"],
+                "currentVersion": current_version,
+                "latest": latest,
+            }
         if operation == "plan_update":
             return self._plan_update(params)
         if operation == "apply_update":
@@ -740,8 +784,12 @@ class UpdateAgent:
         if operation == "rollback_previous":
             return self._rollback_previous(params)
         if operation == "get_operation":
-            return self.operations.get(params["operationId"])
+            return public_operation(self.operations.get(params["operationId"]))
         if operation == "get_logs":
             payload = self.operations.get(params["operationId"])
-            return {"operationId": payload["id"], "events": payload["events"][-params.get("limit", 100):]}
+            projected = public_operation(payload)
+            return {
+                "operationId": projected["id"],
+                "events": projected["events"][-params.get("limit", 100):],
+            }
         raise RequestRejected("Operation is not implemented")

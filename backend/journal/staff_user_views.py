@@ -1,3 +1,5 @@
+from accounts.models import LoginEvent, StaffProfile
+from config.api_errors import public_failure
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
@@ -8,15 +10,19 @@ from django.utils.http import urlsafe_base64_encode
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
-from accounts.models import LoginEvent, StaffProfile
 from site_config.models import SiteSettings
 
 from .emails import EmailDeliveryError, send_transactional_email
-from .staff_common import _column_data, _entry_data, _journal_data, _require_sensitive_reauthentication, _user_data, _validation_detail
+from .staff_common import (
+    _column_data,
+    _entry_data,
+    _journal_data,
+    _require_sensitive_reauthentication,
+    _user_data,
+)
 from .staff_services import (
-    StaffCapabilityPermission,
     USER_MANAGEMENT_DENIED_DETAIL,
+    StaffCapabilityPermission,
     assert_can_manage_user,
     get_security_profile,
     record_audit,
@@ -25,7 +31,6 @@ from .staff_services import (
     revoke_user_sessions,
     update_user_password,
 )
-
 
 User = get_user_model()
 
@@ -38,8 +43,11 @@ class StaffUserDetailView(APIView):
         user = get_object_or_404(User.objects.select_related("journal_settings", "security_profile", "staff_profile"), pk=pk)
         try:
             assert_can_manage_user(request, user, action="view_security")
-        except DjangoValidationError as error:
-            return Response({"detail": _validation_detail(error)}, status=status.HTTP_403_FORBIDDEN)
+        except DjangoValidationError:
+            return Response(
+                public_failure(request=request, candidate_code="staff_user_access_denied", status_code=status.HTTP_403_FORBIDDEN),
+                status=status.HTTP_403_FORBIDDEN,
+            )
         return Response({
             **_user_data(user, request.user),
             "settings": _journal_data(request, user.journal_settings, detail=False) if hasattr(user, "journal_settings") else None,
@@ -68,13 +76,19 @@ class StaffUserActionView(APIView):
         user = get_object_or_404(User, pk=pk)
         try:
             assert_can_manage_user(request, user, action=action)
-        except DjangoValidationError as error:
-            return Response({"detail": _validation_detail(error)}, status=status.HTTP_403_FORBIDDEN)
+        except DjangoValidationError:
+            return Response(
+                public_failure(request=request, candidate_code="staff_user_access_denied", status_code=status.HTTP_403_FORBIDDEN),
+                status=status.HTTP_403_FORBIDDEN,
+            )
         if action == "force-logout":
             try:
                 _require_sensitive_reauthentication(request, user, action)
-            except DjangoValidationError as error:
-                return Response({"detail": _validation_detail(error)}, status=status.HTTP_403_FORBIDDEN)
+            except DjangoValidationError:
+                return Response(
+                    public_failure(request=request, candidate_code="staff_reauthentication_failed", status_code=status.HTTP_403_FORBIDDEN),
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             version = revoke_user_sessions(user)
             record_login_event(request, event_type=LoginEvent.EventType.FORCE_LOGOUT, success=True, user=user)
             record_audit(request, action="user.force_logout", target=user, after={"session_version": version})
@@ -82,8 +96,11 @@ class StaffUserActionView(APIView):
         if action == "reset-password":
             try:
                 _require_sensitive_reauthentication(request, user, action)
-            except DjangoValidationError as error:
-                return Response({"detail": _validation_detail(error)}, status=status.HTTP_403_FORBIDDEN)
+            except DjangoValidationError:
+                return Response(
+                    public_failure(request=request, candidate_code="staff_reauthentication_failed", status_code=status.HTTP_403_FORBIDDEN),
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             password = str(request.data.get("password", ""))
             confirm = str(request.data.get("password_confirm", ""))
             if password != confirm:
@@ -111,8 +128,11 @@ class StaffUserActionView(APIView):
                     html=f'<h1>账号激活</h1><p><a href="{verify_url}">点击激活账号</a></p>',
                     text=f"请打开以下链接激活账号：{verify_url}",
                 )
-            except EmailDeliveryError as error:
-                return Response({"detail": str(error)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            except EmailDeliveryError:
+                return Response(
+                    public_failure(request=request, candidate_code="email_delivery_failed", status_code=status.HTTP_503_SERVICE_UNAVAILABLE),
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
             record_audit(request, action="user.resend_activation", target=user)
             return Response({"detail": "激活邮件已重新发送。"})
         if action == "role":
@@ -123,8 +143,11 @@ class StaffUserActionView(APIView):
                 return Response({"detail": "不支持的后台角色。"}, status=status.HTTP_400_BAD_REQUEST)
             try:
                 _require_sensitive_reauthentication(request, user, action, force=True)
-            except DjangoValidationError as error:
-                return Response({"detail": _validation_detail(error)}, status=status.HTTP_403_FORBIDDEN)
+            except DjangoValidationError:
+                return Response(
+                    public_failure(request=request, candidate_code="staff_reauthentication_failed", status_code=status.HTTP_403_FORBIDDEN),
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             before = {"is_staff": user.is_staff, "role": resolve_staff_role(user) if user.is_staff else "user"}
             user.is_staff = True
             user.save(update_fields=["is_staff"])

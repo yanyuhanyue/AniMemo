@@ -425,10 +425,10 @@ class UpdateAgentTests(unittest.TestCase):
             )
 
             self.assertEqual(rolled_back["operation"]["status"], "rolled_back")
+            persisted = agent.operations.get(rolled_back["operation"]["id"])
+            self.assertNotIn("metadata", rolled_back["operation"])
             self.assertEqual(
-                rolled_back["operation"]["metadata"]["releaseBinding"][
-                    "expectedRollbackVersion"
-                ],
+                persisted["metadata"]["releaseBinding"]["expectedRollbackVersion"],
                 "v1.0.0",
             )
             self.assertIn(Path("/media/previous-portable.tar"), created)
@@ -530,8 +530,10 @@ class UpdateAgentTests(unittest.TestCase):
                     "verifiedReleaseIdentity": "sha256:" + "2" * 64,
                 },
             )
+            persisted = agent.operations.get(result["operation"]["id"])
+            self.assertNotIn("metadata", result["operation"])
             self.assertEqual(
-                result["operation"]["metadata"]["releaseBinding"],
+                persisted["metadata"]["releaseBinding"],
                 stored["releaseBinding"],
             )
             target_fetches = [
@@ -656,8 +658,10 @@ class UpdateAgentTests(unittest.TestCase):
             )
 
             self.assertEqual(result["operation"]["status"], "rolled_back")
+            persisted = agent.operations.get(result["operation"]["id"])
+            self.assertNotIn("metadata", result["operation"])
             self.assertEqual(
-                result["operation"]["metadata"]["releaseBinding"],
+                persisted["metadata"]["releaseBinding"],
                 {
                     "source": "official-mirror",
                     "transportPolicyIdentity": (
@@ -765,10 +769,180 @@ class UpdateAgentTests(unittest.TestCase):
             operation_id = applied["operation"]["id"]
             operation = agent.dispatch({"operation": "get_operation", "params": {"operationId": operation_id}})
             logs = agent.dispatch({"operation": "get_logs", "params": {"operationId": operation_id, "limit": 100}})
+            checked = agent.dispatch({"operation": "check_update", "params": {"channel": "stable"}})
 
             self.assertTrue(all(item["channel"] == "stable" for item in releases["releases"]))
+            self.assertEqual(applied["planId"], plan["planId"])
+            self.assertEqual(checked["channel"], "stable")
+            self.assertIsNone(checked["latest"])
             self.assertEqual(operation["status"], "succeeded")
             self.assertEqual(logs["events"][-1]["status"], "succeeded")
+
+    def test_check_update_selects_only_the_newest_strict_upgrade(self):
+        def release(version):
+            return {"version": version}
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            cases = (
+                (
+                    "current absent",
+                    [release("v1.0.0"), release("v1.0.2")],
+                    "v1.0.2",
+                ),
+                ("only older", [release("v1.0.0")], None),
+                (
+                    "mixed unsorted",
+                    [
+                        release("v1.0.2"),
+                        release("v1.0.0"),
+                        release("v1.0.3"),
+                        release("v1.0.1"),
+                    ],
+                    "v1.0.3",
+                ),
+            )
+            for label, releases, expected in cases:
+                with (
+                    self.subTest(label=label),
+                    mock.patch.object(
+                        agent,
+                        "_list_releases",
+                        return_value={"channel": "stable", "releases": releases},
+                    ),
+                    mock.patch.object(
+                        agent,
+                        "_status",
+                        return_value={"current": {"version": "v1.0.1"}},
+                    ),
+                ):
+                    checked = agent.dispatch(
+                        {
+                            "operation": "check_update",
+                            "params": {"channel": "stable"},
+                        }
+                    )
+                    self.assertEqual(checked["channel"], "stable")
+                    if expected is None:
+                        self.assertIsNone(checked["latest"])
+                    else:
+                        self.assertEqual(checked["latest"]["version"], expected)
+
+    def test_check_update_rejects_any_invalid_candidate_or_current_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            cases = (
+                ("candidate", "v1.0.1", [{"version": "v1.0.2"}, {"version": "not-a-version"}]),
+                ("current", "not-a-version", [{"version": "v1.0.2"}]),
+            )
+            for label, current, releases in cases:
+                with (
+                    self.subTest(label=label),
+                    mock.patch.object(
+                        agent,
+                        "_list_releases",
+                        return_value={"channel": "stable", "releases": releases},
+                    ),
+                    mock.patch.object(
+                        agent,
+                        "_status",
+                        return_value={"current": {"version": current}},
+                    ),
+                    self.assertRaisesRegex(
+                        StateError, "Release discovery version set is invalid"
+                    ),
+                ):
+                    agent.dispatch(
+                        {
+                            "operation": "check_update",
+                            "params": {"channel": "stable"},
+                        }
+                    )
+
+    def test_legacy_operation_diagnostics_are_projected_at_every_rpc_readback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = self.make_agent(directory)
+            operation = agent.operations.create(
+                "apply_update",
+                {"privatePath": r"C:\\private\\operator\\release.json"},
+            )
+            path = (
+                Path(directory)
+                / "state"
+                / "operations"
+                / f"{operation['id']}.json"
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            private_diagnostics = (
+                r"C:\\private\\operator\\runtime.py "
+                "SELECT secret_column FROM internal_table "
+                "stderr=PROCESS_CANARY Traceback USERNAME_CANARY"
+            )
+            payload["status"] = "manual_recovery_required"
+            payload["updatedAt"] = private_diagnostics
+            payload["metadata"] = {
+                "locator": private_diagnostics,
+                "releaseBinding": {"private": private_diagnostics},
+            }
+            payload["events"] = [
+                {
+                    "status": "manual_recovery_required",
+                    "at": private_diagnostics,
+                    "detail": private_diagnostics,
+                    "traceback": private_diagnostics,
+                }
+            ]
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            status_payload = agent.dispatch(
+                {"operation": "get_status", "params": {}}
+            )
+            operation_payload = agent.dispatch(
+                {
+                    "operation": "get_operation",
+                    "params": {"operationId": operation["id"]},
+                }
+            )
+            logs_payload = agent.dispatch(
+                {
+                    "operation": "get_logs",
+                    "params": {"operationId": operation["id"], "limit": 100},
+                }
+            )
+
+            exposed = json.dumps(
+                [status_payload, operation_payload, logs_payload],
+                ensure_ascii=False,
+            )
+            for sentinel in (
+                "private",
+                "SELECT secret_column",
+                "PROCESS_CANARY",
+                "Traceback",
+                "USERNAME_CANARY",
+            ):
+                self.assertNotIn(sentinel, exposed)
+            self.assertEqual(
+                set(operation_payload),
+                {"id", "kind", "status", "createdAt", "updatedAt", "events"},
+            )
+            self.assertEqual(
+                operation_payload["events"][0]["detail"],
+                "Operation state is unavailable",
+            )
+            self.assertEqual(
+                operation_payload["status"],
+                "invalid_operation_state",
+            )
+            self.assertEqual(logs_payload["events"], operation_payload["events"])
+            self.assertEqual(status_payload["recoveryBlock"]["since"], "")
+            self.assertEqual(
+                status_payload["recoveryBlock"]["detail"],
+                "Operation state is unavailable",
+            )
 
     def test_status_exposes_live_previous_compatibility_for_rollback_ux(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -810,7 +984,16 @@ class UpdateAgentTests(unittest.TestCase):
                 time.sleep(0.01)
 
             self.assertEqual(operation["status"], "failed_pre_switch")
-            self.assertIn("worker exploded", operation["events"][-1]["detail"])
+            self.assertEqual(
+                operation["events"][-1]["detail"],
+                "Operation failed before application switch",
+            )
+            self.assertNotIn("worker exploded", json.dumps(operation))
+            persisted = agent.operations.get(operation_id)
+            self.assertEqual(
+                persisted["events"][-1]["detail"],
+                "background update worker failed",
+            )
             self.assertTrue(
                 agent.wait_for_background_operation(operation_id, timeout=1)
             )
@@ -968,7 +1151,16 @@ class UpdateAgentTests(unittest.TestCase):
                 time.sleep(0.01)
 
             self.assertEqual(operation["status"], "failed_pre_switch")
-            self.assertIn("rollback worker exploded", operation["events"][-1]["detail"])
+            self.assertEqual(
+                operation["events"][-1]["detail"],
+                "Operation failed before application switch",
+            )
+            self.assertNotIn("rollback worker exploded", json.dumps(operation))
+            persisted = agent.operations.get(operation_id)
+            self.assertEqual(
+                persisted["events"][-1]["detail"],
+                "background rollback worker failed",
+            )
             self.assertTrue(
                 agent.wait_for_background_operation(operation_id, timeout=1)
             )

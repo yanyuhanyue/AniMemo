@@ -1,3 +1,6 @@
+import hashlib
+
+from config.api_errors import public_failure
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
@@ -5,15 +8,24 @@ from rest_framework import permissions, status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
 from site_config.models import InstallationState, SiteSettings, TagDefinition
 
-from .emails import EmailDeliveryDisabled, EmailDeliveryError, EmailDeliveryNotConfigured, send_transactional_email
+from .emails import (
+    EmailDeliveryDisabled,
+    EmailDeliveryError,
+    EmailDeliveryNotConfigured,
+    send_transactional_email,
+)
 from .models import Column, JournalEntry, UserSettings
-from .serializers import ColumnSerializer, JournalEntrySerializer, SiteSettingsSerializer, StaffSiteSettingsSerializer, TestEmailSerializer
+from .serializers import (
+    ColumnSerializer,
+    JournalEntrySerializer,
+    SiteSettingsSerializer,
+    StaffSiteSettingsSerializer,
+    TestEmailSerializer,
+)
 from .staff_services import StaffCapabilityPermission, record_audit
 from .view_helpers import build_public_stats
-
 
 User = get_user_model()
 
@@ -92,19 +104,36 @@ class StaffTestEmailView(APIView):
                 ),
                 text=f"{site_settings.site_name} 邮件服务测试成功。",
             )
-        except EmailDeliveryDisabled as error:
-            return Response({"detail": str(error)}, status=status.HTTP_409_CONFLICT)
-        except EmailDeliveryNotConfigured as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
-        except EmailDeliveryError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_502_BAD_GATEWAY)
+        except EmailDeliveryDisabled:
+            return Response(
+                public_failure(request=request, candidate_code="email_delivery_disabled", status_code=status.HTTP_409_CONFLICT),
+                status=status.HTTP_409_CONFLICT,
+            )
+        except EmailDeliveryNotConfigured:
+            return Response(
+                public_failure(request=request, candidate_code="email_delivery_not_configured", status_code=status.HTTP_400_BAD_REQUEST),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except EmailDeliveryError:
+            return Response(
+                public_failure(request=request, candidate_code="email_delivery_failed", status_code=status.HTTP_502_BAD_GATEWAY),
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         provider_id = result.get("id", "") if isinstance(result, dict) else ""
         detail = (
             "开发环境未配置 Resend，邮件内容已写入后端日志，未实际发送。"
             if provider_id == "development-console"
             else f"测试邮件已发送至 {recipient}。"
         )
-        record_audit(request, action="settings.test_email", target=site_settings, metadata={"recipient": recipient, "provider_id": provider_id})
+        record_audit(
+            request,
+            action="settings.test_email",
+            target=site_settings,
+            metadata={
+                "recipient_hash": hashlib.sha256(recipient.casefold().encode("utf-8")).hexdigest(),
+                "result": "sent",
+            },
+        )
         return Response({"detail": detail, "provider_id": provider_id})
 
 

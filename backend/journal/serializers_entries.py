@@ -24,7 +24,7 @@ def _validate_poster_url(value):
     try:
         return validate_poster_url(value)
     except PosterUrlValidationError as error:
-        raise serializers.ValidationError(str(error)) from error
+        raise serializers.ValidationError("封面地址不符合安全策略。", code="invalid_poster_url") from error
 
 
 def _prefetched_watch_history(obj):

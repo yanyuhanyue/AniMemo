@@ -5,51 +5,87 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
 from datetime import timedelta
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from urllib.parse import parse_qs, unquote, urlparse
 from unittest.mock import patch
+from urllib.parse import parse_qs, unquote, urlparse
 
-from PIL import Image
+from accounts.models import (
+    PendingRegistration,
+    RevokedAccessToken,
+    StaffProfile,
+    UserSecurityProfile,
+)
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.cache import cache
 from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import close_old_connections, connection
-from django.db import IntegrityError, transaction
-from django.test import RequestFactory, SimpleTestCase, TransactionTestCase, override_settings, skipUnlessDBFeature
+from django.db import IntegrityError, close_old_connections, connection, transaction
+from django.test import (
+    RequestFactory,
+    SimpleTestCase,
+    TransactionTestCase,
+    override_settings,
+    skipUnlessDBFeature,
+)
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
+from PIL import Image
+from plugin_host.models import (
+    PluginDeployment,
+    PluginPackageBlob,
+    PluginProject,
+    PluginVersion,
+)
+from plugin_host.permissions import (
+    can_access_plugin_backend,
+    plugin_permissions_for_user,
+)
 from rest_framework import status
 from rest_framework.exceptions import ParseError
-from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.test import APIClient, APITestCase
-from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+from rest_framework.throttling import SimpleRateThrottle
+from rest_framework_simplejwt.token_blacklist.models import (
+    BlacklistedToken,
+    OutstandingToken,
+)
 from rest_framework_simplejwt.tokens import RefreshToken
+from site_config.models import InstallationState, SiteSettings
 
 from .account_security import AccountDeletionError, delete_current_account
-from .emails import EmailDeliveryError
+from .admin_security_middleware import (
+    STAFF_2FA_AT_KEY,
+    STAFF_2FA_USER_KEY,
+    STAFF_2FA_VERSION_KEY,
+)
 from .auth_tokens import create_refresh_token
 from .csv_security import safe_csv_value
+from .emails import EmailDeliveryError
 from .import_parsers import LimitedImportJSONParser
-from accounts.models import PendingRegistration, RevokedAccessToken, StaffProfile, UserSecurityProfile
-from site_config.models import InstallationState, SiteSettings
 from .models import AdminAuditLog, Column, JournalEntry, UserSettings
-from plugin_host.models import PluginDeployment, PluginPackageBlob, PluginProject, PluginVersion
-from plugin_host.permissions import can_access_plugin_backend, plugin_permissions_for_user
-from .serializers import ColumnSerializer, JournalEntrySerializer, RegistrationCompleteSerializer, RegistrationRequestSerializer, SiteSettingsSerializer, UserSettingsSerializer
 from .network import client_ip
-from .security import TOTP_RECOVERY_CODE_COUNT, _totp_at, consume_recovery_code, hash_recovery_codes
-from .throttling import AuthThrottleUnavailable, HashedAccountRateThrottle
-from .admin_security_middleware import STAFF_2FA_AT_KEY, STAFF_2FA_USER_KEY, STAFF_2FA_VERSION_KEY
+from .security import (
+    TOTP_RECOVERY_CODE_COUNT,
+    _totp_at,
+    consume_recovery_code,
+    hash_recovery_codes,
+)
+from .serializers import (
+    ColumnSerializer,
+    JournalEntrySerializer,
+    RegistrationCompleteSerializer,
+    RegistrationRequestSerializer,
+    SiteSettingsSerializer,
+    UserSettingsSerializer,
+)
 from .staff_services import ALL_CAPABILITIES, resolve_staff_role, staff_capabilities
-
+from .throttling import AuthThrottleUnavailable, HashedAccountRateThrottle
 
 User = get_user_model()
 RELAXED_THROTTLE_SETTINGS = {
@@ -290,7 +326,14 @@ class StaffHierarchySecurityTests(APITestCase):
         self.assertEqual(normal.status_code, status.HTTP_200_OK)
         denied = client.post(reverse("staff-user-action", kwargs={"pk": self.staff.pk, "action": "force-logout"}), {}, format="json")
         self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(denied.data["detail"], "无权操作该管理员账号。")
+        self.assertEqual(set(denied.data), {"code", "detail", "correlation_id"})
+        self.assertEqual(denied.data["code"], "staff_user_access_denied")
+        self.assertEqual(denied.data["detail"], "无权执行该操作。")
+        self.assertRegex(denied.data["correlation_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(
+            denied["X-AniMemo-Correlation-ID"],
+            denied.data["correlation_id"],
+        )
         self.assertTrue(AdminAuditLog.objects.filter(action="user.management_denied", target_id=str(self.staff.pk)).exists())
 
     def test_staff_sensitive_action_requires_reauthentication(self):
@@ -982,7 +1025,6 @@ class TwoFactorSecurityTests(APITestCase):
             "password": self.password,
         }, format="json")
         self.assertEqual(second_factor_token.status_code, invalid_token.status_code)
-        self.assertEqual(second_factor_token.data, invalid_token.data)
 
         staff_client = APIClient(enforce_csrf_checks=True)
         csrf = staff_client.get(reverse("csrf-token")).data["csrf_token"]
@@ -995,7 +1037,6 @@ class TwoFactorSecurityTests(APITestCase):
             "password": self.password,
         }, format="json", HTTP_X_CSRFTOKEN=csrf)
         self.assertEqual(second_factor_staff.status_code, invalid_staff.status_code)
-        self.assertEqual(second_factor_staff.data, invalid_staff.data)
 
         non_staff = User.objects.create_user(
             username="ordinary-login-oracle",
@@ -1012,8 +1053,33 @@ class TwoFactorSecurityTests(APITestCase):
             "password": "wrong-password",
         }, format="json", HTTP_X_CSRFTOKEN=csrf)
         self.assertEqual(correct_non_staff.status_code, wrong_non_staff.status_code)
-        self.assertEqual(correct_non_staff.data, wrong_non_staff.data)
-        self.assertEqual(correct_non_staff.data, invalid_staff.data)
+        failures = (
+            invalid_token,
+            second_factor_token,
+            invalid_staff,
+            second_factor_staff,
+            correct_non_staff,
+            wrong_non_staff,
+        )
+        expected_public_fields = {
+            "code": "invalid_credentials",
+            "detail": "用户名、密码或验证码不正确。",
+        }
+        for failure in failures:
+            self.assertEqual(set(failure.data), {"code", "detail", "correlation_id"})
+            self.assertEqual(
+                {key: failure.data[key] for key in expected_public_fields},
+                expected_public_fields,
+            )
+            self.assertRegex(failure.data["correlation_id"], r"^[0-9a-f]{32}$")
+            self.assertEqual(
+                failure["X-AniMemo-Correlation-ID"],
+                failure.data["correlation_id"],
+            )
+        self.assertEqual(
+            len({failure.data["correlation_id"] for failure in failures}),
+            len(failures),
+        )
 
     def test_first_bind_uses_pending_secret_and_standard_uri(self):
         begin = self.begin()
@@ -1058,7 +1124,14 @@ class TwoFactorSecurityTests(APITestCase):
             "code": _totp_at(begin.data["secret"], time.time()),
         })
         self.assertEqual(expired.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(expired.data["detail"], "二维码已过期，请重新生成。")
+        self.assertEqual(set(expired.data), {"code", "detail", "correlation_id"})
+        self.assertEqual(expired.data["code"], "invalid_request")
+        self.assertEqual(expired.data["detail"], "请求参数无效。")
+        self.assertRegex(expired.data["correlation_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(
+            expired["X-AniMemo-Correlation-ID"],
+            expired.data["correlation_id"],
+        )
         profile.refresh_from_db()
         self.assertFalse(profile.pending_totp_secret_encrypted)
 
@@ -1325,7 +1398,8 @@ class CsvAndImportSecurityTests(APITestCase):
         upload = SimpleUploadedFile("entries.json", b"{" + b" " * 100 + b"}", content_type="application/json")
         response = self.client.post(reverse("import"), {"file": upload, "preview": "true"}, format="multipart")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("不能超过", response.data["detail"])
+        self.assertEqual(set(response.data), {"code", "detail", "correlation_id"})
+        self.assertEqual(response.data["code"], "invalid_import_file")
 
     @override_settings(IMPORT_FILE_MAX_BYTES=64)
     def test_direct_json_parser_enforces_raw_bytes_without_trusting_content_length(self):
@@ -1429,7 +1503,14 @@ class AccountDeletionSecurityTests(APITestCase):
         code = _totp_at("JBSWY3DPEHPK3PXP", time.time())
         response = self.client.delete(reverse("account"), {"current_password": self.password, "otp": code}, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("最后一个有效超级管理员", str(response.data))
+        self.assertEqual(set(response.data), {"code", "detail", "correlation_id"})
+        self.assertEqual(response.data["code"], "invalid_request")
+        self.assertEqual(response.data["detail"], "请求参数无效。")
+        self.assertRegex(response.data["correlation_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(
+            response["X-AniMemo-Correlation-ID"],
+            response.data["correlation_id"],
+        )
         self.assertTrue(User.objects.filter(pk=admin.pk).exists())
 
 

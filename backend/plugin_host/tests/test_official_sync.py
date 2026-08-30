@@ -6,13 +6,16 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
-from io import BytesIO
+from contextlib import redirect_stderr
+from io import BytesIO, StringIO
 from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
 from django.contrib.auth import get_user_model
-from django.core.management import call_command
+from django.core.management import ManagementUtility, call_command
+from django.core.management.base import CommandError
+from django.db import OperationalError
 from django.test import TestCase, override_settings
 
 from plugin_host.models import (
@@ -29,6 +32,7 @@ from plugin_host.official_packages import (
     canonical_content_digest_from_package,
     canonical_content_digest_from_source,
 )
+from plugin_host.package import PluginPackageError
 from plugin_host.runtime import runtime_registry
 from plugin_host.services import store_package_blob
 
@@ -246,7 +250,10 @@ class OfficialPluginSyncTests(TestCase):
             description="Must not be claimed by official synchronization",
         )
 
-        with self.assertRaisesRegex(RuntimeError, "Official plugin id/slug conflict"):
+        with self.assertRaisesRegex(
+            CommandError,
+            r"^official_plugin_sync_failed correlation_id=[0-9a-f]{32}$",
+        ):
             call_command("sync_official_plugins")
 
         project.refresh_from_db()
@@ -301,7 +308,10 @@ class OfficialPluginSyncTests(TestCase):
             return_value=changed_package,
         ), patch(
             "plugin_host.management.commands.sync_official_plugins.PluginPackageInstaller.publish"
-        ) as publish, self.assertRaisesRegex(RuntimeError, "Official plugin immutable content mismatch"):
+        ) as publish, self.assertRaisesRegex(
+            CommandError,
+            r"^official_plugin_sync_failed correlation_id=[0-9a-f]{32}$",
+        ):
             call_command("sync_official_plugins")
 
         deployment.refresh_from_db()
@@ -318,7 +328,10 @@ class OfficialPluginSyncTests(TestCase):
         package_path = Path(self.root.name) / version.package_blob.storage_path
         package_path.unlink()
 
-        with self.assertRaisesRegex(RuntimeError, "historical package is missing from CAS"):
+        with self.assertRaisesRegex(
+            CommandError,
+            r"^official_plugin_sync_failed correlation_id=[0-9a-f]{32}$",
+        ):
             call_command("sync_official_plugins")
 
         self.assertEqual(PluginVersion.objects.count(), 1)
@@ -330,8 +343,79 @@ class OfficialPluginSyncTests(TestCase):
         package_path = Path(self.root.name) / version.package_blob.storage_path
         package_path.write_bytes(json.dumps({"corrupt": True}).encode("utf-8"))
 
-        with self.assertRaisesRegex(RuntimeError, "historical package is corrupt"):
+        with self.assertRaisesRegex(
+            CommandError,
+            r"^official_plugin_sync_failed correlation_id=[0-9a-f]{32}$",
+        ):
             call_command("sync_official_plugins")
 
         self.assertEqual(PluginVersion.objects.count(), 1)
         self.assertEqual(PluginPackageBlob.objects.count(), 1)
+
+    def test_sync_package_failure_does_not_expose_hostile_diagnostics(self):
+        sentinels = (
+            r"C:\Users\hostile-user\private.sql",
+            "SELECT secret FROM auth_user",
+            "official-package-secret-sentinel",
+            "hostile-user",
+        )
+        errors = StringIO()
+        with (
+            patch(
+                "plugin_host.management.commands.sync_official_plugins.build_official_package",
+                side_effect=PluginPackageError(" ".join(sentinels)),
+            ),
+            redirect_stderr(errors),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            ManagementUtility(
+                ["manage.py", "sync_official_plugins", "--no-color"]
+            ).execute()
+
+        public_text = errors.getvalue()
+        for sentinel in sentinels:
+            self.assertNotIn(sentinel, public_text)
+        self.assertEqual(raised.exception.code, 1)
+        self.assertRegex(
+            public_text,
+            r"^CommandError: official_plugin_sync_failed "
+            r"correlation_id=[0-9a-f]{32}\r?\n$",
+        )
+        self.assertNotIn("Traceback", public_text)
+
+    def test_sync_unexpected_failures_use_real_cli_safe_stderr(self):
+        sentinels = (
+            r"C:\private\official.sqlite token=ORM_TOKEN_CANARY Traceback",
+            r"C:\private\publisher.key token=PUBLISH_TOKEN_CANARY Traceback",
+        )
+        failures = (
+            patch(
+                "plugin_host.management.commands.sync_official_plugins.get_user_model",
+                side_effect=OperationalError(sentinels[0]),
+            ),
+            patch(
+                "plugin_host.management.commands.sync_official_plugins.PluginPackageInstaller.publish",
+                side_effect=CommandError(sentinels[1]),
+            ),
+        )
+        for failure, sentinel in zip(failures, sentinels, strict=True):
+            errors = StringIO()
+            with (
+                self.subTest(sentinel=sentinel),
+                failure,
+                redirect_stderr(errors),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                ManagementUtility(
+                    ["manage.py", "sync_official_plugins", "--no-color"]
+                ).execute()
+
+            public_text = errors.getvalue()
+            self.assertEqual(raised.exception.code, 1)
+            self.assertRegex(
+                public_text,
+                r"^CommandError: official_plugin_sync_failed "
+                r"correlation_id=[0-9a-f]{32}\r?\n$",
+            )
+            self.assertNotIn(sentinel, public_text)
+            self.assertNotIn("Traceback", public_text)

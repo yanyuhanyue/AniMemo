@@ -1,19 +1,25 @@
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import urlparse
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
-
 from site_config.media_storage.common import UnsafeObjectKey
-from site_config.media_storage.local import approved_local_root, validate_storage_subpath
+from site_config.media_storage.local import (
+    approved_local_root,
+    validate_storage_subpath,
+)
 from site_config.media_storage.pool import StoragePoolService
-from site_config.media_storage.usage import account_actual_usage_bytes, account_managed_usage_bytes, effective_account_usage, effective_storage_usage, managed_usage_bytes
+from site_config.media_storage.usage import (
+    account_actual_usage_bytes,
+    account_managed_usage_bytes,
+    effective_account_usage,
+    effective_storage_usage,
+    managed_usage_bytes,
+)
 from site_config.models import CloudflareR2Account, MediaStorageBackend
-
 
 BUCKET_PATTERN = re.compile(r"^(?!\d+\.\d+\.\d+\.\d+$)[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?$")
 
@@ -147,7 +153,7 @@ class MediaStorageBackendSerializer(serializers.ModelSerializer):
         try:
             return validate_storage_subpath(value)
         except UnsafeObjectKey as error:
-            raise serializers.ValidationError(str(error)) from error
+            raise serializers.ValidationError("本地存储子路径无效。", code="unsafe_storage_path") from error
 
     def validate(self, attrs):
         backend_type = attrs.get("backend_type", getattr(self.instance, "backend_type", None))
@@ -193,7 +199,9 @@ class MediaStorageBackendSerializer(serializers.ModelSerializer):
             try:
                 approved_local_root(candidate)
             except (UnsafeObjectKey, ValueError) as error:
-                raise serializers.ValidationError({"local_root": str(error)}) from error
+                raise serializers.ValidationError(
+                    {"local_root": serializers.ErrorDetail("本地存储目录不可用。", code="storage_root_unavailable")}
+                ) from error
             public_url = attrs.get("local_public_base_url", getattr(self.instance, "local_public_base_url", "") if self.instance else "")
             if not public_url:
                 raise serializers.ValidationError({"local_public_base_url": "Local 存储必须填写公共 URL。"})

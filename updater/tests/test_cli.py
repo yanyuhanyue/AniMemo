@@ -117,8 +117,38 @@ class HostAgentCliTests(unittest.TestCase):
                 1,
             )
         payload = json.loads(errors.getvalue())
+        self.assertEqual(set(payload["error"]), {"code", "detail", "correlation_id"})
         self.assertEqual(payload["error"]["code"], "CONFIG_PLAN_ACCEPTANCE_REQUIRED")
+        self.assertEqual(payload["error"]["detail"], "Configuration request failed")
+        self.assertRegex(payload["error"]["correlation_id"], r"^[0-9a-f]{32}$")
         manager.apply.assert_not_called()
+
+    def test_cli_unexpected_failure_is_generic_and_has_no_traceback(self):
+        errors = io.StringIO()
+        private_diagnostic = (
+            r"C:\\private\\runtime.py SELECT secret FROM internal_table "
+            "Traceback CLI_PRIVATE_CANARY"
+        )
+        with (
+            patch(
+                "updater.__main__.production_runtime",
+                side_effect=RuntimeError(private_diagnostic),
+            ),
+            redirect_stderr(errors),
+        ):
+            self.assertEqual(main(["status"]), 1)
+
+        payload = json.loads(errors.getvalue())
+        self.assertEqual(set(payload), {"ok", "error"})
+        self.assertFalse(payload["ok"])
+        self.assertEqual(set(payload["error"]), {"code", "detail", "correlation_id"})
+        self.assertEqual(payload["error"]["code"], "internal_error")
+        self.assertEqual(
+            payload["error"]["detail"],
+            "Internal update service error",
+        )
+        self.assertRegex(payload["error"]["correlation_id"], r"^[0-9a-f]{32}$")
+        self.assertNotIn(private_diagnostic, errors.getvalue())
 
     def test_configuration_apply_exit_codes_distinguish_recovery_and_failure(self):
         plan = SimpleNamespace(plan_digest="sha256:" + "a" * 64)

@@ -15,13 +15,11 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
-
 from site_config.models import InstallationState
 
 from .auth_tokens import issue_token_pair
 from .security import _totp_at
 from .staff_services import get_security_profile
-
 
 User = get_user_model()
 
@@ -174,7 +172,14 @@ class InstallationTokenIdentityTests(APITestCase):
         client, response = self.staff_login()
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(set(response.data), {"code", "detail", "correlation_id"})
         self.assertEqual(response.data["code"], "session_revoked")
+        self.assertEqual(response.data["detail"], "登录会话已失效，请重新登录。")
+        self.assertRegex(response.data["correlation_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(
+            response["X-AniMemo-Correlation-ID"],
+            response.data["correlation_id"],
+        )
         self.assertNotIn("_auth_user_id", client.session)
         admin = client.get("/admin/")
         self.assertEqual(admin.status_code, status.HTTP_302_FOUND)

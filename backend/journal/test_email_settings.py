@@ -1,13 +1,14 @@
 from unittest.mock import Mock, patch
 
+from accounts.models import StaffProfile
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.urls import reverse
 from rest_framework.test import APITestCase
-
-from accounts.models import StaffProfile
 from site_config.models import InstallationState, SiteSettings
 
+from journal.emails import EmailDeliveryError
+from journal.models import AdminAuditLog
 
 User = get_user_model()
 
@@ -86,6 +87,32 @@ class StaffEmailSettingsTests(APITestCase):
         self.assertEqual(response.data["provider_id"], "email_123")
         self.assertEqual(post.call_args.kwargs["json"]["from"], "Anime Mail <noreply@example.com>")
         self.assertEqual(post.call_args.kwargs["json"]["to"], ["recipient@example.com"])
+        audit = AdminAuditLog.objects.get(action="settings.test_email")
+        self.assertNotIn("recipient@example.com", str(audit.metadata))
+        self.assertNotIn("email_123", str(audit.metadata))
+        self.assertIn("recipient_hash", audit.metadata)
+
+    @patch("journal.public_views.send_transactional_email")
+    def test_test_email_failure_never_exposes_provider_exception(self, send):
+        marker = "EMAIL-PROVIDER-STACK-SENTINEL"
+        settings_obj = SiteSettings.load()
+        settings_obj.email_delivery_enabled = True
+        settings_obj.set_resend_api_key("re_test-secret")
+        settings_obj.save()
+        send.side_effect = EmailDeliveryError(marker)
+        self.client.force_authenticate(self.admin)
+
+        response = self.client.post(
+            reverse("staff-test-email"),
+            {"email": "recipient@example.com"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.data["code"], "email_delivery_failed")
+        self.assertIn("correlation_id", response.data)
+        self.assertNotIn(marker, str(response.data))
+        self.assertFalse(AdminAuditLog.objects.filter(action="settings.test_email").exists())
 
     @patch("journal.emails.requests.post")
     def test_disabled_email_delivery_blocks_test_send(self, post):
