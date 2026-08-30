@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -14,14 +15,17 @@ from unittest import mock
 
 from release import cli
 from release.acceptance import (
-    build_rc_live_acceptance,
     verify_stable_promotion_acceptance,
 )
 from release.cli import _validate_stable_publication_authority_inputs
 from release.contract import build_manifest, promote_manifest
+from release.formal_acceptance_test_support import build_test_formal_acceptance
 from release.materials import MaterialContractError
 from release.publication import PublicationError
 from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
+from scripts.tests.formal_windows_pretrust_fixture import (
+    create_test_formal_windows_pretrust_kit,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 COMMIT = "b" * 40
@@ -179,8 +183,6 @@ class ReleaseCliTests(unittest.TestCase):
             stable_manifest = promote_manifest(
                 rc_manifest,
                 existing_tags=[],
-                provenance_source_commit="c" * 40,
-                created_at="2026-08-20T00:00:00Z",
             )
             (assets / "release-manifest.json").write_text(
                 json.dumps(stable_manifest, ensure_ascii=False, indent=2, sort_keys=True)
@@ -190,9 +192,10 @@ class ReleaseCliTests(unittest.TestCase):
             )
             (assets / "deployment-contract.json").write_bytes(deployment)
             (assets / "installer-materials.tar").write_bytes(materials)
-            acceptance = build_rc_live_acceptance(
+            acceptance = build_test_formal_acceptance(
                 rc_tag="v1.1.0-rc.1",
                 rc_commit=COMMIT,
+                rc_tree=COMMIT,
                 release_manifest_identity=(
                     "sha256:" + hashlib.sha256(rc_manifest_path.read_bytes()).hexdigest()
                 ),
@@ -203,9 +206,6 @@ class ReleaseCliTests(unittest.TestCase):
                 fresh_base_identity="sha256:" + "6" * 64,
                 docker_base_identity="sha256:" + "7" * 64,
                 runtime_base_identity="sha256:" + "8" * 64,
-                install_path="github",
-                doctor_result="PASS",
-                upgrade_result="PASS",
                 accepted_at="2026-08-20T00:01:00Z",
                 operator_identity="github:maintainer-review/v1",
                 tool_identity="sha256:" + "9" * 64,
@@ -250,6 +250,16 @@ class ReleaseCliTests(unittest.TestCase):
             with self.assertRaisesRegex(PublicationError, "RC manifest"):
                 _validate_stable_publication_authority_inputs(arguments)
             rc_manifest_path.write_bytes(rc_manifest_path.read_bytes()[:-1])
+            tampered_stable = copy.deepcopy(stable_manifest)
+            tampered_stable["release"]["createdAt"] = "2026-08-19T00:00:01Z"
+            (assets / "release-manifest.json").write_text(
+                json.dumps(tampered_stable), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(PublicationError, "derive exactly"):
+                _validate_stable_publication_authority_inputs(arguments)
+            (assets / "release-manifest.json").write_text(
+                json.dumps(stable_manifest), encoding="utf-8"
+            )
             (assets / "installer-materials.tar").write_bytes(b"tampered")
             with self.assertRaisesRegex(PublicationError, "immutable materials"):
                 _validate_stable_publication_authority_inputs(arguments)
@@ -267,12 +277,16 @@ class ReleaseCliTests(unittest.TestCase):
             )
             checksums = root / "checksums.txt"
             trust_kit = create_test_initial_trust_kit(root)
+            formal_windows_kit = create_test_formal_windows_pretrust_kit(
+                root, source_initial_trust_kit=trust_kit
+            )
             self.run_cli(
                 "build-installer-materials",
                 "--root", ROOT,
                 "--wheelhouse", wheelhouse,
                 "--output", installer_materials,
                 "--initial-trust-kit", trust_kit,
+                "--formal-windows-pretrust-kit", formal_windows_kit,
             )
             self.run_cli(
                 "generate-deployment-contract",
@@ -337,10 +351,14 @@ class ReleaseCliTests(unittest.TestCase):
             )
             installer_materials = root / "installer-materials.tar"
             trust_kit = create_test_initial_trust_kit(root)
+            formal_windows_kit = create_test_formal_windows_pretrust_kit(
+                root, source_initial_trust_kit=trust_kit
+            )
             self.run_cli(
                 "build-installer-materials", "--root", ROOT,
                 "--wheelhouse", wheelhouse, "--output", installer_materials,
                 "--initial-trust-kit", trust_kit,
+                "--formal-windows-pretrust-kit", formal_windows_kit,
             )
             self.run_cli(
                 "generate-deployment-contract", "--root", source_root,

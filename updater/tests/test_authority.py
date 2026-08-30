@@ -22,7 +22,7 @@ from updater.tests.test_source import (
 )
 
 EXPECTED_IDENTITY = (
-    "sha256:5d8de954302dc5ac5233729491f165bc0f263735178f370b2bac34270674b10c"
+    "sha256:30d6c1cadb28c21c5bee9fe8381ce86f9788b4d12b80148bb8bb9d12516b65b6"
 )
 MATERIAL_PATH = "wheelhouse/qualified_dependency-1.0-py3-none-any.whl"
 
@@ -68,8 +68,8 @@ def _fixture() -> tuple[dict[str, bytes], AuthorityEvidence]:
             certificate_identity=(
                 f"https://github.com/{REPOSITORY}/{producer_workflow}@refs/heads/main"
             ),
-            source_commit=source_commit,
-            signer_digest=source_commit,
+            logical_source_commit=source_commit,
+            logical_signer_digest=source_commit,
             **common,
         )
 
@@ -261,9 +261,13 @@ class ReleaseAuthorityVerifierTests(unittest.TestCase):
             "wrong_oidc_issuer": change_attestation(
                 "oidc_issuer", "https://example.invalid/issuer"
             ),
-            "wrong_source_commit": change_attestation("source_commit", "8" * 40),
+            "wrong_source_commit": change_attestation(
+                "logical_source_commit", "8" * 40
+            ),
             "wrong_source_ref": change_attestation("source_ref", "refs/tags/v1.0.0"),
-            "wrong_signer_digest": change_attestation("signer_digest", "7" * 40),
+            "wrong_signer_digest": change_attestation(
+                "logical_signer_digest", "7" * 40
+            ),
             "wrong_predicate": change_attestation(
                 "predicate_type", "https://example.invalid/predicate"
             ),

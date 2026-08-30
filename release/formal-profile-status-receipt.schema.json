@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://animemo.cc/schemas/formal-profile-status-receipt-v1.json",
+  "title": "AniMemo Formal profile non-observation status receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "rc_authority_identity", "profile", "status",
+    "failure_code", "continuation_receipt_digest",
+    "release_authority_granted", "publish_authorized", "receipt_digest"
+  ],
+  "properties": {
+    "schema": {"const": "animemo.formal-profile-status-receipt/v1"},
+    "version": {"const": 1},
+    "rc_authority_identity": {"$ref": "#/$defs/digest"},
+    "profile": {"enum": ["FORMAL_FRESH", "FORMAL_DOCKER", "FORMAL_OFFLINE"]},
+    "status": {"enum": ["ERROR", "NOT_RUN_SHARED_BLOCKER"]},
+    "failure_code": {"type": "string", "pattern": "^FORMAL_[A-Z0-9_]{1,120}$"},
+    "continuation_receipt_digest": {"$ref": "#/$defs/nullableDigest"},
+    "release_authority_granted": {"const": false},
+    "publish_authorized": {"const": false},
+    "receipt_digest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "nullableDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}
+  }
+}

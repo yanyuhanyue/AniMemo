@@ -6,10 +6,11 @@ import ctypes
 import hashlib
 import io
 import json
+import os
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from ctypes import wintypes
 from dataclasses import replace
 from pathlib import Path
@@ -23,6 +24,7 @@ from release.candidate import (
     canonical_json_bytes,
     sha256_bytes,
 )
+from release.formal_windows_pretrust import hold_windows_private_path_authority
 from release.r2_prestate import (
     ACCESS_KEY_ENV,
     ACCOUNT_ID_ENV,
@@ -72,7 +74,11 @@ class FakeProvider:
         self.profile_errors = {}
         self.profile_results = {}
         self.hashes = {
-            name: "sha256:" + "3" * 64 for name in harness.SOURCE_VM_HASH_FILES
+            name: "sha256:" + "3" * 64
+            for name in (
+                *harness.SOURCE_VM_HASH_FILES,
+                *harness.SOURCE_VM_PRIVATE_ADDITIONAL_FILES,
+            )
         }
         self.snapshots = {
             profile: "sha256:" + character * 64
@@ -91,6 +97,7 @@ class FakeProvider:
             snapshot_identities=self.snapshots,
             snapshot_disk_graph_identities=self.snapshot_disk_graphs,
             source_disk_graph_identity=self.source_disk_graph,
+            source_vm_inventory_identity="sha256:" + "e" * 64,
             original_hashes=self.hashes,
         )
 
@@ -127,7 +134,12 @@ class FakeProvider:
             "candidate_version": harness_plan.candidate_version,
             "profile": plan.profile,
             "base_vm_identity": harness_plan.source_vm_digest,
+            "source_vm_inventory_identity": (
+                harness_plan.source_vm_inventory_identity
+            ),
+            "source_disk_graph_identity": harness_plan.source_disk_graph_identity,
             "snapshot_identity": plan.snapshot_identity,
+            "snapshot_disk_graph_identity": plan.snapshot_disk_graph_identity,
             "clone_identity": plan.clone_identity,
             "initial_platform_state": dict(initial_platform_state),
             "platform_bootstrap_plan_digest": "sha256:" + "7" * 64,
@@ -250,6 +262,136 @@ class CandidateGuestPathContractTests(unittest.TestCase):
             VERIFIED_CANDIDATE_ROOT,
         )
 
+    def test_candidate_material_manifest_requires_closed_inventory_program(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = {
+                "qualification_run_id": RUN_ID,
+                "candidate_runtime_file_inventory": [],
+            }
+            for name in harness._CANDIDATE_AUTHORITY_ROOT_FILES:
+                (root / name).write_bytes(("fixed:" + name).encode("utf-8"))
+            (root / f"release-qualification-{RUN_ID}.json").write_bytes(
+                b"fixed qualification"
+            )
+            runner = root / "installer-root" / "scripts" / "candidate_profile_runner.py"
+            runner.parent.mkdir(parents=True)
+            runner.write_bytes(b"print('fixed candidate runner')\n")
+            loaded = SimpleNamespace(
+                root=root,
+                verified_digest=sha256_bytes(
+                    (root / "verified-candidate.json").read_bytes()
+                ),
+                verified={"candidate_input_sha256": DIGEST},
+                candidate_input=candidate,
+                materials=SimpleNamespace(
+                    verified=SimpleNamespace(
+                        files=(
+                            SimpleNamespace(
+                                path="scripts/candidate_profile_runner.py",
+                                sha256=sha256_bytes(runner.read_bytes()),
+                            ),
+                        )
+                    )
+                ),
+            )
+            with self.assertRaisesRegex(
+                harness.CandidateHarnessError,
+                "CANDIDATE_MATERIAL_AUTHORITY_INVALID",
+            ):
+                harness._candidate_authoritative_file_identities(loaded)
+
+    def test_closed_inventory_execution_has_no_dynamic_loader_shape(self):
+        repository = Path(__file__).resolve().parents[2]
+        paths = (
+            Path(harness.__file__),
+            repository / "scripts" / "formal_vm_harness.py",
+            repository / "scripts" / "closed_runtime_inventory.py",
+            Path(__file__),
+            repository / "scripts" / "tests" / "test_formal_vm_harness.py",
+        )
+        dynamic_builtins = {"ex" + "ec", "ev" + "al"}
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [
+                    node.func.id
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in dynamic_builtins
+                ],
+                [],
+                path,
+            )
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                for keyword in node.keywords:
+                    self.assertFalse(
+                        keyword.arg == "shell"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value is True,
+                        path,
+                    )
+        production_tree = ast.parse(Path(harness.__file__).read_text(encoding="utf-8"))
+        inventory_builder = next(
+            node
+            for node in production_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_guest_runtime_inventory_command"
+        )
+        builder_constants = tuple(
+            node.value
+            for node in ast.walk(inventory_builder)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        )
+        self.assertFalse(any(" -" + "c " in value for value in builder_constants))
+        self.assertFalse(
+            any(
+                "base" + "64.b64" + "decode" in value
+                for value in builder_constants
+            )
+        )
+
+    def test_root_only_guest_inventory_calls_use_hidden_sudo_stdin(self):
+        production_tree = ast.parse(Path(harness.__file__).read_text(encoding="utf-8"))
+        for method_name, error_code in (
+            ("_stage_candidate", "CANDIDATE_VM_GUEST_MATERIAL_INVENTORY_UNAVAILABLE"),
+            ("_stage_formal_workload", "FORMAL_VM_GUEST_RUNTIME_INVENTORY_UNAVAILABLE"),
+        ):
+            method = next(
+                node
+                for node in ast.walk(production_tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == method_name
+            )
+            call = next(
+                node
+                for node in ast.walk(method)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_ssh_checked"
+                and any(
+                    keyword.arg == "code"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value == error_code
+                    for keyword in node.keywords
+                )
+            )
+            command = call.args[1]
+            self.assertIsInstance(command, ast.BinOp)
+            self.assertIsInstance(command.op, ast.Add)
+            self.assertIsInstance(command.left, ast.Constant)
+            self.assertEqual(command.left.value, "sudo -S -p '' -- ")
+            sudo_password = next(
+                keyword.value
+                for keyword in call.keywords
+                if keyword.arg == "sudo_password"
+            )
+            self.assertIsInstance(sudo_password, ast.Name)
+            self.assertEqual(sudo_password.id, "password")
+
     def test_profile_runner_uses_python_safe_path(self):
         provider = harness.ClosedVmwareProvider(
             runner=RecordingRunner(),
@@ -260,9 +402,12 @@ class CandidateGuestPathContractTests(unittest.TestCase):
             profile="FRESH_BASE",
             clone_identity=DIGEST,
             snapshot_identity=DIGEST,
+            snapshot_disk_graph_identity=DIGEST,
         )
         plan = SimpleNamespace(
             source_vm_digest=DIGEST,
+            source_vm_inventory_identity=DIGEST,
+            source_disk_graph_identity=DIGEST,
             original_vm_hashes={"base.vmx": DIGEST},
             candidate_input_digest=DIGEST,
             verified_candidate_digest=DIGEST,
@@ -306,11 +451,12 @@ class RecordingRunner:
         self.calls = []
         self.returncodes = dict(returncodes or {})
 
-    def run(self, argv, *, environment, input_bytes=None, timeout=300):
+    def run(self, argv, *, environment, cwd, input_bytes=None, timeout=300):
         self.calls.append(
             {
                 "argv": tuple(argv),
                 "environment": dict(environment),
+                "cwd": Path(cwd),
                 "input_bytes": input_bytes,
                 "timeout": timeout,
             }
@@ -331,7 +477,12 @@ class FakeWindowsPlatform:
         binary_available: bool = True,
         ssh_digest: str | None = None,
         scp_digest: str | None = None,
+        vmrun_digest: str | None = None,
+        robocopy_digest: str | None = None,
+        libcrypto_digest: str | None = None,
         machine: int = 0x8664,
+        vm_machine: int = 0x014C,
+        robocopy_machine: int = 0x8664,
         identity_safe: bool = True,
         known_hosts_safe: bool = True,
         identity_status: str | None = None,
@@ -344,7 +495,16 @@ class FakeWindowsPlatform:
         self.binary_available = binary_available
         self.ssh_digest = ssh_digest or harness.EXPECTED_SSH_SHA256
         self.scp_digest = scp_digest or harness.EXPECTED_SCP_SHA256
+        self.vmrun_digest = vmrun_digest or harness.EXPECTED_VMRUN_SHA256
+        self.robocopy_digest = (
+            robocopy_digest or harness.EXPECTED_ROBOCOPY_SHA256
+        )
+        self.libcrypto_digest = (
+            libcrypto_digest or harness.EXPECTED_OPENSSH_LIBCRYPTO_SHA256
+        )
         self.machine = machine
+        self.vm_machine = vm_machine
+        self.robocopy_machine = robocopy_machine
         self.identity_safe = identity_safe
         self.known_hosts_safe = known_hosts_safe
         self.identity_status = identity_status or (
@@ -382,11 +542,23 @@ class FakeWindowsPlatform:
             digest = self.ssh_digest
         elif path == harness.SCP:
             digest = self.scp_digest
+        elif path == harness.VMRUN:
+            digest = self.vmrun_digest
+        elif path == harness.ROBOCOPY:
+            digest = self.robocopy_digest
+        elif path == harness.OPENSSH_LIBCRYPTO:
+            digest = self.libcrypto_digest
         else:
             digest = harness.EXPECTED_SSH_KEYGEN_SHA256
         return harness.WindowsBinaryIdentity(
             sha256=digest,
-            pe_machine=self.machine,
+            pe_machine=(
+                self.vm_machine
+                if path == harness.VMRUN
+                else self.robocopy_machine
+                if path == harness.ROBOCOPY
+                else self.machine
+            ),
         )
 
     def inspect_controlled_file(self, path, *, root, private):
@@ -648,6 +820,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
             'scsi0:0.fileName = "Ubuntu 64 位-000002.vmdk"\n',
             encoding="utf-8",
         )
+        for name in harness.SOURCE_VM_PRIVATE_ADDITIONAL_FILES:
+            (root / name).write_bytes(("source:" + name).encode("utf-8"))
         assert selected_extent is not None
         return selected_extent
 
@@ -661,6 +835,13 @@ class CandidateVmHarnessTests(unittest.TestCase):
         ), mock.patch(
             "scripts.candidate_vm_harness.execute_harness_plan",
             return_value=result,
+        ), mock.patch.object(
+            harness.ClosedVmwareProvider,
+            "execution_authority",
+            return_value=nullcontext(),
+        ), mock.patch(
+            "scripts.candidate_vm_harness.acquire_candidate_material_authority",
+            return_value=nullcontext(SimpleNamespace()),
         ), redirect_stdout(output):
             code = harness.main(
                 [
@@ -680,6 +861,126 @@ class CandidateVmHarnessTests(unittest.TestCase):
 
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(output.getvalue()), result)
+
+    @unittest.skipUnless(os.name == "nt", "Windows Candidate material authority")
+    def test_candidate_material_authority_is_private_held_and_transferable(self):
+        candidate_digest = "sha256:" + "2" * 64
+        candidate_leaf = candidate_digest.removeprefix("sha256:")
+        public_state = self.root / "public-state"
+        public_root = public_state / candidate_leaf
+        public_root.mkdir(parents=True)
+        candidate = {
+            "qualification_run_id": RUN_ID,
+            "candidate_runtime_file_inventory": [],
+        }
+        for name in harness._CANDIDATE_AUTHORITY_ROOT_FILES:
+            (public_root / name).write_bytes(("fixed:" + name).encode("utf-8"))
+        qualification = public_root / f"release-qualification-{RUN_ID}.json"
+        qualification.write_bytes(b"fixed qualification")
+        runner = public_root / "installer-root" / "scripts" / "candidate_profile_runner.py"
+        runner.parent.mkdir(parents=True)
+        runner.write_bytes(b"print('held candidate runner')\n")
+        inventory_program = runner.parent / "closed_runtime_inventory.py"
+        inventory_program.write_bytes(
+            (Path(__file__).resolve().parents[2] / "scripts" / inventory_program.name)
+            .read_bytes()
+        )
+        verified_digest = sha256_bytes((public_root / "verified-candidate.json").read_bytes())
+        materials = (
+            SimpleNamespace(
+                path="scripts/candidate_profile_runner.py",
+                sha256=sha256_bytes(runner.read_bytes()),
+            ),
+            SimpleNamespace(
+                path="scripts/closed_runtime_inventory.py",
+                sha256=sha256_bytes(inventory_program.read_bytes()),
+            ),
+        )
+        public_loaded = SimpleNamespace(
+            root=public_root,
+            verified_digest=verified_digest,
+            verified={"candidate_input_sha256": candidate_digest},
+            candidate_input=candidate,
+            materials=SimpleNamespace(
+                verified=SimpleNamespace(files=materials)
+            ),
+        )
+        provider = harness.ClosedVmwareProvider(
+            runner=RecordingRunner(),
+            windows_platform=FakeWindowsPlatform(),
+            environment={},
+        )
+
+        def load(digest, *, _state_root=None):
+            self.assertEqual(digest, verified_digest)
+            if Path(_state_root) == public_state:
+                return public_loaded
+            return SimpleNamespace(
+                **{
+                    **public_loaded.__dict__,
+                    "root": Path(_state_root) / candidate_leaf,
+                }
+            )
+
+        outer = harness.create_windows_private_directory(
+            Path("E:/"), prefix="candidate-continuation-lifetime"
+        )
+        material_parent = harness.create_windows_private_directory(
+            outer, prefix="candidate-material-parent"
+        )
+        key_root = harness.create_windows_private_directory(
+            self.root, prefix="candidate-bootstrap-key"
+        )
+        bootstrap_identity = key_root / "id_ed25519"
+        bootstrap_identity.write_bytes(b"test-only-bootstrap-identity")
+        try:
+            with hold_windows_private_path_authority(
+                outer
+            ) as parent_authority, mock.patch.object(
+                harness, "OPENSSH_IDENTITY", bootstrap_identity
+            ), provider.execution_authority():
+                with mock.patch(
+                    "scripts.candidate_vm_harness.load_verified_candidate",
+                    side_effect=load,
+                ):
+                    authority = harness.acquire_candidate_material_authority(
+                        verified_digest,
+                        provider=provider,
+                        _state_root=public_state,
+                        private_parent=material_parent,
+                        _parent_path_authority=parent_authority,
+                    )
+                private_root = authority.loaded.root
+                self.assertNotEqual(private_root, public_root)
+                self.assertEqual(
+                    (
+                        private_root
+                        / "installer-root"
+                        / "scripts"
+                        / runner.name
+                    ).read_bytes(),
+                    runner.read_bytes(),
+                )
+                self.assertEqual(
+                    (
+                        private_root
+                        / "installer-root"
+                        / "scripts"
+                        / inventory_program.name
+                    ).read_bytes(),
+                    inventory_program.read_bytes(),
+                )
+                with self.assertRaises(TypeError):
+                    authority.__reduce__()
+                with self.assertRaises(OSError):
+                    runner.write_bytes(b"rebound")
+                authority.close()
+                self.assertFalse(private_root.exists())
+                with self.assertRaises(harness.CandidateHarnessError):
+                    _ = authority.loaded
+        finally:
+            if outer.exists():
+                shutil.rmtree(outer)
 
     def test_runtime_snapshot_authority_tracks_rebuilt_leaf_state(self):
         rebuilt_state = "Ubuntu 64 位-Snapshot6.vmsn"
@@ -1287,6 +1588,26 @@ class CandidateVmHarnessTests(unittest.TestCase):
             second = harness.ClosedVmwareProvider._acquire_provider_lease(authority)
             harness.ClosedVmwareProvider._release_provider_lease(second)
         self.assertFalse((provider_root / ".active-provider-session.lock").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows provider lease holder")
+    def test_private_provider_lease_is_handle_held_until_release(self):
+        _, _, authority, _, _, _ = self._connection_fixture()
+        authority = self._temporary_authority(authority)
+        work_root = harness.create_windows_private_directory(
+            self.root, prefix="candidate-provider-lease"
+        )
+        lease = harness.ClosedVmwareProvider._acquire_provider_lease(
+            authority, work_root=work_root
+        )
+        self.assertIsNotNone(lease.holder)
+        with self.assertRaises(OSError):
+            lease.path.write_bytes(b"rebound")
+        with self.assertRaises(OSError):
+            lease.path.unlink()
+        harness.ClosedVmwareProvider._release_provider_lease(
+            lease, work_root=work_root
+        )
+        self.assertFalse(lease.path.exists())
 
     def test_cli_exposes_no_vm_snapshot_shell_or_package_override(self):
         help_text = harness._parser().format_help()
@@ -2125,7 +2446,9 @@ class CandidateVmHarnessTests(unittest.TestCase):
         stop.assert_called_once_with(authority.clone_vmx)
         remove.assert_called_once_with(verified)
         quarantine.assert_not_called()
-        release_lease.assert_called_once_with(mock.sentinel.lease)
+        release_lease.assert_called_once_with(
+            mock.sentinel.lease, work_root=harness.VM_WORK_PARENT
+        )
 
     def test_host_commands_receive_only_sanitized_environment_and_stdin_secret(self):
         plan = self._plan()
@@ -2276,6 +2599,24 @@ class CandidateVmHarnessTests(unittest.TestCase):
             ):
                 provider._run(argv, code="TEST", openssh=openssh)
         self.assertEqual(runner.calls, [])
+
+    def test_windows_provider_rejects_rooted_paths_without_a_drive(self):
+        for executable in (r"\Windows\System32\robocopy.exe", "/Windows/robocopy.exe"):
+            with self.subTest(executable=executable):
+                runner = RecordingRunner()
+                provider = harness.ClosedVmwareProvider(
+                    runner=runner,
+                    windows_platform=FakeWindowsPlatform(),
+                    environment={"ProgramData": r"C:\ProgramData"},
+                )
+                with mock.patch.object(
+                    provider, "_tool_path", return_value=Path(executable)
+                ), self.assertRaisesRegex(
+                    harness.CandidateHarnessError,
+                    "WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE",
+                ):
+                    provider._run((str(harness.ROBOCOPY), "source", "target"), code="TEST")
+                self.assertEqual(runner.calls, [])
 
     def test_windows_provider_environments_use_known_folder_authority_per_scope(self):
         platform = FakeWindowsPlatform()
@@ -2833,6 +3174,51 @@ class CandidateVmHarnessTests(unittest.TestCase):
             )
         self.assertEqual(results, ["PASS", "PASS"])
 
+    @unittest.skipUnless(harness.os.name == "nt", "Windows provider authority test")
+    def test_production_execution_authority_runs_readiness_from_private_tools(self):
+        source = self.root / "source-vm"
+        source.mkdir()
+        (source / "authority.txt").write_bytes(b"source authority fixture")
+        key_root = harness.create_windows_private_directory(
+            self.root, prefix="bootstrap-authority"
+        )
+        bootstrap_identity = key_root / "id_ed25519"
+        bootstrap_identity.write_bytes(b"test-only-bootstrap-identity")
+        provider = harness.ClosedVmwareProvider()
+
+        with mock.patch.multiple(
+            harness,
+            PROVIDER_EXECUTION_PARENT=Path("E:/"),
+            OPENSSH_IDENTITY=bootstrap_identity,
+            SOURCE_VM_ROOT=source,
+        ):
+            with self.assertRaisesRegex(
+                harness.CandidateHarnessError,
+                "CANDIDATE_VM_EXECUTION_AUTHORITY_REQUIRED",
+            ):
+                provider.inspect_readiness()
+            with provider.execution_authority() as receipt:
+                private_ssh = provider._tool_path(harness.SSH)
+                private_libcrypto = provider._tool_path(
+                    harness.OPENSSH_LIBCRYPTO
+                )
+                private_root = provider._execution.root
+                readiness = provider.inspect_readiness()
+                self.assertTrue(private_ssh.is_relative_to(private_root))
+                self.assertEqual(private_libcrypto.parent, private_ssh.parent)
+                self.assertIn(
+                    "libcrypto.dll",
+                    harness.inspect_windows_pe_imports(private_ssh),
+                )
+                self.assertNotEqual(private_ssh, harness.SSH)
+                self.assertEqual(readiness.result, "PASS")
+                self.assertEqual(
+                    receipt.system_tool_identities["libcrypto.dll"],
+                    harness.EXPECTED_OPENSSH_LIBCRYPTO_SHA256,
+                )
+                self.assertEqual(receipt.source_vm_inventory_identity, None)
+            self.assertFalse(private_root.exists())
+
     def test_provider_readiness_distinguishes_acl_query_policy_and_abi_failures(self):
         cases = {
             "query": ("ACL_QUERY_FAILED", "WINDOWS_OPENSSH_ACL_QUERY_FAILED"),
@@ -2904,6 +3290,11 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 FakeWindowsPlatform(ssh_digest="sha256:" + "0" * 64),
                 RecordingRunner(),
                 "WINDOWS_OPENSSH_IDENTITY_MISMATCH",
+            ),
+            "vmrun-identity": (
+                FakeWindowsPlatform(vmrun_digest="sha256:" + "0" * 64),
+                RecordingRunner(),
+                "WINDOWS_VM_TOOL_IDENTITY_MISMATCH",
             ),
             "architecture": (
                 FakeWindowsPlatform(machine=0x14C),

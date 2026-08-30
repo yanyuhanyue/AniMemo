@@ -8,6 +8,7 @@
     "schema", "version", "candidate_input_digest", "verified_candidate_digest",
     "qualification_run_id", "qualification_run_attempt", "source_sha", "source_tree",
     "candidate_version", "profile", "base_vm_identity", "snapshot_identity", "clone_identity",
+    "source_disk_graph_identity", "snapshot_disk_graph_identity", "source_vm_inventory_identity",
     "initial_platform_state", "platform_bootstrap_plan_digest", "platform_bootstrap_receipt_digest",
     "strict_platform_qualification", "instance_mutation_before_platform_qualification",
     "installer_plan_digest", "installer_execution_receipt_digest", "installer_execution_result",
@@ -32,6 +33,9 @@
     "base_vm_identity": {"$ref": "#/$defs/digest"},
     "snapshot_identity": {"$ref": "#/$defs/digest"},
     "clone_identity": {"$ref": "#/$defs/digest"},
+    "source_disk_graph_identity": {"$ref": "#/$defs/digest"},
+    "snapshot_disk_graph_identity": {"$ref": "#/$defs/digest"},
+    "source_vm_inventory_identity": {"$ref": "#/$defs/digest"},
     "initial_platform_state": {
       "type": "object", "additionalProperties": false,
       "required": ["docker_present", "runtime_dependencies_present", "network_allowed"],

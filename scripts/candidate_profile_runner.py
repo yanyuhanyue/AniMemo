@@ -228,11 +228,21 @@ def _decode_context(value: str) -> dict[str, Any]:
         "initial_platform_state",
         "original_vm_pre_hashes",
         "profile",
+        "source_disk_graph_identity",
+        "source_vm_inventory_identity",
+        "snapshot_disk_graph_identity",
         "snapshot_identity",
     }
     if type(context) is not dict or set(context) != fields:
         raise ProfileRunnerError("CANDIDATE_PROFILE_CONTEXT_INVALID")
-    for field in ("base_vm_identity", "clone_identity", "snapshot_identity"):
+    for field in (
+        "base_vm_identity",
+        "clone_identity",
+        "source_disk_graph_identity",
+        "source_vm_inventory_identity",
+        "snapshot_disk_graph_identity",
+        "snapshot_identity",
+    ):
         if type(context[field]) is not str or not _DIGEST.fullmatch(context[field]):
             raise ProfileRunnerError("CANDIDATE_PROFILE_CONTEXT_INVALID")
     hashes = context["original_vm_pre_hashes"]
@@ -890,6 +900,13 @@ def build_profile_receipt(
         "base_vm_identity": context["base_vm_identity"],
         "snapshot_identity": context["snapshot_identity"],
         "clone_identity": context["clone_identity"],
+        "source_disk_graph_identity": context["source_disk_graph_identity"],
+        "snapshot_disk_graph_identity": context[
+            "snapshot_disk_graph_identity"
+        ],
+        "source_vm_inventory_identity": context[
+            "source_vm_inventory_identity"
+        ],
         "initial_platform_state": context["initial_platform_state"],
         "platform_bootstrap_plan_digest": platform_plan,
         "platform_bootstrap_receipt_digest": sha256_bytes(

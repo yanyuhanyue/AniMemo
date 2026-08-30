@@ -335,7 +335,7 @@ func closeReleaseStatement(request releaseRequest, statement releaseStatement, s
 	return claim, nil
 }
 
-func closeActionsStatement(request actionsRequest, statement actionsStatement) (actionsClaim, error) {
+func closeActionsStatement(request actionsRequest, statement actionsStatement, observedSourceCommit ...string) (actionsClaim, error) {
 	var claim actionsClaim
 	workflows := map[string]bool{
 		".github/workflows/release.yml":         true,
@@ -345,9 +345,18 @@ func closeActionsStatement(request actionsRequest, statement actionsStatement) (
 		"api-image": true, "web-image": true, "release-manifest": true,
 		"deployment-contract": true, "installer-materials": true,
 	}
+	sourceCommit := request.SourceCommit
+	if len(observedSourceCommit) == 1 {
+		sourceCommit = observedSourceCommit[0]
+	} else if len(observedSourceCommit) > 1 {
+		return claim, errors.New("Actions execution source commit observation is ambiguous")
+	}
+	observedExecution := request.SourceCommit == ""
 	if request.SchemaVersion != 1 || request.Mode != "actions-provenance" ||
 		!evidenceNames[request.EvidenceName] || !workflows[request.Workflow] ||
-		!commitIdentity.MatchString(request.SourceCommit) ||
+		!commitIdentity.MatchString(sourceCommit) ||
+		(observedExecution && (request.Workflow != ".github/workflows/promote-release.yml" ||
+			request.EvidenceName == "api-image" || request.EvidenceName == "web-image")) ||
 		request.Subject.Name == "" || !sha256Identity.MatchString(request.Subject.SHA256) {
 		return claim, errors.New("Actions 验证请求身份未关闭")
 	}
@@ -395,9 +404,9 @@ func closeActionsStatement(request actionsRequest, statement actionsStatement) (
 	claim.Workflow = request.Workflow
 	claim.Certificate.Identity = "https://github.com/" + repository + "/" + request.Workflow + "@" + actionsSourceRef
 	claim.Certificate.Issuer = actionsOIDCIssuer
-	claim.Source.Commit = request.SourceCommit
+	claim.Source.Commit = sourceCommit
 	claim.Source.Ref = actionsSourceRef
-	claim.SignerDigest = request.SourceCommit
+	claim.SignerDigest = sourceCommit
 	return claim, nil
 }
 
@@ -420,21 +429,24 @@ func matchesOCISubject(name, repositoryName, digest string) bool {
 func actionsCertificateExtensions(request actionsRequest) certificate.Extensions {
 	workflowIdentity := "https://github.com/" + repository + "/" +
 		request.Workflow + "@" + actionsSourceRef
-	return certificate.Extensions{
+	extensions := certificate.Extensions{
 		BuildSignerURI:                      workflowIdentity,
 		RunnerEnvironment:                   "github-hosted",
 		SourceRepositoryURI:                 "https://github.com/" + repository,
 		SourceRepositoryOwnerURI:            "https://github.com/yanyuhanyue",
-		BuildSignerDigest:                   request.SourceCommit,
-		SourceRepositoryDigest:              request.SourceCommit,
 		SourceRepositoryRef:                 actionsSourceRef,
 		SourceRepositoryIdentifier:          repositoryID,
 		SourceRepositoryOwnerIdentifier:     ownerID,
 		BuildConfigURI:                      workflowIdentity,
-		BuildConfigDigest:                   request.SourceCommit,
 		BuildTrigger:                        "workflow_dispatch",
 		SourceRepositoryVisibilityAtSigning: "public",
 	}
+	if request.SourceCommit != "" {
+		extensions.BuildSignerDigest = request.SourceCommit
+		extensions.SourceRepositoryDigest = request.SourceCommit
+		extensions.BuildConfigDigest = request.SourceCommit
+	}
+	return extensions
 }
 
 func actionsCertificateIdentity(request actionsRequest) (verify.CertificateIdentity, error) {
@@ -705,6 +717,13 @@ func verifyActions(bundlePath, trustedRootPath, requestPath string) (actionsClai
 	if err := certIdentity.Verify(certificateSummary); err != nil {
 		return actionsClaim{}, fmt.Errorf("Actions certificate 身份不一致: %w", err)
 	}
+	observedSourceCommit := certificateSummary.Extensions.BuildSignerDigest
+	if !commitIdentity.MatchString(observedSourceCommit) ||
+		certificateSummary.Extensions.SourceRepositoryDigest != observedSourceCommit ||
+		certificateSummary.Extensions.BuildConfigDigest != observedSourceCommit ||
+		(request.SourceCommit != "" && request.SourceCommit != observedSourceCommit) {
+		return actionsClaim{}, errors.New("Actions execution source commit observation is invalid")
+	}
 	digestBytes, err := hex.DecodeString(trimDigest(request.Subject.SHA256))
 	if err != nil {
 		return actionsClaim{}, errors.New("Actions subject digest 无效")
@@ -724,7 +743,7 @@ func verifyActions(bundlePath, trustedRootPath, requestPath string) (actionsClai
 	if err := json.Unmarshal(statementJSON, &statement); err != nil {
 		return actionsClaim{}, fmt.Errorf("已验证 Actions 声明不可解析: %w", err)
 	}
-	return closeActionsStatement(request, statement)
+	return closeActionsStatement(request, statement, observedSourceCommit)
 }
 
 func verifyTUFTrack(

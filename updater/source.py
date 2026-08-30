@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -26,6 +26,8 @@ from release.contract import (
 
 from .authority import (
     AttestationEvidence,
+    AttestationExecutionObservation,
+    AttestationExecutionReceipt,
     AuthorityEvidence,
     ReleaseAssetEvidence,
     ReleaseAuthorityVerifier,
@@ -562,7 +564,7 @@ class GitHubReleaseSource:
     @staticmethod
     def _verify_attestation_result(
         output: str, expected_name: str, digest: str
-    ) -> None:
+    ) -> tuple[str, str]:
         try:
             payload = json.loads(output)
         except json.JSONDecodeError as error:
@@ -574,6 +576,7 @@ class GitHubReleaseSource:
             raise RequestRejected(
                 "Artifact attestation verification returned no result"
             )
+        matches: list[tuple[str, str]] = []
         for item in payload:
             if not isinstance(item, dict):
                 continue
@@ -595,9 +598,37 @@ class GitHubReleaseSource:
                     and subject.get("name") == expected_name
                     and subject_digest.get("sha256") == expected_digest
                 ):
-                    return
+                    signature = verification.get("signature")
+                    certificate = (
+                        signature.get("certificate")
+                        if isinstance(signature, dict)
+                        else None
+                    )
+                    extensions = (
+                        certificate.get("extensions")
+                        if isinstance(certificate, dict)
+                        else None
+                    )
+                    if not isinstance(extensions, dict):
+                        continue
+                    source_commit = extensions.get("sourceRepositoryDigest")
+                    signer_digest = extensions.get("buildSignerDigest")
+                    build_config_digest = extensions.get("buildConfigDigest")
+                    if (
+                        not isinstance(source_commit, str)
+                        or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
+                        or not isinstance(signer_digest, str)
+                        or re.fullmatch(r"[0-9a-f]{40}", signer_digest) is None
+                        or build_config_digest != signer_digest
+                        or source_commit != signer_digest
+                    ):
+                        continue
+                    matches.append((source_commit, signer_digest))
+        if len(matches) == 1:
+            return matches[0]
         raise RequestRejected(
-            "Artifact attestation subject does not match the release authority"
+            "Artifact attestation subject or execution certificate does not match "
+            "the release authority"
         )
 
     def fetch_verified_materials(
@@ -707,7 +738,12 @@ class GitHubReleaseSource:
                     "GitHub release metadata and manifest channel differ"
                 )
             commit = manifest["release"]["commit"]
-            provenance_commit = manifest["provenance"]["sourceCommit"]
+            logical_provenance_commit = manifest["provenance"]["sourceCommit"]
+            provenance_commit = (
+                None
+                if manifest["release"]["channel"] == "stable"
+                else logical_provenance_commit
+            )
             self._verify_release_tag(version, commit)
             subjects = [
                 (
@@ -756,6 +792,7 @@ class GitHubReleaseSource:
                 ),
             ]
             attestation_evidence: list[AttestationEvidence] = []
+            execution_observations: list[AttestationExecutionObservation] = []
             for index, (
                 subject,
                 expected_name,
@@ -765,8 +802,7 @@ class GitHubReleaseSource:
             ) in enumerate(subjects):
                 bundle = destination / f"attestation-{index}.jsonl"
                 self._write_attestation_bundle(digest, bundle)
-                result = self.runner.run(
-                    [
+                verification_command = [
                         "/usr/bin/gh",
                         "attestation",
                         "verify",
@@ -779,21 +815,53 @@ class GitHubReleaseSource:
                         f"https://github.com/{REPOSITORY}/{workflow}@refs/heads/main",
                         "--cert-oidc-issuer",
                         "https://token.actions.githubusercontent.com",
-                        "--source-digest",
-                        source_commit,
                         "--source-ref",
                         "refs/heads/main",
-                        "--signer-digest",
-                        source_commit,
                         "--predicate-type",
                         "https://slsa.dev/provenance/v1",
                         "--format",
                         "json",
-                    ],
+                    ]
+                if source_commit is not None:
+                    predicate_index = verification_command.index("--predicate-type")
+                    verification_command[predicate_index:predicate_index] = [
+                        "--source-digest",
+                        source_commit,
+                        "--signer-digest",
+                        source_commit,
+                    ]
+                result = self.runner.run(
+                    verification_command,
                     env=environment,
                     timeout=60,
                 )
-                self._verify_attestation_result(result.stdout, expected_name, digest)
+                observed_source_commit, observed_signer_digest = (
+                    self._verify_attestation_result(
+                        result.stdout,
+                        expected_name,
+                        digest,
+                    )
+                )
+                if (
+                    source_commit is not None
+                    and (
+                        observed_source_commit != source_commit
+                        or observed_signer_digest != source_commit
+                    )
+                ):
+                    raise RequestRejected(
+                        "Artifact attestation execution commit differs from the "
+                        "release authority"
+                    )
+                execution_observations.append(
+                    AttestationExecutionObservation(
+                        subject_name=expected_name,
+                        subject_digest=digest,
+                        workflow=workflow,
+                        source_commit=observed_source_commit,
+                        signer_digest=observed_signer_digest,
+                    )
+                )
                 attestation_evidence.append(
                     AttestationEvidence(
                         subject_name=expected_name,
@@ -805,9 +873,17 @@ class GitHubReleaseSource:
                             "@refs/heads/main"
                         ),
                         oidc_issuer="https://token.actions.githubusercontent.com",
-                        source_commit=source_commit,
+                        logical_source_commit=(
+                            logical_provenance_commit
+                            if source_commit is None
+                            else source_commit
+                        ),
                         source_ref="refs/heads/main",
-                        signer_digest=source_commit,
+                        logical_signer_digest=(
+                            logical_provenance_commit
+                            if source_commit is None
+                            else source_commit
+                        ),
                         predicate_type="https://slsa.dev/provenance/v1",
                     )
                 )
@@ -842,6 +918,35 @@ class GitHubReleaseSource:
                     authority=authority,
                     destination=final_root,
                     updater_version=updater_version,
+                )
+                execution_receipt_payload = {
+                    "schema": "animemo.attestation-execution-receipt/v1",
+                    "observations": [
+                        {
+                            "subjectName": item.subject_name,
+                            "subjectDigest": item.subject_digest,
+                            "workflow": item.workflow,
+                            "sourceCommit": item.source_commit,
+                            "signerDigest": item.signer_digest,
+                        }
+                        for item in execution_observations
+                    ],
+                }
+                execution_receipt_identity = "sha256:" + hashlib.sha256(
+                    json.dumps(
+                        execution_receipt_payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                verified = replace(
+                    verified,
+                    attestation_execution_receipt=AttestationExecutionReceipt(
+                        schema=execution_receipt_payload["schema"],
+                        observations=tuple(execution_observations),
+                        identity=execution_receipt_identity,
+                    ),
                 )
             except (OSError, StateError, RequestRejected) as error:
                 raise RequestRejected(

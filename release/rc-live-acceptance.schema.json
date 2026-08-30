@@ -1,57 +1,439 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/yanyuhanyue/AniMemo/blob/main/release/rc-live-acceptance.schema.json",
-  "title": "AniMemo RC Live Acceptance Record v1",
+  "title": "AniMemo RC Live Acceptance Authority v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema",
-    "identity",
-    "rc_tag",
-    "rc_commit",
-    "release_manifest_identity",
-    "deployment_contract_identity",
-    "installer_materials_identity",
-    "api_digest",
-    "web_digest",
-    "fresh_base_identity",
-    "docker_base_identity",
-    "runtime_base_identity",
-    "install_path",
-    "doctor_result",
-    "upgrade_result",
-    "accepted_at",
-    "operator_identity",
-    "tool_identity"
+    "schema", "identity", "rc_tag", "rc_commit", "rc_tree",
+    "release_manifest_identity", "deployment_contract_identity",
+    "installer_materials_identity", "formal_windows_pretrust_kit_identity",
+    "offline_release_trust_profile_identity", "api_digest", "web_digest",
+    "formal_profile_authority_identities", "formal_authority_identity",
+    "formal_rc_authority_identity", "formal_producer_contract_identity",
+    "formal_profile_transports", "doctor_result", "upgrade_result", "formal_evidence",
+    "execution_receipt"
   ],
   "properties": {
-    "schema": {"const": "animemo.rc-live-acceptance/v1"},
+    "schema": {"const": "animemo.rc-live-acceptance/v2"},
     "identity": {"$ref": "#/$defs/sha256"},
-    "rc_tag": {
-      "type": "string",
-      "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"
-    },
+    "rc_tag": {"type": "string", "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"},
     "rc_commit": {"$ref": "#/$defs/gitSha"},
+    "rc_tree": {"$ref": "#/$defs/gitSha"},
     "release_manifest_identity": {"$ref": "#/$defs/sha256"},
     "deployment_contract_identity": {"$ref": "#/$defs/sha256"},
     "installer_materials_identity": {"$ref": "#/$defs/sha256"},
+    "formal_windows_pretrust_kit_identity": {"$ref": "#/$defs/sha256"},
+    "offline_release_trust_profile_identity": {"$ref": "#/$defs/sha256"},
     "api_digest": {"$ref": "#/$defs/sha256"},
     "web_digest": {"$ref": "#/$defs/sha256"},
-    "fresh_base_identity": {"$ref": "#/$defs/sha256"},
-    "docker_base_identity": {"$ref": "#/$defs/sha256"},
-    "runtime_base_identity": {"$ref": "#/$defs/sha256"},
-    "install_path": {"enum": ["github", "official-mirror"]},
+    "formal_profile_authority_identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fresh_base", "docker_base", "runtime_base_offline"],
+      "properties": {
+        "fresh_base": {"$ref": "#/$defs/sha256"},
+        "docker_base": {"$ref": "#/$defs/sha256"},
+        "runtime_base_offline": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "formal_authority_identity": {"$ref": "#/$defs/sha256"},
+    "formal_rc_authority_identity": {"$ref": "#/$defs/sha256"},
+    "formal_producer_contract_identity": {"$ref": "#/$defs/sha256"},
+    "formal_profile_transports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fresh_base", "docker_base", "runtime_base_offline"],
+      "properties": {
+        "fresh_base": {"const": "github"},
+        "docker_base": {"const": "github"},
+        "runtime_base_offline": {"const": "local-bundle"}
+      }
+    },
     "doctor_result": {"const": "PASS"},
     "upgrade_result": {"enum": ["PASS", "NOT_APPLICABLE"]},
-    "accepted_at": {
-      "type": "string",
-      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
-    },
-    "operator_identity": {"type": "string", "minLength": 1, "maxLength": 200},
-    "tool_identity": {"$ref": "#/$defs/sha256"}
+    "formal_evidence": {"$ref": "#/$defs/formalEvidence"},
+    "execution_receipt": {"$ref": "#/$defs/executionReceipt"}
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "nullableSafe": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[^\\u0000-\\u001f]+$"}
+      ]
+    },
+    "executionReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "identity", "acceptance_identity", "accepted_at",
+        "observed_at", "operator_identity", "run_id", "run_attempt",
+        "correlation_id", "current_workflow_commit", "execution_environment",
+        "tool_identity", "formal_record_input_digest",
+        "formal_profile_receipt_digests", "formal_aggregate_receipt_digest",
+        "formal_execution_receipt_digest", "publication_execution_receipt_identity",
+        "publication_signed_claim_identity", "publication_signed_at"
+      ],
+      "properties": {
+        "schema": {"const": "animemo.rc-live-acceptance-execution-receipt/v1"},
+        "identity": {"$ref": "#/$defs/sha256"},
+        "acceptance_identity": {"$ref": "#/$defs/sha256"},
+        "accepted_at": {"$ref": "#/$defs/canonicalTimestamp"},
+        "observed_at": {"$ref": "#/$defs/canonicalTimestamp"},
+        "operator_identity": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[^\\u0000-\\u001f]+$"},
+        "run_id": {"$ref": "#/$defs/nullableSafe"},
+        "run_attempt": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1}]},
+        "correlation_id": {"$ref": "#/$defs/nullableSafe"},
+        "current_workflow_commit": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/gitSha"}]},
+        "execution_environment": {"$ref": "#/$defs/nullableSafe"},
+        "tool_identity": {"$ref": "#/$defs/sha256"},
+        "formal_record_input_digest": {"$ref": "#/$defs/sha256"},
+        "formal_profile_receipt_digests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["formal_fresh", "formal_docker", "formal_offline"],
+          "properties": {
+            "formal_fresh": {"$ref": "#/$defs/sha256"},
+            "formal_docker": {"$ref": "#/$defs/sha256"},
+            "formal_offline": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "formal_aggregate_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "formal_execution_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "publication_execution_receipt_identity": {"$ref": "#/$defs/sha256"},
+        "publication_signed_claim_identity": {"$ref": "#/$defs/sha256"},
+        "publication_signed_at": {"$ref": "#/$defs/canonicalTimestamp"}
+      }
+    },
+    "formalEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rcLiveAcceptanceInput", "profileReceipts", "aggregateReceipt",
+        "executionReceipt"
+      ],
+      "properties": {
+        "rcLiveAcceptanceInput": {"$ref": "#/$defs/formalAcceptanceInput"},
+        "profileReceipts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["FORMAL_FRESH", "FORMAL_DOCKER", "FORMAL_OFFLINE"],
+          "properties": {
+            "FORMAL_FRESH": {"$ref": "#/$defs/formalProfileReceipt"},
+            "FORMAL_DOCKER": {"$ref": "#/$defs/formalProfileReceipt"},
+            "FORMAL_OFFLINE": {"$ref": "#/$defs/formalProfileReceipt"}
+          }
+        },
+        "aggregateReceipt": {"$ref": "#/$defs/formalAggregateReceipt"},
+        "executionReceipt": {"$ref": "#/$defs/formalExecutionReceipt"}
+      }
+    },
+    "formalAcceptanceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "version", "producer_contract_identity", "rc_authority_identity",
+        "formal_authority_identity", "repository", "rc_tag", "verified_candidate_digest", "source_sha",
+        "source_tree", "release_manifest_identity", "deployment_contract_identity",
+        "installer_materials_identity", "formal_windows_pretrust_kit_identity",
+        "offline_release_trust_profile_identity", "api_digest", "web_digest",
+        "publication_identity", "workflow_identity", "attestation_claim_identities",
+        "profile_authority_identities", "formal_profile_receipt_digests",
+        "formal_aggregate_receipt_digest", "formal_execution_receipt_digest",
+        "release_authority_granted", "publish_authorized", "record_input_digest"
+      ],
+      "properties": {
+        "schema": {"const": "animemo.formal-rc-live-acceptance-input/v1"},
+        "version": {"const": 1},
+        "producer_contract_identity": {"$ref": "#/$defs/sha256"},
+        "rc_authority_identity": {"$ref": "#/$defs/sha256"},
+        "formal_authority_identity": {"$ref": "#/$defs/sha256"},
+        "repository": {"const": "yanyuhanyue/AniMemo"},
+        "rc_tag": {"$ref": "#/$defs/rcTag"},
+        "verified_candidate_digest": {"$ref": "#/$defs/sha256"},
+        "source_sha": {"$ref": "#/$defs/gitSha"},
+        "source_tree": {"$ref": "#/$defs/gitSha"},
+        "release_manifest_identity": {"$ref": "#/$defs/sha256"},
+        "deployment_contract_identity": {"$ref": "#/$defs/sha256"},
+        "installer_materials_identity": {"$ref": "#/$defs/sha256"},
+        "formal_windows_pretrust_kit_identity": {"$ref": "#/$defs/sha256"},
+        "offline_release_trust_profile_identity": {"$ref": "#/$defs/sha256"},
+        "api_digest": {"$ref": "#/$defs/sha256"},
+        "web_digest": {"$ref": "#/$defs/sha256"},
+        "publication_identity": {"$ref": "#/$defs/sha256"},
+        "workflow_identity": {"const": "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main"},
+        "attestation_claim_identities": {"$ref": "#/$defs/formalAttestations"},
+        "profile_authority_identities": {"$ref": "#/$defs/formalProfileDigests"},
+        "formal_profile_receipt_digests": {"$ref": "#/$defs/formalProfileDigests"},
+        "formal_aggregate_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "formal_execution_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "release_authority_granted": {"const": false},
+        "publish_authorized": {"const": false},
+        "record_input_digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "formalProfileReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "version", "rc_authority_identity", "profile", "transport_source",
+        "resolved_release", "base_vm_identity", "snapshot_identity", "clone_identity",
+        "provider_execution_authority_receipt_digest",
+        "publication_execution_receipt_identity", "publication_signed_claim_identity",
+        "publication_signed_at", "formal_windows_pretrust_kit_identity",
+        "offline_release_trust_profile_identity",
+        "pretrusted_profile_identity", "provenance_verifier_identity",
+        "github_trusted_root_identity", "sigstore_trusted_root_identity",
+        "platform_plan_digest", "platform_receipt_digest", "installer_plan_digest",
+        "installer_execution_receipt_digest", "doctor_receipt_digest",
+        "canonical_acceptance_receipt_digests", "continuation_receipt_digest",
+        "profile_authority_identity", "execution_receipt_digest",
+        "release_authority_granted", "publish_authorized", "result", "receipt_digest"
+      ],
+      "properties": {
+        "schema": {"const": "animemo.formal-profile-receipt/v1"},
+        "version": {"const": 1},
+        "rc_authority_identity": {"$ref": "#/$defs/sha256"},
+        "profile": {"enum": ["FORMAL_FRESH", "FORMAL_DOCKER", "FORMAL_OFFLINE"]},
+        "transport_source": {"enum": ["github", "local-bundle"]},
+        "resolved_release": {"$ref": "#/$defs/formalResolvedRelease"},
+        "base_vm_identity": {"$ref": "#/$defs/sha256"},
+        "snapshot_identity": {"$ref": "#/$defs/sha256"},
+        "clone_identity": {"$ref": "#/$defs/sha256"},
+        "provider_execution_authority_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "publication_execution_receipt_identity": {"$ref": "#/$defs/sha256"},
+        "publication_signed_claim_identity": {"$ref": "#/$defs/sha256"},
+        "publication_signed_at": {"$ref": "#/$defs/canonicalTimestamp"},
+        "formal_windows_pretrust_kit_identity": {"$ref": "#/$defs/sha256"},
+        "offline_release_trust_profile_identity": {"$ref": "#/$defs/sha256"},
+        "pretrusted_profile_identity": {"$ref": "#/$defs/sha256"},
+        "provenance_verifier_identity": {"$ref": "#/$defs/sha256"},
+        "github_trusted_root_identity": {"$ref": "#/$defs/sha256"},
+        "sigstore_trusted_root_identity": {"$ref": "#/$defs/sha256"},
+        "platform_plan_digest": {"$ref": "#/$defs/sha256"},
+        "platform_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "installer_plan_digest": {"$ref": "#/$defs/sha256"},
+        "installer_execution_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "doctor_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "canonical_acceptance_receipt_digests": {
+          "type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sha256"}
+        },
+        "continuation_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "profile_authority_identity": {"$ref": "#/$defs/sha256"},
+        "execution_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "release_authority_granted": {"const": false},
+        "publish_authorized": {"const": false},
+        "result": {"const": "PASS"},
+        "receipt_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"profile": {"const": "FORMAL_OFFLINE"}},
+            "required": ["profile"]
+          },
+          "then": {"properties": {"transport_source": {"const": "local-bundle"}}},
+          "else": {"properties": {"transport_source": {"const": "github"}}}
+        }
+      ]
+    },
+    "formalAggregateReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "version", "rc_authority_identity", "profile_results",
+        "profile_authority_identities", "all_profiles_pass",
+        "formal_authority_identity", "formal_execution_receipt_digest",
+        "release_authority_granted", "publish_authorized", "result", "receipt_digest"
+      ],
+      "properties": {
+        "schema": {"const": "animemo.formal-acceptance-receipt/v1"},
+        "version": {"const": 1},
+        "rc_authority_identity": {"$ref": "#/$defs/sha256"},
+        "profile_results": {"$ref": "#/$defs/formalProfileResults"},
+        "profile_authority_identities": {"$ref": "#/$defs/formalProfileDigests"},
+        "all_profiles_pass": {"const": true},
+        "formal_authority_identity": {"$ref": "#/$defs/sha256"},
+        "formal_execution_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "release_authority_granted": {"const": false},
+        "publish_authorized": {"const": false},
+        "result": {"const": "PASS"},
+        "receipt_digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "formalExecutionReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "version", "formal_authority_identity", "verified_candidate_digest",
+        "candidate_aggregate_receipt_digest", "candidate_profile_receipt_digests",
+        "candidate_source_vm_authority_identity",
+        "candidate_provider_execution_authority_receipt_digest",
+        "candidate_material_authority_identity",
+        "candidate_material_tree_inventory_identity",
+        "formal_provider_execution_authority_receipt_digest",
+        "profile_execution_receipt_digests", "profile_results",
+        "provenance_preflight_digest", "actions_preflight_receipt_digest",
+        "provenance_claim_summaries", "publication_preflight_summary",
+        "formal_windows_pretrust_kit_identity",
+        "offline_release_trust_profile_identity",
+        "pretrusted_profile_identity", "provenance_verifier_identity",
+        "github_trusted_root_identity", "sigstore_trusted_root_identity", "accepted_at",
+        "observed_at", "operator_identity", "run_id", "run_attempt",
+        "correlation_id", "current_workflow_commit", "execution_environment",
+        "tool_identity", "result", "release_authority_granted",
+        "publish_authorized", "receipt_digest"
+      ],
+      "properties": {
+        "schema": {"const": "animemo.formal-execution-receipt/v1"},
+        "version": {"const": 1},
+        "formal_authority_identity": {"$ref": "#/$defs/sha256"},
+        "verified_candidate_digest": {"$ref": "#/$defs/sha256"},
+        "candidate_aggregate_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "candidate_profile_receipt_digests": {"$ref": "#/$defs/candidateProfileDigests"},
+        "candidate_source_vm_authority_identity": {"$ref": "#/$defs/sha256"},
+        "candidate_provider_execution_authority_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "candidate_material_authority_identity": {"$ref": "#/$defs/sha256"},
+        "candidate_material_tree_inventory_identity": {"$ref": "#/$defs/sha256"},
+        "formal_provider_execution_authority_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "profile_execution_receipt_digests": {"$ref": "#/$defs/formalProfileDigests"},
+        "profile_results": {"$ref": "#/$defs/formalProfileResults"},
+        "provenance_preflight_digest": {"$ref": "#/$defs/sha256"},
+        "actions_preflight_receipt_digest": {"$ref": "#/$defs/sha256"},
+        "provenance_claim_summaries": {"$ref": "#/$defs/formalProvenanceSummaries"},
+        "publication_preflight_summary": {"$ref": "#/$defs/formalPublicationPreflightSummary"},
+        "formal_windows_pretrust_kit_identity": {"$ref": "#/$defs/sha256"},
+        "offline_release_trust_profile_identity": {"$ref": "#/$defs/sha256"},
+        "pretrusted_profile_identity": {"$ref": "#/$defs/sha256"},
+        "provenance_verifier_identity": {"$ref": "#/$defs/sha256"},
+        "github_trusted_root_identity": {"$ref": "#/$defs/sha256"},
+        "sigstore_trusted_root_identity": {"$ref": "#/$defs/sha256"},
+        "accepted_at": {"$ref": "#/$defs/canonicalTimestamp"},
+        "observed_at": {"$ref": "#/$defs/canonicalTimestamp"},
+        "operator_identity": {"type": "string", "minLength": 1, "maxLength": 200},
+        "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "run_attempt": {"type": "integer", "minimum": 1},
+        "correlation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "current_workflow_commit": {"$ref": "#/$defs/gitSha"},
+        "execution_environment": {"type": "string", "minLength": 1, "maxLength": 256},
+        "tool_identity": {"$ref": "#/$defs/sha256"},
+        "result": {"const": "PASS"},
+        "release_authority_granted": {"const": false},
+        "publish_authorized": {"const": false},
+        "receipt_digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "rcTag": {
+      "type": "string",
+      "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"
+    },
+    "formalProfileDigests": {
+      "type": "object", "additionalProperties": false,
+      "required": ["formal_fresh", "formal_docker", "formal_offline"],
+      "properties": {
+        "formal_fresh": {"$ref": "#/$defs/sha256"},
+        "formal_docker": {"$ref": "#/$defs/sha256"},
+        "formal_offline": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "candidateProfileDigests": {
+      "type": "object", "additionalProperties": false,
+      "required": ["fresh_base", "docker_base", "runtime_base_offline"],
+      "properties": {
+        "fresh_base": {"$ref": "#/$defs/sha256"},
+        "docker_base": {"$ref": "#/$defs/sha256"},
+        "runtime_base_offline": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "formalAttestations": {
+      "type": "object", "additionalProperties": false,
+      "required": ["api-image", "web-image", "release-manifest", "deployment-contract", "installer-materials"],
+      "properties": {
+        "api-image": {"$ref": "#/$defs/sha256"},
+        "web-image": {"$ref": "#/$defs/sha256"},
+        "release-manifest": {"$ref": "#/$defs/sha256"},
+        "deployment-contract": {"$ref": "#/$defs/sha256"},
+        "installer-materials": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "formalProvenanceSummaries": {
+      "type": "object", "additionalProperties": false,
+      "required": ["api-image", "web-image", "release-manifest", "deployment-contract", "installer-materials"],
+      "properties": {
+        "api-image": {"$ref": "#/$defs/formalProvenanceSummary"},
+        "web-image": {"$ref": "#/$defs/formalProvenanceSummary"},
+        "release-manifest": {"$ref": "#/$defs/formalProvenanceSummary"},
+        "deployment-contract": {"$ref": "#/$defs/formalProvenanceSummary"},
+        "installer-materials": {"$ref": "#/$defs/formalProvenanceSummary"}
+      }
+    },
+    "formalProvenanceSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["claim_digest", "bundle_digest", "trusted_root_digest", "request_digest"],
+      "properties": {
+        "claim_digest": {"$ref": "#/$defs/sha256"},
+        "bundle_digest": {"$ref": "#/$defs/sha256"},
+        "trusted_root_digest": {"$ref": "#/$defs/sha256"},
+        "request_digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "formalPublicationPreflightSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["verifier_digest", "bundle_digest", "trusted_root_digest", "request_digest", "claim_digest"],
+      "properties": {
+        "verifier_digest": {"$ref": "#/$defs/sha256"},
+        "bundle_digest": {"$ref": "#/$defs/sha256"},
+        "trusted_root_digest": {"$ref": "#/$defs/sha256"},
+        "request_digest": {"$ref": "#/$defs/sha256"},
+        "claim_digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "formalResolvedRelease": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "version", "source_sha", "release_manifest_identity",
+        "deployment_contract_identity", "installer_materials_identity",
+        "api_digest", "web_digest", "publication_identity", "workflow_identity",
+        "attestation_claim_identities"
+      ],
+      "properties": {
+        "version": {"$ref": "#/$defs/rcTag"},
+        "source_sha": {"$ref": "#/$defs/gitSha"},
+        "release_manifest_identity": {"$ref": "#/$defs/sha256"},
+        "deployment_contract_identity": {"$ref": "#/$defs/sha256"},
+        "installer_materials_identity": {"$ref": "#/$defs/sha256"},
+        "api_digest": {"$ref": "#/$defs/sha256"},
+        "web_digest": {"$ref": "#/$defs/sha256"},
+        "publication_identity": {"$ref": "#/$defs/sha256"},
+        "workflow_identity": {"const": "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main"},
+        "attestation_claim_identities": {"$ref": "#/$defs/formalAttestations"}
+      }
+    },
+    "formalProfileResults": {
+      "type": "object", "additionalProperties": false,
+      "required": ["formal_fresh", "formal_docker", "formal_offline"],
+      "properties": {
+        "formal_fresh": {"$ref": "#/$defs/formalPassResult"},
+        "formal_docker": {"$ref": "#/$defs/formalPassResult"},
+        "formal_offline": {"$ref": "#/$defs/formalPassResult"}
+      }
+    },
+    "formalPassResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "failure_code", "receipt_digest", "continuation_receipt_digest"],
+      "properties": {
+        "status": {"const": "PASS"},
+        "failure_code": {"type": "null"},
+        "receipt_digest": {"$ref": "#/$defs/sha256"},
+        "continuation_receipt_digest": {"type": "null"}
+      }
+    },
+    "canonicalTimestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    }
   }
 }

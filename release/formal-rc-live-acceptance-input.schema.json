@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yanyuhanyue/AniMemo/blob/main/release/formal-rc-live-acceptance-input.schema.json",
+  "title": "AniMemo production Formal RC live acceptance record input v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "producer_contract_identity", "rc_authority_identity", "formal_authority_identity", "repository", "rc_tag",
+    "verified_candidate_digest", "source_sha", "source_tree", "release_manifest_identity",
+    "deployment_contract_identity", "installer_materials_identity",
+    "formal_windows_pretrust_kit_identity", "offline_release_trust_profile_identity",
+    "api_digest", "web_digest", "publication_identity", "workflow_identity",
+    "attestation_claim_identities", "profile_authority_identities",
+    "formal_profile_receipt_digests", "formal_aggregate_receipt_digest",
+    "formal_execution_receipt_digest", "release_authority_granted",
+    "publish_authorized", "record_input_digest"
+  ],
+  "properties": {
+    "schema": {"const": "animemo.formal-rc-live-acceptance-input/v1"},
+    "version": {"const": 1},
+    "producer_contract_identity": {"$ref": "#/$defs/digest"},
+    "rc_authority_identity": {"$ref": "#/$defs/digest"},
+    "formal_authority_identity": {"$ref": "#/$defs/digest"},
+    "repository": {"const": "yanyuhanyue/AniMemo"},
+    "rc_tag": {"$ref": "#/$defs/rcTag"},
+    "verified_candidate_digest": {"$ref": "#/$defs/digest"},
+    "source_sha": {"$ref": "#/$defs/gitSha"},
+    "source_tree": {"$ref": "#/$defs/gitSha"},
+    "release_manifest_identity": {"$ref": "#/$defs/digest"},
+    "deployment_contract_identity": {"$ref": "#/$defs/digest"},
+    "installer_materials_identity": {"$ref": "#/$defs/digest"},
+    "formal_windows_pretrust_kit_identity": {"$ref": "#/$defs/digest"},
+    "offline_release_trust_profile_identity": {"$ref": "#/$defs/digest"},
+    "api_digest": {"$ref": "#/$defs/digest"},
+    "web_digest": {"$ref": "#/$defs/digest"},
+    "publication_identity": {"$ref": "#/$defs/digest"},
+    "workflow_identity": {"const": "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main"},
+    "attestation_claim_identities": {"$ref": "#/$defs/attestations"},
+    "profile_authority_identities": {"$ref": "#/$defs/profileDigests"},
+    "formal_profile_receipt_digests": {"$ref": "#/$defs/profileDigests"},
+    "formal_aggregate_receipt_digest": {"$ref": "#/$defs/digest"},
+    "formal_execution_receipt_digest": {"$ref": "#/$defs/digest"},
+    "release_authority_granted": {"const": false},
+    "publish_authorized": {"const": false},
+    "record_input_digest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "rcTag": {"type": "string", "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"},
+    "profileDigests": {
+      "type": "object", "additionalProperties": false,
+      "required": ["formal_fresh", "formal_docker", "formal_offline"],
+      "properties": {
+        "formal_fresh": {"$ref": "#/$defs/digest"},
+        "formal_docker": {"$ref": "#/$defs/digest"},
+        "formal_offline": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "attestations": {
+      "type": "object", "additionalProperties": false,
+      "required": ["api-image", "web-image", "release-manifest", "deployment-contract", "installer-materials"],
+      "properties": {
+        "api-image": {"$ref": "#/$defs/digest"},
+        "web-image": {"$ref": "#/$defs/digest"},
+        "release-manifest": {"$ref": "#/$defs/digest"},
+        "deployment-contract": {"$ref": "#/$defs/digest"},
+        "installer-materials": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

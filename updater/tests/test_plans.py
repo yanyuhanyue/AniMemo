@@ -74,6 +74,25 @@ def local_release_binding() -> dict[str, object]:
     manifest_bytes = json.dumps(
         manifest(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
+    execution_unsigned = {
+        "schema": "animemo.release-execution-receipt/v1",
+        "publicationIdentity": "sha256:" + "5" * 64,
+        "publicationExecutionReceiptIdentity": "sha256:" + "6" * 64,
+        "signedClaimIdentity": "sha256:" + "7" * 64,
+        "signedAt": "2026-08-30T00:00:00Z",
+    }
+    execution_receipt = {
+        **execution_unsigned,
+        "identity": "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                execution_unsigned,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
     return {
         "source": "local-bundle",
         "transportPolicyIdentity": LocalBundleTransportPolicy().identity,
@@ -81,6 +100,7 @@ def local_release_binding() -> dict[str, object]:
         "transportIdentity": "sha256:" + "1" * 64,
         "payloadIdentity": "sha256:" + "2" * 64,
         "releaseAttestationIdentity": "sha256:" + "3" * 64,
+        "releaseExecutionReceipt": execution_receipt,
         "trustProfileVersion": 1,
         "trustProfileIdentity": "sha256:" + "4" * 64,
         "manifestIdentity": "sha256:" + hashlib.sha256(manifest_bytes).hexdigest(),
@@ -140,6 +160,29 @@ class PlanStoreTests(unittest.TestCase):
             self.assertEqual(restored["schemaVersion"], 3)
             self.assertEqual(restored["releaseBinding"], local_release_binding())
             self.assertEqual(restored["planningContextIdentity"], instance_identity)
+
+    def test_local_release_execution_receipt_is_closed_and_exact(self):
+        for mutation in (
+            lambda value: value["releaseExecutionReceipt"].__setitem__(
+                "signedAt", "2026-08-30T08:00:00+08:00"
+            ),
+            lambda value: value["releaseExecutionReceipt"].__setitem__(
+                "identity", "sha256:" + "0" * 64
+            ),
+            lambda value: value["releaseExecutionReceipt"].__setitem__(
+                "unexpected", True
+            ),
+        ):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                binding = local_release_binding()
+                mutation(binding)
+                with self.assertRaises(StateError):
+                    PlanStore(Path(directory)).create(
+                        manifest(),
+                        {"target": "v1.0.0"},
+                        release_binding=binding,
+                        planning_context_identity="sha256:" + "9" * 64,
+                    )
 
     def test_legacy_or_tampered_plan_binding_fails_closed(self):
         mutations = (

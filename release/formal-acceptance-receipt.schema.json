@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yanyuhanyue/AniMemo/blob/main/release/formal-acceptance-receipt.schema.json",
+  "title": "AniMemo production Formal aggregate receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "rc_authority_identity", "profile_results",
+    "profile_authority_identities", "all_profiles_pass",
+    "formal_authority_identity", "formal_execution_receipt_digest",
+    "release_authority_granted", "publish_authorized", "result",
+    "receipt_digest"
+  ],
+  "properties": {
+    "schema": {"const": "animemo.formal-acceptance-receipt/v1"},
+    "version": {"const": 1},
+    "rc_authority_identity": {"$ref": "#/$defs/digest"},
+    "profile_results": {"$ref": "#/$defs/profileResults"},
+    "profile_authority_identities": {"$ref": "#/$defs/profileDigests"},
+    "all_profiles_pass": {"type": "boolean"},
+    "formal_authority_identity": {"$ref": "#/$defs/digest"},
+    "formal_execution_receipt_digest": {"$ref": "#/$defs/digest"},
+    "release_authority_granted": {"const": false},
+    "publish_authorized": {"const": false},
+    "result": {"enum": ["PASS", "FAIL"]},
+    "receipt_digest": {"$ref": "#/$defs/digest"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"result": {"const": "PASS"}}, "required": ["result"]},
+      "then": {
+        "properties": {
+          "profile_results": {"$ref": "#/$defs/passProfileResults"},
+          "profile_authority_identities": {"$ref": "#/$defs/passProfileDigests"},
+          "all_profiles_pass": {"const": true}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "nullableDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "profileDigests": {
+      "type": "object", "additionalProperties": false,
+      "required": ["formal_fresh", "formal_docker", "formal_offline"],
+      "properties": {
+        "formal_fresh": {"$ref": "#/$defs/nullableDigest"},
+        "formal_docker": {"$ref": "#/$defs/nullableDigest"},
+        "formal_offline": {"$ref": "#/$defs/nullableDigest"}
+      }
+    },
+    "passProfileDigests": {
+      "type": "object", "additionalProperties": false,
+      "required": ["formal_fresh", "formal_docker", "formal_offline"],
+      "properties": {
+        "formal_fresh": {"$ref": "#/$defs/digest"},
+        "formal_docker": {"$ref": "#/$defs/digest"},
+        "formal_offline": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "passOutcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "failure_code", "receipt_digest", "continuation_receipt_digest"],
+      "properties": {
+        "status": {"const": "PASS"},
+        "failure_code": {"type": "null"},
+        "receipt_digest": {"$ref": "#/$defs/digest"},
+        "continuation_receipt_digest": {"type": "null"}
+      }
+    },
+    "passProfileResults": {
+      "type": "object", "additionalProperties": false,
+      "required": ["formal_fresh", "formal_docker", "formal_offline"],
+      "properties": {
+        "formal_fresh": {"$ref": "#/$defs/passOutcome"},
+        "formal_docker": {"$ref": "#/$defs/passOutcome"},
+        "formal_offline": {"$ref": "#/$defs/passOutcome"}
+      }
+    },
+    "outcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "failure_code", "receipt_digest", "continuation_receipt_digest"],
+      "properties": {
+        "status": {"enum": ["PASS", "FAIL", "ERROR", "NOT_RUN_SHARED_BLOCKER"]},
+        "failure_code": {"oneOf": [{"type": "string", "pattern": "^FORMAL_[A-Z0-9_]{1,120}$"}, {"type": "null"}]},
+        "receipt_digest": {"$ref": "#/$defs/nullableDigest"},
+        "continuation_receipt_digest": {"$ref": "#/$defs/nullableDigest"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "PASS"}}, "required": ["status"]},
+          "then": {
+            "properties": {
+              "failure_code": {"type": "null"},
+              "receipt_digest": {"$ref": "#/$defs/digest"},
+              "continuation_receipt_digest": {"type": "null"}
+            }
+          }
+        }
+        ,
+        {
+          "if": {"properties": {"status": {"const": "FAIL"}}, "required": ["status"]},
+          "then": {
+            "properties": {
+              "failure_code": {"type": "string", "pattern": "^FORMAL_[A-Z0-9_]{1,120}$"},
+              "receipt_digest": {"$ref": "#/$defs/digest"},
+              "continuation_receipt_digest": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"status": {"enum": ["ERROR", "NOT_RUN_SHARED_BLOCKER"]}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "failure_code": {"type": "string", "pattern": "^FORMAL_[A-Z0-9_]{1,120}$"},
+              "receipt_digest": {"type": "null"}
+            }
+          }
+        }
+      ]
+    },
+    "profileResults": {
+      "type": "object", "additionalProperties": false,
+      "required": ["formal_fresh", "formal_docker", "formal_offline"],
+      "properties": {
+        "formal_fresh": {"$ref": "#/$defs/outcome"},
+        "formal_docker": {"$ref": "#/$defs/outcome"},
+        "formal_offline": {"$ref": "#/$defs/outcome"}
+      }
+    }
+  }
+}

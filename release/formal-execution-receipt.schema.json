@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yanyuhanyue/AniMemo/blob/main/release/formal-execution-receipt.schema.json",
+  "title": "AniMemo Formal execution and observation receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "formal_authority_identity", "verified_candidate_digest",
+    "candidate_aggregate_receipt_digest", "candidate_profile_receipt_digests",
+    "candidate_source_vm_authority_identity",
+    "candidate_provider_execution_authority_receipt_digest",
+    "candidate_material_authority_identity",
+    "candidate_material_tree_inventory_identity",
+    "formal_provider_execution_authority_receipt_digest",
+    "profile_execution_receipt_digests", "profile_results",
+    "provenance_preflight_digest", "actions_preflight_receipt_digest",
+    "provenance_claim_summaries", "publication_preflight_summary",
+    "formal_windows_pretrust_kit_identity", "offline_release_trust_profile_identity",
+    "pretrusted_profile_identity", "provenance_verifier_identity",
+    "github_trusted_root_identity", "sigstore_trusted_root_identity",
+    "accepted_at", "observed_at",
+    "operator_identity", "run_id", "run_attempt", "correlation_id",
+    "current_workflow_commit", "execution_environment", "tool_identity",
+    "result", "release_authority_granted", "publish_authorized",
+    "receipt_digest"
+  ],
+  "properties": {
+    "schema": {"const": "animemo.formal-execution-receipt/v1"},
+    "version": {"const": 1},
+    "formal_authority_identity": {"$ref": "#/$defs/digest"},
+    "verified_candidate_digest": {"$ref": "#/$defs/digest"},
+    "candidate_aggregate_receipt_digest": {"$ref": "#/$defs/digest"},
+    "candidate_profile_receipt_digests": {"$ref": "#/$defs/candidateProfileDigests"},
+    "candidate_source_vm_authority_identity": {"$ref": "#/$defs/digest"},
+    "candidate_provider_execution_authority_receipt_digest": {"$ref": "#/$defs/digest"},
+    "candidate_material_authority_identity": {"$ref": "#/$defs/digest"},
+    "candidate_material_tree_inventory_identity": {"$ref": "#/$defs/digest"},
+    "formal_provider_execution_authority_receipt_digest": {"$ref": "#/$defs/nullableDigest"},
+    "profile_execution_receipt_digests": {"$ref": "#/$defs/profileDigests"},
+    "profile_results": {"$ref": "#/$defs/profileResults"},
+    "provenance_preflight_digest": {"$ref": "#/$defs/digest"},
+    "actions_preflight_receipt_digest": {"$ref": "#/$defs/digest"},
+    "provenance_claim_summaries": {
+      "type": "object", "additionalProperties": false,
+      "required": ["api-image", "web-image", "release-manifest", "deployment-contract", "installer-materials"],
+      "properties": {
+        "api-image": {"$ref": "#/$defs/provenanceSummary"},
+        "web-image": {"$ref": "#/$defs/provenanceSummary"},
+        "release-manifest": {"$ref": "#/$defs/provenanceSummary"},
+        "deployment-contract": {"$ref": "#/$defs/provenanceSummary"},
+        "installer-materials": {"$ref": "#/$defs/provenanceSummary"}
+      }
+    },
+    "publication_preflight_summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["verifier_digest", "bundle_digest", "trusted_root_digest", "request_digest", "claim_digest"],
+      "properties": {
+        "verifier_digest": {"$ref": "#/$defs/digest"},
+        "bundle_digest": {"$ref": "#/$defs/digest"},
+        "trusted_root_digest": {"$ref": "#/$defs/digest"},
+        "request_digest": {"$ref": "#/$defs/digest"},
+        "claim_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "formal_windows_pretrust_kit_identity": {"$ref": "#/$defs/digest"},
+    "offline_release_trust_profile_identity": {"$ref": "#/$defs/digest"},
+    "pretrusted_profile_identity": {"$ref": "#/$defs/digest"},
+    "provenance_verifier_identity": {"$ref": "#/$defs/digest"},
+    "github_trusted_root_identity": {"$ref": "#/$defs/digest"},
+    "sigstore_trusted_root_identity": {"$ref": "#/$defs/digest"},
+    "accepted_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "observed_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "operator_identity": {"type": "string", "minLength": 1, "maxLength": 200},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "run_attempt": {"type": "integer", "minimum": 1},
+    "correlation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "current_workflow_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "execution_environment": {"type": "string", "minLength": 1, "maxLength": 256},
+    "tool_identity": {"$ref": "#/$defs/digest"},
+    "result": {"enum": ["PASS", "FAIL"]},
+    "release_authority_granted": {"const": false},
+    "publish_authorized": {"const": false},
+    "receipt_digest": {"$ref": "#/$defs/digest"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"result": {"const": "PASS"}}, "required": ["result"]},
+      "then": {
+        "properties": {
+          "formal_provider_execution_authority_receipt_digest": {"$ref": "#/$defs/digest"},
+          "profile_execution_receipt_digests": {"$ref": "#/$defs/passProfileDigests"},
+          "profile_results": {"$ref": "#/$defs/passProfileResults"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "provenanceSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["claim_digest", "bundle_digest", "trusted_root_digest", "request_digest"],
+      "properties": {
+        "claim_digest": {"$ref": "#/$defs/digest"},
+        "bundle_digest": {"$ref": "#/$defs/digest"},
+        "trusted_root_digest": {"$ref": "#/$defs/digest"},
+        "request_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "nullableDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "profileDigests": {
+      "type": "object", "additionalProperties": false,
+      "required": ["formal_fresh", "formal_docker", "formal_offline"],
+      "properties": {
+        "formal_fresh": {"$ref": "#/$defs/nullableDigest"},
+        "formal_docker": {"$ref": "#/$defs/nullableDigest"},
+        "formal_offline": {"$ref": "#/$defs/nullableDigest"}
+      }
+    },
+    "passProfileDigests": {
+      "type": "object", "additionalProperties": false,
+      "required": ["formal_fresh", "formal_docker", "formal_offline"],
+      "properties": {
+        "formal_fresh": {"$ref": "#/$defs/digest"},
+        "formal_docker": {"$ref": "#/$defs/digest"},
+        "formal_offline": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "passOutcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "failure_code", "receipt_digest", "continuation_receipt_digest"],
+      "properties": {
+        "status": {"const": "PASS"},
+        "failure_code": {"type": "null"},
+        "receipt_digest": {"$ref": "#/$defs/digest"},
+        "continuation_receipt_digest": {"type": "null"}
+      }
+    },
+    "passProfileResults": {
+      "type": "object", "additionalProperties": false,
+      "required": ["formal_fresh", "formal_docker", "formal_offline"],
+      "properties": {
+        "formal_fresh": {"$ref": "#/$defs/passOutcome"},
+        "formal_docker": {"$ref": "#/$defs/passOutcome"},
+        "formal_offline": {"$ref": "#/$defs/passOutcome"}
+      }
+    },
+    "candidateProfileDigests": {
+      "type": "object", "additionalProperties": false,
+      "required": ["fresh_base", "docker_base", "runtime_base_offline"],
+      "properties": {
+        "fresh_base": {"$ref": "#/$defs/digest"},
+        "docker_base": {"$ref": "#/$defs/digest"},
+        "runtime_base_offline": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "outcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "failure_code", "receipt_digest", "continuation_receipt_digest"],
+      "properties": {
+        "status": {"enum": ["PASS", "FAIL", "ERROR", "NOT_RUN_SHARED_BLOCKER"]},
+        "failure_code": {"oneOf": [{"type": "string", "pattern": "^FORMAL_[A-Z0-9_]{1,120}$"}, {"type": "null"}]},
+        "receipt_digest": {"$ref": "#/$defs/nullableDigest"},
+        "continuation_receipt_digest": {"$ref": "#/$defs/nullableDigest"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "PASS"}}, "required": ["status"]},
+          "then": {"properties": {"failure_code": {"type": "null"}, "receipt_digest": {"$ref": "#/$defs/digest"}, "continuation_receipt_digest": {"type": "null"}}}
+        }
+        ,
+        {
+          "if": {"properties": {"status": {"const": "FAIL"}}, "required": ["status"]},
+          "then": {"properties": {"failure_code": {"type": "string", "pattern": "^FORMAL_[A-Z0-9_]{1,120}$"}, "receipt_digest": {"$ref": "#/$defs/digest"}, "continuation_receipt_digest": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"status": {"enum": ["ERROR", "NOT_RUN_SHARED_BLOCKER"]}}, "required": ["status"]},
+          "then": {"properties": {"failure_code": {"type": "string", "pattern": "^FORMAL_[A-Z0-9_]{1,120}$"}, "receipt_digest": {"type": "null"}}}
+        }
+      ]
+    },
+    "profileResults": {
+      "type": "object", "additionalProperties": false,
+      "required": ["formal_fresh", "formal_docker", "formal_offline"],
+      "properties": {
+        "formal_fresh": {"$ref": "#/$defs/outcome"},
+        "formal_docker": {"$ref": "#/$defs/outcome"},
+        "formal_offline": {"$ref": "#/$defs/outcome"}
+      }
+    }
+  }
+}

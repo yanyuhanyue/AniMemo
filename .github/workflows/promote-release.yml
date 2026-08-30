@@ -175,8 +175,6 @@ jobs:
           git tag --list 'v*' --sort=version:refname > "$RUNNER_TEMP/tags.txt"
           python -m release.cli promote-manifest \
             --rc-manifest rc-assets/release-manifest.json --tags-file "$RUNNER_TEMP/tags.txt" \
-            --created-at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            --provenance-source-commit "$GITHUB_SHA" \
             --output promotion-output/release-manifest.json
           python -m release.cli validate-manifest \
             --manifest promotion-output/release-manifest.json --updater-version 1.0.0

@@ -10,7 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .acceptance import build_rc_live_acceptance, verify_stable_promotion_acceptance
+from .acceptance import verify_stable_promotion_acceptance
+from .formal_acceptance_test_support import build_test_formal_acceptance
 from .notes import CANONICAL_RELEASE_ASSETS
 from .presentation import (
     PresentationError,
@@ -102,9 +103,10 @@ def _metadata(tag: str, *, title: str | None = None, stable: bool = False):
 
 
 def _acceptance(tag: str, commit: str):
-    return build_rc_live_acceptance(
+    return build_test_formal_acceptance(
         rc_tag=tag,
         rc_commit=commit,
+        rc_tree=commit,
         release_manifest_identity=IDENTITY,
         deployment_contract_identity=IDENTITY,
         installer_materials_identity=IDENTITY,
@@ -113,9 +115,6 @@ def _acceptance(tag: str, commit: str):
         fresh_base_identity=IDENTITY,
         docker_base_identity=IDENTITY,
         runtime_base_identity=IDENTITY,
-        install_path="github",
-        doctor_result="PASS",
-        upgrade_result="PASS",
         accepted_at="2026-08-23T00:00:00Z",
         operator_identity="presentation-test",
         tool_identity=IDENTITY,

@@ -554,6 +554,29 @@ class VersionResolutionTests(unittest.TestCase):
 
 
 class ManifestContractTests(unittest.TestCase):
+    def test_manifest_rejects_naive_invalid_and_variable_precision_timestamps(self):
+        for timestamp in (
+            "2026-08-12T00:00:00",
+            "2026-08-12T00:00:00.1Z",
+            "2026-02-30T00:00:00Z",
+        ):
+            with self.subTest(timestamp=timestamp), self.assertRaises(
+                ReleaseContractError
+            ):
+                manifest(created_at=timestamp)
+
+    def test_stable_manifest_time_and_provenance_derive_only_from_frozen_rc(self):
+        rc = manifest(created_at="2026-08-12T08:00:00+08:00")
+
+        stable = promote_manifest(rc, existing_tags=[])
+
+        self.assertEqual(stable["release"]["createdAt"], "2026-08-12T00:00:00Z")
+        self.assertEqual(
+            stable["provenance"]["sourceCommit"],
+            rc["release"]["commit"],
+        )
+        self.assertEqual(stable, promote_manifest(rc, existing_tags=[]))
+
     def test_installer_materials_identity_is_explicit_and_cannot_be_zero(self):
         parameter = inspect.signature(build_manifest).parameters[
             "installer_materials_sha256"
@@ -756,11 +779,9 @@ class ManifestContractTests(unittest.TestCase):
 
     def test_stable_manifest_can_only_promote_exact_rc_artifacts(self):
         rc = manifest()
-        promotion_commit = "b" * 40
         stable = promote_manifest(
             rc,
             existing_tags=["v0.9.0"],
-            provenance_source_commit=promotion_commit,
         )
         validate_manifest(stable)
         self.assertEqual(stable["release"]["version"], "v1.0.0")
@@ -772,7 +793,7 @@ class ManifestContractTests(unittest.TestCase):
             stable["artifacts"]["deploymentContract"],
             rc["artifacts"]["deploymentContract"],
         )
-        self.assertEqual(stable["provenance"]["sourceCommit"], promotion_commit)
+        self.assertEqual(stable["provenance"]["sourceCommit"], rc["release"]["commit"])
 
         wrong_stable_workflow = copy.deepcopy(stable)
         wrong_stable_workflow["provenance"]["workflow"] = ".github/workflows/release.yml"
@@ -780,11 +801,11 @@ class ManifestContractTests(unittest.TestCase):
             validate_manifest(wrong_stable_workflow)
 
         with self.assertRaisesRegex(ReleaseContractError, "already exists"):
-            promote_manifest(rc, existing_tags=["v1.0.0"], provenance_source_commit=promotion_commit)
+            promote_manifest(rc, existing_tags=["v1.0.0"])
 
         beta = manifest(version="v1.0.0-beta.1", channel="beta")
         with self.assertRaisesRegex(ReleaseContractError, "RC"):
-            promote_manifest(beta, existing_tags=[], provenance_source_commit=promotion_commit)
+            promote_manifest(beta, existing_tags=[])
 
     def test_manifest_file_is_canonical_utf8_json(self):
         payload = manifest()

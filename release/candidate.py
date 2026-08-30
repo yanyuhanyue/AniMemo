@@ -1874,6 +1874,11 @@ def validate_aggregate_receipt(value: object) -> dict[str, Any]:
     ):
         _reject("CANDIDATE_R2_OBSERVATION_REUSED")
     profile_results = receipt["profile_results"]
+    original_vm_hashes = receipt["original_vm_hashes"]
+    if receipt["base_vm_identity"] != sha256_bytes(
+        canonical_json_bytes(dict(sorted(original_vm_hashes.items())))
+    ):
+        _reject("CANDIDATE_SOURCE_VM_AUTHORITY_MISMATCH")
     digests = [
         result["receipt_digest"]
         for result in profile_results.values()

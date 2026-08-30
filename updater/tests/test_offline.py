@@ -34,6 +34,7 @@ from updater.offline import (
     SigstoreGoEvidenceVerifier,
     TrustProfile,
     advance_trust_profile,
+    migrate_pristine_offline_authority_state_v1,
     production_offline_release_verifier,
 )
 from updater.tests.test_oci_offline import write_layout
@@ -163,7 +164,7 @@ def _portable_fixture(root: Path):
 
     action_claims = {}
     release_commit = manifest["release"]["commit"]
-    provenance_commit = manifest["provenance"]["sourceCommit"]
+    promotion_execution_commit = "2" * 40
     provenance_workflow = manifest["provenance"]["workflow"]
     subjects = {
         "api": (
@@ -182,19 +183,19 @@ def _portable_fixture(root: Path):
             "release-manifest.json",
             "sha256:" + hashlib.sha256(manifest_bytes).hexdigest(),
             provenance_workflow,
-            provenance_commit,
+            promotion_execution_commit,
         ),
         "deployment": (
             "deployment-contract.json",
             "sha256:" + hashlib.sha256(deployment_bytes).hexdigest(),
             provenance_workflow,
-            provenance_commit,
+            promotion_execution_commit,
         ),
         "materials": (
             "installer-materials.tar",
             "sha256:" + hashlib.sha256(FAKE_MATERIAL_ARCHIVE).hexdigest(),
             provenance_workflow,
-            provenance_commit,
+            promotion_execution_commit,
         ),
     }
     for label, evidence_name in ACTIONS_EVIDENCE_NAMES.items():
@@ -513,6 +514,36 @@ class OfflineProductionGateTests(unittest.TestCase):
 
 
 class ClosedPublicationClaimTests(unittest.TestCase):
+    def test_signed_at_rejects_naive_invalid_and_variable_precision_values(self) -> None:
+        for timestamp in (
+            "2026-08-19T00:00:00",
+            "2026-08-19T00:00:00.1Z",
+            "2026-02-30T00:00:00Z",
+        ):
+            claim = _release_claim()
+            claim["signedAt"] = timestamp
+            with self.subTest(timestamp=timestamp), self.assertRaises(
+                PublicationEvidenceError
+            ):
+                close_github_release_publication(claim)
+
+    def test_signed_at_is_execution_evidence_not_logical_publication_identity(self) -> None:
+        first_claim = _release_claim()
+        first_claim["signedAt"] = "2026-08-19T08:00:00+08:00"
+        second_claim = _release_claim()
+        second_claim["signedAt"] = "2026-08-20T00:00:00Z"
+
+        first = close_github_release_publication(first_claim)
+        second = close_github_release_publication(second_claim)
+
+        self.assertEqual(first.identity, second.identity)
+        self.assertNotEqual(
+            first.execution_receipt_identity,
+            second.execution_receipt_identity,
+        )
+        self.assertEqual(first.signed_at, "2026-08-19T00:00:00Z")
+        self.assertNotEqual(first.signed_claim_identity, second.signed_claim_identity)
+
     def test_github_release_claim_is_closed_and_identity_is_deterministic(self) -> None:
         first = close_github_release_publication(_release_claim())
         second = close_github_release_publication(deepcopy(_release_claim()))
@@ -587,6 +618,68 @@ class ClosedPublicationClaimTests(unittest.TestCase):
 
 
 class OfflineDurableStateTests(unittest.TestCase):
+    def test_v1_migration_is_explicit_and_only_pristine_state_is_safe(self) -> None:
+        profile = _profile()
+        legacy = {
+            "acceptedPublicationIdentities": [],
+            "activeProfileIdentity": profile.identity,
+            "activeProfileVersion": profile.profile_version,
+            "generation": 0,
+            "highestReleaseVersion": None,
+            "revokedEvidenceIdentities": [],
+            "schemaVersion": 1,
+        }
+
+        migrated = migrate_pristine_offline_authority_state_v1(
+            legacy,
+            profile=profile,
+        )
+
+        self.assertEqual(migrated.schema_version, 2)
+        changed = deepcopy(legacy)
+        changed["acceptedPublicationIdentities"] = [_DIGEST_A]
+        changed["generation"] = 1
+        changed["highestReleaseVersion"] = "v1.0.0"
+        with self.assertRaisesRegex(RequestRejected, "原始 signed evidence.*重验"):
+            migrate_pristine_offline_authority_state_v1(changed, profile=profile)
+
+    def test_v2_state_keys_replay_by_logical_authority_and_rejects_v1(self) -> None:
+        profile = _profile()
+        state = OfflineAuthorityState.initial(profile)
+        record = state.as_record()
+
+        self.assertEqual(record["schemaVersion"], 2)
+        self.assertIn("acceptedAuthorityIdentities", record)
+        self.assertNotIn("acceptedPublicationIdentities", record)
+
+        legacy = deepcopy(record)
+        legacy["schemaVersion"] = 1
+        legacy["acceptedPublicationIdentities"] = legacy.pop(
+            "acceptedAuthorityIdentities"
+        )
+        with self.assertRaisesRegex(
+            RequestRejected,
+            "v1 已拒绝.*migrate_pristine_offline_authority_state_v1",
+        ):
+            OfflineAuthorityState.from_record(legacy)
+
+        first_claim = _release_claim()
+        second_claim = _release_claim()
+        second_claim["signedAt"] = "2026-08-20T00:00:00Z"
+        first = close_github_release_publication(first_claim)
+        second = close_github_release_publication(second_claim)
+        accepted = state.accept_publication(
+            profile=profile,
+            publication_identity=first.identity,
+            release_version="v1.0.0",
+        )
+        with self.assertRaisesRegex(RequestRejected, "重放"):
+            accepted.accept_publication(
+                profile=profile,
+                publication_identity=second.identity,
+                release_version="v1.0.0",
+            )
+
     def test_replay_and_version_downgrade_are_rejected(self) -> None:
         profile = _profile()
         state = OfflineAuthorityState.initial(profile).accept_publication(
@@ -986,6 +1079,29 @@ class OfflineOrchestrationTests(unittest.TestCase):
             self.assertIn(
                 verified.publication_identity,
                 verified.next_state.accepted_publication_identities,
+            )
+            publication = close_github_release_publication(release_claim)
+            self.assertEqual(
+                verified.publication_execution_receipt_identity,
+                publication.execution_receipt_identity,
+            )
+            self.assertEqual(
+                verified.signed_claim_identity,
+                publication.signed_claim_identity,
+            )
+            self.assertEqual(verified.signed_at, "2026-08-19T00:00:00Z")
+            release_execution = verified.release_execution_receipt
+            self.assertEqual(
+                release_execution["publicationIdentity"],
+                verified.publication_identity,
+            )
+            self.assertEqual(
+                release_execution["publicationExecutionReceiptIdentity"],
+                verified.publication_execution_receipt_identity,
+            )
+            self.assertRegex(
+                release_execution["identity"],
+                r"^sha256:[0-9a-f]{64}$",
             )
             self.assertEqual(
                 verified.release_attestation_identity,

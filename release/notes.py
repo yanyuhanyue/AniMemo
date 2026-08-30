@@ -354,7 +354,7 @@ def render_release_notes(value: Mapping[str, Any]) -> str:
     context = snapshot["context"]
     channel_line = {
         "beta": "Beta 预览版本；用于验证，不代表 Stable 发布。",
-        "rc": "RC 候选版本；发布后仍须通过 Fresh Base live acceptance。",
+        "rc": "RC 候选版本；发布后仍须通过正式 Formal 三 Profile producer 验收。",
         "stable": "Stable 版本；由已验收 RC 的同一提交与 OCI 摘要提升。",
     }[context["channel"]]
     lines = [f"# {context['release_tag']}", "", f"> {channel_line}", ""]

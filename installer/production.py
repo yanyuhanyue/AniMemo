@@ -7,6 +7,7 @@ only fixed-path OS, Release, Compose, Updater, and protected-file boundaries.
 from __future__ import annotations
 
 import base64
+import hashlib
 import ipaddress
 import json
 import os
@@ -281,7 +282,11 @@ class CandidatePlatformCommandObserver:
             {
                 **_completed_command_observation(
                     argv,
-                    operation=("apt-get" if classification == "APT_NETWORK" else "local"),
+                    operation=(
+                        "apt-get"
+                        if classification == "APT_NETWORK"
+                        else "local"
+                    ),
                     return_code=int(result.returncode),
                 ),
                 "classification": classification,
@@ -777,6 +782,127 @@ class ProductionReleasePort:
                 outcome=InstallOutcome.ENVIRONMENT_FAILED,
             )
         return self._latest
+
+    def latest_offline_authority_binding(self) -> dict[str, object]:
+        """Return the resolver-observed closed offline authority binding.
+
+        This deliberately exposes no resolver/source object.  It is available
+        only after an exact Local Bundle release has been resolved.
+        """
+
+        if (
+            self.transport_source is not InstallTransportSource.LOCAL_BUNDLE
+            or self._latest_evidence is None
+        ):
+            raise InstallerError(
+                "INSTALL_RELEASE_EXECUTION_RECEIPT_UNAVAILABLE",
+                outcome=InstallOutcome.ENVIRONMENT_FAILED,
+            )
+        binding_reader = getattr(self.source, "release_binding", None)
+        try:
+            binding = binding_reader(self._latest_evidence.version)
+            receipt = binding["releaseExecutionReceipt"]
+        except Exception:  # noqa: BLE001 - Local Bundle authority boundary
+            raise InstallerError(
+                "INSTALL_RELEASE_EXECUTION_RECEIPT_UNAVAILABLE",
+                outcome=InstallOutcome.ENVIRONMENT_FAILED,
+            ) from None
+        if not isinstance(receipt, dict) or set(receipt) != {
+            "schema",
+            "publicationIdentity",
+            "publicationExecutionReceiptIdentity",
+            "signedClaimIdentity",
+            "signedAt",
+            "identity",
+        }:
+            raise InstallerError(
+                "INSTALL_RELEASE_EXECUTION_RECEIPT_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        unsigned = dict(receipt)
+        identity = unsigned.pop("identity")
+        encoded = json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            signed_at = datetime.strptime(
+                str(receipt["signedAt"]), "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc)
+        except ValueError:
+            signed_at = None
+        if (
+            receipt["schema"] != "animemo.release-execution-receipt/v1"
+            or signed_at is None
+            or signed_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+            != receipt["signedAt"]
+            or any(
+                not isinstance(receipt[field], str)
+                or len(receipt[field]) != 71
+                or not receipt[field].startswith("sha256:")
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in receipt[field][7:]
+                )
+                for field in (
+                    "publicationIdentity",
+                    "publicationExecutionReceiptIdentity",
+                    "signedClaimIdentity",
+                )
+            )
+            or identity != "sha256:" + hashlib.sha256(encoded).hexdigest()
+        ):
+            raise InstallerError(
+                "INSTALL_RELEASE_EXECUTION_RECEIPT_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        trust_profile_version = binding.get("trustProfileVersion")
+        trust_profile_identity = binding.get("trustProfileIdentity")
+        unsigned_binding = {
+            "schema": "animemo.offline-release-authority-binding/v1",
+            "version": self._latest_evidence.version,
+            "trustProfileVersion": trust_profile_version,
+            "trustProfileIdentity": trust_profile_identity,
+            "releaseExecutionReceipt": dict(receipt),
+        }
+        if (
+            type(trust_profile_version) is not int
+            or trust_profile_version < 1
+            or not isinstance(trust_profile_identity, str)
+            or len(trust_profile_identity) != 71
+            or not trust_profile_identity.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in trust_profile_identity[7:]
+            )
+        ):
+            raise InstallerError(
+                "INSTALL_OFFLINE_AUTHORITY_BINDING_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            )
+        binding_bytes = json.dumps(
+            unsigned_binding,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return {
+            **unsigned_binding,
+            "identity": "sha256:" + hashlib.sha256(binding_bytes).hexdigest(),
+        }
+
+    def latest_release_execution_receipt(self) -> dict[str, object]:
+        """Compatibility view of the closed offline authority binding."""
+
+        return dict(
+            self.latest_offline_authority_binding()[
+                "releaseExecutionReceipt"
+            ]
+        )
 
     def latest_evidence(self) -> ReleaseEvidence:
         if self._latest_evidence is None:
@@ -2819,6 +2945,12 @@ class ProductionInstallerComposition:
     candidate_doctor: ProductionDoctorAcceptance | None = None
     candidate_platform_observer: CandidatePlatformCommandObserver | None = None
     candidate_command_runner: LocalDockerCommandRunner | None = None
+    formal_trust_temporary: tempfile.TemporaryDirectory[str] | None = None
+
+    def close_formal_authority(self) -> None:
+        temporary = self.formal_trust_temporary
+        if temporary is not None:
+            temporary.cleanup()
 
     def candidate_profile_execution_observation(
         self,
@@ -3204,9 +3336,13 @@ class ProductionInstallerComposition:
             )
         from .platform_bootstrap import ProductionPlatformBootstrap
 
-        bootstrap = ProductionPlatformBootstrap(
-            runner=self.candidate_platform_observer
-        ) if self.candidate_platform_observer is not None else ProductionPlatformBootstrap()
+        bootstrap = (
+            ProductionPlatformBootstrap(
+                runner=self.candidate_platform_observer
+            )
+            if self.candidate_platform_observer is not None
+            else ProductionPlatformBootstrap()
+        )
         plan = bootstrap.plan(transport_source=request.transport_source)
         return VerifiedPlatformBootstrapSession(
             release=release,
@@ -3250,7 +3386,7 @@ class ProductionInstallerComposition:
         return receipt
 
 
-def build_production_composition(
+def _build_production_composition(
     *,
     instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
     transport_source: InstallTransportSource = InstallTransportSource.GITHUB,
@@ -3259,6 +3395,7 @@ def build_production_composition(
     | None = None,
     local_bundle_payload: Path | None = None,
     local_bundle_release_attestation: Path | None = None,
+    offline_verifier=None,
 ) -> ProductionInstallerComposition:
     namespace = instance_namespace(instance_name)
     runner = LocalDockerCommandRunner()
@@ -3267,6 +3404,7 @@ def build_production_composition(
         transport_policy=transport_policy,
         local_bundle_payload=local_bundle_payload,
         local_bundle_release_attestation=local_bundle_release_attestation,
+        offline_verifier=offline_verifier,
         image_acquirer=ImageAcquirer(runner=runner),
     )
     configuration = ProductionManagedConfigurationPort(namespace=namespace)
@@ -3314,6 +3452,183 @@ def build_production_composition(
         platform=platform,
         bootstrap_privilege_gate=bootstrap_privilege_gate,
     )
+
+
+_FORMAL_OFFLINE_VERIFIER_CAPABILITIES: dict[
+    object, tuple[object, tempfile.TemporaryDirectory[str]]
+] = {}
+
+
+class FormalCandidateBoundOfflineVerifierCapability:
+    """Opaque one-use verifier capability issued after Candidate-kit closure."""
+
+    __slots__ = ("__token",)
+
+    def __init__(self) -> None:
+        raise TypeError("Formal offline verifier capability不能直接构造")
+
+    def __reduce__(self):
+        raise TypeError("Formal offline verifier capability不可序列化")
+
+    def _consume(self):
+        try:
+            token = self.__token
+            verifier = _FORMAL_OFFLINE_VERIFIER_CAPABILITIES.pop(token)
+        except (AttributeError, KeyError) as error:
+            raise InstallerError(
+                "INSTALL_FORMAL_OFFLINE_CAPABILITY_INVALID",
+                outcome=InstallOutcome.VALIDATION_FAILED,
+            ) from error
+        self.__token = None
+        return verifier
+
+
+def issue_formal_candidate_bound_offline_verifier(
+    authority_root: Path,
+    *,
+    expected_profile_identity: str,
+) -> FormalCandidateBoundOfflineVerifierCapability:
+    """Close Candidate-staged initial/Formal kits before issuing capability."""
+
+    from release.formal_windows_pretrust import (
+        FORMAL_WINDOWS_PRETRUST_PREFIX,
+        FormalWindowsPretrustedTrustMaterial,
+    )
+    from release.materials import INITIAL_TRUST_KIT_PREFIX
+    from updater.offline import (
+        OfflineReleaseVerifier,
+        PretrustedTrustMaterial,
+        SigstoreGoEvidenceVerifier,
+    )
+
+    initial_root = Path(authority_root) / INITIAL_TRUST_KIT_PREFIX
+    formal_root = Path(authority_root) / FORMAL_WINDOWS_PRETRUST_PREFIX
+    expected_initial = {
+        "github-trusted-root.jsonl",
+        "github-tuf-root.json",
+        "initial-trust-bootstrap.json",
+        "offline-release-verifier",
+        "sigstore-trusted-root.jsonl",
+        "sigstore-tuf-root.json",
+        "trust-profile.json",
+    }
+    temporary: tempfile.TemporaryDirectory[str] | None = None
+    try:
+        if {item.name for item in initial_root.iterdir()} != expected_initial:
+            raise ValueError("candidate pretrust set")
+        formal_material = FormalWindowsPretrustedTrustMaterial.load(formal_root)
+        temporary = tempfile.TemporaryDirectory(
+            prefix="animemo-formal-guest-pretrust-"
+        )
+        guest_root = Path(temporary.name)
+        for name in sorted(expected_initial - {"initial-trust-bootstrap.json"}):
+            source = initial_root / name
+            target = guest_root / name
+            metadata = source.lstat()
+            if source.is_symlink() or not source.is_file() or metadata.st_nlink != 1:
+                raise ValueError("candidate pretrust member")
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o700 if name == "offline-release-verifier" else 0o600,
+            )
+            try:
+                with os.fdopen(descriptor, "wb", closefd=True) as output:
+                    descriptor = -1
+                    with source.open("rb") as input_file:
+                        shutil.copyfileobj(
+                            input_file, output, length=1024 * 1024
+                        )
+                    output.flush()
+                    os.fsync(output.fileno())
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+        material = PretrustedTrustMaterial.load(guest_root)
+        if (
+            material.profile.identity != expected_profile_identity
+            or formal_material.profile.source_profile_identity
+            != material.profile.identity
+            or formal_material.profile.linux_guest_verifier_identity
+            != material.profile.verifier_identity
+            or formal_material.profile.github_trusted_root_sha256
+            != material.profile.github_trusted_root_sha256
+            or formal_material.profile.sigstore_trusted_root_sha256
+            != material.profile.sigstore_trusted_root_sha256
+        ):
+            raise ValueError("candidate pretrust binding")
+        verifier = OfflineReleaseVerifier(
+            trust_profile=material.profile,
+            external_verifier=SigstoreGoEvidenceVerifier(material),
+            idempotent_reverification=True,
+        )
+    except Exception as error:
+        if temporary is not None:
+            temporary.cleanup()
+        raise InstallerError(
+            "INSTALL_FORMAL_OFFLINE_CAPABILITY_INVALID",
+            outcome=InstallOutcome.VALIDATION_FAILED,
+        ) from error
+    token = object()
+    capability = object.__new__(
+        FormalCandidateBoundOfflineVerifierCapability
+    )
+    capability._FormalCandidateBoundOfflineVerifierCapability__token = token
+    assert temporary is not None
+    _FORMAL_OFFLINE_VERIFIER_CAPABILITIES[token] = (verifier, temporary)
+    return capability
+
+
+def build_production_composition(
+    *,
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+    transport_source: InstallTransportSource = InstallTransportSource.GITHUB,
+    transport_policy: ExplicitTransportPolicy
+    | LocalBundleTransportPolicy
+    | None = None,
+    local_bundle_payload: Path | None = None,
+    local_bundle_release_attestation: Path | None = None,
+) -> ProductionInstallerComposition:
+    return _build_production_composition(
+        instance_name=instance_name,
+        transport_source=transport_source,
+        transport_policy=transport_policy,
+        local_bundle_payload=local_bundle_payload,
+        local_bundle_release_attestation=local_bundle_release_attestation,
+        offline_verifier=None,
+    )
+
+
+def build_formal_production_composition(
+    *,
+    offline_verifier_capability: FormalCandidateBoundOfflineVerifierCapability,
+    instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+    transport_policy: LocalBundleTransportPolicy | None = None,
+    local_bundle_payload: Path,
+    local_bundle_release_attestation: Path,
+) -> ProductionInstallerComposition:
+    if type(offline_verifier_capability) is not (
+        FormalCandidateBoundOfflineVerifierCapability
+    ):
+        raise InstallerError(
+            "INSTALL_FORMAL_OFFLINE_CAPABILITY_INVALID",
+            outcome=InstallOutcome.VALIDATION_FAILED,
+        )
+    verifier, temporary = offline_verifier_capability._consume()
+    try:
+        composition = _build_production_composition(
+            instance_name=instance_name,
+            transport_source=InstallTransportSource.LOCAL_BUNDLE,
+            transport_policy=transport_policy,
+            local_bundle_payload=local_bundle_payload,
+            local_bundle_release_attestation=local_bundle_release_attestation,
+            offline_verifier=verifier,
+        )
+    except Exception:
+        temporary.cleanup()
+        raise
+    object.__setattr__(composition, "formal_trust_temporary", temporary)
+    return composition
 
 
 def build_candidate_composition(

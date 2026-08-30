@@ -435,6 +435,7 @@ def _build_installer_materials(args) -> dict[str, object]:
         wheelhouse=args.wheelhouse,
         output=args.output,
         initial_trust_kit=args.initial_trust_kit,
+        formal_windows_pretrust_kit=args.formal_windows_pretrust_kit,
     )
     return {
         "archive": str(args.output),
@@ -708,7 +709,7 @@ def _promote(args) -> dict[str, object]:
     payload = promote_manifest(
         _read_json(args.rc_manifest),
         existing_tags=_read_tags(args.tags_file),
-        provenance_source_commit=args.provenance_source_commit,
+        provenance_source_commit=args.provenance_source_commit or None,
         created_at=args.created_at or None,
     )
     _write_json(args.output, payload)
@@ -987,8 +988,6 @@ def _validate_stable_publication_authority_inputs(
         expected_stable_manifest = promote_manifest(
             rc_manifest,
             existing_tags=[],
-            provenance_source_commit=stable_manifest["provenance"]["sourceCommit"],
-            created_at=stable_manifest["release"]["createdAt"],
         )
     except (KeyError, TypeError) as error:
         raise PublicationError("Stable manifest authority fields are incomplete") from error
@@ -1120,6 +1119,9 @@ def _parser() -> argparse.ArgumentParser:
     materials.add_argument("--wheelhouse", type=Path, required=True)
     materials.add_argument("--output", type=Path, required=True)
     materials.add_argument("--initial-trust-kit", type=Path, required=True)
+    materials.add_argument(
+        "--formal-windows-pretrust-kit", type=Path, required=True
+    )
     materials.set_defaults(handler=_build_installer_materials)
 
     prepublication = subparsers.add_parser("build-prepublication-materials")
@@ -1356,7 +1358,7 @@ def _parser() -> argparse.ArgumentParser:
     promote = subparsers.add_parser("promote-manifest")
     promote.add_argument("--rc-manifest", type=Path, required=True)
     promote.add_argument("--tags-file", type=Path, required=True)
-    promote.add_argument("--provenance-source-commit", required=True)
+    promote.add_argument("--provenance-source-commit", default="")
     promote.add_argument("--created-at", default="")
     promote.add_argument("--output", type=Path, required=True)
     promote.set_defaults(handler=_promote)

@@ -350,6 +350,39 @@ func TestCloseActionsStatementRequiresSignedSubjectNameAndDigest(t *testing.T) {
 	}
 }
 
+func TestStableActionsClaimObservesExecutionCommitWithoutAddingItToLogicalRequest(t *testing.T) {
+	request := actionsRequest{
+		SchemaVersion: 1,
+		Mode:          "actions-provenance",
+		EvidenceName:  "release-manifest",
+		Subject:       expectedSubject{Name: "release-manifest.json", SHA256: digest('a'), Size: 7},
+		Workflow:      ".github/workflows/promote-release.yml",
+	}
+	statement := actionsStatement{
+		Type:          "https://in-toto.io/Statement/v1",
+		PredicateType: actionsPredicateType,
+		Subjects: []statementSubject{{
+			Name:   request.Subject.Name,
+			Digest: map[string]string{"sha256": trimDigest(request.Subject.SHA256)},
+		}},
+	}
+	observed := "2222222222222222222222222222222222222222"
+	claim, err := closeActionsStatement(request, statement, observed)
+	if err != nil {
+		t.Fatalf("expected observed stable execution commit, got %v", err)
+	}
+	if claim.Source.Commit != observed || claim.SignerDigest != observed {
+		t.Fatalf("execution claim did not retain observed commit: %#v", claim)
+	}
+	if actionsCertificateExtensions(request).BuildSignerDigest != "" {
+		t.Fatal("stable logical request must not predeclare an execution commit")
+	}
+	request.Workflow = ".github/workflows/release.yml"
+	if _, err := closeActionsStatement(request, statement, observed); err == nil {
+		t.Fatal("release producer evidence must retain its exact source commit")
+	}
+}
+
 func TestActionsCertificatePolicySpecifiesIssuerOnlyInMatcher(t *testing.T) {
 	request := actionsRequest{
 		Workflow:     ".github/workflows/release.yml",

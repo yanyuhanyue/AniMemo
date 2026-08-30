@@ -4,7 +4,7 @@ import copy
 import hashlib
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -494,10 +494,19 @@ def resolve_prerelease(
 
 def _timestamp(value: datetime | str) -> str:
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            raise ReleaseContractError("created_at must include a timezone")
-        return value.isoformat().replace("+00:00", "Z")
-    return value
+        parsed = value
+    elif isinstance(value, str) and value and value == value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ReleaseContractError("timestamp must be valid RFC3339") from error
+    else:
+        raise ReleaseContractError("timestamp must be valid RFC3339")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ReleaseContractError("timestamp must include a timezone")
+    if parsed.microsecond != 0:
+        raise ReleaseContractError("timestamp must use fixed whole-second precision")
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _digest_hex(value: str, *, label: str) -> str:
@@ -722,6 +731,8 @@ def validate_manifest(
             )
 
     release = payload["release"]
+    if release["createdAt"] != _timestamp(release["createdAt"]):
+        raise ReleaseContractError("Release createdAt must be canonical UTC Z")
     version = release["version"]
     channel = release["channel"]
     prerelease = PRERELEASE_TAG.fullmatch(version)
@@ -755,9 +766,12 @@ def validate_manifest(
         )
     provenance = payload["provenance"]
     if channel == "stable":
-        if provenance["workflow"] != ".github/workflows/promote-release.yml":
+        if (
+            provenance["workflow"] != ".github/workflows/promote-release.yml"
+            or provenance["sourceCommit"] != release["commit"]
+        ):
             raise ReleaseContractError(
-                "Stable provenance must use the promotion workflow"
+                "Stable provenance must use the promotion workflow and frozen RC commit"
             )
     elif (
         provenance["workflow"] != ".github/workflows/release.yml"
@@ -817,7 +831,7 @@ def promote_manifest(
     rc_manifest: dict[str, object],
     *,
     existing_tags: list[str],
-    provenance_source_commit: str,
+    provenance_source_commit: str | None = None,
     created_at: datetime | str | None = None,
 ) -> dict[str, object]:
     validate_manifest(rc_manifest)
@@ -827,18 +841,30 @@ def promote_manifest(
         raise ReleaseContractError("Only a valid RC manifest can be promoted")
     stable_tag = f"v{match.group('base')}"
     assert_tag_absent(stable_tag, existing_tags)
+    frozen_created_at = _timestamp(rc_release["createdAt"])
+    if created_at is not None and _timestamp(created_at) != frozen_created_at:
+        raise ReleaseContractError(
+            "Stable createdAt must derive exactly from the frozen RC manifest"
+        )
+    if (
+        provenance_source_commit is not None
+        and provenance_source_commit != rc_release["commit"]
+    ):
+        raise ReleaseContractError(
+            "Promotion workflow commit is execution metadata, not Stable Authority"
+        )
 
     promoted = copy.deepcopy(rc_manifest)
     promoted["release"].update(
         {
             "version": stable_tag,
             "channel": "stable",
-            "createdAt": _timestamp(created_at or rc_release["createdAt"]),
+            "createdAt": frozen_created_at,
             "promotedFrom": rc_release["version"],
         }
     )
     promoted["releaseNotes"]["tag"] = stable_tag
     promoted["provenance"]["workflow"] = ".github/workflows/promote-release.yml"
-    promoted["provenance"]["sourceCommit"] = provenance_source_commit
+    promoted["provenance"]["sourceCommit"] = rc_release["commit"]
     validate_manifest(promoted)
     return promoted

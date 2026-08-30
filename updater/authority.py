@@ -45,6 +45,7 @@ class VerifiedReleaseMaterials:
     deployment_contract: dict[str, object]
     verified: VerifiedMaterialSet
     identity_digest: str
+    attestation_execution_receipt: AttestationExecutionReceipt | None = None
 
     @property
     def root(self) -> Path:
@@ -79,10 +80,26 @@ class AttestationEvidence:
     workflow: str
     certificate_identity: str
     oidc_issuer: str
-    source_commit: str
+    logical_source_commit: str
     source_ref: str
-    signer_digest: str
+    logical_signer_digest: str
     predicate_type: str
+
+
+@dataclass(frozen=True)
+class AttestationExecutionObservation:
+    subject_name: str
+    subject_digest: str
+    workflow: str
+    source_commit: str
+    signer_digest: str
+
+
+@dataclass(frozen=True)
+class AttestationExecutionReceipt:
+    schema: str
+    observations: tuple[AttestationExecutionObservation, ...]
+    identity: str
 
 
 @dataclass(frozen=True)
@@ -151,9 +168,9 @@ class ReleaseAuthorityVerifier:
                 f"https://github.com/{REPOSITORY}/{workflow}@refs/heads/main"
             ),
             oidc_issuer=OIDC_ISSUER,
-            source_commit=source_commit,
+            logical_source_commit=source_commit,
             source_ref=SOURCE_REF,
-            signer_digest=source_commit,
+            logical_signer_digest=source_commit,
             predicate_type=PREDICATE_TYPE,
         )
 
