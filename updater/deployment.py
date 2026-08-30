@@ -39,6 +39,8 @@ from .state import _atomic_json, _atomic_text, _read_private_text
 MAX_BACKUP_AGE = timedelta(hours=24)
 MIN_AVAILABLE_MEMORY = 512 * 1024 * 1024
 HEALTH_PATHS = ("/health/", "/", "/login", "/api/schema/", "/api/docs/")
+INITIAL_HTTP_READY_ATTEMPTS = 12
+INITIAL_HTTP_READY_INTERVAL_SECONDS = 2
 PROCESS_ENV_ALLOWLIST = frozenset(
     {
         "DOCKER_CONFIG",
@@ -58,6 +60,10 @@ CRITICAL_LOG = re.compile(
 MIGRATION_PLAN_LINE = re.compile(
     r"^\s*\[(?P<state>[ X])\]\s+(?P<name>[A-Za-z0-9_]+\.[^\s]+)\s*$"
 )
+
+
+class _InitialHttpTransportUnavailable(StateError):
+    pass
 
 
 def _sha256_file(path: Path) -> str:
@@ -391,12 +397,24 @@ class ImmutableComposeDeployment:
                 status = self.http_probe(
                     path, host=host, port=port, forwarded_proto=forwarded_proto
                 )
-            except OSError as error:
-                raise StateError(f"AniMemo HTTP contract failed for {path}") from error
+            except (OSError, http.client.HTTPException) as error:
+                raise _InitialHttpTransportUnavailable(
+                    f"AniMemo HTTP contract failed for {path}"
+                ) from error
             if status != 200:
                 raise StateError(
                     f"AniMemo HTTP contract failed for {path}: HTTP {status}"
                 )
+
+    def _wait_for_initial_http_paths(self, paths: tuple[str, ...]) -> None:
+        for attempt in range(INITIAL_HTTP_READY_ATTEMPTS):
+            try:
+                self._verify_http_paths(paths)
+                return
+            except _InitialHttpTransportUnavailable:
+                if attempt + 1 == INITIAL_HTTP_READY_ATTEMPTS:
+                    raise
+                time.sleep(INITIAL_HTTP_READY_INTERVAL_SECONDS)
 
     def _verify_recent_logs(self, manifest: dict[str, object], *, since: str) -> None:
         for service in ["api", "web"]:
@@ -1121,7 +1139,10 @@ class ImmutableComposeDeployment:
                 status, restarts = self._container_state(manifest, service)
                 if status != "healthy" or restarts != 0:
                     raise CommandFailed(f"{service} failed stable health observation")
-            self._verify_http_paths(HEALTH_PATHS)
+            if observation == 0:
+                self._wait_for_initial_http_paths(HEALTH_PATHS)
+            else:
+                self._verify_http_paths(HEALTH_PATHS)
             self._verify_recent_logs(manifest, since=observation_started)
             self._verify_release_identity(manifest, live_contracts=live_contracts)
             if observation + 1 < self.stable_observations:
