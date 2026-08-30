@@ -39,12 +39,10 @@ _FILESYSTEM_DIAGNOSTIC_CODES = frozenset(
         "token_sid",
         "dacl_read",
         "dacl_protection",
-        "dacl_sddl",
         "dacl_owner",
         "dacl_ace_type",
         "dacl_ace_flags",
         "dacl_ace_rights",
-        "dacl_ace_object",
         "dacl_ace_principal",
         "dacl_duplicate",
         "dacl_principals",
@@ -225,74 +223,28 @@ def _windows_current_sid() -> str:
             kernel32.CloseHandle(token)
 
 
-def _windows_ace_flags_match(value: str, *, directory: bool) -> bool:
-    if not value:
-        return not directory
-    if len(value) % 2:
-        return False
-    tokens = [value[index : index + 2] for index in range(0, len(value), 2)]
-    if len(tokens) != len(set(tokens)):
-        return False
-    return set(tokens) == ({"OI", "CI"} if directory else set())
+class _AclSizeInformation(ctypes.Structure):
+    _fields_ = (
+        ("ace_count", wintypes.DWORD),
+        ("acl_bytes_in_use", wintypes.DWORD),
+        ("acl_bytes_free", wintypes.DWORD),
+    )
 
 
-def _windows_file_all_rights(value: str) -> bool:
-    if value == "FA":
-        return True
-    if not re.fullmatch(r"0[xX][0-9A-Fa-f]{1,8}", value):
-        return False
-    return int(value, 16) == 0x001F01FF
+class _AceHeader(ctypes.Structure):
+    _fields_ = (
+        ("ace_type", ctypes.c_ubyte),
+        ("ace_flags", ctypes.c_ubyte),
+        ("ace_size", ctypes.c_ushort),
+    )
 
 
-def _validate_windows_ace_entries(
-    dacl_text: str,
-    *,
-    sid: str,
-    directory: bool,
-) -> None:
-    aliases = {"S-1-5-18": "SY", "S-1-5-32-544": "BA"}
-    trusted = {sid, "SY", "BA", *aliases}
-    entries = re.findall(r"\(([^()]*)\)", dacl_text)
-    observed: set[str] = set()
-    for entry in entries:
-        fields = entry.split(";")
-        if len(fields) != 6 or fields[0] != "A":
-            raise PluginFilesystemSecurityError(
-                "Windows 插件存储 DACL 包含非受信 ACE。",
-                diagnostic_code="dacl_ace_type",
-            )
-        if not _windows_ace_flags_match(fields[1], directory=directory):
-            raise PluginFilesystemSecurityError(
-                "Windows 插件存储 DACL 包含非受信 ACE。",
-                diagnostic_code="dacl_ace_flags",
-            )
-        if not _windows_file_all_rights(fields[2]):
-            raise PluginFilesystemSecurityError(
-                "Windows 插件存储 DACL 包含非受信 ACE。",
-                diagnostic_code="dacl_ace_rights",
-            )
-        if fields[3] or fields[4]:
-            raise PluginFilesystemSecurityError(
-                "Windows 插件存储 DACL 包含非受信 ACE。",
-                diagnostic_code="dacl_ace_object",
-            )
-        if fields[5] not in trusted:
-            raise PluginFilesystemSecurityError(
-                "Windows 插件存储 DACL 包含非受信 ACE。",
-                diagnostic_code="dacl_ace_principal",
-            )
-        canonical = aliases.get(fields[5], fields[5])
-        if canonical in observed:
-            raise PluginFilesystemSecurityError(
-                "Windows 插件存储 DACL 包含重复 ACE。",
-                diagnostic_code="dacl_duplicate",
-            )
-        observed.add(canonical)
-    if observed != {sid, "SY", "BA"}:
-        raise PluginFilesystemSecurityError(
-            "Windows 插件存储 DACL 主体不完整。",
-            diagnostic_code="dacl_principals",
-        )
+class _AccessAllowedAce(ctypes.Structure):
+    _fields_ = (
+        ("header", _AceHeader),
+        ("mask", wintypes.DWORD),
+        ("sid_start", wintypes.DWORD),
+    )
 
 
 def _validate_windows_dacl(path: Path, *, directory: bool) -> None:
@@ -316,20 +268,38 @@ def _validate_windows_dacl(path: Path, *, directory: bool) -> None:
         ctypes.POINTER(wintypes.DWORD),
     )
     advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
-    advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = (
+    advapi32.ConvertStringSidToSidW.argtypes = (
+        wintypes.LPCWSTR,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+    advapi32.GetAclInformation.argtypes = (
+        ctypes.c_void_p,
         ctypes.c_void_p,
         wintypes.DWORD,
+        ctypes.c_int,
+    )
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    advapi32.IsValidAcl.argtypes = (ctypes.c_void_p,)
+    advapi32.IsValidAcl.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = (
+        ctypes.c_void_p,
         wintypes.DWORD,
         ctypes.POINTER(ctypes.c_void_p),
-        ctypes.POINTER(wintypes.DWORD),
     )
-    advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.GetAce.restype = wintypes.BOOL
+    advapi32.IsValidSid.argtypes = (ctypes.c_void_p,)
+    advapi32.IsValidSid.restype = wintypes.BOOL
+    advapi32.GetLengthSid.argtypes = (ctypes.c_void_p,)
+    advapi32.GetLengthSid.restype = wintypes.DWORD
+    advapi32.EqualSid.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    advapi32.EqualSid.restype = wintypes.BOOL
     kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
     kernel32.LocalFree.restype = ctypes.c_void_p
     descriptor = ctypes.c_void_p()
     owner = ctypes.c_void_p()
     dacl = ctypes.c_void_p()
-    sddl_pointer = ctypes.c_void_p()
+    principal_pointers: list[tuple[str, ctypes.c_void_p]] = []
     owner_information = 0x00000001
     dacl_information = 0x00000004
     security_information = owner_information | dacl_information
@@ -356,36 +326,129 @@ def _validate_windows_dacl(path: Path, *, directory: bool) -> None:
             raise PluginFilesystemSecurityError(
                 "Windows 插件存储 DACL 未受保护。", diagnostic_code="dacl_protection"
             )
-        length = wintypes.DWORD()
-        if not advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            descriptor,
-            1,
-            security_information,
-            ctypes.byref(sddl_pointer),
-            ctypes.byref(length),
-        ) or not sddl_pointer.value:
-            raise PluginFilesystemSecurityError(
-                "Windows 插件存储 DACL 无法验证。", diagnostic_code="dacl_sddl"
-            )
-        sddl = ctypes.wstring_at(sddl_pointer.value, length.value).rstrip("\x00")
-        owner_match = re.search(r"O:([^:]+?)(?=[GDS]:)", sddl)
-        owner_value = owner_match.group(1) if owner_match else ""
-        trusted = {sid, "SY", "BA", "S-1-5-18", "S-1-5-32-544"}
-        if owner_value not in trusted:
+        principal_texts = tuple(dict.fromkeys((sid, "S-1-5-18", "S-1-5-32-544")))
+        for principal_text in principal_texts:
+            principal = ctypes.c_void_p()
+            if not advapi32.ConvertStringSidToSidW(
+                principal_text, ctypes.byref(principal)
+            ) or not principal.value:
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 无法验证。", diagnostic_code="dacl_api"
+                )
+            principal_pointers.append((principal_text, principal))
+        if not any(
+            advapi32.EqualSid(owner, principal)
+            for _, principal in principal_pointers
+        ):
             raise PluginFilesystemSecurityError(
                 "Windows 插件存储所有者不可信。", diagnostic_code="dacl_owner"
             )
-        dacl_text = sddl.split("D:", 1)[1].split("S:", 1)[0] if "D:" in sddl else ""
-        _validate_windows_ace_entries(dacl_text, sid=sid, directory=directory)
+        acl_information = _AclSizeInformation()
+        if not advapi32.IsValidAcl(dacl) or not advapi32.GetAclInformation(
+            dacl, ctypes.byref(acl_information), ctypes.sizeof(acl_information), 2
+        ):
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 无法验证。", diagnostic_code="dacl_api"
+            )
+        if acl_information.ace_count != len(principal_pointers):
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 主体不完整。",
+                diagnostic_code="dacl_principals",
+            )
+        expected_flags = 0x03 if directory else 0x00
+        observed: set[str] = set()
+        acl_start = dacl.value
+        acl_end = acl_start + acl_information.acl_bytes_in_use
+        for index in range(acl_information.ace_count):
+            ace_pointer = ctypes.c_void_p()
+            if not advapi32.GetAce(dacl, index, ctypes.byref(ace_pointer)):
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 无法验证。", diagnostic_code="dacl_api"
+                )
+            ace_start = ace_pointer.value
+            if (
+                not ace_start
+                or ace_start < acl_start
+                or ace_start + ctypes.sizeof(_AceHeader) > acl_end
+            ):
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 包含非受信 ACE。",
+                    diagnostic_code="dacl_ace_type",
+                )
+            header = ctypes.cast(ace_pointer, ctypes.POINTER(_AceHeader)).contents
+            sid_offset = _AccessAllowedAce.sid_start.offset
+            if (
+                header.ace_type != 0
+                or header.ace_size < sid_offset + 8
+                or ace_start + header.ace_size > acl_end
+            ):
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 包含非受信 ACE。",
+                    diagnostic_code="dacl_ace_type",
+                )
+            if header.ace_flags != expected_flags:
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 包含非受信 ACE。",
+                    diagnostic_code="dacl_ace_flags",
+                )
+            ace = ctypes.cast(
+                ace_pointer, ctypes.POINTER(_AccessAllowedAce)
+            ).contents
+            if ace.mask != 0x001F01FF:
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 包含非受信 ACE。",
+                    diagnostic_code="dacl_ace_rights",
+                )
+            ace_sid = ctypes.c_void_p(ace_pointer.value + sid_offset)
+            if not advapi32.IsValidSid(ace_sid):
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 包含非受信 ACE。",
+                    diagnostic_code="dacl_ace_principal",
+                )
+            sid_length = advapi32.GetLengthSid(ace_sid)
+            if not sid_length or header.ace_size != sid_offset + sid_length:
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 包含非受信 ACE。",
+                    diagnostic_code="dacl_ace_type",
+                )
+            matches = [
+                principal_text
+                for principal_text, principal in principal_pointers
+                if advapi32.EqualSid(ace_sid, principal)
+            ]
+            if len(matches) != 1:
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 包含非受信 ACE。",
+                    diagnostic_code="dacl_ace_principal",
+                )
+            if matches[0] in observed:
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 包含重复 ACE。",
+                    diagnostic_code="dacl_duplicate",
+                )
+            observed.add(matches[0])
+        if observed != set(principal_texts):
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 主体不完整。",
+                diagnostic_code="dacl_principals",
+            )
     except PluginFilesystemSecurityError:
         raise
-    except (AttributeError, OSError, ValueError) as error:
+    except (
+        AttributeError,
+        OSError,
+        OverflowError,
+        TypeError,
+        ValueError,
+        ctypes.ArgumentError,
+    ) as error:
         raise PluginFilesystemSecurityError(
             "Windows 插件存储 DACL 无法验证。", diagnostic_code="dacl_api"
         ) from error
     finally:
-        if sddl_pointer.value:
-            kernel32.LocalFree(sddl_pointer)
+        for _, principal in principal_pointers:
+            if principal.value:
+                kernel32.LocalFree(principal)
         if descriptor.value:
             kernel32.LocalFree(descriptor)
 
@@ -393,11 +456,9 @@ def _validate_windows_dacl(path: Path, *, directory: bool) -> None:
 def _harden_windows_dacl(path: Path, *, directory: bool) -> None:
     sid = _windows_current_sid()
     ace_flags = "OICI" if directory else ""
-    descriptor_text = (
-        "D:P"
-        f"(A;{ace_flags};FA;;;{sid})"
-        f"(A;{ace_flags};FA;;;SY)"
-        f"(A;{ace_flags};FA;;;BA)"
+    principal_texts = tuple(dict.fromkeys((sid, "S-1-5-18", "S-1-5-32-544")))
+    descriptor_text = "D:P" + "".join(
+        f"(A;{ace_flags};FA;;;{principal})" for principal in principal_texts
     )
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)

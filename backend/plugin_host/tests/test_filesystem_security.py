@@ -15,8 +15,8 @@ from plugin_host.filesystem_security import (
     RUNTIME_DIRECTORY_MODE,
     RUNTIME_FILE_MODE,
     PluginFilesystemSecurityError,
-    _validate_windows_ace_entries,
     _windows_current_sid,
+    ensure_directory,
     ensure_plugin_layout,
     filesystem_diagnostic_code,
     secure_file,
@@ -26,9 +26,7 @@ from plugin_host.filesystem_security import (
 )
 
 
-def _grant_windows_world_full_control(path):
-    sid = _windows_current_sid()
-    descriptor_text = f"D:P(A;;FA;;;{sid})(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)"
+def _set_windows_dacl(path, descriptor_text):
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
@@ -82,6 +80,14 @@ def _grant_windows_world_full_control(path):
             kernel32.LocalFree(descriptor)
 
 
+def _grant_windows_world_full_control(path):
+    sid = _windows_current_sid()
+    _set_windows_dacl(
+        path,
+        f"D:P(A;;FA;;;{sid})(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)",
+    )
+
+
 def _storage(root):
     return SimpleNamespace(
         root=root,
@@ -105,35 +111,6 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
         error._diagnostic_code = sentinel
 
         self.assertEqual(filesystem_diagnostic_code(error), "unspecified")
-
-    def test_windows_ace_parser_accepts_equivalent_sddl_text_forms(self):
-        sid = "S-1-5-21-1000"
-        for flags in ("OICI", "CIOI"):
-            with self.subTest(flags=flags):
-                _validate_windows_ace_entries(
-                    f"P(A;{flags};FA;;;{sid})"
-                    f"(A;{flags};0x001f01ff;;;SY)"
-                    f"(A;{flags};FA;;;S-1-5-32-544)",
-                    sid=sid,
-                    directory=True,
-                )
-
-    def test_windows_ace_parser_rejects_inherited_or_broader_entries(self):
-        sid = "S-1-5-21-1000"
-        cases = (
-            (f"P(A;OICIID;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", "dacl_ace_flags"),
-            (f"P(A;OICI;GA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", "dacl_ace_rights"),
-            (f"P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;WD)", "dacl_ace_principal"),
-        )
-        for dacl_text, diagnostic_code in cases:
-            with self.subTest(diagnostic_code=diagnostic_code):
-                with self.assertRaises(PluginFilesystemSecurityError) as raised:
-                    _validate_windows_ace_entries(
-                        dacl_text,
-                        sid=sid,
-                        directory=True,
-                    )
-                self.assertEqual(raised.exception.diagnostic_code, diagnostic_code)
 
     @skipIf(os.name == "nt", "POSIX mode contract")
     def test_permissive_umask_cannot_create_group_or_world_writable_material(self):
@@ -274,3 +251,49 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
             _grant_windows_world_full_control(payload)
             with self.assertRaises(PluginFilesystemSecurityError):
                 validate_secure_tree(storage.staging)
+
+    @skipUnless(os.name == "nt", "native Windows DACL contract")
+    def test_windows_binary_acl_validation_rejects_three_ace_variants(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = _storage(Path(directory))
+            ensure_plugin_layout(storage)
+            payload = write_secure_bytes(
+                storage.staging,
+                storage.staging / "payload",
+                b"private",
+            )
+            sid = _windows_current_sid()
+            flag_target = storage.staging / "flag-target"
+            ensure_directory(storage.staging, flag_target)
+            _set_windows_dacl(
+                flag_target,
+                f"D:P(A;OI;FA;;;{sid})(A;OI;FA;;;SY)(A;OI;FA;;;BA)",
+            )
+            with self.assertRaises(PluginFilesystemSecurityError) as raised:
+                validate_secure_tree(storage.staging)
+            self.assertEqual(raised.exception.diagnostic_code, "dacl_ace_flags")
+            ensure_directory(storage.staging, flag_target)
+            cases = (
+                (
+                    f"D:P(D;;FA;;;{sid})(A;;FA;;;SY)(A;;FA;;;BA)",
+                    "dacl_ace_type",
+                ),
+                (
+                    f"D:P(A;;FR;;;{sid})(A;;FA;;;SY)(A;;FA;;;BA)",
+                    "dacl_ace_rights",
+                ),
+                (
+                    f"D:P(A;;FA;;;{sid})(A;;FA;;;SY)(A;;FA;;;WD)",
+                    "dacl_ace_principal",
+                ),
+            )
+            for descriptor_text, diagnostic_code in cases:
+                with self.subTest(diagnostic_code=diagnostic_code):
+                    _set_windows_dacl(payload, descriptor_text)
+                    with self.assertRaises(PluginFilesystemSecurityError) as raised:
+                        validate_secure_tree(storage.staging)
+                    self.assertEqual(
+                        raised.exception.diagnostic_code,
+                        diagnostic_code,
+                    )
+                    secure_file(storage.staging, payload)
