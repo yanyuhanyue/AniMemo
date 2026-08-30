@@ -156,6 +156,25 @@ class DependencySecurityContractTests(unittest.TestCase):
         self.assertEqual(bash_assignments, ['export PYTHONPATH="$ROOT"'])
         self.assertEqual(powershell_assignments, ["$env:PYTHONPATH = $root"])
 
+    def test_development_plugin_storage_is_separate_from_tracked_plugin_sources(self) -> None:
+        settings_source = (ROOT / "backend" / "config" / "settings.py").read_text(
+            encoding="utf-8"
+        )
+        development_environment = (
+            ROOT / ".env.development.example"
+        ).read_text(encoding="utf-8").splitlines()
+        environment_documentation = (ROOT / ".env.example").read_text(
+            encoding="utf-8"
+        )
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn('else BASE_DIR.parent / "plugins"', settings_source)
+        self.assertIn("_plugin_root_candidate.is_absolute()", settings_source)
+        self.assertIn("BASE_DIR.parent / _plugin_root_candidate", settings_source)
+        self.assertIn("PLUGIN_ROOT=runtime/plugins", development_environment)
+        self.assertIn("新配置不得指向仓库内的 plugins 源码目录", environment_documentation)
+        self.assertIn("仅为兼容既有本地 .env 与 CAS 数据", environment_documentation)
+        self.assertIn("/runtime/plugins/", gitignore)
+
     def test_backend_runtime_and_python_tooling_are_environment_isolated(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
