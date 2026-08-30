@@ -219,6 +219,7 @@ jobs:
     timeout-minutes: 20
     env:
       DEBUG: "true"
+      PYTHONPATH: ${{ github.workspace }}
       DJANGO_SECRET_KEY: ci-only-django-secret-key-for-local-github-actions-validation
       CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
       ANIMEMO_PUBLIC_ORIGIN: ${{ inputs.public_origin || 'http://localhost:5173' }}
@@ -283,6 +284,7 @@ jobs:
     timeout-minutes: 30
     env:
       DEBUG: "true"
+      PYTHONPATH: ${{ github.workspace }}
       DJANGO_SECRET_KEY: ci-only-django-secret-key-for-local-github-actions-validation
       CREDENTIAL_ENCRYPTION_KEY: a0DtqkhZwqytmU2lcF-2oUKmjlyqPIrJsU5O_T6d3Io=
       ANIMEMO_PUBLIC_ORIGIN: ${{ inputs.public_origin || 'http://localhost:5173' }}
