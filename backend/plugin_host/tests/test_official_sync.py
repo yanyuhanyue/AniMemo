@@ -430,7 +430,9 @@ class OfficialPluginSyncTests(TestCase):
             patch.dict(os.environ, {"CI": "true"}),
             patch(
                 "plugin_host.management.commands.sync_official_plugins.store_package_blob",
-                side_effect=PluginFilesystemSecurityError(sentinel),
+                side_effect=PluginFilesystemSecurityError(
+                    sentinel, diagnostic_code="dacl_read"
+                ),
             ),
             patch("sys.stdout", output),
             redirect_stderr(errors),
@@ -446,7 +448,7 @@ class OfficialPluginSyncTests(TestCase):
         self.assertEqual(
             diagnostic,
             "official_plugin_sync_internal_failure "
-            "stage=package_store class=filesystem_security\n",
+            "stage=package_store class=filesystem_security reason=dacl_read\n",
         )
         self.assertRegex(
             public_error,
@@ -478,3 +480,30 @@ class OfficialPluginSyncTests(TestCase):
                 call_command("sync_official_plugins", stdout=output)
 
             self.assertEqual(output.getvalue(), "")
+
+    @override_settings(DEBUG=True)
+    def test_ci_diagnostic_revalidates_mutated_reason_at_output_boundary(self):
+        sentinel = r"C:\private\plugin-store token=SYNC_REASON_CANARY"
+        failure = PluginFilesystemSecurityError("stable", diagnostic_code="dacl_read")
+        failure._diagnostic_code = sentinel
+        output = StringIO()
+        with (
+            patch.dict(os.environ, {"CI": "true"}),
+            patch(
+                "plugin_host.management.commands.sync_official_plugins.store_package_blob",
+                side_effect=failure,
+            ),
+            self.assertRaisesRegex(
+                CommandError,
+                r"^official_plugin_sync_failed correlation_id=[0-9a-f]{32}$",
+            ),
+        ):
+            call_command("sync_official_plugins", stdout=output)
+
+        diagnostic = output.getvalue()
+        self.assertEqual(
+            diagnostic,
+            "official_plugin_sync_internal_failure "
+            "stage=package_store class=filesystem_security reason=unspecified\n",
+        )
+        self.assertNotIn(sentinel, diagnostic)

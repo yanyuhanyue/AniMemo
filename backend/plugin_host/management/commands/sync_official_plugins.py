@@ -7,7 +7,10 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.db import DatabaseError
 
-from plugin_host.filesystem_security import PluginFilesystemSecurityError
+from plugin_host.filesystem_security import (
+    PluginFilesystemSecurityError,
+    filesystem_diagnostic_code,
+)
 from plugin_host.installer import PluginPackageInstaller
 from plugin_host.models import PluginDeployment, PluginProject, PluginVersion
 from plugin_host.official_packages import (
@@ -49,6 +52,12 @@ def _diagnostic_class(error):
     return "unexpected"
 
 
+def _diagnostic_reason(error):
+    if isinstance(error, PluginFilesystemSecurityError):
+        return filesystem_diagnostic_code(error)
+    return "none"
+
+
 def _existing_official_content_digest(version):
     blob = version.package_blob
     storage = LocalPluginPackageStorage(settings.PLUGIN_ROOT)
@@ -87,7 +96,8 @@ class Command(BaseCommand):
                 self.stdout.write(
                     "official_plugin_sync_internal_failure "
                     f"stage={self._failure_stage} "
-                    f"class={_diagnostic_class(error)}"
+                    f"class={_diagnostic_class(error)} "
+                    f"reason={_diagnostic_reason(error)}"
                 )
             raise _command_failure() from None
 

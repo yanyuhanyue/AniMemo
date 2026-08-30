@@ -29,8 +29,66 @@ RUNTIME_DIRECTORY_MODE = 0o755
 RUNTIME_FILE_MODE = 0o644
 
 
+_FILESYSTEM_DIAGNOSTIC_CODES = frozenset(
+    {
+        "unspecified",
+        "path_containment",
+        "path_metadata",
+        "path_reparse",
+        "path_owner",
+        "token_sid",
+        "dacl_read",
+        "dacl_protection",
+        "dacl_sddl",
+        "dacl_owner",
+        "dacl_ace",
+        "dacl_duplicate",
+        "dacl_principals",
+        "dacl_api",
+        "dacl_build",
+        "dacl_extract",
+        "dacl_apply",
+        "directory_type",
+        "directory_mode",
+        "directory_create",
+        "file_type",
+        "file_mode",
+        "file_create",
+        "tree_enumerate",
+        "tree_entry",
+        "tree_remove",
+    }
+)
+
+
 class PluginFilesystemSecurityError(ValueError):
     """A plugin path cannot be proven safe for mutation or execution."""
+
+    def __init__(self, message: str, *, diagnostic_code: object = "unspecified"):
+        super().__init__(message)
+        self._diagnostic_code = (
+            diagnostic_code
+            if type(diagnostic_code) is str
+            and diagnostic_code in _FILESYSTEM_DIAGNOSTIC_CODES
+            else "unspecified"
+        )
+
+    @property
+    def diagnostic_code(self) -> str:
+        return filesystem_diagnostic_code(self)
+
+
+def filesystem_diagnostic_code(error: PluginFilesystemSecurityError) -> str:
+    """Return only a stable allowlisted value at the public logging boundary."""
+
+    try:
+        state = object.__getattribute__(error, "__dict__")
+    except (AttributeError, TypeError):
+        return "unspecified"
+    value = state.get("_diagnostic_code", "unspecified")
+    if type(value) is str and value in _FILESYSTEM_DIAGNOSTIC_CODES:
+        return value
+    return "unspecified"
 
 
 def _absolute(path: Path) -> Path:
@@ -43,7 +101,9 @@ def _contained(root: Path, path: Path) -> tuple[Path, Path]:
     try:
         target.relative_to(boundary)
     except ValueError as error:
-        raise PluginFilesystemSecurityError("插件存储路径越过受控根目录。") from error
+        raise PluginFilesystemSecurityError(
+            "插件存储路径越过受控根目录。", diagnostic_code="path_containment"
+        ) from error
     return boundary, target
 
 
@@ -57,15 +117,21 @@ def _metadata(path: Path) -> os.stat_result:
     try:
         metadata = path.lstat()
     except OSError as error:
-        raise PluginFilesystemSecurityError("插件存储路径元数据不可验证。") from error
+        raise PluginFilesystemSecurityError(
+            "插件存储路径元数据不可验证。", diagnostic_code="path_metadata"
+        ) from error
     if path.is_symlink() or _is_reparse(metadata):
-        raise PluginFilesystemSecurityError("插件存储路径禁止符号链接或重解析点。")
+        raise PluginFilesystemSecurityError(
+            "插件存储路径禁止符号链接或重解析点。", diagnostic_code="path_reparse"
+        )
     return metadata
 
 
 def _require_owner(metadata: os.stat_result) -> None:
     if os.name != "nt" and hasattr(os, "geteuid") and metadata.st_uid != os.geteuid():
-        raise PluginFilesystemSecurityError("插件存储路径所有者不可信。")
+        raise PluginFilesystemSecurityError(
+            "插件存储路径所有者不可信。", diagnostic_code="path_owner"
+        )
 
 
 @lru_cache(maxsize=1)
@@ -114,11 +180,15 @@ def _windows_current_sid() -> str:
             0x0008,
             ctypes.byref(token),
         ):
-            raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储当前 SID 不可验证。", diagnostic_code="token_sid"
+            )
         length = wintypes.DWORD()
         advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(length))
         if not length.value:
-            raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储当前 SID 不可验证。", diagnostic_code="token_sid"
+            )
         buffer = ctypes.create_string_buffer(length.value)
         if not advapi32.GetTokenInformation(
             token,
@@ -127,16 +197,22 @@ def _windows_current_sid() -> str:
             length,
             ctypes.byref(length),
         ):
-            raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储当前 SID 不可验证。", diagnostic_code="token_sid"
+            )
         token_user = ctypes.cast(buffer, ctypes.POINTER(_TokenUser)).contents
         if not token_user.user.sid or not advapi32.ConvertSidToStringSidW(
             token_user.user.sid,
             ctypes.byref(sid_text),
         ):
-            raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储当前 SID 不可验证。", diagnostic_code="token_sid"
+            )
         sid = sid_text.value or ""
         if not re.fullmatch(r"S-1-(?:[0-9]+-)*[0-9]+", sid):
-            raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储当前 SID 不可验证。", diagnostic_code="token_sid"
+            )
         return sid
     finally:
         if sid_text:
@@ -195,13 +271,17 @@ def _validate_windows_dacl(path: Path, *, directory: bool) -> None:
             ctypes.byref(descriptor),
         )
         if result != 0 or not descriptor.value or not owner.value or not dacl.value:
-            raise PluginFilesystemSecurityError("Windows 插件存储 DACL 无法验证。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 无法验证。", diagnostic_code="dacl_read"
+            )
         control = ctypes.c_ushort()
         revision = wintypes.DWORD()
         if not advapi32.GetSecurityDescriptorControl(
             descriptor, ctypes.byref(control), ctypes.byref(revision)
         ) or not control.value & 0x1000:
-            raise PluginFilesystemSecurityError("Windows 插件存储 DACL 未受保护。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 未受保护。", diagnostic_code="dacl_protection"
+            )
         length = wintypes.DWORD()
         if not advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
             descriptor,
@@ -210,14 +290,18 @@ def _validate_windows_dacl(path: Path, *, directory: bool) -> None:
             ctypes.byref(sddl_pointer),
             ctypes.byref(length),
         ) or not sddl_pointer.value:
-            raise PluginFilesystemSecurityError("Windows 插件存储 DACL 无法验证。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 无法验证。", diagnostic_code="dacl_sddl"
+            )
         sddl = ctypes.wstring_at(sddl_pointer.value, length.value).rstrip("\x00")
         owner_match = re.search(r"O:([^:]+?)(?=[GDS]:)", sddl)
         owner_value = owner_match.group(1) if owner_match else ""
         aliases = {"S-1-5-18": "SY", "S-1-5-32-544": "BA"}
         trusted = {sid, "SY", "BA", *aliases}
         if owner_value not in trusted:
-            raise PluginFilesystemSecurityError("Windows 插件存储所有者不可信。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储所有者不可信。", diagnostic_code="dacl_owner"
+            )
         dacl_text = sddl.split("D:", 1)[1].split("S:", 1)[0] if "D:" in sddl else ""
         entries = re.findall(r"\(([^()]*)\)", dacl_text)
         expected_flags = "OICI" if directory else ""
@@ -233,17 +317,28 @@ def _validate_windows_dacl(path: Path, *, directory: bool) -> None:
                 or fields[4]
                 or fields[5] not in trusted
             ):
-                raise PluginFilesystemSecurityError("Windows 插件存储 DACL 包含非受信 ACE。")
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 包含非受信 ACE。",
+                    diagnostic_code="dacl_ace",
+                )
             canonical = aliases.get(fields[5], fields[5])
             if canonical in observed:
-                raise PluginFilesystemSecurityError("Windows 插件存储 DACL 包含重复 ACE。")
+                raise PluginFilesystemSecurityError(
+                    "Windows 插件存储 DACL 包含重复 ACE。",
+                    diagnostic_code="dacl_duplicate",
+                )
             observed.add(canonical)
         if observed != {sid, "SY", "BA"}:
-            raise PluginFilesystemSecurityError("Windows 插件存储 DACL 主体不完整。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 主体不完整。",
+                diagnostic_code="dacl_principals",
+            )
     except PluginFilesystemSecurityError:
         raise
     except (AttributeError, OSError, ValueError) as error:
-        raise PluginFilesystemSecurityError("Windows 插件存储 DACL 无法验证。") from error
+        raise PluginFilesystemSecurityError(
+            "Windows 插件存储 DACL 无法验证。", diagnostic_code="dacl_api"
+        ) from error
     finally:
         if sddl_pointer.value:
             kernel32.LocalFree(sddl_pointer)
@@ -297,7 +392,9 @@ def _harden_windows_dacl(path: Path, *, directory: bool) -> None:
             ctypes.byref(descriptor),
             ctypes.byref(length),
         ) or not descriptor.value:
-            raise PluginFilesystemSecurityError("Windows 插件存储 DACL 无法收紧。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 无法收紧。", diagnostic_code="dacl_build"
+            )
         present = wintypes.BOOL()
         defaulted = wintypes.BOOL()
         dacl = ctypes.c_void_p()
@@ -307,7 +404,9 @@ def _harden_windows_dacl(path: Path, *, directory: bool) -> None:
             ctypes.byref(dacl),
             ctypes.byref(defaulted),
         ) or not present.value or not dacl.value:
-            raise PluginFilesystemSecurityError("Windows 插件存储 DACL 无法收紧。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 无法收紧。", diagnostic_code="dacl_extract"
+            )
         target = ctypes.create_unicode_buffer(str(path))
         result = advapi32.SetNamedSecurityInfoW(
             target,
@@ -319,7 +418,9 @@ def _harden_windows_dacl(path: Path, *, directory: bool) -> None:
             None,
         )
         if result != 0:
-            raise PluginFilesystemSecurityError("Windows 插件存储 DACL 无法收紧。")
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 无法收紧。", diagnostic_code="dacl_apply"
+            )
     finally:
         if descriptor.value:
             kernel32.LocalFree(descriptor)
@@ -329,7 +430,9 @@ def _harden_windows_dacl(path: Path, *, directory: bool) -> None:
 def _secure_directory(path: Path, mode: int) -> None:
     metadata = _metadata(path)
     if not stat.S_ISDIR(metadata.st_mode):
-        raise PluginFilesystemSecurityError("插件存储目录类型无效。")
+        raise PluginFilesystemSecurityError(
+            "插件存储目录类型无效。", diagnostic_code="directory_type"
+        )
     _require_owner(metadata)
     if os.name == "nt":
         try:
@@ -340,10 +443,14 @@ def _secure_directory(path: Path, mode: int) -> None:
         try:
             os.chmod(path, mode, follow_symlinks=False)
         except OSError as error:
-            raise PluginFilesystemSecurityError("插件存储目录权限无法收紧。") from error
+            raise PluginFilesystemSecurityError(
+                "插件存储目录权限无法收紧。", diagnostic_code="directory_mode"
+            ) from error
         checked = _metadata(path)
         if stat.S_IMODE(checked.st_mode) != mode:
-            raise PluginFilesystemSecurityError("插件存储目录权限不符合合同。")
+            raise PluginFilesystemSecurityError(
+                "插件存储目录权限不符合合同。", diagnostic_code="directory_mode"
+            )
 
 
 def secure_file(
@@ -359,7 +466,9 @@ def secure_file(
     ensure_directory(boundary, target.parent, mode=directory_mode)
     metadata = _metadata(target)
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        raise PluginFilesystemSecurityError("插件存储文件必须是单链接普通文件。")
+        raise PluginFilesystemSecurityError(
+            "插件存储文件必须是单链接普通文件。", diagnostic_code="file_type"
+        )
     _require_owner(metadata)
     if os.name == "nt":
         try:
@@ -370,10 +479,14 @@ def secure_file(
         try:
             os.chmod(target, mode, follow_symlinks=False)
         except OSError as error:
-            raise PluginFilesystemSecurityError("插件存储文件权限无法收紧。") from error
+            raise PluginFilesystemSecurityError(
+                "插件存储文件权限无法收紧。", diagnostic_code="file_mode"
+            ) from error
         checked = _metadata(target)
         if stat.S_IMODE(checked.st_mode) != mode:
-            raise PluginFilesystemSecurityError("插件存储文件权限不符合合同。")
+            raise PluginFilesystemSecurityError(
+                "插件存储文件权限不符合合同。", diagnostic_code="file_mode"
+            )
     return target
 
 
@@ -383,12 +496,16 @@ def validate_directory(path: Path) -> Path:
     target = _absolute(path)
     metadata = _metadata(target)
     if not stat.S_ISDIR(metadata.st_mode):
-        raise PluginFilesystemSecurityError("插件存储目录类型无效。")
+        raise PluginFilesystemSecurityError(
+            "插件存储目录类型无效。", diagnostic_code="directory_type"
+        )
     _require_owner(metadata)
     if os.name == "nt":
         _validate_windows_dacl(target, directory=True)
     elif stat.S_IMODE(metadata.st_mode) & 0o022:
-        raise PluginFilesystemSecurityError("插件存储目录禁止组或其他用户写入。")
+        raise PluginFilesystemSecurityError(
+            "插件存储目录禁止组或其他用户写入。", diagnostic_code="directory_mode"
+        )
     return target
 
 
@@ -419,7 +536,9 @@ def ensure_directory(
         except FileExistsError:
             pass
         except OSError as error:
-            raise PluginFilesystemSecurityError("插件存储根目录无法创建。") from error
+            raise PluginFilesystemSecurityError(
+                "插件存储根目录无法创建。", diagnostic_code="directory_create"
+            ) from error
     _secure_directory(boundary, mode if target == boundary else PRIVATE_DIRECTORY_MODE)
     current = boundary
     for part in target.relative_to(boundary).parts:
@@ -430,7 +549,9 @@ def ensure_directory(
             except FileExistsError:
                 pass
             except OSError as error:
-                raise PluginFilesystemSecurityError("插件存储目录无法创建。") from error
+                raise PluginFilesystemSecurityError(
+                    "插件存储目录无法创建。", diagnostic_code="directory_create"
+                ) from error
         _secure_directory(current, mode)
     return target
 
@@ -478,9 +599,13 @@ def write_secure_bytes(
             view = view[written:]
         os.fsync(descriptor)
     except FileExistsError as error:
-        raise PluginFilesystemSecurityError("插件存储文件已存在。") from error
+        raise PluginFilesystemSecurityError(
+            "插件存储文件已存在。", diagnostic_code="file_create"
+        ) from error
     except OSError as error:
-        raise PluginFilesystemSecurityError("插件存储文件无法安全写入。") from error
+        raise PluginFilesystemSecurityError(
+            "插件存储文件无法安全写入。", diagnostic_code="file_create"
+        ) from error
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -512,7 +637,9 @@ def secure_tree(
         try:
             children = list(directory.iterdir())
         except OSError as error:
-            raise PluginFilesystemSecurityError("插件存储目录无法枚举。") from error
+            raise PluginFilesystemSecurityError(
+                "插件存储目录无法枚举。", diagnostic_code="tree_enumerate"
+            ) from error
         for child in children:
             metadata = _metadata(child)
             if stat.S_ISDIR(metadata.st_mode):
@@ -526,7 +653,9 @@ def secure_tree(
                     directory_mode=directory_mode,
                 )
             else:
-                raise PluginFilesystemSecurityError("插件存储树包含链接或特殊文件。")
+                raise PluginFilesystemSecurityError(
+                    "插件存储树包含链接或特殊文件。", diagnostic_code="tree_entry"
+                )
     return boundary
 
 
@@ -540,7 +669,9 @@ def validate_secure_tree(root: Path) -> Path:
         try:
             children = list(directory.iterdir())
         except OSError as error:
-            raise PluginFilesystemSecurityError("插件存储目录无法枚举。") from error
+            raise PluginFilesystemSecurityError(
+                "插件存储目录无法枚举。", diagnostic_code="tree_enumerate"
+            ) from error
         for child in children:
             metadata = _metadata(child)
             _require_owner(metadata)
@@ -549,11 +680,15 @@ def validate_secure_tree(root: Path) -> Path:
                 directories.append(child)
                 continue
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-                raise PluginFilesystemSecurityError("插件存储树包含链接或特殊文件。")
+                raise PluginFilesystemSecurityError(
+                    "插件存储树包含链接或特殊文件。", diagnostic_code="tree_entry"
+                )
             if os.name == "nt":
                 _validate_windows_dacl(child, directory=False)
             elif stat.S_IMODE(metadata.st_mode) & 0o022:
-                raise PluginFilesystemSecurityError("插件存储文件禁止组或其他用户写入。")
+                raise PluginFilesystemSecurityError(
+                    "插件存储文件禁止组或其他用户写入。", diagnostic_code="file_mode"
+                )
     return boundary
 
 
@@ -568,4 +703,6 @@ def remove_secure_tree(root: Path, path: Path) -> None:
     try:
         shutil.rmtree(target)
     except OSError as error:
-        raise PluginFilesystemSecurityError("插件存储树无法安全删除。") from error
+        raise PluginFilesystemSecurityError(
+            "插件存储树无法安全删除。", diagnostic_code="tree_remove"
+        ) from error

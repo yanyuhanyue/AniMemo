@@ -17,6 +17,7 @@ from plugin_host.filesystem_security import (
     PluginFilesystemSecurityError,
     _windows_current_sid,
     ensure_plugin_layout,
+    filesystem_diagnostic_code,
     secure_file,
     secure_tree,
     validate_secure_tree,
@@ -91,6 +92,19 @@ def _storage(root):
 
 
 class PluginFilesystemSecurityTests(SimpleTestCase):
+    def test_diagnostic_code_rejects_unlisted_values(self):
+        malformed = ["dacl_read"]
+        error = PluginFilesystemSecurityError("private-path-token", diagnostic_code=malformed)
+
+        self.assertEqual(error.diagnostic_code, "unspecified")
+
+    def test_diagnostic_code_is_revalidated_at_the_logging_boundary(self):
+        sentinel = r"C:\private\plugin-store token=FILESYSTEM_DIAGNOSTIC_CANARY"
+        error = PluginFilesystemSecurityError("stable", diagnostic_code="dacl_read")
+        error._diagnostic_code = sentinel
+
+        self.assertEqual(filesystem_diagnostic_code(error), "unspecified")
+
     @skipIf(os.name == "nt", "POSIX mode contract")
     def test_permissive_umask_cannot_create_group_or_world_writable_material(self):
         with tempfile.TemporaryDirectory() as directory:
