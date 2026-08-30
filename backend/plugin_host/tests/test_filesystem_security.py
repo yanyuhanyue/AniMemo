@@ -1,7 +1,8 @@
+import ctypes
 import os
 import stat
-import subprocess
 import tempfile
+from ctypes import wintypes
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import skipIf, skipUnless
@@ -14,12 +15,69 @@ from plugin_host.filesystem_security import (
     RUNTIME_DIRECTORY_MODE,
     RUNTIME_FILE_MODE,
     PluginFilesystemSecurityError,
+    _windows_current_sid,
     ensure_plugin_layout,
     secure_file,
     secure_tree,
     validate_secure_tree,
     write_secure_bytes,
 )
+
+
+def _grant_windows_world_full_control(path):
+    sid = _windows_current_sid()
+    descriptor_text = f"D:P(A;;FA;;;{sid})(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)"
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorDacl.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    )
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.SetNamedSecurityInfoW.argtypes = (
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    )
+    advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    descriptor = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    present = wintypes.BOOL()
+    defaulted = wintypes.BOOL()
+    length = wintypes.DWORD()
+    try:
+        if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor_text, 1, ctypes.byref(descriptor), ctypes.byref(length)
+        ):
+            raise OSError(ctypes.get_last_error(), "cannot create test DACL")
+        if not advapi32.GetSecurityDescriptorDacl(
+            descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
+        ) or not present.value:
+            raise OSError(ctypes.get_last_error(), "cannot read test DACL")
+        target = ctypes.create_unicode_buffer(str(path))
+        result = advapi32.SetNamedSecurityInfoW(
+            target, 1, 0x00000004 | 0x80000000, None, None, dacl, None
+        )
+        if result:
+            raise OSError(result, "cannot install test DACL")
+    finally:
+        if descriptor.value:
+            kernel32.LocalFree(descriptor)
 
 
 def _storage(root):
@@ -114,7 +172,12 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
 
             storage = _storage(root)
             ensure_plugin_layout(storage)
-            secure_file(runtime, payload, mode=RUNTIME_FILE_MODE)
+            secure_file(
+                runtime,
+                payload,
+                mode=RUNTIME_FILE_MODE,
+                directory_mode=RUNTIME_DIRECTORY_MODE,
+            )
 
             self.assertEqual(stat.S_IMODE(root.stat().st_mode), PRIVATE_DIRECTORY_MODE)
             self.assertEqual(stat.S_IMODE(runtime.stat().st_mode), RUNTIME_DIRECTORY_MODE)
@@ -164,14 +227,6 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
                 b"private",
             )
             validate_secure_tree(storage.staging)
-            icacls = Path(os.environ["SystemRoot"]) / "System32" / "icacls.exe"
-            completed = subprocess.run(
-                [str(icacls), str(payload), "/grant", "*S-1-1-0:(F)"],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                check=False,
-                creationflags=int(getattr(subprocess, "CREATE_NO_WINDOW", 0)),
-            )
-            self.assertEqual(completed.returncode, 0)
+            _grant_windows_world_full_control(payload)
             with self.assertRaises(PluginFilesystemSecurityError):
                 validate_secure_tree(storage.staging)

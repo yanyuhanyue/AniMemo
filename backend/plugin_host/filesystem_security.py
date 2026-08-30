@@ -6,21 +6,19 @@ therefore cannot inherit ambient ``umask`` or an ambient Windows DACL.
 
 The native-Windows contract is deliberately explicit.  AniMemo production
 runs the plugin host in Linux containers; a native-Windows process is accepted
-only when ``icacls`` can install a protected DACL for the current user,
-SYSTEM, and Administrators and this Backend module can independently read
-back its exact security descriptor.  Missing tooling or an unverifiable DACL
-fails closed.
+only when the Win32 token and security-descriptor APIs can install a protected
+DACL for the current user, SYSTEM, and Administrators and this Backend module
+can independently read back its exact security descriptor.  An unavailable
+API or an unverifiable DACL fails closed.
 """
 
 from __future__ import annotations
 
-import csv
 import ctypes
 import os
 import re
 import shutil
 import stat
-import subprocess
 from ctypes import wintypes
 from functools import lru_cache
 from pathlib import Path
@@ -71,39 +69,84 @@ def _require_owner(metadata: os.stat_result) -> None:
 
 
 @lru_cache(maxsize=1)
-def _windows_tools() -> tuple[Path, Path, str]:
-    system_root = os.environ.get("SystemRoot")
-    if not system_root:
-        raise PluginFilesystemSecurityError("Windows 插件存储 DACL 工具不可用。")
-    system32 = Path(system_root) / "System32"
-    icacls = system32 / "icacls.exe"
-    whoami = system32 / "whoami.exe"
-    if not whoami.is_file() or not icacls.is_file():
-        raise PluginFilesystemSecurityError("Windows 插件存储 DACL 工具不可用。")
-    flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+def _windows_current_sid() -> str:
+    """Read the process token SID without executing an ambient command."""
+
+    class _SidAndAttributes(ctypes.Structure):
+        _fields_ = (("sid", ctypes.c_void_p), ("attributes", wintypes.DWORD))
+
+    class _TokenUser(ctypes.Structure):
+        _fields_ = (("user", _SidAndAttributes),)
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.OpenProcessToken.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    )
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.LPWSTR),
+    )
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    kernel32.GetCurrentProcess.argtypes = ()
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    token = wintypes.HANDLE()
+    sid_text = wintypes.LPWSTR()
     try:
-        completed = subprocess.run(
-            [str(whoami), "/user", "/fo", "csv", "/nh"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="mbcs",
-            errors="strict",
-            timeout=10,
-            check=False,
-            creationflags=flags,
-        )
-        row = next(csv.reader([completed.stdout.strip()]))
-    except (OSError, subprocess.SubprocessError, UnicodeError, csv.Error, StopIteration) as error:
-        raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。") from error
-    sid = row[1] if completed.returncode == 0 and len(row) == 2 else ""
-    if not sid.startswith("S-1-") or any(part and not part.isdigit() for part in sid.split("-")[1:]):
-        raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。")
-    return icacls, whoami, sid
+        if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(),
+            0x0008,
+            ctypes.byref(token),
+        ):
+            raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。")
+        length = wintypes.DWORD()
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(length))
+        if not length.value:
+            raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。")
+        buffer = ctypes.create_string_buffer(length.value)
+        if not advapi32.GetTokenInformation(
+            token,
+            1,
+            buffer,
+            length,
+            ctypes.byref(length),
+        ):
+            raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。")
+        token_user = ctypes.cast(buffer, ctypes.POINTER(_TokenUser)).contents
+        if not token_user.user.sid or not advapi32.ConvertSidToStringSidW(
+            token_user.user.sid,
+            ctypes.byref(sid_text),
+        ):
+            raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。")
+        sid = sid_text.value or ""
+        if not re.fullmatch(r"S-1-(?:[0-9]+-)*[0-9]+", sid):
+            raise PluginFilesystemSecurityError("Windows 插件存储当前 SID 不可验证。")
+        return sid
+    finally:
+        if sid_text:
+            kernel32.LocalFree(ctypes.cast(sid_text, ctypes.c_void_p))
+        if token:
+            kernel32.CloseHandle(token)
 
 
 def _validate_windows_dacl(path: Path, *, directory: bool) -> None:
-    _icacls, _whoami, sid = _windows_tools()
+    sid = _windows_current_sid()
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     advapi32.GetNamedSecurityInfoW.argtypes = (
@@ -209,33 +252,77 @@ def _validate_windows_dacl(path: Path, *, directory: bool) -> None:
 
 
 def _harden_windows_dacl(path: Path, *, directory: bool) -> None:
-    icacls, _whoami, sid = _windows_tools()
-    inheritance = "(OI)(CI)F" if directory else "(F)"
-    flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    command = [
-        str(icacls),
-        str(path),
-        "/inheritance:r",
-        "/grant:r",
-        f"*{sid}:{inheritance}",
-        f"*S-1-5-18:{inheritance}",
-        f"*S-1-5-32-544:{inheritance}",
-        "/remove:g",
-        "*S-1-3-4",
-    ]
+    sid = _windows_current_sid()
+    ace_flags = "OICI" if directory else ""
+    descriptor_text = (
+        "D:P"
+        f"(A;{ace_flags};FA;;;{sid})"
+        f"(A;{ace_flags};FA;;;SY)"
+        f"(A;{ace_flags};FA;;;BA)"
+    )
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorDacl.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    )
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.SetNamedSecurityInfoW.argtypes = (
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    )
+    advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    descriptor = ctypes.c_void_p()
     try:
-        completed = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=10,
-            check=False,
-            creationflags=flags,
+        length = wintypes.DWORD()
+        if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor_text,
+            1,
+            ctypes.byref(descriptor),
+            ctypes.byref(length),
+        ) or not descriptor.value:
+            raise PluginFilesystemSecurityError("Windows 插件存储 DACL 无法收紧。")
+        present = wintypes.BOOL()
+        defaulted = wintypes.BOOL()
+        dacl = ctypes.c_void_p()
+        if not advapi32.GetSecurityDescriptorDacl(
+            descriptor,
+            ctypes.byref(present),
+            ctypes.byref(dacl),
+            ctypes.byref(defaulted),
+        ) or not present.value or not dacl.value:
+            raise PluginFilesystemSecurityError("Windows 插件存储 DACL 无法收紧。")
+        target = ctypes.create_unicode_buffer(str(path))
+        result = advapi32.SetNamedSecurityInfoW(
+            target,
+            1,
+            0x00000004 | 0x80000000,
+            None,
+            None,
+            dacl,
+            None,
         )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise PluginFilesystemSecurityError("Windows 插件存储 DACL 无法收紧。") from error
-    if completed.returncode != 0:
-        raise PluginFilesystemSecurityError("Windows 插件存储 DACL 无法收紧。")
+        if result != 0:
+            raise PluginFilesystemSecurityError("Windows 插件存储 DACL 无法收紧。")
+    finally:
+        if descriptor.value:
+            kernel32.LocalFree(descriptor)
     _validate_windows_dacl(path, directory=directory)
 
 

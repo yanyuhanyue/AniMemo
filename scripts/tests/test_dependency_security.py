@@ -92,17 +92,13 @@ class DependencySecurityContractTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
-        matrix = re.search(
-            r"astrbot_ref:\s*\n(?P<refs>(?:\s+-\s+[^\n]+\n)+)",
+        references = re.findall(
+            r"repository:\s*AstrBotDevs/AstrBot\s*\n\s*ref:\s*([0-9a-f]{40})",
             workflow,
         )
-        self.assertIsNotNone(matrix)
-        references = re.findall(
-            r"-\s+([0-9a-f]{40})(?:\s+#.*)?$",
-            matrix.group("refs"),
-            re.MULTILINE,
-        )
         self.assertEqual(len(references), 2)
+        self.assertEqual(len(set(references)), 2)
+        self.assertNotIn("ref: ${{ matrix.", workflow)
         self.assertIn(
             "6b5b28e189a16b8a0db4f177e32d14e39073c3e9b62ff25f9dc3515b1e232804  .astrbot-runtime/requirements.txt",
             workflow,
@@ -127,6 +123,38 @@ class DependencySecurityContractTests(unittest.TestCase):
             'pywin32==312 ; sys_platform == "win32"',
             runtime_lock,
         )
+
+    def test_plugin_bind_mounts_are_owned_by_the_runtime_identity(self) -> None:
+        sources = {
+            ".github/workflows/release-gate.yml": 'install -d -m 0700 -o 10001 -g 10001 "$data_root/plugins"',
+            ".github/workflows/performance.yml": 'install -d -m 0700 -o 10001 -g 10001 "$data_root/plugins"',
+            "scripts/rehearse-release-images.sh": 'install -d -m 0700 -o 10001 -g 10001 "$DATA_ROOT/plugins"',
+            "scripts/dr-rehearsal.sh": 'install -d -m 0700 -o 10001 -g 10001 "$DATA_A/plugins"',
+            "scripts/stateful-upgrade-gate.sh": 'install -d -m 0700 -o 10001 -g 10001 "$DATA_ROOT/plugins"',
+        }
+        for relative, authority in sources.items():
+            with self.subTest(path=relative):
+                source = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn(authority, source)
+        dr_source = (ROOT / "scripts" / "dr-rehearsal.sh").read_text(encoding="utf-8")
+        self.assertIn('chown -R 10001:10001 "$DATA_B/plugins"', dr_source)
+        self.assertNotIn('chmod -R a+rwx "$DATA_B/plugins"', dr_source)
+
+    def test_development_bootstrap_exposes_the_shared_archive_package(self) -> None:
+        bash_source = (ROOT / "scripts" / "dev.sh").read_text(encoding="utf-8")
+        powershell_source = (ROOT / "scripts" / "dev.ps1").read_text(encoding="utf-8")
+        bash_assignments = [
+            line.strip()
+            for line in bash_source.splitlines()
+            if line.strip().startswith("export PYTHONPATH=")
+        ]
+        powershell_assignments = [
+            line.strip()
+            for line in powershell_source.splitlines()
+            if line.strip().casefold().startswith("$env:pythonpath")
+        ]
+        self.assertEqual(bash_assignments, ['export PYTHONPATH="$ROOT"'])
+        self.assertEqual(powershell_assignments, ["$env:PYTHONPATH = $root"])
 
     def test_backend_runtime_and_python_tooling_are_environment_isolated(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(

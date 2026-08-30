@@ -193,8 +193,9 @@ jobs:
         run: |
           set -euo pipefail
           data_root="$RUNNER_TEMP/animemo-performance-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          mkdir -p "$data_root"/plugins "$data_root"/logs "$data_root"/backups "$data_root"/media "$data_root"/postgres "$data_root"/redis
+          mkdir -p "$data_root"/logs "$data_root"/backups "$data_root"/media "$data_root"/postgres "$data_root"/redis
           chmod -R a+rwx "$data_root"
+          sudo -n install -d -m 0700 -o 10001 -g 10001 "$data_root/plugins"
           sudo install -d -m 0700 -o 10001 -g 10001 "$data_root/private"
           cat > .ci-runtime.env <<EOF
           DEBUG=false
@@ -391,8 +392,9 @@ jobs:
         run: |
           set -euo pipefail
           data_root="$RUNNER_TEMP/animemo-capacity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          mkdir -p "$data_root"/{plugins,logs,backups,media,postgres,redis}
+          mkdir -p "$data_root"/{logs,backups,media,postgres,redis}
           chmod -R a+rwx "$data_root"
+          sudo -n install -d -m 0700 -o 10001 -g 10001 "$data_root/plugins"
           sudo install -d -m 0700 -o 10001 -g 10001 "$data_root/private"
           cat > .ci-runtime.env <<EOF
           DEBUG=false

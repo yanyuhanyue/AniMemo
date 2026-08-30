@@ -99,11 +99,14 @@ class RuntimeRegistry:
     def load_candidate(self, root, *, expected_slug=None, expected_version=None):
         candidate_root = Path(root).absolute()
         try:
-            validate_directory_chain(Path(settings.PLUGIN_ROOT), candidate_root)
+            candidate_root = validate_directory_chain(Path(settings.PLUGIN_ROOT), candidate_root)
             validate_secure_tree(candidate_root)
         except PluginFilesystemSecurityError as error:
             raise RuntimeLoadError(str(error)) from error
-        directory = candidate_root.resolve()
+        # The complete chain has just been proven contained, non-link, owned,
+        # and non-writable by other principals; resolving it again would reopen
+        # the path authority after validation.
+        directory = candidate_root  # lgtm[py/path-injection]
         try:
             manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
             validate_manifest(manifest)

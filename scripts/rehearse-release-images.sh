@@ -71,8 +71,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$DATA_ROOT"/{plugins,logs,backups,media,postgres,redis} "$META_ROOT"
+mkdir -p "$DATA_ROOT"/{logs,backups,media,postgres,redis} "$META_ROOT"
 chmod -R a+rwx "$DATA_ROOT"
+sudo -n install -d -m 0700 -o 10001 -g 10001 "$DATA_ROOT/plugins"
 sudo install -d -m 0700 -o 10001 -g 10001 "$DATA_ROOT/private"
 
 cat > "$ENV_FILE" <<EOF
