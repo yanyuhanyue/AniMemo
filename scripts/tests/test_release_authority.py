@@ -162,17 +162,31 @@ class ReleaseAuthorityTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertEqual(result["portable_sha256"], canonical_receipt["sha256"])
 
-    def test_release_workflow_builds_one_declared_portable_before_draft_and_exports_sidecar_after_publish(self):
+    def test_release_workflow_publishes_and_packages_only_candidate_accepted_oci(self):
         workflow = (
             Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("Materialize exact OCI layouts without rebuilding", workflow)
+        self.assertNotIn("Materialize exact OCI layouts without rebuilding", workflow)
+        self.assertIn("Publish only the Candidate-accepted OCI layouts", workflow)
+        self.assertIn("Assemble the portable transport from accepted OCI layouts", workflow)
+        self.assertIn(
+            'cp -a "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT/candidate-runtime/oci"',
+            workflow,
+        )
         self.assertIn("python -m release.cli build-portable", workflow)
         self.assertIn("--portable \"release-output/$PORTABLE_ASSET\"", workflow)
         self.assertIn("release-output/$PORTABLE_ASSET", workflow)
         self.assertIn("python scripts/acquire_release_attestation.py", workflow)
         self.assertIn("animemo-$RELEASE_TAG-release-attestation.json", workflow)
+        self.assertLess(
+            workflow.index("Publish only the Candidate-accepted OCI layouts"),
+            workflow.index("Assemble the portable transport from accepted OCI layouts"),
+        )
+        self.assertLess(
+            workflow.index("Assemble the portable transport from accepted OCI layouts"),
+            workflow.index("python -m release.cli build-portable"),
+        )
         self.assertLess(
             workflow.index("python -m release.cli build-portable"),
             workflow.index("Create an unpublished GitHub Draft Pre-release"),
