@@ -41,7 +41,11 @@ _FILESYSTEM_DIAGNOSTIC_CODES = frozenset(
         "dacl_protection",
         "dacl_sddl",
         "dacl_owner",
-        "dacl_ace",
+        "dacl_ace_type",
+        "dacl_ace_flags",
+        "dacl_ace_rights",
+        "dacl_ace_object",
+        "dacl_ace_principal",
         "dacl_duplicate",
         "dacl_principals",
         "dacl_api",
@@ -221,6 +225,76 @@ def _windows_current_sid() -> str:
             kernel32.CloseHandle(token)
 
 
+def _windows_ace_flags_match(value: str, *, directory: bool) -> bool:
+    if not value:
+        return not directory
+    if len(value) % 2:
+        return False
+    tokens = [value[index : index + 2] for index in range(0, len(value), 2)]
+    if len(tokens) != len(set(tokens)):
+        return False
+    return set(tokens) == ({"OI", "CI"} if directory else set())
+
+
+def _windows_file_all_rights(value: str) -> bool:
+    if value == "FA":
+        return True
+    if not re.fullmatch(r"0[xX][0-9A-Fa-f]{1,8}", value):
+        return False
+    return int(value, 16) == 0x001F01FF
+
+
+def _validate_windows_ace_entries(
+    dacl_text: str,
+    *,
+    sid: str,
+    directory: bool,
+) -> None:
+    aliases = {"S-1-5-18": "SY", "S-1-5-32-544": "BA"}
+    trusted = {sid, "SY", "BA", *aliases}
+    entries = re.findall(r"\(([^()]*)\)", dacl_text)
+    observed: set[str] = set()
+    for entry in entries:
+        fields = entry.split(";")
+        if len(fields) != 6 or fields[0] != "A":
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 包含非受信 ACE。",
+                diagnostic_code="dacl_ace_type",
+            )
+        if not _windows_ace_flags_match(fields[1], directory=directory):
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 包含非受信 ACE。",
+                diagnostic_code="dacl_ace_flags",
+            )
+        if not _windows_file_all_rights(fields[2]):
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 包含非受信 ACE。",
+                diagnostic_code="dacl_ace_rights",
+            )
+        if fields[3] or fields[4]:
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 包含非受信 ACE。",
+                diagnostic_code="dacl_ace_object",
+            )
+        if fields[5] not in trusted:
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 包含非受信 ACE。",
+                diagnostic_code="dacl_ace_principal",
+            )
+        canonical = aliases.get(fields[5], fields[5])
+        if canonical in observed:
+            raise PluginFilesystemSecurityError(
+                "Windows 插件存储 DACL 包含重复 ACE。",
+                diagnostic_code="dacl_duplicate",
+            )
+        observed.add(canonical)
+    if observed != {sid, "SY", "BA"}:
+        raise PluginFilesystemSecurityError(
+            "Windows 插件存储 DACL 主体不完整。",
+            diagnostic_code="dacl_principals",
+        )
+
+
 def _validate_windows_dacl(path: Path, *, directory: bool) -> None:
     sid = _windows_current_sid()
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -296,43 +370,13 @@ def _validate_windows_dacl(path: Path, *, directory: bool) -> None:
         sddl = ctypes.wstring_at(sddl_pointer.value, length.value).rstrip("\x00")
         owner_match = re.search(r"O:([^:]+?)(?=[GDS]:)", sddl)
         owner_value = owner_match.group(1) if owner_match else ""
-        aliases = {"S-1-5-18": "SY", "S-1-5-32-544": "BA"}
-        trusted = {sid, "SY", "BA", *aliases}
+        trusted = {sid, "SY", "BA", "S-1-5-18", "S-1-5-32-544"}
         if owner_value not in trusted:
             raise PluginFilesystemSecurityError(
                 "Windows 插件存储所有者不可信。", diagnostic_code="dacl_owner"
             )
         dacl_text = sddl.split("D:", 1)[1].split("S:", 1)[0] if "D:" in sddl else ""
-        entries = re.findall(r"\(([^()]*)\)", dacl_text)
-        expected_flags = "OICI" if directory else ""
-        observed: set[str] = set()
-        for entry in entries:
-            fields = entry.split(";")
-            if (
-                len(fields) != 6
-                or fields[0] != "A"
-                or fields[1] != expected_flags
-                or fields[2] != "FA"
-                or fields[3]
-                or fields[4]
-                or fields[5] not in trusted
-            ):
-                raise PluginFilesystemSecurityError(
-                    "Windows 插件存储 DACL 包含非受信 ACE。",
-                    diagnostic_code="dacl_ace",
-                )
-            canonical = aliases.get(fields[5], fields[5])
-            if canonical in observed:
-                raise PluginFilesystemSecurityError(
-                    "Windows 插件存储 DACL 包含重复 ACE。",
-                    diagnostic_code="dacl_duplicate",
-                )
-            observed.add(canonical)
-        if observed != {sid, "SY", "BA"}:
-            raise PluginFilesystemSecurityError(
-                "Windows 插件存储 DACL 主体不完整。",
-                diagnostic_code="dacl_principals",
-            )
+        _validate_windows_ace_entries(dacl_text, sid=sid, directory=directory)
     except PluginFilesystemSecurityError:
         raise
     except (AttributeError, OSError, ValueError) as error:

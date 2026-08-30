@@ -15,6 +15,7 @@ from plugin_host.filesystem_security import (
     RUNTIME_DIRECTORY_MODE,
     RUNTIME_FILE_MODE,
     PluginFilesystemSecurityError,
+    _validate_windows_ace_entries,
     _windows_current_sid,
     ensure_plugin_layout,
     filesystem_diagnostic_code,
@@ -104,6 +105,35 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
         error._diagnostic_code = sentinel
 
         self.assertEqual(filesystem_diagnostic_code(error), "unspecified")
+
+    def test_windows_ace_parser_accepts_equivalent_sddl_text_forms(self):
+        sid = "S-1-5-21-1000"
+        for flags in ("OICI", "CIOI"):
+            with self.subTest(flags=flags):
+                _validate_windows_ace_entries(
+                    f"P(A;{flags};FA;;;{sid})"
+                    f"(A;{flags};0x001f01ff;;;SY)"
+                    f"(A;{flags};FA;;;S-1-5-32-544)",
+                    sid=sid,
+                    directory=True,
+                )
+
+    def test_windows_ace_parser_rejects_inherited_or_broader_entries(self):
+        sid = "S-1-5-21-1000"
+        cases = (
+            (f"P(A;OICIID;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", "dacl_ace_flags"),
+            (f"P(A;OICI;GA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", "dacl_ace_rights"),
+            (f"P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;WD)", "dacl_ace_principal"),
+        )
+        for dacl_text, diagnostic_code in cases:
+            with self.subTest(diagnostic_code=diagnostic_code):
+                with self.assertRaises(PluginFilesystemSecurityError) as raised:
+                    _validate_windows_ace_entries(
+                        dacl_text,
+                        sid=sid,
+                        directory=True,
+                    )
+                self.assertEqual(raised.exception.diagnostic_code, diagnostic_code)
 
     @skipIf(os.name == "nt", "POSIX mode contract")
     def test_permissive_umask_cannot_create_group_or_world_writable_material(self):
