@@ -474,13 +474,16 @@ def _is_shared_contract(path: str) -> bool:
 def _is_dependency(path: str) -> bool:
     name = _name(path)
     return (
-        name
-        in {
+        name.endswith(".lock")
+        or name in {
             "package.json",
             "package-lock.json",
             "requirements.in",
+            "requirements.lock",
             "requirements.txt",
+            "pip-bootstrap.lock",
             "requirements-tools.txt",
+            "requirements-tools.lock",
             "requirements-ci.txt",
             "pyproject.toml",
             "uv.lock",

@@ -95,7 +95,7 @@ class _BoundReleaseResolver:
         self,
         version: str,
         *,
-        updater_version: str = "1.0.0",
+        updater_version: str = __version__,
         refresh: bool = False,
     ):
         materials = self._resolver.fetch_verified_materials(
@@ -117,7 +117,7 @@ class _BoundReleaseResolver:
         self,
         version: str,
         *,
-        updater_version: str = "1.0.0",
+        updater_version: str = __version__,
         refresh: bool = False,
     ) -> dict[str, object]:
         return self.fetch_verified_materials(

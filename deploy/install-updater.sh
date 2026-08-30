@@ -34,8 +34,8 @@ done
 
 SCRIPT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 [ -f "$SCRIPT_ROOT/updater/__init__.py" ] || die "updater package is missing"
-[ -f "$SCRIPT_ROOT/release/requirements.txt" ] || die "release requirements are missing"
-[ -f "$SCRIPT_ROOT/durability/requirements.txt" ] || die "durability requirements are missing"
+[ -f "$SCRIPT_ROOT/release/requirements.lock" ] || die "release requirements lock is missing"
+[ -f "$SCRIPT_ROOT/durability/requirements.lock" ] || die "durability requirements lock is missing"
 [ -d "$SCRIPT_ROOT/wheelhouse" ] || die "offline wheelhouse is missing"
 [ -f "$SCRIPT_ROOT/deploy/updater/animemo-updater" ] || die "verified launcher is missing"
 [ -f "$SCRIPT_ROOT/deploy/updater/animemo" ] || die "verified operator launcher is missing"

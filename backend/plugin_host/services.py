@@ -4,9 +4,8 @@ import ast
 import io
 import os
 import re
-import shutil
 from datetime import timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -15,7 +14,17 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from .installer import PluginInstallError, PluginPackageInstaller
+from .filesystem_security import (
+    PRIVATE_DIRECTORY_MODE,
+    PRIVATE_FILE_MODE,
+    ensure_directory,
+    ensure_plugin_layout,
+    remove_secure_tree,
+    secure_file,
+    secure_tree,
+    write_secure_bytes,
+)
+from .installer import PluginPackageInstaller
 from .manifest import PLUGIN_ID_RE, SLUG_RE
 from .models import (
     PluginData,
@@ -32,6 +41,8 @@ from .package import (
     PluginPackageError,
     inspect_package,
     package_policy,
+    read_validated_package_member,
+    validated_package_members,
 )
 from .public_diagnostics import PLUGIN_SCAN_FAILED, stable_security_report
 
@@ -129,11 +140,23 @@ def static_security_scan(payload, inspected):
         "css_global_selectors": [],
     }
     with ZipFile(io.BytesIO(payload)) as archive:
+        members, budget = validated_package_members(archive)
+        contents = {
+            path.as_posix(): read_validated_package_member(
+                archive,
+                info,
+                budget,
+            )
+            for info, path in members
+        }
+        expected_paths = {item["path"] for item in inspected["files"]}
+        if set(contents) - {"package-index.json"} != expected_paths:
+            raise PluginPackageError("插件包扫描成员与已验证索引不一致")
         for item in inspected["files"]:
             path = item["path"]
             if path == "frontend/plugin.css":
                 try:
-                    css = archive.read(path).decode("utf-8")
+                    css = contents[path].decode("utf-8")
                 except UnicodeDecodeError:
                     report["dangerous_findings"].append(PLUGIN_SCAN_FAILED)
                 else:
@@ -145,7 +168,7 @@ def static_security_scan(payload, inspected):
             if not path.startswith("backend/") or not path.endswith(".py"):
                 continue
             try:
-                tree = ast.parse(archive.read(path).decode("utf-8"), filename=path)
+                tree = ast.parse(contents[path].decode("utf-8"), filename=path)
             except (SyntaxError, UnicodeDecodeError):
                 report["dangerous_findings"].append(PLUGIN_SCAN_FAILED)
                 continue
@@ -174,11 +197,13 @@ def store_package_blob(payload, *, root=None, minimum_free_bytes=0):
     raw = payload.read() if hasattr(payload, "read") else bytes(payload)
     inspected = inspect_package(raw)
     storage = LocalPluginPackageStorage(root or settings.PLUGIN_ROOT)
+    ensure_plugin_layout(storage)
     path = storage.store_package(
         raw,
         sha256=inspected["sha256"],
         minimum_free_bytes=minimum_free_bytes,
     )
+    secure_file(storage.packages, path, mode=PRIVATE_FILE_MODE)
     relative = path.relative_to(storage.root).as_posix()
     try:
         with transaction.atomic():
@@ -304,32 +329,68 @@ def create_frontend_preview(plugin_version, *, actor):
     if set(plugin_version.runtime_types or []) != {"frontend"}:
         raise PluginWorkflowError("只有 frontend-only 草稿允许私人预览。")
     storage = LocalPluginPackageStorage(settings.PLUGIN_ROOT)
-    source = storage.package_path(plugin_version.package_blob.sha256)
+    ensure_plugin_layout(storage)
+    try:
+        raw = storage._read_verified_cas_blob(
+            plugin_version.package_blob.sha256
+        )
+    except PluginPackageError as error:
+        raise PluginWorkflowError("插件预览 Package 校验失败。") from error
     target = storage.previews / plugin_version.plugin.slug / plugin_version.version
-    temporary = target.with_name(f".{target.name}.preview")
-    shutil.rmtree(temporary, ignore_errors=True)
-    temporary.mkdir(parents=True, exist_ok=False)
-    with ZipFile(source) as archive:
-        for info in archive.infolist():
-            path = PurePosixPath(info.filename)
-            if info.is_dir() or not (path == PurePosixPath("manifest.json") or path.parts[0] == "frontend"):
-                continue
-            destination = temporary.joinpath(*path.parts)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(archive.read(info))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(target, ignore_errors=True)
-    temporary.replace(target)
+    temporary = target.with_name(f".{target.name}.{uuid4().hex}.preview")
+    try:
+        ensure_directory(storage.previews, temporary, mode=PRIVATE_DIRECTORY_MODE)
+        with ZipFile(io.BytesIO(raw)) as archive:
+            members, budget = validated_package_members(archive)
+            for info, path in members:
+                content = read_validated_package_member(
+                    archive,
+                    info,
+                    budget,
+                )
+                if not (
+                    path == PurePosixPath("manifest.json")
+                    or path.parts[0] == "frontend"
+                ):
+                    continue
+                destination = temporary.joinpath(*path.parts)
+                write_secure_bytes(
+                    temporary,
+                    destination,
+                    content,
+                    directory_mode=PRIVATE_DIRECTORY_MODE,
+                    file_mode=PRIVATE_FILE_MODE,
+                )
+        secure_tree(
+            temporary,
+            directory_mode=PRIVATE_DIRECTORY_MODE,
+            file_mode=PRIVATE_FILE_MODE,
+        )
+        ensure_directory(storage.previews, target.parent, mode=PRIVATE_DIRECTORY_MODE)
+        remove_secure_tree(storage.previews, target)
+        temporary.replace(target)
+        secure_tree(
+            target,
+            directory_mode=PRIVATE_DIRECTORY_MODE,
+            file_mode=PRIVATE_FILE_MODE,
+        )
+    except PluginPackageError as error:
+        raise PluginWorkflowError("插件预览 Package 解压失败。") from error
+    finally:
+        remove_secure_tree(storage.previews, temporary)
     return target
 
 
 def _payload_for_version(plugin_version):
     storage = LocalPluginPackageStorage(settings.PLUGIN_ROOT)
-    path = storage.package_path(plugin_version.package_blob.sha256)
-    if not path.is_file():
-        raise PluginWorkflowError("插件 Package 文件不存在。")
-    payload = path.read_bytes()
-    inspected = inspect_package(payload)
+    try:
+        payload = storage._read_verified_cas_blob(
+            plugin_version.package_blob.sha256,
+            inspect=False,
+        )
+        inspected = inspect_package(payload)
+    except (FileNotFoundError, PluginPackageError) as error:
+        raise PluginWorkflowError("插件不可变 Package 校验失败。") from error
     if inspected["sha256"] != plugin_version.package_blob.sha256 or inspected["manifest"] != plugin_version.manifest_snapshot:
         raise PluginWorkflowError("插件不可变 Package 校验失败。")
     return payload, inspected
@@ -441,7 +502,9 @@ def _reconcile_gc_tombstones(storage):
     gc_directory = storage.staging / "gc"
     if not gc_directory.is_dir():
         return removed, restored
+    ensure_directory(storage.staging, gc_directory, mode=PRIVATE_DIRECTORY_MODE)
     for tombstone in list(gc_directory.glob("*.tombstone")):
+        secure_file(gc_directory, tombstone, mode=PRIVATE_FILE_MODE)
         digest = tombstone.name.split(".", 1)[0].lower()
         try:
             canonical = storage.package_path(digest)
@@ -452,8 +515,9 @@ def _reconcile_gc_tombstones(storage):
         with storage.package_lock(digest):
             blob_exists = PluginPackageBlob.objects.filter(sha256=digest).exists()
             if blob_exists and not canonical.exists():
-                canonical.parent.mkdir(parents=True, exist_ok=True)
+                ensure_directory(storage.packages, canonical.parent, mode=PRIVATE_DIRECTORY_MODE)
                 os.replace(tombstone, canonical)
+                secure_file(storage.packages, canonical, mode=PRIVATE_FILE_MODE)
                 restored.append(digest)
             else:
                 tombstone.unlink(missing_ok=True)
@@ -463,7 +527,7 @@ def _reconcile_gc_tombstones(storage):
 
 def garbage_collect_package_blobs(*, root=None):
     storage = LocalPluginPackageStorage(root or settings.PLUGIN_ROOT)
-    storage.ensure()
+    ensure_plugin_layout(storage)
     report = {
         "package_blobs_removed": [],
         "orphan_files_removed": [],
@@ -492,18 +556,22 @@ def garbage_collect_package_blobs(*, root=None):
                     if not canonical.is_file():
                         report["missing_blob_files"].append(digest)
                         continue
+                    secure_file(storage.packages, canonical, mode=PRIVATE_FILE_MODE)
                     gc_directory = storage.staging / "gc"
-                    gc_directory.mkdir(parents=True, exist_ok=True)
+                    ensure_directory(storage.staging, gc_directory, mode=PRIVATE_DIRECTORY_MODE)
                     tombstone = gc_directory / f"{digest}.{uuid4().hex}.tombstone"
                     os.replace(canonical, tombstone)
+                    secure_file(gc_directory, tombstone, mode=PRIVATE_FILE_MODE)
                     blob.delete()
                 committed = True
                 tombstone.unlink(missing_ok=True)
                 report["package_blobs_removed"].append(digest)
             except Exception:
                 if not committed and tombstone is not None and tombstone.exists() and not canonical.exists():
-                    canonical.parent.mkdir(parents=True, exist_ok=True)
+                    secure_file(gc_directory, tombstone, mode=PRIVATE_FILE_MODE)
+                    ensure_directory(storage.packages, canonical.parent, mode=PRIVATE_DIRECTORY_MODE)
                     os.replace(tombstone, canonical)
+                    secure_file(storage.packages, canonical, mode=PRIVATE_FILE_MODE)
                 raise
 
     for blob in PluginPackageBlob.objects.only("sha256"):
@@ -531,6 +599,7 @@ def garbage_collect_package_blobs(*, root=None):
             with storage.package_lock(digest):
                 if PluginPackageBlob.objects.filter(sha256=digest).exists() or not path.is_file():
                     continue
+                secure_file(storage.packages, path, mode=PRIVATE_FILE_MODE)
                 path.unlink()
                 report["orphan_files_removed"].append(path.relative_to(storage.root).as_posix())
 

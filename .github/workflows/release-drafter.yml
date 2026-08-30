@@ -18,7 +18,7 @@ jobs:
   update_release_draft:
     name: 更新版本变更草稿
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       pull-requests: read
@@ -29,7 +29,7 @@ jobs:
   auto_label:
     name: 标注变更类别
     if: github.event_name == 'pull_request_target'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pull-requests: write

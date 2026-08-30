@@ -33,7 +33,7 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
       - name: 验证固定 GitHub CLI 安全基线
         uses: ./.github/actions/setup-pinned-gh-cli
       - name: 绑定默认分支工作流与精确发行
@@ -78,7 +78,7 @@ jobs:
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "release_id=$(jq -r '.id' "$metadata")" >> "$GITHUB_OUTPUT"
       - name: 安装固定发行验证依赖
-        run: python -m pip install -r release/requirements.txt
+        run: python -m pip install --require-hashes -r release/requirements.lock
       - name: 发布并匿名回读精确镜像
         env:
           ANIMEMO_RELEASE_MIRROR_ACCOUNT_ID: ${{ secrets.ANIMEMO_RELEASE_MIRROR_ACCOUNT_ID }}

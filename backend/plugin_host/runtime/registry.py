@@ -12,8 +12,13 @@ from uuid import uuid4
 
 from django.conf import settings
 
+from plugin_host.filesystem_security import (
+    PluginFilesystemSecurityError,
+    validate_directory_chain,
+    validate_secure_tree,
+)
 from plugin_host.hooks import HookRegistry, hook_registry
-from plugin_host.manifest import ManifestError, load_manifest, validate_manifest
+from plugin_host.manifest import ManifestError, validate_manifest
 
 from .context import PluginContext
 
@@ -92,7 +97,16 @@ class RuntimeRegistry:
         return Path(settings.PLUGIN_ROOT) / "runtime" / slug / version
 
     def load_candidate(self, root, *, expected_slug=None, expected_version=None):
-        directory = Path(root).resolve()
+        candidate_root = Path(root).absolute()
+        try:
+            candidate_root = validate_directory_chain(Path(settings.PLUGIN_ROOT), candidate_root)
+            validate_secure_tree(candidate_root)
+        except PluginFilesystemSecurityError as error:
+            raise RuntimeLoadError(str(error)) from error
+        # The complete chain has just been proven contained, non-link, owned,
+        # and non-writable by other principals; resolving it again would reopen
+        # the path authority after validation.
+        directory = candidate_root  # lgtm[py/path-injection]
         try:
             manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
             validate_manifest(manifest)

@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const apiFacadeSource = readFileSync(new URL("../src/lib/api.js", import.meta.url), "utf8");
 const apiCoreSource = readFileSync(new URL("../src/lib/apiCore.js", import.meta.url), "utf8");
@@ -23,6 +25,11 @@ const nginxEntrypointSource = readFileSync(
   new URL("../deploy/nginx-entrypoint.sh", import.meta.url),
   "utf8",
 );
+const edgeGatewayParserUrl = new URL(
+  "../deploy/resolve-edge-gateway.awk",
+  import.meta.url,
+);
+const edgeGatewayParserSource = readFileSync(edgeGatewayParserUrl, "utf8");
 const removedRouteAuthField = ["route", "requires", "Auth"].join("\\.");
 const removedRouteStaffField = ["route", "requires", "Admin"].join("\\.");
 
@@ -164,7 +171,41 @@ test("overwrites forwarding headers at the trusted proxy boundary", () => {
     nginxSource,
     /set_real_ip_from __ANIMEMO_TRUSTED_EDGE_PROXY_CIDR__;/,
   );
-  assert.match(nginxEntrypointSource, /ip -4 route show default/);
+  assert.match(nginxEntrypointSource, /\/proc\/net\/route/);
   assert.match(nginxEntrypointSource, /\$\{gateway\}\/32/);
-  assert.match(nginxEntrypointSource, /count != 1/);
+  assert.match(nginxEntrypointSource, /resolve-edge-gateway\.awk/);
+  assert.match(edgeGatewayParserSource, /\$2 == "00000000"/);
+  assert.match(edgeGatewayParserSource, /\$8 == "00000000"/);
+  assert.match(edgeGatewayParserSource, /flags % 2/);
+  assert.match(edgeGatewayParserSource, /int\(flags \/ 2\) % 2/);
+  assert.match(edgeGatewayParserSource, /count != 1/);
 });
+
+test(
+  "accepts exactly one active IPv4 default gateway and rejects route aliases",
+  { skip: process.platform === "win32" },
+  () => {
+    const header = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n";
+    const valid = "eth0 00000000 0101A8C0 0003 0 0 0 00000000 0 0 0\n";
+    const run = (rows) => spawnSync(
+      "/usr/bin/awk",
+      ["-f", fileURLToPath(edgeGatewayParserUrl)],
+      { input: header + rows, encoding: "utf8" },
+    );
+
+    const accepted = run(valid);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.equal(accepted.stdout.trim(), "192.168.1.1");
+
+    for (const rows of [
+      "eth0 00000000 0101A8C0 0003 0 0 0 FFFFFFFF 0 0 0\n",
+      "eth0 00000000 0101A8C0 0001 0 0 0 00000000 0 0 0\n",
+      "eth0 00000000 0101A8C0 0002 0 0 0 00000000 0 0 0\n",
+      "eth0 00000000 101A8C0 0003 0 0 0 00000000 0 0 0\n",
+      "eth0 00000000 0101A8C0 000000003 0 0 0 00000000 0 0 0\n",
+      valid + valid,
+    ]) {
+      assert.notEqual(run(rows).status, 0);
+    }
+  },
+);

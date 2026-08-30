@@ -301,8 +301,9 @@ echo "DR instance B project: $PROJECT_B"
 echo "Ephemeral DR root: $TEMP_ROOT"
 
 echo "== Prepare isolated instance A data roots =="
-mkdir -p "$DATA_A"/{plugins,logs,backups,media,postgres,redis}
+mkdir -p "$DATA_A"/{logs,backups,media,postgres,redis}
 chmod -R a+rwx "$DATA_A"
+as_root install -d -m 0755 -o 10001 -g 10001 "$DATA_A/plugins"
 as_root install -d -m 0700 -o 10001 -g 10001 "$DATA_A/private"
 # systemd-sysusers assigns animemo-updater a host-local dynamic UID. The
 # isolated fixture uses a dedicated non-root UID with the production group GID.
@@ -554,7 +555,8 @@ test ! -e "$DATA_B/logs"
 test ! -e "$DATA_B/redis"
 test "$(as_root cat "$DATA_B/private/dr-private.txt")" = "dr-private-state-v1"
 as_root mkdir -p "$DATA_B"/{logs,backups,postgres,redis}
-as_root chmod -R a+rwx "$DATA_B/plugins" "$DATA_B/media" "$DATA_B/logs" "$DATA_B/backups" "$DATA_B/postgres" "$DATA_B/redis"
+as_root chmod -R a+rwx "$DATA_B/media" "$DATA_B/logs" "$DATA_B/backups" "$DATA_B/postgres" "$DATA_B/redis"
+as_root chown -R 10001:10001 "$DATA_B/plugins"
 as_root chown -R 10001:10001 "$DATA_B/private"
 as_root chmod 0700 "$DATA_B/private"
 as_root chown -R "$UPDATER_FIXTURE_UID:$UPDATER_GID" "$DATA_B/updater-state"

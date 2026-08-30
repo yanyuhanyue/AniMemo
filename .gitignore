@@ -42,6 +42,7 @@ deliverables/
 /plugins/runtime/
 /plugins/staging/
 /runtime/private/
+/runtime/plugins/
 *.zip
 *.tar.gz
 /docs/production-hotfix-20260810.md

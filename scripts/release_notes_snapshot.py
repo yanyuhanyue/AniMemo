@@ -25,6 +25,23 @@ from release.notes import (
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
+def _minimum_updater_version() -> str:
+    try:
+        payload = json.loads(
+            (REPO_IMPORT_ROOT / "release" / "compatibility.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        value = payload["minimumUpdaterVersion"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise SnapshotCollectionError(
+            "minimum updater version authority is unavailable"
+        ) from error
+    if not isinstance(value, str) or not value:
+        raise SnapshotCollectionError("minimum updater version authority is invalid")
+    return value
+
+
 class SnapshotCollectionError(ValueError):
     """GitHub metadata cannot form one deterministic qualified snapshot."""
 
@@ -164,7 +181,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--release-tag", required=True)
     parser.add_argument("--target-version", required=True)
     parser.add_argument("--channel", required=True)
-    parser.add_argument("--minimum-updater-version", default="1.0.0")
     parser.add_argument("--supported-os", action="append", default=[])
     parser.add_argument(
         "--docker-requirement", default="Docker Engine 27+ with Compose v2"
@@ -199,7 +215,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "release_tag": args.release_tag,
                 "target_version": args.target_version,
                 "channel": args.channel,
-                "minimum_updater_version": args.minimum_updater_version,
+                "minimum_updater_version": _minimum_updater_version(),
                 "supported_os": sorted(args.supported_os or ["Ubuntu 24.04 LTS"]),
                 "docker_requirement": args.docker_requirement,
                 "release_assets": list(CANONICAL_RELEASE_ASSETS),

@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from updater import __version__
 from updater.authority import VerifiedReleaseMaterials
 from updater.oci import VerifiedOCIImage, VerifiedOCIImageSet
 
@@ -751,7 +752,7 @@ class LocalBundleReleaseSource:
         self,
         version: str,
         *,
-        updater_version: str = "1.0.0",
+        updater_version: str = __version__,
         refresh: bool = False,
     ) -> VerifiedReleaseMaterials:
         if updater_version != self._updater_version:
@@ -774,7 +775,7 @@ class LocalBundleReleaseSource:
         self,
         version: str,
         *,
-        updater_version: str = "1.0.0",
+        updater_version: str = __version__,
         refresh: bool = False,
     ) -> dict[str, object]:
         return self.fetch_verified_materials(
