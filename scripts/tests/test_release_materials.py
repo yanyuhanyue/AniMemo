@@ -6,11 +6,13 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from durability.platform import (
     canonical_platform_qualification_bytes,
     finalize_platform_qualification,
 )
+from release import materials
 from release.contract import build_deployment_contract, validate_deployment_contract
 from release.formal_windows_pretrust import (
     FORMAL_WINDOWS_PRETRUST_FILES,
@@ -35,6 +37,29 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class InstallerMaterialsTests(unittest.TestCase):
+    def test_bound_directory_io_requires_nofollow_without_global_listdir_downgrade(
+        self,
+    ) -> None:
+        supported_dir_fd = {materials.os.open, materials.os.stat, materials.os.unlink}
+        with (
+            mock.patch.object(materials.os, "supports_dir_fd", supported_dir_fd),
+            mock.patch.object(materials.os, "O_DIRECTORY", 1, create=True),
+            mock.patch.object(
+                materials.os,
+                "supports_fd",
+                {materials.os.listdir},
+            ),
+            mock.patch.object(materials.os, "O_NOFOLLOW", 0, create=True),
+        ):
+            self.assertFalse(materials.bound_release_directory_io_available())
+        with (
+            mock.patch.object(materials.os, "supports_dir_fd", supported_dir_fd),
+            mock.patch.object(materials.os, "O_DIRECTORY", 1, create=True),
+            mock.patch.object(materials.os, "supports_fd", set()),
+            mock.patch.object(materials.os, "O_NOFOLLOW", 1, create=True),
+        ):
+            self.assertTrue(materials.bound_release_directory_io_available())
+
     @staticmethod
     def contract(identity):
         return {

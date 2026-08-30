@@ -1041,6 +1041,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          formal_pretrust_work="release-output/.formal-pretrust-work"
+          rm -rf "$formal_pretrust_work"
+          install -d -m 0700 "$formal_pretrust_work"
           (
             cd release/release_attestation_verifier
             go mod download
@@ -1050,22 +1053,17 @@ jobs:
               go build -mod=readonly -trimpath -o offline-release-verifier .
             CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOPROXY=off GOSUMDB=off \
               go build -mod=readonly -trimpath \
-                -o "$RUNNER_TEMP/formal-release-verifier.exe" .
+                -o "../../$formal_pretrust_work/formal-release-verifier.exe" .
           )
           test -x release/release_attestation_verifier/offline-release-verifier
-          test -s "$RUNNER_TEMP/formal-release-verifier.exe"
-          rm -rf "$RUNNER_TEMP/animemo-pretrust-v2"
+          test -s "$formal_pretrust_work/formal-release-verifier.exe"
           python -m release.cli build-initial-trust-kit \
             --verifier release/release_attestation_verifier/offline-release-verifier \
-            --output "$RUNNER_TEMP/animemo-pretrust-v2"
-          rm -rf "$RUNNER_TEMP/animemo-formal-windows-pretrust-v1"
-          python scripts/formal_windows_pretrust.py build \
-            --verifier "$RUNNER_TEMP/formal-release-verifier.exe" \
-            --source-initial-trust-kit "$RUNNER_TEMP/animemo-pretrust-v2" \
-            --output "$RUNNER_TEMP/animemo-formal-windows-pretrust-v1"
+            --output "$formal_pretrust_work/initial-trust-kit"
+          python -B -m scripts.formal_windows_pretrust build
           mkdir -p release-output
           install -m 0600 \
-            "$RUNNER_TEMP/animemo-pretrust-v2/initial-trust-bootstrap.json" \
+            "$formal_pretrust_work/initial-trust-kit/initial-trust-bootstrap.json" \
             release-output/initial-trust-bootstrap.json
           rm -rf "$RUNNER_TEMP/release-wheelhouse"
           python -m pip download --disable-pip-version-check --only-binary=:all: \
@@ -1073,13 +1071,13 @@ jobs:
             -r release/requirements.txt -r durability/requirements.txt
           python -m release.cli build-installer-materials \
             --root . --wheelhouse "$RUNNER_TEMP/release-wheelhouse" \
-            --initial-trust-kit "$RUNNER_TEMP/animemo-pretrust-v2" \
+            --initial-trust-kit "$formal_pretrust_work/initial-trust-kit" \
             --formal-windows-pretrust-kit \
-              "$RUNNER_TEMP/animemo-formal-windows-pretrust-v1" \
+              "$formal_pretrust_work/formal-windows-pretrust-v1" \
             --output release-output/installer-materials.tar
-          python scripts/formal_windows_pretrust.py inspect-installer-materials \
-            --installer-materials release-output/installer-materials.tar \
+          python -B -m scripts.formal_windows_pretrust inspect-installer-materials \
             > "$RUNNER_TEMP/formal-windows-pretrust-binding.json"
+          rm -rf "$formal_pretrust_work"
           tar --extract --to-stdout --file release-output/installer-materials.tar scripts/closed_runtime_inventory.py | cmp - scripts/closed_runtime_inventory.py
           tar --extract --to-stdout --file release-output/installer-materials.tar \
             release/platform-qualification.json | cmp - release/platform-qualification.json

@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from release import trust_bootstrap
+from release import materials, trust_bootstrap
 from release.materials import build_installer_materials
 from release.trust_bootstrap import (
     TUFMetadataNotFound,
@@ -20,6 +20,7 @@ from release.trust_bootstrap import (
 from scripts.tests.formal_windows_pretrust_fixture import (
     create_test_formal_windows_pretrust_kit,
 )
+from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
 from updater.offline import TrustProfile
 
 
@@ -28,6 +29,85 @@ def _digest(value: bytes) -> str:
 
 
 class InitialTrustBootstrapTests(unittest.TestCase):
+    def test_initial_trust_descriptor_authority_requires_fd_listdir(self) -> None:
+        with (
+            mock.patch(
+                "release.materials.bound_release_directory_io_available",
+                return_value=True,
+            ),
+            mock.patch.object(trust_bootstrap.os, "supports_fd", set()),
+        ):
+            self.assertFalse(
+                trust_bootstrap._initial_trust_descriptor_io_available()
+            )
+
+    def test_initial_trust_kit_fails_closed_without_posix_handle_authority(
+        self,
+    ) -> None:
+        with (
+            mock.patch.object(
+                trust_bootstrap,
+                "_initial_trust_descriptor_io_available",
+                return_value=False,
+            ),
+            mock.patch.object(trust_bootstrap.os, "name", "posix"),
+            self.assertRaisesRegex(
+                trust_bootstrap.TrustBootstrapError,
+                "handle authority",
+            ),
+        ):
+            trust_bootstrap.load_initial_trust_kit(mock.sentinel.unused_root)
+
+    @unittest.skipUnless(
+        materials.bound_release_directory_io_available(),
+        "descriptor-relative trust-kit read contract",
+    )
+    def test_initial_trust_kit_descriptor_reads_reject_empty_members(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            kit = create_test_initial_trust_kit(Path(directory))
+            real_read = materials.read_bounded_release_member
+
+            with mock.patch(
+                "release.materials.read_bounded_release_member",
+                wraps=real_read,
+            ) as read:
+                trust_bootstrap.validate_initial_trust_kit(kit)
+
+            self.assertTrue(read.call_args_list)
+            self.assertTrue(
+                all(call.kwargs.get("allow_empty") is False for call in read.call_args_list)
+            )
+
+    @unittest.skipUnless(
+        materials.bound_release_directory_io_available(),
+        "descriptor-relative trust-kit read contract",
+    )
+    def test_initial_trust_kit_rejects_post_read_membership_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            kit = create_test_initial_trust_kit(Path(directory))
+            real_listdir = trust_bootstrap.os.listdir
+            calls = 0
+
+            def changing_listdir(descriptor):
+                nonlocal calls
+                calls += 1
+                names = list(real_listdir(descriptor))
+                return names if calls == 1 else names + ["late-member"]
+
+            with (
+                mock.patch.object(
+                    trust_bootstrap.os,
+                    "listdir",
+                    side_effect=changing_listdir,
+                ),
+                self.assertRaisesRegex(
+                    trust_bootstrap.TrustBootstrapError,
+                    "读取期间发生变化",
+                ),
+            ):
+                trust_bootstrap.validate_initial_trust_kit(kit)
+
+
     def test_verifier_replacement_during_open_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

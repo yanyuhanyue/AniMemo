@@ -31,7 +31,7 @@ from contextlib import ExitStack, contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Protocol, Self
 from uuid import uuid4
 
@@ -74,8 +74,8 @@ from release.r2_prestate import (
 )
 from scripts.closed_runtime_inventory import (
     MAXIMUM_TOTAL_BYTES as CLOSED_RUNTIME_MAXIMUM_TOTAL_BYTES,
-    closed_runtime_total_bytes,
 )
+from scripts.closed_runtime_inventory import closed_runtime_total_bytes
 
 PROFILES = ("FRESH_BASE", "DOCKER_BASE", "RUNTIME_BASE_OFFLINE")
 PROFILE_RESULT_KEYS = {
@@ -2627,7 +2627,7 @@ class ClosedVmwareProvider:
         }
         expected_identity = expected_identities.get(requested_path)
         try:
-            if not executable_path.is_absolute():
+            if not PureWindowsPath(str(executable_path)).is_absolute():
                 raise CandidateHarnessError(
                     "WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE"
                 )
@@ -4212,12 +4212,13 @@ class ClosedVmwareProvider:
         if material_authority is not None:
             observed_inventory = self._ssh_checked(
                 authority,
-                _guest_runtime_inventory_command(
-                    guest_root,
-                    material_root=guest_root + "/installer-root",
+                "sudo -S -p '' -- "
+                + _guest_runtime_inventory_command(
+                    guest_root, material_root=guest_root + "/installer-root"
                 ),
                 code="CANDIDATE_VM_GUEST_MATERIAL_INVENTORY_UNAVAILABLE",
                 timeout=60 * 60,
+                sudo_password=password,
             ).stdout.decode("ascii", errors="strict").strip()
             if observed_inventory != material_authority.tree_inventory_identity:
                 raise CandidateHarnessError(
@@ -4273,12 +4274,13 @@ class ClosedVmwareProvider:
             )
         observed_inventory = self._ssh_checked(
             authority,
-            _guest_runtime_inventory_command(
-                guest_root,
-                material_root=guest_root,
+            "sudo -S -p '' -- "
+            + _guest_runtime_inventory_command(
+                guest_root, material_root=guest_root
             ),
             code="FORMAL_VM_GUEST_RUNTIME_INVENTORY_UNAVAILABLE",
             timeout=600,
+            sudo_password=password,
         ).stdout.decode("ascii", errors="strict").strip()
         if observed_inventory != workload.runtime_inventory_digest:
             raise CandidateHarnessError("FORMAL_VM_GUEST_RUNTIME_INVENTORY_MISMATCH")

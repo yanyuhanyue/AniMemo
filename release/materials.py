@@ -164,7 +164,10 @@ def bound_release_directory_io_available() -> bool:
     return all(
         function in os.supports_dir_fd
         for function in (os.open, os.stat, os.unlink)
-    ) and bool(getattr(os, "O_DIRECTORY", 0))
+    ) and (
+        bool(getattr(os, "O_DIRECTORY", 0))
+        and bool(getattr(os, "O_NOFOLLOW", 0))
+    )
 
 
 def descriptor_relative_release_io_available() -> bool:
@@ -206,6 +209,90 @@ def bound_release_directory_matches(path: Path, descriptor: int) -> bool:
         and stat.S_ISDIR(current.st_mode)
         and _stat_identity(current)[:3] == _stat_identity(opened)[:3]
     )
+
+
+@contextmanager
+def hold_bound_release_directory(path: Path, *, subject: str) -> Iterator[int]:
+    """Hold one directory identity across descriptor-relative member I/O."""
+
+    try:
+        descriptor = open_bound_release_directory(path)
+    except (NotImplementedError, OSError) as error:
+        raise MaterialContractError(f"{subject} directory is unavailable") from error
+    try:
+        yield descriptor
+        if not bound_release_directory_matches(path, descriptor):
+            raise MaterialContractError(f"{subject} directory changed while reading")
+    finally:
+        os.close(descriptor)
+
+
+def read_bounded_release_member(
+    directory_descriptor: int,
+    name: str,
+    *,
+    subject: str,
+    maximum: int,
+    allow_empty: bool = True,
+) -> bytes:
+    """Read one canonical leaf relative to an already-held directory handle."""
+
+    if (
+        not isinstance(name, str)
+        or not name
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or "\x00" in name
+    ):
+        raise MaterialContractError(f"{subject} member name is invalid")
+    try:
+        before = os.stat(
+            name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        raise MaterialContractError(f"{subject} is unavailable") from error
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size > maximum
+        or (not allow_empty and before.st_size <= 0)
+    ):
+        raise MaterialContractError(
+            f"{subject} is not a bounded single-link regular file"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_descriptor)
+        opened = os.fstat(descriptor)
+        if _stat_identity(opened) != _stat_identity(before):
+            raise MaterialContractError(f"{subject} changed while opening")
+        value = bytearray()
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - len(value)))
+            if not chunk:
+                break
+            value.extend(chunk)
+            if len(value) > maximum:
+                raise MaterialContractError(f"{subject} is too large")
+        after = os.fstat(descriptor)
+        if (
+            len(value) != opened.st_size
+            or _stat_identity(after) != _stat_identity(opened)
+            or _stat_content_state(after) != _stat_content_state(opened)
+        ):
+            raise MaterialContractError(f"{subject} changed while reading")
+        return bytes(value)
+    except MaterialContractError:
+        raise
+    except OSError as error:
+        raise MaterialContractError(f"{subject} is unreadable") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _object_identity(metadata: os.stat_result) -> tuple[int, int, int]:

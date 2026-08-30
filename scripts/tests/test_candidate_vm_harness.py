@@ -354,6 +354,44 @@ class CandidateGuestPathContractTests(unittest.TestCase):
             )
         )
 
+    def test_root_only_guest_inventory_calls_use_hidden_sudo_stdin(self):
+        production_tree = ast.parse(Path(harness.__file__).read_text(encoding="utf-8"))
+        for method_name, error_code in (
+            ("_stage_candidate", "CANDIDATE_VM_GUEST_MATERIAL_INVENTORY_UNAVAILABLE"),
+            ("_stage_formal_workload", "FORMAL_VM_GUEST_RUNTIME_INVENTORY_UNAVAILABLE"),
+        ):
+            method = next(
+                node
+                for node in ast.walk(production_tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == method_name
+            )
+            call = next(
+                node
+                for node in ast.walk(method)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_ssh_checked"
+                and any(
+                    keyword.arg == "code"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value == error_code
+                    for keyword in node.keywords
+                )
+            )
+            command = call.args[1]
+            self.assertIsInstance(command, ast.BinOp)
+            self.assertIsInstance(command.op, ast.Add)
+            self.assertIsInstance(command.left, ast.Constant)
+            self.assertEqual(command.left.value, "sudo -S -p '' -- ")
+            sudo_password = next(
+                keyword.value
+                for keyword in call.keywords
+                if keyword.arg == "sudo_password"
+            )
+            self.assertIsInstance(sudo_password, ast.Name)
+            self.assertEqual(sudo_password.id, "password")
+
     def test_profile_runner_uses_python_safe_path(self):
         provider = harness.ClosedVmwareProvider(
             runner=RecordingRunner(),
@@ -2561,6 +2599,24 @@ class CandidateVmHarnessTests(unittest.TestCase):
             ):
                 provider._run(argv, code="TEST", openssh=openssh)
         self.assertEqual(runner.calls, [])
+
+    def test_windows_provider_rejects_rooted_paths_without_a_drive(self):
+        for executable in (r"\Windows\System32\robocopy.exe", "/Windows/robocopy.exe"):
+            with self.subTest(executable=executable):
+                runner = RecordingRunner()
+                provider = harness.ClosedVmwareProvider(
+                    runner=runner,
+                    windows_platform=FakeWindowsPlatform(),
+                    environment={"ProgramData": r"C:\ProgramData"},
+                )
+                with mock.patch.object(
+                    provider, "_tool_path", return_value=Path(executable)
+                ), self.assertRaisesRegex(
+                    harness.CandidateHarnessError,
+                    "WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE",
+                ):
+                    provider._run((str(harness.ROBOCOPY), "source", "target"), code="TEST")
+                self.assertEqual(runner.calls, [])
 
     def test_windows_provider_environments_use_known_folder_authority_per_scope(self):
         platform = FakeWindowsPlatform()

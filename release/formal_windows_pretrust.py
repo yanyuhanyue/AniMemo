@@ -15,10 +15,6 @@ from contextlib import ExitStack, contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from updater.offline import TrustProfile
 
 FORMAL_WINDOWS_PRETRUST_FILES = frozenset(
     {
@@ -50,6 +46,123 @@ _TRUSTED_INSTALLER_SID = (
 
 class FormalWindowsPretrustError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class FormalPretrustReleaseWorkspace:
+    """Fixed release-workspace paths issued without operator path input."""
+
+    release_root: Path
+    work_root: Path
+    verifier: Path
+    source_initial_trust_kit: Path
+    output: Path
+    installer_materials: Path
+
+
+def _formal_pretrust_checkout_root() -> Path:
+    """Return the loaded module's checkout, never a caller-selected cwd root."""
+
+    try:
+        module = Path(__file__).resolve(strict=True)
+        checkout = module.parents[1]
+        current = Path.cwd().resolve(strict=True)
+    except (IndexError, OSError) as error:
+        raise FormalWindowsPretrustError(
+            "Formal pretrust checkout identity不可用"
+        ) from error
+    if current != checkout:
+        raise FormalWindowsPretrustError(
+            "Formal pretrust必须从模块所属checkout根运行"
+        )
+    return checkout
+
+
+@contextmanager
+def hold_formal_pretrust_release_workspace(
+    *, require_build_workspace: bool
+) -> Iterator[FormalPretrustReleaseWorkspace]:
+    """Hold the fixed checkout-local root used by the Formal pretrust CLI.
+
+    The command intentionally has no path-bearing arguments.  All members are
+    fixed below the loaded module's checkout.  Windows holds the complete
+    ancestor chain; descriptor-capable POSIX holds each leaf identity and
+    rejects any rebound on exit under the private same-token CI boundary.
+    """
+
+    from release.materials import (
+        bound_release_directory_io_available,
+        bound_release_directory_matches,
+        open_bound_release_directory,
+    )
+
+    checkout = _formal_pretrust_checkout_root()
+    release_root = checkout / "release-output"
+    work_root = release_root / ".formal-pretrust-work"
+    roots = (release_root, work_root) if require_build_workspace else (release_root,)
+    for root in roots:
+        try:
+            metadata = root.lstat()
+            resolved = root.resolve(strict=True)
+        except OSError as error:
+            raise FormalWindowsPretrustError(
+                "Formal pretrust fixed release workspace不可用"
+            ) from error
+        if (
+            root.is_symlink()
+            or _is_reparse(metadata)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or resolved != root
+            or not root.is_relative_to(checkout)
+        ):
+            raise FormalWindowsPretrustError(
+                "Formal pretrust fixed release workspace越界"
+            )
+
+    workspace = FormalPretrustReleaseWorkspace(
+        release_root=release_root,
+        work_root=work_root,
+        verifier=work_root / "formal-release-verifier.exe",
+        source_initial_trust_kit=work_root / "initial-trust-kit",
+        output=work_root / "formal-windows-pretrust-v1",
+        installer_materials=release_root / "installer-materials.tar",
+    )
+    with ExitStack() as stack:
+        if os.name == "nt":
+            release_authority = stack.enter_context(
+                hold_windows_private_path_authority(
+                    release_root,
+                    allow_leaf_child_writes=require_build_workspace,
+                )
+            )
+            if require_build_workspace:
+                stack.enter_context(
+                    hold_windows_private_descendant_path(
+                        release_authority,
+                        work_root,
+                        allow_leaf_child_writes=True,
+                    )
+                )
+            yield workspace
+            return
+        if bound_release_directory_io_available():
+            held: list[tuple[Path, int]] = []
+            for root in roots:
+                descriptor = open_bound_release_directory(root)
+                stack.callback(os.close, descriptor)
+                held.append((root, descriptor))
+            yield workspace
+            if not all(
+                bound_release_directory_matches(root, descriptor)
+                for root, descriptor in held
+            ):
+                raise FormalWindowsPretrustError(
+                    "Formal pretrust fixed release workspace发生rebound"
+                )
+            return
+        raise FormalWindowsPretrustError(
+            "Formal pretrust fixed release workspace缺少handle authority"
+        )
 
 
 @dataclass(frozen=True)
@@ -88,7 +201,7 @@ class WindowsPrivateTreeSnapshot:
     aggregate_identity: str
 
 
-class _WindowsDirectoryDeleteAccessDenied(FormalWindowsPretrustError):
+class _WindowsDirectoryDeleteAccessUnavailable(FormalWindowsPretrustError):
     pass
 
 
@@ -1072,9 +1185,13 @@ def _hold_windows_directory_component(
     )
     invalid = ctypes.c_void_p(-1).value
     if handle in (None, 0, invalid):
-        if request_delete and ctypes.get_last_error() == 5:
-            raise _WindowsDirectoryDeleteAccessDenied(
-                "Formal Windows directory DELETE access被拒绝"
+        if request_delete and ctypes.get_last_error() in {5, 32}:
+            # ACCESS_DENIED and SHARING_VIOLATION both prevent acquiring DELETE.
+            # The caller establishes its own no-FILE_SHARE_DELETE handle after
+            # rechecking the component ACL and identity, which blocks any later
+            # rename even if the pre-existing conflicting handle is released.
+            raise _WindowsDirectoryDeleteAccessUnavailable(
+                "Formal Windows directory DELETE access不可用"
             )
         raise FormalWindowsPretrustError(
             "Formal Windows directory chain handle不可用"
@@ -1158,7 +1275,7 @@ def hold_windows_private_path_chain(
                         share_delete=volume_root,
                     )
                 )
-            except _WindowsDirectoryDeleteAccessDenied:
+            except _WindowsDirectoryDeleteAccessUnavailable:
                 if leaf:
                     raise
                 if component != Path(root.anchor):
@@ -1402,7 +1519,7 @@ def hold_windows_audited_tool(path: Path) -> Iterator[Path]:
                         request_delete=True,
                     )
                 )
-            except _WindowsDirectoryDeleteAccessDenied:
+            except _WindowsDirectoryDeleteAccessUnavailable:
                 if component != Path(path.anchor):
                     authority.inspect_acl(
                         component,
@@ -1437,11 +1554,9 @@ def hold_windows_audited_tool(path: Path) -> Iterator[Path]:
         )
 
 
-def _require_windows_system32_tool(path: Path) -> None:
+def _windows_system32_root() -> Path:
     if os.name != "nt":
-        raise FormalWindowsPretrustError(
-            "Formal audited system tool仅支持Windows"
-        )
+        raise FormalWindowsPretrustError("Formal audited system tool仅支持Windows")
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.GetWindowsDirectoryW.argtypes = (
         wintypes.LPWSTR,
@@ -1454,7 +1569,11 @@ def _require_windows_system32_tool(path: Path) -> None:
         raise FormalWindowsPretrustError(
             "Formal Windows system root不可验证"
         )
-    system32 = Path(buffer.value) / "System32"
+    return Path(buffer.value) / "System32"
+
+
+def _require_windows_system32_tool(path: Path) -> None:
+    system32 = _windows_system32_root()
     allowed = {
         system32 / "robocopy.exe",
         system32 / "OpenSSH" / "ssh.exe",
@@ -1534,7 +1653,7 @@ def hold_windows_audited_system_tool_source(
                         request_delete=True,
                     )
                 )
-            except _WindowsDirectoryDeleteAccessDenied:
+            except _WindowsDirectoryDeleteAccessUnavailable:
                 if component != Path(path.anchor):
                     authority.inspect_acl(
                         component,
@@ -1801,7 +1920,7 @@ def _hold_windows_fixed_path_chain(root: Path) -> Iterator[Path]:
                         request_delete=True,
                     )
                 )
-            except _WindowsDirectoryDeleteAccessDenied:
+            except _WindowsDirectoryDeleteAccessUnavailable:
                 if component != Path(root.anchor):
                     authority.inspect_acl(
                         component,
@@ -3598,9 +3717,8 @@ def build_formal_windows_pretrust_kit(
     """Derive one dual-platform Formal kit from an already verified root authority."""
 
     from release.trust_bootstrap import (
-        INITIAL_TRUST_KIT_FILES,
         TrustBootstrapError,
-        validate_initial_trust_kit,
+        load_initial_trust_kit,
     )
 
     verifier = Path(verifier)
@@ -3609,25 +3727,17 @@ def build_formal_windows_pretrust_kit(
     if output.exists() or output.is_symlink():
         raise FormalWindowsPretrustError("Formal Windows pretrust输出必须不存在")
     try:
-        source_profile: TrustProfile = validate_initial_trust_kit(
+        source_profile, source_kit_files = load_initial_trust_kit(
             source_initial_trust_kit
         )
     except (OSError, TrustBootstrapError, ValueError) as error:
         raise FormalWindowsPretrustError("Linux initial pretrust authority无效") from error
-    if {item.name for item in source_initial_trust_kit.iterdir()} != set(
-        INITIAL_TRUST_KIT_FILES
-    ):
-        raise FormalWindowsPretrustError("Linux initial pretrust authority未关闭")
-
     windows_verifier = _read_closed_file(
         verifier, label="Formal Windows verifier"
     )
     _require_pe32_plus_amd64(windows_verifier)
     source_files = {
-        name: _read_closed_file(
-            source_initial_trust_kit / name,
-            label=f"Linux initial pretrust/{name}",
-        )
+        name: source_kit_files[name]
         for name in (
             "github-trusted-root.jsonl",
             "github-tuf-root.json",

@@ -116,7 +116,8 @@ class DependencySecurityContractTests(unittest.TestCase):
         windows_verifier_build = (
             "CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOPROXY=off GOSUMDB=off \\\n"
             "              go build -mod=readonly -trimpath \\\n"
-            "                -o \"$RUNNER_TEMP/formal-release-verifier.exe\" ."
+            "                -o \"../../$formal_pretrust_work/"
+            "formal-release-verifier.exe\" ."
         )
 
         self.assertEqual(release_workflow.count("go-version: '1.26.6'"), 1)

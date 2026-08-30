@@ -322,25 +322,100 @@ def _verified_verifier_copy(value: bytes, parent: Path):
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def validate_initial_trust_kit(root: Path) -> TrustProfile:
-    """验证 build-time kit 的封闭字节集合及 profile/manifest 交叉绑定。"""
+def _directory_state(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
+
+def _initial_trust_descriptor_io_available() -> bool:
+    from release.materials import bound_release_directory_io_available
+
+    return (
+        bound_release_directory_io_available()
+        and os.listdir in os.supports_fd
+    )
+
+
+def load_initial_trust_kit(root: Path) -> tuple[TrustProfile, dict[str, bytes]]:
+    """Load one closed initial trust-kit byte snapshot and validate its bindings."""
+
+    from release.materials import (
+        MaterialContractError,
+        hold_bound_release_directory,
+        read_bounded_release_member,
+    )
+
+    descriptor_io = _initial_trust_descriptor_io_available()
+    if not descriptor_io and os.name != "nt":
+        raise TrustBootstrapError("初始 pretrust kit 缺少handle authority")
     root = Path(root)
-    try:
-        metadata = root.lstat()
-        names = {item.name for item in root.iterdir()}
-    except OSError as error:
-        raise TrustBootstrapError("初始 pretrust kit 不可用") from error
-    if root.is_symlink() or not stat.S_ISDIR(metadata.st_mode) or names != INITIAL_TRUST_KIT_FILES:
-        raise TrustBootstrapError("初始 pretrust kit 文件集合未关闭")
     files: dict[str, bytes] = {}
-    for name in sorted(INITIAL_TRUST_KIT_FILES):
-        path = root / name
-        files[name] = _read_single_link_regular_file(
-            path,
-            maximum=_MAX_VERIFIER_BYTES,
-            label="初始 pretrust kit 文件",
-        )
+    if descriptor_io:
+        try:
+            with hold_bound_release_directory(
+                root, subject="初始 pretrust kit"
+            ) as descriptor:
+                before = os.fstat(descriptor)
+                names_before = set(os.listdir(descriptor))
+                if (
+                    not stat.S_ISDIR(before.st_mode)
+                    or names_before != INITIAL_TRUST_KIT_FILES
+                ):
+                    raise TrustBootstrapError("初始 pretrust kit 文件集合未关闭")
+                for name in sorted(INITIAL_TRUST_KIT_FILES):
+                    files[name] = read_bounded_release_member(
+                        descriptor,
+                        name,
+                        maximum=_MAX_VERIFIER_BYTES,
+                        subject="初始 pretrust kit 文件",
+                        allow_empty=False,
+                    )
+                names_after = set(os.listdir(descriptor))
+                after = os.fstat(descriptor)
+                if (
+                    names_after != names_before
+                    or _directory_state(after) != _directory_state(before)
+                ):
+                    raise TrustBootstrapError("初始 pretrust kit 读取期间发生变化")
+        except TrustBootstrapError:
+            raise
+        except (MaterialContractError, OSError) as error:
+            raise TrustBootstrapError("初始 pretrust kit 不可用") from error
+    else:
+        try:
+            before = root.lstat()
+            names_before = {item.name for item in root.iterdir()}
+        except OSError as error:
+            raise TrustBootstrapError("初始 pretrust kit 不可用") from error
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISDIR(before.st_mode)
+            or names_before != INITIAL_TRUST_KIT_FILES
+        ):
+            raise TrustBootstrapError("初始 pretrust kit 文件集合未关闭")
+        for name in sorted(INITIAL_TRUST_KIT_FILES):
+            path = root / name
+            files[name] = _read_single_link_regular_file(
+                path,
+                maximum=_MAX_VERIFIER_BYTES,
+                label="初始 pretrust kit 文件",
+            )
+        try:
+            names_after = {item.name for item in root.iterdir()}
+            after = root.lstat()
+        except OSError as error:
+            raise TrustBootstrapError("初始 pretrust kit 不可用") from error
+        if (
+            names_after != names_before
+            or _directory_state(after) != _directory_state(before)
+        ):
+            raise TrustBootstrapError("初始 pretrust kit 读取期间发生变化")
     try:
         profile_record = json.loads(files["trust-profile.json"].decode("utf-8"))
         manifest = json.loads(files["initial-trust-bootstrap.json"].decode("utf-8"))
@@ -382,6 +457,13 @@ def validate_initial_trust_kit(root: Path) -> TrustProfile:
         or profile.verifier_identity != _digest(files["offline-release-verifier"])
     ):
         raise TrustBootstrapError("初始 pretrust profile 与材料身份不一致")
+    return profile, dict(files)
+
+
+def validate_initial_trust_kit(root: Path) -> TrustProfile:
+    """验证 build-time kit 的封闭字节集合及 profile/manifest 交叉绑定。"""
+
+    profile, _files = load_initial_trust_kit(root)
     return profile
 
 

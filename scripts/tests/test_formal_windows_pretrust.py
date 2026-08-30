@@ -7,8 +7,9 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -20,9 +21,11 @@ from release.formal_windows_pretrust import (
     FormalWindowsPretrustedTrustMaterial,
     FormalWindowsPretrustError,
     _assert_no_reparse_components,
+    _hold_windows_directory_component,
     _validate_windows_acl_observation,
     _WindowsAceObservation,
     _WindowsAclAuthority,
+    _WindowsDirectoryDeleteAccessUnavailable,
     assert_windows_private_acl,
     build_formal_windows_pretrust_kit,
     commit_windows_private_directory_snapshot,
@@ -40,13 +43,265 @@ from release.formal_windows_pretrust import (
     hold_windows_system_tool_private_snapshot,
 )
 from release.trust_bootstrap import validate_initial_trust_kit
+from scripts import formal_windows_pretrust as formal_windows_pretrust_cli
 from scripts.tests.formal_windows_pretrust_fixture import (
     minimal_pe32_plus_amd64,
+    private_windows_test_directory,
 )
 from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
 
+tempfile = SimpleNamespace(TemporaryDirectory=private_windows_test_directory)
+
 
 class FormalWindowsPretrustTests(unittest.TestCase):
+    def test_module_entrypoint_loads_with_clean_pythonpath(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        environment = dict(os.environ)
+        environment.pop("PYTHONPATH", None)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "scripts.formal_windows_pretrust",
+                "--help",
+            ],
+            cwd=repository,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("inspect-installer-materials", completed.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "Windows full-chain workspace authority")
+    def test_fixed_workspace_selects_full_chain_and_descendant_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory).resolve()
+            release_root = checkout / "release-output"
+            work_root = release_root / ".formal-pretrust-work"
+            work_root.mkdir(parents=True)
+            authority = mock.sentinel.release_authority
+
+            @contextmanager
+            def hold_release(root: Path, *, allow_leaf_child_writes: bool):
+                self.assertEqual(root, release_root)
+                self.assertTrue(allow_leaf_child_writes)
+                yield authority
+
+            @contextmanager
+            def hold_descendant(
+                parent_authority,
+                descendant: Path,
+                *,
+                allow_leaf_child_writes: bool,
+            ):
+                self.assertIs(parent_authority, authority)
+                self.assertEqual(descendant, work_root)
+                self.assertTrue(allow_leaf_child_writes)
+                yield descendant
+
+            with (
+                mock.patch(
+                    "release.formal_windows_pretrust._formal_pretrust_checkout_root",
+                    return_value=checkout,
+                ),
+                mock.patch(
+                    "release.materials.bound_release_directory_io_available",
+                    return_value=False,
+                ),
+                mock.patch(
+                    "release.formal_windows_pretrust.hold_windows_private_path_authority",
+                    side_effect=hold_release,
+                ) as release_hold,
+                mock.patch(
+                    "release.formal_windows_pretrust.hold_windows_private_descendant_path",
+                    side_effect=hold_descendant,
+                ) as descendant_hold,
+            ):
+                with formal_windows_pretrust_cli.hold_formal_pretrust_release_workspace(
+                    require_build_workspace=True
+                ) as workspace:
+                    self.assertEqual(workspace.work_root, work_root)
+
+            release_hold.assert_called_once()
+            descendant_hold.assert_called_once()
+
+    def test_fixed_workspace_is_bound_to_module_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory).resolve()
+            release_root = checkout / "release-output"
+            work_root = release_root / ".formal-pretrust-work"
+            work_root.mkdir(parents=True)
+            descriptors = iter((101, 102))
+
+            with (
+                mock.patch(
+                    "release.formal_windows_pretrust._formal_pretrust_checkout_root",
+                    return_value=checkout,
+                ),
+                mock.patch(
+                    "release.materials.bound_release_directory_io_available",
+                    return_value=True,
+                ),
+                mock.patch(
+                    "release.materials.open_bound_release_directory",
+                    side_effect=lambda _path: next(descriptors),
+                ),
+                mock.patch(
+                    "release.materials.bound_release_directory_matches",
+                    return_value=True,
+                ),
+                mock.patch(
+                    "release.formal_windows_pretrust.hold_windows_private_path_authority",
+                    side_effect=lambda *_args, **_kwargs: nullcontext(
+                        mock.sentinel.release_authority
+                    ),
+                ),
+                mock.patch(
+                    "release.formal_windows_pretrust.hold_windows_private_descendant_path",
+                    side_effect=lambda *_args, **_kwargs: nullcontext(work_root),
+                ),
+                mock.patch("release.formal_windows_pretrust.os.close"),
+            ):
+                with formal_windows_pretrust_cli.hold_formal_pretrust_release_workspace(
+                    require_build_workspace=True
+                ) as workspace:
+                    self.assertEqual(workspace.release_root, release_root)
+                    self.assertEqual(workspace.work_root, work_root)
+                    self.assertEqual(
+                        workspace.verifier,
+                        work_root / "formal-release-verifier.exe",
+                    )
+                    self.assertEqual(
+                        workspace.source_initial_trust_kit,
+                        work_root / "initial-trust-kit",
+                    )
+                    self.assertEqual(
+                        workspace.output,
+                        work_root / "formal-windows-pretrust-v1",
+                    )
+                    self.assertEqual(
+                        workspace.installer_materials,
+                        release_root / "installer-materials.tar",
+                    )
+                    for member in (
+                        workspace.work_root,
+                        workspace.verifier,
+                        workspace.source_initial_trust_kit,
+                        workspace.output,
+                        workspace.installer_materials,
+                    ):
+                        self.assertTrue(member.is_relative_to(release_root))
+
+    def test_cli_build_uses_only_fixed_workspace_members(self) -> None:
+        workspace = SimpleNamespace(
+            verifier=Path("fixed/verifier.exe"),
+            source_initial_trust_kit=Path("fixed/initial-trust-kit"),
+            output=Path("fixed/formal-pretrust"),
+            installer_materials=Path("fixed/installer-materials.tar"),
+        )
+
+        @contextmanager
+        def hold(*, require_build_workspace: bool):
+            self.assertTrue(require_build_workspace)
+            yield workspace
+
+        with (
+            mock.patch.object(sys, "argv", ["formal_windows_pretrust.py", "build"]),
+            mock.patch.object(
+                formal_windows_pretrust_cli,
+                "hold_formal_pretrust_release_workspace",
+                side_effect=hold,
+            ),
+            mock.patch.object(
+                formal_windows_pretrust_cli,
+                "build_formal_windows_pretrust_kit",
+                return_value={"status": "PASS"},
+            ) as build,
+            redirect_stdout(StringIO()) as output,
+        ):
+            self.assertEqual(formal_windows_pretrust_cli.main(), 0)
+
+        build.assert_called_once_with(
+            verifier=workspace.verifier,
+            source_initial_trust_kit=workspace.source_initial_trust_kit,
+            output=workspace.output,
+        )
+        self.assertEqual(json.loads(output.getvalue()), {"status": "PASS"})
+
+    def test_cli_inspect_uses_only_fixed_installer_materials(self) -> None:
+        workspace = SimpleNamespace(
+            installer_materials=Path("fixed/installer-materials.tar")
+        )
+
+        @contextmanager
+        def hold(*, require_build_workspace: bool):
+            self.assertFalse(require_build_workspace)
+            yield workspace
+
+        inspected = SimpleNamespace(
+            as_prepublication_record=lambda: {"status": "PASS"}
+        )
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["formal_windows_pretrust.py", "inspect-installer-materials"],
+            ),
+            mock.patch.object(
+                formal_windows_pretrust_cli,
+                "hold_formal_pretrust_release_workspace",
+                side_effect=hold,
+            ),
+            mock.patch.object(
+                formal_windows_pretrust_cli,
+                "inspect_formal_windows_pretrust_in_installer_materials",
+                return_value=inspected,
+            ) as inspect,
+            redirect_stdout(StringIO()) as output,
+        ):
+            self.assertEqual(formal_windows_pretrust_cli.main(), 0)
+
+        inspect.assert_called_once_with(workspace.installer_materials)
+        self.assertEqual(json.loads(output.getvalue()), {"status": "PASS"})
+
+    def test_cli_rejects_operator_controlled_path_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = create_test_initial_trust_kit(root)
+            verifier = root / "outside-formal-release-verifier.exe"
+            verifier.write_bytes(minimal_pe32_plus_amd64())
+            output = root / "outside-formal-windows-pretrust"
+            arguments = [
+                "formal_windows_pretrust.py",
+                "build",
+                "--verifier",
+                str(verifier),
+                "--source-initial-trust-kit",
+                str(source),
+                "--output",
+                str(output),
+            ]
+
+            with (
+                mock.patch.object(sys, "argv", arguments),
+                mock.patch(
+                    "release.formal_windows_pretrust.assert_windows_private_acl"
+                ),
+                redirect_stdout(StringIO()),
+                redirect_stderr(StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                formal_windows_pretrust_cli.main()
+
+            self.assertFalse(output.exists())
+
     def build(self, root: Path) -> tuple[Path, Path]:
         root.mkdir(parents=True, exist_ok=True)
         source = create_test_initial_trust_kit(root)
@@ -86,7 +341,7 @@ class FormalWindowsPretrustTests(unittest.TestCase):
             self.assertEqual(
                 material.profile.github_trusted_root_sha256,
                 "sha256:"
-                + __import__("hashlib").sha256(
+                + hashlib.sha256(
                     (source / "github-trusted-root.jsonl").read_bytes()
                 ).hexdigest(),
             )
@@ -145,6 +400,38 @@ class FormalWindowsPretrustTests(unittest.TestCase):
                                 source_initial_trust_kit=source,
                                 output=root / ("rejected-" + value[:2].hex()),
                             )
+
+    def test_builder_failure_leaves_no_output_or_private_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = create_test_initial_trust_kit(root)
+            verifier = root / "formal-release-verifier.exe"
+            verifier.write_bytes(minimal_pe32_plus_amd64())
+            output = root / "formal-windows-pretrust-v1"
+            before = {item.name for item in root.iterdir()}
+
+            with (
+                mock.patch(
+                    "release.formal_windows_pretrust.assert_windows_private_acl"
+                ),
+                mock.patch.object(
+                    FormalWindowsPretrustedTrustMaterial,
+                    "load",
+                    side_effect=FormalWindowsPretrustError("forced validation failure"),
+                ),
+                self.assertRaisesRegex(
+                    FormalWindowsPretrustError,
+                    "forced validation failure",
+                ),
+            ):
+                build_formal_windows_pretrust_kit(
+                    verifier=verifier,
+                    source_initial_trust_kit=source,
+                    output=output,
+                )
+
+            self.assertFalse(output.exists())
+            self.assertEqual({item.name for item in root.iterdir()}, before)
 
     def test_private_tool_bundle_copies_exact_mixed_pe_closure_and_rejects_tamper(
         self,
@@ -630,7 +917,9 @@ class FormalWindowsPretrustTests(unittest.TestCase):
     ) -> None:
         import hashlib
 
-        system32 = Path(os.environ["SystemRoot"]) / "System32"
+        from release.formal_windows_pretrust import _windows_system32_root
+
+        system32 = _windows_system32_root()
         sources = (
             system32 / "robocopy.exe",
             system32 / "OpenSSH" / "ssh.exe",
@@ -707,6 +996,88 @@ class FormalWindowsPretrustTests(unittest.TestCase):
             with hold_windows_private_path_chain(work):
                 with self.assertRaises(OSError):
                     ancestor.rename(ancestor.with_name("rebound"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing-violation fallback")
+    def test_path_chain_replaces_a_conflicting_handle_with_its_own_rename_lock(
+        self,
+    ) -> None:
+        with private_windows_test_directory() as directory:
+            parent = create_windows_private_directory(
+                Path(directory), prefix="formal-conflict-parent"
+            )
+            work = create_windows_private_directory(parent, prefix="formal-work")
+
+            @contextmanager
+            def sharing_violation(path: Path, **options):
+                if Path(path) == parent and options["request_delete"]:
+                    raise _WindowsDirectoryDeleteAccessUnavailable(
+                        "simulated ERROR_SHARING_VIOLATION"
+                    )
+                with _hold_windows_directory_component(
+                    path, **options
+                ) as held:
+                    yield held
+
+            authority = SimpleNamespace(
+                assert_fixed_non_reparse_chain=lambda _path: None,
+                inspect_acl=lambda _path, **_options: None,
+            )
+            with mock.patch(
+                "release.formal_windows_pretrust._hold_windows_directory_component",
+                side_effect=sharing_violation,
+            ), mock.patch(
+                "release.formal_windows_pretrust.assert_windows_private_acl"
+            ), mock.patch(
+                "release.formal_windows_pretrust._WindowsAclAuthority",
+                return_value=authority,
+            ):
+                with hold_windows_private_path_chain(work):
+                    with self.assertRaises(OSError):
+                        parent.rename(parent.with_name(parent.name + ".rebound"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing-violation fallback")
+    def test_path_chain_rejects_a_mutable_ancestor_during_conflict_fallback(
+        self,
+    ) -> None:
+        with private_windows_test_directory() as directory:
+            parent = create_windows_private_directory(
+                Path(directory), prefix="formal-mutable-parent"
+            )
+            work = create_windows_private_directory(parent, prefix="formal-work")
+
+            @contextmanager
+            def sharing_violation(path: Path, **options):
+                if Path(path) == parent and options["request_delete"]:
+                    raise _WindowsDirectoryDeleteAccessUnavailable(
+                        "simulated ERROR_SHARING_VIOLATION"
+                    )
+                with _hold_windows_directory_component(
+                    path, **options
+                ) as held:
+                    yield held
+
+            def reject_mutable_ancestor(_path: Path, **_options) -> None:
+                raise FormalWindowsPretrustError(
+                    "Formal Windows fallback ancestor允许current token mutation"
+                )
+
+            authority = SimpleNamespace(
+                assert_fixed_non_reparse_chain=lambda _path: None,
+                inspect_acl=reject_mutable_ancestor,
+            )
+            with mock.patch(
+                "release.formal_windows_pretrust._hold_windows_directory_component",
+                side_effect=sharing_violation,
+            ), mock.patch(
+                "release.formal_windows_pretrust.assert_windows_private_acl"
+            ), mock.patch(
+                "release.formal_windows_pretrust._WindowsAclAuthority",
+                return_value=authority,
+            ), self.assertRaisesRegex(
+                FormalWindowsPretrustError, "current token mutation"
+            ):
+                with hold_windows_private_path_chain(work):
+                    self.fail("mutable ancestor was accepted")
 
     @unittest.skipUnless(os.name == "nt", "Windows shared path authority")
     def test_path_authority_extends_child_without_reopening_ancestors(self) -> None:

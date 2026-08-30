@@ -7,7 +7,7 @@ source checkout:
 - `formal-release-verifier.exe` with
   `CGO_ENABLED=0 GOOS=windows GOARCH=amd64`.
 
-`scripts/formal_windows_pretrust.py build` combines those binaries with the
+`python -B -m scripts.formal_windows_pretrust build` combines those binaries with the
 already validated GitHub and Sigstore trust roots into one closed, dual-platform
 kit. The Windows host verifier and Linux guest verifier have independent byte
 identities. The profile binds both identities, the source Linux trust-profile

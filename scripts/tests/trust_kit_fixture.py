@@ -85,6 +85,30 @@ def safe_test_state_root(path: Path) -> Path:
     return path
 
 
+@contextmanager
+def simulated_test_root_ownership():
+    """Expose POSIX fixture metadata as root-owned inside one test only.
+
+    Production loaders keep their exact uid=0 requirement.  Hosted Linux
+    runners cannot create uid=0 fixtures, so tests replace only ``Path.lstat``
+    metadata while preserving the real type, mode, link count, size, and bytes.
+    """
+
+    if os.name != "posix" or os.geteuid() == 0:
+        yield
+        return
+    real_lstat = Path.lstat
+
+    def root_owned_lstat(path: Path) -> os.stat_result:
+        metadata = real_lstat(path)
+        fields = list(metadata)
+        fields[4] = 0
+        return os.stat_result(fields)
+
+    with mock.patch.object(Path, "lstat", new=root_owned_lstat):
+        yield
+
+
 def load_test_pretrusted_material(root: Path) -> PretrustedTrustMaterial:
     """Load closed trust bytes under the current UID for qualification tests."""
 

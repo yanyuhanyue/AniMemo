@@ -1402,7 +1402,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(
             release.count(
-                '-o "$RUNNER_TEMP/formal-release-verifier.exe" .'
+                '-o "../../$formal_pretrust_work/formal-release-verifier.exe" .'
             ),
             1,
         )
@@ -1414,7 +1414,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(release.count("build-initial-trust-kit"), 1)
         self.assertEqual(
-            release.count("python scripts/formal_windows_pretrust.py build"),
+            release.count("python -B -m scripts.formal_windows_pretrust build"),
             1,
         )
         self.assertEqual(
@@ -1422,7 +1422,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(
             release.count(
-                "python scripts/formal_windows_pretrust.py "
+                "python -B -m scripts.formal_windows_pretrust "
                 "inspect-installer-materials"
             ),
             1,
@@ -1450,12 +1450,19 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "--output release/release_attestation_verifier/pretrust-v2",
             release,
         )
-        self.assertGreaterEqual(release.count("$RUNNER_TEMP/animemo-pretrust-v2"), 4)
+        self.assertNotIn("$RUNNER_TEMP/animemo-pretrust-v2", release)
         self.assertEqual(
             release.count(
-                '--initial-trust-kit "$RUNNER_TEMP/animemo-pretrust-v2"'
+                '--initial-trust-kit "$formal_pretrust_work/initial-trust-kit"'
             ),
             1,
+        )
+        self.assertNotIn("--verifier \"$RUNNER_TEMP", release)
+        self.assertNotIn(
+            "python -B -m scripts.formal_windows_pretrust "
+            "inspect-installer-materials \\\n"
+            "            --installer-materials",
+            release,
         )
 
     def test_publish_rebinds_exact_qualified_prepublication_materials(self):

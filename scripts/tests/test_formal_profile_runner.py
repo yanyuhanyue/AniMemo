@@ -27,7 +27,10 @@ from scripts.formal_profile_runner import (
 from scripts.tests.formal_windows_pretrust_fixture import (
     create_test_formal_windows_pretrust_kit,
 )
-from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
+from scripts.tests.trust_kit_fixture import (
+    create_test_initial_trust_kit,
+    simulated_test_root_ownership,
+)
 
 
 class FormalProfileRunnerTests(unittest.TestCase):
@@ -68,6 +71,7 @@ class FormalProfileRunnerTests(unittest.TestCase):
                     "updater.offline.production_offline_release_verifier",
                     side_effect=AssertionError("ambient trust must be ignored"),
                 ),
+                simulated_test_root_ownership(),
             ):
                 capability = issue_formal_candidate_bound_offline_verifier(
                     authority_root, expected_profile_identity=expected
@@ -100,6 +104,7 @@ class FormalProfileRunnerTests(unittest.TestCase):
                 mock.patch(
                     "release.formal_windows_pretrust.assert_windows_private_acl"
                 ),
+                simulated_test_root_ownership(),
                 self.assertRaisesRegex(
                     InstallerError,
                     "INSTALL_FORMAL_OFFLINE_CAPABILITY_INVALID",

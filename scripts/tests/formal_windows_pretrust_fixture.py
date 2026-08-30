@@ -1,13 +1,46 @@
 from __future__ import annotations
 
-from pathlib import Path
+import os
 import shutil
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
 
 from release.formal_windows_pretrust import (
     build_formal_windows_pretrust_kit,
     create_windows_private_directory,
 )
 from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
+
+
+@contextmanager
+def private_windows_test_directory() -> Iterator[str]:
+    """Use a path that satisfies the production full-chain Windows contract."""
+
+    if os.name != "nt":
+        with tempfile.TemporaryDirectory() as directory:
+            yield directory
+        return
+    volume_root = Path(Path(__file__).resolve().anchor)
+    root = create_windows_private_directory(
+        volume_root, prefix="animemo-formal-test"
+    )
+    created = root.lstat()
+    identity = (int(created.st_dev), int(created.st_ino))
+    try:
+        yield str(root)
+    finally:
+        observed = root.lstat()
+        if (
+            not root.is_absolute()
+            or root.parent != volume_root
+            or root.is_symlink()
+            or getattr(observed, "st_file_attributes", 0) & 0x400
+            or (int(observed.st_dev), int(observed.st_ino)) != identity
+        ):
+            raise RuntimeError("Windows private test root发生rebound")
+        shutil.rmtree(root)
 
 
 def minimal_pe32_plus_amd64(*, marker: bytes = b"FORMAL-WINDOWS") -> bytes:

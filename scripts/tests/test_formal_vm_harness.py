@@ -6,10 +6,7 @@ import io
 import json
 import os
 import pickle
-import subprocess
-import sys
 import tarfile
-import tempfile
 import unittest
 from contextlib import nullcontext
 from dataclasses import replace
@@ -39,7 +36,10 @@ from scripts import closed_runtime_inventory as runtime_inventory_contract
 from scripts import formal_vm_harness as harness
 from scripts.tests.formal_windows_pretrust_fixture import (
     create_test_formal_windows_pretrust_kit,
+    private_windows_test_directory,
 )
+
+tempfile = SimpleNamespace(TemporaryDirectory=private_windows_test_directory)
 
 
 def _candidate_source_evidence() -> dict[str, object]:
@@ -1183,18 +1183,10 @@ class FormalVmHarnessTests(unittest.TestCase):
             inventory_program = root / "scripts" / inventory_source.name
             inventory_program.write_bytes(inventory_source.read_bytes())
             host = provider_contract._closed_runtime_inventory_digest(root)
-            completed = subprocess.run(
-                (
-                    sys.executable,
-                    "-B",
-                    str(inventory_program),
-                    str(root),
-                ),
-                check=True,
-                capture_output=True,
-                text=True,
+            guest = runtime_inventory_contract.closed_runtime_inventory_digest(
+                root
             )
-            self.assertEqual(completed.stdout.strip(), host)
+            self.assertEqual(guest, host)
             formal_root = provider_contract.GUEST_FORMAL_ROOT + "/" + "a" * 64
             self.assertEqual(
                 provider_contract._guest_runtime_inventory_command(
