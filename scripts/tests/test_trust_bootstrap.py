@@ -96,6 +96,11 @@ class InitialTrustBootstrapTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
+                    trust_bootstrap,
+                    "_initial_trust_descriptor_io_available",
+                    return_value=True,
+                ),
+                mock.patch.object(
                     trust_bootstrap.os,
                     "listdir",
                     side_effect=changing_listdir,
