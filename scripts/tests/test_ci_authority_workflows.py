@@ -138,6 +138,37 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertNotIn("ANIME_JOURNAL_PORT", release)
         self.assertNotIn("ANIME_JOURNAL_DATA_ROOT", release)
 
+    def test_trusted_gates_bridge_repository_imports(self):
+        ci = self.source("ci.yml")
+
+        for job_name in ("backend", "postgres"):
+            with self.subTest(job=job_name):
+                self.assertIn(
+                    "PYTHONPATH: ${{ github.workspace }}",
+                    self.job(ci, job_name),
+                )
+
+    def test_trusted_docker_fixture_enforces_plugin_owner_and_mode(self):
+        docker = self.job(self.source("release-gate.yml"), "docker")
+        install = (
+            'sudo -n install -d -m 0755 -o 10001 -g 10001 '
+            '"$data_root/plugins"'
+        )
+
+        self.assertNotIn(
+            'mkdir -p "$data_root"/plugins',
+            docker,
+        )
+        self.assertIn(install, docker)
+        self.assertEqual(
+            docker.count(install),
+            1,
+        )
+        self.assertLess(
+            docker.index('chmod -R a+rwx "$data_root"'),
+            docker.index(install),
+        )
+
     def test_full_selection_flows_only_through_classifier_gates_and_checkouts_are_pinned(self):
         ci = self.source("ci.yml")
         release = self.source("release-gate.yml")
