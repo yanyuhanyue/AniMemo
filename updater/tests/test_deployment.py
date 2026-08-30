@@ -5,6 +5,7 @@ import hashlib
 import http.client
 import json
 import os
+import ssl
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -793,46 +794,86 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
                 ],
             )
 
-    def test_stable_health_waits_for_transient_host_http_publication(self):
-        with tempfile.TemporaryDirectory() as directory:
-            deployment, _, probes = self.make(directory)
-            health_attempts = 0
+    def test_initial_http_retries_only_the_explicit_transient_allowlist(self):
+        transient_errors = (
+            ConnectionRefusedError("endpoint is not listening"),
+            ConnectionResetError("host port was reset"),
+            TimeoutError("bounded HTTP probe timed out"),
+            http.client.RemoteDisconnected("response closed before status"),
+        )
+        for transient_error in transient_errors:
+            with (
+                self.subTest(error=type(transient_error).__name__),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                deployment, _, _ = self.make(directory)
+                health_attempts = 0
 
-            def transient_http_probe(path, *, host, port, forwarded_proto):
-                nonlocal health_attempts
-                probes.append((path, host, port, forwarded_proto))
-                if path == "/health/":
-                    health_attempts += 1
-                    if health_attempts == 1:
-                        raise ConnectionResetError("host port is not ready")
-                return 200
+                def transient_http_probe(
+                    path,
+                    *,
+                    host,
+                    port,
+                    forwarded_proto,
+                    _error=transient_error,
+                ):
+                    nonlocal health_attempts
+                    if path == "/health/":
+                        health_attempts += 1
+                        if health_attempts == 1:
+                            raise _error
+                    return 200
 
-            deployment.http_probe = transient_http_probe
-            with mock.patch("updater.deployment.time.sleep") as sleep:
-                deployment.verify_health(manifest())
+                deployment.http_probe = transient_http_probe
+                with mock.patch("updater.deployment.time.sleep") as sleep:
+                    deployment.verify_health(manifest())
 
-            self.assertEqual(health_attempts, 2)
-            sleep.assert_called_once_with(INITIAL_HTTP_READY_INTERVAL_SECONDS)
+                self.assertEqual(health_attempts, 2)
+                sleep.assert_called_once_with(INITIAL_HTTP_READY_INTERVAL_SECONDS)
 
-    def test_stable_health_waits_for_transient_incomplete_http_response(self):
-        with tempfile.TemporaryDirectory() as directory:
-            deployment, _, _ = self.make(directory)
-            health_attempts = 0
+    def test_initial_http_protocol_and_identity_errors_fail_without_retry(self):
+        deterministic_errors = (
+            http.client.BadStatusLine("garbled status line"),
+            http.client.LineTooLong("header line"),
+            http.client.IncompleteRead(b"partial", 8),
+            http.client.HTTPException("malformed headers"),
+            http.client.UnknownProtocol("HTTP/9"),
+            http.client.InvalidURL("invalid host"),
+            ssl.SSLCertVerificationError(1, "hostname mismatch"),
+            ssl.SSLError(1, "TLS identity mismatch"),
+            OSError(22, "protocol transport is invalid"),
+            StateError("response contract is invalid"),
+        )
+        for deterministic_error in deterministic_errors:
+            with (
+                self.subTest(error=type(deterministic_error).__name__),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                deployment, _, _ = self.make(directory)
+                health_attempts = 0
 
-            def transient_http_probe(path, *, host, port, forwarded_proto):
-                nonlocal health_attempts
-                if path == "/health/":
-                    health_attempts += 1
-                    if health_attempts == 1:
-                        raise http.client.RemoteDisconnected("response closed")
-                return 200
+                def invalid_http_probe(
+                    path,
+                    *,
+                    host,
+                    port,
+                    forwarded_proto,
+                    _error=deterministic_error,
+                ):
+                    nonlocal health_attempts
+                    if path == "/health/":
+                        health_attempts += 1
+                    raise _error
 
-            deployment.http_probe = transient_http_probe
-            with mock.patch("updater.deployment.time.sleep") as sleep:
-                deployment.verify_health(manifest())
+                deployment.http_probe = invalid_http_probe
+                with (
+                    mock.patch("updater.deployment.time.sleep") as sleep,
+                    self.assertRaises(StateError),
+                ):
+                    deployment.verify_health(manifest())
 
-            self.assertEqual(health_attempts, 2)
-            sleep.assert_called_once_with(INITIAL_HTTP_READY_INTERVAL_SECONDS)
+                self.assertEqual(health_attempts, 1)
+                sleep.assert_not_called()
 
     def test_initial_http_non_200_fails_without_retry(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -882,6 +923,30 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
                     for call in sleep.call_args_list
                 )
             )
+
+    def test_later_stable_observation_never_retries_a_transient_http_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, _, _ = self.make(directory)
+            deployment.stable_observations = 2
+            health_attempts = 0
+
+            def second_observation_reset(path, *, host, port, forwarded_proto):
+                nonlocal health_attempts
+                if path == "/health/":
+                    health_attempts += 1
+                    if health_attempts == 2:
+                        raise ConnectionResetError("stable endpoint reset")
+                return 200
+
+            deployment.http_probe = second_observation_reset
+            with (
+                mock.patch("updater.deployment.time.sleep") as sleep,
+                self.assertRaisesRegex(StateError, "/health/"),
+            ):
+                deployment.verify_health(manifest())
+
+            self.assertEqual(health_attempts, 2)
+            sleep.assert_called_once_with(deployment.observation_seconds)
 
     def test_stable_health_binds_exact_images_rc_artifact_and_effective_stable_identity(
         self,

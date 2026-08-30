@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yanyuhanyue/AniMemo/blob/main/release/formal-windows-trust-profile.schema.json",
+  "title": "AniMemo Formal Windows amd64 pretrusted trust profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "authorityRole",
+    "github",
+    "linuxGuestVerifier",
+    "platform",
+    "profileIdentity",
+    "releaseAuthority",
+    "schemaVersion",
+    "sigstore",
+    "sourceProfileIdentity",
+    "sourceVerifierIdentity",
+    "windowsHostVerifier"
+  ],
+  "properties": {
+    "authorityRole": {"const": "FORMAL_WINDOWS_AMD64_PRETRUST_ONLY"},
+    "github": {"$ref": "#/$defs/rootPair"},
+    "linuxGuestVerifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binaryFormat", "machine", "name", "sha256", "size"],
+      "properties": {
+        "name": {"const": "offline-release-verifier"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "size": {"$ref": "#/$defs/size"},
+        "binaryFormat": {"const": "ELF64"},
+        "machine": {"const": "AMD64"}
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binaryFormat", "goarch", "goos", "machine"],
+      "properties": {
+        "binaryFormat": {"const": "PE32+"},
+        "goarch": {"const": "amd64"},
+        "goos": {"const": "windows"},
+        "machine": {"const": "AMD64"}
+      }
+    },
+    "profileIdentity": {"$ref": "#/$defs/digest"},
+    "releaseAuthority": {"const": "GITHUB_IMMUTABLE_RELEASE"},
+    "schemaVersion": {"const": 1},
+    "sigstore": {"$ref": "#/$defs/rootPair"},
+    "sourceProfileIdentity": {"$ref": "#/$defs/digest"},
+    "sourceVerifierIdentity": {"$ref": "#/$defs/digest"},
+    "windowsHostVerifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binaryFormat", "machine", "name", "sha256", "size"],
+      "properties": {
+        "name": {"const": "formal-release-verifier.exe"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "size": {"$ref": "#/$defs/size"},
+        "binaryFormat": {"const": "PE32+"},
+        "machine": {"const": "AMD64"}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864
+    },
+    "rootMaterial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256", "size"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "size": {"$ref": "#/$defs/size"}
+      }
+    },
+    "rootPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trustedRoot", "tufRoot"],
+      "properties": {
+        "trustedRoot": {"$ref": "#/$defs/rootMaterial"},
+        "tufRoot": {"$ref": "#/$defs/rootMaterial"}
+      }
+    }
+  }
+}

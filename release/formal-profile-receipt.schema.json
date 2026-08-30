@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yanyuhanyue/AniMemo/blob/main/release/formal-profile-receipt.schema.json",
+  "title": "AniMemo production Formal profile receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "rc_authority_identity", "profile",
+    "transport_source", "resolved_release", "base_vm_identity",
+    "snapshot_identity", "clone_identity", "provider_execution_authority_receipt_digest",
+    "publication_execution_receipt_identity",
+    "publication_signed_claim_identity", "publication_signed_at",
+    "formal_windows_pretrust_kit_identity", "offline_release_trust_profile_identity",
+    "pretrusted_profile_identity", "provenance_verifier_identity",
+    "github_trusted_root_identity", "sigstore_trusted_root_identity",
+    "platform_plan_digest",
+    "platform_receipt_digest", "installer_plan_digest",
+    "installer_execution_receipt_digest", "doctor_receipt_digest",
+    "canonical_acceptance_receipt_digests", "continuation_receipt_digest",
+    "profile_authority_identity", "execution_receipt_digest",
+    "release_authority_granted", "publish_authorized", "result",
+    "receipt_digest"
+  ],
+  "properties": {
+    "schema": {"const": "animemo.formal-profile-receipt/v1"},
+    "version": {"const": 1},
+    "rc_authority_identity": {"$ref": "#/$defs/digest"},
+    "profile": {"enum": ["FORMAL_FRESH", "FORMAL_DOCKER", "FORMAL_OFFLINE"]},
+    "transport_source": {"enum": ["github", "local-bundle"]},
+    "resolved_release": {"$ref": "#/$defs/release"},
+    "base_vm_identity": {"$ref": "#/$defs/digest"},
+    "snapshot_identity": {"$ref": "#/$defs/digest"},
+    "clone_identity": {"$ref": "#/$defs/digest"},
+    "provider_execution_authority_receipt_digest": {"$ref": "#/$defs/digest"},
+    "publication_execution_receipt_identity": {"$ref": "#/$defs/digest"},
+    "publication_signed_claim_identity": {"$ref": "#/$defs/digest"},
+    "publication_signed_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "formal_windows_pretrust_kit_identity": {"$ref": "#/$defs/digest"},
+    "offline_release_trust_profile_identity": {"$ref": "#/$defs/digest"},
+    "pretrusted_profile_identity": {"$ref": "#/$defs/digest"},
+    "provenance_verifier_identity": {"$ref": "#/$defs/digest"},
+    "github_trusted_root_identity": {"$ref": "#/$defs/digest"},
+    "sigstore_trusted_root_identity": {"$ref": "#/$defs/digest"},
+    "platform_plan_digest": {"$ref": "#/$defs/digest"},
+    "platform_receipt_digest": {"$ref": "#/$defs/digest"},
+    "installer_plan_digest": {"$ref": "#/$defs/digest"},
+    "installer_execution_receipt_digest": {"$ref": "#/$defs/digest"},
+    "doctor_receipt_digest": {"$ref": "#/$defs/nullableDigest"},
+    "canonical_acceptance_receipt_digests": {
+      "type": "array", "minItems": 0, "maxItems": 3,
+      "uniqueItems": true, "items": {"$ref": "#/$defs/digest"}
+    },
+    "continuation_receipt_digest": {"$ref": "#/$defs/digest"},
+    "profile_authority_identity": {"$ref": "#/$defs/digest"},
+    "execution_receipt_digest": {"$ref": "#/$defs/digest"},
+    "release_authority_granted": {"const": false},
+    "publish_authorized": {"const": false},
+    "result": {"enum": ["PASS", "FAIL"]},
+    "receipt_digest": {"$ref": "#/$defs/digest"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"result": {"const": "PASS"}}, "required": ["result"]},
+      "then": {
+        "properties": {
+          "doctor_receipt_digest": {"$ref": "#/$defs/digest"},
+          "canonical_acceptance_receipt_digests": {
+            "type": "array", "minItems": 3, "maxItems": 3,
+            "uniqueItems": true, "items": {"$ref": "#/$defs/digest"}
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"profile": {"const": "FORMAL_OFFLINE"}}, "required": ["profile"]},
+      "then": {"properties": {"transport_source": {"const": "local-bundle"}}},
+      "else": {"properties": {"transport_source": {"const": "github"}}}
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "nullableDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "rcTag": {"type": "string", "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"},
+    "release": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "version", "source_sha", "release_manifest_identity",
+        "deployment_contract_identity", "installer_materials_identity",
+        "api_digest", "web_digest", "publication_identity",
+        "workflow_identity", "attestation_claim_identities"
+      ],
+      "properties": {
+        "version": {"$ref": "#/$defs/rcTag"},
+        "source_sha": {"$ref": "#/$defs/gitSha"},
+        "release_manifest_identity": {"$ref": "#/$defs/digest"},
+        "deployment_contract_identity": {"$ref": "#/$defs/digest"},
+        "installer_materials_identity": {"$ref": "#/$defs/digest"},
+        "api_digest": {"$ref": "#/$defs/digest"},
+        "web_digest": {"$ref": "#/$defs/digest"},
+        "publication_identity": {"$ref": "#/$defs/digest"},
+        "workflow_identity": {
+          "const": "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main"
+        },
+        "attestation_claim_identities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "api-image", "web-image", "release-manifest",
+            "deployment-contract", "installer-materials"
+          ],
+          "properties": {
+            "api-image": {"$ref": "#/$defs/digest"},
+            "web-image": {"$ref": "#/$defs/digest"},
+            "release-manifest": {"$ref": "#/$defs/digest"},
+            "deployment-contract": {"$ref": "#/$defs/digest"},
+            "installer-materials": {"$ref": "#/$defs/digest"}
+          }
+        }
+      }
+    }
+  }
+}

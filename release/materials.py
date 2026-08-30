@@ -18,6 +18,13 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Self
 
 from durability.platform import PlatformQualificationError, parse_platform_qualification
+from release.formal_windows_pretrust import (
+    FORMAL_WINDOWS_PRETRUST_FILES,
+    FORMAL_WINDOWS_PRETRUST_PREFIX,
+    FormalWindowsPretrustedTrustMaterial,
+    FormalWindowsPretrustError,
+    inspect_formal_windows_pretrust_in_installer_materials,
+)
 
 MAX_MATERIAL_FILES = 512
 MAX_MATERIAL_FILE_BYTES = 64 * 1024 * 1024
@@ -30,7 +37,7 @@ OFFLINE_RELEASE_VERIFIER_MATERIAL = (
     "release/release_attestation_verifier/offline-release-verifier"
 )
 INITIAL_TRUST_KIT_PREFIX = "release/release_attestation_verifier/pretrust-v2"
-PREPUBLICATION_SCHEMA_VERSION = 2
+PREPUBLICATION_SCHEMA_VERSION = 3
 PREPUBLICATION_MATERIALS_NAME = "prepublication-materials.json"
 DEPLOYMENT_CONTRACT_NAME = "deployment-contract.json"
 INITIAL_TRUST_KIT_FILES = frozenset(
@@ -53,6 +60,9 @@ _FIXED_DEPLOYMENT_FILES = (
     "deploy/updater/animemo-updater@.service",
     "deploy/updater/animemo-updater.sysusers.conf",
     "deploy/updater/animemo-updater.tmpfiles.conf",
+    "scripts/candidate_profile_runner.py",
+    "scripts/closed_runtime_inventory.py",
+    "scripts/formal_profile_runner.py",
 )
 
 
@@ -486,7 +496,18 @@ def _open_single_link_regular_file(
         if (
             not stat.S_ISREG(opened.st_mode)
             or opened.st_nlink != 1
-            or _stat_identity(opened) != _stat_identity(before)
+            or (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_nlink,
+                opened.st_size,
+            )
+            != (
+                before.st_dev,
+                before.st_ino,
+                before.st_nlink,
+                before.st_size,
+            )
             or opened.st_mtime_ns != before.st_mtime_ns
         ):
             raise MaterialContractError(f"{subject} changed while opening")
@@ -581,6 +602,7 @@ def _profile_paths(
     root: Path,
     wheelhouse: Path,
     initial_trust_kit: Path,
+    formal_windows_pretrust_kit: Path,
 ) -> list[tuple[str, Path]]:
     result = [(relative, root) for relative in _FIXED_DEPLOYMENT_FILES]
     for package in ("durability", "release", "updater", "installer"):
@@ -619,6 +641,20 @@ def _profile_paths(
         for name in sorted(INITIAL_TRUST_KIT_FILES)
     )
 
+    try:
+        FormalWindowsPretrustedTrustMaterial.load(formal_windows_pretrust_kit)
+    except (OSError, FormalWindowsPretrustError) as error:
+        raise MaterialContractError(
+            "Formal Windows pretrust kit is invalid"
+        ) from error
+    result.extend(
+        (
+            f"{FORMAL_WINDOWS_PRETRUST_PREFIX}/{name}",
+            formal_windows_pretrust_kit / name,
+        )
+        for name in sorted(FORMAL_WINDOWS_PRETRUST_FILES)
+    )
+
     paths = [relative for relative, _ in result]
     if len(paths) > MAX_MATERIAL_FILES or len(paths) != len(set(paths)):
         raise MaterialContractError(
@@ -634,6 +670,13 @@ def _mode_for(relative: str) -> int:
         or relative == "deploy/updater/animemo"
         or relative == "deploy/updater/animemo-updater"
         or relative == OFFLINE_RELEASE_VERIFIER_MATERIAL
+        or relative
+        == f"{INITIAL_TRUST_KIT_PREFIX}/offline-release-verifier"
+        or relative
+        in {
+            f"{FORMAL_WINDOWS_PRETRUST_PREFIX}/formal-release-verifier.exe",
+            f"{FORMAL_WINDOWS_PRETRUST_PREFIX}/offline-release-verifier",
+        }
         else 0o644
     )
 
@@ -644,6 +687,7 @@ def build_installer_materials(
     wheelhouse: Path,
     output: Path,
     initial_trust_kit: Path | None = None,
+    formal_windows_pretrust_kit: Path | None = None,
 ) -> MaterialArchiveIdentity:
     root = root.resolve()
     wheelhouse = wheelhouse.resolve()
@@ -651,6 +695,9 @@ def build_installer_materials(
     if initial_trust_kit is None:
         raise MaterialContractError("Initial pretrust kit is required")
     initial_trust_kit = initial_trust_kit.resolve()
+    if formal_windows_pretrust_kit is None:
+        raise MaterialContractError("Formal Windows pretrust kit is required")
+    formal_windows_pretrust_kit = formal_windows_pretrust_kit.resolve()
     files: list[MaterialFileIdentity] = []
     total_bytes = 0
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -666,6 +713,7 @@ def build_installer_materials(
                     root,
                     wheelhouse,
                     initial_trust_kit,
+                    formal_windows_pretrust_kit,
                 ):
                     value = (
                         _direct_source_bytes(source_root, relative)
@@ -856,12 +904,20 @@ def build_prepublication_material_identity(
     candidate_sha: str,
     candidate_tree_sha: str,
 ) -> dict[str, object]:
-    """Bind exact qualified prepublication bytes through a closed v2 contract."""
+    """Bind exact qualified prepublication bytes through a closed v3 contract."""
     candidate_sha = _validate_git_identity(candidate_sha, label="Candidate SHA")
     candidate_tree_sha = _validate_git_identity(
         candidate_tree_sha, label="Candidate tree SHA"
     )
     archive = inspect_installer_materials(installer_materials)
+    try:
+        formal_windows = inspect_formal_windows_pretrust_in_installer_materials(
+            installer_materials
+        )
+    except FormalWindowsPretrustError as error:
+        raise MaterialContractError(
+            "Formal Windows pretrust installer binding is invalid"
+        ) from error
     contract_bytes = _direct_source_bytes(
         deployment_contract, DEPLOYMENT_CONTRACT_NAME
     )
@@ -949,6 +1005,7 @@ def build_prepublication_material_identity(
         "platformQualification": _bound_material(platform),
         "initialTrustBootstrap": _bound_material(initial_trust),
         "offlineVerifier": _bound_material(verifier),
+        "formalWindowsPretrust": formal_windows.as_prepublication_record(),
         "wheelhouse": {
             "memberCount": len(wheels),
             "aggregateSha256": _canonical_member_aggregate(wheels),
@@ -996,6 +1053,12 @@ def verify_prepublication_material_identity(
         ],
         "wheelhouseAggregateSha256": expected["wheelhouse"]["aggregateSha256"],
         "pretrustAggregateSha256": expected["pretrust"]["aggregateSha256"],
+        "formalWindowsPretrustKitIdentity": expected[
+            "formalWindowsPretrust"
+        ]["kitIdentity"],
+        "offlineReleaseTrustProfileIdentity": expected[
+            "formalWindowsPretrust"
+        ]["sourceProfileIdentity"],
         "deploymentContractSha256": expected["deploymentContract"]["sha256"],
         "fallbackPolicy": "FORBIDDEN",
         "actionsArtifactRole": "TRANSPORT_AND_QUALIFICATION_EVIDENCE",
@@ -1246,6 +1309,14 @@ def _parse_material_contract(
     }
     if not required_pretrust.issubset(paths):
         raise MaterialContractError("Installer material profile lacks initial pretrust")
+    required_formal_windows_pretrust = {
+        f"{FORMAL_WINDOWS_PRETRUST_PREFIX}/{name}"
+        for name in FORMAL_WINDOWS_PRETRUST_FILES
+    }
+    if not required_formal_windows_pretrust.issubset(paths):
+        raise MaterialContractError(
+            "Installer material profile lacks Formal Windows pretrust"
+        )
     return archive, tuple(materials)
 
 

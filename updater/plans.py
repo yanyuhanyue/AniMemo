@@ -37,6 +37,18 @@ def _digest(value: object) -> bool:
     )
 
 
+def _canonical_timestamp(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return False
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ") == value
+
+
 def _manifest_identity(manifest: dict[str, object]) -> str:
     return "sha256:" + _manifest_hash(manifest)
 
@@ -66,6 +78,7 @@ def _validate_release_binding(
         "transportIdentity",
         "payloadIdentity",
         "releaseAttestationIdentity",
+        "releaseExecutionReceipt",
         "trustProfileVersion",
         "trustProfileIdentity",
         "manifestIdentity",
@@ -83,12 +96,51 @@ def _validate_release_binding(
     if not _digest(verified_identity) or policy_identity != policy.identity:
         raise StateError("Update plan release binding is invalid")
     if source == "local-bundle":
-        digest_fields = local_fields - common_fields - {"trustProfileVersion"}
+        digest_fields = local_fields - common_fields - {
+            "trustProfileVersion",
+            "releaseExecutionReceipt",
+        }
         if any(not _digest(value.get(field)) for field in digest_fields):
             raise StateError("Update plan local bundle authority binding is invalid")
         profile_version = value.get("trustProfileVersion")
         if type(profile_version) is not int or profile_version < 1:
             raise StateError("Update plan local bundle trust profile is invalid")
+        execution = value.get("releaseExecutionReceipt")
+        if (
+            not isinstance(execution, dict)
+            or set(execution)
+            != {
+                "schema",
+                "publicationIdentity",
+                "publicationExecutionReceiptIdentity",
+                "signedClaimIdentity",
+                "signedAt",
+                "identity",
+            }
+            or execution.get("schema") != "animemo.release-execution-receipt/v1"
+            or any(
+                not _digest(execution.get(field))
+                for field in (
+                    "publicationIdentity",
+                    "publicationExecutionReceiptIdentity",
+                    "signedClaimIdentity",
+                    "identity",
+                )
+            )
+            or not _canonical_timestamp(execution.get("signedAt"))
+        ):
+            raise StateError("Update plan release execution receipt is invalid")
+        unsigned_execution = dict(execution)
+        execution_identity = unsigned_execution.pop("identity")
+        if execution_identity != "sha256:" + hashlib.sha256(
+            json.dumps(
+                unsigned_execution,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest():
+            raise StateError("Update plan release execution receipt is invalid")
         if manifest is not None:
             try:
                 images = manifest["images"]

@@ -375,6 +375,7 @@ def aggregate_receipt() -> dict[str, object]:
         "public_r2": "ABSENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE",
         "r2_origin": "PROVEN_EMPTY",
     }
+    original_vm_hashes = {"source.vmx": "sha256:" + "8" * 64}
     value = {
         "schema": "animemo.prepublication-candidate-acceptance-receipt/v3",
         "version": 3,
@@ -393,6 +394,22 @@ def aggregate_receipt() -> dict[str, object]:
         "r2_origin_poststate_observation_id": (
             "87654321-4321-4765-8abc-876543210fed"
         ),
+        "base_vm_identity": sha256_bytes(
+            canonical_json_bytes(original_vm_hashes)
+        ),
+        "source_vm_inventory_identity": "sha256:" + "9" * 64,
+        "source_disk_graph_identity": "sha256:" + "a" * 64,
+        "original_vm_hashes": original_vm_hashes,
+        "snapshot_identities": {
+            "FRESH_BASE": "sha256:" + "b" * 64,
+            "DOCKER_BASE": "sha256:" + "c" * 64,
+            "RUNTIME_BASE_OFFLINE": "sha256:" + "d" * 64,
+        },
+        "snapshot_disk_graph_identities": {
+            "FRESH_BASE": "sha256:" + "e" * 64,
+            "DOCKER_BASE": "sha256:" + "f" * 64,
+            "RUNTIME_BASE_OFFLINE": "sha256:" + "0" * 64,
+        },
         "profile_results": {
             "fresh_base": {
                 "status": "PASS",
@@ -790,6 +807,9 @@ sys.stdout.buffer.write(canonical_json_bytes(identity))
             "base_vm_identity": "sha256:" + "3" * 64,
             "snapshot_identity": "sha256:" + "4" * 64,
             "clone_identity": "sha256:" + "5" * 64,
+            "source_disk_graph_identity": "sha256:" + "6" * 64,
+            "snapshot_disk_graph_identity": "sha256:" + "7" * 64,
+            "source_vm_inventory_identity": "sha256:" + "8" * 64,
             "initial_platform_state": {
                 "docker_present": True,
                 "runtime_dependencies_present": True,

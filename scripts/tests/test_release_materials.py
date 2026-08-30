@@ -12,6 +12,11 @@ from durability.platform import (
     finalize_platform_qualification,
 )
 from release.contract import build_deployment_contract, validate_deployment_contract
+from release.formal_windows_pretrust import (
+    FORMAL_WINDOWS_PRETRUST_FILES,
+    FORMAL_WINDOWS_PRETRUST_PREFIX,
+    inspect_formal_windows_pretrust_in_installer_materials,
+)
 from release.materials import (
     INITIAL_TRUST_KIT_PREFIX,
     PLATFORM_QUALIFICATION_MATERIAL,
@@ -19,6 +24,9 @@ from release.materials import (
     _validate_dynamic_material,
     build_installer_materials,
     extract_installer_materials,
+)
+from scripts.tests.formal_windows_pretrust_fixture import (
+    create_test_formal_windows_pretrust_kit,
 )
 from scripts.tests.test_platform_qualification import unsigned_payload
 from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
@@ -55,18 +63,23 @@ class InstallerMaterialsTests(unittest.TestCase):
             first = temporary / "first.tar"
             second = temporary / "second.tar"
             trust_kit = create_test_initial_trust_kit(temporary)
+            formal_windows_kit = create_test_formal_windows_pretrust_kit(
+                temporary, source_initial_trust_kit=trust_kit
+            )
 
             first_identity = build_installer_materials(
                 ROOT,
                 wheelhouse=wheelhouse,
                 output=first,
                 initial_trust_kit=trust_kit,
+                formal_windows_pretrust_kit=formal_windows_kit,
             )
             second_identity = build_installer_materials(
                 ROOT,
                 wheelhouse=wheelhouse,
                 output=second,
                 initial_trust_kit=trust_kit,
+                formal_windows_pretrust_kit=formal_windows_kit,
             )
 
             self.assertEqual(first.read_bytes(), second.read_bytes())
@@ -92,11 +105,49 @@ class InstallerMaterialsTests(unittest.TestCase):
                 member for member in members if member.name == "deploy/updater/animemo"
             )
             self.assertEqual(operator.mode, 0o755)
+            guest_pretrust_verifier = next(
+                member
+                for member in members
+                if member.name
+                == f"{INITIAL_TRUST_KIT_PREFIX}/offline-release-verifier"
+            )
+            self.assertEqual(guest_pretrust_verifier.mode, 0o755)
             self.assertIn("durability/backup_cli.py", names)
             self.assertIn("durability/backup_production.py", names)
             self.assertIn("durability/managed_config.py", names)
             self.assertIn("release/contract.py", names)
+            self.assertIn("scripts/candidate_profile_runner.py", names)
+            self.assertIn("scripts/closed_runtime_inventory.py", names)
+            self.assertIn("scripts/formal_profile_runner.py", names)
+            inventory_program = next(
+                item
+                for item in first_identity.files
+                if item.path == "scripts/closed_runtime_inventory.py"
+            )
+            inventory_bytes = (ROOT / inventory_program.path).read_bytes()
+            self.assertEqual(
+                inventory_program.sha256,
+                "sha256:" + hashlib.sha256(inventory_bytes).hexdigest(),
+            )
+            self.assertEqual(inventory_program.size, len(inventory_bytes))
+            self.assertEqual(inventory_program.mode, 0o644)
             self.assertIn("updater/source.py", names)
+            self.assertEqual(
+                {
+                    name.removeprefix(FORMAL_WINDOWS_PRETRUST_PREFIX + "/")
+                    for name in names
+                    if name.startswith(FORMAL_WINDOWS_PRETRUST_PREFIX + "/")
+                },
+                FORMAL_WINDOWS_PRETRUST_FILES,
+            )
+            binding = inspect_formal_windows_pretrust_in_installer_materials(
+                first
+            )
+            self.assertEqual(binding.installer_materials_sha256, first_identity.sha256)
+            self.assertNotEqual(
+                binding.windows_host_verifier_identity,
+                binding.linux_guest_verifier_identity,
+            )
             self.assertIn("wheelhouse/qualified_dependency-1.0-py3-none-any.whl", names)
             self.assertTrue(all(member.isfile() for member in members))
             self.assertTrue(
@@ -129,6 +180,27 @@ class InstallerMaterialsTests(unittest.TestCase):
                     output=temporary / "installer-materials.tar",
                 )
 
+    def test_production_material_builder_requires_formal_windows_pretrust(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            wheelhouse = temporary / "wheelhouse"
+            wheelhouse.mkdir()
+            (wheelhouse / "qualified_dependency-1.0-py3-none-any.whl").write_bytes(
+                b"qualified wheel bytes"
+            )
+            trust_kit = create_test_initial_trust_kit(temporary)
+
+            with self.assertRaisesRegex(
+                MaterialContractError,
+                "Formal Windows pretrust kit is required",
+            ):
+                build_installer_materials(
+                    ROOT,
+                    wheelhouse=wheelhouse,
+                    output=temporary / "installer-materials.tar",
+                    initial_trust_kit=trust_kit,
+                )
+
     def test_staged_platform_qualification_must_be_canonical_evidence(self):
         _validate_dynamic_material("release/ordinary.json", b"{}")
         with self.assertRaisesRegex(
@@ -148,6 +220,9 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "deploy/updater/animemo-updater@.service",
                 "deploy/updater/animemo-updater.sysusers.conf",
                 "deploy/updater/animemo-updater.tmpfiles.conf",
+                "scripts/candidate_profile_runner.py",
+                "scripts/closed_runtime_inventory.py",
+                "scripts/formal_profile_runner.py",
             )
             for relative in fixed:
                 target = source_root / relative
@@ -171,11 +246,16 @@ class InstallerMaterialsTests(unittest.TestCase):
                 b"qualified wheel bytes"
             )
 
+            initial_trust_kit = create_test_initial_trust_kit(temporary)
+            formal_windows_kit = create_test_formal_windows_pretrust_kit(
+                temporary, source_initial_trust_kit=initial_trust_kit
+            )
             identity = build_installer_materials(
                 source_root,
                 wheelhouse=wheelhouse,
                 output=temporary / "installer-materials.tar",
-                initial_trust_kit=create_test_initial_trust_kit(temporary),
+                initial_trust_kit=initial_trust_kit,
+                formal_windows_pretrust_kit=formal_windows_kit,
             )
 
             packaged = next(
@@ -198,6 +278,9 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "deploy/updater/animemo-updater@.service",
                 "deploy/updater/animemo-updater.sysusers.conf",
                 "deploy/updater/animemo-updater.tmpfiles.conf",
+                "scripts/candidate_profile_runner.py",
+                "scripts/closed_runtime_inventory.py",
+                "scripts/formal_profile_runner.py",
             )
             for relative in fixed:
                 target = source_root / relative
@@ -217,11 +300,16 @@ class InstallerMaterialsTests(unittest.TestCase):
                 b"qualified wheel bytes"
             )
 
+            initial_trust_kit = create_test_initial_trust_kit(temporary)
+            formal_windows_kit = create_test_formal_windows_pretrust_kit(
+                temporary, source_initial_trust_kit=initial_trust_kit
+            )
             identity = build_installer_materials(
                 source_root,
                 wheelhouse=wheelhouse,
                 output=temporary / "installer-materials.tar",
-                initial_trust_kit=create_test_initial_trust_kit(temporary),
+                initial_trust_kit=initial_trust_kit,
+                formal_windows_pretrust_kit=formal_windows_kit,
             )
 
             platform_material = next(
@@ -243,11 +331,16 @@ class InstallerMaterialsTests(unittest.TestCase):
             wheel = wheelhouse / "qualified_dependency-1.0-py3-none-any.whl"
             wheel.write_bytes(b"qualified wheel bytes")
             archive = temporary / "installer-materials.tar"
+            initial_trust_kit = create_test_initial_trust_kit(temporary)
+            formal_windows_kit = create_test_formal_windows_pretrust_kit(
+                temporary, source_initial_trust_kit=initial_trust_kit
+            )
             identity = build_installer_materials(
                 ROOT,
                 wheelhouse=wheelhouse,
                 output=archive,
-                initial_trust_kit=create_test_initial_trust_kit(temporary),
+                initial_trust_kit=initial_trust_kit,
+                formal_windows_pretrust_kit=formal_windows_kit,
             )
             destination = temporary / "verified"
 
@@ -266,16 +359,28 @@ class InstallerMaterialsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)
             trust_kit = create_test_initial_trust_kit(temporary)
+            formal_windows_kit = create_test_formal_windows_pretrust_kit(
+                temporary, source_initial_trust_kit=trust_kit
+            )
             archive = temporary / "installer-materials.tar"
+            fixture_sources = [
+                (f"{INITIAL_TRUST_KIT_PREFIX}/{source.name}", source)
+                for source in trust_kit.iterdir()
+            ] + [
+                (f"{FORMAL_WINDOWS_PRETRUST_PREFIX}/{source.name}", source)
+                for source in formal_windows_kit.iterdir()
+            ]
             with tarfile.open(archive, mode="w:", format=tarfile.USTAR_FORMAT) as tar:
                 fixture_materials = []
-                for source in sorted(trust_kit.iterdir(), key=lambda item: item.name):
+                for relative, source in sorted(fixture_sources):
                     value = source.read_bytes()
-                    relative = f"{INITIAL_TRUST_KIT_PREFIX}/{source.name}"
                     member = tarfile.TarInfo(relative)
                     member.size = len(value)
                     member.mode = (
-                        0o755 if source.name == "offline-release-verifier" else 0o644
+                        0o755
+                        if source.name
+                        in {"formal-release-verifier.exe", "offline-release-verifier"}
+                        else 0o644
                     )
                     member.mtime = 0
                     member.uid = 0
@@ -334,11 +439,16 @@ class InstallerMaterialsTests(unittest.TestCase):
                 b"qualified wheel bytes"
             )
             archive = temporary / "installer-materials.tar"
+            initial_trust_kit = create_test_initial_trust_kit(temporary)
+            formal_windows_kit = create_test_formal_windows_pretrust_kit(
+                temporary, source_initial_trust_kit=initial_trust_kit
+            )
             identity = build_installer_materials(
                 ROOT,
                 wheelhouse=wheelhouse,
                 output=archive,
-                initial_trust_kit=create_test_initial_trust_kit(temporary),
+                initial_trust_kit=initial_trust_kit,
+                formal_windows_pretrust_kit=formal_windows_kit,
             )
 
             contract = build_deployment_contract(ROOT, installer_materials=archive)

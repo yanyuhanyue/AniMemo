@@ -16,6 +16,7 @@ import shutil
 import stat
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,56 @@ _MAX_TRANSPORT_RECEIPT_BYTES = 64 * 1024
 
 class LocalBundleError(ValueError):
     """The local transport or its immutable authority proof is invalid."""
+
+
+def _valid_release_execution_receipt(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "publicationIdentity",
+        "publicationExecutionReceiptIdentity",
+        "signedClaimIdentity",
+        "signedAt",
+        "identity",
+    }:
+        return False
+    if value.get("schema") != "animemo.release-execution-receipt/v1":
+        return False
+    for identity_field in (
+        "publicationIdentity",
+        "publicationExecutionReceiptIdentity",
+        "signedClaimIdentity",
+        "identity",
+    ):
+        item = value.get(identity_field)
+        if (
+            not isinstance(item, str)
+            or len(item) != 71
+            or not item.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in item[7:])
+        ):
+            return False
+    signed_at = value.get("signedAt")
+    if not isinstance(signed_at, str):
+        return False
+    try:
+        parsed = datetime.strptime(signed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return False
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != signed_at:
+        return False
+    unsigned = dict(value)
+    identity = unsigned.pop("identity")
+    expected = "sha256:" + hashlib.sha256(
+        json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return identity == expected
 
 
 def _closed_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -625,6 +676,9 @@ class LocalBundleReleaseSource:
             self._verified, "trust_profile_identity", None
         )
         payload_identity = getattr(self._verified, "payload_sha256", None)
+        release_execution_receipt = getattr(
+            self._verified, "release_execution_receipt", None
+        )
         if (
             release_attestation_identity
             != self._acquired.receipt.release_attestation.sha256
@@ -634,6 +688,7 @@ class LocalBundleReleaseSource:
             or type(trust_profile_identity) is not str
             or len(trust_profile_identity) != 71
             or not trust_profile_identity.startswith("sha256:")
+            or not _valid_release_execution_receipt(release_execution_receipt)
         ):
             raise LocalBundleError("LOCAL_BUNDLE_AUTHORITY_BINDING_INVALID")
         manifest_identity = "sha256:" + hashlib.sha256(
@@ -652,6 +707,7 @@ class LocalBundleReleaseSource:
                 "transportIdentity": "sha256:" + self._acquired.receipt.identity,
                 "payloadIdentity": payload_identity,
                 "releaseAttestationIdentity": release_attestation_identity,
+                "releaseExecutionReceipt": dict(release_execution_receipt),
                 "trustProfileVersion": trust_profile_version,
                 "trustProfileIdentity": trust_profile_identity,
                 "manifestIdentity": manifest_identity,

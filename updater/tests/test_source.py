@@ -256,11 +256,24 @@ class FakeRunner:
             expected_commit = (
                 self.manifest["release"]["commit"]
                 if is_image
-                else self.manifest["provenance"]["sourceCommit"]
+                else (
+                    self.attestation_source_commit
+                    or (
+                        "2" * 40
+                        if self.manifest["release"]["channel"] == "stable"
+                        else self.manifest["provenance"]["sourceCommit"]
+                    )
+                )
             )
             repository = self.attestation_repository or "yanyuhanyue/AniMemo"
             workflow = self.attestation_workflow or expected_workflow
-            source_commit = self.attestation_source_commit or expected_commit
+            source_commit = expected_commit
+            constrained_commit = (
+                None
+                if not is_image
+                and self.manifest["release"]["channel"] == "stable"
+                else source_commit
+            )
 
             def option(name):
                 return argv[argv.index(name) + 1] if name in argv else None
@@ -274,9 +287,9 @@ class FakeRunner:
                 or option("--cert-identity") != expected_identity
                 or option("--cert-oidc-issuer")
                 != "https://token.actions.githubusercontent.com"
-                or option("--source-digest") != source_commit
+                or option("--source-digest") != constrained_commit
                 or option("--source-ref") != "refs/heads/main"
-                or option("--signer-digest") != source_commit
+                or option("--signer-digest") != constrained_commit
                 or option("--predicate-type") != "https://slsa.dev/provenance/v1"
                 or option("--format") != "json"
                 or option("--bundle") is None
@@ -291,6 +304,15 @@ class FakeRunner:
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
             return type("Result", (), {"stdout": json.dumps([{
                 "verificationResult": {
+                    "signature": {
+                        "certificate": {
+                            "extensions": {
+                                "sourceRepositoryDigest": source_commit,
+                                "buildSignerDigest": source_commit,
+                                "buildConfigDigest": source_commit,
+                            },
+                        },
+                    },
                     "statement": {
                         "predicateType": "https://slsa.dev/provenance/v1",
                         "subject": [{
@@ -451,7 +473,7 @@ def stable_manifest():
         plugin_sdk_apis=[2],
         promoted_from="v1.0.0-rc.1",
         provenance_workflow=".github/workflows/promote-release.yml",
-        provenance_source_commit="2" * 40,
+        provenance_source_commit="1" * 40,
     )
 
 
@@ -768,17 +790,14 @@ class GitHubReleaseSourceTests(unittest.TestCase):
                 if "attestation verify" in call and "deployment-contract.json" in call
             )
             self.assertTrue(all(f"--source-digest {'1' * 40}" in call for call in image_calls))
-            self.assertIn(f"--source-digest {stable_manifest()['provenance']['sourceCommit']}", manifest_call)
-            self.assertIn(
-                f"--source-digest {stable_manifest()['provenance']['sourceCommit']}",
-                deployment_call,
-            )
+            self.assertNotIn("--source-digest", manifest_call)
+            self.assertNotIn("--signer-digest", manifest_call)
+            self.assertNotIn("--source-digest", deployment_call)
             expected_identity = (
                 "https://github.com/yanyuhanyue/AniMemo/"
                 ".github/workflows/promote-release.yml@refs/heads/main"
             )
             self.assertIn(f"--cert-identity {expected_identity}", manifest_call)
-            self.assertIn(f"--signer-digest {'2' * 40}", manifest_call)
             self.assertIn("--source-ref refs/heads/main", manifest_call)
             self.assertIn("--predicate-type https://slsa.dev/provenance/v1", manifest_call)
             self.assertTrue(all("--signer-workflow" not in call for call in calls))
@@ -848,11 +867,10 @@ class GitHubReleaseSourceTests(unittest.TestCase):
                 [(bundle_url, 1327429673)] * 5,
             )
 
-    def test_attestation_repository_workflow_and_commit_are_bound_exactly(self):
+    def test_attestation_repository_and_workflow_are_bound_exactly(self):
         cases = {
             "repository": {"attestation_repository": "evil/AniMemo"},
             "workflow": {"attestation_workflow": ".github/workflows/evil.yml"},
-            "commit": {"attestation_source_commit": "f" * 40},
         }
         for name, runner_options in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -865,6 +883,44 @@ class GitHubReleaseSourceTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(CommandFailed, "attestation verification failed"):
                     source.fetch_verified("v1.0.0")
+
+    def test_stable_attestation_execution_commit_does_not_change_manifest_authority(self):
+        identities = []
+        execution_receipts = []
+        for execution_commit in ("2" * 40, "f" * 40):
+            with self.subTest(execution_commit=execution_commit), tempfile.TemporaryDirectory() as directory:
+                manifest = stable_manifest()
+                source = GitHubReleaseSource(
+                    Path(directory),
+                    runner=FakeRunner(
+                        manifest,
+                        attestation_source_commit=execution_commit,
+                    ),
+                    rest=FakePublicRest(manifest),
+                )
+
+                verified = source.fetch_verified_materials("v1.0.0")
+
+                self.assertEqual(verified.manifest, manifest)
+                identities.append(verified.identity_digest)
+                receipt = verified.attestation_execution_receipt
+                self.assertIsNotNone(receipt)
+                execution_receipts.append(receipt.identity)
+                stable_observations = [
+                    item
+                    for item in receipt.observations
+                    if item.workflow == ".github/workflows/promote-release.yml"
+                ]
+                self.assertEqual(len(stable_observations), 3)
+                self.assertTrue(
+                    all(
+                        item.source_commit == execution_commit
+                        and item.signer_digest == execution_commit
+                        for item in stable_observations
+                    )
+                )
+        self.assertEqual(identities[0], identities[1])
+        self.assertNotEqual(execution_receipts[0], execution_receipts[1])
 
     def test_release_assets_must_match_the_fixed_contract(self):
         with tempfile.TemporaryDirectory() as directory:

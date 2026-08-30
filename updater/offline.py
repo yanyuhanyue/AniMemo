@@ -523,7 +523,7 @@ class OfflineAuthorityState:
         if type(profile) is not TrustProfile:
             raise ValueError("初始状态必须绑定预置信任 profile")
         return cls(
-            schema_version=1,
+            schema_version=2,
             generation=0,
             active_profile_version=profile.profile_version,
             active_profile_identity=profile.identity,
@@ -571,34 +571,39 @@ class OfflineAuthorityState:
 
     def as_record(self) -> dict[str, object]:
         return {
-            "acceptedPublicationIdentities": sorted(
+            "acceptedAuthorityIdentities": sorted(
                 self.accepted_publication_identities
             ),
             "activeProfileIdentity": self.active_profile_identity,
             "activeProfileVersion": self.active_profile_version,
             "generation": self.generation,
             "highestReleaseVersion": self.highest_release_version,
-            "revokedEvidenceIdentities": sorted(self.revoked_evidence_identities),
+            "revokedAuthorityIdentities": sorted(self.revoked_evidence_identities),
             "schemaVersion": self.schema_version,
         }
 
     @classmethod
     def from_record(cls, record: Mapping[str, object]) -> OfflineAuthorityState:
+        if isinstance(record, dict) and record.get("schemaVersion") == 1:
+            raise RequestRejected(
+                "离线权威耐久状态 v1 已拒绝；必须显式调用 "
+                "migrate_pristine_offline_authority_state_v1，或以原始 signed evidence 重验"
+            )
         expected = {
-            "acceptedPublicationIdentities",
+            "acceptedAuthorityIdentities",
             "activeProfileIdentity",
             "activeProfileVersion",
             "generation",
             "highestReleaseVersion",
-            "revokedEvidenceIdentities",
+            "revokedAuthorityIdentities",
             "schemaVersion",
         }
         if not isinstance(record, dict) or set(record) != expected:
             raise RequestRejected("离线权威耐久状态字段集合未关闭")
-        accepted = record["acceptedPublicationIdentities"]
-        revoked = record["revokedEvidenceIdentities"]
+        accepted = record["acceptedAuthorityIdentities"]
+        revoked = record["revokedAuthorityIdentities"]
         if (
-            record["schemaVersion"] != 1
+            record["schemaVersion"] != 2
             or type(record["generation"]) is not int
             or record["generation"] < 0  # type: ignore[operator]
             or type(record["activeProfileVersion"]) is not int
@@ -618,7 +623,7 @@ class OfflineAuthorityState:
         ):
             raise RequestRejected("离线权威耐久状态无效")
         return cls(
-            schema_version=1,
+            schema_version=2,
             generation=record["generation"],  # type: ignore[arg-type]
             active_profile_version=record["activeProfileVersion"],  # type: ignore[arg-type]
             active_profile_identity=record["activeProfileIdentity"],  # type: ignore[arg-type]
@@ -626,6 +631,44 @@ class OfflineAuthorityState:
             accepted_publication_identities=frozenset(accepted),
             revoked_evidence_identities=frozenset(revoked),
         )
+
+
+def migrate_pristine_offline_authority_state_v1(
+    record: Mapping[str, object],
+    *,
+    profile: TrustProfile,
+) -> OfflineAuthorityState:
+    """Explicitly migrate only a pristine v1 state without reinterpreting keys.
+
+    A v1 accepted/revoked identity included ``signedAt`` in its publication key.
+    It therefore cannot be translated to the v2 logical Authority key without
+    re-verifying the original release evidence. Such states fail closed.
+    """
+
+    expected = {
+        "acceptedPublicationIdentities",
+        "activeProfileIdentity",
+        "activeProfileVersion",
+        "generation",
+        "highestReleaseVersion",
+        "revokedEvidenceIdentities",
+        "schemaVersion",
+    }
+    if not isinstance(record, dict) or set(record) != expected:
+        raise RequestRejected("离线权威耐久状态 v1 显式迁移输入字段集合未关闭")
+    if (
+        record["schemaVersion"] != 1
+        or record["generation"] != 0
+        or record["highestReleaseVersion"] is not None
+        or record["acceptedPublicationIdentities"] != []
+        or record["revokedEvidenceIdentities"] != []
+        or record["activeProfileVersion"] != profile.profile_version
+        or record["activeProfileIdentity"] != profile.identity
+    ):
+        raise RequestRejected(
+            "离线权威耐久状态 v1 已含历史；必须以原始 signed evidence 显式重验，禁止身份重解释"
+        )
+    return OfflineAuthorityState.initial(profile)
 
 
 class ExternalEvidenceVerifier(Protocol):
@@ -674,6 +717,74 @@ def _canonical_json_bytes(payload: object) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def migrate_pristine_offline_authority_state_file_v1(
+    *,
+    state_path: Path,
+    trust_material_root: Path,
+) -> OfflineAuthorityState:
+    """Explicitly and atomically migrate one pristine durable v1 state file."""
+
+    state_path = Path(state_path)
+    material = PretrustedTrustMaterial.load(Path(trust_material_root))
+    parent = state_path.parent
+    try:
+        parent_metadata = parent.lstat()
+    except OSError as error:
+        raise RequestRejected("离线权威状态迁移目录不可用") from error
+    if parent.is_symlink() or not stat.S_ISDIR(parent_metadata.st_mode):
+        raise RequestRejected("离线权威状态迁移目录类型无效")
+    if os.name != "nt" and (
+        parent_metadata.st_uid != 0 or parent_metadata.st_mode & 0o022
+    ):
+        raise RequestRejected("离线权威状态迁移目录不是 root 独占写入")
+    original = _read_pretrusted_file(state_path, max_bytes=1024 * 1024)
+    try:
+        record = json.loads(original.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RequestRejected("离线权威状态 v1 迁移输入不可解析") from error
+    if _canonical_json_bytes(record) != original:
+        raise RequestRejected("离线权威状态 v1 迁移输入不是 canonical JSON")
+    migrated = migrate_pristine_offline_authority_state_v1(
+        record,
+        profile=material.profile,
+    )
+    lock_path = state_path.with_suffix(state_path.suffix + ".migration.lock")
+    temporary = state_path.with_suffix(state_path.suffix + ".migration.new")
+    lock_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        lock_descriptor = os.open(lock_path, lock_flags, 0o600)
+    except OSError as error:
+        raise RequestRejected("离线权威状态迁移已被占用或需要崩溃恢复") from error
+    try:
+        os.close(lock_descriptor)
+        if _read_pretrusted_file(state_path, max_bytes=1024 * 1024) != original:
+            raise RequestRejected("离线权威状态在迁移期间发生变化")
+        output_flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        )
+        descriptor = os.open(temporary, output_flags, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as output:
+            output.write(_canonical_json_bytes(migrated.as_record()))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, state_path)
+        if os.name != "nt":
+            directory = os.open(parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    except OSError as error:
+        raise RequestRejected("离线权威状态 v1 原子迁移失败") from error
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return migrated
 
 
 class SigstoreGoEvidenceVerifier:
@@ -739,30 +850,39 @@ class SigstoreGoEvidenceVerifier:
         workflow: str | None = None,
         source_commit: str | None = None,
     ) -> Mapping[str, object]:
+        observe_execution_commit = source_commit is None
         if (
             subject_name is None
             or subject_sha256 is None
             or workflow is None
-            or source_commit is None
+            or (
+                observe_execution_commit
+                and (
+                    workflow != ".github/workflows/promote-release.yml"
+                    or evidence_name in {"api-image", "web-image"}
+                )
+            )
             or trust_profile.identity != self._material.profile.identity
         ):
             raise RequestRejected("Actions provenance 外部验证输入不完整")
+        request = {
+            "evidenceName": evidence_name,
+            "mode": "actions-provenance",
+            "schemaVersion": 1,
+            "subject": {
+                "name": subject_name,
+                "sha256": subject_sha256,
+                "size": 0,
+            },
+            "workflow": workflow,
+        }
+        if source_commit is not None:
+            request["sourceCommit"] = source_commit
         return self._invoke(
             bundle=bundle,
             evidence_name=evidence_name,
             trusted_root=self._material.sigstore_trusted_root_path,
-            request={
-                "evidenceName": evidence_name,
-                "mode": "actions-provenance",
-                "schemaVersion": 1,
-                "sourceCommit": source_commit,
-                "subject": {
-                    "name": subject_name,
-                    "sha256": subject_sha256,
-                    "size": 0,
-                },
-                "workflow": workflow,
-            },
+            request=request,
         )
 
     def verify_trust_update(
@@ -1093,12 +1213,28 @@ class VerifiedPortableRelease:
     authority_evidence: AuthorityEvidence
     next_state: OfflineAuthorityState
     publication_identity: str
+    publication_execution_receipt_identity: str
+    signed_claim_identity: str
+    signed_at: str
     release_attestation_identity: str
     actions_evidence_identity: str
     trust_profile_version: int
     trust_profile_identity: str
     authenticity_status: str = "AUTHENTIC_AS_OF_SIGNED_EVIDENCE"
     revocation_status: str = "OFFLINE_FUTURE_REVOCATION_UNKNOWN"
+
+    @property
+    def release_execution_receipt(self) -> dict[str, object]:
+        unsigned: dict[str, object] = {
+            "schema": "animemo.release-execution-receipt/v1",
+            "publicationIdentity": self.publication_identity,
+            "publicationExecutionReceiptIdentity": (
+                self.publication_execution_receipt_identity
+            ),
+            "signedClaimIdentity": self.signed_claim_identity,
+            "signedAt": self.signed_at,
+        }
+        return {**unsigned, "identity": _canonical_digest(unsigned)}
 
 
 class OfflineReleaseVerifier:
@@ -1242,7 +1378,17 @@ class OfflineReleaseVerifier:
                     ReleaseAssetEvidence(name=name, state="uploaded")
                     for name in sorted(EXPECTED_RELEASE_ASSETS)
                 ),
-                attestations=tuple(_authority_attestation(item) for item in claims),
+                attestations=tuple(
+                    _authority_attestation(
+                        item,
+                        logical_source_commit=(
+                            authority_inputs["tag_commit"]
+                            if item.workflow == ".github/workflows/promote-release.yml"
+                            else None
+                        ),
+                    )
+                    for item in claims
+                ),
             )
             _bind_oci_to_release_manifest(bundle.index, assets)
             images = self._oci_verifier(bundle.root, bundle.index["ociImages"])
@@ -1279,6 +1425,11 @@ class OfflineReleaseVerifier:
                 authority_evidence=authority,
                 next_state=next_state,
                 publication_identity=publication.identity,
+                publication_execution_receipt_identity=(
+                    publication.execution_receipt_identity
+                ),
+                signed_claim_identity=publication.signed_claim_identity,
+                signed_at=publication.signed_at,
                 release_attestation_identity=(
                     "sha256:" + hashlib.sha256(sidecar_bundle).hexdigest()
                 ),
@@ -1300,7 +1451,7 @@ class OfflineReleaseVerifier:
         self,
         sidecar_bundle: bytes,
         evidence_name: str,
-        expected: Mapping[str, str],
+        expected: Mapping[str, object],
     ) -> ActionsProvenanceClaim:
         assert self._external is not None and self._profile is not None
         try:
@@ -1308,10 +1459,10 @@ class OfflineReleaseVerifier:
                 bundle=sidecar_bundle,
                 evidence_name=evidence_name,
                 trust_profile=self._profile,
-                subject_name=expected["subject_name"],
-                subject_sha256=expected["subject_sha256"],
-                workflow=expected["workflow"],
-                source_commit=expected["source_commit"],
+                subject_name=expected["subject_name"],  # type: ignore[arg-type]
+                subject_sha256=expected["subject_sha256"],  # type: ignore[arg-type]
+                workflow=expected["workflow"],  # type: ignore[arg-type]
+                source_commit=expected["source_commit"],  # type: ignore[arg-type]
             )
             return close_actions_provenance_claim(normalized)
         except (OSError, PortableBundleError, PublicationEvidenceError) as error:
@@ -1402,6 +1553,7 @@ def _manifest_authority_inputs(
         tag_commit = release["commit"]
         provenance_workflow = provenance["workflow"]
         provenance_commit = provenance["sourceCommit"]
+        stable = release["channel"] == "stable"
         action_inputs = {
             "api-image": {
                 "subject_name": "ghcr.io/yanyuhanyue/animemo-api",
@@ -1427,7 +1579,7 @@ def _manifest_authority_inputs(
                     "sha256:" + hashlib.sha256(assets[asset_name]).hexdigest()
                 ),
                 "workflow": provenance_workflow,
-                "source_commit": provenance_commit,
+                "source_commit": None if stable else provenance_commit,
             }
     except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RequestRejected("release manifest 权威输入不可读取") from error
@@ -1448,8 +1600,17 @@ def _manifest_authority_inputs(
                 ".github/workflows/release.yml",
                 ".github/workflows/promote-release.yml",
             }
-            or type(item["source_commit"]) is not str
-            or not re.fullmatch(r"[0-9a-f]{40}", item["source_commit"])
+            or (
+                item["source_commit"] is not None
+                and (
+                    type(item["source_commit"]) is not str
+                    or not re.fullmatch(r"[0-9a-f]{40}", item["source_commit"])
+                )
+            )
+            or (
+                item["source_commit"] is None
+                and item["workflow"] != ".github/workflows/promote-release.yml"
+            )
             for item in action_inputs.values()
         )
     ):
@@ -1457,7 +1618,12 @@ def _manifest_authority_inputs(
     return {"tag": tag, "tag_commit": tag_commit, "actions": action_inputs}
 
 
-def _authority_attestation(claim: ActionsProvenanceClaim) -> AttestationEvidence:
+def _authority_attestation(
+    claim: ActionsProvenanceClaim,
+    *,
+    logical_source_commit: str | None = None,
+) -> AttestationEvidence:
+    source_commit = logical_source_commit or claim.source_commit
     return AttestationEvidence(
         subject_name=claim.subject_name,
         subject_digest=claim.subject_digest,
@@ -1465,9 +1631,9 @@ def _authority_attestation(claim: ActionsProvenanceClaim) -> AttestationEvidence
         workflow=claim.workflow,
         certificate_identity=claim.certificate_identity,
         oidc_issuer=claim.oidc_issuer,
-        source_commit=claim.source_commit,
+        logical_source_commit=source_commit,
         source_ref=claim.source_ref,
-        signer_digest=claim.signer_digest,
+        logical_signer_digest=source_commit,
         predicate_type=claim.predicate_type,
     )
 

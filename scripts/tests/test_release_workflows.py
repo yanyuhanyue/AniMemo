@@ -1382,8 +1382,27 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(
             release.count(
-                "CGO_ENABLED=0 GOPROXY=off GOSUMDB=off go build "
-                "-mod=readonly -trimpath -o offline-release-verifier ."
+                "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 "
+                "GOPROXY=off GOSUMDB=off"
+            ),
+            1,
+        )
+        self.assertEqual(
+            release.count(
+                "CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "
+                "GOPROXY=off GOSUMDB=off"
+            ),
+            1,
+        )
+        self.assertEqual(
+            release.count(
+                "go build -mod=readonly -trimpath -o offline-release-verifier ."
+            ),
+            1,
+        )
+        self.assertEqual(
+            release.count(
+                '-o "$RUNNER_TEMP/formal-release-verifier.exe" .'
             ),
             1,
         )
@@ -1394,6 +1413,39 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             1,
         )
         self.assertEqual(release.count("build-initial-trust-kit"), 1)
+        self.assertEqual(
+            release.count("python scripts/formal_windows_pretrust.py build"),
+            1,
+        )
+        self.assertEqual(
+            release.count("--formal-windows-pretrust-kit"), 1
+        )
+        self.assertEqual(
+            release.count(
+                "python scripts/formal_windows_pretrust.py "
+                "inspect-installer-materials"
+            ),
+            1,
+        )
+        self.assertIn(".formalWindowsPretrust.kitIdentity", release)
+        self.assertIn(".formalWindowsPretrust.sourceProfileIdentity", release)
+        self.assertIn(
+            '"scripts/candidate_profile_runner.py"',
+            (ROOT / "release" / "materials.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            '"scripts/closed_runtime_inventory.py"',
+            (ROOT / "release" / "materials.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            '"scripts/formal_profile_runner.py"',
+            (ROOT / "release" / "materials.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "scripts/closed_runtime_inventory.py | cmp - "
+            "scripts/closed_runtime_inventory.py",
+            release,
+        )
         self.assertNotIn(
             "--output release/release_attestation_verifier/pretrust-v2",
             release,
@@ -1916,6 +1968,14 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertIn("RC_COMMIT == STABLE_COMMIT", source)
         self.assertIn("RC_API_DIGEST == STABLE_API_DIGEST", source)
         self.assertIn("RC_WEB_DIGEST == STABLE_WEB_DIGEST", source)
+        promote_call = source[
+            source.index("python -m release.cli promote-manifest") :
+            source.index("--output promotion-output/release-manifest.json")
+        ]
+        self.assertNotIn("--created-at", promote_call)
+        self.assertNotIn("--provenance-source-commit", promote_call)
+        self.assertNotIn("date -u", promote_call)
+        self.assertNotIn("GITHUB_SHA", promote_call)
 
     def test_stable_promotion_dry_run_checks_out_before_downloading_artifact(self):
         promotion = workflow("promote-release.yml")

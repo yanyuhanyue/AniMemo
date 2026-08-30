@@ -34,6 +34,9 @@ def _context(profile: str = "RUNTIME_BASE_OFFLINE"):
         },
         "original_vm_pre_hashes": {"base.vmx": "sha256:" + "3" * 64},
         "profile": profile,
+        "source_disk_graph_identity": "sha256:" + "5" * 64,
+        "source_vm_inventory_identity": "sha256:" + "6" * 64,
+        "snapshot_disk_graph_identity": "sha256:" + "7" * 64,
         "snapshot_identity": "sha256:" + "4" * 64,
     }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
 import sys
@@ -337,6 +338,25 @@ class LocalBundleTests(unittest.TestCase):
                     )
                     self.trust_profile_version = 1
                     self.trust_profile_identity = digest("4")
+                    unsigned = {
+                        "schema": "animemo.release-execution-receipt/v1",
+                        "publicationIdentity": digest("5"),
+                        "publicationExecutionReceiptIdentity": digest("6"),
+                        "signedClaimIdentity": digest("7"),
+                        "signedAt": "2026-08-30T00:00:00Z",
+                    }
+                    self.release_execution_receipt = {
+                        **unsigned,
+                        "identity": "sha256:"
+                        + hashlib.sha256(
+                            json.dumps(
+                                unsigned,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        ).hexdigest(),
+                    }
 
             class OfflineReleaseVerifier:
                 def verify(self, **_kwargs):

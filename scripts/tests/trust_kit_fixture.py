@@ -8,6 +8,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
+from release.formal_windows_pretrust import (
+    FORMAL_WINDOWS_PRETRUST_FILES,
+    FORMAL_WINDOWS_PRETRUST_PREFIX,
+)
 from updater.offline import (
     GITHUB_RELEASE_CERTIFICATE_IDENTITY,
     OFFLINE_POLICY_IDENTITY,
@@ -139,7 +143,7 @@ def contract_only_test_pretrust_bytes() -> dict[str, bytes]:
     provisioning use :func:`create_test_initial_trust_kit` instead.
     """
 
-    return {
+    initial = {
         f"{TEST_PRETRUST_PREFIX}/{name}": f"TEST-ONLY:{name}\n".encode()
         for name in (
             "github-trusted-root.jsonl",
@@ -151,6 +155,13 @@ def contract_only_test_pretrust_bytes() -> dict[str, bytes]:
             "trust-profile.json",
         )
     }
+    formal = {
+        f"{FORMAL_WINDOWS_PRETRUST_PREFIX}/{name}": (
+            f"TEST-ONLY-FORMAL-WINDOWS:{name}\n".encode()
+        )
+        for name in FORMAL_WINDOWS_PRETRUST_FILES
+    }
+    return {**initial, **formal}
 
 
 def _canonical(value: object) -> bytes:
@@ -175,7 +186,9 @@ def create_test_initial_trust_kit(root: Path) -> Path:
     runtime = {
         "github-trusted-root.jsonl": b'{"fixture":"github-trusted-root"}\n',
         "github-tuf-root.json": b'{"fixture":"github-tuf-root"}\n',
-        "offline-release-verifier": b"TEST-ONLY-NON-EXECUTABLE-VERIFIER\n",
+        "offline-release-verifier": (
+            b"\x7fELF\x02\x01\x01" + bytes(9) + b"\x02\x00\x3e\x00" + bytes(44)
+        ),
         "sigstore-trusted-root.jsonl": b'{"fixture":"sigstore-trusted-root"}\n',
         "sigstore-tuf-root.json": b'{"fixture":"sigstore-tuf-root"}\n',
     }

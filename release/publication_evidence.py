@@ -5,6 +5,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,7 @@ class GitHubReleasePublication:
     draft: bool
     prerelease: bool
     signed_at: str
+    signed_claim_identity: str
     assets: tuple[ReleasePublicationAsset, ...]
     transport_assets: tuple[ReleaseTransportAsset, ...]
 
@@ -110,10 +112,20 @@ class GitHubReleasePublication:
                 "prerelease": self.prerelease,
                 "repository": REPOSITORY,
                 "repositoryId": REPOSITORY_ID,
-                "signedAt": self.signed_at,
                 "tag": self.tag,
                 "tagCommit": self.tag_commit,
                 "tagObject": self.tag_object,
+            }
+        )
+
+    @property
+    def execution_receipt_identity(self) -> str:
+        return _canonical_digest(
+            {
+                "schema": "animemo.github-release-publication-execution-receipt/v1",
+                "publicationAuthorityIdentity": self.identity,
+                "signedAt": self.signed_at,
+                "signedClaimIdentity": self.signed_claim_identity,
             }
         )
 
@@ -144,6 +156,20 @@ def _release_schema() -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise PublicationEvidenceError("GitHub Release claim schema 无效")
     return payload
+
+
+def _canonical_timestamp(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise PublicationEvidenceError(f"{label} 必须是 RFC3339 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise PublicationEvidenceError(f"{label} 必须是 RFC3339 timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise PublicationEvidenceError(f"{label} 必须包含 timezone")
+    if parsed.microsecond != 0:
+        raise PublicationEvidenceError(f"{label} 必须使用固定整秒精度")
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def close_github_release_publication(
@@ -201,7 +227,8 @@ def close_github_release_publication(
             tag_object=payload["tagObject"],  # type: ignore[arg-type]
             draft=payload["draft"],  # type: ignore[arg-type]
             prerelease=prerelease,  # type: ignore[arg-type]
-            signed_at=payload["signedAt"],  # type: ignore[arg-type]
+            signed_at=_canonical_timestamp(payload["signedAt"], label="signedAt"),
+            signed_claim_identity=_canonical_digest(dict(payload)),
             assets=assets,
             transport_assets=transport_assets,
         )

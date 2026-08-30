@@ -110,6 +110,13 @@ class FakeLocalBundleSource(FakeSource):
         encoded = json.dumps(
             item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
+        execution_unsigned = {
+            "schema": "animemo.release-execution-receipt/v1",
+            "publicationIdentity": "sha256:" + "8" * 64,
+            "publicationExecutionReceiptIdentity": "sha256:" + "9" * 64,
+            "signedClaimIdentity": "sha256:" + "a" * 64,
+            "signedAt": "2026-08-30T00:00:00Z",
+        }
         result = {
             "source": "local-bundle",
             "transportPolicyIdentity": self.transport_policy.identity,
@@ -117,6 +124,18 @@ class FakeLocalBundleSource(FakeSource):
             "transportIdentity": self.transport_identity,
             "payloadIdentity": "sha256:" + "6" * 64,
             "releaseAttestationIdentity": "sha256:" + "5" * 64,
+            "releaseExecutionReceipt": {
+                **execution_unsigned,
+                "identity": "sha256:"
+                + hashlib.sha256(
+                    json.dumps(
+                        execution_unsigned,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            },
             "trustProfileVersion": 1,
             "trustProfileIdentity": "sha256:" + "4" * 64,
             "manifestIdentity": "sha256:" + hashlib.sha256(encoded).hexdigest(),

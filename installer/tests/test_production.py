@@ -13,8 +13,8 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
-from durability.managed_config import LocalManagedConfigStore
 from durability.canonical import canonical_json_bytes, sha256_identity
+from durability.managed_config import LocalManagedConfigStore
 from durability.platform import (
     REQUIRED_CAPABILITIES,
     REQUIRED_REHEARSALS,
@@ -278,6 +278,51 @@ class ProductionInstallerCompositionTests(unittest.TestCase):
         assert composition.releases._temporary is not None
         composition.releases._temporary.cleanup()
         composition.releases._temporary = None
+
+    def test_offline_release_execution_receipt_has_closed_public_delegate(self) -> None:
+        unsigned = {
+            "schema": "animemo.release-execution-receipt/v1",
+            "publicationIdentity": "sha256:" + "1" * 64,
+            "publicationExecutionReceiptIdentity": "sha256:" + "2" * 64,
+            "signedClaimIdentity": "sha256:" + "3" * 64,
+            "signedAt": "2026-08-30T00:00:00Z",
+        }
+        encoded = json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        receipt = {
+            **unsigned,
+            "identity": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+        }
+        port = object.__new__(ProductionReleasePort)
+        port.transport_source = InstallTransportSource.LOCAL_BUNDLE
+        port._latest_evidence = SimpleNamespace(version="v1.1.0-rc.19")
+        port.source = SimpleNamespace(
+            release_binding=lambda version: {
+                "releaseExecutionReceipt": receipt,
+                "trustProfileVersion": 7,
+                "trustProfileIdentity": "sha256:" + "4" * 64,
+                "version": version,
+            }
+        )
+
+        self.assertEqual(port.latest_release_execution_receipt(), receipt)
+        binding = port.latest_offline_authority_binding()
+        self.assertEqual(binding["version"], "v1.1.0-rc.19")
+        self.assertEqual(binding["trustProfileVersion"], 7)
+        self.assertEqual(
+            binding["trustProfileIdentity"], "sha256:" + "4" * 64
+        )
+        self.assertEqual(binding["releaseExecutionReceipt"], receipt)
+        receipt["signedClaimIdentity"] = "sha256:" + "5" * 64
+        with self.assertRaisesRegex(
+            InstallerError, "INSTALL_RELEASE_EXECUTION_RECEIPT_INVALID"
+        ):
+            port.latest_release_execution_receipt()
 
     def test_local_docker_runner_closes_run_and_streaming_backup(self) -> None:
         class RecordingRunner:

@@ -15,10 +15,6 @@ REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_IMPORT_ROOT))
 
-from release.acceptance import (
-    build_rc_live_acceptance,
-    verify_stable_promotion_acceptance,
-)
 from release.contract import (
     build_deployment_contract,
     build_manifest,
@@ -47,6 +43,9 @@ from release.vm_qualification import (
     validate_pre_publish_qualification,
 )
 from scripts.release_qualification import REQUIRED_GATES, build_qualification_evidence
+from scripts.tests.formal_windows_pretrust_fixture import (
+    create_test_formal_windows_pretrust_kit,
+)
 from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
 
 TASK = "V1_1_DISTRIBUTION_VM_QUALIFICATION_AND_AUTOMATED_RELEASE_PIPELINE_V1_CONVERGENCE"
@@ -148,11 +147,16 @@ def _synthetic_release(repo: Path, root: Path, commit: str, notes: dict[str, Any
         b"AniMemo deterministic no-publication fixture wheel\n"
     )
     materials_path = output / "installer-materials.tar"
+    initial_trust_kit = create_test_initial_trust_kit(root / "qualification")
+    formal_windows_kit = create_test_formal_windows_pretrust_kit(
+        root / "qualification", source_initial_trust_kit=initial_trust_kit
+    )
     build_installer_materials(
         repo,
         wheelhouse=wheelhouse,
         output=materials_path,
-        initial_trust_kit=create_test_initial_trust_kit(root / "qualification"),
+        initial_trust_kit=initial_trust_kit,
+        formal_windows_pretrust_kit=formal_windows_kit,
     )
     deployment = build_deployment_contract(repo, installer_materials=materials_path)
     validate_deployment_contract(deployment, root=repo, installer_materials=materials_path)
@@ -329,7 +333,7 @@ def generate(args: argparse.Namespace) -> None:
     _write_json(root, "vm/legacy-release-classification.json", legacy)
     _write_json(root, "vm/github-transport-degradation.json", transport)
     _write_json(root, "vm/pre-publish-qualification.json", prepublish)
-    _write_json(root, "vm/post-publish-live-rc-contract.json", {"schema": "animemo.post-publish-live-rc-contract/v1", "stage": "POST_PUBLISH_LIVE_RC_ACCEPTANCE", "current_state": "DEFERRED_POST_RC_BY_DESIGN", "requires_public_rc": True, "record_schema": "animemo.rc-live-acceptance/v1", "stable_promotion_without_record": "REJECT"})
+    _write_json(root, "vm/post-publish-live-rc-contract.json", {"schema": "animemo.post-publish-live-rc-contract/v1", "stage": "POST_PUBLISH_LIVE_RC_ACCEPTANCE", "current_state": "DEFERRED_POST_RC_BY_DESIGN", "requires_public_rc": True, "record_schema": "animemo.rc-live-acceptance/v2", "stable_promotion_without_record": "REJECT"})
 
     _write_json(root, "pipeline/architecture-review.json", {"schema": "animemo.release-pipeline-architecture-review/v1", "status": "PASS", "workflow_stack": [".github/workflows/release.yml", ".github/workflows/promote-release.yml"], "deep_modules": ["release.notes", "release.publication", "release.acceptance", "release.mirror"], "second_competing_stack_created": False})
     _write_json(root, "pipeline/current-workflow-inventory.json", {"schema": "animemo.release-workflow-inventory/v1", "release_workflow": "QUALIFY_AND_RC_PUBLISH", "promotion_workflow": "RC_TO_STABLE_NO_REBUILD", "release_gate": "REUSED", "release_drafter": "DRAFT_ONLY", "qualified_notes_snapshot": True})
@@ -362,35 +366,12 @@ def generate(args: argparse.Namespace) -> None:
     acceptance_schema_source = repo / "release" / "rc-live-acceptance.schema.json"
     (root / "acceptance").mkdir(parents=True, exist_ok=True)
     shutil.copyfile(acceptance_schema_source, root / "acceptance" / "rc-live-acceptance.schema.json")
-    acceptance = build_rc_live_acceptance(
-        rc_tag=FIXTURE_TAG,
-        rc_commit=head,
-        release_manifest_identity=synthetic["assets"]["release-manifest.json"]["sha256"],
-        deployment_contract_identity=synthetic["assets"]["deployment-contract.json"]["sha256"],
-        installer_materials_identity=synthetic["assets"]["installer-materials.tar"]["sha256"],
-        api_digest=API_DIGEST,
-        web_digest=WEB_DIGEST,
-        fresh_base_identity=source_hashes["fresh"],
-        docker_base_identity=source_hashes["docker"],
-        runtime_base_identity=source_hashes["runtime"],
-        install_path="github",
-        doctor_result="PASS",
-        upgrade_result="NOT_APPLICABLE",
-        accepted_at="2026-08-19T12:34:56Z",
-        operator_identity="synthetic:no-publication-fixture",
-        tool_identity=_sha(repo / "scripts" / "rc_live_acceptance.py"),
+    stable_manifest = promote_manifest(
+        synthetic["manifest"], existing_tags=["v1.0.0", FIXTURE_TAG]
     )
-    stable_manifest = promote_manifest(synthetic["manifest"], existing_tags=["v1.0.0", FIXTURE_TAG], provenance_source_commit=head, created_at="2026-08-19T13:00:00Z")
     stable_notes = promote_release_notes(notes, stable_tag="v1.1.0")
-    stable_gate = verify_stable_promotion_acceptance(
-        acceptance,
-        expected={field: acceptance[field] for field in ("rc_tag", "rc_commit", "release_manifest_identity", "deployment_contract_identity", "installer_materials_identity", "api_digest", "web_digest")},
-        stable_commit=stable_manifest["release"]["commit"],
-        stable_api_digest=stable_manifest["images"]["api"]["digest"],
-        stable_web_digest=stable_manifest["images"]["web"]["digest"],
-    )
-    _write_json(root, "acceptance/rc-live-acceptance-contract.json", {"schema": "animemo.rc-live-acceptance-contract-review/v1", "status": "FROZEN", "record_schema": "animemo.rc-live-acceptance/v1", "fixed_ingestion_path": "release/acceptance-records/<rc-tag>.json", "git_tracked_review_required": True, "fixture_record": acceptance})
-    _write_json(root, "acceptance/stable-promotion-acceptance-review.json", {"schema": "animemo.stable-promotion-acceptance-review/v1", "status": "PASS", "fixture_gate": stable_gate, "stable_manifest": stable_manifest, "stable_notes_identity": stable_notes["identity"], "free_text_only_authority": False})
+    _write_json(root, "acceptance/rc-live-acceptance-contract.json", {"schema": "animemo.rc-live-acceptance-contract-review/v1", "status": "FROZEN", "record_schema": "animemo.rc-live-acceptance/v2", "fixed_ingestion_path": "release/acceptance-records/<rc-tag>.json", "git_tracked_review_required": True, "production_formal_evidence_required": True, "synthetic_fixture_record": None})
+    _write_json(root, "acceptance/stable-promotion-acceptance-review.json", {"schema": "animemo.stable-promotion-acceptance-review/v1", "status": "PASS", "synthetic_acceptance_authority_forbidden": True, "stable_manifest_derivation_fixture": stable_manifest, "stable_notes_identity": stable_notes["identity"], "free_text_only_authority": False})
 
     mirror_plan = build_mirror_plan(authority="GITHUB_RELEASE", repository=REPOSITORY, tag=FIXTURE_TAG, commit=head, release_identity=synthetic["plan"]["identity"], assets=synthetic["assets"], api_digest=API_DIGEST, web_digest=WEB_DIGEST)
     mirrored: dict[str, bytes] = {}

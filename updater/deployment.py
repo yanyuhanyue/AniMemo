@@ -67,6 +67,19 @@ class _InitialHttpTransportUnavailable(StateError):
     pass
 
 
+def _is_retryable_initial_http_error(error: BaseException) -> bool:
+    """Allow only bounded startup publication races into the readiness retry loop."""
+
+    if isinstance(error, http.client.RemoteDisconnected):
+        # The readiness contract explicitly permits a peer that accepts the
+        # connection and closes it before publishing an HTTP status line.
+        return True
+    return isinstance(
+        error,
+        (ConnectionRefusedError, ConnectionResetError, TimeoutError),
+    )
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -393,7 +406,12 @@ class ImmutableComposeDeployment:
             timeout=30,
         ).stdout.strip()
 
-    def _verify_http_paths(self, paths: tuple[str, ...]) -> None:
+    def _verify_http_paths(
+        self,
+        paths: tuple[str, ...],
+        *,
+        allow_initial_retry: bool = False,
+    ) -> None:
         host, port, forwarded_proto = self._public_endpoint()
         for path in paths:
             try:
@@ -401,9 +419,10 @@ class ImmutableComposeDeployment:
                     path, host=host, port=port, forwarded_proto=forwarded_proto
                 )
             except (OSError, http.client.HTTPException) as error:
-                raise _InitialHttpTransportUnavailable(
-                    f"AniMemo HTTP contract failed for {path}"
-                ) from error
+                message = f"AniMemo HTTP contract failed for {path}"
+                if allow_initial_retry and _is_retryable_initial_http_error(error):
+                    raise _InitialHttpTransportUnavailable(message) from error
+                raise StateError(message) from error
             if status != 200:
                 raise StateError(
                     f"AniMemo HTTP contract failed for {path}: HTTP {status}"
@@ -412,7 +431,7 @@ class ImmutableComposeDeployment:
     def _wait_for_initial_http_paths(self, paths: tuple[str, ...]) -> None:
         for attempt in range(INITIAL_HTTP_READY_ATTEMPTS):
             try:
-                self._verify_http_paths(paths)
+                self._verify_http_paths(paths, allow_initial_retry=True)
                 return
             except _InitialHttpTransportUnavailable:
                 if attempt + 1 == INITIAL_HTTP_READY_ATTEMPTS:

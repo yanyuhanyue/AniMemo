@@ -17,6 +17,9 @@ from release.trust_bootstrap import (
     TUFMetadataNotFound,
     build_initial_trust_kit,
 )
+from scripts.tests.formal_windows_pretrust_fixture import (
+    create_test_formal_windows_pretrust_kit,
+)
 from updater.offline import TrustProfile
 
 
@@ -227,7 +230,12 @@ class InitialTrustBootstrapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             verifier = root / "offline-release-verifier"
-            verifier.write_bytes(b"linux-amd64-verifier")
+            verifier.write_bytes(
+                b"\x7fELF\x02\x01\x01"
+                + bytes(9)
+                + b"\x02\x00\x3e\x00"
+                + bytes(44)
+            )
             kit = root / "pretrust-v2"
 
             tracks = {
@@ -279,11 +287,16 @@ class InitialTrustBootstrapTests(unittest.TestCase):
                 b"qualified wheel bytes"
             )
             archive = root / "installer-materials.tar"
+            formal_windows_kit = create_test_formal_windows_pretrust_kit(
+                root,
+                source_initial_trust_kit=kit,
+            )
             build_installer_materials(
                 Path(__file__).resolve().parents[2],
                 wheelhouse=wheelhouse,
                 output=archive,
                 initial_trust_kit=kit,
+                formal_windows_pretrust_kit=formal_windows_kit,
             )
             with tarfile.open(archive, "r:") as bundle:
                 names = {item.name for item in bundle.getmembers()}

@@ -24,12 +24,12 @@ from durability.platform import (
 )
 from release.acceptance import (
     AcceptanceError,
-    build_rc_live_acceptance,
     validate_rc_live_acceptance,
     validate_stable_promotion_acceptance,
     verify_stable_promotion_acceptance,
 )
 from release.contract import build_deployment_contract
+from release.formal_acceptance_test_support import build_test_formal_acceptance
 from release.materials import (
     PLATFORM_QUALIFICATION_MATERIAL,
     MaterialContractError,
@@ -52,6 +52,9 @@ from release.vm_qualification import (
     classify_github_transport,
     classify_legacy_release,
     validate_pre_publish_qualification,
+)
+from scripts.tests.formal_windows_pretrust_fixture import (
+    create_test_formal_windows_pretrust_kit,
 )
 from scripts.tests.test_platform_qualification import unsigned_payload
 from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
@@ -79,6 +82,9 @@ def frozen_prepublication_fixture(directory: Path):
         "deploy/updater/animemo-updater.sysusers.conf",
         "deploy/updater/animemo-updater.tmpfiles.conf",
         "updater/docker-compose.runtime.yml",
+        "scripts/candidate_profile_runner.py",
+        "scripts/closed_runtime_inventory.py",
+        "scripts/formal_profile_runner.py",
     ):
         target = source / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +99,9 @@ def frozen_prepublication_fixture(directory: Path):
         )
     )
     trust_kit = create_test_initial_trust_kit(directory)
+    formal_windows_kit = create_test_formal_windows_pretrust_kit(
+        directory, source_initial_trust_kit=trust_kit
+    )
     verifier = (
         source
         / "release"
@@ -112,6 +121,7 @@ def frozen_prepublication_fixture(directory: Path):
         wheelhouse=wheelhouse,
         output=archive,
         initial_trust_kit=trust_kit,
+        formal_windows_pretrust_kit=formal_windows_kit,
     )
     deployment_contract = directory / "deployment-contract.json"
     deployment_contract.write_text(
@@ -170,6 +180,7 @@ def acceptance_record(**changes):
     fields = {
         "rc_tag": "v1.1.0-rc.1",
         "rc_commit": COMMIT,
+        "rc_tree": "a" * 40,
         "release_manifest_identity": asset_identities()["release-manifest.json"]["sha256"],
         "deployment_contract_identity": asset_identities()["deployment-contract.json"]["sha256"],
         "installer_materials_identity": asset_identities()["installer-materials.tar"]["sha256"],
@@ -178,15 +189,12 @@ def acceptance_record(**changes):
         "fresh_base_identity": "sha256:" + "6" * 64,
         "docker_base_identity": "sha256:" + "7" * 64,
         "runtime_base_identity": "sha256:" + "8" * 64,
-        "install_path": "github",
-        "doctor_result": "PASS",
-        "upgrade_result": "NOT_APPLICABLE",
         "accepted_at": "2026-08-19T12:34:56Z",
         "operator_identity": "github:maintainer-review/v1",
         "tool_identity": "sha256:" + "9" * 64,
     }
     fields.update(changes)
-    return build_rc_live_acceptance(**fields)
+    return build_test_formal_acceptance(**fields)
 
 
 class DraftPublicationTests(unittest.TestCase):
@@ -317,6 +325,61 @@ class DraftPublicationTests(unittest.TestCase):
 
 
 class AcceptanceAndPromotionTests(unittest.TestCase):
+    def test_acceptance_rejects_naive_invalid_and_variable_precision_timestamps(self):
+        for timestamp in (
+            "2026-08-19T12:34:56",
+            "2026-08-19T12:34:56.1Z",
+            "2026-02-30T12:34:56Z",
+        ):
+            with self.subTest(timestamp=timestamp), self.assertRaises(AcceptanceError):
+                acceptance_record(accepted_at=timestamp)
+
+    def test_acceptance_authority_identity_excludes_execution_metadata(self):
+        first = acceptance_record(
+            accepted_at="2026-08-19T12:34:56Z",
+            observed_at="2026-08-19T12:35:56Z",
+            operator_identity="operator:first",
+        )
+        second = acceptance_record(
+            accepted_at="2026-08-19T12:34:56Z",
+            observed_at="2026-08-19T12:36:56Z",
+            operator_identity="operator:second",
+            fresh_base_identity="sha256:" + "0" * 64,
+        )
+
+        self.assertEqual(first["identity"], second["identity"])
+        self.assertNotEqual(
+            first["execution_receipt"]["identity"],
+            second["execution_receipt"]["identity"],
+        )
+        self.assertEqual(
+            first["execution_receipt"]["accepted_at"],
+            "2026-08-19T12:34:56Z",
+        )
+        self.assertEqual(
+            first["execution_receipt"]["observed_at"],
+            "2026-08-19T12:35:56Z",
+        )
+        self.assertNotEqual(
+            first["execution_receipt"]["observed_at"],
+            second["execution_receipt"]["observed_at"],
+        )
+        self.assertNotIn("accepted_at", first)
+        self.assertNotIn("operator_identity", first)
+        self.assertNotIn("fresh_base_identity", first)
+        self.assertNotIn("docker_base_identity", first)
+        self.assertNotIn("runtime_base_identity", first)
+        self.assertEqual(
+            first["formal_evidence"]["profileReceipts"]["FORMAL_FRESH"][
+                "snapshot_identity"
+            ],
+            "sha256:" + "6" * 64,
+        )
+        self.assertEqual(
+            set(first["formal_profile_authority_identities"]),
+            {"fresh_base", "docker_base", "runtime_base_offline"},
+        )
+
     def test_acceptance_record_is_closed_self_identifying_and_authorizes_exact_stable(self):
         record = acceptance_record()
         validate_rc_live_acceptance(record)
@@ -344,6 +407,32 @@ class AcceptanceAndPromotionTests(unittest.TestCase):
         )
         jsonschema.Draft202012Validator.check_schema(schema)
         jsonschema.validate(record, schema)
+
+    def test_acceptance_schema_closes_formal_execution_and_profile_transport(self):
+        schema = json.loads(
+            Path(__file__).with_name("rc-live-acceptance.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for mutation in (
+            lambda value: value["formal_evidence"]["executionReceipt"].pop(
+                "publication_preflight_summary"
+            ),
+            lambda value: value["formal_evidence"]["executionReceipt"].pop(
+                "pretrusted_profile_identity"
+            ),
+            lambda value: value["formal_evidence"]["profileReceipts"][
+                "FORMAL_OFFLINE"
+            ].__setitem__("transport_source", "github"),
+        ):
+            record = acceptance_record()
+            mutation(record)
+            with self.subTest(mutation=mutation), self.assertRaises(
+                jsonschema.ValidationError
+            ):
+                jsonschema.validate(record, schema)
+            with self.assertRaises(AcceptanceError):
+                validate_rc_live_acceptance(record)
 
     def test_acceptance_rejects_test_only_and_noncanonical_rc_tags(self):
         for rc_tag in (
@@ -621,6 +710,7 @@ class FrozenPrepublicationMaterialTests(unittest.TestCase):
                     wheelhouse=wheelhouse,
                     output=output,
                     initial_trust_kit=trust_kit,
+                    formal_windows_pretrust_kit=temporary / "formal-kit",
                 )
 
             self.assertEqual(victim.read_bytes(), b"do not touch")
@@ -680,6 +770,7 @@ class FrozenPrepublicationMaterialTests(unittest.TestCase):
                     wheelhouse=temporary / "wheelhouse",
                     output=output,
                     initial_trust_kit=temporary / "trust-kit",
+                    formal_windows_pretrust_kit=temporary / "formal-kit",
                 )
 
             self.assertFalse(output.exists())
@@ -705,7 +796,34 @@ class FrozenPrepublicationMaterialTests(unittest.TestCase):
 
             self.assertEqual(
                 (payload["schemaVersion"], result["status"]),
-                (2, "PASS"),
+                (3, "PASS"),
+            )
+            formal = payload["formalWindowsPretrust"]
+            self.assertEqual(
+                result["formalWindowsPretrustKitIdentity"],
+                formal["kitIdentity"],
+            )
+            self.assertEqual(
+                result["offlineReleaseTrustProfileIdentity"],
+                formal["sourceProfileIdentity"],
+            )
+            self.assertEqual(
+                set(formal),
+                {
+                    "formalProfileIdentity",
+                    "githubTrustedRootIdentity",
+                    "githubTufRootIdentity",
+                    "kitIdentity",
+                    "linuxGuestVerifierIdentity",
+                    "sourceProfileIdentity",
+                    "sigstoreTrustedRootIdentity",
+                    "sigstoreTufRootIdentity",
+                    "windowsHostVerifierIdentity",
+                },
+            )
+            self.assertNotEqual(
+                formal["windowsHostVerifierIdentity"],
+                formal["linuxGuestVerifierIdentity"],
             )
             self.assertEqual(
                 (
@@ -714,9 +832,9 @@ class FrozenPrepublicationMaterialTests(unittest.TestCase):
                     payload["pretrust"]["aggregateSha256"],
                 ),
                 (
-                    "sha256:77235727fcd7e23aeccf34f8c45134ac2ac5cbf909a211469df60335ab25b38f",
+                    "sha256:123a31a8a40c00d1fcb7d8f759c9e64ba34f3cd7d9501309f190c84f25af60ec",
                     "sha256:ca794441aa84a156fc47d0cf2efc2d04aef61517925e5dcccbbcc181ec98b93a",
-                    "sha256:bf605057d25869d1a0616a574547c5d2106fe1a4aa013ea7af09dfe03b6e2502",
+                    "sha256:55b1e65bef2482487dfa419dde72f2e99e7db1a02118d7ecf5903c0359af7823",
                 ),
             )
 
@@ -1278,8 +1396,8 @@ class FrozenPrepublicationMaterialTests(unittest.TestCase):
             )
 
             duplicated = identity.read_text(encoding="utf-8").replace(
-                '"schemaVersion": 2,',
-                '"schemaVersion": 2,\n  "schemaVersion": 2,',
+                '"schemaVersion": 3,',
+                '"schemaVersion": 3,\n  "schemaVersion": 3,',
                 1,
             )
             identity.write_text(duplicated, encoding="utf-8")

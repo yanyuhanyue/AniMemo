@@ -108,18 +108,26 @@ class DependencySecurityContractTests(unittest.TestCase):
         ]
         publish = release_workflow[release_workflow.index("  publish:\n") :]
         setup_go = "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16"
-        offline_verifier_build = (
-            "CGO_ENABLED=0 GOPROXY=off GOSUMDB=off go build "
-            "-mod=readonly -trimpath -o offline-release-verifier ."
+        linux_verifier_build = (
+            "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOPROXY=off GOSUMDB=off \\\n"
+            "              go build -mod=readonly -trimpath "
+            "-o offline-release-verifier ."
+        )
+        windows_verifier_build = (
+            "CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOPROXY=off GOSUMDB=off \\\n"
+            "              go build -mod=readonly -trimpath \\\n"
+            "                -o \"$RUNNER_TEMP/formal-release-verifier.exe\" ."
         )
 
         self.assertEqual(release_workflow.count("go-version: '1.26.6'"), 1)
         self.assertEqual(dry_run.count(setup_go), 1)
         self.assertEqual(dry_run.count("go-version: '1.26.6'"), 1)
-        self.assertEqual(dry_run.count(offline_verifier_build), 1)
+        self.assertEqual(dry_run.count(linux_verifier_build), 1)
+        self.assertEqual(dry_run.count(windows_verifier_build), 1)
         self.assertEqual(publish.count(setup_go), 0)
         self.assertEqual(publish.count("go-version: '1.26.6'"), 0)
-        self.assertEqual(publish.count(offline_verifier_build), 0)
+        self.assertEqual(publish.count(linux_verifier_build), 0)
+        self.assertEqual(publish.count(windows_verifier_build), 0)
         self.assertEqual(publish.count("build-initial-trust-kit"), 0)
         self.assertNotIn("go-version: '1.25.8'", release_workflow)
 

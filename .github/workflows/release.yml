@@ -1046,13 +1046,23 @@ jobs:
             go mod download
             GOPROXY=off GOSUMDB=off go mod verify
             GOPROXY=off GOSUMDB=off go test ./...
-            CGO_ENABLED=0 GOPROXY=off GOSUMDB=off go build -mod=readonly -trimpath -o offline-release-verifier .
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOPROXY=off GOSUMDB=off \
+              go build -mod=readonly -trimpath -o offline-release-verifier .
+            CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOPROXY=off GOSUMDB=off \
+              go build -mod=readonly -trimpath \
+                -o "$RUNNER_TEMP/formal-release-verifier.exe" .
           )
           test -x release/release_attestation_verifier/offline-release-verifier
+          test -s "$RUNNER_TEMP/formal-release-verifier.exe"
           rm -rf "$RUNNER_TEMP/animemo-pretrust-v2"
           python -m release.cli build-initial-trust-kit \
             --verifier release/release_attestation_verifier/offline-release-verifier \
             --output "$RUNNER_TEMP/animemo-pretrust-v2"
+          rm -rf "$RUNNER_TEMP/animemo-formal-windows-pretrust-v1"
+          python scripts/formal_windows_pretrust.py build \
+            --verifier "$RUNNER_TEMP/formal-release-verifier.exe" \
+            --source-initial-trust-kit "$RUNNER_TEMP/animemo-pretrust-v2" \
+            --output "$RUNNER_TEMP/animemo-formal-windows-pretrust-v1"
           mkdir -p release-output
           install -m 0600 \
             "$RUNNER_TEMP/animemo-pretrust-v2/initial-trust-bootstrap.json" \
@@ -1064,7 +1074,13 @@ jobs:
           python -m release.cli build-installer-materials \
             --root . --wheelhouse "$RUNNER_TEMP/release-wheelhouse" \
             --initial-trust-kit "$RUNNER_TEMP/animemo-pretrust-v2" \
+            --formal-windows-pretrust-kit \
+              "$RUNNER_TEMP/animemo-formal-windows-pretrust-v1" \
             --output release-output/installer-materials.tar
+          python scripts/formal_windows_pretrust.py inspect-installer-materials \
+            --installer-materials release-output/installer-materials.tar \
+            > "$RUNNER_TEMP/formal-windows-pretrust-binding.json"
+          tar --extract --to-stdout --file release-output/installer-materials.tar scripts/closed_runtime_inventory.py | cmp - scripts/closed_runtime_inventory.py
           tar --extract --to-stdout --file release-output/installer-materials.tar \
             release/platform-qualification.json | cmp - release/platform-qualification.json
           clean_materials="$RUNNER_TEMP/animemo-clean-stage0-materials"
@@ -1106,6 +1122,14 @@ jobs:
             --deployment-contract release-output/deployment-contract.json \
             --expected-candidate-sha "${{ needs.preflight.outputs.candidate_sha }}" \
             --expected-candidate-tree-sha "$candidate_tree"
+          test "$(jq -er '.formalWindowsPretrust.kitIdentity' \
+            release-output/prepublication-materials.json)" = \
+            "$(jq -er '.kitIdentity' \
+              "$RUNNER_TEMP/formal-windows-pretrust-binding.json")"
+          test "$(jq -er '.formalWindowsPretrust.sourceProfileIdentity' \
+            release-output/prepublication-materials.json)" = \
+            "$(jq -er '.sourceProfileIdentity' \
+              "$RUNNER_TEMP/formal-windows-pretrust-binding.json")"
           python -m release.cli generate-manifest \
             --version "$RELEASE_TAG" --channel "${{ inputs.channel }}" \
             --commit "${{ needs.preflight.outputs.candidate_sha }}" --created-at "$CREATED_AT" \
