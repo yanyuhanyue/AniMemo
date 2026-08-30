@@ -5,7 +5,10 @@ import (
 	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,6 +21,42 @@ import (
 	"github.com/sigstore/sigstore/pkg/signature"
 	"github.com/theupdateframework/go-tuf/v2/metadata"
 )
+
+const publicActionsBundleName = "sha256-2588108838c23c9b7e29d70d3a897109bf93b5c52cc4bcf949d5434e51496459.jsonl"
+
+func publicActionsFixture(t *testing.T) (string, string, string, actionsRequest, *x509.Certificate) {
+	t.Helper()
+	root := filepath.Join("testdata", "github-actions-public")
+	bundlePath := filepath.Join(root, publicActionsBundleName)
+	trustedRootPath := filepath.Join(root, "sigstore-public-good-trusted-root.json")
+	requestPath := filepath.Join(root, "request.json")
+	var request actionsRequest
+	if err := decodeClosedJSON(requestPath, &request); err != nil {
+		t.Fatal(err)
+	}
+	entity, err := bundle.LoadJSONFromPath(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := entity.VerificationContent()
+	if err != nil || content.Certificate() == nil {
+		t.Fatal("public Actions fixture certificate unavailable")
+	}
+	return bundlePath, trustedRootPath, requestPath, request, content.Certificate()
+}
+
+func writeActionsRequest(t *testing.T, request actionsRequest) string {
+	t.Helper()
+	value, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "request.json")
+	if err := os.WriteFile(path, value, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 func tufUpdateFixture(t *testing.T) ([]byte, tufTrackPackage, []byte) {
 	t.Helper()
@@ -331,6 +370,160 @@ func TestActionsCertificatePolicySpecifiesIssuerOnlyInMatcher(t *testing.T) {
 	}
 	if _, err := verify.NewCertificateIdentity(sanMatcher, issuerMatcher, extensions); err != nil {
 		t.Fatalf("actions certificate policy must be constructible: %v", err)
+	}
+}
+
+func TestPublicGitHubActionsFixtureInvokesProductionVerifier(t *testing.T) {
+	bundlePath, trustedRootPath, requestPath, request, _ := publicActionsFixture(t)
+	for path, expected := range map[string]string{
+		bundlePath:      "sha256:6f174db7894200a118bc971d86462a0098bdd7766c49f695d1066a8e29d28922",
+		trustedRootPath: "sha256:6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
+		requestPath:     "sha256:fd047aee8acfb7490bac2571d9b002f34fd55e626a6baf2f84f0c19e8e2a5cd5",
+	} {
+		value, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if buildIdentity(value) != expected {
+			t.Fatalf("committed fixture identity changed: %s", path)
+		}
+	}
+	claim, err := verifyActions(bundlePath, trustedRootPath, requestPath)
+	if err != nil {
+		t.Fatalf("committed public Actions fixture must verify: %v", err)
+	}
+	if claim.Subject.Name != request.Subject.Name ||
+		claim.Subject.SHA256 != request.Subject.SHA256 ||
+		claim.Source.Commit != request.SourceCommit ||
+		claim.Workflow != request.Workflow ||
+		claim.Repository.RepositoryID != repositoryID ||
+		claim.Repository.OwnerID != ownerID {
+		t.Fatalf("unexpected production claim: %#v", claim)
+	}
+}
+
+func TestPublicGitHubActionsFixtureNegativeMatrix(t *testing.T) {
+	bundlePath, trustedRootPath, _, request, cert := publicActionsFixture(t)
+	identity, err := actionsCertificateIdentity(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := summarizeUniqueActionsCertificate(cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := []struct {
+		name   string
+		mutate func(*certificate.Summary)
+	}{
+		{"wrong issuer", func(value *certificate.Summary) {
+			value.Extensions.Issuer = "https://issuer.example.invalid"
+		}},
+		{"wrong repository", func(value *certificate.Summary) {
+			value.Extensions.SourceRepositoryURI = "https://github.com/attacker/AniMemo"
+		}},
+		{"wrong workflow", func(value *certificate.Summary) {
+			value.SubjectAlternativeName = "https://github.com/yanyuhanyue/AniMemo/.github/workflows/other.yml@refs/heads/main"
+		}},
+		{"wrong ref", func(value *certificate.Summary) {
+			value.Extensions.SourceRepositoryRef = "refs/heads/release-lookalike"
+		}},
+		{"wrong SHA", func(value *certificate.Summary) {
+			value.Extensions.BuildSignerDigest = "2e699c456110266398f868e43fa2e69b2d704d24"
+		}},
+	}
+	for _, item := range mutations {
+		t.Run(item.name, func(t *testing.T) {
+			changed := summary
+			item.mutate(&changed)
+			if err := identity.Verify(changed); err == nil {
+				t.Fatal("production certificate identity accepted substituted metadata")
+			}
+		})
+	}
+
+	duplicate := *cert
+	duplicate.Extensions = append([]pkix.Extension(nil), cert.Extensions...)
+	for _, extension := range cert.Extensions {
+		if extension.Id.Equal(certificate.OIDIssuerV2) {
+			duplicate.Extensions = append(duplicate.Extensions, extension)
+			break
+		}
+	}
+	if _, err := summarizeUniqueActionsCertificate(&duplicate); err == nil {
+		t.Fatal("duplicate issuer extension must be rejected")
+	}
+
+	for _, requiredOID := range []struct {
+		name  string
+		equal func(pkix.Extension) bool
+	}{
+		{"runner environment", func(value pkix.Extension) bool { return value.Id.Equal(certificate.OIDRunnerEnvironment) }},
+		{"repository URI", func(value pkix.Extension) bool { return value.Id.Equal(certificate.OIDSourceRepositoryURI) }},
+		{"repository owner URI", func(value pkix.Extension) bool { return value.Id.Equal(certificate.OIDSourceRepositoryOwnerURI) }},
+		{"signer digest", func(value pkix.Extension) bool { return value.Id.Equal(certificate.OIDBuildSignerDigest) }},
+		{"repository digest", func(value pkix.Extension) bool { return value.Id.Equal(certificate.OIDSourceRepositoryDigest) }},
+		{"repository ref", func(value pkix.Extension) bool { return value.Id.Equal(certificate.OIDSourceRepositoryRef) }},
+	} {
+		t.Run("missing "+requiredOID.name, func(t *testing.T) {
+			missing := *cert
+			missing.Extensions = nil
+			for _, extension := range cert.Extensions {
+				if !requiredOID.equal(extension) {
+					missing.Extensions = append(missing.Extensions, extension)
+				}
+			}
+			if _, err := summarizeUniqueActionsCertificate(&missing); err == nil {
+				t.Fatal("missing required extension must be rejected")
+			}
+		})
+	}
+
+	wrongWorkflow := request
+	wrongWorkflow.Workflow = ".github/workflows/promote-release.yml"
+	if _, err := verifyActions(
+		bundlePath, trustedRootPath, writeActionsRequest(t, wrongWorkflow),
+	); err == nil {
+		t.Fatal("production verifier accepted wrong workflow")
+	}
+	wrongSHA := request
+	wrongSHA.SourceCommit = "2e699c456110266398f868e43fa2e69b2d704d24"
+	if _, err := verifyActions(
+		bundlePath, trustedRootPath, writeActionsRequest(t, wrongSHA),
+	); err == nil {
+		t.Fatal("production verifier accepted wrong source SHA")
+	}
+	wrongSubject := request
+	wrongSubject.Subject.SHA256 = digest('b')
+	if _, err := verifyActions(
+		bundlePath, trustedRootPath, writeActionsRequest(t, wrongSubject),
+	); err == nil {
+		t.Fatal("production verifier accepted wrong subject")
+	}
+
+	malformed := filepath.Join(t.TempDir(), "malformed.bundle.json")
+	if err := os.WriteFile(malformed, []byte("{\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyActions(
+		malformed, trustedRootPath, writeActionsRequest(t, request),
+	); err == nil {
+		t.Fatal("production verifier accepted malformed bundle")
+	}
+	untrustedRoot := filepath.Join(
+		"testdata", "github-actions-public", "untrusted-scaffolding-root.json",
+	)
+	untrustedBytes, err := os.ReadFile(untrustedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if buildIdentity(untrustedBytes) != "sha256:503c669ede6b4416c39de5d48d5964141970d9881fc941370faac0f75789fecf" {
+		t.Fatal("untrusted-chain fixture identity changed")
+	}
+	if _, err := verifyActions(
+		bundlePath, untrustedRoot, writeActionsRequest(t, request),
+	); err == nil {
+		t.Fatal("production verifier accepted untrusted certificate chain")
 	}
 }
 

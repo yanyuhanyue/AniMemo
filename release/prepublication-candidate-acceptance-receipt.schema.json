@@ -1,21 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://animemo.cc/schemas/prepublication-candidate-acceptance-receipt-v1.json",
-  "title": "AniMemo prepublication candidate acceptance receipt v1",
+  "$id": "https://animemo.cc/schemas/prepublication-candidate-acceptance-receipt-v2.json",
+  "title": "AniMemo prepublication candidate acceptance receipt v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema", "version", "candidate_input_digest", "verified_candidate_digest",
     "qualification_run_id", "qualification_run_attempt", "source_sha", "source_tree",
-    "candidate_version", "r2_origin_prestate_receipt_digest", "profile_receipts", "all_profiles_pass", "rc14_prestate",
-    "rc14_poststate", "repository_mutation_count", "publication_mutation_count",
+    "candidate_version", "r2_origin_prestate_receipt_digest",
+    "r2_origin_poststate_receipt_digest", "r2_origin_prestate_observation_id",
+    "r2_origin_poststate_observation_id", "profile_receipts", "all_profiles_pass",
+    "candidate_prestate", "candidate_poststate", "repository_mutation_count",
+    "publication_mutation_count",
     "shared_host_connection_count", "secret_sweep", "placeholder_sweep",
     "release_authority_granted", "publish_authorized", "completed_at", "result",
     "receipt_digest"
   ],
   "properties": {
-    "schema": {"const": "animemo.prepublication-candidate-acceptance-receipt/v1"},
-    "version": {"const": 1},
+    "schema": {"const": "animemo.prepublication-candidate-acceptance-receipt/v2"},
+    "version": {"const": 2},
     "candidate_input_digest": {"$ref": "#/$defs/digest"},
     "verified_candidate_digest": {"$ref": "#/$defs/digest"},
     "qualification_run_id": {"type": "integer", "minimum": 1},
@@ -24,6 +27,9 @@
     "source_tree": {"$ref": "#/$defs/gitSha"},
     "candidate_version": {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"},
     "r2_origin_prestate_receipt_digest": {"$ref": "#/$defs/digest"},
+    "r2_origin_poststate_receipt_digest": {"$ref": "#/$defs/digest"},
+    "r2_origin_prestate_observation_id": {"$ref": "#/$defs/observationId"},
+    "r2_origin_poststate_observation_id": {"$ref": "#/$defs/observationId"},
     "profile_receipts": {
       "type": "object", "additionalProperties": false,
       "required": ["fresh_base", "docker_base", "runtime_base_offline"],
@@ -34,8 +40,8 @@
       }
     },
     "all_profiles_pass": {"type": "boolean"},
-    "rc14_prestate": {"$ref": "#/$defs/prestate"},
-    "rc14_poststate": {"$ref": "#/$defs/prestate"},
+    "candidate_prestate": {"$ref": "#/$defs/prestate"},
+    "candidate_poststate": {"$ref": "#/$defs/prestate"},
     "repository_mutation_count": {"const": 0},
     "publication_mutation_count": {"const": 0},
     "shared_host_connection_count": {"const": 0},
@@ -50,6 +56,10 @@
   "$defs": {
     "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "observationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
     "prestate": {
       "type": "object", "additionalProperties": false,
       "required": ["tag", "github_release", "ghcr", "public_r2", "r2_origin"],

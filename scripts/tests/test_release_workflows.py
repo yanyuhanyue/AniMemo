@@ -366,31 +366,34 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn(
             'test "$(crane version)" = "$CRANE_REQUIRED_VERSION"', assertion["run"]
         )
-        materialize = next(
+        publish = next(
             step
             for step in publish_steps
-            if step.get("name") == "Materialize exact OCI layouts without rebuilding"
+            if step.get("name") == "Publish only the Candidate-accepted OCI layouts"
         )["run"]
-        self.assertEqual(
-            materialize.count("python -m release.cli normalize-oci-layout"), 1
+        self.assertNotIn("crane pull", publish)
+        self.assertNotIn("normalize-oci-layout", publish)
+        self.assertNotIn("docker build", publish)
+        self.assertIn(
+            'local layout="$ANIMEMO_ACCEPTED_CANDIDATE_ROOT/'
+            'candidate-runtime/oci/$role"',
+            publish,
         )
-        self.assertLess(
-            materialize.index('crane pull "$reference" "$layout" --format=oci'),
-            materialize.index("python -m release.cli normalize-oci-layout"),
+        self.assertEqual(publish.count('crane push "$layout"'), 2)
+        self.assertEqual(publish.count('crane digest "$repository:'), 2)
+        self.assertIn('= "$expected_digest"', publish)
+        portable = next(
+            step
+            for step in publish_steps
+            if step.get("name")
+            == "Assemble the portable transport from accepted OCI layouts"
+        )["run"]
+        self.assertIn(
+            'cp -a "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT/candidate-runtime/oci"',
+            portable,
         )
-        self.assertLess(
-            materialize.index("python -m release.cli normalize-oci-layout"),
-            materialize.index("python -m release.cli build-portable"),
-        )
-        for argument in (
-            '--source-root "$portable_source"',
-            '--layout "$layout"',
-            '--role "$role"',
-            '--repository "${reference%@*}"',
-            '--expected-digest "${reference#*@}"',
-            "--expected-platform linux/amd64",
-        ):
-            self.assertIn(argument, materialize)
+        self.assertNotIn("crane pull", portable)
+        self.assertNotIn("normalize-oci-layout", portable)
 
     def test_oci_layout_function_has_no_same_command_local_dependency(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -419,177 +422,37 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         for declaration in ("local role", "local reference", "local layout"):
             self.assertIn(declaration, source)
         self.assertNotIn('archive="$RUNNER_TEMP/${role}-oci.tar"', source)
-        self.assertNotIn('"$portable_source/oci/$role"', source)
-        for role in ("api", "web", "postgres", "redis"):
-            self.assertIn(f'layout="$portable_source/oci/{role}"', source)
+        self.assertIn(
+            'local layout="$ANIMEMO_ACCEPTED_CANDIDATE_ROOT/'
+            'candidate-runtime/oci/$role"',
+            source,
+        )
+        self.assertIn('layout="$portable_source/oci/$role"', source)
+        self.assertNotIn("normalize-oci-layout", source[source.index("  publish:\n") :])
 
     def test_oci_layout_function_runs_under_bash_nounset_for_every_role(self):
-        bash = _bash_path()
-        self.assertIsNotNone(
-            bash,
-            "Bash is required for the fail-closed OCI layout runtime regression",
-        )
         release = workflow("release.yml")
-        materialize = next(
+        publish = next(
             step
             for step in release["jobs"]["publish"]["steps"]
             if step.get("name")
-            == "Materialize exact OCI layouts without rebuilding"
+            == "Publish only the Candidate-accepted OCI layouts"
         )["run"]
-        function = re.search(
-            r"(?ms)^export_layout\(\) \{\n.*?^\}", materialize
+        self.assertIn("set -euo pipefail", publish)
+        self.assertIn('local role="$1"', publish)
+        self.assertIn('local repository="$2"', publish)
+        self.assertIn('local expected_digest="$3"', publish)
+        self.assertIn('test -d "$layout" && test ! -L "$layout"', publish)
+        self.assertIn(
+            'api_digest="$(publish_image api "$API_REPOSITORY"', publish
         )
-        self.assertIsNotNone(function)
-        function_source = function.group(0)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            portable_source = root / "portable"
-            trace = root / "trace.txt"
-            symlink_target = root / "symlink-target"
-            symlink_target.mkdir()
-            references = {
-                "api": "ghcr.io/yanyuhanyue/animemo-api@sha256:"
-                "3331277a905902388afe430b92370f55b6d0425c663a2ae7470b6d678e579a5a",
-                "web": "ghcr.io/yanyuhanyue/animemo-web@sha256:"
-                "86b99658c1ea71c0a407ef4cddbd5349d8c159195ebedcb3055d9c3c34d5824a",
-                "postgres": "docker.io/library/postgres@sha256:"
-                "075f7ba66bc9b3ce7d6b8b635208ff61cd7cf1a67d71ec530eec5d7ae0cbe571",
-                "redis": "docker.io/library/redis@sha256:"
-                "9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf",
-            }
-            stubs = (
-                "crane() {\n"
-                "  test \"$1\" = pull\n"
-                "  test \"$4\" = --format=oci\n"
-                "  printf 'crane|%s|%s\\n' \"$2\" \"$3\" >> \"$TRACE\"\n"
-                "  if [[ \"$CRANE_MODE\" = fail ]]; then return 17; fi\n"
-                "  if [[ \"$CRANE_MODE\" = symlink ]]; then\n"
-                "    ln -s \"$SYMLINK_TARGET\" \"$3\"\n"
-                "    return\n"
-                "  fi\n"
-                "  mkdir -p \"$3\"\n"
-                "  if [[ \"$CRANE_MODE\" != missing-oci-layout ]]; then\n"
-                "    printf '{\"imageLayoutVersion\":\"1.0.0\"}\\n' > \"$3/oci-layout\"\n"
-                "  fi\n"
-                "  if [[ \"$CRANE_MODE\" != missing-index ]]; then\n"
-                "    printf '{\"schemaVersion\":2,\"manifests\":[]}\\n' > \"$3/index.json\"\n"
-                "  fi\n"
-                "  if [[ \"$CRANE_MODE\" != missing-blobs ]]; then\n"
-                "    mkdir -p \"$3/blobs\"\n"
-                "  fi\n"
-                "}\n"
-                "python() {\n"
-                "  test \"$1\" = -m\n"
-                "  test \"$2\" = release.cli\n"
-                "  test \"$3\" = normalize-oci-layout\n"
-                "  printf 'normalize|%s\\n' \"$*\" >> \"$TRACE\"\n"
-                "  if [[ \"$CRANE_MODE\" = normalize-fail ]]; then return 23; fi\n"
-                "}\n"
-            )
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    "PORTABLE_SOURCE": str(portable_source),
-                    "TRACE": str(trace),
-                    "SYMLINK_TARGET": str(symlink_target),
-                    "CRANE_MODE": "valid",
-                }
-            )
-
-            def script_for(calls):
-                return (
-                    "set -euo pipefail\n"
-                    "umask 077\n"
-                    'portable_source="$PORTABLE_SOURCE"\n'
-                    'mkdir -p "$portable_source/oci"\n'
-                    + stubs
-                    + function_source
-                    + "\n"
-                    + calls
-                )
-
-            calls = "".join(
-                f'export_layout {role} "{reference}"\n'
-                for role, reference in references.items()
-            )
-            script = script_for(calls)
-            syntax = subprocess.run(
-                [bash, "-n"],
-                input=script,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(syntax.returncode, 0, syntax.stderr)
-            completed = subprocess.run(
-                [bash],
-                input=script,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                env=environment,
-                check=False,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            trace_text = trace.read_text(encoding="utf-8").replace("\\", "/")
-            layout_paths = []
-            for role in ("api", "web", "postgres", "redis"):
-                self.assertIn(references[role], trace_text)
-                layout = portable_source / "oci" / role
-                layout_paths.append(layout.resolve())
-                self.assertTrue((layout / "oci-layout").is_file())
-                self.assertTrue((layout / "index.json").is_file())
-                self.assertTrue((layout / "blobs").is_dir())
-                self.assertIn(layout.as_posix(), trace_text)
-                self.assertIn(f"--role {role}", trace_text)
-                self.assertIn(
-                    f"--expected-digest {references[role].split('@', 1)[1]}", trace_text
-                )
-            self.assertEqual(len(set(layout_paths)), 4)
-            self.assertNotIn("tar --extract", function_source)
-
-            failures = (
-                ("unknown role", f'unknown "{references["api"]}"', "valid"),
-                ("empty role", f'"" "{references["api"]}"', "valid"),
-                ("missing reference", "api", "valid"),
-                ("empty reference", 'api ""', "valid"),
-                ("mutable reference", "api ghcr.io/example/image:latest", "valid"),
-                ("crane failure", f'api "{references["api"]}"', "fail"),
-                (
-                    "normalize failure",
-                    f'api "{references["api"]}"',
-                    "normalize-fail",
-                ),
-                (
-                    "missing oci-layout",
-                    f'api "{references["api"]}"',
-                    "missing-oci-layout",
-                ),
-                ("missing index.json", f'api "{references["api"]}"', "missing-index"),
-                ("missing blobs", f'api "{references["api"]}"', "missing-blobs"),
-                ("symlink layout", f'api "{references["api"]}"', "symlink"),
-            )
-            for label, arguments, crane_mode in failures:
-                case_environment = environment.copy()
-                case_environment["CRANE_MODE"] = crane_mode
-                failed = subprocess.run(
-                    [bash],
-                    input=script_for(f"export_layout {arguments}\n"),
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    capture_output=True,
-                    env=case_environment,
-                    check=False,
-                )
-                self.assertNotEqual(
-                    failed.returncode,
-                    0,
-                    f"{label} unexpectedly passed: {failed.stdout}",
-                )
+        self.assertIn(
+            'web_digest="$(publish_image web "$WEB_REPOSITORY"', publish
+        )
+        self.assertEqual(publish.count("crane push"), 2)
+        self.assertEqual(publish.count("crane digest"), 2)
+        self.assertNotIn("crane pull", publish)
+        self.assertNotIn("normalize-oci-layout", publish)
 
     def test_partial_rc_is_never_deleted_overwritten_or_hardcoded_for_push(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -1257,20 +1120,20 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_release_images_receive_the_same_runtime_identity_as_the_manifest(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        self.assertGreaterEqual(source.count("ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}"), 4)
+        publish_section = source[source.index("  publish:\n") :]
+        self.assertGreaterEqual(source.count("ANIMEMO_VERSION=${{ needs.preflight.outputs.release_tag }}"), 2)
         self.assertEqual(source.count("ANIMEMO_COMMIT=${{ needs.preflight.outputs.candidate_sha }}"), 2)
-        self.assertEqual(source.count("ANIMEMO_COMMIT=${{ github.sha }}"), 2)
+        self.assertNotIn("ANIMEMO_COMMIT=${{ github.sha }}", publish_section)
         self.assertNotIn("VITE_TURNSTILE_SITE_KEY", source)
-        self.assertIn("promote-manifest", source)
-        self.assertEqual(source.count("scripts/rehearse-release-images.sh"), 2)
-        self.assertIn("Start and accept the exact images before any external publication", source)
-        self.assertIn("Publish only the already rehearsed images", source)
-        self.assertNotIn("Build and publish API image once", source)
-        publish_section = source.index("  publish:\n")
-        rehearse = source.index("Start and accept the exact images before any external publication", publish_section)
-        publish = source.index("Publish only the already rehearsed images", publish_section)
-        self.assertLess(rehearse, publish)
-        self.assertNotIn("push: true", source[publish_section:publish])
+        self.assertIn("Publish only the Candidate-accepted OCI layouts", publish_section)
+        self.assertIn("verify-publish-candidate-input", publish_section)
+        self.assertIn("release-output/release-manifest.json", publish_section)
+        self.assertNotIn("docker/build-push-action@", publish_section)
+        self.assertNotIn("docker build", publish_section)
+        self.assertNotIn("generate-manifest", publish_section)
+        self.assertNotIn("scripts/rehearse-release-images.sh", publish_section)
+        self.assertIn('test "$(jq -er \'.release.version\'', publish_section)
+        self.assertIn('test "$(jq -er \'.release.commit\'', publish_section)
 
     def test_immutable_release_admin_read_credential_is_isolated_and_fail_closed(self):
         release = workflow("release.yml")
@@ -1329,7 +1192,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertLess(source.index(early_name), source.index("Download and verify Phase A qualification evidence"))
         self.assertLess(source.index(early_name), source.index("docker/login-action"))
         self.assertLess(publish.index(final_name), publish.index("docker/login-action"))
-        self.assertLess(publish.index(final_name), publish.index("docker push"))
+        self.assertLess(publish.index(final_name), publish.index("crane push"))
         self.assertLess(publish.index(final_name), publish.index("git push origin"))
         self.assertLess(
             publish.index(final_name),
@@ -1374,7 +1237,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_dependency_workflows_bind_once_and_use_closed_transport_roles(self):
         expected_counts = {
-            "release.yml": 3,
+            "release.yml": 2,
             "release-gate.yml": 3,
             "performance.yml": 2,
         }
@@ -1391,6 +1254,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 self.assertNotIn("release.registry_transport pull --role", source)
                 self.assertNotIn("docker.io/library/postgres@sha256:", source)
                 self.assertNotIn("docker.io/library/redis@sha256:", source)
+        release_publish = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        ).split("  publish:\n", 1)[1]
+        self.assertNotIn(projection, release_publish)
+        self.assertIn(
+            "Assemble the portable transport from accepted OCI layouts",
+            release_publish,
+        )
 
     def test_all_dependency_compose_startups_disable_hidden_pulls(self):
         paths = (
@@ -1442,23 +1313,54 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         publish = source[source.index("  publish:") :]
-        pull_gate = publish.index("Acquire exact dependency images before external publication")
-        dependency_layouts = publish.index(
-            "Materialize exact dependency OCI layouts before external publication"
+        accepted_gate = publish.index(
+            "Verify and stage exact qualified prepublication materials before mutation"
         )
+        self.assertNotIn("release.registry_transport pull-all", publish)
+        self.assertNotIn("crane pull", publish)
         for mutation_marker in (
             "docker/login-action",
-            "docker push",
+            "crane push",
             "actions/attest@",
             "git push origin",
             'gh api --method POST "repos/$GITHUB_REPOSITORY/releases"',
         ):
             with self.subTest(marker=mutation_marker):
-                self.assertLess(pull_gate, publish.index(mutation_marker))
-                self.assertLess(dependency_layouts, publish.index(mutation_marker))
-        post_mutation = publish[publish.index("Publish only the already rehearsed images") :]
-        self.assertNotIn('export_layout postgres "$POSTGRES_IMAGE"', post_mutation)
-        self.assertNotIn('export_layout redis "$REDIS_IMAGE"', post_mutation)
+                self.assertLess(accepted_gate, publish.index(mutation_marker))
+        post_mutation = publish[
+            publish.index("Publish only the Candidate-accepted OCI layouts") :
+        ]
+        self.assertNotIn("normalize-oci-layout", post_mutation)
+        self.assertNotIn("generate-manifest", post_mutation)
+        self.assertIn(
+            'cp -a "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT/candidate-runtime/oci"',
+            post_mutation,
+        )
+
+    def test_publish_normalizes_the_run_scoped_qualification_filename(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = source[source.index("  publish:") :]
+        stage = publish[
+            publish.index(
+                "Verify and stage exact qualified prepublication materials before mutation"
+            ) : publish.index("Recheck immutable release identity immediately before publishing")
+        ]
+        self.assertIn(
+            'qualification_source="$candidate_root/release-qualification-'
+            '${{ inputs.qualification_run_id }}.json"',
+            stage,
+        )
+        self.assertIn(
+            'install -m 0600 "$qualification_source" \\\n'
+            "            release-output/release-qualification.json",
+            stage,
+        )
+        self.assertNotIn(
+            '"$candidate_root/release-qualification.json"',
+            stage,
+        )
 
     def test_release_verifier_is_built_offline_from_a_pinned_go_toolchain(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -2389,6 +2291,39 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertEqual(publish.count("--expected-candidate-version"), 2)
         self.assertNotIn("continue-on-error", publish)
 
+    def test_publish_consumes_the_candidate_accepted_bytes_without_rebuilding(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = source[source.index("  publish:\n") :]
+        authority = source[
+            source.index("  release-authority:\n") :
+            source.index("  metadata-freshness-authority:\n")
+        ]
+
+        self.assertNotIn("docker/build-push-action", publish)
+        self.assertNotIn("docker build", publish)
+        self.assertNotIn("generate-manifest", publish)
+        for required in (
+            "candidate-input.json",
+            "verified-candidate.json",
+            "candidate-runtime",
+            "release-manifest.json",
+        ):
+            self.assertIn(required, authority)
+            self.assertIn(required, publish)
+        self.assertIn('chmod 0700 "$candidate_state"', publish)
+        self.assertIn(
+            'find "$candidate_state" -mindepth 1 -maxdepth 1 -type d', publish
+        )
+        self.assertIn("PUBLISH_CANDIDATE_BYTE_MISMATCH", publish)
+        mismatch_guard = publish.index("PUBLISH_CANDIDATE_BYTE_MISMATCH")
+        first_mutation = min(
+            publish.index("crane push"),
+            publish.index("gh api --method POST"),
+        )
+        self.assertLess(mismatch_guard, first_mutation)
+
     def test_qualification_artifact_outputs_use_canonical_sha256_identity(self):
         release = workflow("release.yml")
 
@@ -2431,6 +2366,7 @@ cp "$FIXTURE_ARCHIVE" "$output"
         mutation_indices = []
         mutation_fragments = (
             "docker push",
+            "crane push",
             "python -m release.cli build-portable",
             "git tag --annotate",
             'git push origin "refs/tags/',

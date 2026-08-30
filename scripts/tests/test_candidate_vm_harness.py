@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import ctypes
 import shutil
 import tempfile
@@ -481,6 +482,24 @@ class R2Client:
         return {}
 
 
+class R2ClientWithBetweenBoundaryDrift(R2Client):
+    def __init__(self):
+        super().__init__()
+        self.observation_count = 0
+
+    def list_objects_v2(self, *, continuation_token=None):
+        self.observation_count += 1
+        self.operations.append(
+            ("ListObjectsV2", {"continuation_token": continuation_token})
+        )
+        if self.observation_count == 1:
+            return {"Contents": [], "IsTruncated": False}
+        return {
+            "Contents": [{"Key": R2_RC14_PREFIX + "unexpected", "Size": 1}],
+            "IsTruncated": False,
+        }
+
+
 def _r2_environment():
     return {
         ACCOUNT_ID_ENV: ACCOUNT_ID,
@@ -525,7 +544,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 provider=self.provider,
             )
 
-    def _r2_receipt(self):
+    def _r2_receipt(self, observation_role="PRESTATE"):
         with mock.patch(
             "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
             sha256_bytes(ACCOUNT_ID.encode("ascii")),
@@ -534,6 +553,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 source_sha=SHA,
                 source_tree=TREE,
                 auth_method=R2_AUTH_METHOD_ARGUMENT,
+                observation_role=observation_role,
                 environment=_r2_environment(),
                 client=R2Client(),
             )
@@ -662,10 +682,11 @@ class CandidateVmHarnessTests(unittest.TestCase):
 
     def test_harness_selects_only_the_explicit_s3_acceptance_method(self):
         plan = self._plan()
-        receipt = self._r2_receipt()
+        prestate = self._r2_receipt("PRESTATE")
+        poststate = self._r2_receipt("POSTSTATE")
         with mock.patch(
             "scripts.candidate_vm_harness.verify_candidate_r2_origin_from_environment",
-            return_value=receipt,
+            side_effect=[prestate, poststate],
         ) as verify, mock.patch(
             "scripts.candidate_vm_harness.load_verified_candidate",
             return_value=self.loaded,
@@ -679,14 +700,22 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 provider=self.provider,
                 environment={},
             )
-        self.assertEqual(verify.call_count, 1)
+        self.assertEqual(verify.call_count, 2)
+        self.assertTrue(
+            all(
+                call.kwargs["auth_method"] == R2_AUTH_METHOD_ARGUMENT
+                for call in verify.call_args_list
+            )
+        )
         self.assertEqual(
-            verify.call_args.kwargs["auth_method"], R2_AUTH_METHOD_ARGUMENT
+            [call.kwargs["observation_role"] for call in verify.call_args_list],
+            ["PRESTATE", "POSTSTATE"],
         )
 
     def test_three_receipts_close_one_aggregate_without_publication_authority(self):
         plan = self._plan()
         environment = _r2_environment()
+        client = R2Client()
         with mock.patch(
             "scripts.candidate_vm_harness.load_verified_candidate",
             return_value=self.loaded,
@@ -699,7 +728,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 accepted_plan_digest=plan.plan_digest,
                 provider=self.provider,
                 environment=environment,
-                r2_client=R2Client(),
+                r2_client=client,
             )
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(len(result["profileReceipts"]), 3)
@@ -709,11 +738,11 @@ class CandidateVmHarnessTests(unittest.TestCase):
         self.assertFalse(aggregate["publish_authorized"])
         self.assertEqual(self.provider.external_calls, 2)
         self.assertEqual(
-            aggregate["rc14_prestate"],
+            aggregate["candidate_prestate"],
             {**harness.EXPECTED_RC14_EXTERNAL_STATE, "r2_origin": "PROVEN_EMPTY"},
         )
         self.assertEqual(
-            aggregate["rc14_poststate"],
+            aggregate["candidate_poststate"],
             {**harness.EXPECTED_RC14_EXTERNAL_STATE, "r2_origin": "PROVEN_EMPTY"},
         )
         self.assertEqual(
@@ -726,9 +755,97 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 canonical_json_bytes(result["r2OriginPrestateReceipt"])
             ),
         )
+        self.assertEqual(
+            aggregate["r2_origin_poststate_receipt_digest"],
+            sha256_bytes(
+                canonical_json_bytes(result["r2OriginPoststateReceipt"])
+            ),
+        )
+        self.assertEqual(
+            aggregate["r2_origin_prestate_observation_id"],
+            result["r2OriginPrestateReceipt"]["observation_id"],
+        )
+        self.assertEqual(
+            aggregate["r2_origin_poststate_observation_id"],
+            result["r2OriginPoststateReceipt"]["observation_id"],
+        )
+        self.assertNotEqual(
+            result["r2OriginPrestateReceipt"]["observation_id"],
+            result["r2OriginPoststateReceipt"]["observation_id"],
+        )
+        self.assertEqual(
+            [name for name, _ in client.operations].count("ListObjectsV2"), 2
+        )
+        self.assertEqual(
+            result["r2OriginPrestateReceipt"]["observation_role"], "PRESTATE"
+        )
+        self.assertEqual(
+            result["r2OriginPoststateReceipt"]["observation_role"], "POSTSTATE"
+        )
+        self.assertNotIn("rc14_prestate", aggregate)
+        self.assertNotIn("rc14_poststate", aggregate)
         unsigned = dict(aggregate)
         receipt_digest = unsigned.pop("receipt_digest")
         self.assertEqual(receipt_digest, sha256_bytes(canonical_json_bytes(unsigned)))
+
+    def test_same_r2_observation_id_with_distinct_roles_fails_closed(self):
+        plan = self._plan()
+        prestate = self._r2_receipt("PRESTATE")
+        poststate = self._r2_receipt("POSTSTATE")
+        poststate = copy.deepcopy(poststate)
+        poststate["observation_id"] = prestate["observation_id"]
+        poststate_unsigned = dict(poststate)
+        poststate_unsigned.pop("receipt_digest")
+        poststate["receipt_digest"] = sha256_bytes(
+            canonical_json_bytes(poststate_unsigned)
+        )
+        self.assertEqual(prestate["observation_id"], poststate["observation_id"])
+        self.assertNotEqual(
+            sha256_bytes(canonical_json_bytes(prestate)),
+            sha256_bytes(canonical_json_bytes(poststate)),
+        )
+
+        with mock.patch(
+            "scripts.candidate_vm_harness.verify_candidate_r2_origin_from_environment",
+            side_effect=[prestate, poststate],
+        ), mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ), self.assertRaisesRegex(
+            harness.CandidateHarnessError, "CANDIDATE_R2_OBSERVATION_REUSED"
+        ):
+            harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment={},
+            )
+        self.assertEqual(self.provider.execute_calls, 3)
+
+    def test_between_boundary_r2_drift_fails_closed_after_all_profiles(self):
+        plan = self._plan()
+        client = R2ClientWithBetweenBoundaryDrift()
+        with mock.patch(
+            "scripts.candidate_vm_harness.load_verified_candidate",
+            return_value=self.loaded,
+        ), mock.patch(
+            "release.r2_prestate.R2_ACCOUNT_ID_SHA256",
+            sha256_bytes(ACCOUNT_ID.encode("ascii")),
+        ), self.assertRaisesRegex(
+            harness.CandidateHarnessError, "R2_S3_PREFIX_NON_EMPTY"
+        ):
+            harness.execute_harness_plan(
+                plan,
+                accepted_plan_digest=plan.plan_digest,
+                provider=self.provider,
+                environment=_r2_environment(),
+                r2_client=client,
+            )
+        self.assertEqual(self.provider.execute_calls, 3)
+        self.assertEqual(client.observation_count, 2)
 
     def test_next_rc_execution_binds_r2_and_external_reads_to_candidate_version(self):
         candidate_version = "v1.1.0-rc.15"
@@ -759,7 +876,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
             for operation, request in client.operations
             if operation == "HeadObject"
         ]
-        self.assertEqual(len(head_keys), len(R2_RC14_EXPECTED_KEYS))
+        self.assertEqual(len(head_keys), 2 * len(R2_RC14_EXPECTED_KEYS))
         self.assertTrue(
             all(
                 key.startswith(

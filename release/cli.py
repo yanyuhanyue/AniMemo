@@ -26,6 +26,7 @@ from .candidate import (
     build_candidate_input,
     decode_aggregate_receipt_b64url,
     extract_candidate_oci_archive,
+    load_verified_candidate,
     normalize_candidate_oci_layout,
     verify_prepublication_candidate,
 )
@@ -97,6 +98,10 @@ from .publication import (
     PublicationError,
     build_publication_plan,
     validate_publication_plan,
+)
+from .publication_input import (
+    PublicationInputError,
+    build_publish_candidate_plan,
 )
 from .r2_prestate import (
     R2_AUTH_METHOD_ARGUMENT,
@@ -510,7 +515,29 @@ def _verify_prepublication_candidate(args) -> dict[str, object]:
         expected_source_tree=args.expected_source_tree,
         expected_candidate_version=args.expected_candidate_version,
         verified_at=args.verified_at,
+        _state_root=args.state_root,
     )
+
+
+def _verify_publish_candidate_input(args) -> dict[str, object]:
+    loaded = load_verified_candidate(
+        args.verified_candidate_digest,
+        _state_root=args.state_root,
+    )
+    plan = build_publish_candidate_plan(
+        loaded,
+        _read_json(args.candidate_acceptance_receipt),
+    )
+    _write_json(args.output, plan)
+    return {
+        "status": "PASS",
+        "output": str(args.output),
+        "planDigest": plan["plan_digest"],
+        "verifiedCandidateDigest": plan["verified_candidate_digest"],
+        "candidateAcceptanceReceiptDigest": plan[
+            "candidate_acceptance_receipt_digest"
+        ],
+    }
 
 
 def _decode_candidate_acceptance_receipt(args) -> dict[str, object]:
@@ -1177,7 +1204,17 @@ def _parser() -> argparse.ArgumentParser:
             "enters Candidate Identity bytes"
         ),
     )
+    candidate_verify.add_argument("--state-root", type=Path)
     candidate_verify.set_defaults(handler=_verify_prepublication_candidate)
+
+    publish_candidate = subparsers.add_parser("verify-publish-candidate-input")
+    publish_candidate.add_argument("--state-root", type=Path, required=True)
+    publish_candidate.add_argument("--verified-candidate-digest", required=True)
+    publish_candidate.add_argument(
+        "--candidate-acceptance-receipt", type=Path, required=True
+    )
+    publish_candidate.add_argument("--output", type=Path, required=True)
+    publish_candidate.set_defaults(handler=_verify_publish_candidate_input)
 
     candidate_receipt = subparsers.add_parser(
         "decode-candidate-acceptance-receipt"
@@ -1489,6 +1526,12 @@ def main(argv: list[str] | None = None) -> int:
                 sanitize_r2_diagnostic(value, environment=os.environ),
                 ensure_ascii=False,
             ),
+            file=sys.stderr,
+        )
+        return 2
+    except PublicationInputError as error:
+        print(
+            json.dumps({"code": error.code, "detail": str(error)}),
             file=sys.stderr,
         )
         return 2

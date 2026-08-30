@@ -80,6 +80,46 @@ class CandidateVerifierCliTests(unittest.TestCase):
             payload["verificationExecutionReceiptDigest"],
         )
 
+    def test_publish_candidate_command_emits_only_the_verified_plan(self):
+        digest = "sha256:" + "2" * 64
+        receipt_digest = "sha256:" + "3" * 64
+        plan_digest = "sha256:" + "4" * 64
+        plan = {
+            "schema": "animemo.publish-candidate-plan/v1",
+            "verified_candidate_digest": digest,
+            "candidate_acceptance_receipt_digest": receipt_digest,
+            "plan_digest": plan_digest,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            receipt = root / "candidate-acceptance-receipt.json"
+            receipt.write_text("{}\n", encoding="utf-8")
+            output_path = root / "publish-candidate-plan.json"
+            loaded = object()
+            with mock.patch(
+                "release.cli.load_verified_candidate", return_value=loaded
+            ) as loader, mock.patch(
+                "release.cli.build_publish_candidate_plan", return_value=plan
+            ) as builder, contextlib.redirect_stdout(io.StringIO()) as stdout:
+                result = cli.main(
+                    [
+                        "verify-publish-candidate-input",
+                        "--state-root",
+                        str(root),
+                        "--verified-candidate-digest",
+                        digest,
+                        "--candidate-acceptance-receipt",
+                        str(receipt),
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+            self.assertEqual(result, 0)
+            self.assertEqual(json.loads(output_path.read_text()), plan)
+            self.assertEqual(json.loads(stdout.getvalue())["planDigest"], plan_digest)
+            self.assertEqual(loader.call_args.kwargs["_state_root"], root)
+            self.assertEqual(builder.call_args.args[0], loaded)
+
 
 if __name__ == "__main__":
     unittest.main()

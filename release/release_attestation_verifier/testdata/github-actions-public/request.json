@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "mode": "actions-provenance",
+  "evidenceName": "api-image",
+  "subject": {
+    "name": "ghcr.io/yanyuhanyue/animemo-api",
+    "sha256": "sha256:2588108838c23c9b7e29d70d3a897109bf93b5c52cc4bcf949d5434e51496459",
+    "size": 0
+  },
+  "workflow": ".github/workflows/release.yml",
+  "sourceCommit": "1e699c456110266398f868e43fa2e69b2d704d24"
+}

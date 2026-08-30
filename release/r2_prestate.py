@@ -14,6 +14,7 @@ import os
 import re
 import tempfile
 import threading
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ from .candidate import CandidateContractError, canonical_json_bytes, sha256_byte
 REPOSITORY = "yanyuhanyue/AniMemo"
 TARGET_VERSION = "v1.1.0"
 TARGET_RC = "v1.1.0-rc.14"
-R2_RECEIPT_SCHEMA = "animemo.r2-origin-prestate-receipt/v2"
+R2_RECEIPT_SCHEMA = "animemo.r2-origin-observation-receipt/v3"
 R2_AUTH_METHOD = "R2_S3_OBJECT_READ_ONLY"
 R2_AUTH_METHOD_ARGUMENT = "s3-object-read-only"
 R2_ACCOUNT_ID_SHA256 = (
@@ -46,6 +47,7 @@ R2_RC14_EXPECTED_KEYS = (
     "release-manifest.json",
 )
 R2_JURISDICTIONS = frozenset({"default", "eu", "fedramp", "us"})
+R2_OBSERVATION_ROLES = frozenset({"PRESTATE", "POSTSTATE"})
 
 ACCESS_KEY_ENV = "ANIMEMO_R2_S3_ACCESS_KEY_ID"
 SECRET_KEY_ENV = "ANIMEMO_R2_S3_SECRET_ACCESS_KEY"
@@ -511,10 +513,24 @@ def verify_r2_origin_empty(
     jurisdiction: str,
     credentials: R2S3Credentials,
     target_rc: str = TARGET_RC,
+    observation_role: str = "PRESTATE",
     client: R2S3ReadonlyApi | None = None,
     clock: Callable[[], datetime] = _utc_now,
+    observation_id_factory: Callable[[], uuid.UUID] = uuid.uuid4,
 ) -> dict[str, object]:
     _validate_source_identity(source_sha, source_tree)
+    if observation_role not in R2_OBSERVATION_ROLES:
+        _raise("R2_S3_OBSERVATION_ROLE_INVALID")
+    try:
+        observation_uuid = observation_id_factory()
+    except Exception as error:
+        raise R2S3PrecheckError("R2_S3_OBSERVATION_ID_INVALID") from error
+    if (
+        type(observation_uuid) is not uuid.UUID
+        or observation_uuid.version != 4
+        or str(observation_uuid) != str(observation_uuid).lower()
+    ):
+        _raise("R2_S3_OBSERVATION_ID_INVALID")
     prefix = candidate_r2_prefix(target_rc)
     expected_keys = candidate_r2_expected_keys(target_rc)
     endpoint_host, _ = build_r2_s3_endpoint(account_id, jurisdiction)
@@ -628,7 +644,9 @@ def verify_r2_origin_empty(
     completed_at = _timestamp(clock())
     receipt: dict[str, object] = {
         "schema": R2_RECEIPT_SCHEMA,
-        "version": 2,
+        "version": 3,
+        "observation_role": observation_role,
+        "observation_id": str(observation_uuid),
         "repository": REPOSITORY,
         "source_sha": source_sha,
         "source_tree": source_tree,
@@ -648,6 +666,7 @@ def verify_r2_origin_empty(
         "completion_marker_count": 0,
         "temporary_object_count": 0,
         "object_inventory": [],
+        "object_inventory_digest": sha256_bytes(canonical_json_bytes([])),
         "started_at": started_at,
         "completed_at": completed_at,
         "result": "PROVEN_EMPTY",
@@ -673,9 +692,11 @@ def verify_candidate_r2_origin_from_environment(
     source_sha: str,
     source_tree: str,
     auth_method: str,
+    observation_role: str = "PRESTATE",
     environment: Mapping[str, str] | None = None,
     client: R2S3ReadonlyApi | None = None,
     clock: Callable[[], datetime] = _utc_now,
+    observation_id_factory: Callable[[], uuid.UUID] = uuid.uuid4,
 ) -> dict[str, object]:
     if auth_method != R2_AUTH_METHOD_ARGUMENT:
         _raise("R2_S3_AUTH_METHOD_INVALID")
@@ -690,8 +711,10 @@ def verify_candidate_r2_origin_from_environment(
         jurisdiction=jurisdiction,
         credentials=credentials,
         target_rc=target_rc,
+        observation_role=observation_role,
         client=client,
         clock=clock,
+        observation_id_factory=observation_id_factory,
     )
 
 
@@ -700,6 +723,7 @@ def verify_rc14_r2_origin_from_environment(
     source_sha: str,
     source_tree: str,
     auth_method: str,
+    observation_role: str = "PRESTATE",
     environment: Mapping[str, str] | None = None,
     client: R2S3ReadonlyApi | None = None,
     clock: Callable[[], datetime] = _utc_now,
@@ -709,6 +733,7 @@ def verify_rc14_r2_origin_from_environment(
         source_sha=source_sha,
         source_tree=source_tree,
         auth_method=auth_method,
+        observation_role=observation_role,
         environment=environment,
         client=client,
         clock=clock,
@@ -731,6 +756,7 @@ def validate_r2_origin_receipt(
     expected_source_sha: str | None = None,
     expected_source_tree: str | None = None,
     expected_target_rc: str | None = None,
+    expected_observation_role: str | None = None,
 ) -> dict[str, object]:
     errors = tuple(_receipt_validator().iter_errors(value))
     if errors or type(value) is not dict:
@@ -740,6 +766,7 @@ def validate_r2_origin_receipt(
         account_hash = sha256_bytes(receipt["account_id"].encode("ascii"))
         start = datetime.fromisoformat(receipt["started_at"].replace("Z", "+00:00"))
         end = datetime.fromisoformat(receipt["completed_at"].replace("Z", "+00:00"))
+        observation_uuid = uuid.UUID(receipt["observation_id"])
     except (AttributeError, UnicodeEncodeError, ValueError):
         _raise("R2_S3_RECEIPT_INVALID")
     try:
@@ -752,6 +779,9 @@ def validate_r2_origin_receipt(
         _raise("R2_S3_RECEIPT_INVALID")
     if (
         account_hash != R2_ACCOUNT_ID_SHA256
+        or receipt["observation_role"] not in R2_OBSERVATION_ROLES
+        or observation_uuid.version != 4
+        or str(observation_uuid) != receipt["observation_id"]
         or receipt["repository"] != REPOSITORY
         or receipt["target_version"] != TARGET_VERSION
         or not receipt["target_rc"].startswith(TARGET_VERSION + "-rc.")
@@ -764,6 +794,8 @@ def validate_r2_origin_receipt(
         or receipt["completion_marker_count"] != 0
         or receipt["temporary_object_count"] != 0
         or receipt["object_inventory"] != []
+        or receipt["object_inventory_digest"]
+        != sha256_bytes(canonical_json_bytes(receipt["object_inventory"]))
         or receipt["release_authority_granted"] is not False
         or receipt["publish_authorized"] is not False
         or receipt["result"] != "PROVEN_EMPTY"
@@ -773,6 +805,10 @@ def validate_r2_origin_receipt(
         or (expected_source_sha is not None and receipt["source_sha"] != expected_source_sha)
         or (expected_source_tree is not None and receipt["source_tree"] != expected_source_tree)
         or (expected_target_rc is not None and receipt["target_rc"] != expected_target_rc)
+        or (
+            expected_observation_role is not None
+            and receipt["observation_role"] != expected_observation_role
+        )
     ):
         _raise("R2_S3_RECEIPT_INVALID")
     unsigned = dict(receipt)
@@ -832,6 +868,7 @@ __all__ = [
     "R2_AUTH_METHOD_ARGUMENT",
     "R2_BUCKET",
     "R2_JURISDICTIONS",
+    "R2_OBSERVATION_ROLES",
     "R2_RC14_EXPECTED_KEYS",
     "R2_RC14_PREFIX",
     "R2_RECEIPT_SCHEMA",

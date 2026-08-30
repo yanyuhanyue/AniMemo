@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -417,14 +418,104 @@ func matchesOCISubject(name, repositoryName, digest string) bool {
 }
 
 func actionsCertificateExtensions(request actionsRequest) certificate.Extensions {
+	workflowIdentity := "https://github.com/" + repository + "/" +
+		request.Workflow + "@" + actionsSourceRef
 	return certificate.Extensions{
-		RunnerEnvironment:        "github-hosted",
-		SourceRepositoryURI:      "https://github.com/" + repository,
-		SourceRepositoryOwnerURI: "https://github.com/yanyuhanyue",
-		BuildSignerDigest:        request.SourceCommit,
-		SourceRepositoryDigest:   request.SourceCommit,
-		SourceRepositoryRef:      actionsSourceRef,
+		BuildSignerURI:                      workflowIdentity,
+		RunnerEnvironment:                   "github-hosted",
+		SourceRepositoryURI:                 "https://github.com/" + repository,
+		SourceRepositoryOwnerURI:            "https://github.com/yanyuhanyue",
+		BuildSignerDigest:                   request.SourceCommit,
+		SourceRepositoryDigest:              request.SourceCommit,
+		SourceRepositoryRef:                 actionsSourceRef,
+		SourceRepositoryIdentifier:          repositoryID,
+		SourceRepositoryOwnerIdentifier:     ownerID,
+		BuildConfigURI:                      workflowIdentity,
+		BuildConfigDigest:                   request.SourceCommit,
+		BuildTrigger:                        "workflow_dispatch",
+		SourceRepositoryVisibilityAtSigning: "public",
 	}
+}
+
+func actionsCertificateIdentity(request actionsRequest) (verify.CertificateIdentity, error) {
+	identity := "https://github.com/" + repository + "/" + request.Workflow + "@" + actionsSourceRef
+	sanMatcher, err := verify.NewSANMatcher(identity, "")
+	if err != nil {
+		return verify.CertificateIdentity{}, err
+	}
+	issuerMatcher, err := verify.NewIssuerMatcher(actionsOIDCIssuer, "")
+	if err != nil {
+		return verify.CertificateIdentity{}, err
+	}
+	return verify.NewCertificateIdentity(
+		sanMatcher,
+		issuerMatcher,
+		actionsCertificateExtensions(request),
+	)
+}
+
+func summarizeUniqueActionsCertificate(cert *x509.Certificate) (certificate.Summary, error) {
+	if cert == nil {
+		return certificate.Summary{}, errors.New("Actions certificate 缺失")
+	}
+	seen := map[string]int{}
+	legacyIssuer := ""
+	issuerV2 := ""
+	for _, extension := range cert.Extensions {
+		identity := extension.Id.String()
+		seen[identity]++
+		if seen[identity] != 1 {
+			return certificate.Summary{}, fmt.Errorf(
+				"Actions certificate extension 重复: %s", identity,
+			)
+		}
+		if extension.Id.Equal(certificate.OIDIssuer) {
+			legacyIssuer = string(extension.Value)
+		}
+		if extension.Id.Equal(certificate.OIDIssuerV2) {
+			if err := certificate.ParseDERString(extension.Value, &issuerV2); err != nil {
+				return certificate.Summary{}, err
+			}
+		}
+	}
+	if seen[certificate.OIDIssuer.String()]+
+		seen[certificate.OIDIssuerV2.String()] == 0 {
+		return certificate.Summary{}, errors.New("Actions certificate issuer extension 不唯一")
+	}
+	if legacyIssuer != "" && issuerV2 != "" && legacyIssuer != issuerV2 {
+		return certificate.Summary{}, errors.New("Actions certificate issuer extension 冲突")
+	}
+	required := []string{
+		certificate.OIDBuildSignerURI.String(),
+		certificate.OIDBuildSignerDigest.String(),
+		certificate.OIDRunnerEnvironment.String(),
+		certificate.OIDSourceRepositoryURI.String(),
+		certificate.OIDSourceRepositoryDigest.String(),
+		certificate.OIDSourceRepositoryRef.String(),
+		certificate.OIDSourceRepositoryIdentifier.String(),
+		certificate.OIDSourceRepositoryOwnerURI.String(),
+		certificate.OIDSourceRepositoryOwnerIdentifier.String(),
+		certificate.OIDBuildConfigURI.String(),
+		certificate.OIDBuildConfigDigest.String(),
+		certificate.OIDBuildTrigger.String(),
+		certificate.OIDRunInvocationURI.String(),
+		certificate.OIDSourceRepositoryVisibilityAtSigning.String(),
+	}
+	for _, identity := range required {
+		if seen[identity] != 1 {
+			return certificate.Summary{}, fmt.Errorf(
+				"Actions certificate required extension 缺失: %s", identity,
+			)
+		}
+	}
+	summary, err := certificate.SummarizeCertificate(cert)
+	if err != nil {
+		return certificate.Summary{}, err
+	}
+	if summary.Extensions.RunInvocationURI == "" {
+		return certificate.Summary{}, errors.New("Actions run invocation identity 缺失")
+	}
+	return summary, nil
 }
 
 func decodeClosedJSON(path string, target any) error {
@@ -590,6 +681,14 @@ func verifyActions(bundlePath, trustedRootPath, requestPath string) (actionsClai
 	if err != nil {
 		return actionsClaim{}, fmt.Errorf("Sigstore bundle 无效: %w", err)
 	}
+	content, err := entity.VerificationContent()
+	if err != nil || content.Certificate() == nil {
+		return actionsClaim{}, errors.New("Actions certificate 不可用")
+	}
+	certificateSummary, err := summarizeUniqueActionsCertificate(content.Certificate())
+	if err != nil {
+		return actionsClaim{}, err
+	}
 	verifier, err := verify.NewVerifier(
 		trustedRoot,
 		verify.WithSignedCertificateTimestamps(1),
@@ -599,22 +698,12 @@ func verifyActions(bundlePath, trustedRootPath, requestPath string) (actionsClai
 	if err != nil {
 		return actionsClaim{}, fmt.Errorf("Sigstore verifier 初始化失败: %w", err)
 	}
-	identity := "https://github.com/" + repository + "/" + request.Workflow + "@" + actionsSourceRef
-	sanMatcher, err := verify.NewSANMatcher(identity, "")
+	certIdentity, err := actionsCertificateIdentity(request)
 	if err != nil {
 		return actionsClaim{}, err
 	}
-	issuerMatcher, err := verify.NewIssuerMatcher(actionsOIDCIssuer, "")
-	if err != nil {
-		return actionsClaim{}, err
-	}
-	certIdentity, err := verify.NewCertificateIdentity(
-		sanMatcher,
-		issuerMatcher,
-		actionsCertificateExtensions(request),
-	)
-	if err != nil {
-		return actionsClaim{}, err
+	if err := certIdentity.Verify(certificateSummary); err != nil {
+		return actionsClaim{}, fmt.Errorf("Actions certificate 身份不一致: %w", err)
 	}
 	digestBytes, err := hex.DecodeString(trimDigest(request.Subject.SHA256))
 	if err != nil {

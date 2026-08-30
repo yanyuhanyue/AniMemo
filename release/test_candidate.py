@@ -373,8 +373,8 @@ def aggregate_receipt() -> dict[str, object]:
         "r2_origin": "PROVEN_EMPTY",
     }
     value = {
-        "schema": "animemo.prepublication-candidate-acceptance-receipt/v1",
-        "version": 1,
+        "schema": "animemo.prepublication-candidate-acceptance-receipt/v2",
+        "version": 2,
         "candidate_input_digest": "sha256:" + "1" * 64,
         "verified_candidate_digest": "sha256:" + "2" * 64,
         "qualification_run_id": RUN_ID,
@@ -383,14 +383,21 @@ def aggregate_receipt() -> dict[str, object]:
         "source_tree": TREE,
         "candidate_version": "v1.1.0-rc.14",
         "r2_origin_prestate_receipt_digest": "sha256:" + "6" * 64,
+        "r2_origin_poststate_receipt_digest": "sha256:" + "7" * 64,
+        "r2_origin_prestate_observation_id": (
+            "12345678-1234-4678-9234-567812345678"
+        ),
+        "r2_origin_poststate_observation_id": (
+            "87654321-4321-4765-8abc-876543210fed"
+        ),
         "profile_receipts": {
             "fresh_base": "sha256:" + "3" * 64,
             "docker_base": "sha256:" + "4" * 64,
             "runtime_base_offline": "sha256:" + "5" * 64,
         },
         "all_profiles_pass": True,
-        "rc14_prestate": dict(state),
-        "rc14_poststate": dict(state),
+        "candidate_prestate": dict(state),
+        "candidate_poststate": dict(state),
         "repository_mutation_count": 0,
         "publication_mutation_count": 0,
         "shared_host_connection_count": 0,
@@ -664,18 +671,58 @@ sys.stdout.buffer.write(canonical_json_bytes(identity))
         ):
             validate_aggregate_receipt(tampered)
 
-    def test_every_rc_aggregate_requires_r2_prestate_receipt_digest(self):
+    def test_every_rc_aggregate_requires_distinct_r2_observations(self):
         for candidate_version in ("v1.1.0-rc.14", "v1.1.0-rc.15"):
-            receipt = aggregate_receipt()
-            receipt["candidate_version"] = candidate_version
-            receipt.pop("r2_origin_prestate_receipt_digest")
-            unsigned = dict(receipt)
-            unsigned.pop("receipt_digest")
-            receipt["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
-            with self.subTest(candidate_version=candidate_version), self.assertRaisesRegex(
-                CandidateContractError, "CANDIDATE_ACCEPTANCE_RECEIPT_INVALID"
+            for missing in (
+                "r2_origin_prestate_receipt_digest",
+                "r2_origin_poststate_receipt_digest",
+                "r2_origin_prestate_observation_id",
+                "r2_origin_poststate_observation_id",
             ):
-                validate_aggregate_receipt(receipt)
+                receipt = aggregate_receipt()
+                receipt["candidate_version"] = candidate_version
+                receipt.pop(missing)
+                unsigned = dict(receipt)
+                unsigned.pop("receipt_digest")
+                receipt["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
+                with self.subTest(
+                    candidate_version=candidate_version, missing=missing
+                ), self.assertRaisesRegex(
+                    CandidateContractError, "CANDIDATE_ACCEPTANCE_RECEIPT_INVALID"
+                ):
+                    validate_aggregate_receipt(receipt)
+            reused = aggregate_receipt()
+            reused["candidate_version"] = candidate_version
+            reused["r2_origin_poststate_receipt_digest"] = reused[
+                "r2_origin_prestate_receipt_digest"
+            ]
+            unsigned = dict(reused)
+            unsigned.pop("receipt_digest")
+            reused["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
+            with self.subTest(
+                candidate_version=candidate_version, reused=True
+            ), self.assertRaisesRegex(
+                CandidateContractError, "CANDIDATE_R2_OBSERVATION_REUSED"
+            ):
+                validate_aggregate_receipt(reused)
+
+    def test_aggregate_rejects_same_r2_observation_id_even_when_roles_change_digest(self):
+        receipt = aggregate_receipt()
+        receipt["r2_origin_poststate_observation_id"] = (
+            "12345678-1234-4678-9234-567812345678"
+        )
+        self.assertNotEqual(
+            receipt["r2_origin_prestate_receipt_digest"],
+            receipt["r2_origin_poststate_receipt_digest"],
+        )
+        unsigned = dict(receipt)
+        unsigned.pop("receipt_digest")
+        receipt["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
+
+        with self.assertRaisesRegex(
+            CandidateContractError, "CANDIDATE_R2_OBSERVATION_REUSED"
+        ):
+            validate_aggregate_receipt(receipt)
 
     def test_offline_profile_rejects_any_network_apt_or_pull(self):
         receipt = {

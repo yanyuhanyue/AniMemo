@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yanyuhanyue/AniMemo/blob/main/release/formal-provenance-preflight-receipt.schema.json",
+  "title": "AniMemo non-authoritative Formal provenance preflight receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "verifier_digest",
+    "claims",
+    "clone_authorized",
+    "release_authority_granted",
+    "publish_authorized",
+    "preflight_digest"
+  ],
+  "properties": {
+    "schema": {"const": "animemo.formal-provenance-preflight/v1"},
+    "verifier_digest": {"$ref": "#/$defs/digest"},
+    "claims": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {"$ref": "#/$defs/claim"},
+      "allOf": [
+        {"contains": {"properties": {"evidence_name": {"const": "api-image"}}, "required": ["evidence_name"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"evidence_name": {"const": "web-image"}}, "required": ["evidence_name"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"evidence_name": {"const": "release-manifest"}}, "required": ["evidence_name"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"evidence_name": {"const": "deployment-contract"}}, "required": ["evidence_name"]}, "minContains": 1, "maxContains": 1},
+        {"contains": {"properties": {"evidence_name": {"const": "installer-materials"}}, "required": ["evidence_name"]}, "minContains": 1, "maxContains": 1}
+      ]
+    },
+    "clone_authorized": {"const": false},
+    "release_authority_granted": {"const": false},
+    "publish_authorized": {"const": false},
+    "preflight_digest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_name",
+        "subject",
+        "workflow",
+        "source_commit",
+        "bundle_digest",
+        "trusted_root_digest",
+        "request_digest",
+        "claim_digest"
+      ],
+      "properties": {
+        "evidence_name": {
+          "enum": ["api-image", "web-image", "release-manifest", "deployment-contract", "installer-materials"]
+        },
+        "subject": {"$ref": "#/$defs/subject"},
+        "workflow": {
+          "enum": [".github/workflows/release.yml", ".github/workflows/promote-release.yml"]
+        },
+        "source_commit": {"$ref": "#/$defs/gitSha"},
+        "bundle_digest": {"$ref": "#/$defs/digest"},
+        "trusted_root_digest": {"$ref": "#/$defs/digest"},
+        "request_digest": {"$ref": "#/$defs/digest"},
+        "claim_digest": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}
