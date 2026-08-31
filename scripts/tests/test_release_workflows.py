@@ -330,6 +330,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             qualification,
         )
 
+    def test_release_producer_forwards_heredoc_stdin_into_the_container(self):
+        producer = (ROOT / "scripts" / "run-in-release-producer.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("docker run --rm --init --interactive --read-only", producer)
+
     def test_candidate_large_bytes_have_one_authoritative_producer_and_one_upload(self):
         release = workflow("release.yml")
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(

@@ -79,6 +79,14 @@ _FORMAL_TO_PROVIDER = {
     "FORMAL_OFFLINE": "RUNTIME_BASE_OFFLINE",
 }
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_FORMAL_OBSERVATION_ORDER = (
+    "api-image",
+    "web-image",
+    "release-manifest",
+    "deployment-contract",
+    "installer-materials",
+    "github-release",
+)
 
 
 class FormalCleanupFailure(BaseException):
@@ -390,12 +398,53 @@ def _closed_evidence_file_identity(path: Path) -> tuple[str, int]:
             raise FormalProducerError("FORMAL_EVIDENCE_INVENTORY_INVALID")
         digest = hashlib.sha256()
         with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_size,
+                    opened.st_mtime_ns,
+                )
+                != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                )
+            ):
+                raise FormalProducerError("FORMAL_EVIDENCE_INVENTORY_REBOUND")
             while chunk := handle.read(1024 * 1024):
                 digest.update(chunk)
+            closed = os.fstat(handle.fileno())
         after = path.lstat()
         if (
-            before.st_size != after.st_size
-            or before.st_mtime_ns != after.st_mtime_ns
+            (
+                closed.st_dev,
+                closed.st_ino,
+                closed.st_size,
+                closed.st_mtime_ns,
+            )
+            != (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+            )
+            or (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            )
+            != (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+            )
             or not stat.S_ISREG(after.st_mode)
             or after.st_nlink != 1
         ):
@@ -624,6 +673,31 @@ class _FormalRuntimeSnapshot:
 
     def __init__(self, root: Path, stack: ExitStack) -> None:
         self.root = root
+        self._stack = stack
+
+    def cleanup(self) -> None:
+        stack = self._stack
+        self._stack = ExitStack()
+        try:
+            stack.close()
+        finally:
+            shutil.rmtree(self.root, ignore_errors=True)
+
+
+class _FormalInputSnapshot:
+    """Held exact Formal evidence bytes reused by observation and every retry."""
+
+    def __init__(
+        self,
+        *,
+        root: Path,
+        stack: ExitStack,
+        provenance_inputs: tuple[FormalProvenanceInput, ...],
+        publication_input: FormalProvenanceInput,
+    ) -> None:
+        self.root = root
+        self.provenance_inputs = provenance_inputs
+        self.publication_input = publication_input
         self._stack = stack
 
     def cleanup(self) -> None:
@@ -1638,7 +1712,9 @@ class ReleaseContinuationParentWorker:
         "_clear_r2_credentials",
         "_clear_sudo_credentials",
         "_formal_attempts",
+        "_formal_input_snapshot",
         "_formal_output_roots",
+        "_formal_request_observation",
         "_formal_terminal",
         "_lifetime_authority",
         "_lifetime_closed",
@@ -1668,7 +1744,9 @@ class ReleaseContinuationParentWorker:
         self._lifetime_closed = False
         self._candidate_started = False
         self._formal_attempts = 0
+        self._formal_input_snapshot: _FormalInputSnapshot | None = None
         self._formal_output_roots: set[Path] = set()
+        self._formal_request_observation: dict[str, Any] | None = None
         self._formal_terminal = False
         self._qualified_candidate: QualifiedCandidateFormalAuthority | None = None
         self._r2_cleared = False
@@ -1704,6 +1782,111 @@ class ReleaseContinuationParentWorker:
         if qualified is not None:
             qualified.close()
             self._qualified_candidate = None
+        self._formal_request_observation = None
+
+    def _close_formal_input_snapshot(self) -> None:
+        snapshot = self._formal_input_snapshot
+        if snapshot is not None:
+            snapshot.cleanup()
+            self._formal_input_snapshot = None
+        self._formal_request_observation = None
+
+    @staticmethod
+    def _formal_input_binding(
+        provenance_inputs: tuple[FormalProvenanceInput, ...],
+        publication_input: FormalProvenanceInput,
+    ) -> tuple[dict[str, str], ...]:
+        values = (*provenance_inputs, publication_input)
+        if (
+            len(values) != len(_FORMAL_OBSERVATION_ORDER)
+            or any(
+                type(item) is not FormalProvenanceInput
+                or item.trusted_root is not None
+                for item in values
+            )
+        ):
+            raise FormalProducerError("FORMAL_PARENT_OBSERVATION_INPUT_INVALID")
+        if (
+            tuple(item.evidence_name for item in values)
+            != _FORMAL_OBSERVATION_ORDER
+        ):
+            raise FormalProducerError("FORMAL_PARENT_OBSERVATION_INPUT_INVALID")
+        return tuple(
+            {
+                "evidenceName": item.evidence_name,
+                "bundleSha256": sha256_bytes(
+                    _read_closed_asset(item.bundle, maximum=16 * 1024 * 1024)
+                ),
+                "requestSha256": sha256_bytes(
+                    _read_closed_asset(item.request, maximum=16 * 1024 * 1024)
+                ),
+            }
+            for item in values
+        )
+
+    def _create_formal_input_snapshot(
+        self,
+        *,
+        provenance_inputs: tuple[FormalProvenanceInput, ...],
+        publication_input: FormalProvenanceInput,
+        private_work_root: Path,
+        expected_binding: tuple[dict[str, str], ...],
+    ) -> _FormalInputSnapshot:
+        try:
+            root = create_windows_private_directory(
+                private_work_root,
+                prefix="animemo-formal-inputs",
+            )
+        except (OSError, FormalWindowsPretrustError) as error:
+            raise FormalProducerError(
+                "FORMAL_PARENT_OBSERVATION_SNAPSHOT_INVALID"
+            ) from error
+        stack = ExitStack()
+        try:
+            snapshot_values: list[FormalProvenanceInput] = []
+            relative_files: list[str] = []
+            for index, item in enumerate((*provenance_inputs, publication_input)):
+                prefix = f"{index:02d}-{item.evidence_name}"
+                bundle = root / f"{prefix}.bundle.json"
+                request = root / f"{prefix}.request.json"
+                _copy_closed_asset(item.bundle, bundle, maximum=16 * 1024 * 1024)
+                _copy_closed_asset(item.request, request, maximum=16 * 1024 * 1024)
+                assert_windows_private_acl(bundle)
+                assert_windows_private_acl(request)
+                relative_files.extend((bundle.name, request.name))
+                snapshot_values.append(
+                    FormalProvenanceInput(
+                        evidence_name=item.evidence_name,
+                        bundle=bundle,
+                        trusted_root=None,
+                        request=request,
+                    )
+                )
+            stack.enter_context(
+                hold_windows_private_snapshot(
+                    root,
+                    relative_files=tuple(sorted(relative_files)),
+                )
+            )
+            snapshot = _FormalInputSnapshot(
+                root=root,
+                stack=stack,
+                provenance_inputs=tuple(snapshot_values[:-1]),
+                publication_input=snapshot_values[-1],
+            )
+            if (
+                self._formal_input_binding(
+                    snapshot.provenance_inputs,
+                    snapshot.publication_input,
+                )
+                != expected_binding
+            ):
+                raise FormalProducerError("FORMAL_PARENT_OBSERVATION_REBOUND")
+            return snapshot
+        except BaseException:
+            stack.close()
+            shutil.rmtree(root, ignore_errors=True)
+            raise
 
     @staticmethod
     def _formal_result_retryable(result: Mapping[str, object]) -> bool:
@@ -1775,6 +1958,9 @@ class ReleaseContinuationParentWorker:
             result = {
                 "status": "PASS",
                 "verifiedCandidateDigest": verified_candidate_digest,
+                "candidateAggregateReceipt": (
+                    qualified.candidate_aggregate_receipt
+                ),
                 "candidateAggregateReceiptDigest": (
                     qualified.candidate_aggregate_receipt_digest
                 ),
@@ -1806,6 +1992,85 @@ class ReleaseContinuationParentWorker:
             raise
         return result
 
+    def observe_formal_request(
+        self,
+        *,
+        provenance_inputs: tuple[FormalProvenanceInput, ...],
+        publication_input: FormalProvenanceInput,
+        expected_file_sha256: tuple[dict[str, str], ...],
+        private_work_root: Path,
+    ) -> dict[str, Any]:
+        qualified = self._qualified_candidate
+        if (
+            self._formal_terminal
+            or qualified is None
+            or not self._r2_cleared
+            or self._sudo_cleared
+            or self._formal_attempts != 0
+            or type(expected_file_sha256) is not tuple
+        ):
+            raise FormalProducerError("FORMAL_PARENT_CAPABILITY_UNAVAILABLE")
+        binding = self._formal_input_binding(provenance_inputs, publication_input)
+        if (
+            binding != expected_file_sha256
+            or any(
+                type(item) is not dict
+                or set(item)
+                != {"evidenceName", "bundleSha256", "requestSha256"}
+                or _DIGEST.fullmatch(item["bundleSha256"] or "") is None
+                or _DIGEST.fullmatch(item["requestSha256"] or "") is None
+                for item in expected_file_sha256
+            )
+        ):
+            raise FormalProducerError("FORMAL_PARENT_OBSERVATION_INPUT_INVALID")
+        private_root = self._lifetime_authority.require_contained(
+            private_work_root,
+            name="PRIVATE_WORK_ROOT",
+        )
+        existing = self._formal_request_observation
+        if existing is not None:
+            if (
+                existing["binding"] != binding
+                or existing["privateWorkRoot"] != str(private_root)
+            ):
+                raise FormalProducerError("FORMAL_PARENT_OBSERVATION_REBOUND")
+            return dict(existing["result"])
+        snapshot = self._create_formal_input_snapshot(
+            provenance_inputs=provenance_inputs,
+            publication_input=publication_input,
+            private_work_root=private_root,
+            expected_binding=binding,
+        )
+        self._formal_input_snapshot = snapshot
+        try:
+            request = observe_qualified_formal_request(
+                qualified_candidate=qualified,
+                provenance_inputs=snapshot.provenance_inputs,
+                publication_input=snapshot.publication_input,
+                private_work_root=private_root,
+                _parent_path_authority=self._lifetime_authority.path_authority,
+            )
+        except BaseException:
+            self._close_formal_input_snapshot()
+            raise
+        if type(request) is not FormalAuthorityRequest:
+            self._close_formal_input_snapshot()
+            raise FormalProducerError("FORMAL_PARENT_OBSERVATION_INVALID")
+        result = {
+            "schema": "animemo.formal-request-authority-observation/v1",
+            "result": "PASS",
+            "publicationIdentity": request.publication_identity,
+            "attestationClaimIdentities": dict(
+                request.attestation_claim_identities
+            ),
+        }
+        self._formal_request_observation = {
+            "binding": binding,
+            "privateWorkRoot": str(private_root),
+            "result": result,
+        }
+        return dict(result)
+
     def run_formal(
         self,
         *,
@@ -1836,6 +2101,20 @@ class ReleaseContinuationParentWorker:
             private_work_root,
             name="PRIVATE_WORK_ROOT",
         )
+        observation = self._formal_request_observation
+        if observation is not None and (
+            observation["privateWorkRoot"] != str(private_work_root)
+            or observation["binding"]
+            != self._formal_input_binding(provenance_inputs, publication_input)
+            or observation["result"]["publicationIdentity"]
+            != publication_identity
+            or observation["result"]["attestationClaimIdentities"]
+            != dict(attestation_claim_identities)
+        ):
+            raise FormalProducerError("FORMAL_PARENT_OBSERVATION_REBOUND")
+        snapshot = self._formal_input_snapshot
+        if observation is not None and snapshot is None:
+            raise FormalProducerError("FORMAL_PARENT_OBSERVATION_REBOUND")
         attempt_output_root = self._lifetime_authority.require_contained(
             output_root,
             name="OUTPUT_ROOT",
@@ -1849,8 +2128,16 @@ class ReleaseContinuationParentWorker:
                 qualified_candidate=qualified,
                 publication_identity=publication_identity,
                 attestation_claim_identities=attestation_claim_identities,
-                provenance_inputs=provenance_inputs,
-                publication_input=publication_input,
+                provenance_inputs=(
+                    snapshot.provenance_inputs
+                    if snapshot is not None
+                    else provenance_inputs
+                ),
+                publication_input=(
+                    snapshot.publication_input
+                    if snapshot is not None
+                    else publication_input
+                ),
                 execution=execution,
                 publication_root=publication_root,
                 private_work_root=private_work_root,
@@ -1864,9 +2151,12 @@ class ReleaseContinuationParentWorker:
             if not isinstance(error, Exception) or self._formal_attempts >= 5:
                 self._formal_terminal = True
                 try:
-                    self._close_qualified_candidate()
+                    self._close_formal_input_snapshot()
                 finally:
-                    self._clear_sudo_once()
+                    try:
+                        self._close_qualified_candidate()
+                    finally:
+                        self._clear_sudo_once()
             raise
         if (
             not self._formal_result_retryable(result)
@@ -1874,15 +2164,19 @@ class ReleaseContinuationParentWorker:
         ):
             self._formal_terminal = True
             try:
-                self._close_qualified_candidate()
+                self._close_formal_input_snapshot()
             finally:
-                self._clear_sudo_once()
+                try:
+                    self._close_qualified_candidate()
+                finally:
+                    self._clear_sudo_once()
         return result
 
     def fail_closed_cleanup(self) -> None:
         self._formal_terminal = True
         errors: list[BaseException] = []
         for action in (
+            self._close_formal_input_snapshot,
             self._close_qualified_candidate,
             self._clear_r2_once,
             self._clear_sudo_once,
@@ -1904,6 +2198,7 @@ class ReleaseContinuationParentWorker:
             raise FormalProducerError("FORMAL_PARENT_TERMINAL_CLEANUP_INVALID")
         errors: list[BaseException] = []
         for action in (
+            self._close_formal_input_snapshot,
             self._close_qualified_candidate,
             self._clear_r2_once,
             self._clear_sudo_once,
@@ -1978,6 +2273,29 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AniMemo Formal VM producer")
     parser.add_argument("--execute", action="store_true")
     return parser
+
+
+def observe_qualified_formal_request(
+    *,
+    qualified_candidate: QualifiedCandidateFormalAuthority,
+    provenance_inputs: tuple[FormalProvenanceInput, ...],
+    publication_input: FormalProvenanceInput,
+    private_work_root: Path,
+    _parent_path_authority: HeldWindowsPrivatePathAuthority | None = None,
+) -> FormalAuthorityRequest:
+    """Verify signed evidence once to derive the exact Formal request identities."""
+
+    verifier = ProductionFormalAuthorityVerifier(
+        FormalProvenancePlan(
+            verifier=None,
+            inputs=provenance_inputs,
+            publication=publication_input,
+            private_work_root=private_work_root,
+            qualified_candidate=qualified_candidate,
+        ),
+        _parent_path_authority=_parent_path_authority,
+    )
+    return verifier.observe_request()
 
 
 def execute_qualified_formal_production(

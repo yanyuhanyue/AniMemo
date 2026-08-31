@@ -53,7 +53,7 @@ test "$(stat -c '%a' "$producer_home")" = "700"
 test "$(stat -c '%a' "$producer_gotmp")" = "700"
 test "$(stat -c '%a' "$producer_release_output")" = "700"
 test "$(stat -c '%a' "$producer_qualification_output")" = "700"
-docker run --rm --init --read-only --cap-drop=ALL \
+docker run --rm --init --interactive --read-only --cap-drop=ALL \
   --security-opt=no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777 \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,src=$GITHUB_WORKSPACE,dst=$GITHUB_WORKSPACE" \

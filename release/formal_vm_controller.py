@@ -299,6 +299,7 @@ class _QualifiedCandidateFormalRecord:
     source_vm_inventory_identity: str
     candidate_source_vm_authority_identity: str
     formal_windows_pretrust_root: Path
+    candidate_aggregate_receipt_json: bytes | None
 
 
 _QUALIFIED_CANDIDATE_FORMAL_RECORDS: dict[object, _QualifiedCandidateFormalRecord] = {}
@@ -345,6 +346,31 @@ class QualifiedCandidateFormalAuthority:
     @property
     def candidate_aggregate_receipt_digest(self) -> str:
         return self._record().candidate_aggregate_receipt_digest
+
+    @property
+    def candidate_aggregate_receipt(self) -> dict[str, Any]:
+        """Return a fresh copy of the validated Candidate aggregate receipt."""
+
+        record = self._record()
+        encoded = record.candidate_aggregate_receipt_json
+        if (
+            encoded is None
+            or sha256_bytes(encoded) != record.candidate_aggregate_receipt_digest
+        ):
+            raise FormalProducerError("FORMAL_CANDIDATE_ACCEPTANCE_INVALID")
+        try:
+            value = json.loads(
+                encoded.decode("utf-8"),
+                object_pairs_hook=reject_duplicate_json_keys,
+            )
+            receipt = validate_aggregate_receipt(value)
+        except (UnicodeDecodeError, json.JSONDecodeError, CandidateContractError) as error:
+            raise FormalProducerError(
+                "FORMAL_CANDIDATE_ACCEPTANCE_INVALID"
+            ) from error
+        if canonical_json_bytes(receipt) != encoded:
+            raise FormalProducerError("FORMAL_CANDIDATE_ACCEPTANCE_INVALID")
+        return dict(receipt)
 
     @property
     def candidate_profile_receipt_digests(self) -> Mapping[str, str]:
@@ -448,6 +474,7 @@ def _issue_qualified_candidate_formal_authority(
     snapshot_disk_graph_identities: Mapping[str, str],
     source_vm_inventory_identity: str,
     formal_windows_pretrust_root: Path,
+    candidate_aggregate_receipt_json: bytes | None = None,
 ) -> QualifiedCandidateFormalAuthority:
     if candidate_material_authority is not None:
         from scripts.candidate_vm_harness import HeldCandidateMaterialAuthority
@@ -504,6 +531,7 @@ def _issue_qualified_candidate_formal_authority(
             candidate_source_vm_authority_identity
         ),
         formal_windows_pretrust_root=Path(formal_windows_pretrust_root),
+        candidate_aggregate_receipt_json=candidate_aggregate_receipt_json,
     )
     return authority
 
@@ -858,6 +886,7 @@ def close_qualified_candidate_for_formal(
                 candidate_plan.source_vm_inventory_identity
             ),
             formal_windows_pretrust_root=profile_root,
+            candidate_aggregate_receipt_json=canonical_json_bytes(aggregate),
         )
     except BaseException:
         material_authority.close()
@@ -2207,7 +2236,10 @@ class ProductionFormalAuthorityVerifier:
             _formal_reject("FORMAL_PRETRUSTED_MATERIAL_AUTHORITY_MISMATCH")
 
     def _close_publication(
-        self, request: FormalAuthorityRequest
+        self,
+        request: FormalAuthorityRequest,
+        *,
+        require_identity: bool = True,
     ) -> tuple[Any, dict[str, str]]:
         publication_input = self._publication_input
         if (
@@ -2377,7 +2409,10 @@ class ProductionFormalAuthorityVerifier:
         if (
             publication.tag != request.rc_tag
             or publication.tag_commit != request.source_sha
-            or publication.identity != request.publication_identity
+            or (
+                require_identity
+                and publication.identity != request.publication_identity
+            )
             or publication.tag_object != closed_request["tagObject"]
             or len(expected_subjects) != 5
             or expected_subjects != observed_subjects
@@ -2404,6 +2439,109 @@ class ProductionFormalAuthorityVerifier:
             "request_digest": sha256_bytes(request_bytes),
             "claim_digest": publication.signed_claim_identity,
         }
+
+    def observe_request(self) -> FormalAuthorityRequest:
+        """Derive exact Formal identities only from pretrusted verified claims."""
+
+        try:
+            with ExitStack() as stack:
+                if self._parent_path_authority is None:
+                    stack.enter_context(
+                        hold_windows_private_path_chain(
+                            self._private_work_root,
+                            allow_leaf_child_writes=True,
+                        )
+                    )
+                    stack.enter_context(
+                        hold_windows_private_path_chain(
+                            self._material.root,
+                            allow_leaf_child_writes=False,
+                        )
+                    )
+                else:
+                    stack.enter_context(
+                        hold_windows_private_descendant_path(
+                            self._parent_path_authority,
+                            self._private_work_root,
+                            allow_leaf_child_writes=True,
+                        )
+                    )
+                stack.enter_context(
+                    hold_windows_private_snapshot(
+                        self._material.root,
+                        relative_files=tuple(sorted(FORMAL_WINDOWS_PRETRUST_FILES)),
+                        root_already_held=True,
+                    )
+                )
+                return self._observe_request_held()
+        except FormalProducerError:
+            raise
+        except (OSError, FormalWindowsPretrustError) as error:
+            raise FormalProducerError(
+                "FORMAL_PRETRUSTED_EXECUTION_AUTHORITY_INVALID"
+            ) from error
+
+    def _observe_request_held(self) -> FormalAuthorityRequest:
+        zero = "sha256:" + "0" * 64
+        probe = self._qualified_candidate.issue_request(
+            publication_identity=zero,
+            attestation_claim_identities={name: zero for name in REQUIRED_EVIDENCE},
+        )
+        self._bind_pretrusted_authority(probe)
+        publication, _publication_summary = self._close_publication(
+            probe,
+            require_identity=False,
+        )
+        receipt = self._preflight.verify()
+        errors = sorted(
+            Draft202012Validator(
+                _schema("formal-provenance-preflight-receipt.schema.json")
+            ).iter_errors(receipt),
+            key=lambda item: tuple(str(part) for part in item.absolute_path),
+        )
+        if errors:
+            _formal_reject("FORMAL_PROVENANCE_RECEIPT_INVALID")
+        if receipt["verifier_digest"] != self._verifier_identity or any(
+            claim["trusted_root_digest"] != self._sigstore_root_identity
+            for claim in receipt["claims"]
+        ):
+            _formal_reject("FORMAL_PRETRUSTED_MATERIAL_REBOUND")
+        expected_subjects = {
+            "api-image": ("ghcr.io/yanyuhanyue/animemo-api", probe.api_digest),
+            "web-image": ("ghcr.io/yanyuhanyue/animemo-web", probe.web_digest),
+            "release-manifest": (
+                "release-manifest.json",
+                probe.release_manifest_identity,
+            ),
+            "deployment-contract": (
+                "deployment-contract.json",
+                probe.deployment_contract_identity,
+            ),
+            "installer-materials": (
+                "installer-materials.tar",
+                probe.installer_materials_identity,
+            ),
+        }
+        claims = {item["evidence_name"]: item for item in receipt["claims"]}
+        if set(claims) != REQUIRED_EVIDENCE:
+            _formal_reject("FORMAL_PROVENANCE_EVIDENCE_SET_INVALID")
+        for name, (subject_name, subject_digest) in expected_subjects.items():
+            claim = claims[name]
+            if (
+                claim["subject"]
+                != {"name": subject_name, "sha256": subject_digest}
+                or claim["source_commit"] != probe.source_sha
+                or claim["workflow"] != ".github/workflows/release.yml"
+            ):
+                _formal_reject("FORMAL_RC_AUTHORITY_BINDING_MISMATCH")
+        observed = self._qualified_candidate.issue_request(
+            publication_identity=publication.identity,
+            attestation_claim_identities={
+                name: claims[name]["claim_digest"] for name in sorted(claims)
+            },
+        )
+        self._bind_pretrusted_authority(observed)
+        return observed
 
     def verify(self, request: FormalAuthorityRequest) -> VerifiedFormalRcAuthority:
         if type(request) is not FormalAuthorityRequest:

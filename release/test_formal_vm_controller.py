@@ -16,7 +16,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from jsonschema import validate as validate_schema
 
 import release.formal_vm_controller as formal_provenance
-from release.candidate import canonical_json_bytes
+from release.candidate import aggregate_receipt_digest, canonical_json_bytes
 from release.formal_acceptance_test_support import build_test_formal_acceptance
 from release.formal_vm_controller import (
     CANDIDATE_PROFILE_RESULT_KEYS,
@@ -39,6 +39,7 @@ from release.formal_vm_controller import (
     execute_candidate_controller_for_formal,
     validate_formal_acceptance_bundle,
 )
+from release.test_candidate import aggregate_receipt
 
 
 def _candidate_source_evidence() -> dict[str, object]:
@@ -123,6 +124,32 @@ class FormalVmControllerTests(unittest.TestCase):
     def test_qualified_candidate_authority_cannot_be_constructed_or_pickled(self):
         with self.assertRaises(TypeError):
             QualifiedCandidateFormalAuthority()
+
+    def test_qualified_candidate_exports_exact_validated_aggregate_copy(self):
+        receipt = aggregate_receipt()
+        encoded = canonical_json_bytes(receipt)
+        qualified = _issue_qualified_candidate_formal_authority(
+            loaded=SimpleNamespace(root=Path("candidate-root")),
+            candidate_aggregate_receipt_digest=aggregate_receipt_digest(receipt),
+            candidate_aggregate_receipt_json=encoded,
+            candidate_profile_receipt_digests={
+                key: "sha256:" + value * 64
+                for key, value in zip(
+                    CANDIDATE_PROFILE_RESULT_KEYS, "789", strict=True
+                )
+            },
+            **_qualified_source_evidence(),
+            formal_windows_pretrust_root=Path("candidate-kit"),
+        )
+        first = qualified.candidate_aggregate_receipt
+        self.assertEqual(encoded, canonical_json_bytes(first))
+        first["result"] = "FAIL"
+        self.assertEqual("PASS", qualified.candidate_aggregate_receipt["result"])
+        qualified.close()
+        with self.assertRaisesRegex(
+            FormalProducerError, "FORMAL_QUALIFIED_CANDIDATE_INVALID"
+        ):
+            _ = qualified.candidate_aggregate_receipt
 
     def test_qualified_candidate_owns_and_releases_held_material_authority(self):
         from scripts.candidate_vm_harness import HeldCandidateMaterialAuthority
@@ -344,6 +371,86 @@ class FormalVmControllerTests(unittest.TestCase):
                 ):
                     verifier.verify(request)
         self.assertEqual(calls, [])
+
+    def test_production_verifier_observes_request_identities_from_verified_claims(self):
+        template = self._authority_request()
+        publication_identity = "sha256:" + "f" * 64
+        claim_identities = {
+            name: "sha256:" + value * 64
+            for name, value in zip(
+                (
+                    "api-image",
+                    "web-image",
+                    "release-manifest",
+                    "deployment-contract",
+                    "installer-materials",
+                ),
+                "12345",
+                strict=True,
+            )
+        }
+        subjects = {
+            "api-image": ("ghcr.io/yanyuhanyue/animemo-api", template.api_digest),
+            "web-image": ("ghcr.io/yanyuhanyue/animemo-web", template.web_digest),
+            "release-manifest": (
+                "release-manifest.json",
+                template.release_manifest_identity,
+            ),
+            "deployment-contract": (
+                "deployment-contract.json",
+                template.deployment_contract_identity,
+            ),
+            "installer-materials": (
+                "installer-materials.tar",
+                template.installer_materials_identity,
+            ),
+        }
+        claims = [
+            {
+                "evidence_name": name,
+                "subject": {"name": subject, "sha256": digest},
+                "workflow": ".github/workflows/release.yml",
+                "source_commit": template.source_sha,
+                "bundle_digest": "sha256:" + "6" * 64,
+                "trusted_root_digest": "sha256:" + "7" * 64,
+                "request_digest": "sha256:" + "8" * 64,
+                "claim_digest": claim_identities[name],
+            }
+            for name, (subject, digest) in subjects.items()
+        ]
+        receipt = {
+            "schema": "animemo.formal-provenance-preflight/v1",
+            "verifier_digest": "sha256:" + "9" * 64,
+            "claims": claims,
+            "clone_authorized": False,
+            "release_authority_granted": False,
+            "publish_authorized": False,
+            "preflight_digest": "sha256:" + "a" * 64,
+        }
+        qualified = mock.Mock()
+        qualified.issue_request.side_effect = lambda **values: replace(
+            template,
+            publication_identity=values["publication_identity"],
+            attestation_claim_identities=values["attestation_claim_identities"],
+        )
+        verifier = object.__new__(ProductionFormalAuthorityVerifier)
+        verifier._qualified_candidate = qualified
+        verifier._preflight = mock.Mock(verify=mock.Mock(return_value=receipt))
+        verifier._verifier_identity = receipt["verifier_digest"]
+        verifier._sigstore_root_identity = "sha256:" + "7" * 64
+        verifier._bind_pretrusted_authority = mock.Mock()
+        verifier._close_publication = mock.Mock(
+            return_value=(SimpleNamespace(identity=publication_identity), {})
+        )
+
+        observed = verifier._observe_request_held()
+
+        self.assertEqual(publication_identity, observed.publication_identity)
+        self.assertEqual(claim_identities, observed.attestation_claim_identities)
+        self.assertEqual(2, verifier._bind_pretrusted_authority.call_count)
+        verifier._close_publication.assert_called_once_with(
+            mock.ANY, require_identity=False
+        )
 
     @staticmethod
     def _authority_request() -> FormalAuthorityRequest:
