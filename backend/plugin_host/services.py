@@ -17,6 +17,7 @@ from django.utils import timezone
 from .filesystem_security import (
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
+    contained_path,
     ensure_directory,
     ensure_plugin_layout,
     remove_secure_tree,
@@ -25,7 +26,7 @@ from .filesystem_security import (
     write_secure_bytes,
 )
 from .installer import PluginPackageInstaller
-from .manifest import PLUGIN_ID_RE, SLUG_RE
+from .manifest import PLUGIN_ID_RE, ManifestError, validate_slug, validate_version
 from .models import (
     PluginData,
     PluginDeployment,
@@ -74,8 +75,10 @@ def create_plugin_project(*, actor, plugin_id, slug, name, description):
         raise PluginWorkflowError("plugin_id、slug、name、description 均不能为空。")
     if not PLUGIN_ID_RE.fullmatch(values["plugin_id"]):
         raise PluginWorkflowError("plugin_id 必须使用稳定命名空间，例如 com.example.my-plugin。")
-    if not SLUG_RE.fullmatch(values["slug"]):
-        raise PluginWorkflowError("slug 必须使用 kebab-case。")
+    try:
+        validate_slug(values["slug"])
+    except ManifestError as error:
+        raise PluginWorkflowError("slug 必须使用可移植的 kebab-case。") from error
     project = PluginProject(owner=actor, installation_mode=PluginProject.InstallationMode.USER, **values)
     try:
         project.full_clean()
@@ -88,6 +91,10 @@ def create_plugin_project(*, actor, plugin_id, slug, name, description):
 def update_plugin_project(project, *, actor, name=None, description=None):
     with transaction.atomic():
         locked = PluginProject.objects.select_for_update().get(pk=project.pk)
+        try:
+            validate_slug(locked.slug)
+        except ManifestError as error:
+            raise PluginWorkflowError("插件 slug 不符合可移植存储合同。") from error
         if locked.owner_id != actor.pk:
             raise PluginWorkflowError("只能修改自己的插件项目。")
         if locked.status == PluginProject.Status.ARCHIVED:
@@ -107,8 +114,16 @@ def update_plugin_project(project, *, actor, name=None, description=None):
 
 
 def archive_or_delete_plugin_project(project, *, actor):
+    try:
+        validate_slug(project.slug)
+    except ManifestError as error:
+        raise PluginWorkflowError("插件 slug 不符合可移植存储合同。") from error
     with transaction.atomic():
         locked = PluginProject.objects.select_for_update().get(pk=project.pk)
+        try:
+            validate_slug(locked.slug)
+        except ManifestError as error:
+            raise PluginWorkflowError("插件 slug 不符合可移植存储合同。") from error
         if locked.owner_id != actor.pk:
             raise PluginWorkflowError("只能删除自己的插件项目。")
         published = locked.versions.filter(published_at__isnull=False).exists()
@@ -281,8 +296,15 @@ def upload_plugin_version(project, uploaded_file, *, actor):
                 raise PluginWorkflowError("Manifest id/slug 与插件项目不一致。")
             if manifest["installationMode"] != locked_project.installation_mode:
                 raise PluginWorkflowError("Manifest installationMode 与插件项目不一致。")
-            existing = PluginVersion.objects.filter(plugin=locked_project, version=manifest["version"]).first()
+            existing = PluginVersion.objects.filter(
+                plugin=locked_project,
+                version__iexact=manifest["version"],
+            ).first()
             if existing:
+                if existing.version != manifest["version"]:
+                    raise PluginWorkflowError(
+                        "同一插件版本在文件系统不区分大小写时会发生冲突；请提升版本号。"
+                    )
                 if existing.package_blob.sha256 != inspected["sha256"]:
                     raise PluginWorkflowError("同一插件版本的 Package SHA-256 不可改变；请提升版本号。")
                 report = static_security_scan(raw, inspected)
@@ -328,6 +350,11 @@ def create_frontend_preview(plugin_version, *, actor):
         raise PluginWorkflowError("只有草稿或被拒绝的版本可以创建私人预览。")
     if set(plugin_version.runtime_types or []) != {"frontend"}:
         raise PluginWorkflowError("只有 frontend-only 草稿允许私人预览。")
+    try:
+        validate_slug(plugin_version.plugin.slug)
+        validate_version(plugin_version.version)
+    except ManifestError as error:
+        raise PluginWorkflowError("插件预览身份无效。") from error
     storage = LocalPluginPackageStorage(settings.PLUGIN_ROOT)
     ensure_plugin_layout(storage)
     try:
@@ -336,10 +363,20 @@ def create_frontend_preview(plugin_version, *, actor):
         )
     except PluginPackageError as error:
         raise PluginWorkflowError("插件预览 Package 校验失败。") from error
-    target = storage.previews / plugin_version.plugin.slug / plugin_version.version
-    temporary = target.with_name(f".{target.name}.{uuid4().hex}.preview")
+    target = contained_path(
+        storage.root,
+        storage.previews / plugin_version.plugin.slug / plugin_version.version,
+    )
+    temporary = contained_path(
+        storage.root,
+        target.with_name(f".{target.name}.{uuid4().hex}.preview"),
+    )
     try:
-        ensure_directory(storage.previews, temporary, mode=PRIVATE_DIRECTORY_MODE)
+        temporary = ensure_directory(
+            storage.previews,
+            temporary,
+            mode=PRIVATE_DIRECTORY_MODE,
+        )
         with ZipFile(io.BytesIO(raw)) as archive:
             members, budget = validated_package_members(archive)
             for info, path in members:
@@ -362,6 +399,7 @@ def create_frontend_preview(plugin_version, *, actor):
                     file_mode=PRIVATE_FILE_MODE,
                 )
         secure_tree(
+            storage.previews,
             temporary,
             directory_mode=PRIVATE_DIRECTORY_MODE,
             file_mode=PRIVATE_FILE_MODE,
@@ -370,6 +408,7 @@ def create_frontend_preview(plugin_version, *, actor):
         remove_secure_tree(storage.previews, target)
         temporary.replace(target)
         secure_tree(
+            storage.previews,
             target,
             directory_mode=PRIVATE_DIRECTORY_MODE,
             file_mode=PRIVATE_FILE_MODE,

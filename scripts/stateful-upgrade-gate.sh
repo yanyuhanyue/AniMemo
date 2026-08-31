@@ -479,7 +479,7 @@ echo "Upgrade Head SHA: $HEAD_SHA"
 echo "Compose project: $PROJECT_NAME"
 echo "Ephemeral data root: $DATA_ROOT"
 
-git -C "$ROOT" worktree add --detach "$BASE_ROOT" "$BASE_SHA"
+(umask 022 && git -C "$ROOT" worktree add --detach "$BASE_ROOT" "$BASE_SHA")
 BASE_ADDED=true
 
 echo "== Render and validate canonical Base and Current dependency projections =="

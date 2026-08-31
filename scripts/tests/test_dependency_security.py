@@ -150,6 +150,21 @@ class DependencySecurityContractTests(unittest.TestCase):
         )
         self.assertIn("USER 10001:10001", backend_dockerfile)
 
+    def test_backend_installer_modules_are_immutable_but_runtime_importable(self) -> None:
+        backend = (ROOT / "deploy" / "backend.Dockerfile").read_text(encoding="utf-8")
+        for module in ("__init__.py", "safe_archive.py"):
+            self.assertIn(
+                f"COPY --chown=0:0 --chmod=0444 installer/{module} "
+                f"/app/installer/{module}",
+                backend,
+            )
+        self.assertIn("chown root:root /app/installer", backend)
+        self.assertIn("chmod 0555 /app/installer", backend)
+        self.assertNotRegex(
+            backend,
+            r"chown(?:\s+-R)?\s+(?:animemo:animemo|10001:10001)\s+/app/installer",
+        )
+
     def test_development_bootstrap_exposes_the_shared_archive_package(self) -> None:
         bash_source = (ROOT / "scripts" / "dev.sh").read_text(encoding="utf-8")
         powershell_source = (ROOT / "scripts" / "dev.ps1").read_text(encoding="utf-8")
@@ -381,10 +396,14 @@ class DependencySecurityContractTests(unittest.TestCase):
         self.assertNotRegex(frontend, r"\bapk\s+(?:add|upgrade)\b")
         self.assertIn("PYTHONPATH=/app", backend)
         self.assertIn(
-            "COPY installer/__init__.py /app/installer/__init__.py", backend
+            "COPY --chown=0:0 --chmod=0444 installer/__init__.py "
+            "/app/installer/__init__.py",
+            backend,
         )
         self.assertIn(
-            "COPY installer/safe_archive.py /app/installer/safe_archive.py", backend
+            "COPY --chown=0:0 --chmod=0444 installer/safe_archive.py "
+            "/app/installer/safe_archive.py",
+            backend,
         )
         ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
@@ -427,6 +446,10 @@ class DependencySecurityContractTests(unittest.TestCase):
             block = release_workflow[start : boundary if boundary >= 0 else None]
             self.assertIn("scripts/run-in-release-producer.sh", block, step)
         self.assertIn(
+            "release-output/release-producer-toolchain-receipt.json",
+            release_workflow,
+        )
+        self.assertNotIn(
             "release-dry-run-input/release-producer-toolchain-receipt.json",
             release_workflow,
         )
@@ -480,7 +503,7 @@ class DependencySecurityContractTests(unittest.TestCase):
         )
         dry_run = release_workflow[
             release_workflow.index("  dry-run:\n") : release_workflow.index(
-                "  qualification-evidence:\n"
+                "  publish:\n"
             )
         ]
         publish = release_workflow[release_workflow.index("  publish:\n") :]

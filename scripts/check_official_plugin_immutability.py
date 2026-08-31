@@ -5,7 +5,6 @@ import argparse
 import ast
 import hashlib
 import json
-import re
 import subprocess
 import sys
 import tempfile
@@ -13,12 +12,16 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ci_refs import RefResolutionError, resolve_refs
-from packaging.version import InvalidVersion, Version
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from backend.plugin_host.manifest import (
+    ManifestError,
+    parse_version,
+    validate_slug,
+)
 from backend.plugin_host.official_packages import (
     build_official_content_descriptor,
     build_official_package,
@@ -26,8 +29,6 @@ from backend.plugin_host.official_packages import (
 )
 
 OFFICIAL_MODULE_PATH = "backend/plugin_host/official_packages.py"
-SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$")
-OFFICIAL_SLUG_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
 
 class GateInputError(RuntimeError):
@@ -103,8 +104,13 @@ def _official_slugs_from_source(source, source_path):
                     raise GateInputError(f"OFFICIAL_PLUGIN_SLUGS in {source_path} must be a literal sequence.") from error
                 if not isinstance(value, (tuple, list)) or not all(isinstance(item, str) and item for item in value):
                     raise GateInputError(f"OFFICIAL_PLUGIN_SLUGS in {source_path} is invalid.")
-                if any(OFFICIAL_SLUG_RE.fullmatch(item) is None for item in value):
-                    raise GateInputError(f"Invalid official plugin slug in {source_path}.")
+                try:
+                    for item in value:
+                        validate_slug(item)
+                except ManifestError as error:
+                    raise GateInputError(
+                        f"Invalid official plugin slug in {source_path}."
+                    ) from error
                 return tuple(value)
     raise GateInputError(f"OFFICIAL_PLUGIN_SLUGS is missing from {source_path}.")
 
@@ -177,11 +183,9 @@ def _canonicalize_worktree_descriptor(repo, ref, plugin_root, slug, descriptor):
 
 
 def _parse_semver(value, slug):
-    if not isinstance(value, str) or not SEMVER_RE.fullmatch(value):
-        raise GateInputError(f"{slug}: version {value!r} does not match the repository SemVer format.")
     try:
-        return Version(value)
-    except InvalidVersion as error:
+        return parse_version(value)
+    except ManifestError as error:
         raise GateInputError(f"{slug}: version {value!r} is invalid SemVer.") from error
 
 
@@ -194,7 +198,7 @@ def _identity(source_root, official_api, slug):
         descriptor = descriptor_builder(source_root)
         content_digest = digest_builder(descriptor)
         payload = builder(source_root)
-    except (OSError, KeyError, json.JSONDecodeError) as error:
+    except (OSError, KeyError, RuntimeError, json.JSONDecodeError) as error:
         raise GateInputError(f"{slug}: unable to build official package identity: {error}") from error
     return PluginIdentity(
         version=version,
@@ -227,7 +231,7 @@ def _worktree_identity(repo, ref, root, slug):
             descriptor_builder(plugin_root),
         )
         payload = builder(plugin_root)
-    except (OSError, KeyError, json.JSONDecodeError) as error:
+    except (OSError, KeyError, RuntimeError, json.JSONDecodeError) as error:
         raise GateInputError(f"{slug}: unable to build official package identity: {error}") from error
     return PluginIdentity(
         version=version,

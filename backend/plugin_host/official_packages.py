@@ -180,9 +180,15 @@ def canonical_content_digest_from_package(payload):
 
 
 def build_official_package(source_root):
+    from .manifest import ManifestError, validate_manifest
+
     source_root = Path(source_root)
     files = collect_official_package_files(source_root)
     manifest = json.loads(dict(files)["manifest.json"].decode("utf-8"))
+    try:
+        validate_manifest(manifest, directory_name=source_root.name)
+    except ManifestError as error:
+        raise RuntimeError("Official plugin manifest is invalid") from error
     descriptor = _content_descriptor(files)
     package_index = {
         "packageVersion": 1,

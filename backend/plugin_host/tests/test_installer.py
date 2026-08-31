@@ -11,7 +11,12 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
 from plugin_host.installer import PluginInstallError, PluginPackageInstaller
-from plugin_host.models import PluginProject, PluginVersion
+from plugin_host.models import (
+    PluginDeployment,
+    PluginPackageBlob,
+    PluginProject,
+    PluginVersion,
+)
 from plugin_host.package import inspect_package
 from plugin_host.runtime import runtime_registry
 from plugin_host.services import store_package_blob
@@ -68,6 +73,75 @@ class PluginInstallerTests(TestCase):
             runtime_types=inspected["manifest"]["runtimes"],
             review_status=PluginVersion.ReviewStatus.APPROVED, created_by=self.user,
         )
+
+    def _legacy_version(self, version):
+        sequence = PluginPackageBlob.objects.count() + 1
+        blob = PluginPackageBlob.objects.create(
+            sha256=f"{sequence:064x}",
+            size_bytes=1,
+            storage_path=f"legacy/{sequence}.ajplugin",
+        )
+        return PluginVersion.objects.create(
+            plugin=self.project,
+            version=version,
+            package_blob=blob,
+            manifest_snapshot={},
+            runtime_types=["frontend"],
+            review_status=PluginVersion.ReviewStatus.APPROVED,
+            created_by=self.user,
+        )
+
+    def test_legacy_invalid_version_fails_before_any_filesystem_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "storage"
+            installer = PluginPackageInstaller(root)
+            invalid = self._legacy_version("1.0.0-rc.")
+
+            with self.assertRaises(PluginInstallError):
+                installer.publish(invalid, actor=self.user)
+            self.assertFalse(root.exists())
+
+            current = self._legacy_version("1.0.0")
+            deployment = PluginDeployment.objects.create(
+                plugin=self.project,
+                current_version=current,
+                previous_version=invalid,
+            )
+            with self.assertRaises(PluginInstallError):
+                installer.rollback(self.project.slug, actor=self.user)
+            self.assertFalse(root.exists())
+
+            deployment.current_version = invalid
+            deployment.previous_version = None
+            deployment.save(update_fields=["current_version", "previous_version"])
+            with self.assertRaises(PluginInstallError):
+                installer.set_enabled(self.project.slug, True, actor=self.user)
+            self.assertFalse(root.exists())
+
+            with self.assertRaises(PluginInstallError):
+                installer.cleanup(self.project.slug)
+            self.assertFalse(root.exists())
+
+    def test_full_semver_prerelease_publish_finishes_without_postcommit_split(self):
+        with tempfile.TemporaryDirectory() as directory, override_settings(
+            PLUGIN_ROOT=Path(directory),
+        ):
+            version = self._version("1.0.0-x.7.z.92")
+            installer = PluginPackageInstaller(Path(directory))
+
+            result = installer.publish(version, actor=self.user)
+
+            deployment = PluginDeployment.objects.get(plugin=self.project)
+            self.assertEqual(deployment.current_version_id, version.pk)
+            self.assertEqual(result["version"], version.version)
+            self.assertTrue(
+                (
+                    Path(directory)
+                    / "runtime"
+                    / self.project.slug
+                    / version.version
+                ).is_dir()
+            )
 
     def test_publish_failure_preserves_current_runtime(self):
         with tempfile.TemporaryDirectory() as directory, override_settings(PLUGIN_ROOT=Path(directory)):

@@ -1,6 +1,6 @@
 from django.test import SimpleTestCase
 
-from plugin_host.manifest import ManifestError, validate_manifest
+from plugin_host.manifest import ManifestError, parse_version, validate_manifest
 
 
 class ManifestV2Tests(SimpleTestCase):
@@ -19,6 +19,11 @@ class ManifestV2Tests(SimpleTestCase):
     def test_rejects_v1(self):
         with self.assertRaises(ManifestError):
             validate_manifest({"schemaVersion": 1, "sdkApi": 1})
+
+    def test_rejects_windows_reserved_or_overlong_slug_before_acceptance(self):
+        for slug in ("con", "prn", "aux", "nul", "com1", "lpt9", "a" * 81):
+            with self.subTest(slug=slug), self.assertRaises(ManifestError):
+                validate_manifest(self.valid_manifest(slug=slug))
 
     def test_rejects_unknown_role(self):
         manifest = {
@@ -56,6 +61,72 @@ class ManifestV2Tests(SimpleTestCase):
                 version="2.0.0",
                 dataCompatibility={"rollbackFloor": "3.0.0"},
             ))
+
+    def test_version_and_rollback_floor_share_the_database_width_boundary(self):
+        version_40 = "1.0.0-rc." + ("1" * 31)
+        version_41 = "1.0.0-rc." + ("1" * 32)
+
+        self.assertEqual(
+            validate_manifest(self.valid_manifest(version=version_40))["version"],
+            version_40,
+        )
+        with self.assertRaises(ManifestError):
+            validate_manifest(self.valid_manifest(version=version_41))
+        self.assertEqual(
+            validate_manifest(
+                self.valid_manifest(
+                    version="2.0.0",
+                    dataCompatibility={"rollbackFloor": version_40},
+                )
+            )["dataCompatibility"]["rollbackFloor"],
+            version_40,
+        )
+        with self.assertRaises(ManifestError):
+            validate_manifest(
+                self.valid_manifest(
+                    version="2.0.0",
+                    dataCompatibility={"rollbackFloor": version_41},
+                )
+            )
+
+    def test_prerelease_identifiers_are_canonical_semver_segments(self):
+        valid_versions = (
+            "1.0.0-RC.1",
+            "1.0.0-x.7.z.92",
+            "1.0.0-a-b",
+            "1.0.0-0A",
+        )
+        for version in valid_versions:
+            with self.subTest(valid=version):
+                self.assertEqual(
+                    validate_manifest(self.valid_manifest(version=version))["version"],
+                    version,
+                )
+                self.assertIsNotNone(parse_version(version))
+        for version in ("1.0.0-rc.", "1.0.0-a..b", "1.0.0-01"):
+            with self.subTest(version=version), self.assertRaises(ManifestError):
+                validate_manifest(self.valid_manifest(version=version))
+            with self.subTest(rollback_floor=version), self.assertRaises(ManifestError):
+                validate_manifest(
+                    self.valid_manifest(
+                        version="2.0.0",
+                        dataCompatibility={"rollbackFloor": version},
+                    )
+                )
+
+    def test_semver_comparison_uses_semver_not_pep440_precedence(self):
+        ordered = (
+            "1.0.0-1",
+            "1.0.0-0A",
+            "1.0.0-a-b",
+            "1.0.0-x.7.z.92",
+            "1.0.0",
+        )
+
+        self.assertEqual(
+            sorted(ordered, key=parse_version),
+            list(ordered),
+        )
 
     def test_integration_declarations_are_optional_and_provider_neutral(self):
         manifest = self.valid_manifest(

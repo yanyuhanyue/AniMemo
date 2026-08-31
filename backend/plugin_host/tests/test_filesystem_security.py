@@ -5,22 +5,24 @@ import tempfile
 from ctypes import wintypes
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import skipIf, skipUnless
+from unittest import mock, skipIf, skipUnless
 
 from django.test import SimpleTestCase
 
 from plugin_host.filesystem_security import (
+    PLUGIN_ROOT_DIRECTORY_MODE,
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
-    PLUGIN_ROOT_DIRECTORY_MODE,
     RUNTIME_DIRECTORY_MODE,
     RUNTIME_FILE_MODE,
     PluginFilesystemSecurityError,
+    _contained,
     _require_owner,
     _windows_current_sid,
     ensure_directory,
     ensure_plugin_layout,
     filesystem_diagnostic_code,
+    resolve_contained_path,
     secure_file,
     secure_tree,
     validate_secure_tree,
@@ -101,6 +103,48 @@ def _storage(root):
 
 
 class PluginFilesystemSecurityTests(SimpleTestCase):
+    def test_containment_accepts_the_exact_normalized_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugins"
+
+            boundary, target = _contained(root, root / "nested" / "..")
+
+            self.assertEqual(boundary, root.absolute())
+            self.assertEqual(target, boundary)
+            self.assertIs(target, boundary)
+
+    def test_containment_preserves_guarded_component_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugins"
+            requested = root / "Demo" / "1.0.0-RC.1"
+
+            _, target = _contained(root, requested)
+
+            self.assertEqual(target, Path(os.path.abspath(requested)))
+            self.assertEqual(target.parts[-2:], ("Demo", "1.0.0-RC.1"))
+
+    @skipUnless(os.name == "nt", "Windows case-insensitive path contract")
+    def test_containment_aligns_only_the_windows_authority_root_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "PluginRoot"
+            differently_cased_root = Path(str(root).swapcase())
+            requested = differently_cased_root / "Demo" / "1.0.0-RC.1"
+
+            boundary, target = _contained(root, requested)
+
+            expected = boundary / "Demo" / "1.0.0-RC.1"
+            self.assertEqual(os.fspath(target), os.fspath(expected))
+
+    def test_containment_rejects_a_sibling_with_the_same_textual_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugins"
+            sibling = Path(directory) / "plugins-escape" / "payload"
+
+            with self.assertRaises(PluginFilesystemSecurityError) as raised:
+                _contained(root, sibling)
+
+            self.assertEqual(raised.exception.diagnostic_code, "path_containment")
+
     def test_diagnostic_code_rejects_unlisted_values(self):
         malformed = ["dacl_read"]
         error = PluginFilesystemSecurityError("private-path-token", diagnostic_code=malformed)
@@ -120,7 +164,7 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
             nested = root / "private" / "nested"
 
             ensure_directory(root, nested)
-            validate_secure_tree(root)
+            validate_secure_tree(root, root)
 
             self.assertTrue(nested.is_dir())
             if os.name != "nt":
@@ -168,6 +212,7 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
                     file_mode=RUNTIME_FILE_MODE,
                 )
                 secure_tree(
+                    root,
                     runtime_root,
                     directory_mode=RUNTIME_DIRECTORY_MODE,
                     file_mode=RUNTIME_FILE_MODE,
@@ -196,7 +241,8 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
     @skipIf(os.name == "nt", "POSIX mode contract")
     def test_restrictive_umask_does_not_narrow_formal_runtime_mode(self):
         with tempfile.TemporaryDirectory() as directory:
-            runtime = Path(directory) / "plugins" / "runtime" / "demo" / "1.0.0"
+            root = Path(directory) / "plugins"
+            runtime = root / "runtime" / "demo" / "1.0.0"
             previous = os.umask(0o077)
             try:
                 payload = write_secure_bytes(
@@ -207,6 +253,7 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
                     file_mode=RUNTIME_FILE_MODE,
                 )
                 secure_tree(
+                    root,
                     runtime,
                     directory_mode=RUNTIME_DIRECTORY_MODE,
                     file_mode=RUNTIME_FILE_MODE,
@@ -276,7 +323,60 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
                 self.skipTest("symlink creation unavailable")
 
             with self.assertRaises(PluginFilesystemSecurityError):
-                validate_secure_tree(storage.staging)
+                validate_secure_tree(storage.root, storage.staging)
+
+    def test_symlinked_authority_root_is_rejected_without_resolution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            actual = Path(directory) / "actual"
+            actual.mkdir()
+            link = Path(directory) / "plugin-root"
+            try:
+                link.symlink_to(actual, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlink creation unavailable")
+
+            with self.assertRaises(PluginFilesystemSecurityError) as raised:
+                validate_secure_tree(link, link)
+
+            self.assertEqual(raised.exception.diagnostic_code, "path_reparse")
+
+    def test_physical_containment_rejects_an_intermediate_parent_swap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugins"
+            storage = _storage(root)
+            ensure_plugin_layout(storage)
+            runtime = storage.runtime / "demo" / "1.0.0"
+            backend = runtime / "backend"
+            payload = backend / "plugin.py"
+            write_secure_bytes(root, payload, b"safe")
+            validate_secure_tree(root, runtime)
+
+            displaced = runtime / "backend.displaced"
+            backend.rename(displaced)
+            outside = Path(directory) / "outside"
+            outside.mkdir()
+            (outside / "plugin.py").write_bytes(b"outside")
+
+            def assert_physical_escape_rejected():
+                with self.assertRaises(PluginFilesystemSecurityError) as raised:
+                    resolve_contained_path(runtime, payload)
+                self.assertEqual(
+                    raised.exception.diagnostic_code,
+                    "path_containment",
+                )
+
+            try:
+                backend.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                displaced.rename(backend)
+                with mock.patch.object(
+                    Path,
+                    "resolve",
+                    return_value=outside / "plugin.py",
+                ):
+                    assert_physical_escape_rejected()
+            else:
+                assert_physical_escape_rejected()
 
     @skipUnless(os.name == "nt", "native Windows DACL contract")
     def test_windows_layout_rejects_an_extra_broad_writer_ace(self):
@@ -288,10 +388,10 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
                 storage.staging / "work" / "payload",
                 b"private",
             )
-            validate_secure_tree(storage.staging)
+            validate_secure_tree(storage.root, storage.staging)
             _grant_windows_world_full_control(payload)
             with self.assertRaises(PluginFilesystemSecurityError):
-                validate_secure_tree(storage.staging)
+                validate_secure_tree(storage.root, storage.staging)
 
     @skipUnless(os.name == "nt", "native Windows DACL contract")
     def test_windows_binary_acl_validation_rejects_three_ace_variants(self):
@@ -311,7 +411,7 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
                 f"D:P(A;OI;FA;;;{sid})(A;OI;FA;;;SY)(A;OI;FA;;;BA)",
             )
             with self.assertRaises(PluginFilesystemSecurityError) as raised:
-                validate_secure_tree(storage.staging)
+                validate_secure_tree(storage.root, storage.staging)
             self.assertEqual(raised.exception.diagnostic_code, "dacl_ace_flags")
             ensure_directory(storage.staging, flag_target)
             cases = (
@@ -332,7 +432,7 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
                 with self.subTest(diagnostic_code=diagnostic_code):
                     _set_windows_dacl(payload, descriptor_text)
                     with self.assertRaises(PluginFilesystemSecurityError) as raised:
-                        validate_secure_tree(storage.staging)
+                        validate_secure_tree(storage.root, storage.staging)
                     self.assertEqual(
                         raised.exception.diagnostic_code,
                         diagnostic_code,
