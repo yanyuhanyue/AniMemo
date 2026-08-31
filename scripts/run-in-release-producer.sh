@@ -37,16 +37,29 @@ shift
 
 producer_home="$RUNNER_TEMP/animemo-release-producer-home"
 producer_gotmp="$RUNNER_TEMP/animemo-release-producer-gotmp"
+producer_release_output="$RUNNER_TEMP/animemo-release-producer-output"
+producer_qualification_output="$RUNNER_TEMP/animemo-release-qualification-output"
 install -d -m 0700 "$producer_home" "$producer_gotmp"
+install -d -m 0700 \
+  "$producer_release_output" "$producer_qualification_output"
 test -d "$producer_home" && test ! -L "$producer_home" && [[ -O "$producer_home" ]]
 test -d "$producer_gotmp" && test ! -L "$producer_gotmp" && [[ -O "$producer_gotmp" ]]
+test -d "$producer_release_output" && test ! -L "$producer_release_output" && \
+  [[ -O "$producer_release_output" ]]
+test -d "$producer_qualification_output" && \
+  test ! -L "$producer_qualification_output" && \
+  [[ -O "$producer_qualification_output" ]]
 test "$(stat -c '%a' "$producer_home")" = "700"
 test "$(stat -c '%a' "$producer_gotmp")" = "700"
+test "$(stat -c '%a' "$producer_release_output")" = "700"
+test "$(stat -c '%a' "$producer_qualification_output")" = "700"
 docker run --rm --init --read-only --cap-drop=ALL \
   --security-opt=no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777 \
   --user "$(id -u):$(id -g)" \
   --mount "type=bind,src=$GITHUB_WORKSPACE,dst=$GITHUB_WORKSPACE" \
   --mount "type=bind,src=$RUNNER_TEMP,dst=$RUNNER_TEMP" \
+  --mount "type=bind,src=$producer_release_output,dst=$GITHUB_WORKSPACE/release-output" \
+  --mount "type=bind,src=$producer_qualification_output,dst=$GITHUB_WORKSPACE/release-qualification" \
   --workdir "$GITHUB_WORKSPACE" \
   --env "HOME=$producer_home" \
   --env "GH_CONFIG_DIR=$producer_home/gh" \
