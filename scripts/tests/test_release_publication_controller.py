@@ -336,6 +336,20 @@ class ControllerReleaseAuthorityVerifierTests(unittest.TestCase):
         ):
             _GitHubReadOnlyObservationBoundary()
 
+    def test_production_boundary_rejects_non_executable_script_tool_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            script = Path(temporary) / "gh-test.cmd"
+            payload = b"@echo off\r\n"
+            script.write_bytes(payload)
+            with self.assertRaisesRegex(
+                ControllerReleaseAuthorityError,
+                "^CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE$",
+            ):
+                _GitHubReadOnlyObservationBoundary(
+                    gh_executable=str(script),
+                    gh_sha256="sha256:" + hashlib.sha256(payload).hexdigest(),
+                )
+
     def test_gh_tool_digest_mismatch_fails_before_subprocess(self):
         with tempfile.TemporaryDirectory() as temporary:
             authority = _tool_authority(Path(temporary))

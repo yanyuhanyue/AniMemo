@@ -460,7 +460,7 @@ class _GitHubReadOnlyObservationBoundary:
         ):
             _reject("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE")
         executable = Path(executable_value)
-        if not executable.is_absolute():
+        if not executable.is_absolute() or executable.suffix.lower() != ".exe":
             _reject("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE")
         try:
             observed_digest, _size = _hash_file(
@@ -566,7 +566,9 @@ class _GitHubReadOnlyObservationBoundary:
                     or "sha256:" + digest.hexdigest() != self._gh_sha256
                 ):
                     _reject("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE")
-                completed = subprocess.run(
+                # The signed, opened-handle-hashed .exe and every argument are
+                # constrained by _read_only_gh_command before this shell-free call.
+                completed = subprocess.run(  # lgtm [py/command-line-injection]
                     (str(self._gh_executable), *command[1:]),
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
@@ -1770,7 +1772,12 @@ class ProductionReleaseAuthorityObserver:
             )
         except ControllerReleaseAuthorityError:
             raise
-        except (OSError, TimeoutError, subprocess.SubprocessError, urllib.error.URLError):
+        except (
+            OSError,
+            TimeoutError,
+            subprocess.SubprocessError,
+            urllib.error.URLError,
+        ):
             raise ControllerReleaseAuthorityError(
                 "CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE"
             ) from None
