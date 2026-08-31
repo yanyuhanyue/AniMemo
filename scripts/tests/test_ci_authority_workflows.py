@@ -62,12 +62,18 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("context=pre-merge-authority", source)
         self.assertIn("if: ${{ always()", source)
 
-    def test_pre_merge_final_readback_binds_preflight_primary_category_digest(self):
+    def test_pre_merge_final_readback_binds_preflight_base_and_primary_category(self):
         source = self.source("pre-merge-full.yml")
         preflight = self.job(source, "preflight")
         authority = self.job(source, "authority")
 
         self.assertIn("primary_category_digest", preflight)
+        self.assertIn(
+            "EXPECTED_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}",
+            authority,
+        )
+        self.assertIn('test "$current_main_sha" = "$EXPECTED_BASE_SHA"', authority)
+        self.assertIn('--current-main-sha "$EXPECTED_BASE_SHA"', authority)
         self.assertIn(
             "--expected-primary-category-digest \"$PRIMARY_CATEGORY_DIGEST\"",
             authority,

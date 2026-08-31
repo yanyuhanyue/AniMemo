@@ -181,8 +181,13 @@ def _query_population_with_graphql(
             )
         try:
             response = json.loads(completed.stdout)
-            repository_data = response["data"]["repository"]
-        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            if not isinstance(response, Mapping) or "errors" in response:
+                raise TypeError("GraphQL response contains errors")
+            data = response.get("data")
+            repository_data = data.get("repository") if isinstance(data, Mapping) else None
+            if not isinstance(repository_data, Mapping):
+                raise TypeError("GraphQL repository data is missing")
+        except (json.JSONDecodeError, TypeError) as error:
             raise SnapshotCollectionError(
                 "GitHub batched PR metadata is invalid"
             ) from error
@@ -201,16 +206,30 @@ def _query_population_with_graphql(
                 raise SnapshotCollectionError(
                     f"associated PR metadata is missing for commit: {commit}"
                 )
+            if any(not isinstance(node, Mapping) for node in nodes):
+                raise SnapshotCollectionError(
+                    f"associated PR metadata is malformed for commit: {commit}"
+                )
             if not isinstance(page_info, Mapping) or page_info.get("hasNextPage") is not False:
                 raise SnapshotCollectionError(
                     f"associated PR metadata is paginated for commit: {commit}"
                 )
+            if any(node.get("state") not in {"OPEN", "CLOSED", "MERGED"} for node in nodes):
+                raise SnapshotCollectionError(
+                    f"associated PR state is invalid for commit: {commit}"
+                )
+            if any(
+                node.get("state") == "MERGED"
+                and not isinstance(node.get("mergedAt"), str)
+                for node in nodes
+            ):
+                raise SnapshotCollectionError(
+                    f"merged PR metadata is incomplete for commit: {commit}"
+                )
             merged = [
                 node
                 for node in nodes
-                if isinstance(node, Mapping)
-                and node.get("state") == "MERGED"
-                and isinstance(node.get("mergedAt"), str)
+                if node.get("state") == "MERGED"
             ]
             if len(merged) != 1:
                 raise SnapshotCollectionError(

@@ -648,8 +648,15 @@ jobs:
           test "$(jq -r '.release_notes.snapshot_identity // empty' "$evidence_file")" = "$notes_identity"
           test "$(jq -r '.release_notes.markdown_sha256 // empty' "$evidence_file")" = "$notes_markdown_sha256"
           candidate_tree="$(git rev-parse '${{ needs.preflight.outputs.candidate_sha }}^{tree}')"
+          notes_preflight_root="$RUNNER_TEMP/qualification-release-notes-preflight"
+          install -d -m 0700 "$notes_preflight_root"
+          for name in release-notes-input.json release-notes.json release-notes.md \
+            release-notes-readback.json release-notes-preflight.json; do
+            install -m 0600 "$RUNNER_TEMP/qualification/$name" \
+              "$notes_preflight_root/$name"
+          done
           python scripts/release_notes_preflight.py verify \
-            --root "$RUNNER_TEMP/qualification" \
+            --root "$notes_preflight_root" \
             --repository "$GITHUB_REPOSITORY" \
             --run-id "$QUALIFICATION_RUN_ID" --run-attempt "$run_attempt" \
             --head-sha "${{ needs.preflight.outputs.candidate_sha }}" \

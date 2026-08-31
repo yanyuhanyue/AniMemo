@@ -57,6 +57,29 @@ class ReleaseNotesPreflightWorkflowTests(unittest.TestCase):
             )
         self.assertIn('wc -l)" = "14"', phase_a)
 
+    def test_publish_authority_verifies_an_isolated_closed_preflight_root(self):
+        release_authority = job(self.source, "release-authority")
+
+        self.assertIn(
+            'notes_preflight_root="$RUNNER_TEMP/qualification-release-notes-preflight"',
+            release_authority,
+        )
+        self.assertIn('--root "$notes_preflight_root"', release_authority)
+        self.assertNotIn(
+            '--root "$RUNNER_TEMP/qualification"', release_authority
+        )
+        for name in (
+            "release-notes-input.json",
+            "release-notes.json",
+            "release-notes.md",
+            "release-notes-readback.json",
+            "release-notes-preflight.json",
+        ):
+            self.assertIn(name, release_authority)
+        self.assertIn(
+            '"$RUNNER_TEMP/qualification/$name"', release_authority
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

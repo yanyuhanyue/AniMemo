@@ -135,6 +135,30 @@ class PreMergeSnapshotTests(unittest.TestCase):
                 expected_primary_category_digest=preflight.primary_category_digest,
             )
 
+    def test_preflight_rejects_each_invalid_primary_category_shape(self):
+        cases = (
+            ([], "release_primary_category_unclassified"),
+            (
+                [{"name": "release/fix"}, {"name": "release/ci"}],
+                "release_primary_category_conflict",
+            ),
+            (
+                [{"name": "release/internal"}, {"name": "release/security"}],
+                "release_primary_category_exclusion_conflict",
+            ),
+        )
+        for labels, code in cases:
+            with self.subTest(code=code), self.assertRaisesRegex(
+                PreMergeValidationError, code
+            ):
+                validate_snapshot(
+                    pull_request_payload(labels=labels),
+                    expected_pr_number=62,
+                    expected_head_sha=HEAD_SHA,
+                    current_main_sha=BASE_SHA,
+                    repository=REPOSITORY,
+                )
+
 
 class BaseFreshnessTests(unittest.TestCase):
     def setUp(self):

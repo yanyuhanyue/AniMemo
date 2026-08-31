@@ -131,6 +131,7 @@ jobs:
           PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
           FULL_REGRESSION_RESULT: ${{ needs.full-regression.result }}
           FULL_RELEASE_GATE_RESULT: ${{ needs.full-release-gate.result }}
+          EXPECTED_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
           PRIMARY_CATEGORY_DIGEST: ${{ needs.preflight.outputs.primary_category_digest }}
         shell: bash
         run: |
@@ -140,11 +141,12 @@ jobs:
           git fetch --force origin main "+$HEAD_SHA:refs/remotes/origin/pre-merge-candidate"
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
           current_main_sha="$(git rev-parse origin/main)"
+          test "$current_main_sha" = "$EXPECTED_BASE_SHA"
           python scripts/ci_premerge.py \
             --pr-json "$RUNNER_TEMP/pr.json" \
             --pr-number "$PR_NUMBER" \
             --expected-head-sha "$HEAD_SHA" \
-            --current-main-sha "$current_main_sha" \
+            --current-main-sha "$EXPECTED_BASE_SHA" \
             --repository "$GITHUB_REPOSITORY" \
             --expected-primary-category-digest "$PRIMARY_CATEGORY_DIGEST" \
             --repo . --verify-freshness

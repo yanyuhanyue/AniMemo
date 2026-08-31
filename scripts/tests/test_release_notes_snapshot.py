@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from scripts.release_notes_snapshot import (
     SnapshotCollectionError,
+    _query_population_with_graphql,
     collect_pull_metadata,
     collect_pull_metadata_double_readback,
 )
@@ -150,6 +154,41 @@ class ReleaseNotesSnapshotCollectionTests(unittest.TestCase):
                     {"number": True, "title": "bad", "labels": []}
                 ],
             )
+
+    def test_graphql_partial_errors_and_malformed_associations_fail_closed(self):
+        commit = "a" * 40
+        cases = (
+            {
+                "data": {"repository": {}},
+                "errors": [{"message": "partial failure"}],
+            },
+            {
+                "data": {
+                    "repository": {
+                        "c0": {
+                            "oid": commit,
+                            "associatedPullRequests": {
+                                "pageInfo": {"hasNextPage": False},
+                                "nodes": [None],
+                            },
+                        }
+                    }
+                }
+            },
+        )
+        for response in cases:
+            completed = SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(response),
+            )
+            with self.subTest(response=response), patch(
+                "scripts.release_notes_snapshot.subprocess.run",
+                return_value=completed,
+            ), self.assertRaises(SnapshotCollectionError):
+                _query_population_with_graphql(
+                    "yanyuhanyue/AniMemo",
+                    [commit],
+                )
 
 
 if __name__ == "__main__":
