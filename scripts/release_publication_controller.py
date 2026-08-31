@@ -568,7 +568,8 @@ class _GitHubReadOnlyObservationBoundary:
                     _reject("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE")
                 # The signed, opened-handle-hashed .exe and every argument are
                 # constrained by _read_only_gh_command before this shell-free call.
-                completed = subprocess.run(  # lgtm [py/command-line-injection]
+                # codeql[py/command-line-injection]
+                completed = subprocess.run(
                     (str(self._gh_executable), *command[1:]),
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
