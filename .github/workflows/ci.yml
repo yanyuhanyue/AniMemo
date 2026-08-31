@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - labeled
+      - unlabeled
   merge_group:
   workflow_call:
     inputs:
@@ -528,15 +534,32 @@ jobs:
             --job-result "astrbot-bridge=$ASTRBOT_BRIDGE_RESULT" \
             --job-result "astrbot-runtime=$ASTRBOT_RUNTIME_RESULT"
 
+  primary-category:
+    name: pr-primary-category
+    if: ${{ github.event_name == 'pull_request' && !inputs.force_full }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Validate the explicit primary release category
+        shell: bash
+        run: python scripts/ci_primary_category.py --event-path "$GITHUB_EVENT_PATH"
+
   pr-fast-gate:
     name: pr-fast-gate
     if: ${{ always() && github.event_name == 'pull_request' && !inputs.force_full }}
-    needs: selection-authority
+    needs: [selection-authority, primary-category]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require the selection-aware PR Fast authority
         env:
           AUTHORITY_RESULT: ${{ needs.selection-authority.result }}
+          PRIMARY_CATEGORY_RESULT: ${{ needs.primary-category.result }}
         shell: bash
-        run: test "$AUTHORITY_RESULT" = success
+        run: |
+          test "$AUTHORITY_RESULT" = success
+          test "$PRIMARY_CATEGORY_RESULT" = success

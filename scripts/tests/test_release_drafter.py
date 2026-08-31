@@ -70,25 +70,10 @@ class ReleaseDrafterConfigurationTests(unittest.TestCase):
             self.assertEqual(native["labels"], expected_labels)
         self.assertEqual(native_categories[-1]["labels"], ["*"])
 
-    def test_autolabeler_uses_only_declared_release_labels(self) -> None:
-        category_labels = {
-            label
-            for category in self.config["categories"]
-            for label in category.get("when", {}).get(
-                "labels", [category.get("when", {}).get("label")]
-            )
-            if label and label != "skip-changelog"
-        }
-        rules = self.config["autolabeler"]
-        self.assertEqual(len(rules), len({rule["label"] for rule in rules}))
-        automatic_labels = {rule["label"] for rule in rules}
-        self.assertTrue(automatic_labels < category_labels)
-        self.assertEqual(
-            category_labels - automatic_labels,
-            {"release/breaking", "release/internal"},
-        )
-        for rule in rules:
-            self.assertTrue(set(rule) & {"files", "branch", "title", "body"})
+    def test_additive_primary_autolabeler_surface_does_not_exist(self) -> None:
+        self.assertNotIn("autolabeler", self.config)
+        self.assertNotIn("auto_label:", self.workflow)
+        self.assertNotIn("release-drafter/release-drafter/autolabeler@", self.workflow)
 
     def test_workflow_is_draft_only_and_has_minimal_permissions(self) -> None:
         approved_release_drafter_commit = "34d80673e067bdc0c24568d3af899c216adcfaa9"
@@ -96,22 +81,14 @@ class ReleaseDrafterConfigurationTests(unittest.TestCase):
             f"release-drafter/release-drafter@{approved_release_drafter_commit}",
             self.workflow,
         )
-        self.assertIn(
-            "release-drafter/release-drafter/autolabeler@"
-            f"{approved_release_drafter_commit}",
-            self.workflow,
-        )
         self.assertNotIn("release-drafter/release-drafter@v7", self.workflow)
-        self.assertNotIn(
-            "release-drafter/release-drafter/autolabeler@v7", self.workflow
-        )
         self.assertNotIn("actions/checkout", self.workflow)
         self.assertNotIn("release create", self.workflow)
         self.assertNotIn("gh release", self.workflow)
         self.assertNotIn("workflow_dispatch", self.workflow)
         self.assertIn("contents: read", self.workflow)
         self.assertIn("contents: write", self.workflow)
-        self.assertIn("pull-requests: write", self.workflow)
+        self.assertNotIn("pull-requests: write", self.workflow)
 
 
 if __name__ == "__main__":

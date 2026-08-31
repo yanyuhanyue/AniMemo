@@ -6,8 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.ci_premerge import PreMergeValidationError, validate_snapshot, verify_base_freshness
-
+from scripts.ci_premerge import (
+    PreMergeValidationError,
+    validate_snapshot,
+    verify_base_freshness,
+)
 
 REPOSITORY = "yanyuhanyue/AniMemo"
 BASE_SHA = "a" * 40
@@ -24,6 +27,8 @@ def pull_request_payload(**overrides):
             "sha": HEAD_SHA,
             "repo": {"full_name": REPOSITORY},
         },
+        "labels": [{"name": "release/ci"}, {"name": "size/M"}],
+        "updated_at": "2026-08-31T10:00:00Z",
     }
     payload.update(overrides)
     return payload
@@ -43,6 +48,10 @@ class PreMergeSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot.head_sha, HEAD_SHA)
         self.assertEqual(snapshot.base_sha, BASE_SHA)
         self.assertEqual(snapshot.head_ref, "codex/release-producer-workflows")
+        self.assertEqual(snapshot.primary_category, "ci")
+        self.assertEqual(snapshot.primary_labels, ("release/ci",))
+        self.assertEqual(snapshot.exclusion_labels, ())
+        self.assertRegex(snapshot.primary_category_digest, r"^sha256:[0-9a-f]{64}$")
 
     def test_closed_wrong_base_or_moved_head_is_rejected(self):
         cases = (
@@ -78,14 +87,15 @@ class PreMergeSnapshotTests(unittest.TestCase):
             ({"expected_pr_number": 62, "expected_head_sha": "not-a-sha"}, "Invalid expected head SHA"),
         )
         for arguments, message in cases:
-            with self.subTest(message=message):
-                with self.assertRaisesRegex(PreMergeValidationError, message):
-                    validate_snapshot(
-                        pull_request_payload(),
-                        current_main_sha=BASE_SHA,
-                        repository=REPOSITORY,
-                        **arguments,
-                    )
+            with self.subTest(message=message), self.assertRaisesRegex(
+                PreMergeValidationError, message
+            ):
+                validate_snapshot(
+                    pull_request_payload(),
+                    current_main_sha=BASE_SHA,
+                    repository=REPOSITORY,
+                    **arguments,
+                )
 
         foreign = pull_request_payload(
             head={"ref": "topic", "sha": HEAD_SHA, "repo": {"full_name": "attacker/fork"}}
@@ -97,6 +107,32 @@ class PreMergeSnapshotTests(unittest.TestCase):
                 expected_head_sha=HEAD_SHA,
                 current_main_sha=BASE_SHA,
                 repository=REPOSITORY,
+            )
+
+    def test_final_readback_rejects_primary_metadata_changed_after_preflight(self):
+        preflight = validate_snapshot(
+            pull_request_payload(),
+            expected_pr_number=62,
+            expected_head_sha=HEAD_SHA,
+            current_main_sha=BASE_SHA,
+            repository=REPOSITORY,
+        )
+        changed = pull_request_payload(
+            labels=[{"name": "release/deployment"}, {"name": "size/M"}],
+            updated_at="2026-08-31T10:02:00Z",
+        )
+
+        with self.assertRaisesRegex(
+            PreMergeValidationError,
+            "pre_merge_primary_category_metadata_changed",
+        ):
+            validate_snapshot(
+                changed,
+                expected_pr_number=62,
+                expected_head_sha=HEAD_SHA,
+                current_main_sha=BASE_SHA,
+                repository=REPOSITORY,
+                expected_primary_category_digest=preflight.primary_category_digest,
             )
 
 
@@ -150,6 +186,7 @@ class PreMergeCliTests(unittest.TestCase):
                     "--repository", REPOSITORY,
                 ],
                 cwd=Path(__file__).resolve().parents[2],
+                check=False,
                 capture_output=True,
                 text=True,
             )

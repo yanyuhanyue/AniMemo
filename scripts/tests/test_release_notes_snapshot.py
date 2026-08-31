@@ -5,10 +5,40 @@ import unittest
 from scripts.release_notes_snapshot import (
     SnapshotCollectionError,
     collect_pull_metadata,
+    collect_pull_metadata_double_readback,
 )
 
 
 class ReleaseNotesSnapshotCollectionTests(unittest.TestCase):
+    def test_double_readback_requires_identical_population_digest(self):
+        first = [
+            {
+                "number": 203,
+                "title": "修复控制器",
+                "source_identity": "c" * 40,
+                "labels": ["release/deployment"],
+                "observed_updated_at": "2026-08-31T10:00:00Z",
+            }
+        ]
+        second = [
+            {
+                **first[0],
+                "labels": ["release/deployment", "release/fix"],
+                "observed_updated_at": "2026-08-31T10:01:00Z",
+            }
+        ]
+        reads = iter((first, second))
+
+        with self.assertRaisesRegex(
+            SnapshotCollectionError,
+            "release_notes_population_changed_between_readbacks",
+        ):
+            collect_pull_metadata_double_readback(
+                repository="yanyuhanyue/AniMemo",
+                commits=["a" * 40],
+                collect=lambda _repository, _commits: next(reads),
+            )
+
     def test_associated_pull_requests_are_deduplicated_and_closed(self):
         commits = ["a" * 40, "b" * 40]
         responses = {
@@ -19,6 +49,7 @@ class ReleaseNotesSnapshotCollectionTests(unittest.TestCase):
                     "merge_commit_sha": "c" * 40,
                     "head": {"sha": "d" * 40},
                     "labels": [{"name": "release/feature"}],
+                    "updated_at": "2026-08-31T10:00:00Z",
                 }
             ],
             commits[1]: [
@@ -28,6 +59,7 @@ class ReleaseNotesSnapshotCollectionTests(unittest.TestCase):
                     "merge_commit_sha": "c" * 40,
                     "head": {"sha": "d" * 40},
                     "labels": [{"name": "release/feature"}],
+                    "updated_at": "2026-08-31T10:00:00Z",
                 }
             ],
         }
@@ -46,6 +78,7 @@ class ReleaseNotesSnapshotCollectionTests(unittest.TestCase):
                     "title": "v1.1 分发收敛",
                     "source_identity": "c" * 40,
                     "labels": ["release/feature"],
+                    "observed_updated_at": "2026-08-31T10:00:00Z",
                 }
             ],
         )
@@ -70,6 +103,7 @@ class ReleaseNotesSnapshotCollectionTests(unittest.TestCase):
                     "merge_commit_sha": "c" * 40,
                     "head": {"sha": "d" * 40},
                     "labels": [{"name": "release/fix"}],
+                    "updated_at": "2026-08-31T10:00:00Z",
                 }
             ]
 
@@ -78,6 +112,27 @@ class ReleaseNotesSnapshotCollectionTests(unittest.TestCase):
                 repository="yanyuhanyue/AniMemo",
                 commits=["a" * 40, "b" * 40],
                 query=conflict,
+            )
+
+    def test_commit_with_multiple_associated_prs_is_rejected(self):
+        def raw(number: int):
+            return {
+                "number": number,
+                "title": f"change {number}",
+                "merge_commit_sha": str(number) * 40,
+                "head": {"sha": "d" * 40},
+                "labels": [{"name": "release/fix"}],
+                "updated_at": "2026-08-31T10:00:00Z",
+            }
+
+        with self.assertRaisesRegex(
+            SnapshotCollectionError,
+            "exactly one associated merged PR",
+        ):
+            collect_pull_metadata(
+                repository="yanyuhanyue/AniMemo",
+                commits=["a" * 40],
+                query=lambda _repository, _commit: [raw(1), raw(2)],
             )
 
     def test_repository_and_pr_shape_are_strict(self):

@@ -33,6 +33,7 @@ jobs:
       head_sha: ${{ steps.snapshot.outputs.head_sha }}
       base_sha: ${{ steps.snapshot.outputs.base_sha }}
       head_ref: ${{ steps.snapshot.outputs.head_ref }}
+      primary_category_digest: ${{ steps.snapshot.outputs.primary_category_digest }}
     steps:
       - name: Require the trusted default-branch workflow definition
         env:
@@ -130,6 +131,7 @@ jobs:
           PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
           FULL_REGRESSION_RESULT: ${{ needs.full-regression.result }}
           FULL_RELEASE_GATE_RESULT: ${{ needs.full-release-gate.result }}
+          PRIMARY_CATEGORY_DIGEST: ${{ needs.preflight.outputs.primary_category_digest }}
         shell: bash
         run: |
           set -euo pipefail
@@ -144,6 +146,7 @@ jobs:
             --expected-head-sha "$HEAD_SHA" \
             --current-main-sha "$current_main_sha" \
             --repository "$GITHUB_REPOSITORY" \
+            --expected-primary-category-digest "$PRIMARY_CATEGORY_DIGEST" \
             --repo . --verify-freshness
       - name: Publish the exact candidate authority result
         env:

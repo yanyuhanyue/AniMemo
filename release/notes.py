@@ -9,6 +9,14 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from release.primary_category import (
+    CATEGORY_ORDER,
+    EXCLUSION_LABELS,
+    PRIMARY_LABELS,
+    PrimaryCategoryError,
+    validate_primary_category,
+)
+
 SCHEMA = "animemo.release-notes/v1"
 CONFIG_SCHEMA = "animemo.release-notes.configuration/v1"
 CANONICAL_RELEASE_ASSETS = (
@@ -19,36 +27,6 @@ CANONICAL_RELEASE_ASSETS = (
 )
 CANONICAL_SUPPORTED_OS = ("Ubuntu 24.04 LTS",)
 
-_PRIMARY_LABELS = {
-    "release/feature": "feature",
-    "release/fix": "fix",
-    "release/improvement": "improvement",
-    "release/ui": "ui",
-    "release/performance": "performance",
-    "release/refactor": "refactor",
-    "release/deployment": "deployment",
-    "release/ci": "ci",
-    "release/dependencies": "dependencies",
-    "release/security": "security",
-    "release/breaking": "breaking",
-    "release/docs": "docs",
-}
-_CATEGORY_ORDER = (
-    "feature",
-    "fix",
-    "improvement",
-    "ui",
-    "performance",
-    "refactor",
-    "deployment",
-    "ci",
-    "dependencies",
-    "security",
-    "breaking",
-    "docs",
-    "internal",
-    "skip",
-)
 _CONTEXT_FIELDS = {
     "candidate_sha",
     "comparison_base_sha",
@@ -110,12 +88,11 @@ def _configuration() -> dict[str, Any]:
     unsigned: dict[str, Any] = {
         "schema": CONFIG_SCHEMA,
         "label_namespace": "release/",
-        "primary_labels": dict(sorted(_PRIMARY_LABELS.items())),
+        "primary_labels": dict(sorted(PRIMARY_LABELS.items())),
         "exclusion_labels": {
-            "release/internal": "EXCLUDED_INTERNAL",
-            "skip-changelog": "EXCLUDED_SKIP",
+            label: decision for label, (_, decision) in EXCLUSION_LABELS.items()
         },
-        "category_order": list(_CATEGORY_ORDER),
+        "category_order": list(CATEGORY_ORDER),
         "renderer": "animemo.release-notes.renderer/v2",
         "unclassified_policy": "FAIL_QUALIFICATION",
         "conflicting_primary_policy": "FAIL_QUALIFICATION",
@@ -178,29 +155,11 @@ def _validate_context(value: Any) -> dict[str, Any]:
     return copy.deepcopy(result)
 
 
-def _classify(labels: list[str]) -> tuple[str, str]:
-    if len(labels) != len(set(labels)) or labels != sorted(labels):
-        raise ReleaseNotesError("PR labels must be unique and sorted")
-    if "skip-changelog" in labels:
-        return "skip", "EXCLUDED_SKIP"
-    primaries = [label for label in labels if label in _PRIMARY_LABELS]
-    internal = "release/internal" in labels
-    if internal:
-        if primaries:
-            raise ReleaseNotesError("release/internal conflicts with a primary category")
-        return "internal", "EXCLUDED_INTERNAL"
-    if not primaries:
-        raise ReleaseNotesError("user-visible PR is unclassified")
-    if len(primaries) != 1:
-        raise ReleaseNotesError("PR has conflicting primary release categories")
-    return _PRIMARY_LABELS[primaries[0]], "INCLUDED"
-
-
 def _normalize_pull(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ReleaseNotesError("PR metadata must be an object")
     required = {"number", "title", "source_identity", "labels"}
-    if set(value) != required:
+    if set(value) not in (required, required | {"observed_updated_at"}):
         raise ReleaseNotesError("PR metadata has unknown or missing fields")
     number = value["number"]
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
@@ -215,15 +174,28 @@ def _normalize_pull(value: Any) -> dict[str, Any]:
         for label in labels_value
     ):
         raise ReleaseNotesError("PR labels must be canonical strings")
+    if len(labels_value) != len(set(labels_value)):
+        raise ReleaseNotesError("PR labels must be unique")
     labels = sorted(labels_value)
-    category, decision = _classify(labels)
+    observed_updated_at = value.get("observed_updated_at", "frozen-snapshot")
+    if not isinstance(observed_updated_at, str) or not observed_updated_at:
+        raise ReleaseNotesError("PR observed_updated_at is invalid")
+    try:
+        classification = validate_primary_category(
+            number=number,
+            labels=labels,
+            merge_commit=source,
+            observed_updated_at=observed_updated_at,
+        )
+    except PrimaryCategoryError as error:
+        raise ReleaseNotesError(str(error)) from error
     return {
         "number": number,
         "title": title,
         "source_identity": source,
         "labels": labels,
-        "category": category,
-        "decision": decision,
+        "category": classification.category,
+        "decision": classification.decision,
     }
 
 
@@ -244,7 +216,7 @@ def build_release_notes(
             for value in normalized_pulls
             if value["decision"] == "INCLUDED" and value["category"] == category
         )
-        for category in _CATEGORY_ORDER
+        for category in CATEGORY_ORDER
     }
     unsigned: dict[str, Any] = {
         "schema": SCHEMA,
@@ -293,7 +265,7 @@ def validate_release_notes(value: Any) -> dict[str, Any]:
             for item in normalized
             if item["decision"] == "INCLUDED" and item["category"] == category
         )
-        for category in _CATEGORY_ORDER
+        for category in CATEGORY_ORDER
     }
     if counts != expected_counts:
         raise ReleaseNotesError("release note category counts are inconsistent")

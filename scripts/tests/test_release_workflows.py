@@ -929,7 +929,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(
             ci["jobs"]["pr-fast-gate"]["needs"],
-            "selection-authority",
+            ["selection-authority", "primary-category"],
         )
 
         release_authority = gate["jobs"]["selection-authority"]
@@ -1207,7 +1207,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         dry_permissions = release["jobs"]["dry-run"]["permissions"]
         self.assertEqual(
             dry_permissions,
-            {"actions": "read", "contents": "read", "pull-requests": "read"},
+            {"actions": "read", "contents": "read"},
         )
         publish_permissions = release["jobs"]["publish"]["permissions"]
         self.assertEqual(publish_permissions["contents"], "write")
@@ -1288,22 +1288,25 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        dry_run = source[source.index("  dry-run:\n") : source.index("  publish:\n")]
+        preflight = source[
+            source.index("  preflight:\n") : source.index("  full-ci:\n")
+        ]
 
-        self.assertIn("UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}", dry_run)
-        self.assertIn('release_notes_base="$UPGRADE_BASE_SHA"', dry_run)
-        self.assertIn('if [[ -n "$PREVIOUS_STABLE" ]]', dry_run)
+        self.assertIn("UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}", preflight)
+        self.assertIn('release_notes_base="$UPGRADE_BASE_SHA"', preflight)
+        self.assertIn('if [[ -n "$PREVIOUS_STABLE" ]]', preflight)
         self.assertIn(
             'release_notes_base="$(git rev-parse "$PREVIOUS_STABLE^{commit}")"',
-            dry_run,
+            preflight,
         )
         self.assertIn(
             'git merge-base --is-ancestor "$release_notes_base" "$CANDIDATE_SHA"',
-            dry_run,
+            preflight,
         )
-        self.assertIn('--range-start "$release_notes_base"', dry_run)
-        self.assertNotIn('--range-start "$UPGRADE_BASE_SHA"', dry_run)
-        self.assertNotIn('test -n "$PREVIOUS_STABLE"', dry_run)
+        self.assertIn('--range-start "$release_notes_base"', preflight)
+        self.assertIn('--comparison-base-sha "$release_notes_base"', preflight)
+        self.assertNotIn('--range-start "$UPGRADE_BASE_SHA"', preflight)
+        self.assertNotIn('test -n "$PREVIOUS_STABLE"', preflight)
 
     def test_release_images_receive_the_same_runtime_identity_as_the_manifest(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -2503,7 +2506,7 @@ cp "$FIXTURE_ARCHIVE" "$output"
         )
         self.assertEqual(
             freshness["permissions"],
-            {"contents": "read", "pull-requests": "read", "actions": "read"},
+            {"contents": "read", "actions": "read"},
         )
         self.assertEqual(
             freshness["concurrency"]["group"],
@@ -2565,24 +2568,51 @@ cp "$FIXTURE_ARCHIVE" "$output"
         ):
             self.assertIn(guard, module)
 
-    def test_metadata_freshness_collects_two_complete_snapshots_and_exact_artifact(self):
+    def test_metadata_freshness_reads_back_one_frozen_authority_into_exact_artifact(self):
         source = (
             ROOT / ".github" / "workflows" / "release-metadata-freshness.yml"
         ).read_text(encoding="utf-8")
         module = (ROOT / "release" / "metadata_freshness.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("MINIMUM_SNAPSHOT_INTERVAL_SECONDS = 60", module)
-        self.assertIn("MAX_COMPLETE_ATTEMPTS = 3", module)
+        self.assertIn("MINIMUM_SNAPSHOT_INTERVAL_SECONDS = 0", module)
         self.assertIn('test "$GITHUB_WORKFLOW_SHA" = "$INTENDED_MAIN_SHA"', source)
-        self.assertIn('snapshot_label="A"', module)
-        self.assertIn('snapshot_label="B"', module)
-        self.assertIn("runtime_clock.sleep(MINIMUM_SNAPSHOT_INTERVAL_SECONDS)", module)
+        self.assertIn('"releaseNotesAuthorityProducerCount": 1', module)
+        self.assertIn('"livePrLabelQueryCount": 0', module)
+        self.assertNotIn("runtime_clock.sleep(MINIMUM_SNAPSHOT_INTERVAL_SECONDS)", module)
         self.assertIn("release-metadata-freshness-${{ github.run_id }}", source)
         self.assertIn('test "$(find "$directory" -mindepth 1 -maxdepth 1 -type f | wc -l)" = "10"', source)
         self.assertIn("candidate-acceptance-receipt.json", source)
         self.assertIn("--candidate-acceptance-receipt-sha256", source)
         self.assertIn("credential-shaped material detected", source)
+
+    def test_metadata_freshness_consumes_only_frozen_qualification_authority(self):
+        freshness = workflow("release-metadata-freshness.yml")
+        source = (
+            ROOT / ".github" / "workflows" / "release-metadata-freshness.yml"
+        ).read_text(encoding="utf-8")
+        module = (ROOT / "release" / "metadata_freshness.py").read_text(
+            encoding="utf-8"
+        )
+        collection = source[
+            source.index("collect-metadata-freshness") - 500 :
+            source.index("collect-metadata-freshness") + 1500
+        ]
+
+        self.assertEqual(
+            freshness["permissions"], {"contents": "read", "actions": "read"}
+        )
+        for name in (
+            "release-notes-input.json",
+            "release-notes.json",
+            "release-notes.md",
+            "release-notes-readback.json",
+            "release-notes-preflight.json",
+        ):
+            self.assertIn(name, source)
+        self.assertNotIn("GITHUB_TOKEN", collection)
+        self.assertNotIn("pull-requests: read", source)
+        self.assertNotIn("runtime_clock.sleep(MINIMUM_SNAPSHOT_INTERVAL_SECONDS)", module)
 
     def test_publish_authenticates_freshness_producer_bindings_and_ttl(self):
         release = workflow("release.yml")

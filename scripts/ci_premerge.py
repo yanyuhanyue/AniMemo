@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -9,6 +10,11 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_IMPORT_ROOT))
+
+from release.primary_category import PrimaryCategoryError, validate_primary_category
 
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
@@ -24,6 +30,11 @@ class PreMergeSnapshot:
     base_sha: str
     head_ref: str
     repository: str
+    primary_category: str
+    primary_labels: tuple[str, ...]
+    exclusion_labels: tuple[str, ...]
+    observed_updated_at: str
+    primary_category_digest: str
 
 
 def _sha(value, *, label):
@@ -33,7 +44,44 @@ def _sha(value, *, label):
     return normalized
 
 
-def validate_snapshot(payload, *, expected_pr_number, expected_head_sha, current_main_sha, repository):
+def _primary_category_digest(value):
+    canonical = (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _label_names(payload):
+    values = payload.get("labels")
+    if not isinstance(values, list):
+        raise PreMergeValidationError("Pull request labels are missing")
+    labels = []
+    for value in values:
+        name = value.get("name") if isinstance(value, dict) else value
+        if not isinstance(name, str) or not name or name != name.strip():
+            raise PreMergeValidationError("Pull request label is invalid")
+        labels.append(name)
+    if len(labels) != len(set(labels)):
+        raise PreMergeValidationError("Pull request labels contain duplicates")
+    return sorted(labels)
+
+
+def validate_snapshot(
+    payload,
+    *,
+    expected_pr_number,
+    expected_head_sha,
+    current_main_sha,
+    repository,
+    expected_primary_category_digest=None,
+):
     if not isinstance(payload, dict):
         raise PreMergeValidationError("Pull request payload must be a JSON object")
     try:
@@ -68,12 +116,50 @@ def validate_snapshot(payload, *, expected_pr_number, expected_head_sha, current
     head_ref = str(head.get("ref") or "").strip()
     if not head_ref:
         raise PreMergeValidationError("Pull request head ref is empty")
+    labels = _label_names(payload)
+    observed_updated_at = str(payload.get("updated_at") or "").strip()
+    if not observed_updated_at:
+        raise PreMergeValidationError("Pull request updated_at is missing")
+    try:
+        classification = validate_primary_category(
+            number=pr_number,
+            labels=labels,
+            merge_commit=head_sha,
+            observed_updated_at=observed_updated_at,
+        )
+    except PrimaryCategoryError as error:
+        raise PreMergeValidationError(str(error)) from error
+    primary_category_digest = _primary_category_digest(
+        {
+            "exclusion_labels": classification.exclusion_labels,
+            "observed_updated_at": observed_updated_at,
+            "pr_number": pr_number,
+            "primary_labels": classification.primary_labels,
+        }
+    )
+    if (
+        expected_primary_category_digest is not None
+        and primary_category_digest != expected_primary_category_digest
+    ):
+        raise PreMergeValidationError(
+            "pre_merge_primary_category_metadata_changed: "
+            f"PR #{pr_number}; expectedDigest={expected_primary_category_digest}; "
+            f"observedDigest={primary_category_digest}; "
+            f"primaryLabels=[{','.join(classification.primary_labels)}]; "
+            f"exclusionLabels=[{','.join(classification.exclusion_labels)}]; "
+            f"observedUpdatedAt={observed_updated_at}"
+        )
     return PreMergeSnapshot(
         pr_number=pr_number,
         head_sha=head_sha,
         base_sha=base_sha,
         head_ref=head_ref,
         repository=repository,
+        primary_category=classification.category,
+        primary_labels=classification.primary_labels,
+        exclusion_labels=classification.exclusion_labels,
+        observed_updated_at=observed_updated_at,
+        primary_category_digest=primary_category_digest,
     )
 
 
@@ -115,6 +201,8 @@ def _write_outputs(path, snapshot):
         output.write(f"head_sha={snapshot.head_sha}\n")
         output.write(f"base_sha={snapshot.base_sha}\n")
         output.write(f"head_ref={snapshot.head_ref}\n")
+        output.write(f"primary_category={snapshot.primary_category}\n")
+        output.write(f"primary_category_digest={snapshot.primary_category_digest}\n")
 
 
 def main(argv=None):
@@ -127,6 +215,7 @@ def main(argv=None):
     parser.add_argument("--repo", type=Path, default=Path("."))
     parser.add_argument("--verify-freshness", action="store_true")
     parser.add_argument("--github-output", type=Path)
+    parser.add_argument("--expected-primary-category-digest")
     args = parser.parse_args(argv)
     try:
         payload = json.loads(args.pr_json.read_text(encoding="utf-8"))
@@ -136,6 +225,7 @@ def main(argv=None):
             expected_head_sha=args.expected_head_sha,
             current_main_sha=args.current_main_sha,
             repository=args.repository,
+            expected_primary_category_digest=args.expected_primary_category_digest,
         )
         if args.verify_freshness:
             verify_base_freshness(args.repo, base_sha=snapshot.base_sha, head_sha=snapshot.head_sha)

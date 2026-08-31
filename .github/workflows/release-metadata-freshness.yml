@@ -22,7 +22,6 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: read
   actions: read
 
 jobs:
@@ -142,7 +141,9 @@ jobs:
             --workflow-path .github/workflows/release.yml
           install -d -m 0700 "$RUNNER_TEMP/freshness-qualification"
           for name in "release-qualification-$QUALIFICATION_RUN_ID.json" \
-            platform-qualification.json release-notes.json release-notes.md \
+            platform-qualification.json release-notes-input.json \
+            release-notes.json release-notes.md release-notes-readback.json \
+            release-notes-preflight.json \
             prepublication-materials.json installer-materials.tar \
             deployment-contract.json; do
             install -m 0600 "$RUNNER_TEMP/qualification/$name" \
@@ -150,9 +151,8 @@ jobs:
           done
           echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
           echo "candidate_tree=$candidate_tree" >> "$GITHUB_OUTPUT"
-      - name: Collect two complete trusted metadata snapshots
+      - name: Verify and read back the frozen Release Notes authority
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           INTENDED_MAIN_SHA: ${{ inputs.intended_main_sha }}
           QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
           QUALIFICATION_ARTIFACT_ID: ${{ steps.qualification.outputs.artifact_id }}

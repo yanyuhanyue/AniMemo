@@ -4,24 +4,17 @@ on:
   push:
     branches:
       - main
-  pull_request_target:
-    types:
-      - opened
-      - reopened
-      - synchronize
-      - edited
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-drafter-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: release-drafter-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   update_release_draft:
     name: 更新版本变更草稿
-    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -30,15 +23,3 @@ jobs:
     steps:
       - name: 更新草稿
         uses: release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9 # v7
-
-  auto_label:
-    name: 标注变更类别
-    if: github.event_name == 'pull_request_target'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      pull-requests: write
-    steps:
-      - name: 应用确定性标签规则
-        uses: release-drafter/release-drafter/autolabeler@34d80673e067bdc0c24568d3af899c216adcfaa9 # v7
