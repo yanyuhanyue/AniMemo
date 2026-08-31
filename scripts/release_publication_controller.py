@@ -149,6 +149,7 @@ _PUBLIC_IDENTITY_FIELDS = frozenset(
         "releaseStageRoot",
     }
 )
+_PRODUCTION_GH_AUTHORITY: tuple[str, str] | None = None
 
 
 class ControllerReleaseAuthorityError(RuntimeError):
@@ -443,14 +444,8 @@ class _GitHubReadOnlyObservationBoundary:
         gh_sha256: str | None = None,
         opener: Any | None = None,
     ) -> None:
-        executable_value = (
-            os.environ.get("ANIMEMO_GH_EXECUTABLE")
-            if gh_executable is None
-            else gh_executable
-        )
-        digest_value = (
-            os.environ.get("ANIMEMO_GH_SHA256") if gh_sha256 is None else gh_sha256
-        )
+        executable_value = gh_executable
+        digest_value = gh_sha256
         if (
             not isinstance(executable_value, str)
             or not executable_value
@@ -1641,6 +1636,25 @@ class _GitHubReadOnlyObservationBoundary:
         )
 
 
+def configure_production_gh_authority(*, gh_executable: str, gh_sha256: str) -> None:
+    """Bind one exact non-secret GitHub CLI authority for this worker process."""
+
+    global _PRODUCTION_GH_AUTHORITY
+    requested = (gh_executable, gh_sha256)
+    if _PRODUCTION_GH_AUTHORITY is not None:
+        if requested != _PRODUCTION_GH_AUTHORITY:
+            _reject()
+        return
+    boundary = _GitHubReadOnlyObservationBoundary(
+        gh_executable=gh_executable,
+        gh_sha256=gh_sha256,
+    )
+    _PRODUCTION_GH_AUTHORITY = (
+        str(boundary._gh_executable),
+        boundary._gh_sha256,
+    )
+
+
 class ControllerReleaseAuthorityVerifier:
     def __init__(self, observer: ReleaseAuthorityObserver) -> None:
         self._observer = observer
@@ -1752,9 +1766,14 @@ class ControllerReleaseAuthorityVerifier:
 
 class ProductionReleaseAuthorityObserver:
     def __init__(self, boundary: ReleaseAuthorityObserver | None = None) -> None:
-        self._boundary = (
-            boundary if boundary is not None else _GitHubReadOnlyObservationBoundary()
-        )
+        if boundary is None:
+            if _PRODUCTION_GH_AUTHORITY is None:
+                _reject("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE")
+            boundary = _GitHubReadOnlyObservationBoundary(
+                gh_executable=_PRODUCTION_GH_AUTHORITY[0],
+                gh_sha256=_PRODUCTION_GH_AUTHORITY[1],
+            )
+        self._boundary = boundary
 
     def observe(
         self,
@@ -1818,5 +1837,6 @@ __all__ = [
     "ProductionReleaseAuthorityObserver",
     "ReleaseAuthorityEvidence",
     "ReleaseAuthorityObserver",
+    "configure_production_gh_authority",
     "verify_controller_release_authority",
 ]

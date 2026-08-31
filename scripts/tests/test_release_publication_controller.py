@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
 
+import scripts.release_publication_controller as release_controller
 from scripts.release_publication_controller import (
     ControllerReleaseAuthorityError,
     ControllerReleaseAuthorityVerifier,
@@ -338,6 +339,31 @@ class ControllerReleaseAuthorityVerifierTests(unittest.TestCase):
             ),
         ):
             _GitHubReadOnlyObservationBoundary()
+
+    def test_production_tool_authority_requires_explicit_one_process_binding(self):
+        configure = getattr(
+            release_controller, "configure_production_gh_authority", None
+        )
+        self.assertTrue(callable(configure))
+        with tempfile.TemporaryDirectory() as temporary:
+            authority = _tool_authority(Path(temporary))
+            with mock.patch.object(
+                release_controller, "_PRODUCTION_GH_AUTHORITY", None
+            ):
+                configure(**authority)
+                observer = ProductionReleaseAuthorityObserver()
+                self.assertIsInstance(
+                    observer._boundary, _GitHubReadOnlyObservationBoundary
+                )
+                configure(**authority)
+                with self.assertRaisesRegex(
+                    ControllerReleaseAuthorityError,
+                    "^CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_INVALID$",
+                ):
+                    configure(
+                        gh_executable=authority["gh_executable"],
+                        gh_sha256="sha256:" + "0" * 64,
+                    )
 
     def test_production_boundary_rejects_non_executable_script_tool_authority(self):
         with tempfile.TemporaryDirectory() as temporary:
