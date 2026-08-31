@@ -289,9 +289,12 @@ class ControllerReleaseAuthorityVerifierTests(unittest.TestCase):
             self.assertEqual(observed, b"{}")
             self.assertEqual(
                 run.call_args.args[0][0:4],
-                (authority["gh_executable"], "api", "--method", "GET"),
+                ("gh.exe", "api", "--method", "GET"),
             )
-            self.assertTrue(Path(run.call_args.args[0][0]).is_absolute())
+            self.assertEqual(
+                run.call_args.kwargs["executable"], authority["gh_executable"]
+            )
+            self.assertTrue(Path(run.call_args.kwargs["executable"]).is_absolute())
             self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
             self.assertFalse(run.call_args.kwargs["shell"])
             with self.assertRaisesRegex(

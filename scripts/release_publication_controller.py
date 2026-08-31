@@ -566,11 +566,9 @@ class _GitHubReadOnlyObservationBoundary:
                     or "sha256:" + digest.hexdigest() != self._gh_sha256
                 ):
                     _reject("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE")
-                # The signed, opened-handle-hashed .exe and every argument are
-                # constrained by _read_only_gh_command before this shell-free call.
-                # codeql[py/command-line-injection]
                 completed = subprocess.run(
-                    (str(self._gh_executable), *command[1:]),
+                    ("gh.exe", *command[1:]),
+                    executable=str(self._gh_executable),
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
                     check=False,
