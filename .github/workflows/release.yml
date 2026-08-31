@@ -1290,12 +1290,12 @@ jobs:
             --arg release_tag "$RELEASE_TAG" --arg api_digest "$API_DIGEST" \
             --arg web_digest "$WEB_DIGEST" \
             '{schema:$schema,authority:$authority,candidate_sha:$candidate_sha,candidate_tree:$candidate_tree,release_tag:$release_tag,api_digest:$api_digest,web_digest:$web_digest,large_byte_payloads:[]}' \
-            > release-output/dry-run-authority-receipt.json
+            > "$RUNNER_TEMP/animemo-release-producer-output/dry-run-authority-receipt.json"
       - id: dry_run_artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-dry-run-${{ needs.preflight.outputs.release_tag }}
-          path: release-output/dry-run-authority-receipt.json
+          path: ${{ runner.temp }}/animemo-release-producer-output/dry-run-authority-receipt.json
           if-no-files-found: error
           retention-days: 7
       - name: Generate qualification evidence from the single Candidate byte producer
@@ -1396,7 +1396,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-qualification-${{ github.run_id }}
-          path: release-qualification/
+          path: ${{ runner.temp }}/animemo-release-qualification-output/
           if-no-files-found: error
           retention-days: 30
 

@@ -285,6 +285,51 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER",
         )
 
+    def test_release_producer_binds_host_visible_output_staging(self):
+        producer = (ROOT / "scripts" / "run-in-release-producer.sh").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        qualification = source[
+            source.index("  dry-run:\n") : source.index("  publish:\n")
+        ]
+
+        self.assertIn(
+            'producer_release_output="$RUNNER_TEMP/animemo-release-producer-output"',
+            producer,
+        )
+        self.assertIn(
+            'producer_qualification_output="$RUNNER_TEMP/'
+            'animemo-release-qualification-output"',
+            producer,
+        )
+        self.assertIn(
+            '--mount "type=bind,src=$producer_release_output,'
+            'dst=$GITHUB_WORKSPACE/release-output"',
+            producer,
+        )
+        self.assertIn(
+            '--mount "type=bind,src=$producer_qualification_output,'
+            'dst=$GITHUB_WORKSPACE/release-qualification"',
+            producer,
+        )
+        self.assertIn(
+            '> "$RUNNER_TEMP/animemo-release-producer-output/'
+            'dry-run-authority-receipt.json"',
+            qualification,
+        )
+        self.assertIn(
+            "path: ${{ runner.temp }}/animemo-release-producer-output/"
+            "dry-run-authority-receipt.json",
+            qualification,
+        )
+        self.assertIn(
+            "path: ${{ runner.temp }}/animemo-release-qualification-output/",
+            qualification,
+        )
+
     def test_candidate_large_bytes_have_one_authoritative_producer_and_one_upload(self):
         release = workflow("release.yml")
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -296,10 +341,17 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(qualification.count("Build API OCI artifact without publishing"), 1)
         self.assertEqual(qualification.count("Build Web OCI artifact without publishing"), 1)
         self.assertEqual(qualification.count("Build the digest-pinned release byte producer"), 1)
-        self.assertEqual(qualification.count("path: release-qualification/"), 1)
+        self.assertEqual(
+            qualification.count(
+                "path: ${{ runner.temp }}/animemo-release-qualification-output/"
+            ),
+            1,
+        )
         self.assertNotIn("path: release-output/\n", qualification)
         self.assertIn(
-            "path: release-output/dry-run-authority-receipt.json", qualification
+            "path: ${{ runner.temp }}/animemo-release-producer-output/"
+            "dry-run-authority-receipt.json",
+            qualification,
         )
         self.assertIn('large_byte_payloads:[]', qualification)
         self.assertNotIn("Rebuild the exact qualification byte producer", source)
@@ -1896,7 +1948,10 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertGreaterEqual(
             source.count("platform_qualification.py verify"), 4
         )
-        self.assertIn("path: release-qualification/", source)
+        self.assertIn(
+            "path: ${{ runner.temp }}/animemo-release-qualification-output/",
+            source,
+        )
         self.assertIn(
             "install -m 0600 platform-qualification-input/platform-qualification.json", source
         )
