@@ -26,6 +26,7 @@ from durability.platform import (
 )
 from release.candidate import (
     _CANDIDATE_COMMAND_OBSERVER_IDENTITY,
+    MAX_CONTROLLER_ARCHIVE_BYTES,
     CandidateContractError,
     _build_verified_candidate_identity,
     _extract_candidate_archive,
@@ -33,6 +34,8 @@ from release.candidate import (
     _verify_runtime,
     aggregate_receipt_digest,
     apt_network_sequence_matches,
+    build_prepublication_controller_authority,
+    build_prepublication_controller_authority_from_stream,
     canonical_json_bytes,
     decode_aggregate_receipt_b64url,
     extract_candidate_oci_archive,
@@ -1100,6 +1103,371 @@ class CandidateArchiveTests(unittest.TestCase):
 
 
 class CandidateOciAndAuthorityTests(unittest.TestCase):
+    def test_controller_authority_stream_is_exact_bounded_and_exclusive(self):
+        encoded = b"PK\x03\x04bounded-controller-fixture"
+        digest = _digest(encoded)
+        observed = {}
+
+        def accept_archive(**kwargs):
+            archive = kwargs["archive"]
+            observed["bytes"] = archive.read_bytes()
+            observed["mode"] = stat.S_IMODE(archive.stat().st_mode)
+            observed["archive_limit"] = kwargs["_maximum_archive_bytes"]
+            observed["expanded_limit"] = kwargs["_maximum_expanded_bytes"]
+            return {"status": "PASS"}
+
+        with (
+            mock.patch(
+                "release.candidate.shutil.disk_usage",
+                return_value=SimpleNamespace(free=20 * 1024 * 1024 * 1024),
+            ),
+            mock.patch(
+                "release.candidate.build_prepublication_controller_authority",
+                side_effect=accept_archive,
+            ),
+        ):
+            result = build_prepublication_controller_authority_from_stream(
+                source=io.BytesIO(encoded),
+                expected_archive_size=len(encoded),
+                containing_artifact_id=99,
+                containing_artifact_api_digest=digest,
+                output=Path("controller-authority"),
+            )
+        self.assertEqual(result, {"status": "PASS"})
+        self.assertEqual(observed["bytes"], encoded)
+        if os.name == "posix":
+            self.assertEqual(observed["mode"], 0o600)
+        self.assertEqual(observed["archive_limit"], MAX_CONTROLLER_ARCHIVE_BYTES)
+        self.assertGreater(observed["expanded_limit"], 0)
+
+    def test_controller_authority_stream_rejects_size_and_digest_failures(self):
+        encoded = b"bounded"
+        digest = _digest(encoded)
+        cases = (
+            (len(encoded) - 1, digest, "STREAM_GREW"),
+            (len(encoded) + 1, digest, "STREAM_TRUNCATED"),
+            (len(encoded), "sha256:" + "f" * 64, "API_DIGEST_MISMATCH"),
+        )
+        for expected_size, expected_digest, code in cases:
+            with (
+                self.subTest(code=code),
+                mock.patch(
+                    "release.candidate.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=20 * 1024 * 1024 * 1024),
+                ),
+                self.assertRaisesRegex(CandidateContractError, code),
+            ):
+                build_prepublication_controller_authority_from_stream(
+                    source=io.BytesIO(encoded),
+                    expected_archive_size=expected_size,
+                    containing_artifact_id=99,
+                    containing_artifact_api_digest=expected_digest,
+                    output=Path("controller-authority"),
+                )
+        with self.assertRaisesRegex(CandidateContractError, "ARCHIVE_SIZE_INVALID"):
+            build_prepublication_controller_authority_from_stream(
+                source=io.BytesIO(b""),
+                expected_archive_size=MAX_CONTROLLER_ARCHIVE_BYTES + 1,
+                containing_artifact_id=99,
+                containing_artifact_api_digest=digest,
+                output=Path("controller-authority"),
+            )
+
+    def test_controller_authority_stream_reserves_runner_disk_before_reading(self):
+        source = mock.Mock()
+        with (
+            mock.patch(
+                "release.candidate.shutil.disk_usage",
+                return_value=SimpleNamespace(free=1),
+            ),
+            self.assertRaisesRegex(CandidateContractError, "DISK_BUDGET_INSUFFICIENT"),
+        ):
+            build_prepublication_controller_authority_from_stream(
+                source=source,
+                expected_archive_size=1,
+                containing_artifact_id=99,
+                containing_artifact_api_digest="sha256:" + "f" * 64,
+                output=Path("controller-authority"),
+            )
+        source.read.assert_not_called()
+
+    def test_controller_authority_stream_open_failure_is_stably_fail_closed(self):
+        with (
+            mock.patch(
+                "release.candidate.shutil.disk_usage",
+                return_value=SimpleNamespace(free=20 * 1024 * 1024 * 1024),
+            ),
+            mock.patch("release.candidate.os.open", side_effect=OSError("denied")),
+            self.assertRaisesRegex(
+                CandidateContractError, "CONTROLLER_AUTHORITY_ARCHIVE_STREAM_INVALID"
+            ),
+        ):
+            build_prepublication_controller_authority_from_stream(
+                source=io.BytesIO(b"x"),
+                expected_archive_size=1,
+                containing_artifact_id=99,
+                containing_artifact_api_digest=_digest(b"x"),
+                output=Path("controller-authority"),
+            )
+
+    def test_controller_authority_contains_two_deterministic_bound_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            root = temporary_root / "qualification"
+            root.mkdir()
+            candidate = candidate_input()
+            deployment = {
+                "schemaVersion": 2,
+                "profile": "animemo-production-v2",
+                "platform": "linux/amd64",
+                "archive": {},
+                "materials": [],
+            }
+            files = {
+                "candidate-input.json": canonical_json_bytes(candidate),
+                "checksums.txt": b"x",
+                "deployment-contract.json": canonical_json_bytes(deployment),
+                "installer-materials.tar": b"x",
+                "platform-qualification.json": b"{}\n",
+                "prepublication-materials.json": b"{}\n",
+                "release-producer-toolchain-receipt.json": (
+                    producer_toolchain_receipt_bytes()
+                ),
+                "release-manifest.json": b"{}\n",
+                "release-notes.json": b"{}\n",
+                "release-notes.md": b"x",
+                f"release-qualification-{RUN_ID}.json": b"{}\n",
+                **{
+                    item["path"]: b"x"
+                    for item in candidate["candidate_runtime_file_inventory"]
+                },
+            }
+            for name, encoded in files.items():
+                target = root.joinpath(*name.split("/"))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(encoded)
+            archive = temporary_root / "qualification.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                for name in sorted(files):
+                    bundle.writestr(name, files[name])
+            archive_digest = _digest(archive.read_bytes())
+            repositories = {
+                "api": "ghcr.io/yanyuhanyue/animemo-api",
+                "postgres": "docker.io/library/postgres",
+                "redis": "docker.io/library/redis",
+                "web": "ghcr.io/yanyuhanyue/animemo-web",
+            }
+            runtime = SimpleNamespace(
+                images=tuple(
+                    SimpleNamespace(
+                        role=role,
+                        repository=repositories[role],
+                        digest=DIGEST,
+                        platform="linux/amd64",
+                        config_digest=DIGEST,
+                        layer_digests=(DIGEST,),
+                    )
+                    for role in ("api", "postgres", "redis", "web")
+                )
+            )
+
+            def accept_candidate(value, *, root=None):
+                del root
+                return dict(value)
+
+            def extract_materials(_archive, _contract, destination):
+                destination.mkdir(parents=True)
+
+            outputs = []
+            with (
+                mock.patch(
+                    "release.candidate.validate_candidate_input",
+                    side_effect=accept_candidate,
+                ),
+                mock.patch("release.candidate._verify_runtime", return_value=runtime),
+                mock.patch(
+                    "release.candidate.extract_installer_materials",
+                    side_effect=extract_materials,
+                ),
+                mock.patch("release.candidate._verify_qualification_intrinsics"),
+                mock.patch(
+                    "release.candidate.os.getcwd", return_value=str(temporary_root)
+                ),
+            ):
+                for suffix in ("a", "b"):
+                    if suffix == "b":
+                        (root / "unexpected-after-upload.txt").write_text(
+                            "not part of the uploaded artifact", encoding="utf-8"
+                        )
+                    output_name = Path(f"authority-{suffix}")
+                    output = temporary_root / output_name
+                    result = build_prepublication_controller_authority(
+                        archive=archive,
+                        containing_artifact_id=99,
+                        containing_artifact_api_digest=archive_digest,
+                        output=output_name,
+                    )
+                    self.assertEqual(result["status"], "PASS")
+                    self.assertEqual(result["authorityFileCount"], 2)
+                    self.assertEqual(result["archiveFileCount"], len(files))
+                    self.assertEqual(
+                        {item.name for item in output.iterdir()},
+                        {"candidate-input.json", "verified-candidate.json"},
+                    )
+                    outputs.append(output)
+                with self.assertRaisesRegex(
+                    CandidateContractError,
+                    "CONTROLLER_AUTHORITY_ARTIFACT_BINDING_INVALID",
+                ):
+                    build_prepublication_controller_authority(
+                        archive=archive,
+                        containing_artifact_id=0,
+                        containing_artifact_api_digest=archive_digest,
+                        output=Path("invalid-binding"),
+                    )
+                with self.assertRaisesRegex(
+                    CandidateContractError,
+                    "CONTROLLER_AUTHORITY_OUTPUT_EXISTS",
+                ):
+                    build_prepublication_controller_authority(
+                        archive=archive,
+                        containing_artifact_id=99,
+                        containing_artifact_api_digest=archive_digest,
+                        output=Path(outputs[0].name),
+                    )
+                with self.assertRaisesRegex(
+                    CandidateContractError,
+                    "CONTROLLER_AUTHORITY_OUTPUT_INVALID",
+                ):
+                    build_prepublication_controller_authority(
+                        archive=archive,
+                        containing_artifact_id=99,
+                        containing_artifact_api_digest=archive_digest,
+                        output=temporary_root / "absolute-output",
+                    )
+                with self.assertRaisesRegex(
+                    CandidateContractError,
+                    "CANDIDATE_ARTIFACT_API_DIGEST_MISMATCH",
+                ):
+                    build_prepublication_controller_authority(
+                        archive=archive,
+                        containing_artifact_id=99,
+                        containing_artifact_api_digest="sha256:" + "f" * 64,
+                        output=Path("wrong-digest"),
+                    )
+                bad_archive = temporary_root / "qualification-extra-file.zip"
+                with zipfile.ZipFile(bad_archive, "w") as bundle:
+                    for name in sorted(files):
+                        bundle.writestr(name, files[name])
+                    bundle.writestr("unexpected.txt", b"unexpected")
+                with self.assertRaisesRegex(
+                    CandidateContractError,
+                    "CANDIDATE_ARCHIVE_FILE_SET_MISMATCH",
+                ):
+                    build_prepublication_controller_authority(
+                        archive=bad_archive,
+                        containing_artifact_id=100,
+                        containing_artifact_api_digest=_digest(bad_archive.read_bytes()),
+                        output=Path("extra-file"),
+                    )
+            self.assertEqual(
+                (outputs[0] / "candidate-input.json").read_bytes(),
+                (outputs[1] / "candidate-input.json").read_bytes(),
+            )
+            self.assertEqual(
+                (outputs[0] / "verified-candidate.json").read_bytes(),
+                (outputs[1] / "verified-candidate.json").read_bytes(),
+            )
+            artifacts = {
+                "total_count": 3,
+                "artifacts": [
+                    {
+                        "id": 99,
+                        "name": f"release-qualification-{RUN_ID}",
+                        "expired": False,
+                        "digest": archive_digest,
+                        "archive_download_url": (
+                            "https://api.github.com/repos/yanyuhanyue/AniMemo/"
+                            "actions/artifacts/99/zip"
+                        ),
+                        "workflow_run": {"id": RUN_ID, "head_sha": SHA},
+                    },
+                    *[
+                        {
+                            "id": candidate["qualification_artifact_ids"][role],
+                            "name": (
+                                f"platform-qualification-{RUN_ID}"
+                                if role == "platform_qualification"
+                                else "release-dry-run-v1.1.0-rc.14"
+                            ),
+                            "expired": False,
+                            "digest": candidate[
+                                "qualification_artifact_api_digests"
+                            ][role],
+                            "workflow_run": {"id": RUN_ID, "head_sha": SHA},
+                        }
+                        for role in ("platform_qualification", "release_dry_run")
+                    ],
+                ],
+            }
+            run = {
+                "id": RUN_ID,
+                "name": "Release Producer",
+                "path": ".github/workflows/release.yml",
+                "event": "workflow_dispatch",
+                "status": "completed",
+                "conclusion": "success",
+                "run_attempt": 1,
+                "repository": {"full_name": "yanyuhanyue/AniMemo"},
+                "head_branch": "main",
+                "head_sha": SHA,
+            }
+            jobs = {
+                "total_count": 2,
+                "jobs": [
+                    {
+                        "name": "phase-a-qualification-evidence",
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                    {
+                        "name": "publish-immutable-prerelease",
+                        "status": "completed",
+                        "conclusion": "skipped",
+                    },
+                ],
+            }
+            with (
+                mock.patch(
+                    "release.candidate.validate_candidate_input",
+                    side_effect=accept_candidate,
+                ),
+                mock.patch("release.candidate._verify_runtime", return_value=runtime),
+                mock.patch(
+                    "release.candidate.extract_installer_materials",
+                    side_effect=extract_materials,
+                ),
+                mock.patch("release.candidate._verify_qualification_intrinsics"),
+            ):
+                verified = verify_prepublication_candidate(
+                    archive=archive,
+                    run_metadata=run,
+                    jobs_metadata=jobs,
+                    artifacts_metadata=artifacts,
+                    containing_artifact_id=99,
+                    containing_artifact_api_digest=archive_digest,
+                    expected_run_id=RUN_ID,
+                    expected_source_sha=SHA,
+                    expected_source_tree=TREE,
+                    expected_candidate_version="v1.1.0-rc.14",
+                    verified_at="2026-08-31T05:00:00Z",
+                    _state_root=temporary_root / "state",
+                )
+            self.assertEqual(
+                verified["verifiedCandidateDigest"],
+                _digest((outputs[0] / "verified-candidate.json").read_bytes()),
+            )
+
     def test_registry_oci_tar_is_safely_extracted_before_digest_verification(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

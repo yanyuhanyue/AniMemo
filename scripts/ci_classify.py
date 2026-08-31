@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 SCHEMA_VERSION = "animemo.ci-risk/v2"
 RISK_LEVELS = ("LOW", "STANDARD", "HIGH", "CRITICAL")
@@ -163,6 +164,30 @@ OUTPUT_NAMES = (
     "run_release_docker",
     "run_release_stateful",
     "run_release_dr",
+    "full_gate",
+    "critical_gate",
+    "classification_sha256",
+    "authority_scalars_json",
+)
+
+AUTHORITY_SCALAR_NAMES = (
+    "schema_version",
+    "risk_level",
+    "risk_rank",
+    "execution_force_full",
+    "docs_only",
+    "mixed",
+    "run_frontend",
+    "run_backend",
+    "run_bootstrap",
+    "run_plugins",
+    "run_bridge",
+    "run_postgres",
+    "run_runtime",
+    "run_release_full",
+    "run_release_updater",
+    "run_release_docker",
+    "run_release_stateful",
     "full_gate",
     "critical_gate",
 )
@@ -1093,6 +1118,15 @@ def classify_paths(paths: list[str], *, force_full: bool = False) -> dict[str, s
     }
     result.update({name: "true" if signals[name] else "false" for name in SIGNAL_NAMES})
     result.update({name: "true" if gates[name] else "false" for name in GATE_NAMES})
+    result["classification_sha256"] = (
+        "sha256:" + hashlib.sha256(result["classification_json"].encode("utf-8")).hexdigest()
+    )
+    result["authority_scalars_json"] = _json(
+        {
+            **{name: result[name] for name in AUTHORITY_SCALAR_NAMES},
+            "classification_sha256": result["classification_sha256"],
+        }
+    )
     return {name: result[name] for name in OUTPUT_NAMES}
 
 
@@ -1164,6 +1198,28 @@ def write_outputs(result: dict[str, str], output_path: str) -> None:
         output.writelines(f"{name}={value}\n" for name, value in result.items())
 
 
+def write_authority_document(result: dict[str, str], output_path: str) -> None:
+    runner_temp = os.environ.get("RUNNER_TEMP", "")
+    if not runner_temp:
+        raise ValueError("RUNNER_TEMP is required for the authority document")
+    trusted_root = os.path.abspath(runner_temp)
+    normalized_output = os.path.abspath(output_path)
+    if (
+        not normalized_output.startswith(trusted_root + os.sep)
+        or os.path.dirname(normalized_output) != trusted_root
+    ):
+        raise ValueError("authority output must be a direct child of RUNNER_TEMP")
+    target = Path(normalized_output)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(target, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(result["classification_json"].encode("utf-8"))
+        output.flush()
+        os.fsync(output.fileno())
+
+
 def self_test() -> None:
     cases = (
         ("LOW", "DOCS_ONLY", ["docs/architecture.md", "README.md"]),
@@ -1230,6 +1286,7 @@ def main() -> int:
     parser.add_argument("--head")
     parser.add_argument("--files", nargs="*")
     parser.add_argument("--github-output")
+    parser.add_argument("--authority-output")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -1245,6 +1302,8 @@ def main() -> int:
     )
     result = classify_paths(paths, force_full=force_full)
     result["changed_files"] = _json(_normalize_paths(paths))
+    if args.authority_output:
+        write_authority_document(result, args.authority_output)
     if args.github_output:
         write_outputs(result, args.github_output)
     else:

@@ -305,6 +305,61 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("Rebuild the exact qualification byte producer", source)
         self.assertNotIn("release-producer-toolchain-${{ github.run_id }}", source)
 
+    def test_qualification_emits_exact_remote_controller_authority(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        authority = source[
+            source.index("  dry-run:\n") : source.index("  publish:\n")
+        ]
+        controller = authority[
+            authority.index("- name: Build the exact remote controller authority") :
+            authority.index("- name: Upload the small remote controller authority")
+        ]
+        self.assertIn("build-prepublication-controller-authority", authority)
+        self.assertIn(
+            "QUALIFICATION_ARTIFACT_ID: "
+            "${{ needs.dry-run.outputs.artifact_id }}",
+            authority,
+        )
+        self.assertIn(
+            "QUALIFICATION_ARTIFACT_DIGEST: "
+            "${{ needs.dry-run.outputs.artifact_digest }}",
+            authority,
+        )
+        self.assertIn(
+            '"repos/${GITHUB_REPOSITORY}/actions/artifacts/'
+            '${QUALIFICATION_ARTIFACT_ID}/zip"',
+            authority,
+        )
+        self.assertIn(
+            "name: Gate exact GitHub CLI security baseline for controller authority",
+            authority,
+        )
+        self.assertIn(f"uses: {PINNED_GH_ACTION}", authority)
+        self.assertLess(
+            authority.index(
+                "name: Gate exact GitHub CLI security baseline for controller authority"
+            ),
+            authority.index("- name: Build the exact remote controller authority"),
+        )
+        self.assertIn("--archive-stdin", controller)
+        self.assertIn('--expected-archive-size "$artifact_size"', controller)
+        self.assertNotIn("--root", controller)
+        self.assertNotIn('> "$qualification_archive"', controller)
+        self.assertIn(".size_in_bytes", controller)
+        self.assertIn(".workflow_run.head_sha", controller)
+        self.assertIn("needs: [dry-run]", authority)
+        self.assertIn("actions: read", authority)
+        self.assertIn("candidate-input.json", authority)
+        self.assertIn("verified-candidate.json", authority)
+        self.assertIn(
+            "name: controller-authority-${{ github.run_id }}", authority
+        )
+        self.assertIn("path: controller-authority/", authority)
+        self.assertEqual(authority.count("name: controller-authority-"), 1)
+        self.assertEqual(authority.count("path: controller-authority/"), 1)
+
         for workflow_name, job_names in {
             "performance.yml": (
                 "isolated-resource-load",
@@ -771,6 +826,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "risk_rank",
             "execution_force_full",
             "classification_json",
+            "authority_scalars_json",
             "docs_only",
             "mixed",
             "run_frontend",
@@ -1092,7 +1148,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         release = workflow("release.yml")
         dry_permissions = release["jobs"]["dry-run"]["permissions"]
         self.assertEqual(
-            dry_permissions, {"contents": "read", "pull-requests": "read"}
+            dry_permissions,
+            {"actions": "read", "contents": "read", "pull-requests": "read"},
         )
         publish_permissions = release["jobs"]["publish"]["permissions"]
         self.assertEqual(publish_permissions["contents"], "write")
@@ -1651,9 +1708,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("GH_REQUIRED_VERSION", promotion)
         self.assertNotIn("GH_REQUIRED_LINUX_AMD64_SHA256", release)
         self.assertNotIn("GH_REQUIRED_LINUX_AMD64_SHA256", promotion)
-        self.assertEqual(release.count(gate), 3)
+        self.assertEqual(release.count(gate), 4)
         self.assertEqual(promotion.count(gate), 2)
-        self.assertEqual(release.count(f"uses: {PINNED_GH_ACTION}"), 3)
+        self.assertEqual(release.count(f"uses: {PINNED_GH_ACTION}"), 4)
         self.assertEqual(promotion.count(f"uses: {PINNED_GH_ACTION}"), 2)
 
     def test_pinned_github_cli_action_is_digest_bound_and_fail_closed(self):
@@ -2588,7 +2645,7 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertEqual(
             release["jobs"]["dry-run"]["outputs"]["artifact_digest"],
             "${{ format('sha256:{0}', "
-            "steps.dry_run_artifact.outputs.artifact-digest) }}",
+            "steps.qualification_artifact.outputs.artifact-digest) }}",
         )
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"

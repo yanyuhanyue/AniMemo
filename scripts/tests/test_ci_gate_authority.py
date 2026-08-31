@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
+import subprocess
+import tempfile
 import unittest
 from copy import deepcopy
+from pathlib import Path
 from unittest import mock
 
 from scripts.ci_classify import classify_paths
@@ -17,6 +21,7 @@ from scripts.ci_gate_authority import (
     RELEASE_JOB_GATES,
     SCHEMA_VERSION,
     GateAuthorityError,
+    _needs_from_authority_inputs,
     main,
     validate_gate_authority,
 )
@@ -100,6 +105,61 @@ def validate_current_release(
 
 
 class CiGateAuthorityTests(unittest.TestCase):
+    def test_artifact_file_authority_rejects_escape_digest_and_duplicate_results(self):
+        document = classification(["src/pages/Journal.jsx"])
+        raw = json.dumps(
+            document,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        outputs = classify_job(document)["outputs"]
+        scalars = {
+            name: outputs[name]
+            for name in CLASSIFIER_OUTPUT_NAMES
+            if name != "classification_json"
+        }
+        scalars["classification_sha256"] = "sha256:" + hashlib.sha256(
+            raw.encode("utf-8")
+        ).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            authority = root / "classification.json"
+            authority.write_text(raw, encoding="utf-8")
+            encoded_scalars = json.dumps(scalars, separators=(",", ":"))
+            with mock.patch.dict(
+                os.environ, {"RUNNER_TEMP": temporary}, clear=True
+            ):
+                bad_scalars = dict(scalars)
+                bad_scalars["classification_sha256"] = "sha256:" + "f" * 64
+                with self.assertRaisesRegex(GateAuthorityError, "does not match"):
+                    _needs_from_authority_inputs(
+                        classification_file=authority,
+                        authority_scalars_json=json.dumps(bad_scalars),
+                        job_results=["classify=success"],
+                    )
+                with self.assertRaisesRegex(GateAuthorityError, "duplicated"):
+                    _needs_from_authority_inputs(
+                        classification_file=authority,
+                        authority_scalars_json=encoded_scalars,
+                        job_results=["classify=success", "classify=success"],
+                    )
+                descriptor, outside_name = tempfile.mkstemp(
+                    prefix="outside-classification-", suffix=".json", dir=root.parent
+                )
+                os.close(descriptor)
+                outside = Path(outside_name)
+                outside.write_text(raw, encoding="utf-8")
+                try:
+                    with self.assertRaisesRegex(GateAuthorityError, "RUNNER_TEMP"):
+                        _needs_from_authority_inputs(
+                            classification_file=outside,
+                            authority_scalars_json=encoded_scalars,
+                            job_results=["classify=success"],
+                        )
+                finally:
+                    outside.unlink()
+
     def assert_rejected(self, message: str, callback) -> None:
         with self.assertRaisesRegex(GateAuthorityError, message):
             callback()
@@ -642,6 +702,115 @@ class CiGateAuthorityTests(unittest.TestCase):
             code = main(["--workflow", "ci", "--event-name", "pull_request"])
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(stderr.getvalue())["status"], "FAIL")
+
+    def test_cli_accepts_bounded_needs_json_on_stdin_without_environment_copy(self):
+        document = classification(["src/pages/Journal.jsx"])
+        stdin = io.StringIO(json.dumps(ci_needs(document)))
+        stdout = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch("sys.stdin", stdin),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = main(
+                [
+                    "--workflow",
+                    "ci",
+                    "--event-name",
+                    "pull_request",
+                    "--needs-json-stdin",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "PASS")
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"NEEDS_JSON": "{}"}, clear=True),
+            mock.patch("sys.stdin", io.StringIO("{}")),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = main(
+                [
+                    "--workflow",
+                    "ci",
+                    "--event-name",
+                    "pull_request",
+                    "--needs-json-stdin",
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("mutually exclusive", stderr.getvalue())
+
+    def test_full_repository_authority_payload_uses_digest_bound_artifact_file(self):
+        repository = Path(__file__).resolve().parents[2]
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+        )
+        paths = sorted(
+            path for path in tracked.stdout.decode("utf-8").split("\0") if path
+        )
+        document = classification(paths, force_full=True)
+        raw_needs = json.dumps(
+            ci_needs(document, event_name="workflow_call"),
+            separators=(",", ":"),
+        )
+        self.assertGreater(len(raw_needs.encode("utf-8")), 128 * 1024)
+
+        raw_classification = json.dumps(
+            document,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        classify_outputs = classify_job(document)["outputs"]
+        scalars = {
+            name: classify_outputs[name]
+            for name in CLASSIFIER_OUTPUT_NAMES
+            if name != "classification_json"
+        }
+        scalars["classification_sha256"] = "sha256:" + hashlib.sha256(
+            raw_classification.encode("utf-8")
+        ).hexdigest()
+        authority_scalars_json = json.dumps(
+            scalars,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self.assertLess(len(authority_scalars_json.encode("utf-8")), 4096)
+        needs = ci_needs(document, event_name="workflow_call")
+
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary:
+            authority_file = Path(temporary) / "classification.json"
+            authority_file.write_text(raw_classification, encoding="utf-8")
+            arguments = [
+                "--workflow",
+                "ci",
+                "--event-name",
+                "workflow_call",
+                "--classification-file",
+                str(authority_file),
+                "--authority-scalars-json",
+                authority_scalars_json,
+            ]
+            for name, job in needs.items():
+                arguments.extend(("--job-result", f"{name}={job['result']}"))
+            with (
+                mock.patch.dict(
+                    os.environ, {"RUNNER_TEMP": temporary}, clear=True
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = main(arguments)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "PASS")
 
 
 if __name__ == "__main__":

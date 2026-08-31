@@ -59,6 +59,7 @@ jobs:
       risk_rank: ${{ steps.classify.outputs.risk_rank }}
       execution_force_full: ${{ steps.classify.outputs.execution_force_full }}
       classification_json: ${{ steps.classify.outputs.classification_json }}
+      authority_scalars_json: ${{ steps.classify.outputs.authority_scalars_json }}
       docs_only: ${{ steps.classify.outputs.docs_only }}
       mixed: ${{ steps.classify.outputs.mixed }}
       run_frontend: ${{ steps.classify.outputs.run_frontend }}
@@ -86,7 +87,18 @@ jobs:
           CI_FORCE_FULL: ${{ inputs.force_full || false }}
           CI_BASE_SHA: ${{ inputs.upgrade_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before) }}
           CI_HEAD_SHA: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
-        run: python scripts/ci_classify.py --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA" --github-output "$GITHUB_OUTPUT"
+        run: >-
+          python scripts/ci_classify.py
+          --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA"
+          --github-output "$GITHUB_OUTPUT"
+          --authority-output "$RUNNER_TEMP/release-classification-authority.json"
+      - name: Upload the exact Release Gate classification authority document
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-classification-authority-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-classification-authority.json
+          if-no-files-found: error
+          retention-days: 1
 
   post-merge-sanity:
     name: post-merge-sanity
@@ -397,11 +409,33 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
+      - name: Download the exact Release Gate classification authority document
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-classification-authority-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-classification-authority
       - name: Require selected jobs to succeed and unselected jobs to skip
         env:
-          NEEDS_JSON: ${{ toJSON(needs) }}
-        run: >-
-          python scripts/ci_gate_authority.py
-          --workflow release
-          --event-name "${{ github.event_name }}"
-          --release-graph-contract animemo.release-gate.jobs/v2
+          AUTHORITY_EVENT_NAME: ${{ github.event_name }}
+          CLASSIFICATION_AUTHORITY_SCALARS_JSON: ${{ needs.classify.outputs.authority_scalars_json }}
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          POST_MERGE_SANITY_RESULT: ${{ needs.post-merge-sanity.result }}
+          UPDATER_ISOLATED_RESULT: ${{ needs.updater-isolated.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
+          STATEFUL_UPGRADE_RESULT: ${{ needs.stateful-upgrade.result }}
+          DR_REHEARSAL_RESULT: ${{ needs.dr-rehearsal.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/ci_gate_authority.py \
+            --workflow release \
+            --event-name "$AUTHORITY_EVENT_NAME" \
+            --release-graph-contract animemo.release-gate.jobs/v2 \
+            --classification-file "$RUNNER_TEMP/release-classification-authority/release-classification-authority.json" \
+            --authority-scalars-json "$CLASSIFICATION_AUTHORITY_SCALARS_JSON" \
+            --job-result "classify=$CLASSIFY_RESULT" \
+            --job-result "post-merge-sanity=$POST_MERGE_SANITY_RESULT" \
+            --job-result "updater-isolated=$UPDATER_ISOLATED_RESULT" \
+            --job-result "docker=$DOCKER_RESULT" \
+            --job-result "stateful-upgrade=$STATEFUL_UPGRADE_RESULT" \
+            --job-result "dr-rehearsal=$DR_REHEARSAL_RESULT"

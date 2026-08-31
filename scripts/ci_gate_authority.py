@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = "animemo.ci-risk/v2"
+MAX_NEEDS_JSON_BYTES = 4 * 1024 * 1024
 RISK_RANKS = {"LOW": 1, "STANDARD": 2, "HIGH": 3, "CRITICAL": 4}
 EXECUTION_PROFILES = frozenset(
     {"DOCS_ONLY", "CONTRACT_VALIDATION_ONLY", "TARGETED", "FULL_AUTHORITY"}
@@ -106,6 +109,12 @@ CLASSIFIER_OUTPUT_NAMES = (
     "execution_force_full",
     "classification_json",
     *SCALAR_GATE_NAMES,
+)
+CLASSIFIER_AUTHORITY_SCALAR_NAMES = frozenset(
+    {
+        *(name for name in CLASSIFIER_OUTPUT_NAMES if name != "classification_json"),
+        "classification_sha256",
+    }
 )
 PRODUCT_GATE_NAMES = (
     "run_frontend",
@@ -683,6 +692,102 @@ def validate_gate_authority(
     return result
 
 
+def _read_classification_authority(path: Path) -> str:
+    runner_temp = os.environ.get("RUNNER_TEMP", "")
+    if not runner_temp:
+        raise GateAuthorityError(
+            "RUNNER_TEMP is required for classification file authority"
+        )
+    trusted_root = os.path.abspath(runner_temp)
+    normalized_path = os.path.abspath(os.fspath(path))
+    if not normalized_path.startswith(trusted_root + os.sep):
+        raise GateAuthorityError(
+            "classification authority file must remain within RUNNER_TEMP"
+        )
+    path = Path(normalized_path)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as source:
+            metadata = os.fstat(source.fileno())
+            if metadata.st_size < 1 or metadata.st_size > MAX_NEEDS_JSON_BYTES:
+                raise GateAuthorityError(
+                    "classification authority file exceeds the bounded input limit"
+                )
+            encoded = source.read(MAX_NEEDS_JSON_BYTES + 1)
+    except OSError as error:
+        raise GateAuthorityError("classification authority file is unreadable") from error
+    if len(encoded) > MAX_NEEDS_JSON_BYTES:
+        raise GateAuthorityError(
+            "classification authority file exceeds the bounded input limit"
+        )
+    try:
+        raw = encoded.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise GateAuthorityError("classification authority file is not UTF-8") from error
+    document = _object(
+        _load_json(raw, label="classification authority file"),
+        label="classification authority file",
+    )
+    canonical = json.dumps(
+        document,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    if canonical != raw:
+        raise GateAuthorityError("classification authority file is not canonical JSON")
+    return raw
+
+
+def _needs_from_authority_inputs(
+    *,
+    classification_file: Path,
+    authority_scalars_json: str,
+    job_results: Sequence[str],
+) -> Mapping[str, Any]:
+    raw_classification = _read_classification_authority(classification_file)
+    scalars = _object(
+        _load_json(authority_scalars_json, label="authority scalars JSON"),
+        label="authority scalars JSON",
+    )
+    _exact_keys(
+        scalars,
+        CLASSIFIER_AUTHORITY_SCALAR_NAMES,
+        label="authority scalars JSON",
+    )
+    expected_digest = "sha256:" + hashlib.sha256(
+        raw_classification.encode("utf-8")
+    ).hexdigest()
+    if scalars["classification_sha256"] != expected_digest:
+        raise GateAuthorityError(
+            "classification authority file does not match its GitHub output digest"
+        )
+    outputs = {
+        name: scalars[name]
+        for name in CLASSIFIER_OUTPUT_NAMES
+        if name != "classification_json"
+    }
+    outputs["classification_json"] = raw_classification
+    needs: dict[str, dict[str, Any]] = {}
+    for item in job_results:
+        name, separator, result = item.partition("=")
+        if (
+            separator != "="
+            or not name
+            or not result
+            or name in needs
+            or result not in {"success", "failure", "cancelled", "skipped"}
+        ):
+            raise GateAuthorityError("job result authority is invalid or duplicated")
+        needs[name] = {"result": result}
+    if "classify" not in needs:
+        raise GateAuthorityError("classify job result authority is missing")
+    needs["classify"]["outputs"] = outputs
+    return needs
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Validate selection-aware AniMemo CI or Release Gate authority."
@@ -690,11 +795,51 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--workflow", required=True)
     parser.add_argument("--event-name", required=True)
     parser.add_argument("--release-graph-contract", default="")
+    parser.add_argument("--needs-json-stdin", action="store_true")
+    parser.add_argument("--classification-file", type=Path)
+    parser.add_argument("--authority-scalars-json")
+    parser.add_argument("--job-result", action="append", default=[])
     args = parser.parse_args(argv)
 
     try:
-        raw_needs = os.getenv("NEEDS_JSON")
-        needs = _object(_load_json(raw_needs, label="NEEDS_JSON"), label="NEEDS_JSON")
+        environment_needs = os.getenv("NEEDS_JSON")
+        authority_mode = any(
+            (
+                args.classification_file is not None,
+                args.authority_scalars_json is not None,
+                bool(args.job_result),
+            )
+        )
+        if authority_mode:
+            if (
+                args.classification_file is None
+                or args.authority_scalars_json is None
+                or not args.job_result
+                or args.needs_json_stdin
+                or environment_needs is not None
+            ):
+                raise GateAuthorityError(
+                    "classification-file authority inputs must be complete and exclusive"
+                )
+            needs = _needs_from_authority_inputs(
+                classification_file=args.classification_file,
+                authority_scalars_json=args.authority_scalars_json,
+                job_results=args.job_result,
+            )
+        elif args.needs_json_stdin:
+            if environment_needs is not None:
+                raise GateAuthorityError(
+                    "NEEDS_JSON and --needs-json-stdin are mutually exclusive"
+                )
+            raw_needs = sys.stdin.read(MAX_NEEDS_JSON_BYTES + 1)
+            if len(raw_needs.encode("utf-8")) > MAX_NEEDS_JSON_BYTES:
+                raise GateAuthorityError("NEEDS_JSON exceeds the bounded input limit")
+        else:
+            raw_needs = environment_needs
+        if not authority_mode:
+            needs = _object(
+                _load_json(raw_needs, label="NEEDS_JSON"), label="NEEDS_JSON"
+            )
         result = validate_gate_authority(
             needs,
             workflow=args.workflow,

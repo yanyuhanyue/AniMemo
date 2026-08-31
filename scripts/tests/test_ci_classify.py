@@ -14,6 +14,7 @@ from scripts.ci_classify import (
     changed_paths,
     classify_paths,
     force_full_for_event,
+    write_authority_document,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,6 +52,32 @@ def parsed(result: dict[str, str]) -> dict[str, object]:
 
 
 class CiClassificationTests(unittest.TestCase):
+    def test_authority_document_is_canonical_exclusive_and_runner_temp_bound(self):
+        result = classify_paths(["src/pages/Journal.jsx"])
+        scalars = json.loads(result["authority_scalars_json"])
+        self.assertEqual(
+            scalars["classification_sha256"],
+            "sha256:"
+            + __import__("hashlib").sha256(
+                result["classification_json"].encode("utf-8")
+            ).hexdigest(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "classification.json"
+            with mock.patch.dict(
+                os.environ, {"RUNNER_TEMP": temporary}, clear=True
+            ):
+                write_authority_document(result, str(target))
+                self.assertEqual(
+                    target.read_text(encoding="utf-8"), result["classification_json"]
+                )
+                with self.assertRaises(FileExistsError):
+                    write_authority_document(result, str(target))
+                with self.assertRaisesRegex(ValueError, "RUNNER_TEMP"):
+                    write_authority_document(
+                        result, str(Path(temporary).parent / "outside.json")
+                    )
+
     def assert_risk(self, expected: str, path: str) -> dict[str, str]:
         result = classify_paths([path])
         self.assertEqual(result["risk_level"], expected, path)

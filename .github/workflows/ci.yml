@@ -59,6 +59,7 @@ jobs:
       risk_rank: ${{ steps.classify.outputs.risk_rank }}
       execution_force_full: ${{ steps.classify.outputs.execution_force_full }}
       classification_json: ${{ steps.classify.outputs.classification_json }}
+      authority_scalars_json: ${{ steps.classify.outputs.authority_scalars_json }}
       docs_only: ${{ steps.classify.outputs.docs_only }}
       mixed: ${{ steps.classify.outputs.mixed }}
       run_frontend: ${{ steps.classify.outputs.run_frontend }}
@@ -86,7 +87,18 @@ jobs:
           CI_FORCE_FULL: ${{ inputs.force_full || false }}
           CI_BASE_SHA: ${{ inputs.comparison_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before) }}
           CI_HEAD_SHA: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
-        run: python scripts/ci_classify.py --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA" --github-output "$GITHUB_OUTPUT"
+        run: >-
+          python scripts/ci_classify.py
+          --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA"
+          --github-output "$GITHUB_OUTPUT"
+          --authority-output "$RUNNER_TEMP/ci-classification-authority.json"
+      - name: Upload the exact CI classification authority document
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-classification-authority-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-classification-authority.json
+          if-no-files-found: error
+          retention-days: 1
 
   fast-fail:
     name: ci-fast-fail
@@ -478,13 +490,43 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
+      - name: Download the exact CI classification authority document
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ci-classification-authority-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-classification-authority
       - name: Require selected jobs to succeed and unselected jobs to skip
         env:
-          NEEDS_JSON: ${{ toJSON(needs) }}
-        run: >-
-          python scripts/ci_gate_authority.py
-          --workflow ci
-          --event-name "${{ github.event_name }}"
+          AUTHORITY_EVENT_NAME: ${{ github.event_name }}
+          CLASSIFICATION_AUTHORITY_SCALARS_JSON: ${{ needs.classify.outputs.authority_scalars_json }}
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          FAST_FAIL_RESULT: ${{ needs.fast-fail.result }}
+          DOCS_ONLY_RESULT: ${{ needs.docs-only.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          BOOTSTRAP_SMOKE_RESULT: ${{ needs.bootstrap-smoke.result }}
+          POSTGRES_RESULT: ${{ needs.postgres.result }}
+          PLUGINS_RESULT: ${{ needs.plugins.result }}
+          ASTRBOT_BRIDGE_RESULT: ${{ needs.astrbot-bridge.result }}
+          ASTRBOT_RUNTIME_RESULT: ${{ needs.astrbot-runtime.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/ci_gate_authority.py \
+            --workflow ci \
+            --event-name "$AUTHORITY_EVENT_NAME" \
+            --classification-file "$RUNNER_TEMP/ci-classification-authority/ci-classification-authority.json" \
+            --authority-scalars-json "$CLASSIFICATION_AUTHORITY_SCALARS_JSON" \
+            --job-result "classify=$CLASSIFY_RESULT" \
+            --job-result "fast-fail=$FAST_FAIL_RESULT" \
+            --job-result "docs-only=$DOCS_ONLY_RESULT" \
+            --job-result "frontend=$FRONTEND_RESULT" \
+            --job-result "backend=$BACKEND_RESULT" \
+            --job-result "bootstrap-smoke=$BOOTSTRAP_SMOKE_RESULT" \
+            --job-result "postgres=$POSTGRES_RESULT" \
+            --job-result "plugins=$PLUGINS_RESULT" \
+            --job-result "astrbot-bridge=$ASTRBOT_BRIDGE_RESULT" \
+            --job-result "astrbot-runtime=$ASTRBOT_RUNTIME_RESULT"
 
   pr-fast-gate:
     name: pr-fast-gate
