@@ -56,7 +56,6 @@ from release.formal_windows_pretrust import (
     hold_windows_private_snapshot,
 )
 from release.materials import MaterialContractError, inspect_installer_materials
-from scripts import shared_vps_private_read_only as _shared_vps_private_read_only
 from scripts.candidate_vm_harness import (
     EXPECTED_SCP_SHA256,
     EXPECTED_SSH_SHA256,
@@ -72,10 +71,6 @@ from scripts.candidate_vm_harness import (
     _initial_platform_state,
     _validate_continuation_receipt,
     _validate_source_evidence,
-)
-
-verify_shared_vps_private_read_only = (
-    _shared_vps_private_read_only.verify_shared_vps_private_read_only
 )
 
 _FORMAL_TO_PROVIDER = {
