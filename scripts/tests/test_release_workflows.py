@@ -264,23 +264,62 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 "performance.yml:isolated-resource-load",
                 "performance.yml:isolated-long-operation-capacity",
                 "release.yml:dry-run",
-                "release.yml:qualification-evidence",
             },
         )
 
-    def test_release_producer_rebuilds_have_a_commit_bound_epoch(self):
+    def test_release_producer_is_built_once_with_a_commit_bound_epoch(self):
         release = workflow("release.yml")
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(source.count("--provenance=false"), 2)
+        self.assertEqual(source.count("--provenance=false"), 1)
         self.assertEqual(
             source.count('--build-arg "SOURCE_DATE_EPOCH=$source_date_epoch"'),
-            2,
+            1,
         )
-        self.assertEqual(source.count('git show -s --format=%ct "$GITHUB_SHA"'), 2)
+        self.assertEqual(source.count('git show -s --format=%ct "$GITHUB_SHA"'), 1)
         self.assertIn("dry-run", release["jobs"])
-        self.assertIn("qualification-evidence", release["jobs"])
+        self.assertNotIn("qualification-evidence", release["jobs"])
+        self.assertEqual(
+            release["jobs"]["dry-run"]["env"]["ANIMEMO_CANDIDATE_BUILD_AUTHORITY"],
+            "AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER",
+        )
+
+    def test_candidate_large_bytes_have_one_authoritative_producer_and_one_upload(self):
+        release = workflow("release.yml")
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        qualification = source[source.index("  dry-run:\n") : source.index("  publish:\n")]
+
+        self.assertNotIn("qualification-evidence", release["jobs"])
+        self.assertEqual(qualification.count("Build API OCI artifact without publishing"), 1)
+        self.assertEqual(qualification.count("Build Web OCI artifact without publishing"), 1)
+        self.assertEqual(qualification.count("Build the digest-pinned release byte producer"), 1)
+        self.assertEqual(qualification.count("path: release-qualification/"), 1)
+        self.assertNotIn("path: release-output/\n", qualification)
+        self.assertIn(
+            "path: release-output/dry-run-authority-receipt.json", qualification
+        )
+        self.assertIn('large_byte_payloads:[]', qualification)
+        self.assertNotIn("Rebuild the exact qualification byte producer", source)
+        self.assertNotIn("release-producer-toolchain-${{ github.run_id }}", source)
+
+        for workflow_name, job_names in {
+            "performance.yml": (
+                "isolated-resource-load",
+                "isolated-long-operation-capacity",
+            ),
+            "release-gate.yml": ("docker",),
+        }.items():
+            document = workflow(workflow_name)
+            for job_name in job_names:
+                self.assertEqual(
+                    document["jobs"][job_name]["env"][
+                        "ANIMEMO_CANDIDATE_BUILD_AUTHORITY"
+                    ],
+                    "NON_AUTHORITATIVE_ISOLATED_TEST_ONLY",
+                )
 
     def test_release_resolver_requires_the_candidate_bound_reservation_ledger(self):
         release = workflow("release.yml")
@@ -303,6 +342,22 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertTrue((ROOT / "release" / "publication-reservations.json").is_file())
         self.assertIn("--publication-reservations-file", source)
         self.assertNotIn("publication-reservations.json ||", source)
+
+        version_step = next(
+            step
+            for step in release["jobs"]["preflight"]["steps"]
+            if step.get("name") == "Resolve deterministic pre-release version"
+        )
+        self.assertIn('if [[ "$OPERATION" = "publish" ]]', version_step["run"])
+        self.assertIn("decode-candidate-acceptance-receipt", version_step["run"])
+        self.assertIn(".candidate_version", version_step["run"])
+        self.assertIn(".target_version", version_step["run"])
+        reject_step = next(
+            step
+            for step in release["jobs"]["preflight"]["steps"]
+            if step.get("name") == "Reject existing tag or GitHub Release"
+        )
+        self.assertEqual(reject_step["if"], "${{ inputs.operation == 'qualify' }}")
 
         with tempfile.TemporaryDirectory() as directory:
             tags = Path(directory) / "tags.txt"
@@ -384,19 +439,22 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         publish = next(
             step
             for step in publish_steps
-            if step.get("name") == "Publish only the Candidate-accepted OCI layouts"
+            if step.get("name")
+            == "Publish the four exact Candidate registry keys through the durable controller"
         )["run"]
         self.assertNotIn("crane pull", publish)
         self.assertNotIn("normalize-oci-layout", publish)
         self.assertNotIn("docker build", publish)
-        self.assertIn(
-            'local layout="$ANIMEMO_ACCEPTED_CANDIDATE_ROOT/'
-            'candidate-runtime/oci/$role"',
-            publish,
+        self.assertIn("transaction-run", publish)
+        self.assertIn("--phase registry", publish)
+        self.assertNotIn("crane push", publish)
+        remote = (ROOT / "release" / "publication_remote.py").read_text(
+            encoding="utf-8"
         )
-        self.assertEqual(publish.count('crane push "$layout"'), 2)
-        self.assertEqual(publish.count('crane digest "$repository:'), 2)
-        self.assertIn('= "$expected_digest"', publish)
+        self.assertIn('(\"crane\", \"push\", str(self.source_layout), self.target)', remote)
+        self.assertIn('(\"crane\", \"digest\", reference)', remote)
+        self.assertIn("self._digest_observation(self.target)", remote)
+        self.assertIn("source_layout=layout", remote)
         portable = next(
             step
             for step in publish_steps
@@ -434,16 +492,16 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     dependencies.append((line_number, assignment.group(1), referenced))
                 assigned.append(assignment.group(1))
         self.assertEqual(dependencies, [])
-        for declaration in ("local role", "local reference", "local layout"):
+        for declaration in ("local role", "local reference"):
             self.assertIn(declaration, source)
         self.assertNotIn('archive="$RUNNER_TEMP/${role}-oci.tar"', source)
-        self.assertIn(
-            'local layout="$ANIMEMO_ACCEPTED_CANDIDATE_ROOT/'
-            'candidate-runtime/oci/$role"',
-            source,
-        )
         self.assertIn('layout="$portable_source/oci/$role"', source)
         self.assertNotIn("normalize-oci-layout", source[source.index("  publish:\n") :])
+        remote = (ROOT / "release" / "publication_remote.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('Path(candidate_root) / "candidate-runtime" / "oci" / role', remote)
+        self.assertNotIn("shell=True", remote)
 
     def test_oci_layout_function_runs_under_bash_nounset_for_every_role(self):
         release = workflow("release.yml")
@@ -451,21 +509,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             step
             for step in release["jobs"]["publish"]["steps"]
             if step.get("name")
-            == "Publish only the Candidate-accepted OCI layouts"
+            == "Publish the four exact Candidate registry keys through the durable controller"
         )["run"]
         self.assertIn("set -euo pipefail", publish)
-        self.assertIn('local role="$1"', publish)
-        self.assertIn('local repository="$2"', publish)
-        self.assertIn('local expected_digest="$3"', publish)
-        self.assertIn('test -d "$layout" && test ! -L "$layout"', publish)
-        self.assertIn(
-            'api_digest="$(publish_image api "$API_REPOSITORY"', publish
-        )
-        self.assertIn(
-            'web_digest="$(publish_image web "$WEB_REPOSITORY"', publish
-        )
-        self.assertEqual(publish.count("crane push"), 2)
-        self.assertEqual(publish.count("crane digest"), 2)
+        self.assertIn("python -m scripts.release_publication transaction-run", publish)
+        self.assertIn("--candidate-root", publish)
+        self.assertNotIn("crane push", publish)
+        self.assertNotIn("crane digest", publish)
         self.assertNotIn("crane pull", publish)
         self.assertNotIn("normalize-oci-layout", publish)
 
@@ -961,14 +1011,21 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("python scripts/release_authority.py", promote_source)
         self.assertEqual(
             release["jobs"]["dry-run"]["needs"],
-            ["preflight", "release-authority", "platform-qualification"],
+            [
+                "preflight",
+                "full-ci",
+                "full-release-gate",
+                "performance",
+                "platform-qualification",
+                "release-authority",
+            ],
         )
         self.assertEqual(
             release["jobs"]["publish"]["needs"],
             ["preflight", "release-authority", "metadata-freshness-authority"],
         )
-        for job_name in ("dry-run", "publish"):
-            self.assertNotIn("performance", release["jobs"][job_name]["needs"])
+        self.assertIn("performance", release["jobs"]["dry-run"]["needs"])
+        self.assertNotIn("performance", release["jobs"]["publish"]["needs"])
         self.assertNotIn("performance.yml", (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
         self.assertNotIn("performance.yml", (ROOT / ".github" / "workflows" / "release-gate.yml").read_text(encoding="utf-8"))
         self.assertIn(
@@ -1140,7 +1197,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(source.count("ANIMEMO_COMMIT=${{ needs.preflight.outputs.candidate_sha }}"), 2)
         self.assertNotIn("ANIMEMO_COMMIT=${{ github.sha }}", publish_section)
         self.assertNotIn("VITE_TURNSTILE_SITE_KEY", source)
-        self.assertIn("Publish only the Candidate-accepted OCI layouts", publish_section)
+        self.assertIn(
+            "Publish the four exact Candidate registry keys through the durable controller",
+            publish_section,
+        )
         self.assertIn("verify-publish-candidate-input", publish_section)
         self.assertIn("release-output/release-manifest.json", publish_section)
         self.assertNotIn("docker/build-push-action@", publish_section)
@@ -1201,18 +1261,20 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 "packages": "write",
                 "id-token": "write",
                 "attestations": "write",
+                "artifact-metadata": "write",
             },
         )
 
         self.assertLess(source.index(early_name), source.index("Download and verify Phase A qualification evidence"))
         self.assertLess(source.index(early_name), source.index("docker/login-action"))
         self.assertLess(publish.index(final_name), publish.index("docker/login-action"))
-        self.assertLess(publish.index(final_name), publish.index("crane push"))
-        self.assertLess(publish.index(final_name), publish.index("git push origin"))
-        self.assertLess(
-            publish.index(final_name),
-            publish.index('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"'),
+        first_transaction = publish.index(
+            "python -m scripts.release_publication transaction-reconcile"
         )
+        self.assertLess(publish.index(final_name), first_transaction)
+        self.assertNotIn("crane push", publish)
+        self.assertNotIn('git push origin "refs/tags/', publish)
+        self.assertNotIn('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"', publish)
         self.assertNotIn("build-initial-trust-kit", publish)
         self.assertLess(
             publish.index("verify-prepublication-materials"),
@@ -1333,23 +1395,32 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("release.registry_transport pull-all", publish)
         self.assertNotIn("crane pull", publish)
-        for mutation_marker in (
-            "docker/login-action",
-            "crane push",
-            "actions/attest@",
-            "git push origin",
-            'gh api --method POST "repos/$GITHUB_REPOSITORY/releases"',
-        ):
+        for mutation_marker in ("docker/login-action", "actions/attest@"):
             with self.subTest(marker=mutation_marker):
                 self.assertLess(accepted_gate, publish.index(mutation_marker))
+        first_transaction = publish.index(
+            "python -m scripts.release_publication transaction-reconcile"
+        )
+        self.assertLess(accepted_gate, first_transaction)
+        self.assertLess(
+            publish.index("Generate the closed publication plan without mutation"),
+            first_transaction,
+        )
+        for forbidden in (
+            "crane push",
+            'git push origin "refs/tags/',
+            'gh api --method POST "repos/$GITHUB_REPOSITORY/releases"',
+            'gh release upload "$RELEASE_TAG"',
+        ):
+            self.assertNotIn(forbidden, publish)
         post_mutation = publish[
-            publish.index("Publish only the Candidate-accepted OCI layouts") :
+            first_transaction:
         ]
         self.assertNotIn("normalize-oci-layout", post_mutation)
         self.assertNotIn("generate-manifest", post_mutation)
         self.assertIn(
             'cp -a "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT/candidate-runtime/oci"',
-            post_mutation,
+            publish[:first_transaction],
         )
 
     def test_publish_normalizes_the_run_scoped_qualification_filename(self):
@@ -1486,7 +1557,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         dry_run_identity = release.index("build-prepublication-materials")
         qualification_copy = release.index(
-            "install -m 0600 release-dry-run-input/prepublication-materials.json"
+            "install -m 0600 release-output/prepublication-materials.json"
         )
         publish_verify = release.index(
             "Verify and stage exact qualified prepublication materials before mutation"
@@ -1508,9 +1579,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         dry_run = release[
-            release.index("  dry-run:\n") : release.index(
-                "  qualification-evidence:\n"
-            )
+            release.index("  dry-run:\n") : release.index("  publish:\n")
         ]
         publish = release[release.index("  publish:\n") :]
 
@@ -1533,9 +1602,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             release.index("  release-authority:\n") : release.index("  dry-run:\n")
         ]
         qualification = release[
-            release.index("  qualification-evidence:\n") : release.index(
-                "  publish:\n"
-            )
+            release.index("  dry-run:\n") : release.index("  publish:\n")
         ]
         publish = release[release.index("  publish:\n") :]
 
@@ -1584,9 +1651,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("GH_REQUIRED_VERSION", promotion)
         self.assertNotIn("GH_REQUIRED_LINUX_AMD64_SHA256", release)
         self.assertNotIn("GH_REQUIRED_LINUX_AMD64_SHA256", promotion)
-        self.assertEqual(release.count(gate), 4)
+        self.assertEqual(release.count(gate), 3)
         self.assertEqual(promotion.count(gate), 2)
-        self.assertEqual(release.count(f"uses: {PINNED_GH_ACTION}"), 4)
+        self.assertEqual(release.count(f"uses: {PINNED_GH_ACTION}"), 3)
         self.assertEqual(promotion.count(f"uses: {PINNED_GH_ACTION}"), 2)
 
     def test_pinned_github_cli_action_is_digest_bound_and_fail_closed(self):
@@ -1972,7 +2039,7 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertIn("previous-stable", source)
         self.assertIn("promote-release-notes", source)
         self.assertIn("--rc-notes promotion-output/rc-release-notes.json", source)
-        self.assertIn("--notes-file promotion-output/release-notes.md", source)
+        self.assertIn("--stable-notes-markdown promotion-output/release-notes.md", source)
         self.assertNotIn("--generate-notes", source)
 
     def test_stable_promotion_has_no_image_build_and_requires_acceptance(self):
@@ -1996,6 +2063,8 @@ cp "$FIXTURE_ARCHIVE" "$output"
         ]
         self.assertNotIn("--created-at", promote_call)
         self.assertNotIn("--provenance-source-commit", promote_call)
+        self.assertIn("--existing-stable-tag-commit", promote_call)
+        self.assertIn('git rev-parse "refs/tags/$stable_tag^{commit}"', source)
         self.assertNotIn("date -u", promote_call)
         self.assertNotIn("GITHUB_SHA", promote_call)
 
@@ -2024,23 +2093,64 @@ cp "$FIXTURE_ARCHIVE" "$output"
 
         source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(encoding="utf-8")
         publish_source = source[source.index("  publish:\n") :]
-        before_first_mutation = publish_source[: publish_source.index("crane tag")]
+        first_mutation = publish_source.index(
+            "python -m scripts.release_publication transaction-reconcile"
+        )
+        before_first_mutation = publish_source[:first_mutation]
         for guard in (
             'test "$(git rev-parse origin/main)" = "$GITHUB_SHA"',
-            '! git ls-remote --exit-code --tags origin "refs/tags/$STABLE_TAG"',
-            '! gh release view "$STABLE_TAG" --repo "$GITHUB_REPOSITORY"',
+            'test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq \'.enabled\')" = "true"',
+            'cmp "$RUNNER_TEMP/revalidated-stable-publication-plan.json"',
         ):
             self.assertIn(guard, before_first_mutation)
+        self.assertNotIn("crane tag", publish_source)
+        self.assertNotIn('git push origin "refs/tags/', publish_source)
+
+    def test_stable_registry_prestate_is_batch_checked_before_zero_or_two_mutations(self):
+        promotion = workflow("promote-release.yml")
+        steps = promotion["jobs"]["publish"]["steps"]
+        prestate = next(
+            step
+            for step in steps
+            if step.get("name")
+            == "Reconcile the complete Stable transaction before its first mutation"
+        )
+        mutation = next(
+            step
+            for step in steps
+            if step.get("name")
+            == "Add only absent Stable registry tags through the durable controller"
+        )
+        prestate_source = prestate["run"]
+        mutation_source = mutation["run"]
+
+        self.assertLess(steps.index(prestate), steps.index(mutation))
+        self.assertNotIn("crane tag", prestate_source)
+        self.assertIn("transaction-reconcile", prestate_source)
+        self.assertIn("transaction-run", mutation_source)
+        self.assertIn("--phase registry", mutation_source)
+        self.assertNotIn("crane tag", mutation_source)
+        remote = (ROOT / "release" / "publication_remote.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('name = f"registry-{role}-stable"', remote)
+        self.assertIn('source_reference=f"{image_repository}@{digest}"', remote)
+        controller = (ROOT / "release" / "publication_transaction.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Observe every key before any mutation", controller)
+        self.assertIn("TRANSACTION_GLOBAL_FREEZE", controller)
 
     def test_rc_publication_is_draft_upload_verify_publish_with_qualified_notes(self):
         release = workflow("release.yml")
         names = [step.get("name", "") for step in release["jobs"]["publish"]["steps"]]
         expected = (
             "Generate the closed publication plan without mutation",
-            "Create the immutable annotated RC tag",
-            "Create an unpublished GitHub Draft Pre-release",
-            "Upload and read back the complete Draft asset set",
-            "Publish only the fully verified Draft Pre-release",
+            "Reconcile the complete RC transaction before its first mutation",
+            "Publish the four exact Candidate registry keys through the durable controller",
+            "Commit RC tag, Draft, individual assets, and publish through one controller",
+            "Finalize and export the durable RC transaction receipt",
+            "Preserve the finalized RC publication transaction before post-publication checks",
             "Verify the public RC without authenticated asset transport",
         )
         indices = [names.index(name) for name in expected]
@@ -2053,36 +2163,72 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertIn("RELEASE_NOTES_MARKDOWN_SHA256", source)
         self.assertIn("release-notes.md", source)
         self.assertIn("env -u GH_TOKEN curl", source)
-        self.assertLess(
-            source.index('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"'),
-            source.index('gh release upload "$RELEASE_TAG"'),
-        )
-        self.assertLess(
-            source.index('gh release upload "$RELEASE_TAG"'),
-            source.index('gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"'),
-        )
-        self.assertIn("id: draft_release", source)
-        self.assertIn('release_id=$release_id', source)
-        draft_step = source[
-            source.index("Create an unpublished GitHub Draft Pre-release") :
-            source.index("Upload and read back the complete Draft asset set")
+        publish = source[source.index("  publish:\n") :]
+        self.assertNotIn('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"', publish)
+        self.assertNotIn('gh release upload "$RELEASE_TAG"', publish)
+        self.assertIn("transaction-run", publish)
+        self.assertIn("--phase publication", publish)
+        file_attests = [
+            step
+            for step in release["jobs"]["publish"]["steps"]
+            if isinstance(step.get("with"), dict) and "subject-path" in step["with"]
         ]
-        self.assertIn('--input "$RUNNER_TEMP/draft-create-request.json"', draft_step)
-        self.assertNotIn("releases?per_page=100", draft_step)
-        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"', source)
-        self.assertNotIn(
-            'gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"',
-            source[: source.index("Verify the public RC without authenticated asset transport")],
+        self.assertEqual(len(file_attests), 3)
+        self.assertTrue(
+            all(step["with"].get("create-storage-record") == "true" for step in file_attests)
         )
+        all_attests = [
+            step
+            for step in release["jobs"]["publish"]["steps"]
+            if isinstance(step.get("with"), dict)
+            and (
+                "subject-path" in step["with"]
+                or "subject-digest" in step["with"]
+            )
+        ]
+        self.assertEqual(len(all_attests), 5)
+        self.assertTrue(
+            all(step["with"].get("create-storage-record") == "true" for step in all_attests)
+        )
+        self.assertEqual(
+            release["jobs"]["publish"]["permissions"].get("artifact-metadata"),
+            "write",
+        )
+        receipt_upload = next(
+            step
+            for step in release["jobs"]["publish"]["steps"]
+            if step.get("name")
+            == "Preserve the finalized RC publication transaction before post-publication checks"
+        )
+        self.assertEqual(
+            receipt_upload["with"]["path"],
+            "release-output/publication-transaction-ledger.json",
+        )
+        remote = (ROOT / "release" / "publication_remote.py").read_text(
+            encoding="utf-8"
+        )
+        for adapter in (
+            "GitTagAdapter",
+            "GitHubDraftAdapter",
+            "GitHubAssetAdapter",
+            "GitHubPublishAdapter",
+        ):
+            self.assertIn(adapter, remote)
 
     def test_stable_publication_uses_the_same_draft_transaction_and_never_rebuilds(self):
         source = (ROOT / ".github" / "workflows" / "promote-release.yml").read_text(
             encoding="utf-8"
         )
         publish_source = source[source.index("  publish:\n") :]
-        self.assertIn("Create an unpublished Stable Draft Release", source)
-        self.assertIn("Upload and read back the complete Stable Draft asset set", source)
-        self.assertIn("Publish only the fully verified Stable Draft as Latest", source)
+        self.assertIn(
+            "Commit Stable tag, Draft, individual assets, and publish through one controller",
+            source,
+        )
+        self.assertIn("Finalize and export the durable Stable transaction receipt", source)
+        self.assertIn(
+            "Preserve the finalized Stable publication transaction before post-publication checks",
+            source,
+        )
         self.assertIn("Verify the public Stable release without authenticated asset transport", source)
         self.assertNotIn("docker/build-push-action", source)
         self.assertNotIn("docker build", source)
@@ -2092,9 +2238,32 @@ cp "$FIXTURE_ARCHIVE" "$output"
             source,
         )
         self.assertIn("--rc-manifest rc-assets/release-manifest.json", source)
-        self.assertNotIn(
-            'test "$(git rev-parse origin/main)" = "$GITHUB_SHA"',
-            publish_source[publish_source.index("crane tag") :],
+        self.assertNotIn("crane tag", publish_source)
+        self.assertNotIn('gh release upload "$STABLE_TAG"', publish_source)
+        self.assertIn("--phase publication", publish_source)
+        promotion = workflow("promote-release.yml")
+        file_attests = [
+            step
+            for step in promotion["jobs"]["publish"]["steps"]
+            if isinstance(step.get("with"), dict) and "subject-path" in step["with"]
+        ]
+        self.assertEqual(len(file_attests), 3)
+        self.assertTrue(
+            all(step["with"].get("create-storage-record") == "true" for step in file_attests)
+        )
+        self.assertEqual(
+            promotion["jobs"]["publish"]["permissions"].get("artifact-metadata"),
+            "write",
+        )
+        receipt_upload = next(
+            step
+            for step in promotion["jobs"]["publish"]["steps"]
+            if step.get("name")
+            == "Preserve the finalized Stable publication transaction before post-publication checks"
+        )
+        self.assertEqual(
+            receipt_upload["with"]["path"],
+            "promotion-output/publication-transaction-ledger.json",
         )
 
 
@@ -2105,32 +2274,22 @@ cp "$FIXTURE_ARCHIVE" "$output"
         publish = source[source.index("  publish:\n") :]
 
         self.assertEqual(publish.count("emit-publication-presentation"), 1)
-        self.assertIn(
-            "RELEASE_TAG: ${{ steps.presentation.outputs.release_tag }}",
-            publish,
+        self.assertLess(
+            publish.index("emit-publication-presentation"),
+            publish.index("--phase publication"),
         )
-        self.assertIn(
-            "RELEASE_TITLE: ${{ steps.presentation.outputs.release_title }}",
-            publish,
+        self.assertNotIn("steps.presentation.outputs", publish)
+        remote = (ROOT / "release" / "publication_remote.py").read_text(
+            encoding="utf-8"
         )
-        self.assertIn(
-            "ANNOTATED_TAG_SUBJECT: ${{ steps.presentation.outputs.annotated_tag_subject }}",
-            publish,
-        )
-        self.assertIn('--message "$ANNOTATED_TAG_SUBJECT"', publish)
-        self.assertIn('--arg name "$RELEASE_TITLE"', publish)
-        local_guard = publish.index("verify-local-tag-presentation")
-        remote_push = publish.index('git push origin "refs/tags/$RELEASE_TAG"')
-        draft_guard = publish.index("--repository . --state draft")
-        draft_get = publish.index(
-            'gh api "repos/$GITHUB_REPOSITORY/releases/$release_id"'
-        )
-        asset_upload = publish.index('gh release upload "$RELEASE_TAG"')
+        self.assertIn("title=tag", remote)
+        self.assertIn("subject=tag", remote)
+        self.assertIn("body=body", remote)
+        self.assertIn('"git-tag"', remote)
+        self.assertIn('"release-draft"', remote)
+        self.assertIn('"release-publish"', remote)
         post_guard = publish.index("--repository . --state published")
         post_verification = publish.index("verify-post-publish")
-        self.assertLess(local_guard, remote_push)
-        self.assertLess(draft_get, draft_guard)
-        self.assertLess(draft_guard, asset_upload)
         self.assertLess(post_guard, post_verification)
 
     def test_stable_presentation_uses_the_shared_validator_and_rejects_bad_source_rc(
@@ -2151,30 +2310,17 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertEqual(publish.count("verify-stable-source-presentation"), 1)
         self.assertLess(
             publish.index("verify-stable-source-presentation"),
-            publish.index("crane tag"),
+            publish.index("transaction-reconcile"),
         )
-        self.assertIn(
-            "STABLE_TAG: ${{ steps.presentation.outputs.release_tag }}",
-            publish,
+        self.assertNotIn("steps.presentation.outputs", publish)
+        self.assertNotIn("crane tag", publish)
+        self.assertNotIn('git push origin "refs/tags/', publish)
+        remote = (ROOT / "release" / "publication_remote.py").read_text(
+            encoding="utf-8"
         )
-        self.assertIn(
-            "RELEASE_TITLE: ${{ steps.presentation.outputs.release_title }}",
-            publish,
-        )
-        self.assertIn('--message "$ANNOTATED_TAG_SUBJECT"', publish)
-        self.assertIn('--arg name "$RELEASE_TITLE"', publish)
-        self.assertLess(
-            publish.index("verify-local-tag-presentation"),
-            publish.index('git push origin "refs/tags/$STABLE_TAG"'),
-        )
-        self.assertLess(
-            publish.index("--repository . --state draft"),
-            publish.index('gh release upload "$STABLE_TAG"'),
-        )
-        self.assertLess(
-            publish.index('gh api "repos/$GITHUB_REPOSITORY/releases/$release_id"'),
-            publish.index("--repository . --state draft"),
-        )
+        self.assertIn("prerelease = plan[\"channel\"] != \"stable\"", remote)
+        self.assertIn("title=tag", remote)
+        self.assertIn("subject=tag", remote)
         self.assertLess(
             publish.index("--repository . --state published"),
             publish.index("verify-post-publish"),
@@ -2333,10 +2479,8 @@ cp "$FIXTURE_ARCHIVE" "$output"
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        dry_run = source[source.index("  dry-run:\n") : source.index("  qualification-evidence:\n")]
-        qualification = source[
-            source.index("  qualification-evidence:\n") : source.index("  publish:\n")
-        ]
+        dry_run = source[source.index("  dry-run:\n") : source.index("  publish:\n")]
+        qualification = dry_run
         publish = source[source.index("  publish:\n") :]
         self.assertEqual(dry_run.count("outputs: type=oci"), 2)
         self.assertEqual(dry_run.count("normalize-candidate-oci-layout"), 4)
@@ -2374,12 +2518,14 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertNotIn("continue-on-error", publish)
 
     def test_qualification_producer_uses_only_explicit_run_authority(self):
-        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
-            encoding="utf-8"
+        release = workflow("release.yml")
+        qualification_step = next(
+            step
+            for step in release["jobs"]["dry-run"]["steps"]
+            if step.get("name")
+            == "Generate qualification evidence from the single Candidate byte producer"
         )
-        qualification = source[
-            source.index("  qualification-evidence:\n") : source.index("  publish:\n")
-        ]
+        qualification = qualification_step["run"]
 
         self.assertIn(
             'install -m 0600 "$QUALIFICATION_ARTIFACT_PATH"', qualification
@@ -2394,6 +2540,10 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertIn('--qualification-run-attempt "$RUN_ATTEMPT"', qualification)
         self.assertNotIn("$GITHUB_RUN_ID", qualification)
         self.assertNotIn("$GITHUB_RUN_ATTEMPT", qualification)
+        self.assertEqual(qualification_step["env"]["RUN_ID"], "${{ github.run_id }}")
+        self.assertEqual(
+            qualification_step["env"]["RUN_ATTEMPT"], "${{ github.run_attempt }}"
+        )
 
     def test_publish_consumes_the_candidate_accepted_bytes_without_rebuilding(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -2422,9 +2572,8 @@ cp "$FIXTURE_ARCHIVE" "$output"
         )
         self.assertIn("PUBLISH_CANDIDATE_BYTE_MISMATCH", publish)
         mismatch_guard = publish.index("PUBLISH_CANDIDATE_BYTE_MISMATCH")
-        first_mutation = min(
-            publish.index("crane push"),
-            publish.index("gh api --method POST"),
+        first_mutation = publish.index(
+            "python -m scripts.release_publication transaction-reconcile"
         )
         self.assertLess(mismatch_guard, first_mutation)
 
@@ -2444,9 +2593,7 @@ cp "$FIXTURE_ARCHIVE" "$output"
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        qualification = source[
-            source.index("  qualification-evidence:\n") : source.index("  publish:\n")
-        ]
+        qualification = source[source.index("  dry-run:\n") : source.index("  publish:\n")]
         self.assertIn(
             '[[ "$PLATFORM_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
             qualification,

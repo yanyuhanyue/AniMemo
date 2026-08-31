@@ -803,6 +803,20 @@ class ManifestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ReleaseContractError, "already exists"):
             promote_manifest(rc, existing_tags=["v1.0.0"])
 
+        replay = promote_manifest(
+            rc,
+            existing_tags=["v1.0.0"],
+            existing_stable_tag_commit=rc["release"]["commit"],
+        )
+        self.assertEqual(replay, stable)
+
+        with self.assertRaisesRegex(ReleaseContractError, "different commit"):
+            promote_manifest(
+                rc,
+                existing_tags=["v1.0.0"],
+                existing_stable_tag_commit="f" * 40,
+            )
+
         beta = manifest(version="v1.0.0-beta.1", channel="beta")
         with self.assertRaisesRegex(ReleaseContractError, "RC"):
             promote_manifest(beta, existing_tags=[])

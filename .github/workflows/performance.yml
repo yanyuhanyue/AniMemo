@@ -161,6 +161,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
+      ANIMEMO_CANDIDATE_BUILD_AUTHORITY: NON_AUTHORITATIVE_ISOLATED_TEST_ONLY
       COMPOSE_PROJECT_NAME: animemo-perf-${{ github.run_id }}-${{ github.run_attempt }}
       COMPOSE_HTTP_TIMEOUT: "120"
       COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.build.yml:deploy/docker-compose.performance.yml
@@ -361,6 +362,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
+      ANIMEMO_CANDIDATE_BUILD_AUTHORITY: NON_AUTHORITATIVE_ISOLATED_TEST_ONLY
       COMPOSE_PROJECT_NAME: animemo-capacity-${{ github.run_id }}-${{ github.run_attempt }}
       COMPOSE_HTTP_TIMEOUT: "120"
       COMPOSE_FILE: deploy/docker-compose.yml:deploy/docker-compose.build.yml:deploy/docker-compose.performance.yml

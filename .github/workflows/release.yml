@@ -63,6 +63,7 @@ jobs:
   preflight:
     name: release-preflight
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     outputs:
       target_version: ${{ steps.version.outputs.target_version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
@@ -171,18 +172,37 @@ jobs:
       - name: Resolve deterministic pre-release version
         id: version
         env:
+          OPERATION: ${{ inputs.operation }}
           VERSION_BUMP: ${{ inputs.version_bump }}
           RELEASE_CHANNEL: ${{ inputs.channel }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          CANDIDATE_ACCEPTANCE_RECEIPT_B64URL: ${{ inputs.candidate_acceptance_receipt_b64url }}
         shell: bash
         run: |
           set -euo pipefail
-          git tag --list 'v*' --sort=version:refname > "$RUNNER_TEMP/tags.txt"
-          python -m release.cli resolve-version \
-            --tags-file "$RUNNER_TEMP/tags.txt" \
-            --publication-reservations-file release/publication-reservations.json \
-            --bump "$VERSION_BUMP" \
-            --channel "$RELEASE_CHANNEL" \
-            --github-output "$GITHUB_OUTPUT"
+          if [[ "$OPERATION" = "publish" ]]; then
+            python -m release.cli decode-candidate-acceptance-receipt \
+              --value "$CANDIDATE_ACCEPTANCE_RECEIPT_B64URL" \
+              --output "$RUNNER_TEMP/publish-candidate-acceptance-receipt.json" \
+              > "$RUNNER_TEMP/publish-candidate-acceptance-result.json"
+            test "$(jq -r '.qualification_run_id' "$RUNNER_TEMP/publish-candidate-acceptance-receipt.json")" = \
+              "$QUALIFICATION_RUN_ID"
+            release_tag="$(jq -r '.candidate_version' "$RUNNER_TEMP/publish-candidate-acceptance-receipt.json")"
+            target_version="$(jq -r '.target_version' "$RUNNER_TEMP/publish-candidate-acceptance-receipt.json")"
+            [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-${RELEASE_CHANNEL}\.[1-9][0-9]*$ ]]
+            [[ "$target_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            test "${release_tag%%-*}" = "$target_version"
+            echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+            echo "target_version=$target_version" >> "$GITHUB_OUTPUT"
+          else
+            git tag --list 'v*' --sort=version:refname > "$RUNNER_TEMP/tags.txt"
+            python -m release.cli resolve-version \
+              --tags-file "$RUNNER_TEMP/tags.txt" \
+              --publication-reservations-file release/publication-reservations.json \
+              --bump "$VERSION_BUMP" \
+              --channel "$RELEASE_CHANNEL" \
+              --github-output "$GITHUB_OUTPUT"
+          fi
       - name: Resolve the exact previous Stable notes boundary
         id: previous
         env:
@@ -195,6 +215,7 @@ jobs:
             --tags-file "$RUNNER_TEMP/tags.txt" --target "$TARGET_VERSION" \
             --github-output "$GITHUB_OUTPUT"
       - name: Reject existing tag or GitHub Release
+        if: ${{ inputs.operation == 'qualify' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
@@ -435,6 +456,7 @@ jobs:
     if: ${{ always() }}
     needs: [preflight, full-ci, full-release-gate, performance, platform-qualification]
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
       actions: read
@@ -732,6 +754,7 @@ jobs:
     if: ${{ !cancelled() && inputs.operation == 'publish' && needs.preflight.result == 'success' && needs.release-authority.result == 'success' }}
     needs: [preflight, release-authority]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read
@@ -855,10 +878,13 @@ jobs:
           retention-days: 1
 
   dry-run:
-    name: read-only-release-dry-run
-    if: ${{ inputs.operation == 'qualify' }}
-    needs: [preflight, release-authority, platform-qualification]
+    name: phase-a-qualification-evidence
+    if: ${{ always() && inputs.operation == 'qualify' && needs.preflight.result == 'success' && needs.full-ci.result == 'success' && needs.full-release-gate.result == 'success' && ((inputs.channel == 'rc' && needs.performance.result == 'success') || (inputs.channel == 'beta' && needs.performance.result == 'skipped')) && needs.platform-qualification.result == 'success' && needs.release-authority.result == 'success' }}
+    needs: [preflight, full-ci, full-release-gate, performance, platform-qualification, release-authority]
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      ANIMEMO_CANDIDATE_BUILD_AUTHORITY: AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER
     permissions:
       contents: read
       pull-requests: read
@@ -1253,69 +1279,33 @@ jobs:
               "$(jq -cS '.artifacts.deploymentContract' release-output/stable-manifest.dry-run.json)"
           fi
           ANIMEMO_PRODUCER
+      - name: Close the read-only Candidate authority receipt
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+          API_DIGEST: ${{ steps.api.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$ANIMEMO_CANDIDATE_BUILD_AUTHORITY" = "AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER"
+          candidate_tree="$(git rev-parse "$CANDIDATE_SHA^{tree}")"
+          jq -cS -n \
+            --arg schema "animemo.read-only-candidate-authority/v1" \
+            --arg authority "$ANIMEMO_CANDIDATE_BUILD_AUTHORITY" \
+            --arg candidate_sha "$CANDIDATE_SHA" --arg candidate_tree "$candidate_tree" \
+            --arg release_tag "$RELEASE_TAG" --arg api_digest "$API_DIGEST" \
+            --arg web_digest "$WEB_DIGEST" \
+            '{schema:$schema,authority:$authority,candidate_sha:$candidate_sha,candidate_tree:$candidate_tree,release_tag:$release_tag,api_digest:$api_digest,web_digest:$web_digest,large_byte_payloads:[]}' \
+            > release-output/dry-run-authority-receipt.json
       - id: dry_run_artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-dry-run-${{ needs.preflight.outputs.release_tag }}
-          path: release-output/
+          path: release-output/dry-run-authority-receipt.json
           if-no-files-found: error
           retention-days: 7
-      - name: Upload exact producer toolchain receipt
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-producer-toolchain-${{ github.run_id }}
-          path: ${{ runner.temp }}/release-producer-toolchain-receipt.json
-          if-no-files-found: error
-          retention-days: 7
-
-  qualification-evidence:
-    name: phase-a-qualification-evidence
-    if: ${{ always() && inputs.operation == 'qualify' }}
-    needs: [preflight, full-ci, full-release-gate, performance, platform-qualification, release-authority, dry-run]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-      - id: qualification_buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-        with:
-          version: v0.36.0
-          driver-opts: |
-            image=moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
-          cache-binary: false
-      - name: Rebuild the exact qualification byte producer
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_date_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
-          [[ "$source_date_epoch" =~ ^[1-9][0-9]*$ ]]
-          docker buildx build --load --provenance=false --platform linux/amd64 \
-            --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
-            --file deploy/release-producer.Dockerfile \
-            --tag "animemo-qualification-producer:$GITHUB_SHA" .
-          producer_image_id="$(docker image inspect --format '{{.Id}}' "animemo-qualification-producer:$GITHUB_SHA")"
-          [[ "$producer_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "ANIMEMO_RELEASE_PRODUCER_IMAGE_ID=$producer_image_id" >> "$GITHUB_ENV"
-      - name: Gate exact GitHub CLI security baseline
-        uses: ./.github/actions/setup-pinned-gh-cli
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: "3.12.10"
-      - run: python -m pip install --require-hashes -r release/requirements.lock
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: platform-qualification-${{ github.run_id }}
-          path: platform-qualification-input
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-dry-run-${{ needs.preflight.outputs.release_tag }}
-          path: release-dry-run-input
-      - name: Generate qualification evidence after complete Phase A
+      - name: Generate qualification evidence from the single Candidate byte producer
         env:
           OPERATION: qualify
           CHANNEL: ${{ inputs.channel }}
@@ -1331,12 +1321,12 @@ jobs:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           CREATED_AT: ${{ needs.preflight.outputs.created_at }}
           QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/release-qualification-${{ github.run_id }}.json
-          RELEASE_NOTES_IDENTITY_FILE: release-dry-run-input/release-notes.json
-          RELEASE_NOTES_MARKDOWN_FILE: release-dry-run-input/release-notes.md
+          RELEASE_NOTES_IDENTITY_FILE: release-output/release-notes.json
+          RELEASE_NOTES_MARKDOWN_FILE: release-output/release-notes.md
           PLATFORM_ARTIFACT_ID: ${{ needs.platform-qualification.outputs.artifact_id }}
           PLATFORM_ARTIFACT_DIGEST: ${{ needs.platform-qualification.outputs.artifact_digest }}
-          DRY_RUN_ARTIFACT_ID: ${{ needs.dry-run.outputs.artifact_id }}
-          DRY_RUN_ARTIFACT_DIGEST: ${{ needs.dry-run.outputs.artifact_digest }}
+          DRY_RUN_ARTIFACT_ID: ${{ steps.dry_run_artifact.outputs.artifact-id }}
+          DRY_RUN_ARTIFACT_DIGEST: sha256:${{ steps.dry_run_artifact.outputs.artifact-digest }}
         shell: bash
         run: |
           bash scripts/run-in-release-producer.sh \
@@ -1351,13 +1341,13 @@ jobs:
           [[ "$RELEASE_NOTES_IDENTITY" =~ ^sha256:[0-9a-f]{64}$ ]]
           candidate_tree="$(git rev-parse "$CANDIDATE_SHA^{tree}")"
           python -m release.cli verify-prepublication-materials \
-            --prepublication release-dry-run-input/prepublication-materials.json \
-            --installer-materials release-dry-run-input/installer-materials.tar \
-            --deployment-contract release-dry-run-input/deployment-contract.json \
+            --prepublication release-output/prepublication-materials.json \
+            --installer-materials release-output/installer-materials.tar \
+            --deployment-contract release-output/deployment-contract.json \
             --expected-candidate-sha "$CANDIDATE_SHA" \
             --expected-candidate-tree-sha "$candidate_tree"
-          python -c 'from pathlib import Path; from release.producer_toolchain import validate_producer_toolchain_receipt; validate_producer_toolchain_receipt(Path("release-dry-run-input/release-producer-toolchain-receipt.json"), expected_candidate_sha="'"$CANDIDATE_SHA"'")'
-          test "$(jq -er '.byteAuthority.releaseProducer.imageId' release-dry-run-input/release-producer-toolchain-receipt.json)" = \
+          python -c 'from pathlib import Path; from release.producer_toolchain import validate_producer_toolchain_receipt; validate_producer_toolchain_receipt(Path("release-output/release-producer-toolchain-receipt.json"), expected_candidate_sha="'"$CANDIDATE_SHA"'")'
+          test "$(jq -er '.byteAuthority.releaseProducer.imageId' release-output/release-producer-toolchain-receipt.json)" = \
             "$ANIMEMO_RELEASE_PRODUCER_IMAGE_ID"
           python -m scripts.release_authority
           mkdir -p release-qualification
@@ -1371,24 +1361,24 @@ jobs:
             --workflow-path .github/workflows/release.yml
           install -m 0600 platform-qualification-input/platform-qualification.json \
             release-qualification/platform-qualification.json
-          install -m 0600 release-dry-run-input/release-notes.json \
+          install -m 0600 release-output/release-notes.json \
             release-qualification/release-notes.json
-          install -m 0600 release-dry-run-input/release-notes.md \
+          install -m 0600 release-output/release-notes.md \
             release-qualification/release-notes.md
-          install -m 0600 release-dry-run-input/prepublication-materials.json \
+          install -m 0600 release-output/prepublication-materials.json \
             release-qualification/prepublication-materials.json
-          install -m 0600 release-dry-run-input/installer-materials.tar \
+          install -m 0600 release-output/installer-materials.tar \
             release-qualification/installer-materials.tar
-          install -m 0600 release-dry-run-input/deployment-contract.json \
+          install -m 0600 release-output/deployment-contract.json \
             release-qualification/deployment-contract.json
-          install -m 0600 release-dry-run-input/release-manifest.json \
+          install -m 0600 release-output/release-manifest.json \
             release-qualification/release-manifest.json
-          install -m 0600 release-dry-run-input/checksums.txt \
+          install -m 0600 release-output/checksums.txt \
             release-qualification/checksums.txt
           install -m 0600 \
-            release-dry-run-input/release-producer-toolchain-receipt.json \
+            release-output/release-producer-toolchain-receipt.json \
             release-qualification/release-producer-toolchain-receipt.json
-          cp -a release-dry-run-input/candidate-runtime \
+          cp -a release-output/candidate-runtime \
             release-qualification/candidate-runtime
           [[ "$PLATFORM_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$DRY_RUN_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
@@ -1408,7 +1398,8 @@ jobs:
           test "$(find release-qualification -maxdepth 1 -type f | wc -l)" = "11"
           test "$(find release-qualification/candidate-runtime -type f | wc -l)" -gt "8"
           ANIMEMO_PRODUCER
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Upload the sole Candidate large-byte artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-qualification-${{ github.run_id }}
           path: release-qualification/
@@ -1420,12 +1411,14 @@ jobs:
     if: ${{ !cancelled() && inputs.operation == 'publish' && needs.preflight.result == 'success' && needs.release-authority.result == 'success' && needs.metadata-freshness-authority.result == 'success' }}
     needs: [preflight, release-authority, metadata-freshness-authority]
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     permissions:
       actions: read
       contents: write
       packages: write
       id-token: write
       attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -1586,8 +1579,6 @@ jobs:
               echo "PUBLISH_CANDIDATE_BYTE_MISMATCH" >&2
               exit 1
             }
-          ! git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1
-          ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
       - name: Recheck immutable release setting immediately before publishing
         env:
           GH_TOKEN: ${{ secrets.ANIMEMO_RELEASE_ADMIN_READ_TOKEN }}
@@ -1618,24 +1609,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Reject existing immutable image manifests before transport
-        env:
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          for image in "$API_REPOSITORY:$RELEASE_TAG" "$API_REPOSITORY:sha-$GITHUB_SHA" \
-            "$WEB_REPOSITORY:$RELEASE_TAG" "$WEB_REPOSITORY:sha-$GITHUB_SHA"; do
-            if output="$(crane manifest "$image" 2>&1)"; then
-              echo "Immutable image manifest already exists: $image" >&2
-              exit 1
-            fi
-            if ! grep -qiE 'manifest unknown|not found|name unknown' <<<"$output"; then
-              echo "Unable to prove image manifest is absent: $image" >&2
-              printf '%s\n' "$output" >&2
-              exit 1
-            fi
-          done
       - name: Verify metadata freshness TTL immediately before external publication
         shell: bash
         run: |
@@ -1651,45 +1624,13 @@ jobs:
             --expected-qualification-artifact-id "${{ needs.metadata-freshness-authority.outputs.qualification_artifact_id }}" \
             --expected-candidate-acceptance-receipt-sha256 "${{ needs.metadata-freshness-authority.outputs.candidate_acceptance_receipt_sha256 }}" \
             --expected-candidate-version "${{ needs.metadata-freshness-authority.outputs.candidate_version }}"
-      - name: Publish only the Candidate-accepted OCI layouts
+      - name: Bind the accepted Candidate digests for the no-rebuild publication
         id: published
-        env:
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
-          publish_image() {
-            local role="$1"
-            local repository="$2"
-            local expected_digest="$3"
-            local layout="$ANIMEMO_ACCEPTED_CANDIDATE_ROOT/candidate-runtime/oci/$role"
-            test -d "$layout" && test ! -L "$layout"
-            crane push "$layout" "$repository:$RELEASE_TAG" >/dev/null
-            test "$(crane digest "$repository:$RELEASE_TAG")" = "$expected_digest"
-            crane push "$layout" "$repository:sha-$GITHUB_SHA" >/dev/null
-            test "$(crane digest "$repository:sha-$GITHUB_SHA")" = "$expected_digest"
-            printf '%s' "$expected_digest"
-          }
-          api_digest="$(publish_image api "$API_REPOSITORY" \
-            "$ANIMEMO_ACCEPTED_API_DIGEST")"
-          web_digest="$(publish_image web "$WEB_REPOSITORY" \
-            "$ANIMEMO_ACCEPTED_WEB_DIGEST")"
-          echo "api_digest=$api_digest" >> "$GITHUB_OUTPUT"
-          echo "web_digest=$web_digest" >> "$GITHUB_OUTPUT"
-      - name: Attest API image provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
-        with:
-          subject-name: ${{ env.API_REPOSITORY }}
-          subject-digest: ${{ steps.published.outputs.api_digest }}
-          push-to-registry: true
-          create-storage-record: false
-      - name: Attest Web image provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
-        with:
-          subject-name: ${{ env.WEB_REPOSITORY }}
-          subject-digest: ${{ steps.published.outputs.web_digest }}
-          push-to-registry: true
-          create-storage-record: false
+          echo "api_digest=$ANIMEMO_ACCEPTED_API_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "web_digest=$ANIMEMO_ACCEPTED_WEB_DIGEST" >> "$GITHUB_OUTPUT"
       - name: Validate the exact Candidate-accepted release assets
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
@@ -1759,33 +1700,6 @@ jobs:
             --image "postgres=$postgres_repository@$postgres_digest" \
             --image "redis=$redis_repository@$redis_digest" \
             > release-output/portable-build-receipt.json
-      - name: Attest release manifest provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
-        with:
-          subject-checksums: release-output/checksums.txt
-      - name: Verify published OCI and file attestations
-        env:
-          GH_TOKEN: ${{ github.token }}
-          API_DIGEST: ${{ steps.published.outputs.api_digest }}
-          WEB_DIGEST: ${{ steps.published.outputs.web_digest }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh attestation verify "oci://$API_REPOSITORY@$API_DIGEST" \
-            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-            --source-digest "$GITHUB_SHA"
-          gh attestation verify "oci://$WEB_REPOSITORY@$WEB_DIGEST" \
-            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-            --source-digest "$GITHUB_SHA"
-          gh attestation verify release-output/release-manifest.json \
-            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-            --source-digest "$GITHUB_SHA"
-          gh attestation verify release-output/deployment-contract.json \
-            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-            --source-digest "$GITHUB_SHA"
-          gh attestation verify release-output/installer-materials.tar \
-            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-            --source-digest "$GITHUB_SHA"
       - name: Generate the closed publication plan without mutation
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
@@ -1809,6 +1723,213 @@ jobs:
           OPERATION=portable python -m scripts.release_authority \
             > release-output/portable-pipeline-authority.json
           test "$(jq -r '.external_mutation_mode' release-output/publication-plan.json)" = "PLAN_ONLY"
+      - name: Reconcile the complete RC transaction before its first mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-reconcile \
+            --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Publish the four exact Candidate registry keys through the durable controller
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-run \
+            --phase registry --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Begin the durable API image attestation intent
+        id: tx_attest_api
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-begin-external \
+            --step attestation-api --github-output "$GITHUB_OUTPUT" \
+            --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Attest API image provenance under the durable intent
+        if: steps.tx_attest_api.outputs.should_mutate == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.API_REPOSITORY }}
+          subject-digest: ${{ steps.published.outputs.api_digest }}
+          push-to-registry: true
+          create-storage-record: true
+      - name: Reconcile the API image attestation readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-reconcile-external \
+            --step attestation-api --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Begin the durable Web image attestation intent
+        id: tx_attest_web
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-begin-external \
+            --step attestation-web --github-output "$GITHUB_OUTPUT" \
+            --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Attest Web image provenance under the durable intent
+        if: steps.tx_attest_web.outputs.should_mutate == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.WEB_REPOSITORY }}
+          subject-digest: ${{ steps.published.outputs.web_digest }}
+          push-to-registry: true
+          create-storage-record: true
+      - name: Reconcile the Web image attestation readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-reconcile-external \
+            --step attestation-web --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Begin the durable manifest attestation intent
+        id: tx_attest_file_01
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-begin-external \
+            --step attestation-file-01 --github-output "$GITHUB_OUTPUT" \
+            --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Attest the exact release manifest under the durable intent
+        if: steps.tx_attest_file_01.outputs.should_mutate == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release-output/release-manifest.json
+          create-storage-record: true
+      - name: Reconcile the manifest attestation readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-reconcile-external \
+            --step attestation-file-01 --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Begin the durable deployment contract attestation intent
+        id: tx_attest_file_02
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-begin-external \
+            --step attestation-file-02 --github-output "$GITHUB_OUTPUT" \
+            --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Attest the exact deployment contract under the durable intent
+        if: steps.tx_attest_file_02.outputs.should_mutate == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release-output/deployment-contract.json
+          create-storage-record: true
+      - name: Reconcile the deployment contract attestation readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-reconcile-external \
+            --step attestation-file-02 --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Begin the durable installer materials attestation intent
+        id: tx_attest_file_03
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-begin-external \
+            --step attestation-file-03 --github-output "$GITHUB_OUTPUT" \
+            --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Attest the exact installer materials under the durable intent
+        if: steps.tx_attest_file_03.outputs.should_mutate == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release-output/installer-materials.tar
+          create-storage-record: true
+      - name: Reconcile the installer materials attestation readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-reconcile-external \
+            --step attestation-file-03 --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Verify every controller-owned RC attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_DIGEST: ${{ steps.published.outputs.api_digest }}
+          WEB_DIGEST: ${{ steps.published.outputs.web_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://$API_REPOSITORY@$API_DIGEST" \
+            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA"
+          gh attestation verify "oci://$WEB_REPOSITORY@$WEB_DIGEST" \
+            --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA"
+          for subject in release-manifest.json deployment-contract.json installer-materials.tar; do
+            gh attestation verify "release-output/$subject" \
+              --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA"
+          done
       - name: Emit the validated RC presentation identity
         id: presentation
         shell: bash
@@ -1817,98 +1938,38 @@ jobs:
           python -m release.cli emit-publication-presentation \
             --plan release-output/publication-plan.json \
             --github-output "$GITHUB_OUTPUT"
-      - name: Create the immutable annotated RC tag
+      - name: Commit RC tag, Draft, individual assets, and publish through one controller
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.presentation.outputs.release_tag }}
-          RESOLVED_RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-          ANNOTATED_TAG_SUBJECT: ${{ steps.presentation.outputs.annotated_tag_subject }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$RELEASE_TAG" = "$RESOLVED_RELEASE_TAG"
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git tag --annotate "$RELEASE_TAG" "$GITHUB_SHA" --message "$ANNOTATED_TAG_SUBJECT"
-          python -m release.cli verify-local-tag-presentation \
-            --plan release-output/publication-plan.json --repository .
-          git push origin "refs/tags/$RELEASE_TAG"
-      - name: Create an unpublished GitHub Draft Pre-release
-        id: draft_release
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-run \
+            --phase publication --plan release-output/publication-plan.json \
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin
+      - name: Finalize and export the durable RC transaction receipt
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.presentation.outputs.release_tag }}
-          RELEASE_TITLE: ${{ steps.presentation.outputs.release_title }}
         shell: bash
         run: |
           set -euo pipefail
-          jq -n --arg tag "$RELEASE_TAG" --arg name "$RELEASE_TITLE" \
-            --rawfile body release-output/release-notes.md \
-            '{tag_name:$tag,name:$name,body:$body,
-              draft:true,prerelease:true,make_latest:"false"}' \
-            > "$RUNNER_TEMP/draft-create-request.json"
-          gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
-            --input "$RUNNER_TEMP/draft-create-request.json" \
-            > "$RUNNER_TEMP/draft-release.json"
-          release_id="$(jq -r '.id' "$RUNNER_TEMP/draft-release.json")"
-          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
-          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" \
-            > "$RUNNER_TEMP/draft-release-readback.json"
-          jq '{id,tag_name,name,target_commitish,draft,prerelease,immutable,
-               assets:[.assets[]|{name}]}' \
-            "$RUNNER_TEMP/draft-release-readback.json" \
-            > "$RUNNER_TEMP/draft-presentation.json"
-          python -m release.cli verify-release-presentation \
+          candidate_tree="$(git rev-parse "$GITHUB_SHA^{tree}")"
+          python -m scripts.release_publication transaction-finalize \
             --plan release-output/publication-plan.json \
-            --metadata "$RUNNER_TEMP/draft-presentation.json" \
-            --repository . --state draft
-          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
-      - name: Upload and read back the complete Draft asset set
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-          RELEASE_ID: ${{ steps.draft_release.outputs.release_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          PORTABLE_ASSET="animemo-$RELEASE_TAG-portable.tar"
-          gh release upload "$RELEASE_TAG" \
-            release-output/release-manifest.json release-output/deployment-contract.json \
-            release-output/installer-materials.tar release-output/checksums.txt \
-            "release-output/$PORTABLE_ASSET" \
-            --repo "$GITHUB_REPOSITORY"
-          rm -rf "$RUNNER_TEMP/draft-readback"
-          mkdir -p "$RUNNER_TEMP/draft-readback"
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern release-manifest.json --pattern deployment-contract.json \
-            --pattern installer-materials.tar --pattern checksums.txt \
-            --pattern "$PORTABLE_ASSET" \
-            --dir "$RUNNER_TEMP/draft-readback"
-          target="$(git rev-list -n 1 "$RELEASE_TAG")"
-          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            | jq --arg target "$target" \
-              '{id,tag:.tag_name,target:$target,draft,prerelease,body,assets:[.assets[]|{name,size,digest}]}' \
-              > "$RUNNER_TEMP/draft-metadata.json"
-          python scripts/release_publication.py verify-draft \
-            --plan release-output/publication-plan.json \
-            --metadata "$RUNNER_TEMP/draft-metadata.json" \
-            --download-directory "$RUNNER_TEMP/draft-readback" \
-            --notes-file release-output/release-notes.md
-      - name: Publish only the fully verified Draft Pre-release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-          RELEASE_ID: ${{ steps.draft_release.outputs.release_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            -F draft=false -F prerelease=true -f make_latest=false \
-            > "$RUNNER_TEMP/published-release.json"
-          jq -e --arg tag "$RELEASE_TAG" --arg id "$RELEASE_ID" \
-            '.id == ($id | tonumber) and .tag_name == $tag and .draft == false
-             and .prerelease == true and .immutable == true' \
-            "$RUNNER_TEMP/published-release.json" >/dev/null
+            --source-tree "$candidate_tree" --asset-root release-output \
+            --candidate-root "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT" \
+            --repository-path . --remote origin \
+            --receipt release-output/publication-transaction-ledger.json
+      - name: Preserve the finalized RC publication transaction before post-publication checks
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-publication-transaction-${{ needs.preflight.outputs.release_tag }}-${{ github.run_attempt }}
+          path: release-output/publication-transaction-ledger.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Verify the public RC without authenticated asset transport
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
@@ -1994,6 +2055,7 @@ jobs:
             release-output/candidate-acceptance-receipt.json
             release-output/publish-candidate-plan.json
             release-output/publication-plan.json
+            release-output/publication-transaction-ledger.json
             release-output/post-publish-verification.json
             release-output/portable-build-receipt.json
             release-output/portable-pipeline-authority.json
