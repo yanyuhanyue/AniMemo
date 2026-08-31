@@ -110,19 +110,16 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("comparison_base_sha:", ci)
         self.assertIn("upgrade_base_sha:", release)
 
-    def test_classifiers_write_only_to_the_runner_output_file(self):
-        expected = (
-            'run: python scripts/ci_classify.py --base "$CI_BASE_SHA" '
-            '--head "$CI_HEAD_SHA" --github-output "$GITHUB_OUTPUT"'
-        )
+    def test_classifiers_write_outputs_and_one_exact_authority_document(self):
         for name in ("ci.yml", "release-gate.yml"):
-            invocations = [
-                line.strip()
-                for line in self.source(name).splitlines()
-                if "scripts/ci_classify.py" in line and "--github-output" in line
-            ]
+            source = self.source(name)
+            classify = self.job(source, "classify")
             with self.subTest(workflow=name):
-                self.assertEqual(invocations, [expected])
+                self.assertEqual(classify.count("python scripts/ci_classify.py"), 1)
+                self.assertEqual(classify.count('--github-output "$GITHUB_OUTPUT"'), 1)
+                self.assertEqual(classify.count("--authority-output"), 1)
+                self.assertEqual(source.count("classification-authority.json"), 3)
+                self.assertIn("actions/upload-artifact@", source)
 
     def test_pre_merge_passes_candidate_public_origin_to_trusted_reusable_gates(self):
         source = self.source("pre-merge-full.yml")
@@ -242,9 +239,16 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
 
         ci_authority = self.job(ci, "selection-authority")
         self.assertIn("if: ${{ always() }}", ci_authority)
-        self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", ci_authority)
+        self.assertNotIn("NEEDS_JSON: ${{ toJSON(needs) }}", ci_authority)
+        self.assertNotIn("${{ toJSON(needs) }}", ci_authority)
+        self.assertNotIn("--needs-json-stdin", ci_authority)
+        self.assertIn("--classification-file", ci_authority)
+        self.assertIn("--authority-scalars-json", ci_authority)
+        self.assertIn("--job-result", ci_authority)
+        self.assertIn("actions/download-artifact@", ci_authority)
+        self.assertIn("ci-classification-authority-${{ github.run_id }}", ci_authority)
         self.assertIn("--workflow ci", ci_authority)
-        self.assertIn('--event-name "${{ github.event_name }}"', ci_authority)
+        self.assertIn('--event-name "$AUTHORITY_EVENT_NAME"', ci_authority)
         for dependency in (
             "classify",
             "fast-fail",
@@ -261,7 +265,17 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
 
         release_authority = self.job(release, "selection-authority")
         self.assertIn("if: ${{ always() }}", release_authority)
-        self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", release_authority)
+        self.assertNotIn("NEEDS_JSON: ${{ toJSON(needs) }}", release_authority)
+        self.assertNotIn("${{ toJSON(needs) }}", release_authority)
+        self.assertNotIn("--needs-json-stdin", release_authority)
+        self.assertIn("--classification-file", release_authority)
+        self.assertIn("--authority-scalars-json", release_authority)
+        self.assertIn("--job-result", release_authority)
+        self.assertIn("actions/download-artifact@", release_authority)
+        self.assertIn(
+            "release-classification-authority-${{ github.run_id }}",
+            release_authority,
+        )
         self.assertIn("--workflow release", release_authority)
         self.assertIn(
             "--release-graph-contract animemo.release-gate.jobs/v2",

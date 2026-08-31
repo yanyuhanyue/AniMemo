@@ -25,6 +25,8 @@ from .acceptance import (
 from .candidate import (
     CandidateContractError,
     build_candidate_input,
+    build_prepublication_controller_authority,
+    build_prepublication_controller_authority_from_stream,
     decode_aggregate_receipt_b64url,
     extract_candidate_oci_archive,
     load_verified_candidate,
@@ -500,6 +502,31 @@ def _build_prepublication_candidate_input(args) -> dict[str, object]:
             "release_dry_run": args.dry_run_artifact_digest,
         },
         generated_at=args.generated_at,
+        output=args.output,
+    )
+
+
+def _build_prepublication_controller_authority(args) -> dict[str, object]:
+    if args.archive_stdin:
+        if args.expected_archive_size is None:
+            raise CandidateContractError(
+                "CONTROLLER_AUTHORITY_EXPECTED_ARCHIVE_SIZE_REQUIRED"
+            )
+        return build_prepublication_controller_authority_from_stream(
+            source=sys.stdin.buffer,
+            expected_archive_size=args.expected_archive_size,
+            containing_artifact_id=args.containing_artifact_id,
+            containing_artifact_api_digest=args.containing_artifact_api_digest,
+            output=args.output,
+        )
+    if args.expected_archive_size is not None:
+        raise CandidateContractError(
+            "CONTROLLER_AUTHORITY_EXPECTED_ARCHIVE_SIZE_WITH_PATH"
+        )
+    return build_prepublication_controller_authority(
+        archive=args.archive,
+        containing_artifact_id=args.containing_artifact_id,
+        containing_artifact_api_digest=args.containing_artifact_api_digest,
         output=args.output,
     )
 
@@ -1180,6 +1207,28 @@ def _parser() -> argparse.ArgumentParser:
     candidate_input.add_argument("--generated-at", required=True)
     candidate_input.add_argument("--output", type=Path, required=True)
     candidate_input.set_defaults(handler=_build_prepublication_candidate_input)
+
+    controller_authority = subparsers.add_parser(
+        "build-prepublication-controller-authority",
+        description=(
+            "Build the small remote authority artifact after the sole Qualification "
+            "byte artifact has been uploaded."
+        ),
+    )
+    controller_source = controller_authority.add_mutually_exclusive_group(required=True)
+    controller_source.add_argument("--archive", type=Path)
+    controller_source.add_argument("--archive-stdin", action="store_true")
+    controller_authority.add_argument("--expected-archive-size", type=int)
+    controller_authority.add_argument(
+        "--containing-artifact-id", type=int, required=True
+    )
+    controller_authority.add_argument(
+        "--containing-artifact-api-digest", required=True
+    )
+    controller_authority.add_argument("--output", type=Path, required=True)
+    controller_authority.set_defaults(
+        handler=_build_prepublication_controller_authority
+    )
 
     candidate_verify = subparsers.add_parser(
         "verify-prepublication-candidate",

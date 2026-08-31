@@ -53,6 +53,9 @@ from .contract import (
     validate_manifest,
 )
 from .materials import (
+    MAX_MATERIAL_TOTAL_BYTES,
+    AtomicReleaseFile,
+    MaterialContractError,
     VerifiedMaterialSet,
     extract_installer_materials,
     reject_duplicate_json_keys,
@@ -95,6 +98,9 @@ MAX_ARCHIVE_FILE_COUNT = 1100
 MAX_RUNTIME_BYTES = 16 * 1024 * 1024 * 1024
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_RECEIPT_B64URL_BYTES = 512 * 1024
+MAX_CONTROLLER_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
+MAX_CONTROLLER_EXPANDED_BYTES = 6 * 1024 * 1024 * 1024
+MIN_CONTROLLER_DISK_RESERVE_BYTES = 2 * 1024 * 1024 * 1024
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 _RC = re.compile(
@@ -929,7 +935,11 @@ def _validate_bound_artifacts(candidate: Mapping[str, Any], metadata: object) ->
     return result
 
 
-def _archive_entries(archive: zipfile.ZipFile) -> tuple[list[zipfile.ZipInfo], dict[str, int]]:
+def _archive_entries(
+    archive: zipfile.ZipFile,
+    *,
+    maximum_total: int = MAX_ARCHIVE_BYTES,
+) -> tuple[list[zipfile.ZipInfo], dict[str, int]]:
     entries = archive.infolist()
     if not entries or len(entries) > MAX_ARCHIVE_FILE_COUNT:
         _reject("CANDIDATE_ARCHIVE_FILE_COUNT_INVALID")
@@ -945,7 +955,7 @@ def _archive_entries(archive: zipfile.ZipFile) -> tuple[list[zipfile.ZipInfo], d
             or entry.flag_bits & 0x1
             or file_type not in {0, stat.S_IFREG}
             or entry.file_size <= 0
-            or entry.file_size > MAX_ARCHIVE_MEMBER_BYTES
+            or entry.file_size > min(MAX_ARCHIVE_MEMBER_BYTES, maximum_total)
         ):
             _reject("CANDIDATE_ARCHIVE_ENTRY_UNSAFE")
         if name in names:
@@ -955,7 +965,7 @@ def _archive_entries(archive: zipfile.ZipFile) -> tuple[list[zipfile.ZipInfo], d
         names.append(name)
         folded.add(name.casefold())
         total += entry.file_size
-        if total > MAX_ARCHIVE_BYTES:
+        if total > maximum_total:
             _reject("CANDIDATE_ARCHIVE_SIZE_LIMIT")
     return entries, {entry.filename: entry.file_size for entry in entries}
 
@@ -963,6 +973,8 @@ def _archive_entries(archive: zipfile.ZipFile) -> tuple[list[zipfile.ZipInfo], d
 def _extract_candidate_archive_stream(
     source: BinaryIO,
     destination: Path,
+    *,
+    maximum_total: int = MAX_ARCHIVE_BYTES,
 ) -> tuple[dict[str, Any], str, int]:
     try:
         if destination.exists() or destination.is_symlink():
@@ -977,7 +989,7 @@ def _extract_candidate_archive_stream(
         else:
             destination.mkdir(parents=True, mode=0o700)
         with zipfile.ZipFile(source, mode="r") as archive:
-            entries, sizes = _archive_entries(archive)
+            entries, sizes = _archive_entries(archive, maximum_total=maximum_total)
             if "candidate-input.json" not in sizes:
                 _reject("CANDIDATE_INPUT_MISSING")
             if sizes["candidate-input.json"] > MAX_JSON_BYTES:
@@ -1447,6 +1459,239 @@ def _verify_qualification_intrinsics(
         }
     ):
         _reject("CANDIDATE_PLATFORM_QUALIFICATION_MISMATCH")
+
+
+def build_prepublication_controller_authority(
+    *,
+    archive: Path,
+    containing_artifact_id: int,
+    containing_artifact_api_digest: str,
+    output: Path,
+    _maximum_archive_bytes: int = MAX_ARCHIVE_BYTES,
+    _maximum_expanded_bytes: int = MAX_ARCHIVE_BYTES,
+) -> dict[str, Any]:
+    if (
+        type(containing_artifact_id) is not int
+        or containing_artifact_id < 1
+        or _DIGEST.fullmatch(containing_artifact_api_digest) is None
+    ):
+        _reject("CONTROLLER_AUTHORITY_ARTIFACT_BINDING_INVALID")
+    archive = Path(archive)
+    output = Path(output)
+    if (
+        output.is_absolute()
+        or output.drive
+        or len(output.parts) != 1
+        or output.name in {"", ".", ".."}
+    ):
+        _reject("CONTROLLER_AUTHORITY_OUTPUT_INVALID")
+    trusted_root = os.path.abspath(os.getcwd())
+    normalized_output = os.path.abspath(
+        os.path.join(trusted_root, os.fspath(output))
+    )
+    if (
+        not normalized_output.startswith(trusted_root + os.sep)
+        or os.path.dirname(normalized_output) != trusted_root
+    ):
+        _reject("CONTROLLER_AUTHORITY_OUTPUT_INVALID")
+    with tempfile.TemporaryDirectory(
+        prefix="animemo-controller-authority-"
+    ) as temporary:
+        root = Path(temporary) / "qualification"
+        with _open_regular_file(archive, maximum=_maximum_archive_bytes) as source:
+            artifact_hash = hashlib.sha256()
+            artifact_size = 0
+            while chunk := source.read(1024 * 1024):
+                artifact_size += len(chunk)
+                if artifact_size > _maximum_archive_bytes:
+                    _reject("CANDIDATE_ARCHIVE_SIZE_LIMIT")
+                artifact_hash.update(chunk)
+            archive_digest = "sha256:" + artifact_hash.hexdigest()
+            if archive_digest != containing_artifact_api_digest:
+                _reject("CANDIDATE_ARTIFACT_API_DIGEST_MISMATCH")
+            source.seek(0)
+            candidate, candidate_digest, file_count = (
+                _extract_candidate_archive_stream(
+                    source,
+                    root,
+                    maximum_total=_maximum_expanded_bytes,
+                )
+            )
+        candidate_bytes = _read_regular_file(
+            root / "candidate-input.json", maximum=MAX_JSON_BYTES
+        )
+        if sha256_bytes(candidate_bytes) != candidate_digest:
+            _reject("CANDIDATE_INPUT_DIGEST_MISMATCH")
+        candidate = validate_candidate_input(candidate, root=root)
+        manifest = _strict_json_file(
+            root / "release-manifest.json", code="CANDIDATE_MANIFEST_INVALID"
+        )[0]
+        runtime = _verify_runtime(root, manifest)
+        deployment = _strict_json_file(
+            root / "deployment-contract.json", code="CANDIDATE_DEPLOYMENT_INVALID"
+        )[0]
+        material_contract = {
+            "schemaVersion": deployment["schemaVersion"],
+            "profile": deployment["profile"],
+            "platform": deployment["platform"],
+            "archive": deployment["archive"],
+            "materials": deployment["materials"],
+        }
+        extract_installer_materials(
+            root / "installer-materials.tar",
+            material_contract,
+            root / "installer-root",
+        )
+        _verify_qualification_intrinsics(root, candidate)
+        verified = _build_verified_candidate_identity(
+            candidate=candidate,
+            candidate_digest=candidate_digest,
+            containing_artifact_id=containing_artifact_id,
+            containing_artifact_api_digest=containing_artifact_api_digest,
+            archive_digest=archive_digest,
+            archive_file_count=file_count,
+            runtime=runtime,
+        )
+    verified_bytes = canonical_json_bytes(verified)
+    output = Path(normalized_output)
+    if output.exists() or output.is_symlink():
+        _reject("CONTROLLER_AUTHORITY_OUTPUT_EXISTS")
+    try:
+        output.mkdir(mode=0o700)
+        created = output.lstat()
+        if (
+            output.is_symlink()
+            or bool(getattr(output, "is_junction", lambda: False)())
+            or not stat.S_ISDIR(created.st_mode)
+            or (os.name == "posix" and created.st_uid != os.geteuid())
+        ):
+            _reject("CONTROLLER_AUTHORITY_OUTPUT_INVALID")
+        for name, encoded in (
+            ("candidate-input.json", candidate_bytes),
+            ("verified-candidate.json", verified_bytes),
+        ):
+            with AtomicReleaseFile(output / name) as atomic:
+                assert atomic.created is not None
+                with atomic.open_stream() as stream:
+                    stream.write(encoded)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                    completed = os.fstat(stream.fileno())
+                    if (
+                        completed.st_nlink != 1
+                        or (
+                            completed.st_dev,
+                            completed.st_ino,
+                            completed.st_mode,
+                        )
+                        != (
+                            atomic.created.st_dev,
+                            atomic.created.st_ino,
+                            atomic.created.st_mode,
+                        )
+                    ):
+                        _reject("CONTROLLER_AUTHORITY_OUTPUT_CHANGED")
+                    atomic.publish(stream, completed)
+        final = output.lstat()
+        if (
+            final.st_dev != created.st_dev
+            or final.st_ino != created.st_ino
+            or final.st_mode != created.st_mode
+            or {item.name for item in output.iterdir()}
+            != {"candidate-input.json", "verified-candidate.json"}
+        ):
+            _reject("CONTROLLER_AUTHORITY_OUTPUT_CHANGED")
+        for name, encoded in (
+            ("candidate-input.json", candidate_bytes),
+            ("verified-candidate.json", verified_bytes),
+        ):
+            if _read_regular_file(output / name, maximum=MAX_JSON_BYTES) != encoded:
+                _reject("CONTROLLER_AUTHORITY_OUTPUT_CHANGED")
+    except FileExistsError as error:
+        raise CandidateContractError("CONTROLLER_AUTHORITY_OUTPUT_EXISTS") from error
+    except MaterialContractError as error:
+        raise CandidateContractError("CONTROLLER_AUTHORITY_OUTPUT_CHANGED") from error
+    except OSError as error:
+        raise CandidateContractError("CONTROLLER_AUTHORITY_OUTPUT_INVALID") from error
+    return {
+        "status": "PASS",
+        "containingArtifactId": containing_artifact_id,
+        "containingArtifactApiDigest": containing_artifact_api_digest,
+        "candidateInputDigest": candidate_digest,
+        "verifiedCandidateDigest": sha256_bytes(verified_bytes),
+        "archiveFileCount": file_count,
+        "authorityFileCount": 2,
+    }
+
+
+def build_prepublication_controller_authority_from_stream(
+    *,
+    source: BinaryIO,
+    expected_archive_size: int,
+    containing_artifact_id: int,
+    containing_artifact_api_digest: str,
+    output: Path,
+) -> dict[str, Any]:
+    if (
+        type(expected_archive_size) is not int
+        or expected_archive_size < 1
+        or expected_archive_size > MAX_CONTROLLER_ARCHIVE_BYTES
+    ):
+        _reject("CONTROLLER_AUTHORITY_ARCHIVE_SIZE_INVALID")
+    with tempfile.TemporaryDirectory(
+        prefix="animemo-controller-download-"
+    ) as temporary:
+        temporary_root = Path(temporary)
+        free_bytes = shutil.disk_usage(temporary_root).free
+        expanded_budget = min(
+            MAX_CONTROLLER_EXPANDED_BYTES,
+            free_bytes
+            - expected_archive_size
+            - MAX_MATERIAL_TOTAL_BYTES
+            - MIN_CONTROLLER_DISK_RESERVE_BYTES,
+        )
+        if expanded_budget < 1:
+            _reject("CONTROLLER_AUTHORITY_DISK_BUDGET_INSUFFICIENT")
+        archive = temporary_root / "qualification.zip"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = -1
+        try:
+            descriptor = os.open(archive, flags, 0o600)
+            written = 0
+            digest = hashlib.sha256()
+            with os.fdopen(descriptor, "wb") as destination:
+                descriptor = -1
+                while chunk := source.read(1024 * 1024):
+                    written += len(chunk)
+                    if written > expected_archive_size:
+                        _reject("CONTROLLER_AUTHORITY_ARCHIVE_STREAM_GREW")
+                    digest.update(chunk)
+                    destination.write(chunk)
+                destination.flush()
+                os.fsync(destination.fileno())
+            if written != expected_archive_size:
+                _reject("CONTROLLER_AUTHORITY_ARCHIVE_STREAM_TRUNCATED")
+            if "sha256:" + digest.hexdigest() != containing_artifact_api_digest:
+                _reject("CANDIDATE_ARTIFACT_API_DIGEST_MISMATCH")
+        except CandidateContractError:
+            raise
+        except OSError as error:
+            raise CandidateContractError(
+                "CONTROLLER_AUTHORITY_ARCHIVE_STREAM_INVALID"
+            ) from error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        return build_prepublication_controller_authority(
+            archive=archive,
+            containing_artifact_id=containing_artifact_id,
+            containing_artifact_api_digest=containing_artifact_api_digest,
+            output=output,
+            _maximum_archive_bytes=MAX_CONTROLLER_ARCHIVE_BYTES,
+            _maximum_expanded_bytes=expanded_budget,
+        )
 
 
 def verify_prepublication_candidate(

@@ -886,11 +886,12 @@ jobs:
     env:
       ANIMEMO_CANDIDATE_BUILD_AUTHORITY: AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER
     permissions:
+      actions: read
       contents: read
       pull-requests: read
     outputs:
-      artifact_id: ${{ steps.dry_run_artifact.outputs.artifact-id }}
-      artifact_digest: ${{ format('sha256:{0}', steps.dry_run_artifact.outputs.artifact-digest) }}
+      artifact_id: ${{ steps.qualification_artifact.outputs.artifact-id }}
+      artifact_digest: ${{ format('sha256:{0}', steps.qualification_artifact.outputs.artifact-digest) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -1399,10 +1400,78 @@ jobs:
           test "$(find release-qualification/candidate-runtime -type f | wc -l)" -gt "8"
           ANIMEMO_PRODUCER
       - name: Upload the sole Candidate large-byte artifact
+        id: qualification_artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-qualification-${{ github.run_id }}
           path: release-qualification/
+          if-no-files-found: error
+          retention-days: 30
+
+  controller-authority:
+    name: controller-authority
+    if: ${{ always() && inputs.operation == 'qualify' && needs.dry-run.result == 'success' }}
+    needs: [dry-run]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Gate exact GitHub CLI security baseline for controller authority
+        uses: ./.github/actions/setup-pinned-gh-cli
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r release/requirements.lock
+      - name: Build the exact remote controller authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_ARTIFACT_ID: ${{ needs.dry-run.outputs.artifact_id }}
+          QUALIFICATION_ARTIFACT_DIGEST: ${{ needs.dry-run.outputs.artifact_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$QUALIFICATION_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$QUALIFICATION_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          artifact_metadata="$(gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${QUALIFICATION_ARTIFACT_ID}" \
+            --jq '[.id, .name, .expired, .size_in_bytes, .digest, .workflow_run.id, .workflow_run.head_sha] | @tsv')"
+          IFS=$'\t' read -r artifact_id artifact_name artifact_expired \
+            artifact_size artifact_digest artifact_run_id artifact_head_sha extra \
+            <<< "$artifact_metadata"
+          test -z "${extra:-}"
+          test "$artifact_id" = "$QUALIFICATION_ARTIFACT_ID"
+          test "$artifact_name" = "release-qualification-${GITHUB_RUN_ID}"
+          test "$artifact_expired" = "false"
+          [[ "$artifact_size" =~ ^[1-9][0-9]*$ ]]
+          test "$artifact_digest" = "$QUALIFICATION_ARTIFACT_DIGEST"
+          test "$artifact_run_id" = "$GITHUB_RUN_ID"
+          test "$artifact_head_sha" = "$GITHUB_SHA"
+          gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${QUALIFICATION_ARTIFACT_ID}/zip" |
+            python -m release.cli build-prepublication-controller-authority \
+              --archive-stdin --expected-archive-size "$artifact_size" \
+              --containing-artifact-id "$QUALIFICATION_ARTIFACT_ID" \
+              --containing-artifact-api-digest "$QUALIFICATION_ARTIFACT_DIGEST" \
+              --output controller-authority
+          test "$(find controller-authority -maxdepth 1 -type f | wc -l)" = "2"
+          test -f controller-authority/candidate-input.json
+          test -f controller-authority/verified-candidate.json
+          test ! -e controller-authority/candidate-runtime
+      - name: Upload the small remote controller authority
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: controller-authority-${{ github.run_id }}
+          path: controller-authority/
           if-no-files-found: error
           retention-days: 30
 
