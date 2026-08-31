@@ -7,6 +7,7 @@ import json
 import os
 import pickle
 import tarfile
+import tempfile as stdlib_tempfile
 import unittest
 from contextlib import nullcontext
 from dataclasses import replace
@@ -345,7 +346,12 @@ class FormalVmHarnessTests(unittest.TestCase):
     def test_parent_worker_keeps_capability_in_memory_and_clears_credentials(self):
         events: list[str] = []
         continuation = object()
+        candidate_aggregate_receipt = {
+            "schema": "animemo.candidate-aggregate-receipt/v1",
+            "result": "PASS",
+        }
         qualified = mock.Mock()
+        qualified.candidate_aggregate_receipt = candidate_aggregate_receipt
         qualified.candidate_aggregate_receipt_digest = "sha256:" + "5" * 64
         qualified.candidate_profile_receipt_digests = {
             "fresh_base": "sha256:" + "6" * 64,
@@ -393,6 +399,7 @@ class FormalVmHarnessTests(unittest.TestCase):
             {
                 "status": "PASS",
                 "verifiedCandidateDigest": "sha256:" + "1" * 64,
+                "candidateAggregateReceipt": candidate_aggregate_receipt,
                 "candidateAggregateReceiptDigest": "sha256:" + "5" * 64,
                 "candidateProfileReceiptDigests": {
                     "fresh_base": "sha256:" + "6" * 64,
@@ -464,6 +471,170 @@ class FormalVmHarnessTests(unittest.TestCase):
                 private_work_root=Path.cwd() / "private",
                 output_root=Path.cwd() / "output",
             )
+
+    def test_parent_worker_observes_formal_identities_and_binds_exact_input_bytes(self):
+        qualified = mock.Mock()
+        request = self.request()
+        with stdlib_tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir()
+            worker = harness.ReleaseContinuationParentWorker(
+                clear_r2_credentials=lambda: None,
+                clear_sudo_credentials=lambda: None,
+                continuation_lifetime_authority=self._test_lifetime(),
+            )
+            worker.__enter__()
+            self.addCleanup(worker.fail_closed_cleanup)
+            worker._qualified_candidate = qualified
+            worker._candidate_started = True
+            worker._r2_cleared = True
+            inputs = []
+            expected = []
+            for name in (
+                "api-image",
+                "web-image",
+                "release-manifest",
+                "deployment-contract",
+                "installer-materials",
+                "github-release",
+            ):
+                bundle = root / f"{name}.bundle.json"
+                request_path = root / f"{name}.request.json"
+                bundle.write_bytes(f"bundle:{name}".encode())
+                request_path.write_bytes(f"request:{name}".encode())
+                inputs.append(
+                    FormalProvenanceInput(
+                        evidence_name=name,
+                        bundle=bundle,
+                        trusted_root=None,
+                        request=request_path,
+                    )
+                )
+                expected.append(
+                    {
+                        "evidenceName": name,
+                        "bundleSha256": harness.sha256_bytes(bundle.read_bytes()),
+                        "requestSha256": harness.sha256_bytes(
+                            request_path.read_bytes()
+                        ),
+                    }
+                )
+            with mock.patch.object(
+                harness,
+                "observe_qualified_formal_request",
+                create=True,
+                return_value=request,
+            ) as observe:
+                result = worker.observe_formal_request(
+                    provenance_inputs=tuple(inputs[:5]),
+                    publication_input=inputs[5],
+                    expected_file_sha256=tuple(expected),
+                    private_work_root=private,
+                )
+            self.assertEqual(
+                result,
+                {
+                    "schema": "animemo.formal-request-authority-observation/v1",
+                    "result": "PASS",
+                    "publicationIdentity": request.publication_identity,
+                    "attestationClaimIdentities": dict(
+                        request.attestation_claim_identities
+                    ),
+                },
+            )
+            observe.assert_called_once()
+            observed_call = observe.call_args.kwargs
+            self.assertIs(observed_call["qualified_candidate"], qualified)
+            self.assertEqual(private.resolve(), observed_call["private_work_root"])
+            self.assertIs(
+                worker._lifetime_authority.path_authority,
+                observed_call["_parent_path_authority"],
+            )
+            observed_inputs = (
+                *observed_call["provenance_inputs"],
+                observed_call["publication_input"],
+            )
+            self.assertEqual(
+                tuple(item.evidence_name for item in inputs),
+                tuple(item.evidence_name for item in observed_inputs),
+            )
+            for source, snapshot in zip(inputs, observed_inputs, strict=True):
+                self.assertNotEqual(source.bundle, snapshot.bundle)
+                self.assertNotEqual(source.request, snapshot.request)
+                self.assertEqual(source.bundle.read_bytes(), snapshot.bundle.read_bytes())
+                self.assertEqual(
+                    source.request.read_bytes(), snapshot.request.read_bytes()
+                )
+                snapshot.bundle.resolve().relative_to(private.resolve())
+                snapshot.request.resolve().relative_to(private.resolve())
+            inputs[0].bundle.write_bytes(b"rebound")
+            with (
+                mock.patch.object(
+                    harness,
+                    "execute_qualified_formal_production",
+                    side_effect=AssertionError("Formal must remain unreachable"),
+                ),
+                self.assertRaisesRegex(
+                    FormalProducerError, "FORMAL_PARENT_OBSERVATION_REBOUND"
+                ),
+            ):
+                worker.run_formal(
+                    publication_identity=request.publication_identity,
+                    attestation_claim_identities=(
+                        request.attestation_claim_identities
+                    ),
+                    provenance_inputs=tuple(inputs[:5]),
+                    publication_input=inputs[5],
+                    execution=object(),
+                    publication_root=root,
+                    private_work_root=private,
+                    output_root=root / "output",
+                )
+            original_bundle = f"bundle:{inputs[0].evidence_name}".encode()
+            inputs[0].bundle.write_bytes(original_bundle)
+            original_binding = (
+                harness.ReleaseContinuationParentWorker._formal_input_binding
+            )
+            executed_bundle = None
+
+            def race_after_binding(provenance_inputs, publication_input):
+                binding = original_binding(provenance_inputs, publication_input)
+                inputs[0].bundle.write_bytes(b"rebound-after-binding")
+                return binding
+
+            def execute_snapshot(**kwargs):
+                nonlocal executed_bundle
+                executed_bundle = kwargs["provenance_inputs"][0].bundle.read_bytes()
+                return {"status": "PASS"}
+
+            with (
+                mock.patch.object(
+                    harness.ReleaseContinuationParentWorker,
+                    "_formal_input_binding",
+                    staticmethod(race_after_binding),
+                ),
+                mock.patch.object(
+                    harness,
+                    "execute_qualified_formal_production",
+                    side_effect=execute_snapshot,
+                ),
+            ):
+                terminal = worker.run_formal(
+                    publication_identity=request.publication_identity,
+                    attestation_claim_identities=(
+                        request.attestation_claim_identities
+                    ),
+                    provenance_inputs=tuple(inputs[:5]),
+                    publication_input=inputs[5],
+                    execution=object(),
+                    publication_root=root,
+                    private_work_root=private,
+                    output_root=root / "output",
+                )
+            self.assertEqual({"status": "PASS"}, terminal)
+            self.assertEqual(original_bundle, executed_bundle)
+            worker.fail_closed_cleanup()
 
     def test_parent_worker_failure_clears_both_credential_scopes_once(self):
         events: list[str] = []
