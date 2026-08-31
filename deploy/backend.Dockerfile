@@ -37,11 +37,13 @@ RUN python -m pip uninstall --yes pip
 
 COPY backend /app/backend
 COPY plugins /app/plugins
-COPY installer/__init__.py /app/installer/__init__.py
-COPY installer/safe_archive.py /app/installer/safe_archive.py
+COPY --chown=0:0 --chmod=0444 installer/__init__.py /app/installer/__init__.py
+COPY --chown=0:0 --chmod=0444 installer/safe_archive.py /app/installer/safe_archive.py
 RUN addgroup -S -g 10001 animemo \
     && adduser -S -D -u 10001 -G animemo -h /home/animemo animemo \
     && mkdir -p /app/runtime/plugins /app/logs \
+    && chown root:root /app/installer \
+    && chmod 0555 /app/installer \
     && chown -R animemo:animemo /app/runtime /app/logs /app/backend /app/plugins \
     && ANIMEMO_BUILD_STATIC=1 python /app/backend/manage.py collectstatic --noinput \
     && chown -R animemo:animemo /app/backend/staticfiles

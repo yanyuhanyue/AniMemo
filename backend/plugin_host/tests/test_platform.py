@@ -8,7 +8,7 @@ from unittest.mock import patch
 from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import connection
+from django.db import IntegrityError, connection, transaction
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -27,7 +27,13 @@ from plugin_host.models import (
 )
 from plugin_host.package import PluginPackageError
 from plugin_host.runtime import RuntimeLoadError, runtime_registry
-from plugin_host.services import PluginWorkflowError, upload_plugin_version
+from plugin_host.services import (
+    PluginWorkflowError,
+    archive_or_delete_plugin_project,
+    create_frontend_preview,
+    create_plugin_project,
+    upload_plugin_version,
+)
 from plugin_host.tests.test_runtime_e2e import make_package
 
 
@@ -59,6 +65,99 @@ class PluginPlatformApiTests(APITestCase):
         self.assertEqual(response.status_code, 201, response.data)
         project = PluginProject.objects.get(pk=project_id)
         return project, project.versions.get()
+
+    def test_reserved_slug_is_rejected_before_project_or_storage_mutation(self):
+        with self.assertRaises(PluginWorkflowError):
+            create_plugin_project(
+                actor=self.owner,
+                plugin_id="com.example.con",
+                slug="con",
+                name="Reserved",
+                description="Reserved Windows device name",
+            )
+
+        self.assertFalse(PluginProject.objects.filter(slug="con").exists())
+        self.assertFalse((Path(self.root.name) / "packages").exists())
+
+    def test_legacy_reserved_slug_is_rejected_before_delete_mutation(self):
+        project = PluginProject.objects.create(
+            owner=self.owner,
+            plugin_id="com.example.con",
+            slug="con",
+            name="Legacy Reserved",
+            description="Legacy row",
+        )
+
+        with self.assertRaises(PluginWorkflowError):
+            archive_or_delete_plugin_project(project, actor=self.owner)
+
+        self.assertTrue(PluginProject.objects.filter(pk=project.pk).exists())
+        self.assertFalse((Path(self.root.name) / "packages").exists())
+
+    def test_stale_project_slug_is_revalidated_under_database_lock(self):
+        project = self._create_project("stale-slug")
+        PluginProject.objects.filter(pk=project.pk).update(slug="con")
+
+        with patch(
+            "plugin_host.services.LocalPluginPackageStorage.delete_plugin"
+        ) as delete_plugin, self.assertRaises(PluginWorkflowError):
+            archive_or_delete_plugin_project(project, actor=self.owner)
+
+        self.assertTrue(PluginProject.objects.filter(pk=project.pk).exists())
+        delete_plugin.assert_not_called()
+        self.assertFalse((Path(self.root.name) / "packages").exists())
+
+    def test_plugin_version_database_constraint_rejects_windows_case_alias(self):
+        project = self._create_project("case-alias")
+        first_blob = PluginPackageBlob.objects.create(
+            sha256="a" * 64,
+            size_bytes=1,
+            storage_path="fixtures/case-alias-upper.ajplugin",
+        )
+        second_blob = PluginPackageBlob.objects.create(
+            sha256="b" * 64,
+            size_bytes=1,
+            storage_path="fixtures/case-alias-lower.ajplugin",
+        )
+        PluginVersion.objects.create(
+            plugin=project,
+            version="1.0.0-RC.1",
+            package_blob=first_blob,
+        )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                PluginVersion.objects.create(
+                    plugin=project,
+                    version="1.0.0-rc.1",
+                    package_blob=second_blob,
+                )
+
+        self.assertEqual(project.versions.count(), 1)
+        self.assertIn(
+            "plugin_version_ci_unique",
+            {constraint.name for constraint in PluginVersion._meta.constraints},
+        )
+
+    def test_legacy_invalid_preview_version_fails_before_storage_mutation(self):
+        project = self._create_project("legacy-preview")
+        blob = PluginPackageBlob.objects.create(
+            sha256="c" * 64,
+            size_bytes=1,
+            storage_path="fixtures/legacy-preview.ajplugin",
+        )
+        version = PluginVersion.objects.create(
+            plugin=project,
+            version="1.0.0-a..b",
+            package_blob=blob,
+            runtime_types=["frontend"],
+            created_by=self.owner,
+        )
+
+        with self.assertRaises(PluginWorkflowError):
+            create_frontend_preview(version, actor=self.owner)
+
+        self.assertFalse((Path(self.root.name) / "packages").exists())
 
     def _create_project(self, slug="upload-guard", plugin_id=None):
         return PluginProject.objects.create(
@@ -575,6 +674,25 @@ class PluginPlatformApiTests(APITestCase):
         project = self._create_project()
         first, _ = make_package(project.slug, "1.0.0", runtimes=["frontend"], frontend_source="export default 1;")
         second, _ = make_package(project.slug, "1.0.0", runtimes=["frontend"], frontend_source="export default 2;")
+        self.assertEqual(self._upload(project, first).status_code, 201)
+
+        response = self._upload(project, second)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(len(self._cas_files()), 1)
+
+    def test_case_alias_version_is_rejected_before_second_cas_write(self):
+        project = self._create_project("case-alias-upload")
+        first, _ = make_package(
+            project.slug,
+            "1.0.0-RC.1",
+            runtimes=["frontend"],
+        )
+        second, _ = make_package(
+            project.slug,
+            "1.0.0-rc.1",
+            runtimes=["frontend"],
+        )
         self.assertEqual(self._upload(project, first).status_code, 201)
 
         response = self._upload(project, second)

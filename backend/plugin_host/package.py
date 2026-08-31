@@ -10,7 +10,6 @@ from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
 
 from django.conf import settings
-from packaging.version import InvalidVersion, Version
 
 from installer.safe_archive import (
     SafeArchiveError,
@@ -27,6 +26,7 @@ from .filesystem_security import (
     RUNTIME_FILE_MODE,
     PluginFilesystemSecurityError,
     close_and_unlink_created_file,
+    contained_path,
     created_file_identity,
     ensure_directory,
     ensure_plugin_layout,
@@ -39,7 +39,13 @@ from .filesystem_security import (
     write_descriptor_all,
     write_secure_bytes,
 )
-from .manifest import ManifestError, validate_manifest
+from .manifest import (
+    ManifestError,
+    parse_version,
+    validate_manifest,
+    validate_slug,
+    validate_version,
+)
 
 
 class PluginPackageError(ValueError):
@@ -52,12 +58,60 @@ DEFAULT_MAX_FILES = 1000
 DEFAULT_MAX_COMPRESSION_RATIO = 100
 ALLOWED_ROOT_FILES = {"manifest.json", "package-index.json"}
 ALLOWED_TOP_DIRS = {"frontend", "backend"}
+_SYNTHETIC_STORAGE_SEGMENT_ROOT = os.path.abspath(
+    os.path.join(os.path.sep, "__animemo_storage_segment__")
+)
+
+
+def _normalized_storage_segment(value, error_message):
+    if type(value) is not str:
+        raise PluginPackageError(error_message)
+    candidate = os.path.abspath(
+        os.path.join(_SYNTHETIC_STORAGE_SEGMENT_ROOT, value)
+    )
+    trusted_prefix = (
+        _SYNTHETIC_STORAGE_SEGMENT_ROOT
+        if _SYNTHETIC_STORAGE_SEGMENT_ROOT.endswith(os.sep)
+        else _SYNTHETIC_STORAGE_SEGMENT_ROOT + os.sep
+    )
+    if not candidate.startswith(trusted_prefix):
+        raise PluginPackageError(error_message)
+    segment = os.path.basename(candidate)
+    if (
+        os.path.dirname(candidate) != _SYNTHETIC_STORAGE_SEGMENT_ROOT
+        or segment != value
+    ):
+        raise PluginPackageError(error_message)
+    return segment
+
+
+def _canonical_slug_segment(value):
+    message = "插件 slug 不是规范的单一安全路径段"
+    segment = _normalized_storage_segment(value, message)
+    try:
+        validate_slug(segment)
+    except ManifestError as error:
+        raise PluginPackageError(message) from error
+    return segment
+
+
+def _canonical_version_segment(value):
+    message = "插件版本不是规范的单一安全路径段"
+    segment = _normalized_storage_segment(value, message)
+    try:
+        validate_version(segment)
+    except ManifestError as error:
+        raise PluginPackageError(message) from error
+    return segment
 
 
 class PackageHashLock:
     def __init__(self, root, sha256, timeout=10):
         self.root = Path(root)
-        self.path = self.root / ".locks" / f"cas-{sha256}.lock"
+        self.path = contained_path(
+            self.root,
+            self.root / ".locks" / f"cas-{sha256}.lock",
+        )
         self.timeout = timeout
         self.fd = None
         self.token = f"{os.getpid()}:{uuid4().hex}"
@@ -104,10 +158,15 @@ class PackageHashLock:
                 write_descriptor_all(self.fd, self.payload)
                 os.fsync(self.fd)
                 secure_file(self.root, self.path, mode=PRIVATE_FILE_MODE)
-                require_created_file_identity(self.path, self.identity)
+                require_created_file_identity(
+                    self.root,
+                    self.path,
+                    self.identity,
+                )
                 return self
             except BaseException as error:
                 close_and_unlink_created_file(
+                    self.root,
                     self.path,
                     self.fd,
                     self.identity,
@@ -122,6 +181,7 @@ class PackageHashLock:
         if self.fd is None:
             return
         close_and_unlink_created_file(
+            self.root,
             self.path,
             self.fd,
             self.identity,
@@ -406,17 +466,20 @@ class LocalPluginPackageStorage:
 
     @staticmethod
     def _version_key(value):
-        try:
-            return Version(str(value))
-        except InvalidVersion as error:
-            raise PluginPackageError(f"发现无效插件版本：{value}") from error
+        return parse_version(_canonical_version_segment(value))
 
     def retain_versions(self, slug, *, current=None, previous="", keep=2):
-        protected = [value for value in (current, previous) if value]
-        runtime_directory = self.runtime / slug
+        slug = _canonical_slug_segment(slug)
+        protected = [
+            _canonical_version_segment(value)
+            for value in (current, previous)
+            if value not in (None, "")
+        ]
+        runtime_directory = contained_path(self.root, self.runtime / slug)
         if runtime_directory.is_dir():
             try:
                 secure_tree(
+                    self.root,
                     runtime_directory,
                     directory_mode=RUNTIME_DIRECTORY_MODE,
                     file_mode=RUNTIME_FILE_MODE,
@@ -426,7 +489,7 @@ class LocalPluginPackageStorage:
                 raise PluginPackageError("插件 runtime 目录不安全") from error
         if len(protected) < keep:
             runtime_versions = {
-                path.name
+                _canonical_version_segment(path.name)
                 for path in runtime_directory.iterdir()
                 if path.is_dir() and not path.name.startswith(".")
             } if runtime_directory.is_dir() else set()
@@ -439,7 +502,9 @@ class LocalPluginPackageStorage:
         retained = set(protected[:keep])
         if runtime_directory.is_dir():
             for path in runtime_directory.iterdir():
-                if path.is_dir() and not path.name.startswith(".") and path.name not in retained:
+                if path.is_dir() and not path.name.startswith("."):
+                    if path.name in retained:
+                        continue
                     try:
                         remove_secure_tree(self.root, path)
                     except PluginFilesystemSecurityError as error:
@@ -447,21 +512,38 @@ class LocalPluginPackageStorage:
         return sorted(retained, key=self._version_key, reverse=True)
 
     def list_versions(self, slug):
-        directory = self.runtime / slug
+        slug = _canonical_slug_segment(slug)
+        directory = contained_path(self.root, self.runtime / slug)
         if not directory.is_dir():
             return []
         try:
             validate_directory_chain(self.root, directory)
-            validate_secure_tree(directory)
+            validate_secure_tree(self.root, directory)
         except PluginFilesystemSecurityError as error:
             raise PluginPackageError("插件 runtime 目录不安全") from error
-        return sorted((path.name for path in directory.iterdir() if path.is_dir() and not path.name.startswith(".")), key=self._version_key, reverse=True)
+        return sorted(
+            (
+                _canonical_version_segment(path.name)
+                for path in directory.iterdir()
+                if path.is_dir() and not path.name.startswith(".")
+            ),
+            key=self._version_key,
+            reverse=True,
+        )
 
     def rollback(self, slug, version, package_sha256):
+        slug = _canonical_slug_segment(slug)
+        version = _canonical_version_segment(version)
         raw = self._read_verified_cas_blob(package_sha256)
-        destination = self.runtime / slug / version
-        staging = self.staging / f"rollback-{slug}-{version}"
-        temporary = destination.with_name(f".{version}.rollback-{os.getpid()}")
+        destination = contained_path(self.root, self.runtime / slug / version)
+        staging = contained_path(
+            self.root,
+            self.staging / f"rollback-{slug}-{version}",
+        )
+        temporary = contained_path(
+            self.root,
+            destination.with_name(f".{version}.rollback-{os.getpid()}"),
+        )
         try:
             remove_secure_tree(self.root, staging)
             remove_secure_tree(self.root, temporary)
@@ -488,6 +570,7 @@ class LocalPluginPackageStorage:
                         file_mode=RUNTIME_FILE_MODE,
                     )
             secure_tree(
+                self.root,
                 staging,
                 directory_mode=RUNTIME_DIRECTORY_MODE,
                 file_mode=RUNTIME_FILE_MODE,
@@ -499,13 +582,14 @@ class LocalPluginPackageStorage:
             )
             os.replace(staging, temporary)
             secure_tree(
+                self.root,
                 temporary,
                 directory_mode=RUNTIME_DIRECTORY_MODE,
                 file_mode=RUNTIME_FILE_MODE,
             )
             remove_secure_tree(self.root, destination)
             os.replace(temporary, destination)
-            validate_secure_tree(destination)
+            validate_secure_tree(self.root, destination)
             return destination
         except PluginFilesystemSecurityError as error:
             raise PluginPackageError("插件 rollback 文件系统边界失败关闭") from error
@@ -517,6 +601,7 @@ class LocalPluginPackageStorage:
                     pass
 
     def delete_plugin(self, slug):
+        slug = _canonical_slug_segment(slug)
         try:
             remove_secure_tree(self.root, self.runtime / slug)
             remove_secure_tree(self.root, self.previews / slug)
@@ -539,6 +624,7 @@ class LocalPluginPackageStorage:
             if path.is_dir():
                 try:
                     secure_tree(
+                        self.root,
                         path,
                         directory_mode=PRIVATE_DIRECTORY_MODE,
                         file_mode=PRIVATE_FILE_MODE,

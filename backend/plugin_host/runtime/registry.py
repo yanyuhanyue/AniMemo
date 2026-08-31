@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import json
 import re
@@ -14,6 +15,8 @@ from django.conf import settings
 
 from plugin_host.filesystem_security import (
     PluginFilesystemSecurityError,
+    contained_path,
+    resolve_contained_path,
     validate_directory_chain,
     validate_secure_tree,
 )
@@ -25,6 +28,13 @@ from .context import PluginContext
 
 class RuntimeLoadError(RuntimeError):
     pass
+
+
+class _RuntimeSourceLoader(importlib.machinery.SourceFileLoader):
+    """Load verified runtime source without writing new bytecode into its tree."""
+
+    def set_data(self, path, data, *, _mode=0o666):
+        return None
 
 
 class RuntimeUnavailable(RuntimeLoadError):
@@ -97,16 +107,17 @@ class RuntimeRegistry:
         return Path(settings.PLUGIN_ROOT) / "runtime" / slug / version
 
     def load_candidate(self, root, *, expected_slug=None, expected_version=None):
-        candidate_root = Path(root).absolute()
+        authority_root = Path(settings.PLUGIN_ROOT)
         try:
-            candidate_root = validate_directory_chain(Path(settings.PLUGIN_ROOT), candidate_root)
-            validate_secure_tree(candidate_root)
+            candidate_root = contained_path(authority_root, root)
+            candidate_root = validate_directory_chain(authority_root, candidate_root)
+            validate_secure_tree(authority_root, candidate_root)
         except PluginFilesystemSecurityError as error:
             raise RuntimeLoadError(str(error)) from error
         # The complete chain has just been proven contained, non-link, owned,
         # and non-writable by other principals; resolving it again would reopen
         # the path authority after validation.
-        directory = candidate_root  # lgtm[py/path-injection]
+        directory = candidate_root
         try:
             manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
             validate_manifest(manifest)
@@ -124,10 +135,10 @@ class RuntimeRegistry:
             return RuntimeCandidate(slug, version, directory, manifest, context, None)
 
         entry_value = str((manifest.get("backend") or {}).get("entry") or "")
-        entry = (directory / entry_value).resolve()
         try:
-            entry.relative_to(directory)
-        except ValueError as error:
+            entry_candidate = contained_path(directory, directory / entry_value)
+            entry = resolve_contained_path(directory, entry_candidate)
+        except PluginFilesystemSecurityError as error:
             raise RuntimeLoadError("Backend entry 越过插件目录边界。") from error
         if not entry.is_file() or entry.is_symlink():
             raise RuntimeLoadError("Backend runtime entry 不存在。")
@@ -143,7 +154,12 @@ class RuntimeRegistry:
         sys.modules[namespace] = package
         module_name = f"{namespace}.entry"
         try:
-            spec = importlib.util.spec_from_file_location(module_name, entry)
+            loader = _RuntimeSourceLoader(module_name, str(entry))
+            spec = importlib.util.spec_from_file_location(
+                module_name,
+                entry,
+                loader=loader,
+            )
             if spec is None or spec.loader is None:
                 raise RuntimeLoadError("Backend runtime entry 无法创建导入规范。")
             module = importlib.util.module_from_spec(spec)

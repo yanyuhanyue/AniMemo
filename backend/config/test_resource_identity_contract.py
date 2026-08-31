@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from django.db import models
+from django.db.models.functions import Lower
 from django.test import SimpleTestCase
 
 from integrations.models import IntegrationActionReceipt, IntegrationConnection
@@ -17,9 +18,12 @@ from plugin_host.models import PluginProject, PluginVersion
 from site_config.models import MediaObject
 
 
+def named_constraint(model, name):
+    return next(item for item in model._meta.constraints if item.name == name)
+
+
 def constraint_fields(model, name):
-    constraint = next(item for item in model._meta.constraints if item.name == name)
-    return tuple(constraint.fields)
+    return tuple(named_constraint(model, name).fields)
 
 
 class StableResourceIdentityContractTests(SimpleTestCase):
@@ -43,10 +47,16 @@ class StableResourceIdentityContractTests(SimpleTestCase):
     def test_plugin_and_integration_business_identities_are_unique(self):
         self.assertTrue(PluginProject._meta.get_field("plugin_id").unique)
         self.assertTrue(PluginProject._meta.get_field("slug").unique)
-        self.assertEqual(
-            constraint_fields(PluginVersion, "plugin_version_unique"),
-            ("plugin", "version"),
+        plugin_version_identity = named_constraint(
+            PluginVersion,
+            "plugin_version_ci_unique",
         )
+        self.assertIsInstance(plugin_version_identity, models.UniqueConstraint)
+        self.assertEqual(
+            plugin_version_identity.expressions,
+            (models.F("plugin"), Lower("version")),
+        )
+        self.assertEqual(plugin_version_identity.fields, ())
         self.assertEqual(
             constraint_fields(IntegrationActionReceipt, "integration_action_request_uniq"),
             ("connection", "request_id"),

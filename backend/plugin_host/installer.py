@@ -5,14 +5,13 @@ import os
 import shutil
 import time
 from io import BytesIO
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 from zipfile import ZipFile
 
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
-from packaging.version import Version
 
 from .filesystem_security import (
     PRIVATE_DIRECTORY_MODE,
@@ -21,6 +20,7 @@ from .filesystem_security import (
     RUNTIME_FILE_MODE,
     PluginFilesystemSecurityError,
     close_and_unlink_created_file,
+    contained_path,
     created_file_identity,
     ensure_directory,
     ensure_plugin_layout,
@@ -31,6 +31,7 @@ from .filesystem_security import (
     write_descriptor_all,
     write_secure_bytes,
 )
+from .manifest import ManifestError, parse_version, validate_slug, validate_version
 from .models import PluginDeployment, PluginVersion
 from .package import (
     LocalPluginPackageStorage,
@@ -48,8 +49,16 @@ class PluginInstallError(PluginPackageError):
 
 class _PluginFilesystemLock:
     def __init__(self, root, slug, timeout=10):
-        self.root = root
-        self.path = root / ".locks" / f"{slug}.lock"
+        try:
+            slug = validate_slug(slug)
+        except ManifestError as error:
+            raise PluginInstallError("插件生命周期锁 slug 无效。") from error
+        storage_root = Path(root)
+        self.root = contained_path(storage_root, storage_root / ".locks")
+        self.path = contained_path(
+            self.root,
+            self.root / f"{slug}.lock",
+        )
         self.timeout = timeout
         self.fd = None
         self.token = f"{os.getpid()}:{uuid4().hex}"
@@ -92,10 +101,15 @@ class _PluginFilesystemLock:
                 write_descriptor_all(self.fd, self.payload)
                 os.fsync(self.fd)
                 secure_file(self.path.parent, self.path, mode=PRIVATE_FILE_MODE)
-                require_created_file_identity(self.path, self.identity)
+                require_created_file_identity(
+                    self.root,
+                    self.path,
+                    self.identity,
+                )
                 return self
             except BaseException as error:
                 close_and_unlink_created_file(
+                    self.root,
                     self.path,
                     self.fd,
                     self.identity,
@@ -110,6 +124,7 @@ class _PluginFilesystemLock:
         if self.fd is None:
             return
         close_and_unlink_created_file(
+            self.root,
             self.path,
             self.fd,
             self.identity,
@@ -130,8 +145,49 @@ class PluginPackageInstaller:
         self.storage = LocalPluginPackageStorage(root or settings.PLUGIN_ROOT)
 
     @staticmethod
-    def _extract(payload, inspected, destination):
-        ensure_directory(destination, destination, mode=PRIVATE_DIRECTORY_MODE)
+    def _validated_slug(slug):
+        try:
+            return validate_slug(slug)
+        except ManifestError as error:
+            raise PluginInstallError("插件 slug 无效。") from error
+
+    @staticmethod
+    def _validated_version(version):
+        try:
+            return validate_version(version)
+        except ManifestError as error:
+            raise PluginInstallError("插件版本无效。") from error
+
+    @classmethod
+    def _validate_deployment_identity(cls, deployment):
+        cls._validated_slug(deployment.plugin.slug)
+        cls._validated_version(deployment.current_version.version)
+        if deployment.previous_version is not None:
+            cls._validated_version(deployment.previous_version.version)
+        if deployment.rollback_floor:
+            cls._validated_version(deployment.rollback_floor)
+
+    @classmethod
+    def _manifest_rollback_floor(cls, plugin_version):
+        snapshot = plugin_version.manifest_snapshot
+        if not isinstance(snapshot, dict):
+            raise PluginInstallError("不可变版本的 Manifest 快照无效。")
+        compatibility = snapshot.get("dataCompatibility")
+        if compatibility is None:
+            return ""
+        if not isinstance(compatibility, dict):
+            raise PluginInstallError("不可变版本的数据兼容声明无效。")
+        floor = compatibility.get("rollbackFloor", "")
+        if floor == "":
+            return ""
+        return cls._validated_version(floor)
+
+    def _extract(self, payload, inspected, destination):
+        destination = ensure_directory(
+            self.storage.staging,
+            destination,
+            mode=PRIVATE_DIRECTORY_MODE,
+        )
         expected = {entry["path"]: entry for entry in inspected["files"]}
         extracted = set()
         try:
@@ -172,6 +228,7 @@ class PluginPackageInstaller:
         if extracted != set(expected):
             raise PluginInstallError("插件包成员与已验证索引不一致。")
         secure_tree(
+            self.storage.staging,
             destination,
             directory_mode=PRIVATE_DIRECTORY_MODE,
             file_mode=PRIVATE_FILE_MODE,
@@ -205,7 +262,6 @@ class PluginPackageInstaller:
         return payload, inspected
 
     def publish(self, plugin_version, *, actor=None):
-        ensure_plugin_layout(self.storage)
         plugin_version = PluginVersion.objects.select_related("plugin", "package_blob").get(pk=plugin_version.pk)
         plugin = plugin_version.plugin
         if plugin_version.review_status != PluginVersion.ReviewStatus.APPROVED or plugin_version.revoked_at:
@@ -213,10 +269,24 @@ class PluginPackageInstaller:
         if "backend" in set(plugin_version.runtime_types or []) and not getattr(actor, "is_superuser", False):
             raise PluginInstallError("包含 Backend Runtime 的版本只能由超级管理员发布。")
 
-        slug = plugin.slug
-        version = plugin_version.version
+        slug = self._validated_slug(plugin.slug)
+        version = self._validated_version(plugin_version.version)
+        self._manifest_rollback_floor(plugin_version)
+        preflight_deployment = PluginDeployment.objects.select_related(
+            "plugin", "current_version", "previous_version"
+        ).filter(plugin=plugin).first()
+        if preflight_deployment is not None:
+            self._validate_deployment_identity(preflight_deployment)
+            if preflight_deployment.current_version_id == plugin_version.pk:
+                raise PluginInstallError("该版本已经是当前部署版本。")
+
+        ensure_plugin_layout(self.storage)
         with _PluginFilesystemLock(self.storage.root, slug):
-            deployment = PluginDeployment.objects.select_related("current_version").filter(plugin=plugin).first()
+            deployment = PluginDeployment.objects.select_related(
+                "plugin", "current_version", "previous_version"
+            ).filter(plugin=plugin).first()
+            if deployment is not None:
+                self._validate_deployment_identity(deployment)
             old_version = deployment.current_version if deployment else None
             if old_version and old_version.pk == plugin_version.pk:
                 raise PluginInstallError("该版本已经是当前部署版本。")
@@ -228,19 +298,28 @@ class PluginPackageInstaller:
             current_floor = deployment.rollback_floor if deployment else ""
             effective_floor = max(
                 (value for value in (current_floor, declared_floor) if value),
-                key=Version,
+                key=parse_version,
                 default="",
             )
-            if effective_floor and Version(version) < Version(effective_floor):
+            if effective_floor and parse_version(version) < parse_version(effective_floor):
                 raise PluginInstallError(f"版本 {version} 低于数据兼容下限 {effective_floor}，不能发布。")
             expanded_bytes = sum(item["size"] for item in inspected["files"])
             # Publish keeps both the extracted staging tree and a temporary
             # runtime tree before the atomic replacement, so reserve 2x the
             # expanded package size in addition to the configured free floor.
             self._assert_growth_allowed(expanded_bytes, peak_multiplier=2)
-            runtime_target = self.storage.runtime / slug / version
-            staging = self.storage.staging / f"{slug}-{version}-{uuid4().hex}"
-            runtime_temp = runtime_target.with_name(f".{version}.staged-{uuid4().hex}")
+            runtime_target = contained_path(
+                self.storage.root,
+                self.storage.runtime / slug / version,
+            )
+            staging = contained_path(
+                self.storage.root,
+                self.storage.staging / f"{slug}-{version}-{uuid4().hex}",
+            )
+            runtime_temp = contained_path(
+                self.storage.root,
+                runtime_target.with_name(f".{version}.staged-{uuid4().hex}"),
+            )
             previous_candidate = None
             final_candidate = None
             activated = False
@@ -258,6 +337,7 @@ class PluginPackageInstaller:
                 )
                 shutil.copytree(staging, runtime_temp)
                 secure_tree(
+                    self.storage.runtime,
                     runtime_temp,
                     directory_mode=RUNTIME_DIRECTORY_MODE,
                     file_mode=RUNTIME_FILE_MODE,
@@ -267,6 +347,7 @@ class PluginPackageInstaller:
 
                 os.replace(runtime_temp, runtime_target)
                 secure_tree(
+                    self.storage.runtime,
                     runtime_target,
                     directory_mode=RUNTIME_DIRECTORY_MODE,
                     file_mode=RUNTIME_FILE_MODE,
@@ -331,6 +412,25 @@ class PluginPackageInstaller:
                 remove_secure_tree(self.storage.staging, staging)
 
     def rollback(self, slug, *, actor=None):
+        slug = self._validated_slug(slug)
+        deployment = PluginDeployment.objects.select_related(
+            "plugin", "current_version", "previous_version", "previous_version__package_blob"
+        ).filter(plugin__slug=slug).first()
+        if deployment is None or deployment.previous_version is None:
+            raise PluginInstallError("没有可回滚的上一版本。")
+        self._validate_deployment_identity(deployment)
+        if deployment.previous_version.revoked_at:
+            raise PluginInstallError("上一版本已撤销，不能回滚。")
+        if (
+            deployment.rollback_floor
+            and parse_version(deployment.previous_version.version)
+            < parse_version(deployment.rollback_floor)
+        ):
+            raise PluginInstallError(
+                f"目标版本 {deployment.previous_version.version} 低于数据兼容下限 "
+                f"{deployment.rollback_floor}，不能回滚。"
+            )
+
         ensure_plugin_layout(self.storage)
         with _PluginFilesystemLock(self.storage.root, slug):
             deployment = PluginDeployment.objects.select_related(
@@ -338,23 +438,32 @@ class PluginPackageInstaller:
             ).filter(plugin__slug=slug).first()
             if deployment is None or deployment.previous_version is None:
                 raise PluginInstallError("没有可回滚的上一版本。")
+            self._validate_deployment_identity(deployment)
             current_version = deployment.current_version
             target_version = deployment.previous_version
             if target_version.revoked_at:
                 raise PluginInstallError("上一版本已撤销，不能回滚。")
-            if deployment.rollback_floor and Version(target_version.version) < Version(deployment.rollback_floor):
+            if (
+                deployment.rollback_floor
+                and parse_version(target_version.version)
+                < parse_version(deployment.rollback_floor)
+            ):
                 raise PluginInstallError(
                     f"目标版本 {target_version.version} 低于数据兼容下限 {deployment.rollback_floor}，不能回滚。"
                 )
             if deployment.enabled and deployment.healthy:
                 runtime_registry.ensure_current(slug)
-            runtime_target = self.storage.runtime / slug / target_version.version
+            runtime_target = contained_path(
+                self.storage.root,
+                self.storage.runtime / slug / target_version.version,
+            )
             if not runtime_target.is_dir():
                 _, inspected = self._payload_for(target_version)
                 expanded_bytes = sum(item["size"] for item in inspected["files"])
                 self._assert_growth_allowed(expanded_bytes, peak_multiplier=2)
                 self.storage.rollback(slug, target_version.version, target_version.package_blob.sha256)
                 secure_tree(
+                    self.storage.runtime,
                     runtime_target,
                     directory_mode=RUNTIME_DIRECTORY_MODE,
                     file_mode=RUNTIME_FILE_MODE,
@@ -392,16 +501,25 @@ class PluginPackageInstaller:
                 raise
 
     def set_enabled(self, slug, enabled, *, actor=None):
-        ensure_plugin_layout(self.storage)
+        slug = self._validated_slug(slug)
         deployment = PluginDeployment.objects.select_related("plugin", "current_version").filter(plugin__slug=slug).first()
         if deployment is None:
             raise PluginInstallError("插件尚未部署。")
+        self._validate_deployment_identity(deployment)
+        ensure_plugin_layout(self.storage)
         candidate = runtime_registry.load_installed_candidate(slug, deployment.current_version.version) if enabled else None
         previous = None
         with _PluginFilesystemLock(self.storage.root, slug), runtime_registry.plugin_lock(slug):
             try:
                 with transaction.atomic():
-                    locked = PluginDeployment.objects.select_for_update().get(pk=deployment.pk)
+                    # previous_version is nullable, so PostgreSQL must not try
+                    # to lock that select_related outer-join target.
+                    locked = PluginDeployment.objects.select_for_update(
+                        of=("self",)
+                    ).select_related(
+                        "plugin", "current_version", "previous_version"
+                    ).get(pk=deployment.pk)
+                    self._validate_deployment_identity(locked)
                     if locked.current_version_id != deployment.current_version_id:
                         raise PluginInstallError("部署版本已被另一项操作修改。")
                     if enabled:
@@ -449,7 +567,18 @@ class PluginPackageInstaller:
         return locked_version
 
     def cleanup(self, slug=None):
+        if slug is not None:
+            slug = self._validated_slug(slug)
         from .services import garbage_collect_package_blobs
+
+        deployments = PluginDeployment.objects.select_related(
+            "plugin", "current_version", "previous_version"
+        )
+        if slug:
+            deployments = deployments.filter(plugin__slug=slug)
+        deployments = list(deployments)
+        for deployment in deployments:
+            self._validate_deployment_identity(deployment)
 
         ensure_plugin_layout(self.storage)
         now = time.time()
@@ -463,9 +592,6 @@ class PluginPackageInstaller:
             "orphan_files_removed": [],
             "missing_blob_files": [],
         }
-        deployments = PluginDeployment.objects.select_related("plugin", "current_version", "previous_version")
-        if slug:
-            deployments = deployments.filter(plugin__slug=slug)
         for deployment in deployments:
             before = set(self.storage.list_versions(deployment.plugin.slug))
             retained = self.storage.retain_versions(

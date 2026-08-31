@@ -77,6 +77,7 @@ class StatefulUpgradeDiagnosticsTests(unittest.TestCase):
             fi
             if [[ "$args" == *"worktree add --detach"* ]]; then
               target="${@: -2:1}"
+              umask >"$FAKE_STATE_DIR/base-worktree-umask"
               mkdir -p "$target/deploy"
               exit 0
             fi
@@ -323,6 +324,18 @@ class StatefulUpgradeDiagnosticsTests(unittest.TestCase):
         self.assertIn("exec python manage.py collectstatic --noinput", bootstrap_calls[0])
         self.assertNotIn("gunicorn", bootstrap_calls[0])
         self.assertTrue(bootstrap_calls[1].endswith("run --rm --no-deps bootstrap"), bootstrap_calls[1])
+
+    def test_base_worktree_uses_build_context_permissions_inside_private_root(self) -> None:
+        completed = self.run_gate()
+
+        output = self.output(completed)
+        self.assertEqual(completed.returncode, 0, output)
+        self.assertEqual(
+            (self.state / "base-worktree-umask").read_text(encoding="utf-8").strip(),
+            "0022",
+        )
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertEqual(source.splitlines()[2], "umask 077")
 
     def test_health_probe_can_fail_then_recover(self) -> None:
         completed = self.run_gate(FAKE_HEALTH_FAILURES="2")

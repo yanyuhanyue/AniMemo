@@ -9,15 +9,64 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from jsonschema import Draft202012Validator
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in os.sys.path:
     os.sys.path.insert(0, str(SCRIPTS))
 
-from check_official_plugin_immutability import GateInputError, check_repository, main
+from check_official_plugin_immutability import (
+    GateInputError,
+    _official_slugs_from_source,
+    _parse_semver,
+    check_repository,
+    main,
+    parse_version,
+)
 
 
 class OfficialPluginImmutabilityTests(unittest.TestCase):
+    def test_schema_and_official_gate_share_canonical_semver_contract(self):
+        schema = json.loads(
+            (ROOT / "plugins" / "plugin.schema.json").read_text(encoding="utf-8")
+        )
+        Draft202012Validator.check_schema(schema)
+        semver_validator = Draft202012Validator(schema["$defs"]["semver"])
+        slug_validator = Draft202012Validator(schema["$defs"]["slug"])
+        valid_versions = (
+            "1.0.0",
+            "1.0.0-RC.1",
+            "1.0.0-x.7.z.92",
+            "1.0.0-a-b",
+            "1.0.0-0A",
+            "1.0.0-rc." + ("1" * 31),
+        )
+        invalid_versions = (
+            "1.0.0-rc.",
+            "1.0.0-a..b",
+            "1.0.0-01",
+            "1\N{ARABIC-INDIC DIGIT TWO}.0.0",
+            "1.0.0-rc." + ("1" * 32),
+        )
+
+        for version in valid_versions:
+            with self.subTest(valid=version):
+                semver_validator.validate(version)
+                self.assertEqual(
+                    _parse_semver(version, "alpha"),
+                    parse_version(version),
+                )
+        for version in invalid_versions:
+            with self.subTest(invalid=version):
+                self.assertFalse(semver_validator.is_valid(version))
+                with self.assertRaises(GateInputError):
+                    _parse_semver(version, "alpha")
+        self.assertTrue(slug_validator.is_valid("watch-history-importer"))
+        for slug in ("con", "com1", "a" * 81):
+            with self.subTest(invalid_slug=slug):
+                self.assertFalse(slug_validator.is_valid(slug))
+
     def test_cli_rejects_arbitrary_repository_and_worktree_roots(self):
         for option in ("--repo", "--head-root"):
             with (
@@ -98,7 +147,31 @@ class OfficialPluginImmutabilityTests(unittest.TestCase):
         (root / "frontend").mkdir(parents=True, exist_ok=True)
         (root / "frontend" / "assets").mkdir(parents=True, exist_ok=True)
         (root / "backend").mkdir(parents=True, exist_ok=True)
-        manifest = {"id": f"com.example.{slug}", "slug": slug, "version": version, "description": description}
+        manifest = {
+            "schemaVersion": 2,
+            "sdkApi": 2,
+            "id": f"com.example.{slug}",
+            "slug": slug,
+            "name": slug,
+            "version": version,
+            "description": description,
+            "author": {"name": "CI"},
+            "license": "MIT",
+            "installationMode": "user",
+            "runtimes": ["frontend", "backend"],
+            "frontend": {"exposure": "public"},
+            "backend": {"entry": "backend/plugin.py"},
+            "extensions": ["frontend.page", "backend.api"],
+            "permissions": [],
+            "hooks": [],
+            "settings": [],
+            "dataPolicy": {
+                "storesPersonalData": False,
+                "usesExternalNetwork": False,
+                "acceptsFileUploads": False,
+                "retainsDataOnDisable": True,
+            },
+        }
         (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
         (root / "frontend" / "plugin.js").write_text(frontend, encoding="utf-8")
         (root / "frontend" / "assets" / "fixture.bin").write_bytes(asset)
@@ -203,6 +276,19 @@ class OfficialPluginImmutabilityTests(unittest.TestCase):
 
         with self.assertRaisesRegex(GateInputError, "official plugin slug"):
             self._report(base, head)
+
+    def test_official_registry_uses_the_portable_slug_contract(self):
+        for slug in ("con", "com1", "a" * 81):
+            source = f"OFFICIAL_PLUGIN_SLUGS = ({slug!r},)\n".encode()
+            with self.subTest(slug=slug), self.assertRaises(GateInputError):
+                _official_slugs_from_source(source, "fixture.py")
+        self.assertEqual(
+            _official_slugs_from_source(
+                b"OFFICIAL_PLUGIN_SLUGS = ('watch-history-importer',)\n",
+                "fixture.py",
+            ),
+            ("watch-history-importer",),
+        )
 
     def test_new_official_plugin_passes(self):
         base = self._base()

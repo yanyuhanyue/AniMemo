@@ -94,20 +94,76 @@ def filesystem_diagnostic_code(error: PluginFilesystemSecurityError) -> str:
     return "unspecified"
 
 
-def _absolute(path: Path) -> Path:
-    return Path(os.path.abspath(os.fspath(path)))
-
-
 def _contained(root: Path, path: Path) -> tuple[Path, Path]:
-    boundary = _absolute(Path(root))
-    target = _absolute(Path(path))
+    boundary_text = os.path.abspath(os.fspath(root))
+    target_text = os.path.abspath(os.fspath(path))
+    normalized_boundary = os.path.normcase(boundary_text)
+    normalized_target = os.path.normcase(target_text)
+    normalized_prefix = (
+        normalized_boundary
+        if normalized_boundary.endswith(os.sep)
+        else normalized_boundary + os.sep
+    )
+    boundary = Path(boundary_text)
+    if normalized_target == normalized_boundary:
+        return boundary, boundary
+    if not normalized_target.startswith(normalized_prefix):
+        raise PluginFilesystemSecurityError(
+            "插件存储路径越过受控根目录。", diagnostic_code="path_containment"
+        )
     try:
-        target.relative_to(boundary)
+        common = os.path.commonpath((normalized_boundary, normalized_target))
     except ValueError as error:
         raise PluginFilesystemSecurityError(
             "插件存储路径越过受控根目录。", diagnostic_code="path_containment"
         ) from error
-    return boundary, target
+    if os.path.normcase(common) != normalized_boundary:
+        raise PluginFilesystemSecurityError(
+            "插件存储路径越过受控根目录。", diagnostic_code="path_containment"
+        )
+    if (
+        len(normalized_boundary) != len(boundary_text)
+        or os.path.normcase(target_text[: len(boundary_text)])
+        != normalized_boundary
+    ):
+        raise PluginFilesystemSecurityError(
+            "插件存储路径越过受控根目录。", diagnostic_code="path_containment"
+        )
+    suffix = target_text[len(boundary_text) :]
+    if not boundary_text.endswith(os.sep) and not suffix.startswith(os.sep):
+        raise PluginFilesystemSecurityError(
+            "插件存储路径越过受控根目录。", diagnostic_code="path_containment"
+        )
+    case_aligned_target = boundary_text + suffix
+    trusted_prefix = (
+        boundary_text if boundary_text.endswith(os.sep) else boundary_text + os.sep
+    )
+    if not case_aligned_target.startswith(trusted_prefix):
+        raise PluginFilesystemSecurityError(
+            "插件存储路径越过受控根目录。", diagnostic_code="path_containment"
+        )
+    return boundary, Path(os.path.normpath(case_aligned_target))
+
+
+def contained_path(root: Path, path: Path) -> Path:
+    """Return an absolute lexical path only after a trusted-root guard."""
+
+    _, target = _contained(root, path)
+    return target
+
+
+def resolve_contained_path(root: Path, path: Path) -> Path:
+    """Resolve an existing path and reject physical escapes after validation."""
+
+    boundary, candidate = _contained(root, path)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise PluginFilesystemSecurityError(
+            "插件存储路径元数据不可验证。", diagnostic_code="path_metadata"
+        ) from error
+    _, target = _contained(boundary, resolved)
+    return target
 
 
 def _is_reparse(metadata: os.stat_result) -> bool:
@@ -598,10 +654,10 @@ def secure_file(
     return target
 
 
-def validate_directory(path: Path) -> Path:
+def validate_directory(root: Path, path: Path) -> Path:
     """Require a real, owned directory without changing its mode."""
 
-    target = _absolute(path)
+    _, target = _contained(root, path)
     metadata = _metadata(target)
     if not stat.S_ISDIR(metadata.st_mode):
         raise PluginFilesystemSecurityError(
@@ -621,11 +677,11 @@ def validate_directory_chain(root: Path, path: Path) -> Path:
     """Reject links/reparse points in every component below a trusted root."""
 
     boundary, target = _contained(root, path)
-    validate_directory(boundary)
+    validate_directory(boundary, boundary)
     current = boundary
     for part in target.relative_to(boundary).parts:
         current = current / part
-        validate_directory(current)
+        validate_directory(boundary, current)
     return target
 
 
@@ -654,7 +710,7 @@ def ensure_directory(
     elif boundary_created:
         _secure_directory(boundary, PRIVATE_DIRECTORY_MODE)
     else:
-        validate_directory(boundary)
+        validate_directory(boundary, boundary)
     current = boundary
     for part in target.relative_to(boundary).parts:
         current = current / part
@@ -707,9 +763,14 @@ def created_file_identity(descriptor: int) -> tuple[int, int]:
     return int(metadata.st_dev), int(metadata.st_ino)
 
 
-def _path_has_identity(path: Path, identity: tuple[int, int]) -> bool:
+def _path_has_identity(
+    root: Path,
+    path: Path,
+    identity: tuple[int, int],
+) -> bool:
+    _, target = _contained(root, path)
     try:
-        metadata = path.lstat()
+        metadata = target.lstat()
     except OSError:
         return False
     return (
@@ -719,16 +780,21 @@ def _path_has_identity(path: Path, identity: tuple[int, int]) -> bool:
     )
 
 
-def require_created_file_identity(path: Path, identity: tuple[int, int]) -> None:
+def require_created_file_identity(
+    root: Path,
+    path: Path,
+    identity: tuple[int, int],
+) -> None:
     """Fail closed when a just-created path no longer names its opened file."""
 
-    if not _path_has_identity(path, identity):
+    if not _path_has_identity(root, path, identity):
         raise PluginFilesystemSecurityError(
             "插件存储文件身份在创建期间发生变化。", diagnostic_code="file_type"
         )
 
 
 def close_and_unlink_created_file(
+    root: Path,
     path: Path,
     descriptor: int,
     identity: tuple[int, int] | None,
@@ -755,10 +821,16 @@ def close_and_unlink_created_file(
 
     if not descriptor_matches or identity is None:
         return
-    unlink_created_file(path, identity, expected_payload=expected_payload)
+    unlink_created_file(
+        root,
+        path,
+        identity,
+        expected_payload=expected_payload,
+    )
 
 
 def unlink_created_file(
+    root: Path,
     path: Path,
     identity: tuple[int, int],
     *,
@@ -766,18 +838,19 @@ def unlink_created_file(
 ) -> None:
     """Unlink only an unchanged, closed file with the captured identity."""
 
-    if not _path_has_identity(path, identity):
+    boundary, target = _contained(root, path)
+    if not _path_has_identity(boundary, target, identity):
         return
     if expected_payload is not None:
         try:
-            if path.read_bytes() != expected_payload:
+            if target.read_bytes() != expected_payload:
                 return
         except OSError:
             return
-        if not _path_has_identity(path, identity):
+        if not _path_has_identity(boundary, target, identity):
             return
     try:
-        path.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
     except OSError:
         return
 
@@ -813,7 +886,12 @@ def write_secure_bytes(
         ) from error
     except OSError as error:
         if descriptor >= 0:
-            close_and_unlink_created_file(target, descriptor, identity)
+            close_and_unlink_created_file(
+                boundary,
+                target,
+                descriptor,
+                identity,
+            )
             descriptor = -1
         raise PluginFilesystemSecurityError(
             "插件存储文件无法安全写入。", diagnostic_code="file_create"
@@ -828,11 +906,12 @@ def write_secure_bytes(
             mode=file_mode,
             directory_mode=directory_mode,
         )
-        require_created_file_identity(target, identity)
+        require_created_file_identity(boundary, target, identity)
         return secured
     except BaseException:
         if identity is not None:
             unlink_created_file(
+                boundary,
                 target,
                 identity,
                 expected_payload=bytes(payload),
@@ -842,15 +921,18 @@ def write_secure_bytes(
 
 def secure_tree(
     root: Path,
+    path: Path,
     *,
     directory_mode: int,
     file_mode: int,
 ) -> Path:
     """Reject links/special files and harden a complete extracted tree."""
 
-    boundary = _absolute(root)
-    _secure_directory(boundary, directory_mode)
-    directories = [boundary]
+    boundary, target = _contained(root, path)
+    if target != boundary:
+        validate_directory_chain(boundary, target.parent)
+    _secure_directory(target, directory_mode)
+    directories = [target]
     while directories:
         directory = directories.pop()
         try:
@@ -866,7 +948,7 @@ def secure_tree(
                 directories.append(child)
             elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
                 secure_file(
-                    boundary,
+                    target,
                     child,
                     mode=file_mode,
                     directory_mode=directory_mode,
@@ -875,14 +957,15 @@ def secure_tree(
                 raise PluginFilesystemSecurityError(
                     "插件存储树包含链接或特殊文件。", diagnostic_code="tree_entry"
                 )
-    return boundary
+    return target
 
 
-def validate_secure_tree(root: Path) -> Path:
+def validate_secure_tree(root: Path, path: Path) -> Path:
     """Validate an existing tree before execution, move, or recursive delete."""
 
-    boundary = validate_directory(root)
-    directories = [boundary]
+    boundary, target = _contained(root, path)
+    validate_directory_chain(boundary, target)
+    directories = [target]
     while directories:
         directory = directories.pop()
         try:
@@ -895,7 +978,7 @@ def validate_secure_tree(root: Path) -> Path:
             metadata = _metadata(child)
             _require_owner(metadata)
             if stat.S_ISDIR(metadata.st_mode):
-                validate_directory(child)
+                validate_directory(target, child)
                 directories.append(child)
                 continue
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
@@ -908,7 +991,7 @@ def validate_secure_tree(root: Path) -> Path:
                 raise PluginFilesystemSecurityError(
                     "插件存储文件禁止组或其他用户写入。", diagnostic_code="file_mode"
                 )
-    return boundary
+    return target
 
 
 def remove_secure_tree(root: Path, path: Path) -> None:
@@ -918,7 +1001,7 @@ def remove_secure_tree(root: Path, path: Path) -> None:
     if not target.exists() and not target.is_symlink():
         return
     validate_directory_chain(boundary, target.parent)
-    validate_secure_tree(target)
+    validate_secure_tree(boundary, target)
     try:
         shutil.rmtree(target)
     except OSError as error:

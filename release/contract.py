@@ -831,6 +831,7 @@ def promote_manifest(
     rc_manifest: dict[str, object],
     *,
     existing_tags: list[str],
+    existing_stable_tag_commit: str | None = None,
     provenance_source_commit: str | None = None,
     created_at: datetime | str | None = None,
 ) -> dict[str, object]:
@@ -840,7 +841,13 @@ def promote_manifest(
     if rc_release["channel"] != "rc" or not match:
         raise ReleaseContractError("Only a valid RC manifest can be promoted")
     stable_tag = f"v{match.group('base')}"
-    assert_tag_absent(stable_tag, existing_tags)
+    stable_exists = stable_tag in set(existing_tags)
+    if stable_exists and existing_stable_tag_commit != rc_release["commit"]:
+        raise ReleaseContractError(
+            f"Release tag already exists with a different commit: {stable_tag}"
+        )
+    if not stable_exists and existing_stable_tag_commit is not None:
+        raise ReleaseContractError("Stable replay tag state is inconsistent")
     frozen_created_at = _timestamp(rc_release["createdAt"])
     if created_at is not None and _timestamp(created_at) != frozen_created_at:
         raise ReleaseContractError(

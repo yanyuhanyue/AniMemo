@@ -24,6 +24,7 @@ jobs:
   plan:
     name: verify-exact-rc-and-plan-stable
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       actions: read
       contents: read
@@ -173,8 +174,14 @@ jobs:
           cp --no-clobber rc-assets/deployment-contract.json promotion-output/deployment-contract.json
           cp --no-clobber rc-assets/installer-materials.tar promotion-output/installer-materials.tar
           git tag --list 'v*' --sort=version:refname > "$RUNNER_TEMP/tags.txt"
+          stable_tag="${RC_TAG%-rc.*}"
+          existing_stable_tag_commit=""
+          if git show-ref --verify --quiet "refs/tags/$stable_tag"; then
+            existing_stable_tag_commit="$(git rev-parse "refs/tags/$stable_tag^{commit}")"
+          fi
           python -m release.cli promote-manifest \
             --rc-manifest rc-assets/release-manifest.json --tags-file "$RUNNER_TEMP/tags.txt" \
+            --existing-stable-tag-commit "$existing_stable_tag_commit" \
             --output promotion-output/release-manifest.json
           python -m release.cli validate-manifest \
             --manifest promotion-output/release-manifest.json
@@ -248,8 +255,6 @@ jobs:
           PORTABLE_BUILD_RECEIPT_PATH=promotion-output/portable-promotion-receipt.json \
             python -m scripts.release_authority \
             > promotion-output/portable-pipeline-authority.json
-          ! git ls-remote --exit-code --tags origin "refs/tags/$stable_tag" >/dev/null 2>&1
-          ! gh release view "$stable_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
           echo "stable_tag=$stable_tag" >> "$GITHUB_OUTPUT"
           echo "rc_commit=$rc_commit" >> "$GITHUB_OUTPUT"
           echo "api_repository=$api_repository" >> "$GITHUB_OUTPUT"
@@ -268,6 +273,7 @@ jobs:
     if: ${{ inputs.dry_run }}
     needs: plan
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -294,11 +300,13 @@ jobs:
     if: ${{ !inputs.dry_run }}
     needs: plan
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     permissions:
       contents: write
       packages: write
       id-token: write
       attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -374,8 +382,6 @@ jobs:
           # must not abort this immutable RC transaction halfway through.
           test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
           test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = "true"
-          ! git ls-remote --exit-code --tags origin "refs/tags/$STABLE_TAG" >/dev/null 2>&1
-          ! gh release view "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
       - name: Emit the validated Stable presentation identity
         id: presentation
         shell: bash
@@ -390,24 +396,126 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
-      - name: Add Stable tags to the exact RC manifests
+      - name: Reconcile the complete Stable transaction before its first mutation
         env:
-          STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
-          API_REPOSITORY: ${{ needs.plan.outputs.api_repository }}
-          API_DIGEST: ${{ needs.plan.outputs.api_digest }}
-          WEB_REPOSITORY: ${{ needs.plan.outputs.web_repository }}
-          WEB_DIGEST: ${{ needs.plan.outputs.web_digest }}
+          GH_TOKEN: ${{ github.token }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
         shell: bash
         run: |
           set -euo pipefail
-          crane tag "$API_REPOSITORY@$API_DIGEST" "$STABLE_TAG"
-          crane tag "$WEB_REPOSITORY@$WEB_DIGEST" "$STABLE_TAG"
-          test "$(crane digest "$API_REPOSITORY:$STABLE_TAG")" = "$API_DIGEST"
-          test "$(crane digest "$WEB_REPOSITORY:$STABLE_TAG")" = "$WEB_DIGEST"
-      - name: Attest the promoted Stable manifest
+          rc_tree="$(git rev-parse "$RC_COMMIT^{tree}")"
+          python -m scripts.release_publication transaction-reconcile \
+            --plan promotion-output/publication-plan.json \
+            --source-tree "$rc_tree" --asset-root promotion-output \
+            --repository-path . --remote origin
+      - name: Add only absent Stable registry tags through the durable controller
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc_tree="$(git rev-parse "$RC_COMMIT^{tree}")"
+          python -m scripts.release_publication transaction-run \
+            --phase registry --plan promotion-output/publication-plan.json \
+            --source-tree "$rc_tree" --asset-root promotion-output \
+            --repository-path . --remote origin
+      - name: Begin the durable Stable manifest attestation intent
+        id: tx_attest_file_01
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc_tree="$(git rev-parse "$RC_COMMIT^{tree}")"
+          python -m scripts.release_publication transaction-begin-external \
+            --step attestation-file-01 --github-output "$GITHUB_OUTPUT" \
+            --plan promotion-output/publication-plan.json \
+            --source-tree "$rc_tree" --asset-root promotion-output \
+            --repository-path . --remote origin
+      - name: Attest the Stable manifest under the durable intent
+        if: steps.tx_attest_file_01.outputs.should_mutate == 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          subject-checksums: promotion-output/checksums.txt
+          subject-path: promotion-output/release-manifest.json
+          create-storage-record: true
+      - name: Reconcile the Stable manifest attestation readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc_tree="$(git rev-parse "$RC_COMMIT^{tree}")"
+          python -m scripts.release_publication transaction-reconcile-external \
+            --step attestation-file-01 --plan promotion-output/publication-plan.json \
+            --source-tree "$rc_tree" --asset-root promotion-output \
+            --repository-path . --remote origin
+      - name: Begin the durable Stable deployment contract attestation intent
+        id: tx_attest_file_02
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc_tree="$(git rev-parse "$RC_COMMIT^{tree}")"
+          python -m scripts.release_publication transaction-begin-external \
+            --step attestation-file-02 --github-output "$GITHUB_OUTPUT" \
+            --plan promotion-output/publication-plan.json \
+            --source-tree "$rc_tree" --asset-root promotion-output \
+            --repository-path . --remote origin
+      - name: Attest the Stable deployment contract under the durable intent
+        if: steps.tx_attest_file_02.outputs.should_mutate == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: promotion-output/deployment-contract.json
+          create-storage-record: true
+      - name: Reconcile the Stable deployment contract attestation readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc_tree="$(git rev-parse "$RC_COMMIT^{tree}")"
+          python -m scripts.release_publication transaction-reconcile-external \
+            --step attestation-file-02 --plan promotion-output/publication-plan.json \
+            --source-tree "$rc_tree" --asset-root promotion-output \
+            --repository-path . --remote origin
+      - name: Begin the durable Stable installer materials attestation intent
+        id: tx_attest_file_03
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc_tree="$(git rev-parse "$RC_COMMIT^{tree}")"
+          python -m scripts.release_publication transaction-begin-external \
+            --step attestation-file-03 --github-output "$GITHUB_OUTPUT" \
+            --plan promotion-output/publication-plan.json \
+            --source-tree "$rc_tree" --asset-root promotion-output \
+            --repository-path . --remote origin
+      - name: Attest the Stable installer materials under the durable intent
+        if: steps.tx_attest_file_03.outputs.should_mutate == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: promotion-output/installer-materials.tar
+          create-storage-record: true
+      - name: Reconcile the Stable installer materials attestation readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc_tree="$(git rev-parse "$RC_COMMIT^{tree}")"
+          python -m scripts.release_publication transaction-reconcile-external \
+            --step attestation-file-03 --plan promotion-output/publication-plan.json \
+            --source-tree "$rc_tree" --asset-root promotion-output \
+            --repository-path . --remote origin
       - name: Verify Stable release contract attestations
         env:
           GH_TOKEN: ${{ github.token }}
@@ -421,97 +529,38 @@ jobs:
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/promote-release.yml" \
               --source-digest "$GITHUB_SHA"
           done
-      - name: Create Stable tag at the accepted RC commit
+      - name: Commit Stable tag, Draft, individual assets, and publish through one controller
         env:
           GH_TOKEN: ${{ github.token }}
-          STABLE_TAG: ${{ steps.presentation.outputs.release_tag }}
-          RESOLVED_STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
-          ANNOTATED_TAG_SUBJECT: ${{ steps.presentation.outputs.annotated_tag_subject }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
-          PREVIOUS_STABLE: ${{ needs.plan.outputs.previous_stable }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$STABLE_TAG" = "$RESOLVED_STABLE_TAG"
-          ! git ls-remote --exit-code --tags origin "refs/tags/$STABLE_TAG" >/dev/null 2>&1
-          ! gh release view "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git tag --annotate "$STABLE_TAG" "$RC_COMMIT" --message "$ANNOTATED_TAG_SUBJECT"
-          python -m release.cli verify-local-tag-presentation \
-            --plan promotion-output/publication-plan.json --repository .
-          git push origin "refs/tags/$STABLE_TAG"
-      - name: Create an unpublished Stable Draft Release
-        id: draft_release
+          rc_tree="$(git rev-parse "$RC_COMMIT^{tree}")"
+          python -m scripts.release_publication transaction-run \
+            --phase publication --plan promotion-output/publication-plan.json \
+            --source-tree "$rc_tree" --asset-root promotion-output \
+            --repository-path . --remote origin
+      - name: Finalize and export the durable Stable transaction receipt
         env:
           GH_TOKEN: ${{ github.token }}
-          STABLE_TAG: ${{ steps.presentation.outputs.release_tag }}
-          RELEASE_TITLE: ${{ steps.presentation.outputs.release_title }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          jq -n --arg tag "$STABLE_TAG" --arg name "$RELEASE_TITLE" \
-            --rawfile body promotion-output/release-notes.md \
-            '{tag_name:$tag,name:$name,body:$body,
-              draft:true,prerelease:false,make_latest:"false"}' \
-            > "$RUNNER_TEMP/stable-draft-create-request.json"
-          gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
-            --input "$RUNNER_TEMP/stable-draft-create-request.json" \
-            > "$RUNNER_TEMP/stable-draft-release.json"
-          release_id="$(jq -r '.id' "$RUNNER_TEMP/stable-draft-release.json")"
-          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
-          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" \
-            > "$RUNNER_TEMP/stable-draft-release-readback.json"
-          jq '{id,tag_name,name,target_commitish,draft,prerelease,immutable,
-               assets:[.assets[]|{name}]}' \
-            "$RUNNER_TEMP/stable-draft-release-readback.json" \
-            > "$RUNNER_TEMP/stable-draft-presentation.json"
-          python -m release.cli verify-release-presentation \
-            --plan promotion-output/publication-plan.json \
-            --metadata "$RUNNER_TEMP/stable-draft-presentation.json" \
-            --repository . --state draft
-          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
-      - name: Upload and read back the complete Stable Draft asset set
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
           RC_COMMIT: ${{ needs.plan.outputs.rc_commit }}
-          RELEASE_ID: ${{ steps.draft_release.outputs.release_id }}
         shell: bash
         run: |
           set -euo pipefail
-          STABLE_PORTABLE_ASSET="animemo-$STABLE_TAG-portable.tar"
-          gh release upload "$STABLE_TAG" \
-            promotion-output/release-manifest.json promotion-output/deployment-contract.json \
-            promotion-output/installer-materials.tar promotion-output/checksums.txt \
-            "promotion-output/$STABLE_PORTABLE_ASSET" \
-            --repo "$GITHUB_REPOSITORY"
-          rm -rf "$RUNNER_TEMP/stable-draft-readback"
-          mkdir -p "$RUNNER_TEMP/stable-draft-readback"
-          gh release download "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern release-manifest.json --pattern deployment-contract.json \
-            --pattern installer-materials.tar --pattern checksums.txt \
-            --pattern "$STABLE_PORTABLE_ASSET" \
-            --dir "$RUNNER_TEMP/stable-draft-readback"
-          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            | jq --arg target "$RC_COMMIT" \
-              '{id,tag:.tag_name,target:$target,draft,prerelease,body,assets:[.assets[]|{name,size,digest}]}' \
-              > "$RUNNER_TEMP/stable-draft-metadata.json"
-          python scripts/release_publication.py verify-draft \
+          rc_tree="$(git rev-parse "$RC_COMMIT^{tree}")"
+          python -m scripts.release_publication transaction-finalize \
             --plan promotion-output/publication-plan.json \
-            --metadata "$RUNNER_TEMP/stable-draft-metadata.json" \
-            --download-directory "$RUNNER_TEMP/stable-draft-readback" \
-            --notes-file promotion-output/release-notes.md
-      - name: Publish only the fully verified Stable Draft as Latest
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STABLE_TAG: ${{ needs.plan.outputs.stable_tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          STABLE_PORTABLE_ASSET="animemo-$STABLE_TAG-portable.tar"
-          gh release edit "$STABLE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --draft=false --prerelease=false --latest
+            --source-tree "$rc_tree" --asset-root promotion-output \
+            --repository-path . --remote origin \
+            --receipt promotion-output/publication-transaction-ledger.json
+      - name: Preserve the finalized Stable publication transaction before post-publication checks
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stable-publication-transaction-${{ needs.plan.outputs.stable_tag }}-${{ github.run_attempt }}
+          path: promotion-output/publication-transaction-ledger.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Verify the public Stable release without authenticated asset transport
         env:
           GH_TOKEN: ${{ github.token }}
@@ -599,5 +648,6 @@ jobs:
           path: |
             promotion-output/release-attestation-acquisition-receipt.json
             promotion-output/animemo-${{ needs.plan.outputs.stable_tag }}-release-attestation.json
+            promotion-output/publication-transaction-ledger.json
           if-no-files-found: error
           retention-days: 90

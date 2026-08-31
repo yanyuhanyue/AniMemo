@@ -12,10 +12,11 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from django.test import SimpleTestCase, override_settings
 
-from plugin_host import package as package_module
 from plugin_host import filesystem_security as filesystem_security_module
 from plugin_host import installer as installer_module
+from plugin_host import package as package_module
 from plugin_host import services as services_module
+from plugin_host.filesystem_security import PluginFilesystemSecurityError
 from plugin_host.installer import (
     PluginInstallError,
     PluginPackageInstaller,
@@ -28,7 +29,6 @@ from plugin_host.package import (
     inspect_package,
 )
 from plugin_host.services import PluginWorkflowError, static_security_scan
-from plugin_host.filesystem_security import PluginFilesystemSecurityError
 
 
 def make_package(*members):
@@ -141,6 +141,25 @@ class PluginLockSecurityTests(SimpleTestCase):
 
                 self.assertFalse(lock.path.exists())
 
+    def test_plugin_lock_rejects_traversal_before_touching_storage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "storage"
+
+            with self.assertRaises(PluginInstallError):
+                _PluginFilesystemLock(root, "../runtime/evil")
+
+            self.assertFalse(root.exists())
+
+    def test_cleanup_rejects_slug_before_global_storage_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "storage"
+            installer = PluginPackageInstaller(root)
+
+            with self.assertRaises(PluginInstallError):
+                installer.cleanup("../runtime/evil")
+
+            self.assertFalse(root.exists())
+
     def test_lock_initialization_failures_close_and_remove_created_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -227,6 +246,215 @@ class PluginLockSecurityTests(SimpleTestCase):
 
 
 class PackageSecurityTests(SimpleTestCase):
+    def test_manifest_and_storage_share_the_same_slug_acceptance_boundary(self):
+        candidates = (
+            "demo",
+            "watch-history-importer",
+            "a" * 80,
+            "con",
+            "prn",
+            "com1",
+            "a" * 81,
+            "Demo",
+            "d\N{LATIN SMALL LETTER E WITH ACUTE}mo",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            storage = LocalPluginPackageStorage(Path(directory) / "storage")
+            for slug in candidates:
+                manifest = valid_manifest()
+                manifest["slug"] = slug
+                try:
+                    package_module.validate_manifest(manifest)
+                    manifest_accepts = True
+                except package_module.ManifestError:
+                    manifest_accepts = False
+                try:
+                    storage.list_versions(slug)
+                    storage_accepts = True
+                except PluginPackageError:
+                    storage_accepts = False
+
+                with self.subTest(slug=slug):
+                    self.assertEqual(storage_accepts, manifest_accepts)
+
+    def test_manifest_and_storage_share_the_same_version_acceptance_boundary(self):
+        candidates = (
+            "1.0.0",
+            "1.0.0-RC.1",
+            "1.0.0-x.7.z.92",
+            "1.0.0-a-b",
+            "1.0.0-0A",
+            "1.0.0-rc." + ("1" * 31),
+            "1.0.0-rc." + ("1" * 32),
+            "1.0.0-rc.",
+            "1.0.0-a..b",
+            "1.0.0-01",
+            "../1.0.0",
+            r"1.0.0\child",
+            "\N{FULLWIDTH DIGIT ONE}.0.0",
+        )
+        for version in candidates:
+            manifest = valid_manifest()
+            manifest["version"] = version
+            try:
+                package_module.validate_manifest(manifest)
+                manifest_accepts = True
+            except package_module.ManifestError:
+                manifest_accepts = False
+            try:
+                package_module._canonical_version_segment(version)
+                storage_accepts = True
+            except PluginPackageError:
+                storage_accepts = False
+
+            with self.subTest(version=version):
+                self.assertEqual(storage_accepts, manifest_accepts)
+
+    def test_storage_rejects_noncanonical_slug_before_any_path_operation(self):
+        invalid_slugs = (
+            "",
+            ".",
+            "..",
+            "../escape",
+            r"..\escape",
+            "/absolute",
+            r"C:\absolute",
+            "nested/plugin",
+            r"nested\plugin",
+            "Demo",
+            "d\N{LATIN SMALL LETTER E WITH ACUTE}mo",
+            "a" * 81,
+            "con",
+            b"demo",
+            Path("demo"),
+            None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            storage = LocalPluginPackageStorage(Path(directory) / "storage")
+            for slug in invalid_slugs:
+                with self.subTest(slug=slug), mock.patch.object(
+                    package_module,
+                    "remove_secure_tree",
+                ) as remove:
+                    with self.assertRaises(PluginPackageError):
+                        storage.delete_plugin(slug)
+                    remove.assert_not_called()
+
+    def test_storage_rejects_noncanonical_version_before_reading_cas(self):
+        invalid_versions = (
+            "",
+            ".",
+            "..",
+            "../1.0.0",
+            r"..\1.0.0",
+            "/1.0.0",
+            r"C:\1.0.0",
+            "1.0.0/child",
+            r"1.0.0\child",
+            "\N{FULLWIDTH DIGIT ONE}.0.0",
+            "1.0.0 ",
+            "1.0.0-rc.",
+            "1.0.0-a..b",
+            "1.0.0-01",
+            "1.0.0-rc." + ("1" * 32),
+            b"1.0.0",
+            Path("1.0.0"),
+            None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            storage = LocalPluginPackageStorage(Path(directory) / "storage")
+            for version in invalid_versions:
+                with self.subTest(version=version), mock.patch.object(
+                    storage,
+                    "_read_verified_cas_blob",
+                ) as read_blob:
+                    with self.assertRaises(PluginPackageError):
+                        storage.rollback("demo", version, "a" * 64)
+                    read_blob.assert_not_called()
+
+    def test_storage_rejects_invalid_retention_segments_before_enumeration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = LocalPluginPackageStorage(Path(directory) / "storage")
+            for arguments in (
+                {"slug": "../escape"},
+                {"slug": "demo", "current": "../1.0.0"},
+                {"slug": "demo", "previous": r"..\1.0.0"},
+            ):
+                with self.subTest(arguments=arguments), self.assertRaises(
+                    PluginPackageError
+                ):
+                    storage.retain_versions(**arguments)
+
+    def test_storage_validates_slug_at_every_public_path_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = LocalPluginPackageStorage(Path(directory) / "storage")
+            operations = (
+                lambda: storage.retain_versions("../escape"),
+                lambda: storage.list_versions("../escape"),
+                lambda: storage.rollback("../escape", "1.0.0", "a" * 64),
+                lambda: storage.delete_plugin("../escape"),
+            )
+            with mock.patch.object(
+                storage,
+                "_read_verified_cas_blob",
+            ) as read_blob, mock.patch.object(
+                package_module,
+                "remove_secure_tree",
+            ) as remove:
+                for operation in operations:
+                    with self.subTest(operation=operation), self.assertRaises(
+                        PluginPackageError
+                    ):
+                        operation()
+                read_blob.assert_not_called()
+                remove.assert_not_called()
+
+    def test_storage_accepts_database_width_canonical_segments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = LocalPluginPackageStorage(Path(directory) / "storage")
+            slug = "a" * 80
+            version = "1.0.0-rc." + ("1" * 31)
+
+            retained = storage.retain_versions(slug, current=version, keep=1)
+
+            self.assertEqual(retained, [version])
+
+    def test_storage_sorts_the_complete_shared_semver_prerelease_subset(self):
+        versions = (
+            "1.0.0-0A",
+            "1.0.0-a-b",
+            "1.0.0-x.7.z.92",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            storage = LocalPluginPackageStorage(Path(directory) / "storage")
+            for version in versions:
+                package_module.ensure_directory(
+                    storage.root,
+                    storage.runtime / "demo" / version,
+                    mode=package_module.RUNTIME_DIRECTORY_MODE,
+                )
+
+            self.assertEqual(
+                storage.list_versions("demo"),
+                list(reversed(versions)),
+            )
+
+    def test_full_retention_set_removes_noncanonical_stale_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = LocalPluginPackageStorage(Path(directory) / "storage")
+            stale = storage.runtime / "demo" / "legacy+garbage"
+            package_module.ensure_directory(storage.root, stale)
+
+            retained = storage.retain_versions(
+                "demo",
+                current="1.1.0",
+                previous="1.0.0",
+                keep=2,
+            )
+
+            self.assertEqual(retained, ["1.1.0", "1.0.0"])
+            self.assertFalse(stale.exists())
+
     def test_static_scan_reads_nfd_member_through_normalized_zipinfo_plan(self):
         manifest = json.dumps(valid_manifest(), separators=(",", ":"))
         source = "value = 1"
@@ -325,9 +553,10 @@ class PackageSecurityTests(SimpleTestCase):
         struct.pack_into("<L", encoded, local + 14, 0)
 
         with tempfile.TemporaryDirectory() as directory:
-            destination = Path(directory) / "runtime"
+            installer = PluginPackageInstaller(Path(directory) / "storage")
+            destination = installer.storage.staging / "runtime"
             with self.assertRaises(PluginInstallError):
-                PluginPackageInstaller._extract(
+                installer._extract(
                     bytes(encoded),
                     inspected,
                     destination,

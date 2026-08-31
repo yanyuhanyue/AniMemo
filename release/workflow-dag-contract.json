@@ -1,0 +1,284 @@
+{
+  "schemaVersion": "animemo.workflow-dag-contract/v1",
+  "requiredWorkflows": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/dr-rehearsal.yml",
+    ".github/workflows/performance.yml",
+    ".github/workflows/pre-merge-full.yml",
+    ".github/workflows/promote-release.yml",
+    ".github/workflows/release-drafter.yml",
+    ".github/workflows/release-gate.yml",
+    ".github/workflows/release-metadata-freshness.yml",
+    ".github/workflows/release-mirror.yml",
+    ".github/workflows/release.yml"
+  ],
+  "nonCancellingConcurrency": [
+    ".github/workflows/dr-rehearsal.yml",
+    ".github/workflows/performance.yml",
+    ".github/workflows/pre-merge-full.yml",
+    ".github/workflows/promote-release.yml",
+    ".github/workflows/release-drafter.yml",
+    ".github/workflows/release-metadata-freshness.yml",
+    ".github/workflows/release-mirror.yml",
+    ".github/workflows/release.yml"
+  ],
+  "mutationAuthorities": [
+    {
+      "domain": "RC_PUBLICATION",
+      "workflow": ".github/workflows/release.yml",
+      "job": "publish",
+      "reconciliationMarker": "python -m scripts.release_publication transaction-"
+    },
+    {
+      "domain": "STABLE_PUBLICATION",
+      "workflow": ".github/workflows/promote-release.yml",
+      "job": "publish",
+      "reconciliationMarker": "python -m scripts.release_publication transaction-"
+    }
+  ],
+  "skipAuthorities": [
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "selection-authority",
+      "covers": [
+        "classify",
+        "fast-fail",
+        "docs-only",
+        "frontend",
+        "backend",
+        "bootstrap-smoke",
+        "postgres",
+        "plugins",
+        "astrbot-bridge",
+        "astrbot-runtime"
+      ],
+      "allowedSkippedJobs": [
+        "fast-fail",
+        "docs-only",
+        "frontend",
+        "backend",
+        "bootstrap-smoke",
+        "postgres",
+        "plugins",
+        "astrbot-bridge",
+        "astrbot-runtime"
+      ],
+      "conditionMarker": "always()"
+    },
+    {
+      "workflow": ".github/workflows/release-gate.yml",
+      "job": "selection-authority",
+      "covers": [
+        "classify",
+        "post-merge-sanity",
+        "updater-isolated",
+        "docker",
+        "stateful-upgrade",
+        "dr-rehearsal"
+      ],
+      "allowedSkippedJobs": [
+        "post-merge-sanity",
+        "updater-isolated",
+        "docker",
+        "stateful-upgrade",
+        "dr-rehearsal"
+      ],
+      "conditionMarker": "always()"
+    },
+    {
+      "workflow": ".github/workflows/performance.yml",
+      "job": "regression-gate",
+      "covers": [
+        "frontend",
+        "backend",
+        "isolated-resource-load",
+        "isolated-long-operation-capacity"
+      ],
+      "allowedSkippedJobs": [],
+      "conditionMarker": "always()"
+    },
+    {
+      "workflow": ".github/workflows/pre-merge-full.yml",
+      "job": "authority",
+      "covers": [
+        "preflight",
+        "full-regression",
+        "full-release-gate"
+      ],
+      "allowedSkippedJobs": [],
+      "conditionMarker": "always()"
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
+      "job": "release-authority",
+      "covers": [
+        "preflight",
+        "full-ci",
+        "full-release-gate",
+        "performance",
+        "platform-qualification"
+      ],
+      "allowedSkippedJobs": [
+        "full-ci",
+        "full-release-gate",
+        "performance",
+        "platform-qualification"
+      ],
+      "conditionMarker": "always()"
+    }
+  ],
+  "requiredGateReachability": [
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "selection-authority",
+      "requiredGates": [
+        "classify",
+        "fast-fail",
+        "docs-only",
+        "frontend",
+        "backend",
+        "bootstrap-smoke",
+        "postgres",
+        "plugins",
+        "astrbot-bridge",
+        "astrbot-runtime"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "pr-fast-gate",
+      "requiredGates": [
+        "selection-authority"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/performance.yml",
+      "job": "regression-gate",
+      "requiredGates": [
+        "frontend",
+        "backend",
+        "isolated-resource-load",
+        "isolated-long-operation-capacity"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/pre-merge-full.yml",
+      "job": "authority",
+      "requiredGates": [
+        "preflight",
+        "full-regression",
+        "full-release-gate"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/release-gate.yml",
+      "job": "selection-authority",
+      "requiredGates": [
+        "classify",
+        "post-merge-sanity",
+        "updater-isolated",
+        "docker",
+        "stateful-upgrade",
+        "dr-rehearsal"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
+      "job": "release-authority",
+      "requiredGates": [
+        "preflight",
+        "full-ci",
+        "full-release-gate",
+        "performance",
+        "platform-qualification"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
+      "job": "metadata-freshness-authority",
+      "requiredGates": [
+        "preflight",
+        "release-authority"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
+      "job": "dry-run",
+      "requiredGates": [
+        "preflight",
+        "full-ci",
+        "full-release-gate",
+        "performance",
+        "platform-qualification",
+        "release-authority"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
+      "job": "publish",
+      "requiredGates": [
+        "preflight",
+        "release-authority",
+        "metadata-freshness-authority"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/promote-release.yml",
+      "job": "dry-run",
+      "requiredGates": [
+        "plan"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/promote-release.yml",
+      "job": "publish",
+      "requiredGates": [
+        "plan"
+      ]
+    }
+  ],
+  "candidateAuthority": {
+    "producer": {
+      "workflow": ".github/workflows/release.yml",
+      "job": "dry-run",
+      "annotation": "AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER"
+    },
+    "consumers": [
+      {
+        "workflow": ".github/workflows/release.yml",
+        "job": "publish"
+      }
+    ],
+    "producerMarkers": [
+      "Build API OCI artifact without publishing",
+      "Build Web OCI artifact without publishing",
+      "build-installer-materials",
+      "generate-manifest",
+      "build-prepublication-candidate-input"
+    ],
+    "forbiddenConsumerBuildMarkers": [
+      "docker build",
+      "docker/build-push-action@",
+      "build-installer-materials",
+      "generate-manifest",
+      "build-prepublication-candidate-input"
+    ],
+    "nonAuthoritativeBuilds": [
+      {
+        "workflow": ".github/workflows/performance.yml",
+        "job": "isolated-resource-load",
+        "annotation": "NON_AUTHORITATIVE_ISOLATED_TEST_ONLY"
+      },
+      {
+        "workflow": ".github/workflows/performance.yml",
+        "job": "isolated-long-operation-capacity",
+        "annotation": "NON_AUTHORITATIVE_ISOLATED_TEST_ONLY"
+      },
+      {
+        "workflow": ".github/workflows/release-gate.yml",
+        "job": "docker",
+        "annotation": "NON_AUTHORITATIVE_ISOLATED_TEST_ONLY"
+      }
+    ]
+  }
+}

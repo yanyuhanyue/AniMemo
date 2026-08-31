@@ -2,6 +2,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
+from django.db.models.functions import Lower
 
 
 class PluginProject(models.Model):
@@ -95,7 +96,11 @@ class PluginVersion(models.Model):
     class Meta:
         ordering = ["plugin__slug", "-created_at"]
         constraints = [
-            models.UniqueConstraint(fields=("plugin", "version"), name="plugin_version_unique"),
+            models.UniqueConstraint(
+                models.F("plugin"),
+                Lower("version"),
+                name="plugin_version_ci_unique",
+            ),
         ]
 
     def save(self, *args, **kwargs):

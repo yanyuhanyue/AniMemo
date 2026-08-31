@@ -1,0 +1,266 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://animemo.example/schemas/publication-transaction-ledger-v1.json",
+  "title": "AniMemo durable publication transaction ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "operationId",
+    "planSchema",
+    "planDigest",
+    "planIdentity",
+    "repository",
+    "channel",
+    "source",
+    "target",
+    "expected",
+    "attemptLimit",
+    "steps",
+    "revision",
+    "previousLedgerIdentity",
+    "finalState",
+    "recoveryStatus",
+    "ledgerIdentity"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "operationId": {"$ref": "#/$defs/sha256"},
+    "planSchema": {
+      "enum": [
+        "animemo.publish-candidate-plan/v1",
+        "animemo.release-publication-plan/v1",
+        "animemo.release-publication-plan/v2"
+      ]
+    },
+    "planDigest": {"$ref": "#/$defs/sha256"},
+    "planIdentity": {"$ref": "#/$defs/sha256"},
+    "repository": {"const": "yanyuhanyue/AniMemo"},
+    "channel": {"enum": ["beta", "rc", "stable"]},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha", "tree"],
+      "properties": {
+        "sha": {"$ref": "#/$defs/commit"},
+        "tree": {"$ref": "#/$defs/commit"}
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "version"],
+      "properties": {
+        "tag": {"$ref": "#/$defs/tag"},
+        "version": {"$ref": "#/$defs/tag"}
+      }
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiDigest", "webDigest", "assets", "transportAssets"],
+      "properties": {
+        "apiDigest": {"$ref": "#/$defs/sha256"},
+        "webDigest": {"$ref": "#/$defs/sha256"},
+        "assets": {"$ref": "#/$defs/assets"},
+        "transportAssets": {"$ref": "#/$defs/transportAssets"}
+      }
+    },
+    "attemptLimit": {"const": 10},
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/step"}
+    },
+    "revision": {"type": "integer", "minimum": 0, "maximum": 4096},
+    "previousLedgerIdentity": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]
+    },
+    "finalState": {"enum": ["ACTIVE", "COMPLETE", "FROZEN"]},
+    "recoveryStatus": {
+      "enum": [
+        "NOT_REQUIRED",
+        "IDEMPOTENT_REMOTE_SAME",
+        "REMOTE_COMMIT_CONFIRMED",
+        "REMOTE_ABSENT_EXACT_CONTINUE",
+        "CONTROLLER_INTERRUPTION_RECONCILED",
+        "GLOBAL_FREEZE_DIFFERENT",
+        "GLOBAL_FREEZE_UNKNOWN",
+        "ATTEMPT_LIMIT_EXHAUSTED",
+        "COMPLETE"
+      ]
+    },
+    "ledgerIdentity": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-(?:beta|rc)\\.(?:[1-9][0-9]*|TEST))?$"
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "size"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"type": "integer", "minimum": 0, "maximum": 34359738368}
+      }
+    },
+    "assets": {
+      "type": "object",
+      "minProperties": 0,
+      "maxProperties": 4,
+      "additionalProperties": false,
+      "oneOf": [
+        {"maxProperties": 0},
+        {
+          "required": [
+            "checksums.txt",
+            "deployment-contract.json",
+            "installer-materials.tar",
+            "release-manifest.json"
+          ]
+        }
+      ],
+      "properties": {
+        "checksums.txt": {"$ref": "#/$defs/asset"},
+        "deployment-contract.json": {"$ref": "#/$defs/asset"},
+        "installer-materials.tar": {"$ref": "#/$defs/asset"},
+        "release-manifest.json": {"$ref": "#/$defs/asset"}
+      }
+    },
+    "transportAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "sha256", "size"],
+      "properties": {
+        "role": {"const": "PORTABLE_RELEASE_BUNDLE"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"type": "integer", "minimum": 1, "maximum": 34359738368}
+      }
+    },
+    "transportAssets": {
+      "type": "object",
+      "minProperties": 0,
+      "maxProperties": 1,
+      "patternProperties": {
+        "^animemo-v[0-9]+\\.[0-9]+\\.[0-9]+(?:-(?:beta|rc)\\.(?:[1-9][0-9]*|TEST))?-portable\\.tar$": {
+          "$ref": "#/$defs/transportAsset"
+        }
+      },
+      "additionalProperties": false
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "identity", "diagnosticCode"],
+      "properties": {
+        "classification": {"enum": ["ABSENT", "SAME", "DIFFERENT", "UNKNOWN"]},
+        "identity": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]
+        },
+        "diagnosticCode": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,95}$"}
+          ]
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "diagnosticCode"],
+      "properties": {
+        "classification": {"enum": ["ACKNOWLEDGED", "TERMINAL", "AMBIGUOUS"]},
+        "diagnosticCode": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,95}$"}
+          ]
+        }
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "prestate",
+        "intentIdentity",
+        "requestStarted",
+        "response",
+        "readback",
+        "committed"
+      ],
+      "properties": {
+        "number": {"type": "integer", "minimum": 1, "maximum": 10},
+        "prestate": {"$ref": "#/$defs/observation"},
+        "intentIdentity": {"$ref": "#/$defs/sha256"},
+        "requestStarted": {"type": "boolean"},
+        "response": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/response"}]
+        },
+        "readback": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/observation"}]
+        },
+        "committed": {"type": "boolean"}
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "remoteKey",
+        "expectedIdentity",
+        "state",
+        "preflight",
+        "attempts",
+        "committed"
+      ],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+        "kind": {
+          "enum": [
+            "REGISTRY_PUSH",
+            "REGISTRY_TAG",
+            "ATTESTATION",
+            "GIT_TAG",
+            "GITHUB_RELEASE_DRAFT",
+            "GITHUB_RELEASE_ASSET",
+            "GITHUB_RELEASE_PUBLISH"
+          ]
+        },
+        "remoteKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "expectedIdentity": {"$ref": "#/$defs/sha256"},
+        "state": {"enum": ["WAITING", "READY", "REQUEST_STARTED", "COMMITTED", "FROZEN"]},
+        "preflight": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/observation"}]
+        },
+        "attempts": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 10,
+          "items": {"$ref": "#/$defs/attempt"}
+        },
+        "committed": {"type": "boolean"}
+      }
+    }
+  }
+}

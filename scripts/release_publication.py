@@ -21,6 +21,13 @@ from release.publication import (
     verify_asset_readback,
     verify_post_publish,
 )
+from release.publication_remote import build_publication_runtime
+from release.publication_transaction import (
+    DurablePublicationController,
+    GitRemoteAppendOnlyJournal,
+    MutationResponse,
+    PublicationTransactionError,
+)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -119,6 +126,152 @@ def _verify_public(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def _transaction_controller(
+    args: argparse.Namespace,
+) -> tuple[DurablePublicationController, Any]:
+    plan = _read_json(args.plan)
+    runtime = build_publication_runtime(
+        plan,
+        source_tree=args.source_tree,
+        asset_root=args.asset_root,
+        candidate_root=args.candidate_root,
+        repository_path=args.repository_path,
+        remote=args.remote,
+    )
+    journal = GitRemoteAppendOnlyJournal(
+        args.repository_path,
+        remote=args.remote,
+    )
+    controller = DurablePublicationController.open(
+        plan,
+        source_tree=args.source_tree,
+        intents=runtime.intents,
+        journal=journal,
+        adapters=runtime.adapters,
+    )
+    return controller, runtime
+
+
+def _transaction_reconcile(args: argparse.Namespace) -> dict[str, Any]:
+    controller, _runtime = _transaction_controller(args)
+    controller.resume_pending()
+    ledger = controller.preflight_all()
+    return {
+        "schema": "animemo.publication-transaction-command/v1",
+        "command": "reconcile",
+        "operationId": ledger["operationId"],
+        "revision": ledger["revision"],
+        "finalState": ledger["finalState"],
+        "recoveryStatus": ledger["recoveryStatus"],
+    }
+
+
+def _transaction_run(args: argparse.Namespace) -> dict[str, Any]:
+    controller, runtime = _transaction_controller(args)
+    controller.resume_pending()
+    controller.preflight_all()
+    names = (
+        runtime.registry_steps
+        if args.phase == "registry"
+        else runtime.publication_steps
+    )
+    ledger = controller.ledger
+    for name in names:
+        ledger = controller.advance(name)
+    return {
+        "schema": "animemo.publication-transaction-command/v1",
+        "command": "run",
+        "phase": args.phase,
+        "operationId": ledger["operationId"],
+        "revision": ledger["revision"],
+        "finalState": ledger["finalState"],
+        "committedSteps": [
+            step["name"] for step in ledger["steps"] if step["committed"]
+        ],
+    }
+
+
+def _append_github_output(path: Path, name: str, value: str) -> None:
+    if name not in {"should_mutate"} or value not in {"true", "false"}:
+        raise PublicationTransactionError("TRANSACTION_GITHUB_OUTPUT_INVALID")
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(f"{name}={value}\n")
+
+
+def _transaction_begin_external(args: argparse.Namespace) -> dict[str, Any]:
+    controller, runtime = _transaction_controller(args)
+    if args.step not in runtime.external_steps:
+        raise PublicationTransactionError("TRANSACTION_EXTERNAL_STEP_INVALID")
+    controller.preflight_all()
+    ledger = controller.begin_external(args.step)
+    step = next(item for item in ledger["steps"] if item["name"] == args.step)
+    should_mutate = step["state"] == "REQUEST_STARTED"
+    _append_github_output(
+        args.github_output,
+        "should_mutate",
+        "true" if should_mutate else "false",
+    )
+    return {
+        "schema": "animemo.publication-transaction-command/v1",
+        "command": "begin-external",
+        "step": args.step,
+        "operationId": ledger["operationId"],
+        "revision": ledger["revision"],
+        "shouldMutate": should_mutate,
+    }
+
+
+def _transaction_reconcile_external(args: argparse.Namespace) -> dict[str, Any]:
+    controller, runtime = _transaction_controller(args)
+    if args.step not in runtime.external_steps:
+        raise PublicationTransactionError("TRANSACTION_EXTERNAL_STEP_INVALID")
+    ledger = controller.reconcile_external(
+        args.step,
+        response=MutationResponse.acknowledged(),
+    )
+    step = next(item for item in ledger["steps"] if item["name"] == args.step)
+    if not step["committed"]:
+        raise PublicationTransactionError("TRANSACTION_EXTERNAL_STEP_INCOMPLETE")
+    return {
+        "schema": "animemo.publication-transaction-command/v1",
+        "command": "reconcile-external",
+        "step": args.step,
+        "operationId": ledger["operationId"],
+        "revision": ledger["revision"],
+        "committed": True,
+    }
+
+
+def _transaction_finalize(args: argparse.Namespace) -> dict[str, Any]:
+    controller, _runtime = _transaction_controller(args)
+    ledger = controller.finalize()
+    args.receipt.parent.mkdir(parents=True, exist_ok=True)
+    args.receipt.write_text(
+        json.dumps(ledger, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return {
+        "schema": "animemo.publication-transaction-command/v1",
+        "command": "finalize",
+        "operationId": ledger["operationId"],
+        "revision": ledger["revision"],
+        "finalState": ledger["finalState"],
+        "ledgerIdentity": ledger["ledgerIdentity"],
+        "receipt": str(args.receipt),
+    }
+
+
+def _add_transaction_common(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--source-tree", required=True)
+    parser.add_argument("--asset-root", type=Path, required=True)
+    parser.add_argument("--candidate-root", type=Path)
+    parser.add_argument("--repository-path", type=Path, default=Path("."))
+    parser.add_argument("--remote", default="origin")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Verify AniMemo release publication")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -137,6 +290,26 @@ def _parser() -> argparse.ArgumentParser:
     public.add_argument("--public-unauthenticated-assets", action="store_true")
     public.add_argument("--attestations-verified", action="store_true")
     public.set_defaults(handler=_verify_public)
+    reconcile = subparsers.add_parser("transaction-reconcile")
+    _add_transaction_common(reconcile)
+    reconcile.set_defaults(handler=_transaction_reconcile)
+    run = subparsers.add_parser("transaction-run")
+    _add_transaction_common(run)
+    run.add_argument("--phase", choices=("registry", "publication"), required=True)
+    run.set_defaults(handler=_transaction_run)
+    begin_external = subparsers.add_parser("transaction-begin-external")
+    _add_transaction_common(begin_external)
+    begin_external.add_argument("--step", required=True)
+    begin_external.add_argument("--github-output", type=Path, required=True)
+    begin_external.set_defaults(handler=_transaction_begin_external)
+    reconcile_external = subparsers.add_parser("transaction-reconcile-external")
+    _add_transaction_common(reconcile_external)
+    reconcile_external.add_argument("--step", required=True)
+    reconcile_external.set_defaults(handler=_transaction_reconcile_external)
+    finalize = subparsers.add_parser("transaction-finalize")
+    _add_transaction_common(finalize)
+    finalize.add_argument("--receipt", type=Path, required=True)
+    finalize.set_defaults(handler=_transaction_finalize)
     return parser
 
 
@@ -144,7 +317,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
         result = args.handler(args)
-    except (OSError, json.JSONDecodeError, PublicationError) as error:
+    except (
+        OSError,
+        json.JSONDecodeError,
+        PublicationError,
+        PublicationTransactionError,
+    ) as error:
         print(
             json.dumps(
                 {"code": "release_publication_invalid", "detail": str(error)},

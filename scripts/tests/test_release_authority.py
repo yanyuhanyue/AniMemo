@@ -168,7 +168,11 @@ class ReleaseAuthorityTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertNotIn("Materialize exact OCI layouts without rebuilding", workflow)
-        self.assertIn("Publish only the Candidate-accepted OCI layouts", workflow)
+        self.assertNotIn("Publish only the Candidate-accepted OCI layouts", workflow)
+        self.assertIn(
+            "Publish the four exact Candidate registry keys through the durable controller",
+            workflow,
+        )
         self.assertIn("Assemble the portable transport from accepted OCI layouts", workflow)
         self.assertIn(
             'cp -a "$ANIMEMO_ACCEPTED_CANDIDATE_ROOT/candidate-runtime/oci"',
@@ -180,20 +184,32 @@ class ReleaseAuthorityTests(unittest.TestCase):
         self.assertIn("python scripts/acquire_release_attestation.py", workflow)
         self.assertIn("animemo-$RELEASE_TAG-release-attestation.json", workflow)
         self.assertLess(
-            workflow.index("Publish only the Candidate-accepted OCI layouts"),
-            workflow.index("Assemble the portable transport from accepted OCI layouts"),
-        )
-        self.assertLess(
             workflow.index("Assemble the portable transport from accepted OCI layouts"),
             workflow.index("python -m release.cli build-portable"),
         )
         self.assertLess(
             workflow.index("python -m release.cli build-portable"),
-            workflow.index("Create an unpublished GitHub Draft Pre-release"),
+            workflow.index("Reconcile the complete RC transaction before its first mutation"),
+        )
+        self.assertLess(
+            workflow.index("Reconcile the complete RC transaction before its first mutation"),
+            workflow.index(
+                "Publish the four exact Candidate registry keys through the durable controller"
+            ),
+        )
+        self.assertLess(
+            workflow.index(
+                "Publish the four exact Candidate registry keys through the durable controller"
+            ),
+            workflow.index(
+                "Commit RC tag, Draft, individual assets, and publish through one controller"
+            ),
         )
         self.assertGreater(
             workflow.index("python scripts/acquire_release_attestation.py"),
-            workflow.index("Publish only the fully verified Draft Pre-release"),
+            workflow.index(
+                "Commit RC tag, Draft, individual assets, and publish through one controller"
+            ),
         )
         self.assertIn(
             '--payload "$RUNNER_TEMP/public-readback/$PORTABLE_ASSET"', workflow

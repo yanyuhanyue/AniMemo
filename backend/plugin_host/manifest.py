@@ -1,15 +1,26 @@
 import json
 import re
+from dataclasses import dataclass
+from functools import total_ordering
 from pathlib import Path
-
-from packaging.version import Version
 
 from .hook_contract import SUPPORTED_HOOKS, SYSTEM_SCOPED_HOOKS
 
-
 SLUG_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+MAX_PLUGIN_SLUG_LENGTH = 80
+WINDOWS_RESERVED_PLUGIN_SLUGS = frozenset(
+    {
+        "aux",
+        "con",
+        "nul",
+        "prn",
+        *(f"com{number}" for number in range(1, 10)),
+        *(f"lpt{number}" for number in range(1, 10)),
+    }
+)
 PLUGIN_ID_RE = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)+$")
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$")
+MAX_PLUGIN_VERSION_LENGTH = 40
 INTEGRATION_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 ROLES = {"reviewer", "user_manager", "operator", "administrator"}
 EXTENSIONS = {
@@ -24,6 +35,79 @@ POLICY_KEYS = {"storesPersonalData", "usesExternalNetwork", "acceptsFileUploads"
 
 class ManifestError(ValueError):
     pass
+
+
+@total_ordering
+@dataclass(frozen=True)
+class SemVer:
+    release: tuple[int, int, int]
+    prerelease: tuple[str, ...] | None
+
+    def __lt__(self, other):
+        if not isinstance(other, SemVer):
+            return NotImplemented
+        if self.release != other.release:
+            return self.release < other.release
+        left = self.prerelease
+        right = other.prerelease
+        if left is None or right is None:
+            return left is not None and right is None
+        for left_identifier, right_identifier in zip(left, right, strict=False):
+            if left_identifier == right_identifier:
+                continue
+            left_numeric = left_identifier.isdigit()
+            right_numeric = right_identifier.isdigit()
+            if left_numeric and right_numeric:
+                return int(left_identifier) < int(right_identifier)
+            if left_numeric != right_numeric:
+                return left_numeric
+            return left_identifier < right_identifier
+        return len(left) < len(right)
+
+
+def validate_slug(slug: object) -> str:
+    if (
+        type(slug) is not str
+        or not slug.isascii()
+        or not 1 <= len(slug) <= MAX_PLUGIN_SLUG_LENGTH
+        or SLUG_RE.fullmatch(slug) is None
+        or slug.casefold() in WINDOWS_RESERVED_PLUGIN_SLUGS
+    ):
+        raise ManifestError("slug 必须为可移植的 kebab-case 标识")
+    return slug
+
+
+def validate_version(version: object) -> str:
+    if (
+        type(version) is not str
+        or not version.isascii()
+        or not 1 <= len(version) <= MAX_PLUGIN_VERSION_LENGTH
+        or SEMVER_RE.fullmatch(version) is None
+    ):
+        raise ManifestError("version 必须为最长 40 字符的 ASCII SemVer")
+    _release, separator, prerelease = version.partition("-")
+    if separator:
+        identifiers = prerelease.split(".")
+        if any(
+            not identifier
+            or (
+                identifier.isdigit()
+                and len(identifier) > 1
+                and identifier.startswith("0")
+            )
+            for identifier in identifiers
+        ):
+            raise ManifestError("version 的预发布标识必须符合 SemVer")
+    return version
+
+
+def parse_version(version: object) -> SemVer:
+    canonical = validate_version(version)
+    release, separator, prerelease = canonical.partition("-")
+    return SemVer(
+        release=tuple(int(component) for component in release.split(".")),
+        prerelease=tuple(prerelease.split(".")) if separator else None,
+    )
 
 
 def load_manifest(plugin_dir: str | Path) -> dict:
@@ -44,8 +128,7 @@ def validate_manifest(manifest: dict, *, directory_name: str | None = None) -> d
     if manifest.get("schemaVersion") != 2 or manifest.get("sdkApi") != 2:
         raise ManifestError("仅支持 Manifest Schema v2 / SDK API v2")
     slug = manifest.get("slug", "")
-    if not SLUG_RE.fullmatch(slug):
-        raise ManifestError("slug 必须为 kebab-case")
+    validate_slug(slug)
     if directory_name and directory_name != slug:
         raise ManifestError("目录名必须与 slug 一致")
     for key in ("id", "name", "version", "description", "license"):
@@ -58,16 +141,19 @@ def validate_manifest(manifest: dict, *, directory_name: str | None = None) -> d
         raise ManifestError("author.name 不能为空")
     if manifest.get("installationMode") not in {"user", "system"}:
         raise ManifestError("installationMode 必须是 user 或 system")
-    if not SEMVER_RE.fullmatch(manifest["version"]):
-        raise ManifestError("version 必须符合 SemVer")
+    validate_version(manifest["version"])
     data_compatibility = manifest.get("dataCompatibility")
     if data_compatibility is not None:
         if not isinstance(data_compatibility, dict) or set(data_compatibility) != {"rollbackFloor"}:
             raise ManifestError("dataCompatibility 必须只声明 rollbackFloor")
         rollback_floor = data_compatibility.get("rollbackFloor")
-        if not isinstance(rollback_floor, str) or not SEMVER_RE.fullmatch(rollback_floor):
-            raise ManifestError("dataCompatibility.rollbackFloor 必须符合 SemVer")
-        if Version(rollback_floor) > Version(manifest["version"]):
+        try:
+            validate_version(rollback_floor)
+        except ManifestError as error:
+            raise ManifestError(
+                "dataCompatibility.rollbackFloor 必须符合 SemVer"
+            ) from error
+        if parse_version(rollback_floor) > parse_version(manifest["version"]):
             raise ManifestError("dataCompatibility.rollbackFloor 不能高于当前版本")
     runtimes = manifest.get("runtimes")
     if not isinstance(runtimes, list) or len(runtimes) != len(set(runtimes)) or not set(runtimes) <= {"frontend", "backend"}:
