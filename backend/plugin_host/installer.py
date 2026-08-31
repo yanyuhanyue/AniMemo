@@ -512,7 +512,11 @@ class PluginPackageInstaller:
         with _PluginFilesystemLock(self.storage.root, slug), runtime_registry.plugin_lock(slug):
             try:
                 with transaction.atomic():
-                    locked = PluginDeployment.objects.select_for_update().select_related(
+                    # previous_version is nullable, so PostgreSQL must not try
+                    # to lock that select_related outer-join target.
+                    locked = PluginDeployment.objects.select_for_update(
+                        of=("self",)
+                    ).select_related(
                         "plugin", "current_version", "previous_version"
                     ).get(pk=deployment.pk)
                     self._validate_deployment_identity(locked)

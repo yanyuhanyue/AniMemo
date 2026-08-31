@@ -205,7 +205,7 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
                 )
                 runtime_root = storage.runtime / "demo" / "1.0.0"
                 write_secure_bytes(
-                    runtime_root,
+                    storage.runtime,
                     runtime_root / "plugin.py",
                     b"runtime",
                     directory_mode=RUNTIME_DIRECTORY_MODE,
@@ -231,6 +231,10 @@ class PluginFilesystemSecurityTests(SimpleTestCase):
             )
             self.assertEqual(
                 stat.S_IMODE(runtime_root.stat().st_mode),
+                RUNTIME_DIRECTORY_MODE,
+            )
+            self.assertEqual(
+                stat.S_IMODE(runtime_root.parent.stat().st_mode),
                 RUNTIME_DIRECTORY_MODE,
             )
             self.assertEqual(

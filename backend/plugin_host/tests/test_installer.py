@@ -143,6 +143,29 @@ class PluginInstallerTests(TestCase):
                 ).is_dir()
             )
 
+    def test_set_enabled_locks_only_the_deployment_row(self):
+        with tempfile.TemporaryDirectory() as directory, override_settings(
+            PLUGIN_ROOT=Path(directory),
+        ):
+            version = self._version()
+            installer = PluginPackageInstaller(Path(directory))
+            installer.publish(version, actor=self.user)
+
+            with patch.object(
+                PluginDeployment.objects,
+                "select_for_update",
+                wraps=PluginDeployment.objects.select_for_update,
+            ) as select_for_update:
+                result = installer.set_enabled(
+                    self.project.slug,
+                    False,
+                    actor=self.user,
+                )
+
+            select_for_update.assert_called_once_with(of=("self",))
+            self.assertFalse(result.enabled)
+            self.assertEqual(result.status, PluginDeployment.Status.DEPLOYED)
+
     def test_publish_failure_preserves_current_runtime(self):
         with tempfile.TemporaryDirectory() as directory, override_settings(PLUGIN_ROOT=Path(directory)):
             first = self._version()
