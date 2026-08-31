@@ -40,6 +40,30 @@ INITIAL_TRUST_KIT_PREFIX = "release/release_attestation_verifier/pretrust-v2"
 PREPUBLICATION_SCHEMA_VERSION = 3
 PREPUBLICATION_MATERIALS_NAME = "prepublication-materials.json"
 DEPLOYMENT_CONTRACT_NAME = "deployment-contract.json"
+CANDIDATE_QUALIFICATION_ROOT_FILES = frozenset(
+    {
+        "candidate-input.json",
+        "checksums.txt",
+        DEPLOYMENT_CONTRACT_NAME,
+        INSTALLER_MATERIALS_NAME,
+        "platform-qualification.json",
+        PREPUBLICATION_MATERIALS_NAME,
+        "release-producer-toolchain-receipt.json",
+        "release-manifest.json",
+        "release-notes.json",
+        "release-notes.md",
+    }
+)
+LEGACY_QUALIFICATION_ROOT_FILES = frozenset(
+    {
+        DEPLOYMENT_CONTRACT_NAME,
+        INSTALLER_MATERIALS_NAME,
+        "platform-qualification.json",
+        PREPUBLICATION_MATERIALS_NAME,
+        "release-notes.json",
+        "release-notes.md",
+    }
+)
 INITIAL_TRUST_KIT_FILES = frozenset(
     {
         "github-trusted-root.jsonl",
@@ -1172,15 +1196,8 @@ def extract_qualification_artifact(
         r"sha256:[0-9a-f]{64}", expected_sha256
     ):
         raise MaterialContractError("Qualification artifact digest is invalid")
-    legacy_expected = {
-        f"release-qualification-{qualification_run_id}.json",
-        "platform-qualification.json",
-        "release-notes.json",
-        "release-notes.md",
-        PREPUBLICATION_MATERIALS_NAME,
-        INSTALLER_MATERIALS_NAME,
-        DEPLOYMENT_CONTRACT_NAME,
-    }
+    legacy_expected = set(LEGACY_QUALIFICATION_ROOT_FILES)
+    legacy_expected.add(f"release-qualification-{qualification_run_id}.json")
     if destination.exists() or destination.is_symlink():
         raise MaterialContractError(
             "Qualification artifact destination must not exist"
@@ -1253,11 +1270,9 @@ def extract_qualification_artifact(
                         item["path"]
                         for item in candidate["candidate_runtime_file_inventory"]
                     }
-                    expected = legacy_expected | {
-                        "candidate-input.json",
-                        "checksums.txt",
-                        "release-manifest.json",
-                    } | runtime
+                    expected = set(CANDIDATE_QUALIFICATION_ROOT_FILES)
+                    expected.add(f"release-qualification-{qualification_run_id}.json")
+                    expected.update(runtime)
                 else:
                     expected = legacy_expected
                 if (

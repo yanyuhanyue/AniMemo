@@ -1080,6 +1080,49 @@ class CandidateArchiveTests(unittest.TestCase):
         self.assertEqual(candidate["qualification_run_id"], RUN_ID)
         self.assertEqual(count, 23)
 
+    def test_publish_extraction_accepts_current_candidate_archive(self):
+        archive = self._archive()
+        destination = self.root / "publish"
+        result = extract_qualification_artifact(
+            archive,
+            destination,
+            qualification_run_id=RUN_ID,
+            expected_sha256=_digest(archive.read_bytes()),
+            require_candidate_contract=True,
+        )
+        self.assertEqual(result["fileCount"], 23)
+        receipt = producer_toolchain_receipt_bytes()
+        receipt_identity = next(
+            item
+            for item in result["files"]
+            if item["name"] == "release-producer-toolchain-receipt.json"
+        )
+        self.assertEqual(receipt_identity["sha256"], _digest(receipt))
+        self.assertEqual(
+            (destination / "release-producer-toolchain-receipt.json").read_bytes(),
+            receipt,
+        )
+
+    def test_publish_extraction_rejects_candidate_without_toolchain_receipt(self):
+        archive = self._archive()
+        missing = self.root / "missing-toolchain-receipt.zip"
+        with zipfile.ZipFile(archive, "r") as source, zipfile.ZipFile(
+            missing, "w"
+        ) as output:
+            for entry in source.infolist():
+                if entry.filename != "release-producer-toolchain-receipt.json":
+                    output.writestr(entry, source.read(entry))
+        with self.assertRaisesRegex(
+            MaterialContractError, "Qualification artifact file set differs"
+        ):
+            extract_qualification_artifact(
+                missing,
+                self.root / "missing-receipt-output",
+                qualification_run_id=RUN_ID,
+                expected_sha256=_digest(missing.read_bytes()),
+                require_candidate_contract=True,
+            )
+
     def test_zip_slip_absolute_drive_link_duplicate_and_case_collision_fail(self):
         attacks = (
             ("../escape", b"x", None),

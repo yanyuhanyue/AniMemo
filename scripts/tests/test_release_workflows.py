@@ -1911,6 +1911,25 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertNotIn("platform_qualification.py collect", promotion)
         self.assertNotIn("build-installer-materials", promotion)
 
+    def test_platform_qualification_waits_for_stable_published_postgres(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        qualification = source[
+            source.index("  platform-qualification:\n") : source.index(
+                "  release-authority:\n"
+            )
+        ]
+        self.assertEqual(
+            qualification.count("bash scripts/wait-for-stable-postgres.sh"), 1
+        )
+        self.assertIn(
+            "timeout --foreground --signal=TERM --kill-after=5s 10m",
+            qualification,
+        )
+        self.assertIn("PGPASSWORD: qualification-only", qualification)
+        self.assertNotIn("docker exec", qualification)
+
     def test_exact_image_rehearsal_is_runner_scoped_and_read_only(self):
         source = (ROOT / "scripts" / "rehearse-release-images.sh").read_text(encoding="utf-8")
 

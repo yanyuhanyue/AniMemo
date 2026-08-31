@@ -53,6 +53,7 @@ from .contract import (
     validate_manifest,
 )
 from .materials import (
+    CANDIDATE_QUALIFICATION_ROOT_FILES,
     MAX_MATERIAL_TOTAL_BYTES,
     AtomicReleaseFile,
     MaterialContractError,
@@ -110,22 +111,6 @@ _RC = re.compile(
 _WINDOWS_DRIVE = re.compile(r"[A-Za-z]:")
 _SINGLE_LINK_COUNT = frozenset({1})
 _RECEIPT_PUBLICATION_LINK_COUNTS = frozenset({1, 2})
-
-_QUALIFICATION_ROOT_FILES = frozenset(
-    {
-        "candidate-input.json",
-        "checksums.txt",
-        "deployment-contract.json",
-        "installer-materials.tar",
-        "platform-qualification.json",
-        "prepublication-materials.json",
-        "release-producer-toolchain-receipt.json",
-        "release-manifest.json",
-        "release-notes.json",
-        "release-notes.md",
-    }
-)
-
 
 class CandidateContractError(ValueError):
     """A prepublication Candidate input is not closed or correctly bound."""
@@ -1000,7 +985,7 @@ def _extract_candidate_archive_stream(
             )
             if canonical_json_bytes(candidate) != candidate_bytes:
                 _reject("CANDIDATE_INPUT_JSON_NON_CANONICAL")
-            expected = set(_QUALIFICATION_ROOT_FILES)
+            expected = set(CANDIDATE_QUALIFICATION_ROOT_FILES)
             expected.add(f"release-qualification-{candidate['qualification_run_id']}.json")
             expected.update(
                 item["path"] for item in candidate["candidate_runtime_file_inventory"]
