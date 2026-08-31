@@ -60,7 +60,6 @@ from .metadata_freshness import WORKFLOW_PATH as METADATA_FRESHNESS_WORKFLOW_PAT
 from .metadata_freshness import (
     FreshnessExpectation,
     FreshnessRunIdentity,
-    GitHubAssociatedPullSource,
     MetadataFreshnessError,
     collect_metadata_freshness,
     extract_metadata_freshness_artifact,
@@ -615,7 +614,6 @@ def _extract_qualification_artifact(args) -> dict[str, object]:
 
 
 def _collect_metadata_freshness(args) -> dict[str, object]:
-    token = os.environ.get("GITHUB_TOKEN", "")
     identity = FreshnessRunIdentity(
         workflow_run_id=args.workflow_run_id,
         workflow_attempt=args.workflow_attempt,
@@ -635,7 +633,6 @@ def _collect_metadata_freshness(args) -> dict[str, object]:
         qualification_directory=args.qualification_directory,
         output_directory=args.output_directory,
         identity=identity,
-        source=GitHubAssociatedPullSource(token),
         candidate_acceptance_receipt=args.candidate_acceptance_receipt,
     )
 

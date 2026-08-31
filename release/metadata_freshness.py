@@ -3,30 +3,23 @@
 from __future__ import annotations
 
 import hashlib
-import http.client
 import json
 import os
 import re
 import shutil
-import socket
 import stat
-import subprocess
-import time
-import urllib.error
-import urllib.request
 import zipfile
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
 from .materials import DuplicateJsonFieldError, reject_duplicate_json_keys
-from .notes import (
-    ReleaseNotesError,
-    build_release_notes,
-    render_release_notes,
-    validate_release_notes,
+from .notes import render_release_notes, validate_release_notes
+from .release_notes_preflight import (
+    ReleaseNotesPreflightError,
+    verify_preflight_manifest,
 )
 
 REPOSITORY = "yanyuhanyue/AniMemo"
@@ -35,15 +28,10 @@ QUALIFICATION_WORKFLOW_NAME = "Release Producer"
 QUALIFICATION_WORKFLOW_PATH = ".github/workflows/release.yml"
 FRESHNESS_WORKFLOW_NAME = "Release Metadata Freshness"
 SCHEMA_VERSION = 1
-MINIMUM_SNAPSHOT_INTERVAL_SECONDS = 60
+MINIMUM_SNAPSHOT_INTERVAL_SECONDS = 0
 FRESHNESS_TTL_SECONDS = 15 * 60
-MAX_COMPLETE_ATTEMPTS = 3
 MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 MAX_ARTIFACT_MEMBER_BYTES = 8 * 1024 * 1024
-MAX_HTTP_RESPONSE_BYTES = 4 * 1024 * 1024
-ENDPOINT_TEMPLATE = (
-    "repos/yanyuhanyue/AniMemo/commits/{sha}/pulls?per_page=100"
-)
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
@@ -81,6 +69,11 @@ RECEIPT_FIELDS = frozenset(
         "qualifiedJsonSha",
         "qualifiedConfigurationIdentity",
         "qualifiedRendererIdentity",
+        "qualifiedPreflightIdentity",
+        "qualifiedPopulationDigest",
+        "qualifiedEventDigest",
+        "releaseNotesAuthorityProducerCount",
+        "livePrLabelQueryCount",
         "snapshotCount",
         "artifactFileCount",
         "snapshotACompletedAt",
@@ -103,30 +96,6 @@ RECEIPT_FIELDS = frozenset(
     }
 )
 
-DIAGNOSTIC_FIELDS = frozenset(
-    {
-        "endpointTemplate",
-        "commitSha",
-        "snapshot",
-        "attempt",
-        "startedAt",
-        "durationMs",
-        "exitCode",
-        "httpStatus",
-        "contentType",
-        "responseBytes",
-        "arrayLength",
-        "githubRequestId",
-        "rateLimitLimit",
-        "rateLimitRemaining",
-        "rateLimitUsed",
-        "rateLimitReset",
-        "retryAfter",
-        "sanitizedErrorClass",
-        "result",
-    }
-)
-
 COMPARISON_FIELDS = frozenset(
     {
         "schemaVersion",
@@ -145,29 +114,6 @@ COMPARISON_FIELDS = frozenset(
     }
 )
 
-RETRYABLE_ERROR_CODES = frozenset(
-    {
-        "TRANSPORT_CONNECTION_RESET",
-        "TRANSPORT_EOF",
-        "TRANSPORT_TIMEOUT",
-        "SECONDARY_RATE_LIMIT",
-        "SERVER_ERROR",
-    }
-)
-
-ERROR_CODES = RETRYABLE_ERROR_CODES | {
-    "TRANSPORT_OTHER",
-    "PRIMARY_RATE_LIMIT",
-    "AUTHENTICATION_FAILURE",
-    "PERMISSION_FAILURE",
-    "NOT_FOUND",
-    "JSON_INVALID",
-    "RESPONSE_SHAPE_INVALID",
-    "ASSOCIATED_PULLS_EMPTY",
-    "RELEASE_NOTES_CONTRACT_FAILURE",
-}
-
-
 class MetadataFreshnessError(ValueError):
     """Trusted metadata freshness cannot be established."""
 
@@ -176,19 +122,9 @@ class MetadataFreshnessError(ValueError):
         message: str,
         *,
         code: str = "RELEASE_NOTES_CONTRACT_FAILURE",
-        retry_after_seconds: int | None = None,
-        retryable: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
-        self.retry_after_seconds = retry_after_seconds
-        self._retryable = retryable
-
-    @property
-    def retryable(self) -> bool:
-        if self._retryable is not None:
-            return self._retryable
-        return self.code in RETRYABLE_ERROR_CODES
 
 
 @dataclass(frozen=True)
@@ -265,43 +201,13 @@ class FreshnessExpectation:
         ).validate()
 
 
-@dataclass(frozen=True)
-class FetchResponse:
-    pulls: list[dict[str, Any]] | None
-    diagnostic: dict[str, Any]
-    error_code: str | None = None
-    retry_after_seconds: int | None = None
-    retryable: bool | None = None
-
-
-class AssociatedPullSource(Protocol):
-    def fetch(
-        self,
-        *,
-        repository: str,
-        commit: str,
-        snapshot: str,
-        attempt: int,
-    ) -> FetchResponse: ...
-
-
 class FreshnessClock(Protocol):
     def now(self) -> datetime: ...
-
-    def monotonic(self) -> float: ...
-
-    def sleep(self, seconds: float) -> None: ...
 
 
 class SystemFreshnessClock:
     def now(self) -> datetime:
         return datetime.now(timezone.utc)
-
-    def monotonic(self) -> float:
-        return time.monotonic()
-
-    def sleep(self, seconds: float) -> None:
-        time.sleep(seconds)
 
 
 def _iso8601(value: datetime) -> str:
@@ -357,247 +263,6 @@ def _strict_json_file(path: Path, *, label: str) -> tuple[object, bytes]:
     if len(value) != file_stat.st_size:
         raise MetadataFreshnessError(f"{label} changed while reading")
     return _strict_json_bytes(value, label=label), value
-
-
-def _header_int(headers: Mapping[str, str], name: str) -> int | None:
-    try:
-        return int(headers.get(name, ""))
-    except (TypeError, ValueError):
-        return None
-
-
-def _retry_after(headers: Mapping[str, str]) -> int | None:
-    value = _header_int(headers, "retry-after")
-    return value if value is not None and 0 <= value <= FRESHNESS_TTL_SECONDS else None
-
-
-def _http_error_code(status_code: int, headers: Mapping[str, str], body: bytes) -> str:
-    message = body[:4096].decode("utf-8", errors="replace").lower()
-    if status_code == 401:
-        return "AUTHENTICATION_FAILURE"
-    if status_code == 403:
-        if _header_int(headers, "x-ratelimit-remaining") == 0:
-            return "PRIMARY_RATE_LIMIT"
-        if headers.get("retry-after") or "secondary rate limit" in message:
-            return "SECONDARY_RATE_LIMIT"
-        return "PERMISSION_FAILURE"
-    if status_code == 404:
-        return "NOT_FOUND"
-    if status_code == 429:
-        return "SECONDARY_RATE_LIMIT"
-    if status_code in {502, 503, 504}:
-        return "SERVER_ERROR"
-    if status_code >= 500:
-        return "SERVER_ERROR"
-    return "PERMISSION_FAILURE"
-
-
-def _transport_error_code(error: BaseException) -> str:
-    reason = error.reason if isinstance(error, urllib.error.URLError) else error
-    if isinstance(reason, (socket.timeout, TimeoutError)):
-        return "TRANSPORT_TIMEOUT"
-    if isinstance(reason, (ConnectionResetError, ConnectionAbortedError)):
-        return "TRANSPORT_CONNECTION_RESET"
-    if isinstance(reason, (EOFError, http.client.RemoteDisconnected, http.client.IncompleteRead)):
-        return "TRANSPORT_EOF"
-    text = str(reason).lower()
-    if "reset" in text or "forcibly closed" in text:
-        return "TRANSPORT_CONNECTION_RESET"
-    if "eof" in text or "remote end closed" in text:
-        return "TRANSPORT_EOF"
-    if "timed out" in text or "timeout" in text:
-        return "TRANSPORT_TIMEOUT"
-    return "TRANSPORT_OTHER"
-
-
-class GitHubAssociatedPullSource:
-    """Fixed-endpoint GitHub adapter with closed, redacted diagnostics."""
-
-    def __init__(
-        self,
-        token: str,
-        *,
-        clock: FreshnessClock | None = None,
-        opener: Callable[..., Any] = urllib.request.urlopen,
-    ) -> None:
-        if not isinstance(token, str) or not token.strip():
-            raise MetadataFreshnessError("GitHub workflow token is missing")
-        self._token = token
-        self._clock = clock or SystemFreshnessClock()
-        self._opener = opener
-
-    def fetch(
-        self,
-        *,
-        repository: str,
-        commit: str,
-        snapshot: str,
-        attempt: int,
-    ) -> FetchResponse:
-        if repository != REPOSITORY or not _SHA.fullmatch(commit):
-            raise MetadataFreshnessError("associated-pulls request authority is invalid")
-        started_at = self._clock.now()
-        started_clock = self._clock.monotonic()
-        url = f"https://api.github.com/repos/{repository}/commits/{commit}/pulls?per_page=100"
-        request = urllib.request.Request(
-            url,
-            method="GET",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {self._token}",
-                "User-Agent": "AniMemo-Release-Metadata-Freshness/1",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        status_code: int | None = None
-        headers: dict[str, str] = {}
-        body = b""
-        exit_code = 1
-        error_code: str | None = None
-        value: object = None
-        try:
-            with self._opener(request, timeout=30) as response:
-                status_code = int(response.status)
-                headers = {name.lower(): item for name, item in response.headers.items()}
-                body = response.read(MAX_HTTP_RESPONSE_BYTES + 1)
-            exit_code = 0
-            if len(body) > MAX_HTTP_RESPONSE_BYTES:
-                error_code = "RESPONSE_SHAPE_INVALID"
-            elif status_code != 200:
-                error_code = _http_error_code(status_code, headers, body)
-            elif 'rel="next"' in headers.get("link", ""):
-                error_code = "RESPONSE_SHAPE_INVALID"
-            else:
-                try:
-                    value = _strict_json_bytes(body, label="associated-pulls response")
-                except MetadataFreshnessError:
-                    error_code = "JSON_INVALID"
-                if error_code is None and not isinstance(value, list):
-                    error_code = "RESPONSE_SHAPE_INVALID"
-                if error_code is None and not value:
-                    error_code = "ASSOCIATED_PULLS_EMPTY"
-        except urllib.error.HTTPError as error:
-            status_code = int(error.code)
-            headers = {name.lower(): item for name, item in error.headers.items()}
-            body = error.read(MAX_HTTP_RESPONSE_BYTES + 1)
-            exit_code = 0
-            error_code = _http_error_code(status_code, headers, body)
-        except (OSError, EOFError, http.client.HTTPException, urllib.error.URLError) as error:
-            error_code = _transport_error_code(error)
-
-        diagnostic = {
-            "endpointTemplate": ENDPOINT_TEMPLATE,
-            "commitSha": commit,
-            "snapshot": snapshot,
-            "attempt": attempt,
-            "startedAt": _iso8601(started_at),
-            "durationMs": round(
-                max(0.0, self._clock.monotonic() - started_clock) * 1000,
-                3,
-            ),
-            "exitCode": exit_code,
-            "httpStatus": status_code,
-            "contentType": headers.get("content-type"),
-            "responseBytes": len(body),
-            "arrayLength": len(value) if isinstance(value, list) else None,
-            "githubRequestId": headers.get("x-github-request-id"),
-            "rateLimitLimit": _header_int(headers, "x-ratelimit-limit"),
-            "rateLimitRemaining": _header_int(headers, "x-ratelimit-remaining"),
-            "rateLimitUsed": _header_int(headers, "x-ratelimit-used"),
-            "rateLimitReset": _header_int(headers, "x-ratelimit-reset"),
-            "retryAfter": _retry_after(headers),
-            "sanitizedErrorClass": error_code,
-            "result": "PASS" if error_code is None else "FAIL",
-        }
-        _validate_diagnostic(diagnostic)
-        return FetchResponse(
-            pulls=value if isinstance(value, list) and error_code is None else None,
-            diagnostic=diagnostic,
-            error_code=error_code,
-            retry_after_seconds=_retry_after(headers),
-            retryable=(
-                error_code
-                in {
-                    "TRANSPORT_CONNECTION_RESET",
-                    "TRANSPORT_EOF",
-                    "TRANSPORT_TIMEOUT",
-                    "SECONDARY_RATE_LIMIT",
-                }
-                or (error_code == "SERVER_ERROR" and status_code in {502, 503, 504})
-            ),
-        )
-
-
-def _validate_diagnostic(value: object) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != DIAGNOSTIC_FIELDS:
-        raise MetadataFreshnessError("request diagnostic schema is not closed")
-    if value["endpointTemplate"] != ENDPOINT_TEMPLATE:
-        raise MetadataFreshnessError("request diagnostic endpoint differs")
-    if not isinstance(value["commitSha"], str) or not _SHA.fullmatch(value["commitSha"]):
-        raise MetadataFreshnessError("request diagnostic commit is invalid")
-    if value["snapshot"] not in {"A", "B"}:
-        raise MetadataFreshnessError("request diagnostic snapshot is invalid")
-    if isinstance(value["attempt"], bool) or value["attempt"] not in {1, 2, 3}:
-        raise MetadataFreshnessError("request diagnostic attempt is invalid")
-    if value["result"] not in {"PASS", "FAIL"}:
-        raise MetadataFreshnessError("request diagnostic result is invalid")
-    _parse_timestamp(value["startedAt"], label="request diagnostic timestamp")
-    if (
-        not isinstance(value["durationMs"], (int, float))
-        or isinstance(value["durationMs"], bool)
-        or value["durationMs"] < 0
-        or value["exitCode"] not in {0, 1}
-        or (
-            value["httpStatus"] is not None
-            and (
-                isinstance(value["httpStatus"], bool)
-                or not isinstance(value["httpStatus"], int)
-                or not 100 <= value["httpStatus"] <= 599
-            )
-        )
-        or isinstance(value["responseBytes"], bool)
-        or not isinstance(value["responseBytes"], int)
-        or not 0 <= value["responseBytes"] <= MAX_HTTP_RESPONSE_BYTES + 1
-        or (
-            value["arrayLength"] is not None
-            and (
-                isinstance(value["arrayLength"], bool)
-                or not isinstance(value["arrayLength"], int)
-                or value["arrayLength"] < 0
-            )
-        )
-        or value["sanitizedErrorClass"] not in ERROR_CODES | {None}
-        or (value["result"] == "PASS")
-        != (value["sanitizedErrorClass"] is None)
-    ):
-        raise MetadataFreshnessError("request diagnostic values are invalid")
-    for field in (
-        "rateLimitLimit",
-        "rateLimitRemaining",
-        "rateLimitUsed",
-        "rateLimitReset",
-        "retryAfter",
-    ):
-        item = value[field]
-        if item is not None and (
-            isinstance(item, bool) or not isinstance(item, int) or item < 0
-        ):
-            raise MetadataFreshnessError("request diagnostic rate limit is invalid")
-    for field, maximum in (("contentType", 256), ("githubRequestId", 128)):
-        item = value[field]
-        if item is not None and (
-            not isinstance(item, str)
-            or not item
-            or len(item) > maximum
-            or any(ord(character) < 32 for character in item)
-        ):
-            raise MetadataFreshnessError(f"request diagnostic {field} is invalid")
-    forbidden = re.compile(
-        r"(?i)(authorization\s*:|cookie\s*:|bearer\s+[a-z0-9._~+/=-]{12,}|github_pat_|gh[pousr]_)",
-    )
-    if forbidden.search(json.dumps(value, ensure_ascii=False)):
-        raise MetadataFreshnessError("request diagnostic contains credential material")
-    return value
 
 
 def _validate_comparison(value: object) -> dict[str, Any]:
@@ -782,46 +447,6 @@ def validate_freshness_run_metadata(
     )
 
 
-def _git_commit_range(repository_root: Path, range_start: str, candidate_sha: str) -> list[str]:
-    if not _SHA.fullmatch(range_start) or not _SHA.fullmatch(candidate_sha):
-        raise MetadataFreshnessError("release note commit range is invalid")
-    ancestor = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository_root),
-            "merge-base",
-            "--is-ancestor",
-            range_start,
-            candidate_sha,
-        ],
-        check=False,
-        capture_output=True,
-    )
-    if ancestor.returncode != 0:
-        raise MetadataFreshnessError("release note range start is not an ancestor")
-    completed = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository_root),
-            "rev-list",
-            "--reverse",
-            f"{range_start}..{candidate_sha}",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    if completed.returncode != 0:
-        raise MetadataFreshnessError("unable to read exact release note commit range")
-    commits = completed.stdout.splitlines()
-    if not commits or not all(_SHA.fullmatch(commit) for commit in commits):
-        raise MetadataFreshnessError("release note commit population is invalid")
-    return commits
-
-
 def _qualification_evidence_name(directory: Path, run_id: int) -> str:
     exact = f"release-qualification-{run_id}.json"
     if (directory / exact).is_file():
@@ -842,8 +467,11 @@ def _load_qualification(
     expected_files = {
         evidence_name,
         "platform-qualification.json",
+        "release-notes-input.json",
         "release-notes.json",
         "release-notes.md",
+        "release-notes-readback.json",
+        "release-notes-preflight.json",
         "prepublication-materials.json",
         "installer-materials.tar",
         "deployment-contract.json",
@@ -861,6 +489,18 @@ def _load_qualification(
     )
     notes_value, notes_bytes = _strict_json_file(
         directory / "release-notes.json", label="qualified release notes"
+    )
+    notes_input_value, notes_input_bytes = _strict_json_file(
+        directory / "release-notes-input.json",
+        label="qualified release notes input",
+    )
+    readback_value, readback_bytes = _strict_json_file(
+        directory / "release-notes-readback.json",
+        label="qualified release notes readback",
+    )
+    preflight_value, preflight_bytes = _strict_json_file(
+        directory / "release-notes-preflight.json",
+        label="qualified release notes preflight",
     )
     prepublication, _ = _strict_json_file(
         directory / "prepublication-materials.json",
@@ -911,10 +551,45 @@ def _load_qualification(
         raise MetadataFreshnessError("qualification source identity differs")
     if render_release_notes(notes).encode("utf-8") != markdown_bytes:
         raise MetadataFreshnessError("qualified Markdown differs from canonical rendering")
+    frozen_files = {
+        "release-notes-input.json": notes_input_bytes,
+        "release-notes.json": notes_bytes,
+        "release-notes.md": markdown_bytes,
+        "release-notes-readback.json": readback_bytes,
+    }
+    notes_context = notes["context"]
+    expected_binding = {
+        "repository": REPOSITORY,
+        "run_id": identity.qualification_run_id,
+        "run_attempt": 1,
+        "head_sha": identity.candidate_sha,
+        "head_tree": identity.candidate_tree,
+        "comparison_base_sha": notes_context["comparison_base_sha"],
+        "previous_stable": notes_context["previous_stable"],
+        "release_tag": notes_context["release_tag"],
+        "target_version": notes_context["target_version"],
+        "channel": notes_context["channel"],
+    }
+    try:
+        preflight = verify_preflight_manifest(
+            preflight_value,
+            files=frozen_files,
+            expected_binding=expected_binding,
+        )
+    except (ReleaseNotesPreflightError, KeyError, TypeError) as error:
+        raise MetadataFreshnessError(
+            "qualified release notes preflight differs"
+        ) from error
     return {
         "notes": notes,
+        "input": notes_input_value,
+        "inputBytes": notes_input_bytes,
         "notesBytes": notes_bytes,
         "markdownBytes": markdown_bytes,
+        "readback": readback_value,
+        "readbackBytes": readback_bytes,
+        "preflight": preflight,
+        "preflightBytes": preflight_bytes,
         "jsonSha": _digest_bytes(notes_bytes),
         "markdownSha": _digest_bytes(markdown_bytes),
         "population": len(notes["pulls"]),
@@ -931,105 +606,6 @@ class _Snapshot:
     markdown_bytes: bytes
     value: dict[str, Any]
     completed_at: datetime
-
-
-def _complete_snapshot(
-    *,
-    repository_root: Path,
-    context: Mapping[str, Any],
-    source: AssociatedPullSource,
-    clock: FreshnessClock,
-    snapshot_label: str,
-    attempt: int,
-    diagnostics: list[dict[str, Any]],
-    commit_loader: Callable[[Path, str, str], list[str]],
-) -> _Snapshot:
-    from scripts.release_notes_snapshot import (
-        SnapshotCollectionError,
-        collect_pull_metadata,
-    )
-
-    commits = commit_loader(
-        repository_root,
-        str(context["comparison_base_sha"]),
-        str(context["candidate_sha"]),
-    )
-
-    def query(repository: str, commit: str) -> list[dict[str, Any]]:
-        response = source.fetch(
-            repository=repository,
-            commit=commit,
-            snapshot=snapshot_label,
-            attempt=attempt,
-        )
-        diagnostics.append(_validate_diagnostic(response.diagnostic))
-        if response.error_code is not None:
-            raise MetadataFreshnessError(
-                f"associated-pulls request failed with {response.error_code}",
-                code=response.error_code,
-                retry_after_seconds=response.retry_after_seconds,
-                retryable=response.retryable,
-            )
-        if response.pulls is None:
-            raise MetadataFreshnessError(
-                "associated-pulls response is missing",
-                code="RESPONSE_SHAPE_INVALID",
-            )
-        return response.pulls
-
-    try:
-        pulls = collect_pull_metadata(
-            repository=REPOSITORY,
-            commits=commits,
-            query=query,
-        )
-        input_value = {"context": dict(context), "pulls": pulls}
-        snapshot_value = build_release_notes(context=context, pulls=pulls)
-        markdown = render_release_notes(snapshot_value)
-    except MetadataFreshnessError:
-        raise
-    except (SnapshotCollectionError, ReleaseNotesError, KeyError, TypeError) as error:
-        raise MetadataFreshnessError(
-            "release notes contract failed",
-            code="RELEASE_NOTES_CONTRACT_FAILURE",
-        ) from error
-    return _Snapshot(
-        input_bytes=_json_bytes(input_value),
-        json_bytes=_json_bytes(snapshot_value),
-        markdown_bytes=markdown.encode("utf-8"),
-        value=snapshot_value,
-        completed_at=clock.now(),
-    )
-
-
-def _collect_with_retry(
-    *,
-    repository_root: Path,
-    context: Mapping[str, Any],
-    source: AssociatedPullSource,
-    clock: FreshnessClock,
-    snapshot_label: str,
-    diagnostics: list[dict[str, Any]],
-    commit_loader: Callable[[Path, str, str], list[str]],
-) -> _Snapshot:
-    for attempt in range(1, MAX_COMPLETE_ATTEMPTS + 1):
-        try:
-            return _complete_snapshot(
-                repository_root=repository_root,
-                context=context,
-                source=source,
-                clock=clock,
-                snapshot_label=snapshot_label,
-                attempt=attempt,
-                diagnostics=diagnostics,
-                commit_loader=commit_loader,
-            )
-        except MetadataFreshnessError as error:
-            if not error.retryable or attempt == MAX_COMPLETE_ATTEMPTS:
-                raise
-            delay = max(5 * (2 ** (attempt - 1)), error.retry_after_seconds or 0)
-            clock.sleep(delay)
-    raise AssertionError("bounded retry loop did not terminate")
 
 
 def _receipt_digest(receipt: Mapping[str, Any]) -> str:
@@ -1108,10 +684,8 @@ def collect_metadata_freshness(
     qualification_directory: Path,
     output_directory: Path,
     repository_root: Path,
-    source: AssociatedPullSource,
     candidate_acceptance_receipt: Path,
     clock: FreshnessClock | None = None,
-    commit_loader: Callable[[Path, str, str], list[str]] = _git_commit_range,
 ) -> dict[str, Any]:
     """Create one exact ten-file trusted freshness transport."""
 
@@ -1126,34 +700,31 @@ def collect_metadata_freshness(
         identity=identity,
         current_time=runtime_clock.now(),
     )
-    qualification = _load_qualification(
+    qualification_a = _load_qualification(
         qualification_directory,
         identity=identity,
     )
-    context = qualification["notes"]["context"]
-    diagnostics: list[dict[str, Any]] = []
-    snapshot_a = _collect_with_retry(
-        repository_root=repository_root,
-        context=context,
-        source=source,
-        clock=runtime_clock,
-        snapshot_label="A",
-        diagnostics=diagnostics,
-        commit_loader=commit_loader,
+    snapshot_a = _Snapshot(
+        input_bytes=qualification_a["inputBytes"],
+        json_bytes=qualification_a["notesBytes"],
+        markdown_bytes=qualification_a["markdownBytes"],
+        value=qualification_a["notes"],
+        completed_at=runtime_clock.now(),
     )
-    runtime_clock.sleep(MINIMUM_SNAPSHOT_INTERVAL_SECONDS)
-    snapshot_b = _collect_with_retry(
-        repository_root=repository_root,
-        context=context,
-        source=source,
-        clock=runtime_clock,
-        snapshot_label="B",
-        diagnostics=diagnostics,
-        commit_loader=commit_loader,
+    qualification_b = _load_qualification(
+        qualification_directory,
+        identity=identity,
+    )
+    snapshot_b = _Snapshot(
+        input_bytes=qualification_b["inputBytes"],
+        json_bytes=qualification_b["notesBytes"],
+        markdown_bytes=qualification_b["markdownBytes"],
+        value=qualification_b["notes"],
+        completed_at=runtime_clock.now(),
     )
     interval = (snapshot_b.completed_at - snapshot_a.completed_at).total_seconds()
     if interval < MINIMUM_SNAPSHOT_INTERVAL_SECONDS:
-        raise MetadataFreshnessError("metadata snapshot interval is shorter than 60 seconds")
+        raise MetadataFreshnessError("frozen metadata readback interval is invalid")
     if (
         snapshot_a.input_bytes != snapshot_b.input_bytes
         or snapshot_a.json_bytes != snapshot_b.json_bytes
@@ -1165,12 +736,10 @@ def collect_metadata_freshness(
             code="ACTUAL_METADATA_DRIFT",
         )
     if (
-        snapshot_a.json_bytes != qualification["notesBytes"]
-        or snapshot_b.json_bytes != qualification["notesBytes"]
-        or snapshot_a.markdown_bytes != qualification["markdownBytes"]
-        or snapshot_b.markdown_bytes != qualification["markdownBytes"]
-        or snapshot_a.value["identity"] != qualification["notes"]["identity"]
-        or len(snapshot_a.value["pulls"]) != qualification["population"]
+        qualification_a["preflightBytes"] != qualification_b["preflightBytes"]
+        or qualification_a["readbackBytes"] != qualification_b["readbackBytes"]
+        or snapshot_a.value["identity"] != qualification_a["notes"]["identity"]
+        or len(snapshot_a.value["pulls"]) != qualification_a["population"]
     ):
         raise MetadataFreshnessError(
             "current metadata differs from qualification",
@@ -1196,8 +765,8 @@ def collect_metadata_freshness(
     _validate_comparison(comparison)
     request_diagnostics = {
         "schemaVersion": SCHEMA_VERSION,
-        "endpointTemplate": ENDPOINT_TEMPLATE,
-        "requests": diagnostics,
+        "source": "QUALIFICATION_FROZEN_PREFLIGHT",
+        "requests": [],
     }
     receipt: dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
@@ -1213,12 +782,21 @@ def collect_metadata_freshness(
             identity.candidate_acceptance_receipt_sha256
         ),
         "candidateVersion": identity.candidate_version,
-        "qualifiedReleaseTag": qualification["releaseTag"],
-        "qualifiedReleaseNotesIdentity": qualification["notes"]["identity"],
-        "qualifiedMarkdownSha": qualification["markdownSha"],
-        "qualifiedJsonSha": qualification["jsonSha"],
-        "qualifiedConfigurationIdentity": qualification["configurationIdentity"],
-        "qualifiedRendererIdentity": qualification["rendererIdentity"],
+        "qualifiedReleaseTag": qualification_a["releaseTag"],
+        "qualifiedReleaseNotesIdentity": qualification_a["notes"]["identity"],
+        "qualifiedMarkdownSha": qualification_a["markdownSha"],
+        "qualifiedJsonSha": qualification_a["jsonSha"],
+        "qualifiedConfigurationIdentity": qualification_a["configurationIdentity"],
+        "qualifiedRendererIdentity": qualification_a["rendererIdentity"],
+        "qualifiedPreflightIdentity": qualification_a["preflight"]["identity"],
+        "qualifiedPopulationDigest": qualification_a["preflight"]["population"][
+            "digest"
+        ],
+        "qualifiedEventDigest": qualification_a["preflight"]["population"][
+            "event_digest"
+        ],
+        "releaseNotesAuthorityProducerCount": 1,
+        "livePrLabelQueryCount": 0,
         "snapshotCount": 2,
         "artifactFileCount": len(ARTIFACT_FILES),
         "snapshotACompletedAt": _iso8601(snapshot_a.completed_at),
@@ -1234,9 +812,7 @@ def collect_metadata_freshness(
         "conflicts": 0,
         "unclassified": 0,
         "duplicates": 0,
-        "requestFailureCount": sum(
-            1 for item in diagnostics if item["result"] == "FAIL"
-        ),
+        "requestFailureCount": 0,
         "result": "PASS",
         "completedAt": _iso8601(completed_at),
         "receiptDigest": "",
@@ -1304,6 +880,9 @@ def _validate_receipt(value: object) -> dict[str, Any]:
         "qualifiedMarkdownSha",
         "qualifiedJsonSha",
         "qualifiedConfigurationIdentity",
+        "qualifiedPreflightIdentity",
+        "qualifiedPopulationDigest",
+        "qualifiedEventDigest",
         "snapshotAIdentity",
         "snapshotBIdentity",
         "snapshotAMarkdownSha",
@@ -1328,6 +907,8 @@ def _validate_receipt(value: object) -> dict[str, Any]:
         "unclassified",
         "duplicates",
         "requestFailureCount",
+        "releaseNotesAuthorityProducerCount",
+        "livePrLabelQueryCount",
     ):
         if isinstance(value[field], bool) or not isinstance(value[field], int) or value[field] < 0:
             raise MetadataFreshnessError(f"metadata freshness {field} is invalid")
@@ -1341,6 +922,8 @@ def _validate_receipt(value: object) -> dict[str, Any]:
         or value["conflicts"] != 0
         or value["unclassified"] != 0
         or value["duplicates"] != 0
+        or value["releaseNotesAuthorityProducerCount"] != 1
+        or value["livePrLabelQueryCount"] != 0
     ):
         raise MetadataFreshnessError("metadata freshness closed counts differ")
     if not isinstance(value["snapshotIntervalSeconds"], (int, float)) or isinstance(
@@ -1369,7 +952,7 @@ def extract_metadata_freshness_artifact(
     *,
     expected_sha256: str,
 ) -> dict[str, Any]:
-    """Safely extract the exact nine-file freshness transport."""
+    """Safely extract the exact ten-file freshness transport."""
 
     if not isinstance(expected_sha256, str) or not _DIGEST.fullmatch(expected_sha256):
         raise MetadataFreshnessError("freshness artifact digest is invalid")
@@ -1531,19 +1114,12 @@ def verify_metadata_freshness_artifact(
     )
     input_value_a = _strict_json_bytes(input_a, label="snapshot A input")
     input_value_b = _strict_json_bytes(input_b, label="snapshot B input")
-    expected_input_pulls = [
-        {
-            field: pull[field]
-            for field in ("number", "title", "source_identity", "labels")
-        }
-        for pull in snapshot_a["pulls"]
-    ]
     if (
         not isinstance(input_value_a, dict)
         or set(input_value_a) != {"context", "pulls"}
         or input_value_a != input_value_b
-        or input_value_a["context"] != snapshot_a["context"]
-        or input_value_a["pulls"] != expected_input_pulls
+        or input_a != qualification["inputBytes"]
+        or input_b != qualification["inputBytes"]
     ):
         raise MetadataFreshnessError("freshness input snapshot contract differs")
     if input_a != input_b:
@@ -1564,6 +1140,12 @@ def verify_metadata_freshness_artifact(
         != qualification["configurationIdentity"]
         or receipt["qualifiedRendererIdentity"] != qualification["rendererIdentity"]
         or receipt["qualifiedReleaseTag"] != qualification["releaseTag"]
+        or receipt["qualifiedPreflightIdentity"]
+        != qualification["preflight"]["identity"]
+        or receipt["qualifiedPopulationDigest"]
+        != qualification["preflight"]["population"]["digest"]
+        or receipt["qualifiedEventDigest"]
+        != qualification["preflight"]["population"]["event_digest"]
     ):
         raise MetadataFreshnessError("freshness artifact differs from qualification")
     if (
@@ -1590,18 +1172,13 @@ def verify_metadata_freshness_artifact(
     )
     if (
         not isinstance(diagnostics_value, dict)
-        or set(diagnostics_value) != {"schemaVersion", "endpointTemplate", "requests"}
+        or set(diagnostics_value) != {"schemaVersion", "source", "requests"}
         or diagnostics_value.get("schemaVersion") != SCHEMA_VERSION
-        or diagnostics_value.get("endpointTemplate") != ENDPOINT_TEMPLATE
-        or not isinstance(diagnostics_value.get("requests"), list)
+        or diagnostics_value.get("source") != "QUALIFICATION_FROZEN_PREFLIGHT"
+        or diagnostics_value.get("requests") != []
     ):
         raise MetadataFreshnessError("request diagnostics envelope is invalid")
-    diagnostics = [
-        _validate_diagnostic(item) for item in diagnostics_value["requests"]
-    ]
-    if receipt["requestFailureCount"] != sum(
-        1 for item in diagnostics if item["result"] == "FAIL"
-    ):
+    if receipt["requestFailureCount"] != 0:
         raise MetadataFreshnessError("request failure count differs")
 
     verification_time = verified_at or datetime.now(timezone.utc)
@@ -1634,6 +1211,13 @@ def verify_metadata_freshness_artifact(
         "freshnessAgeSeconds": age,
         "freshnessTtlSeconds": FRESHNESS_TTL_SECONDS,
         "receiptDigest": receipt["receiptDigest"],
+        "preflightIdentity": receipt["qualifiedPreflightIdentity"],
+        "populationDigest": receipt["qualifiedPopulationDigest"],
+        "eventDigest": receipt["qualifiedEventDigest"],
+        "releaseNotesAuthorityProducerCount": receipt[
+            "releaseNotesAuthorityProducerCount"
+        ],
+        "livePrLabelQueryCount": receipt["livePrLabelQueryCount"],
         "releaseAuthority": "GITHUB_IMMUTABLE_RELEASE",
         "artifactRole": "TRANSPORT_AND_QUALIFICATION_EVIDENCE",
     }

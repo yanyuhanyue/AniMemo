@@ -93,6 +93,30 @@ class ReleaseNotesTests(unittest.TestCase):
             with self.subTest(pulls=pulls), self.assertRaises(ReleaseNotesError):
                 build_release_notes(context=context(), pulls=pulls)
 
+    def test_conflict_diagnostic_uses_stable_policy_code_and_exact_pr_context(self):
+        merge_commit = "c" * 40
+        conflicted = pull(
+            198,
+            "release/fix",
+            source_identity=merge_commit,
+            labels=["release/fix", "release/deployment", "release/ci"],
+            observed_updated_at="2026-08-31T07:11:22Z",
+        )
+
+        with self.assertRaises(ReleaseNotesError) as raised:
+            build_release_notes(context=context(), pulls=[conflicted])
+
+        detail = str(raised.exception)
+        self.assertIn("release_primary_category_conflict", detail)
+        self.assertIn("PR #198", detail)
+        self.assertIn(
+            "primaryLabels=[release/ci,release/deployment,release/fix]",
+            detail,
+        )
+        self.assertIn("exclusionLabels=[]", detail)
+        self.assertIn(f"mergeCommit={merge_commit}", detail)
+        self.assertIn("observedUpdatedAt=2026-08-31T07:11:22Z", detail)
+
     def test_pr_input_order_does_not_change_identity_or_markdown(self):
         pulls = [
             pull(9, "release/fix", "修复 [Markdown] *边界*"),

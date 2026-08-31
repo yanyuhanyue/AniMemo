@@ -52,6 +52,9 @@ CANDIDATE_QUALIFICATION_ROOT_FILES = frozenset(
         "release-manifest.json",
         "release-notes.json",
         "release-notes.md",
+        "release-notes-input.json",
+        "release-notes-readback.json",
+        "release-notes-preflight.json",
     }
 )
 LEGACY_QUALIFICATION_ROOT_FILES = frozenset(

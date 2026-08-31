@@ -433,8 +433,16 @@ class DependencySecurityContractTests(unittest.TestCase):
             "--file deploy/release-producer.Dockerfile",
             release_workflow,
         )
+        preflight_start = release_workflow.index(
+            "- name: Freeze and bind the complete Release Notes population"
+        )
+        preflight_boundary = release_workflow.find("\n      - ", preflight_start + 1)
+        preflight_block = release_workflow[
+            preflight_start : preflight_boundary if preflight_boundary >= 0 else None
+        ]
+        self.assertNotIn("scripts/run-in-release-producer.sh", preflight_block)
+        self.assertIn("scripts/release_notes_snapshot.py", preflight_block)
         for step in (
-            "Freeze deterministic PR metadata and render qualified Release Notes",
             "Bind the hosted platform qualification into Installer materials",
             "Bind the exact byte-producing toolchain",
             "Prepare closed Candidate OCI roots",

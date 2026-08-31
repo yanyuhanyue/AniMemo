@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import io
 import json
 import shutil
 import tempfile
 import unittest
-import urllib.error
 import zipfile
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -16,13 +14,9 @@ from pathlib import Path
 from release.candidate import canonical_json_bytes, sha256_bytes
 from release.metadata_freshness import (
     ARTIFACT_FILES,
-    DIAGNOSTIC_FIELDS,
-    ENDPOINT_TEMPLATE,
     WORKFLOW_PATH,
-    FetchResponse,
     FreshnessExpectation,
     FreshnessRunIdentity,
-    GitHubAssociatedPullSource,
     MetadataFreshnessError,
     _receipt_digest,
     _validate_receipt,
@@ -33,13 +27,17 @@ from release.metadata_freshness import (
     verify_metadata_freshness_artifact,
 )
 from release.notes import build_release_notes, render_release_notes
+from release.release_notes_preflight import (
+    build_preflight_manifest,
+)
+from release.release_notes_preflight import (
+    canonical_json_bytes as release_notes_json_bytes,
+)
 from scripts.release_qualification import REQUIRED_GATES, build_qualification_evidence
 
 CANDIDATE = "e65f9beb0b5a19be2b4562206b38bb6d00adff7e"
 TREE = "b21598e5352654985a17146b3272775df0694fbe"
 BASE = "225c47e858d56e449869c32ebb7102107c151d61"
-COMMIT_ONE = "d" * 40
-COMMIT_TWO = "e" * 40
 QUALIFICATION_RUN_ID = 32635898412
 QUALIFICATION_ARTIFACT_ID = 9492671353
 FRESHNESS_RUN_ID = 789
@@ -49,22 +47,13 @@ def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
 
 
-def _pull(title: str = "修复发布门禁", *, number: int = 45) -> dict[str, object]:
-    return {
-        "number": number,
-        "title": title,
-        "merge_commit_sha": "f" * 40,
-        "head": {"sha": "1" * 40},
-        "labels": [{"name": "release/fix"}],
-    }
-
-
 def _normalized_pull(title: str = "修复发布门禁", *, number: int = 45) -> dict[str, object]:
     return {
         "number": number,
         "title": title,
         "source_identity": "f" * 40,
         "labels": ["release/fix"],
+        "observed_updated_at": "2026-08-23T11:58:00Z",
     }
 
 
@@ -162,59 +151,6 @@ class FakeClock:
             self.elapsed += seconds
 
 
-def _diagnostic(
-    *, snapshot: str, attempt: int, commit: str, code: str | None = None
-) -> dict[str, object]:
-    value = {field: None for field in DIAGNOSTIC_FIELDS}
-    value.update(
-        {
-            "endpointTemplate": ENDPOINT_TEMPLATE,
-            "commitSha": commit,
-            "snapshot": snapshot,
-            "attempt": attempt,
-            "startedAt": "2026-08-23T12:00:00Z",
-            "durationMs": 1.0,
-            "exitCode": 0 if code is None else 1,
-            "httpStatus": 200 if code is None else None,
-            "contentType": "application/json",
-            "responseBytes": 200,
-            "arrayLength": 1 if code is None else None,
-            "sanitizedErrorClass": code,
-            "result": "PASS" if code is None else "FAIL",
-        }
-    )
-    return value
-
-
-class StubSource:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, int, str]] = []
-        self.failures: dict[tuple[str, int, str], tuple[str, int | None]] = {}
-        self.titles = {"A": "修复发布门禁", "B": "修复发布门禁"}
-
-    def fetch(
-        self, *, repository: str, commit: str, snapshot: str, attempt: int
-    ) -> FetchResponse:
-        self.calls.append((snapshot, attempt, commit))
-        failure = self.failures.get((snapshot, attempt, commit))
-        if failure:
-            code, retry_after = failure
-            return FetchResponse(
-                pulls=None,
-                diagnostic=_diagnostic(
-                    snapshot=snapshot, attempt=attempt, commit=commit, code=code
-                ),
-                error_code=code,
-                retry_after_seconds=retry_after,
-            )
-        return FetchResponse(
-            pulls=[_pull(self.titles[snapshot])],
-            diagnostic=_diagnostic(
-                snapshot=snapshot, attempt=attempt, commit=commit
-            ),
-        )
-
-
 class MetadataFreshnessTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -224,10 +160,49 @@ class MetadataFreshnessTests(unittest.TestCase):
         self.qualification = self.root / "qualification"
         self.qualification.mkdir()
         self.output = self.root / "freshness"
+        notes_input = {"context": _context(), "pulls": [_normalized_pull()]}
         self.notes = build_release_notes(
-            context=_context(), pulls=[_normalized_pull()]
+            context=notes_input["context"], pulls=notes_input["pulls"]
         )
         markdown = render_release_notes(self.notes).encode()
+        population_digest = sha256_bytes(
+            release_notes_json_bytes(notes_input["pulls"])
+        )
+        events = [
+            {
+                "labels": pull["labels"],
+                "number": pull["number"],
+                "observed_updated_at": pull["observed_updated_at"],
+            }
+            for pull in notes_input["pulls"]
+        ]
+        readback = {
+            "schema": "animemo.release-notes-readback/v1",
+            "readback_count": 2,
+            "population_digest": population_digest,
+            "event_digest": sha256_bytes(release_notes_json_bytes(events)),
+        }
+        frozen_files = {
+            "release-notes-input.json": release_notes_json_bytes(notes_input),
+            "release-notes.json": release_notes_json_bytes(self.notes),
+            "release-notes.md": markdown,
+            "release-notes-readback.json": release_notes_json_bytes(readback),
+        }
+        preflight = build_preflight_manifest(
+            binding={
+                "repository": "yanyuhanyue/AniMemo",
+                "run_id": QUALIFICATION_RUN_ID,
+                "run_attempt": 1,
+                "head_sha": CANDIDATE,
+                "head_tree": TREE,
+                "comparison_base_sha": BASE,
+                "previous_stable": "v1.0.0",
+                "release_tag": "v1.1.0-rc.9",
+                "target_version": "v1.1.0",
+                "channel": "rc",
+            },
+            files=frozen_files,
+        )
         needs = {name: {"result": "success"} for name in REQUIRED_GATES}
         needs.update(
             {
@@ -256,8 +231,8 @@ class MetadataFreshnessTests(unittest.TestCase):
         files = {
             f"release-qualification-{QUALIFICATION_RUN_ID}.json": _json_bytes(evidence),
             "platform-qualification.json": b"{}\n",
-            "release-notes.json": _json_bytes(self.notes),
-            "release-notes.md": markdown,
+            **frozen_files,
+            "release-notes-preflight.json": release_notes_json_bytes(preflight),
             "prepublication-materials.json": _json_bytes(
                 {
                     "schemaVersion": 2,
@@ -374,38 +349,82 @@ class MetadataFreshnessTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    @staticmethod
-    def _commits(_root: Path, _start: str, _candidate: str) -> list[str]:
-        return [COMMIT_ONE, COMMIT_TWO]
-
-    def _collect(
-        self, source: StubSource | None = None, clock: FakeClock | None = None
-    ) -> tuple[StubSource, FakeClock]:
-        source = source or StubSource()
+    def _collect(self, clock: FakeClock | None = None) -> FakeClock:
         clock = clock or FakeClock()
         collect_metadata_freshness(
             repository_root=self.repository,
             qualification_directory=self.qualification,
             output_directory=self.output,
             identity=self.identity,
-            source=source,
             candidate_acceptance_receipt=self.candidate_receipt,
             clock=clock,
-            commit_loader=self._commits,
         )
-        return source, clock
+        return clock
 
-    def test_two_complete_identical_snapshots_pass_and_verify(self) -> None:
-        source, clock = self._collect()
-        self.assertEqual({path.name for path in self.output.iterdir()}, ARTIFACT_FILES)
+    def test_module_has_no_live_pull_request_query_surface(self) -> None:
+        source = (Path(__file__).with_name("metadata_freshness.py")).read_text(
+            encoding="utf-8"
+        )
+
+        for forbidden in (
+            "GitHubAssociatedPullSource",
+            "AssociatedPullSource",
+            "ENDPOINT_TEMPLATE",
+            "commits/{sha}/pulls",
+            "_git_commit_range",
+            "_complete_snapshot",
+            "_collect_with_retry",
+            "MAX_COMPLETE_ATTEMPTS",
+        ):
+            self.assertNotIn(forbidden, source)
+
+    def test_collector_reads_only_frozen_qualification_bytes_without_sleep(self) -> None:
+        clock = FakeClock(advance_sleep=False)
+
+        collect_metadata_freshness(
+            repository_root=self.repository,
+            qualification_directory=self.qualification,
+            output_directory=self.output,
+            identity=self.identity,
+            candidate_acceptance_receipt=self.candidate_receipt,
+            clock=clock,
+        )
+
+        self.assertEqual(clock.elapsed, 0.0)
+        for source_name, frozen_name in (
+            ("release-notes-input.json", "snapshot-a-input.json"),
+            ("release-notes.json", "snapshot-a.json"),
+            ("release-notes.md", "snapshot-a.md"),
+            ("release-notes-input.json", "snapshot-b-input.json"),
+            ("release-notes.json", "snapshot-b.json"),
+            ("release-notes.md", "snapshot-b.md"),
+        ):
+            self.assertEqual(
+                (self.qualification / source_name).read_bytes(),
+                (self.output / frozen_name).read_bytes(),
+            )
         self.assertEqual(
-            source.calls,
-            [
-                ("A", 1, COMMIT_ONE),
-                ("A", 1, COMMIT_TWO),
-                ("B", 1, COMMIT_ONE),
-                ("B", 1, COMMIT_TWO),
-            ],
+            json.loads((self.output / "request-diagnostics.json").read_bytes()),
+            {
+                "schemaVersion": 1,
+                "source": "QUALIFICATION_FROZEN_PREFLIGHT",
+                "requests": [],
+            },
+        )
+
+    def test_verifier_binds_the_single_frozen_preflight_authority(self) -> None:
+        clock = FakeClock(advance_sleep=False)
+        collect_metadata_freshness(
+            repository_root=self.repository,
+            qualification_directory=self.qualification,
+            output_directory=self.output,
+            identity=self.identity,
+            candidate_acceptance_receipt=self.candidate_receipt,
+            clock=clock,
+        )
+
+        manifest = json.loads(
+            (self.qualification / "release-notes-preflight.json").read_bytes()
         )
         result = verify_metadata_freshness_artifact(
             artifact_directory=self.output,
@@ -413,8 +432,60 @@ class MetadataFreshnessTests(unittest.TestCase):
             expectation=self.expectation,
             verified_at=clock.now() + timedelta(minutes=1),
         )
+
+        self.assertEqual(result["preflightIdentity"], manifest["identity"])
+        self.assertEqual(
+            result["populationDigest"], manifest["population"]["digest"]
+        )
+        self.assertEqual(result["eventDigest"], manifest["population"]["event_digest"])
+        self.assertEqual(result["releaseNotesAuthorityProducerCount"], 1)
+        self.assertEqual(result["livePrLabelQueryCount"], 0)
+
+    def test_frozen_preflight_run_head_tree_and_boundary_are_fail_closed(self) -> None:
+        original = json.loads(
+            (self.qualification / "release-notes-preflight.json").read_bytes()
+        )
+        for field, replacement in (
+            ("run_id", QUALIFICATION_RUN_ID + 1),
+            ("head_sha", "1" * 40),
+            ("head_tree", "2" * 40),
+            ("comparison_base_sha", "3" * 40),
+        ):
+            with self.subTest(field=field):
+                manifest = copy.deepcopy(original)
+                manifest["binding"][field] = replacement
+                unsigned = copy.deepcopy(manifest)
+                unsigned.pop("identity")
+                manifest["identity"] = sha256_bytes(
+                    release_notes_json_bytes(unsigned)
+                )
+                (self.qualification / "release-notes-preflight.json").write_bytes(
+                    release_notes_json_bytes(manifest)
+                )
+                with self.assertRaisesRegex(
+                    MetadataFreshnessError,
+                    "preflight differs",
+                ):
+                    collect_metadata_freshness(
+                        repository_root=self.repository,
+                        qualification_directory=self.qualification,
+                        output_directory=self.output,
+                        identity=self.identity,
+                        candidate_acceptance_receipt=self.candidate_receipt,
+                        clock=FakeClock(),
+                    )
+
+    def test_two_frozen_byte_readbacks_pass_and_verify(self) -> None:
+        clock = self._collect()
+        self.assertEqual({path.name for path in self.output.iterdir()}, ARTIFACT_FILES)
+        result = verify_metadata_freshness_artifact(
+            artifact_directory=self.output,
+            qualification_directory=self.qualification,
+            expectation=self.expectation,
+            verified_at=clock.now() + timedelta(minutes=1),
+        )
         self.assertEqual(result["status"], "PASS")
-        self.assertEqual(result["snapshotIntervalSeconds"], 60)
+        self.assertEqual(result["snapshotIntervalSeconds"], 0)
 
     def test_valid_overall_fail_aggregate_cannot_start_freshness(self) -> None:
         receipt = json.loads(self.candidate_receipt.read_bytes())
@@ -441,42 +512,8 @@ class MetadataFreshnessTests(unittest.TestCase):
         ):
             self._collect()
 
-    def test_interval_shorter_than_sixty_seconds_fails(self) -> None:
-        with self.assertRaisesRegex(MetadataFreshnessError, "shorter than 60"):
-            self._collect(clock=FakeClock(advance_sleep=False))
-
-    def test_one_success_and_one_nonretryable_failure_fails(self) -> None:
-        source = StubSource()
-        source.failures[("B", 1, COMMIT_ONE)] = ("PERMISSION_FAILURE", None)
-        with self.assertRaisesRegex(MetadataFreshnessError, "PERMISSION_FAILURE"):
-            self._collect(source)
-        self.assertFalse(self.output.exists())
-
-    def test_metadata_drift_between_snapshots_fails(self) -> None:
-        source = StubSource()
-        source.titles["B"] = "发布元数据发生变化"
-        with self.assertRaisesRegex(MetadataFreshnessError, "snapshots differ"):
-            self._collect(source)
-
-    def test_current_identity_different_from_qualification_fails(self) -> None:
-        source = StubSource()
-        source.titles = {"A": "新标题", "B": "新标题"}
-        with self.assertRaisesRegex(MetadataFreshnessError, "differs from qualification"):
-            self._collect(source)
-
-    def test_population_different_from_qualification_fails(self) -> None:
-        class ExtraPullSource(StubSource):
-            def fetch(self, **kwargs) -> FetchResponse:
-                response = super().fetch(**kwargs)
-                if kwargs["commit"] == COMMIT_ONE and response.pulls is not None:
-                    response.pulls.append(_pull("新增发布条目", number=46))
-                return response
-
-        with self.assertRaisesRegex(MetadataFreshnessError, "differs from qualification"):
-            self._collect(ExtraPullSource())
-
     def test_historical_qualification_passes_old_main_and_not_a_new_main(self) -> None:
-        _, clock = self._collect()
+        clock = self._collect()
         self.assertEqual(
             verify_metadata_freshness_artifact(
                 artifact_directory=self.output,
@@ -501,70 +538,6 @@ class MetadataFreshnessTests(unittest.TestCase):
                 ),
                 verified_at=clock.now(),
             )
-
-    def test_transient_failure_restarts_the_whole_snapshot(self) -> None:
-        source = StubSource()
-        source.failures[("A", 1, COMMIT_TWO)] = ("TRANSPORT_EOF", None)
-        self._collect(source)
-        self.assertEqual(
-            source.calls[:4],
-            [
-                ("A", 1, COMMIT_ONE),
-                ("A", 1, COMMIT_TWO),
-                ("A", 2, COMMIT_ONE),
-                ("A", 2, COMMIT_TWO),
-            ],
-        )
-
-    def test_http_429_is_bounded_to_three_complete_attempts(self) -> None:
-        source = StubSource()
-        for attempt in (1, 2, 3):
-            source.failures[("A", attempt, COMMIT_ONE)] = (
-                "SECONDARY_RATE_LIMIT",
-                1,
-            )
-        with self.assertRaises(MetadataFreshnessError):
-            self._collect(source)
-        self.assertEqual(source.calls, [("A", attempt, COMMIT_ONE) for attempt in (1, 2, 3)])
-
-    def test_http_401_and_permission_403_are_not_retried(self) -> None:
-        for code in ("AUTHENTICATION_FAILURE", "PERMISSION_FAILURE"):
-            with self.subTest(code=code):
-                output = self.root / f"freshness-{code}"
-                source = StubSource()
-                source.failures[("A", 1, COMMIT_ONE)] = (code, None)
-                with self.assertRaises(MetadataFreshnessError):
-                    collect_metadata_freshness(
-                        repository_root=self.repository,
-                        qualification_directory=self.qualification,
-                        output_directory=output,
-                        identity=self.identity,
-                        source=source,
-                        candidate_acceptance_receipt=self.candidate_receipt,
-                        clock=FakeClock(),
-                        commit_loader=self._commits,
-                    )
-                self.assertEqual(source.calls, [("A", 1, COMMIT_ONE)])
-
-    def test_connection_reset_and_eof_are_bounded(self) -> None:
-        for code in ("TRANSPORT_CONNECTION_RESET", "TRANSPORT_EOF"):
-            with self.subTest(code=code):
-                output = self.root / f"freshness-{code}"
-                source = StubSource()
-                for attempt in (1, 2, 3):
-                    source.failures[("A", attempt, COMMIT_ONE)] = (code, None)
-                with self.assertRaises(MetadataFreshnessError):
-                    collect_metadata_freshness(
-                        repository_root=self.repository,
-                        qualification_directory=self.qualification,
-                        output_directory=output,
-                        identity=self.identity,
-                        source=source,
-                        candidate_acceptance_receipt=self.candidate_receipt,
-                        clock=FakeClock(),
-                        commit_loader=self._commits,
-                    )
-                self.assertEqual(len(source.calls), 3)
 
     def test_closed_receipt_rejects_unknown_conflict_unclassified_and_duplicate(self) -> None:
         self._collect()
@@ -605,7 +578,7 @@ class MetadataFreshnessTests(unittest.TestCase):
             )
 
     def test_stale_freshness_fails_with_exact_code(self) -> None:
-        _, clock = self._collect()
+        clock = self._collect()
         with self.assertRaises(MetadataFreshnessError) as raised:
             verify_metadata_freshness_artifact(
                 artifact_directory=self.output,
@@ -676,10 +649,8 @@ class MetadataFreshnessTests(unittest.TestCase):
             qualification_directory=qualification_consumer,
             output_directory=self.output,
             identity=self.identity,
-            source=StubSource(),
             candidate_acceptance_receipt=self.candidate_receipt,
             clock=clock,
-            commit_loader=self._commits,
         )
         self.assertFalse(mutation_unlocked)
         freshness_archive = self.root / "freshness.zip"
@@ -818,101 +789,6 @@ class MetadataFreshnessTests(unittest.TestCase):
                         self.root / f"extract-{excluded or 'extra'}",
                         expected_sha256=broken_digest,
                     )
-
-
-class GitHubAdapterTests(unittest.TestCase):
-    def test_http_diagnostics_are_closed_and_do_not_contain_token(self) -> None:
-        class Response:
-            def __init__(self) -> None:
-                self.status = 200
-                self.headers = {
-                    "Content-Type": "application/json",
-                    "X-GitHub-Request-Id": "request-id",
-                    "X-RateLimit-Limit": "5000",
-                    "X-RateLimit-Remaining": "4999",
-                    "X-RateLimit-Used": "1",
-                    "X-RateLimit-Reset": "123456",
-                }
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self, _maximum: int) -> bytes:
-                return _json_bytes([_pull()])
-
-        source = GitHubAssociatedPullSource(
-            "github_pat_secret_material", opener=lambda *_args, **_kwargs: Response()
-        )
-        response = source.fetch(
-            repository="yanyuhanyue/AniMemo",
-            commit=COMMIT_ONE,
-            snapshot="A",
-            attempt=1,
-        )
-        serialized = json.dumps(response.diagnostic)
-        self.assertEqual(set(response.diagnostic), DIAGNOSTIC_FIELDS)
-        self.assertNotIn("github_pat_secret_material", serialized)
-        self.assertNotIn("Authorization", serialized)
-        self.assertEqual(response.diagnostic["githubRequestId"], "request-id")
-
-    def test_http_error_classes_do_not_expose_headers_or_body(self) -> None:
-        def opener(*_args, **_kwargs):
-            raise urllib.error.HTTPError(
-                "https://api.github.com/fixed",
-                429,
-                "rate limited",
-                {"Retry-After": "7", "X-GitHub-Request-Id": "request-id"},
-                io.BytesIO(b'{"message":"secondary rate limit"}'),
-            )
-
-        response = GitHubAssociatedPullSource("secret", opener=opener).fetch(
-            repository="yanyuhanyue/AniMemo",
-            commit=COMMIT_ONE,
-            snapshot="A",
-            attempt=1,
-        )
-        self.assertEqual(response.error_code, "SECONDARY_RATE_LIMIT")
-        self.assertEqual(response.retry_after_seconds, 7)
-        self.assertNotIn("secret", json.dumps(response.diagnostic))
-
-    def test_only_502_503_and_504_server_errors_are_retryable(self) -> None:
-        for status, expected in ((500, False), (502, True), (503, True), (504, True)):
-            with self.subTest(status=status):
-                def opener(*_args, status_code=status, **_kwargs):
-                    raise urllib.error.HTTPError(
-                        "https://api.github.com/fixed",
-                        status_code,
-                        "server error",
-                        {"X-GitHub-Request-Id": "request-id"},
-                        io.BytesIO(b'{"message":"server error"}'),
-                    )
-
-                response = GitHubAssociatedPullSource(
-                    "secret", opener=opener
-                ).fetch(
-                    repository="yanyuhanyue/AniMemo",
-                    commit=COMMIT_ONE,
-                    snapshot="A",
-                    attempt=1,
-                )
-                self.assertEqual(response.error_code, "SERVER_ERROR")
-                self.assertIs(response.retryable, expected)
-
-    def test_unknown_transport_failure_is_not_mislabeled_as_retryable_eof(self) -> None:
-        def opener(*_args, **_kwargs):
-            raise urllib.error.URLError("certificate verification failed")
-
-        response = GitHubAssociatedPullSource("secret", opener=opener).fetch(
-            repository="yanyuhanyue/AniMemo",
-            commit=COMMIT_ONE,
-            snapshot="A",
-            attempt=1,
-        )
-        self.assertEqual(response.error_code, "TRANSPORT_OTHER")
-        self.assertIs(response.retryable, False)
 
 
 if __name__ == "__main__":

@@ -62,6 +62,27 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("context=pre-merge-authority", source)
         self.assertIn("if: ${{ always()", source)
 
+    def test_pre_merge_final_readback_binds_preflight_base_and_primary_category(self):
+        source = self.source("pre-merge-full.yml")
+        preflight = self.job(source, "preflight")
+        authority = self.job(source, "authority")
+
+        self.assertIn("primary_category_digest", preflight)
+        self.assertIn(
+            "EXPECTED_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}",
+            authority,
+        )
+        self.assertIn('test "$current_main_sha" = "$EXPECTED_BASE_SHA"', authority)
+        self.assertIn('--current-main-sha "$EXPECTED_BASE_SHA"', authority)
+        self.assertIn(
+            "--expected-primary-category-digest \"$PRIMARY_CATEGORY_DIGEST\"",
+            authority,
+        )
+        self.assertIn(
+            "PRIMARY_CATEGORY_DIGEST: ${{ needs.preflight.outputs.primary_category_digest }}",
+            authority,
+        )
+
     def test_pre_merge_workflow_uses_trusted_default_branch_and_independent_concurrency(self):
         source = self.source("pre-merge-full.yml")
         self.assertIn("group: pre-merge-full-pr-${{ inputs.pr_number }}", source)
@@ -217,13 +238,29 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         release = self.source("release-gate.yml")
         self.assertIn("name: pr-fast-gate", ci)
         self.assertIn("name: ci-selection-authority", ci)
-        self.assertIn("needs: selection-authority", self.job(ci, "pr-fast-gate"))
+        self.assertIn(
+            "needs: [selection-authority, primary-category]",
+            self.job(ci, "pr-fast-gate"),
+        )
         self.assertIn("!inputs.force_full", self.job(ci, "pr-fast-gate"))
         self.assertIn("name: release-gate-authority", release)
         self.assertIn("github.event_name == 'pull_request'", ci)
         self.assertIn("github.event_name != 'push'", ci)
         self.assertIn("github.event_name != 'push'", release)
         self.assertIn("name: post-merge-sanity", release)
+
+    def test_pr_fast_requires_the_shared_primary_category_policy(self):
+        ci = self.source("ci.yml")
+        policy = self.job(ci, "primary-category")
+        aggregate = self.job(ci, "pr-fast-gate")
+
+        header = ci[: ci.index("concurrency:")]
+        for activity in ("opened", "reopened", "synchronize", "labeled", "unlabeled"):
+            self.assertIn(f"      - {activity}", header)
+        self.assertIn("github.event_name == 'pull_request'", policy)
+        self.assertIn("python scripts/ci_primary_category.py", policy)
+        self.assertIn("needs: [selection-authority, primary-category]", aggregate)
+        self.assertIn("PRIMARY_CATEGORY_RESULT", aggregate)
 
     def test_plugin_immutability_gate_uses_the_checked_out_candidate_head(self):
         plugins = self.job(self.source("ci.yml"), "plugins")

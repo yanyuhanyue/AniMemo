@@ -22,10 +22,10 @@ from release.contract import build_manifest, promote_manifest
 from release.formal_acceptance_test_support import build_test_formal_acceptance
 from release.materials import MaterialContractError
 from release.publication import PublicationError
-from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
 from scripts.tests.formal_windows_pretrust_fixture import (
     create_test_formal_windows_pretrust_kit,
 )
+from scripts.tests.trust_kit_fixture import create_test_initial_trust_kit
 
 ROOT = Path(__file__).resolve().parents[2]
 COMMIT = "b" * 40
@@ -112,6 +112,16 @@ class ReleaseCliTests(unittest.TestCase):
         self.assertIn("--artifacts-metadata", freshness.stdout)
         for forbidden in ("--repository", "--api-url", "--allow-expired", "--override"):
             self.assertNotIn(forbidden, qualification.stdout + freshness.stdout)
+
+    def test_metadata_freshness_collector_has_no_live_github_adapter(self):
+        source = (ROOT / "release" / "cli.py").read_text(encoding="utf-8")
+        collector = source[
+            source.index("def _collect_metadata_freshness") :
+            source.index("def _extract_metadata_freshness_artifact")
+        ]
+
+        self.assertNotIn("GitHubAssociatedPullSource", collector)
+        self.assertNotIn("GITHUB_TOKEN", collector)
 
     def test_resolve_version_emits_json_and_github_outputs(self):
         with tempfile.TemporaryDirectory() as directory:

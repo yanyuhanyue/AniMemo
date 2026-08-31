@@ -263,7 +263,7 @@ def verified_candidate_identity() -> dict[str, object]:
         containing_artifact_id=99,
         containing_artifact_api_digest=DIGEST,
         archive_digest=DIGEST,
-        archive_file_count=23,
+        archive_file_count=26,
         runtime=runtime,
     )
 
@@ -646,7 +646,7 @@ identity = _build_verified_candidate_identity(
     containing_artifact_id=99,
     containing_artifact_api_digest=DIGEST,
     archive_digest=DIGEST,
-    archive_file_count=23,
+    archive_file_count=26,
     runtime=runtime,
 )
 sys.stdout.buffer.write(canonical_json_bytes(identity))
@@ -1060,6 +1060,9 @@ class CandidateArchiveTests(unittest.TestCase):
             "release-manifest.json": b"x",
             "release-notes.json": b"x",
             "release-notes.md": b"x",
+            "release-notes-input.json": b"x",
+            "release-notes-readback.json": b"x",
+            "release-notes-preflight.json": b"x",
             f"release-qualification-{RUN_ID}.json": b"x",
             **{item["path"]: b"x" for item in candidate["candidate_runtime_file_inventory"]},
         }
@@ -1078,7 +1081,7 @@ class CandidateArchiveTests(unittest.TestCase):
         destination = self.root / "out"
         candidate, _, count = _extract_candidate_archive(self._archive(), destination)
         self.assertEqual(candidate["qualification_run_id"], RUN_ID)
-        self.assertEqual(count, 23)
+        self.assertEqual(count, 26)
 
     def test_publish_extraction_accepts_current_candidate_archive(self):
         archive = self._archive()
@@ -1090,7 +1093,7 @@ class CandidateArchiveTests(unittest.TestCase):
             expected_sha256=_digest(archive.read_bytes()),
             require_candidate_contract=True,
         )
-        self.assertEqual(result["fileCount"], 23)
+        self.assertEqual(result["fileCount"], 26)
         receipt = producer_toolchain_receipt_bytes()
         receipt_identity = next(
             item
@@ -1279,6 +1282,9 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 "release-manifest.json": b"{}\n",
                 "release-notes.json": b"{}\n",
                 "release-notes.md": b"x",
+                "release-notes-input.json": b"x",
+                "release-notes-readback.json": b"x",
+                "release-notes-preflight.json": b"x",
                 f"release-qualification-{RUN_ID}.json": b"{}\n",
                 **{
                     item["path"]: b"x"
@@ -1695,6 +1701,9 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 "release-manifest.json": b"{}\n",
                 "release-notes.json": b"{}\n",
                 "release-notes.md": b"x",
+                "release-notes-input.json": b"x",
+                "release-notes-readback.json": b"x",
+                "release-notes-preflight.json": b"x",
                 f"release-qualification-{RUN_ID}.json": b"{}\n",
                 **{
                     item["path"]: b"x"
