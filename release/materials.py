@@ -10,6 +10,7 @@ import shutil
 import stat
 import tarfile
 import tempfile
+import unicodedata
 import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -40,9 +41,35 @@ INITIAL_TRUST_KIT_PREFIX = "release/release_attestation_verifier/pretrust-v2"
 PREPUBLICATION_SCHEMA_VERSION = 3
 PREPUBLICATION_MATERIALS_NAME = "prepublication-materials.json"
 DEPLOYMENT_CONTRACT_NAME = "deployment-contract.json"
+CANDIDATE_PRODUCTION_RECEIPT_NAME = "candidate-production-receipt.json"
+CANDIDATE_PRODUCTION_RECEIPT_SCHEMA = (
+    "animemo.candidate-production-receipt/v1"
+)
+CANDIDATE_PRODUCTION_REPOSITORY = "yanyuhanyue/AniMemo"
+CANDIDATE_PRODUCTION_RECEIPT_IDENTITY_FIELDS = frozenset(
+    {
+        "repository",
+        "workflow_ref",
+        "workflow_sha",
+        "run_id",
+        "run_attempt",
+        "event",
+        "candidate_sha",
+        "candidate_tree",
+        "target_version",
+        "release_tag",
+        "channel",
+    }
+)
+_CANDIDATE_TARGET_VERSION = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
+_CANDIDATE_RELEASE_TAG = re.compile(
+    r"(?P<target_version>v[0-9]+\.[0-9]+\.[0-9]+)-"
+    r"(?P<channel>beta|rc)\.(?P<sequence>[1-9][0-9]*)"
+)
 CANDIDATE_QUALIFICATION_ROOT_FILES = frozenset(
     {
         "candidate-input.json",
+        CANDIDATE_PRODUCTION_RECEIPT_NAME,
         "checksums.txt",
         DEPLOYMENT_CONTRACT_NAME,
         INSTALLER_MATERIALS_NAME,
@@ -95,6 +122,27 @@ _FIXED_DEPLOYMENT_FILES = (
 
 class MaterialContractError(ValueError):
     pass
+
+
+class CandidateProductionReceiptError(MaterialContractError):
+    """A Candidate Production Receipt cannot be trusted."""
+
+    code = "CandidateProductionReceiptError"
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"{self.code}: {detail}")
+
+
+class ReceiptSchemaError(CandidateProductionReceiptError):
+    code = "ReceiptSchemaError"
+
+
+class ReceiptIdentityMismatch(CandidateProductionReceiptError):
+    code = "ReceiptIdentityMismatch"
+
+
+class ByteSetMismatch(CandidateProductionReceiptError):
+    code = "ByteSetMismatch"
 
 
 @dataclass(frozen=True)
@@ -1005,6 +1053,427 @@ def _bound_material(identity: MaterialFileIdentity) -> dict[str, object]:
     }
 
 
+_CANDIDATE_PRODUCTION_RECEIPT_FIELDS = frozenset(
+    {
+        "schema",
+        "identity",
+        "local_observation",
+        "no_rebuild_policy",
+        "member_inventory",
+        "member_inventory_sha256",
+        "member_count",
+        "total_size",
+        "authority",
+    }
+)
+_CANDIDATE_PRODUCTION_AUTHORITY_FIELDS = frozenset(
+    {
+        "release_authority",
+        "publish_authorized",
+        "production_authorized",
+    }
+)
+_CANDIDATE_PRODUCTION_MEMBER_FIELDS = frozenset(
+    {"path", "sha256", "size"}
+)
+
+
+def _canonical_candidate_production_receipt_bytes(value: object) -> bytes:
+    try:
+        return (
+            json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ReceiptSchemaError("receipt is not canonical JSON data") from error
+
+
+def _normalize_candidate_production_identity(
+    identity: object,
+    *,
+    error_type: type[CandidateProductionReceiptError],
+) -> dict[str, object]:
+    if (
+        type(identity) is not dict
+        or any(type(key) is not str for key in identity)
+        or set(identity) != CANDIDATE_PRODUCTION_RECEIPT_IDENTITY_FIELDS
+    ):
+        raise error_type("receipt identity has unknown or missing fields")
+    result = dict(identity)
+    repository = result["repository"]
+    workflow_ref = result["workflow_ref"]
+    workflow_sha = result["workflow_sha"]
+    run_id = result["run_id"]
+    run_attempt = result["run_attempt"]
+    event = result["event"]
+    candidate_sha = result["candidate_sha"]
+    candidate_tree = result["candidate_tree"]
+    target_version = result["target_version"]
+    release_tag = result["release_tag"]
+    channel = result["channel"]
+    expected_workflow_ref = (
+        f"{CANDIDATE_PRODUCTION_REPOSITORY}/.github/workflows/"
+        "release.yml@refs/heads/main"
+    )
+    string_values = (
+        repository,
+        workflow_ref,
+        workflow_sha,
+        run_id,
+        event,
+        candidate_sha,
+        candidate_tree,
+        target_version,
+        release_tag,
+        channel,
+    )
+    release_tag_match = (
+        _CANDIDATE_RELEASE_TAG.fullmatch(release_tag)
+        if type(release_tag) is str
+        else None
+    )
+    if (
+        any(type(value) is not str for value in string_values)
+        or repository != CANDIDATE_PRODUCTION_REPOSITORY
+        or workflow_ref != expected_workflow_ref
+        or not re.fullmatch(r"[0-9a-f]{40}", workflow_sha)
+        or not re.fullmatch(r"[1-9][0-9]*", run_id)
+        or type(run_attempt) is not int
+        or run_attempt <= 0
+        or event != "workflow_dispatch"
+        or not re.fullmatch(r"[0-9a-f]{40}", candidate_sha)
+        or workflow_sha != candidate_sha
+        or not re.fullmatch(r"[0-9a-f]{40}", candidate_tree)
+        or not _CANDIDATE_TARGET_VERSION.fullmatch(target_version)
+        or channel not in {"beta", "rc"}
+        or release_tag_match is None
+        or release_tag_match.group("target_version") != target_version
+        or release_tag_match.group("channel") != channel
+    ):
+        raise error_type("receipt identity is invalid")
+    return result
+
+
+def _candidate_production_member_identity(
+    source: Path,
+    *,
+    relative: str,
+    error_type: type[CandidateProductionReceiptError],
+) -> dict[str, object]:
+    try:
+        with _open_single_link_regular_file(
+            source,
+            subject=f"Candidate production member {relative}",
+            maximum=MAX_QUALIFICATION_MEMBER_BYTES,
+        ) as (stream, opened):
+            digest = hashlib.sha256()
+            size = 0
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                size += len(chunk)
+                digest.update(chunk)
+            if size != opened.st_size:
+                raise error_type("candidate member changed while hashing")
+    except CandidateProductionReceiptError:
+        raise
+    except MaterialContractError as error:
+        raise error_type("candidate member is not a closed regular file") from error
+    return {
+        "path": relative,
+        "sha256": "sha256:" + digest.hexdigest(),
+        "size": size,
+    }
+
+
+def _validate_candidate_production_path(
+    value: object,
+    *,
+    error_type: type[CandidateProductionReceiptError],
+) -> str:
+    try:
+        relative = _validate_relative_path(value)
+    except MaterialContractError as error:
+        raise error_type("candidate member path is invalid") from error
+    if (
+        re.match(r"[A-Za-z]:", relative)
+        or unicodedata.normalize("NFC", relative) != relative
+        or any(ord(character) < 32 for character in relative)
+    ):
+        raise error_type("candidate member path is not portable")
+    return relative
+
+
+def _scan_candidate_production_root(
+    root: Path,
+    *,
+    excluded: frozenset[str],
+    error_type: type[CandidateProductionReceiptError],
+) -> list[dict[str, object]]:
+    root = Path(root)
+    try:
+        before = root.lstat()
+    except OSError as error:
+        raise error_type("candidate root is unavailable") from error
+    if (
+        not stat.S_ISDIR(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or getattr(before, "st_reparse_tag", 0) != 0
+    ):
+        raise error_type("candidate root is not a regular directory")
+    members: list[dict[str, object]] = []
+    total_size = 0
+    try:
+        paths = sorted(
+            root.rglob("*"),
+            key=lambda item: item.relative_to(root).as_posix(),
+        )
+        for source in paths:
+            relative = source.relative_to(root).as_posix()
+            try:
+                relative = _validate_candidate_production_path(
+                    relative,
+                    error_type=error_type,
+                )
+                metadata = source.lstat()
+            except OSError as error:
+                raise error_type("candidate member path is invalid") from error
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or getattr(metadata, "st_reparse_tag", 0) != 0
+            ):
+                raise error_type("candidate member is a link")
+            if stat.S_ISDIR(metadata.st_mode):
+                continue
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise error_type("candidate member is not a single-link regular file")
+            if relative in excluded:
+                continue
+            member = _candidate_production_member_identity(
+                source,
+                relative=relative,
+                error_type=error_type,
+            )
+            total_size += int(member["size"])
+            if (
+                len(members) >= MAX_MATERIAL_FILES
+                or total_size > MAX_QUALIFICATION_ARTIFACT_BYTES
+            ):
+                raise error_type("candidate member inventory exceeds its bounds")
+            members.append(member)
+    except CandidateProductionReceiptError:
+        raise
+    except OSError as error:
+        raise error_type("candidate root cannot be enumerated") from error
+    try:
+        after = root.lstat()
+    except OSError as error:
+        raise error_type("candidate root changed while reading") from error
+    if (
+        _stat_identity(after) != _stat_identity(before)
+        or _stat_content_state(after) != _stat_content_state(before)
+        or stat.S_ISLNK(after.st_mode)
+        or getattr(after, "st_reparse_tag", 0) != 0
+    ):
+        raise error_type("candidate root changed while reading")
+    paths = [str(member["path"]) for member in members]
+    if paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise error_type("candidate member inventory is duplicate or unordered")
+    casefolded = [path.casefold() for path in paths]
+    if len(casefolded) != len(set(casefolded)):
+        raise error_type("candidate member inventory has a case collision")
+    return members
+
+
+def _validate_candidate_production_inventory(
+    value: object,
+) -> list[dict[str, object]]:
+    if (
+        type(value) is not list
+        or not value
+        or len(value) > MAX_MATERIAL_FILES
+    ):
+        raise ReceiptSchemaError("member inventory is invalid")
+    result: list[dict[str, object]] = []
+    total_size = 0
+    for item in value:
+        if type(item) is not dict or set(item) != _CANDIDATE_PRODUCTION_MEMBER_FIELDS:
+            raise ReceiptSchemaError("member inventory entry has an invalid shape")
+        relative = item["path"]
+        relative = _validate_candidate_production_path(
+            relative,
+            error_type=ReceiptSchemaError,
+        )
+        if (
+            relative == CANDIDATE_PRODUCTION_RECEIPT_NAME
+            or relative == "candidate-input.json"
+            or re.fullmatch(r"release-qualification-[1-9][0-9]*\.json", relative)
+        ):
+            raise ReceiptSchemaError("member inventory includes a reserved member")
+        digest = item["sha256"]
+        size = item["size"]
+        if (
+            not isinstance(digest, str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or size > MAX_QUALIFICATION_MEMBER_BYTES
+        ):
+            raise ReceiptSchemaError("member inventory identity is invalid")
+        total_size += size
+        if total_size > MAX_QUALIFICATION_ARTIFACT_BYTES:
+            raise ReceiptSchemaError("member inventory exceeds its byte bound")
+        result.append({"path": relative, "sha256": digest, "size": size})
+    paths = [str(item["path"]) for item in result]
+    if paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise ReceiptSchemaError("member inventory is duplicate or unordered")
+    casefolded = [path.casefold() for path in paths]
+    if len(casefolded) != len(set(casefolded)):
+        raise ReceiptSchemaError("member inventory has a case collision")
+    return result
+
+
+def build_candidate_production_receipt(
+    *,
+    root: Path,
+    identity: dict[str, object],
+) -> dict[str, object]:
+    """Close one provisional Candidate byte set without future-state claims."""
+
+    normalized_identity = _normalize_candidate_production_identity(
+        identity,
+        error_type=ReceiptIdentityMismatch,
+    )
+    members = _scan_candidate_production_root(
+        root,
+        excluded=frozenset({CANDIDATE_PRODUCTION_RECEIPT_NAME}),
+        error_type=ReceiptSchemaError,
+    )
+    if not members:
+        raise ReceiptSchemaError("provisional Candidate byte set is empty")
+    for member in members:
+        relative = str(member["path"])
+        if relative == "candidate-input.json" or re.fullmatch(
+            r"release-qualification-[1-9][0-9]*\.json", relative
+        ):
+            raise ReceiptSchemaError(
+                "provisional Candidate contains a finalization-only member"
+            )
+    inventory_sha256 = _sha256_bytes(
+        _canonical_candidate_production_receipt_bytes(members)
+    )
+    receipt = {
+        "schema": CANDIDATE_PRODUCTION_RECEIPT_SCHEMA,
+        "identity": normalized_identity,
+        "local_observation": "CANDIDATE_BYTES_CLOSED",
+        "no_rebuild_policy": "REBUILD_FORBIDDEN_BYTE_EXACT_COPY_REQUIRED",
+        "member_inventory": members,
+        "member_inventory_sha256": inventory_sha256,
+        "member_count": len(members),
+        "total_size": sum(int(member["size"]) for member in members),
+        "authority": {
+            "release_authority": False,
+            "publish_authorized": False,
+            "production_authorized": False,
+        },
+    }
+    _canonical_candidate_production_receipt_bytes(receipt)
+    return receipt
+
+
+def validate_candidate_production_receipt(
+    payload: object,
+    *,
+    root: Path,
+    identity: dict[str, object],
+) -> dict[str, object]:
+    """Recompute a Receipt's exact provisional bytes and immutable identity."""
+
+    if type(payload) is not dict or set(payload) != _CANDIDATE_PRODUCTION_RECEIPT_FIELDS:
+        raise ReceiptSchemaError("receipt has unknown or missing fields")
+    if payload["schema"] != CANDIDATE_PRODUCTION_RECEIPT_SCHEMA:
+        raise ReceiptSchemaError("receipt schema is unsupported")
+    embedded_identity = _normalize_candidate_production_identity(
+        payload["identity"],
+        error_type=ReceiptSchemaError,
+    )
+    expected_identity = _normalize_candidate_production_identity(
+        identity,
+        error_type=ReceiptIdentityMismatch,
+    )
+    if embedded_identity != expected_identity:
+        raise ReceiptIdentityMismatch("receipt identity differs")
+    if payload["local_observation"] != "CANDIDATE_BYTES_CLOSED":
+        raise ReceiptSchemaError("local byte-close observation is invalid")
+    if (
+        payload["no_rebuild_policy"]
+        != "REBUILD_FORBIDDEN_BYTE_EXACT_COPY_REQUIRED"
+    ):
+        raise ReceiptSchemaError("receipt no-rebuild policy is invalid")
+    authority = payload["authority"]
+    if (
+        type(authority) is not dict
+        or set(authority) != _CANDIDATE_PRODUCTION_AUTHORITY_FIELDS
+        or any(authority.values())
+        or any(type(value) is not bool for value in authority.values())
+    ):
+        raise ReceiptSchemaError("receipt authority flags are invalid")
+    members = _validate_candidate_production_inventory(payload["member_inventory"])
+    expected_count = len(members)
+    expected_size = sum(int(member["size"]) for member in members)
+    expected_inventory_sha256 = _sha256_bytes(
+        _canonical_candidate_production_receipt_bytes(members)
+    )
+    if (
+        not isinstance(payload["member_count"], int)
+        or isinstance(payload["member_count"], bool)
+        or payload["member_count"] != expected_count
+        or not isinstance(payload["total_size"], int)
+        or isinstance(payload["total_size"], bool)
+        or payload["total_size"] != expected_size
+        or not isinstance(payload["member_inventory_sha256"], str)
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", payload["member_inventory_sha256"]
+        )
+        or payload["member_inventory_sha256"] != expected_inventory_sha256
+    ):
+        raise ReceiptSchemaError("receipt inventory aggregate is invalid")
+    canonical = _canonical_candidate_production_receipt_bytes(payload)
+    receipt_path = Path(root) / CANDIDATE_PRODUCTION_RECEIPT_NAME
+    if receipt_path.exists() or receipt_path.is_symlink():
+        try:
+            receipt_bytes = read_bounded_release_file(
+                receipt_path,
+                subject="Candidate Production Receipt",
+                maximum=MAX_MATERIAL_FILE_BYTES,
+                allow_empty=False,
+            )
+        except MaterialContractError as error:
+            raise ReceiptSchemaError("receipt file is unavailable") from error
+        if receipt_bytes != canonical:
+            raise ReceiptSchemaError("receipt file is not canonical")
+    finalization_exclusions = frozenset(
+        {
+            CANDIDATE_PRODUCTION_RECEIPT_NAME,
+            "candidate-input.json",
+            f"release-qualification-{expected_identity['run_id']}.json",
+        }
+    )
+    observed = _scan_candidate_production_root(
+        root,
+        excluded=finalization_exclusions,
+        error_type=ByteSetMismatch,
+    )
+    if observed != members:
+        raise ByteSetMismatch("candidate byte set differs from the receipt")
+    return dict(payload)
+
+
 def _validate_git_identity(value: str, *, label: str) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
         raise MaterialContractError(f"{label} is invalid")
@@ -1200,7 +1669,8 @@ def extract_qualification_artifact(
     ):
         raise MaterialContractError("Qualification artifact digest is invalid")
     legacy_expected = set(LEGACY_QUALIFICATION_ROOT_FILES)
-    legacy_expected.add(f"release-qualification-{qualification_run_id}.json")
+    qualification_name = f"release-qualification-{qualification_run_id}.json"
+    legacy_expected.add(qualification_name)
     if destination.exists() or destination.is_symlink():
         raise MaterialContractError(
             "Qualification artifact destination must not exist"
@@ -1274,7 +1744,7 @@ def extract_qualification_artifact(
                         for item in candidate["candidate_runtime_file_inventory"]
                     }
                     expected = set(CANDIDATE_QUALIFICATION_ROOT_FILES)
-                    expected.add(f"release-qualification-{qualification_run_id}.json")
+                    expected.add(qualification_name)
                     expected.update(runtime)
                 else:
                     expected = legacy_expected
@@ -1288,6 +1758,107 @@ def extract_qualification_artifact(
                     raise MaterialContractError(
                         "Qualification artifact file set differs"
                     )
+                candidate_receipt: dict[str, object] | None = None
+                candidate_receipt_identity: dict[str, object] | None = None
+                if require_candidate_contract:
+                    receipt_entries = [
+                        entry
+                        for entry in entries
+                        if entry.filename == CANDIDATE_PRODUCTION_RECEIPT_NAME
+                    ]
+                    qualification_entries = [
+                        entry
+                        for entry in entries
+                        if entry.filename == qualification_name
+                    ]
+                    if len(receipt_entries) != 1 or len(qualification_entries) != 1:
+                        raise ReceiptSchemaError(
+                            "qualification receipt cardinality differs"
+                        )
+                    receipt_entry = receipt_entries[0]
+                    qualification_entry = qualification_entries[0]
+                    if (
+                        receipt_entry.file_size > MAX_MATERIAL_FILE_BYTES
+                        or qualification_entry.file_size > MAX_MATERIAL_FILE_BYTES
+                    ):
+                        raise ReceiptSchemaError(
+                            "qualification receipt binding is too large"
+                        )
+                    receipt_bytes = archive.read(receipt_entry)
+                    qualification_bytes = archive.read(qualification_entry)
+                    try:
+                        receipt_value = json.loads(
+                            receipt_bytes,
+                            object_pairs_hook=reject_duplicate_json_keys,
+                        )
+                        qualification_value = json.loads(
+                            qualification_bytes,
+                            object_pairs_hook=reject_duplicate_json_keys,
+                        )
+                    except (
+                        UnicodeDecodeError,
+                        json.JSONDecodeError,
+                        DuplicateJsonFieldError,
+                    ) as error:
+                        raise ReceiptSchemaError(
+                            "qualification receipt binding is invalid JSON"
+                        ) from error
+                    if type(receipt_value) is not dict:
+                        raise ReceiptSchemaError("receipt must be a JSON object")
+                    if (
+                        _canonical_candidate_production_receipt_bytes(receipt_value)
+                        != receipt_bytes
+                    ):
+                        raise ReceiptSchemaError("receipt is not canonical JSON")
+                    try:
+                        from scripts.release_qualification import (
+                            validate_qualification_evidence,
+                        )
+
+                        qualification = validate_qualification_evidence(
+                            qualification_value
+                        )
+                    except Exception as error:
+                        raise ReceiptSchemaError(
+                            "Qualification v3 receipt binding is invalid"
+                        ) from error
+                    if (
+                        qualification.get("schema")
+                        != "animemo.release-qualification/v3"
+                        or qualification.get(
+                            "candidate_production_receipt_sha256"
+                        )
+                        != _sha256_bytes(receipt_bytes)
+                    ):
+                        raise ReceiptIdentityMismatch(
+                            "Qualification v3 receipt digest differs"
+                        )
+                    workflow = qualification.get("workflow")
+                    run = qualification.get("run")
+                    if type(workflow) is not dict or type(run) is not dict:
+                        raise ReceiptIdentityMismatch(
+                            "Qualification v3 identity is invalid"
+                        )
+                    candidate_receipt_identity = {
+                        "repository": qualification.get("repository"),
+                        "workflow_ref": workflow.get("ref"),
+                        "workflow_sha": workflow.get("sha"),
+                        "run_id": run.get("id"),
+                        "run_attempt": run.get("attempt"),
+                        "event": run.get("event"),
+                        "candidate_sha": qualification.get("candidate_sha"),
+                        "candidate_tree": qualification.get("candidate_tree"),
+                        "target_version": qualification.get("target_version"),
+                        "release_tag": qualification.get("release_tag"),
+                        "channel": qualification.get("channel"),
+                    }
+                    if candidate_receipt_identity["run_id"] != str(
+                        qualification_run_id
+                    ):
+                        raise ReceiptIdentityMismatch(
+                            "Qualification v3 run identity differs"
+                        )
+                    candidate_receipt = receipt_value
                 destination.mkdir(parents=True, mode=0o700)
                 identities = []
                 for entry in sorted(entries, key=lambda item: item.filename):
@@ -1317,6 +1888,19 @@ def extract_qualification_artifact(
                             "sha256": "sha256:" + member_digest.hexdigest(),
                             "size": written,
                         }
+                    )
+                if require_candidate_contract:
+                    if (
+                        candidate_receipt is None
+                        or candidate_receipt_identity is None
+                    ):
+                        raise ReceiptSchemaError(
+                            "qualification receipt binding is unavailable"
+                        )
+                    validate_candidate_production_receipt(
+                        candidate_receipt,
+                        root=destination,
+                        identity=candidate_receipt_identity,
                     )
     except (OSError, zipfile.BadZipFile, RuntimeError) as error:
         shutil.rmtree(destination, ignore_errors=True)

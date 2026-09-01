@@ -14,6 +14,11 @@ class WorkflowDagContractTests(unittest.TestCase):
         root = Path(temporary.name)
         (root / ".github" / "workflows").mkdir(parents=True)
         (root / "release").mkdir()
+        (root / "scripts").mkdir()
+        self._write(
+            root / "scripts" / "release_qualification.py",
+            'REQUIRED_RESULT_JOB_IDS = ("build",)\n',
+        )
         return temporary
 
     @staticmethod
@@ -52,10 +57,14 @@ class WorkflowDagContractTests(unittest.TestCase):
                 "consumers": [
                     {
                         "workflow": ".github/workflows/release.yml",
+                        "job": "qualification-finalizer",
+                    },
+                    {
+                        "workflow": ".github/workflows/release.yml",
                         "job": "publish",
                     }
                 ],
-                "producerMarkers": ["build-prepublication-candidate-input"],
+                "producerMarkers": ["build-installer-materials"],
                 "forbiddenConsumerBuildMarkers": [
                     "docker build",
                     "docker/build-push-action@",
@@ -64,6 +73,15 @@ class WorkflowDagContractTests(unittest.TestCase):
                 ],
                 "nonAuthoritativeBuilds": [],
             },
+            "completedResultBuilders": [
+                {
+                    "workflow": ".github/workflows/release.yml",
+                    "job": "qualification-finalizer",
+                    "builderModule": "scripts/release_qualification.py",
+                    "requiredResultsConstant": "REQUIRED_RESULT_JOB_IDS",
+                    "requiredResults": ["build"],
+                }
+            ],
         }
         contract.update(overrides)
         return contract
@@ -81,6 +99,12 @@ jobs:
     timeout-minutes: 10
     env:
       ANIMEMO_CANDIDATE_BUILD_AUTHORITY: AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER
+    steps:
+      - run: python -m release.cli build-installer-materials
+  qualification-finalizer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: build
     steps:
       - run: python -m release.cli build-prepublication-candidate-input
   publish:
@@ -169,8 +193,8 @@ jobs:
         with self._repository() as directory:
             root = Path(directory)
             source = self._valid_workflow().replace(
-                "    steps:\n      - run: python -m release.cli build-prepublication-candidate-input\n  publish:",
-                "    needs: publish\n    steps:\n      - run: python -m release.cli build-prepublication-candidate-input\n  publish:",
+                "    steps:\n      - run: python -m release.cli build-installer-materials\n  qualification-finalizer:",
+                "    needs: publish\n    steps:\n      - run: python -m release.cli build-installer-materials\n  qualification-finalizer:",
             )
             self._write(root / ".github" / "workflows" / "release.yml", source)
             self._write(
@@ -309,18 +333,18 @@ jobs:
         with self._repository() as directory:
             root = Path(directory)
             source = self._valid_workflow().replace(
-                "    steps:\n      - run: python -m release.cli build-prepublication-candidate-input\n  publish:",
+                "    steps:\n      - run: python -m release.cli build-installer-materials\n  qualification-finalizer:",
                 "    outputs:\n"
                 "      candidate_tag: ${{ steps.identity.outputs.candidate_tag }}\n"
                 "    steps:\n"
                 "      - id: identity\n"
                 "        run: |\n"
                 "          echo candidate_tag=v1.1.0-rc.19 >> \"$GITHUB_OUTPUT\"\n"
-                "          python -m release.cli build-prepublication-candidate-input\n"
+                "          python -m release.cli build-installer-materials\n"
                 "      - uses: actions/upload-artifact@1111111111111111111111111111111111111111\n"
                 "        with:\n"
                 "          name: candidate-${{ steps.identity.outputs.candidate_tag }}\n"
-                "  publish:",
+                "  qualification-finalizer:",
             ).replace(
                 "    steps:\n      - run: python -m scripts.release_publication transaction-reconcile",
                 "    steps:\n"
@@ -339,6 +363,8 @@ jobs:
 
             self.assertEqual(receipt["artifactProducerCount"], 1)
             self.assertEqual(receipt["artifactConsumerCount"], 1)
+            self.assertEqual(receipt["completedResultBuilderCount"], 1)
+            self.assertEqual(receipt["completedResultRequirementCount"], 1)
 
     def test_skip_authority_must_always_observe_every_covered_job(self) -> None:
         with self._repository() as directory:
@@ -383,6 +409,162 @@ jobs:
 
             with self.assertRaisesRegex(
                 WorkflowDagError, "candidate authority consumer cannot build"
+            ):
+                validate_repository(root)
+
+    def test_candidate_input_metadata_generation_is_allowed_in_finalizer(self) -> None:
+        with self._repository() as directory:
+            root = Path(directory)
+            self._write(
+                root / ".github" / "workflows" / "release.yml",
+                self._valid_workflow(),
+            )
+            self._write(
+                root / "release" / "workflow-dag-contract.json",
+                json.dumps(self._contract()),
+            )
+
+            receipt = validate_repository(root)
+
+            self.assertEqual(receipt["candidateAuthorityProducer"], ".github/workflows/release.yml:build")
+            self.assertEqual(receipt["completedResultBuilderCount"], 1)
+
+    def test_completed_result_builder_cannot_require_itself(self) -> None:
+        with self._repository() as directory:
+            root = Path(directory)
+            self._write(
+                root / ".github" / "workflows" / "release.yml",
+                self._valid_workflow(),
+            )
+            self._write(
+                root / "scripts" / "release_qualification.py",
+                'REQUIRED_RESULT_JOB_IDS = ("qualification-finalizer",)\n',
+            )
+            contract = self._contract()
+            contract["completedResultBuilders"][0]["requiredResults"] = [
+                "qualification-finalizer"
+            ]
+            self._write(
+                root / "release" / "workflow-dag-contract.json",
+                json.dumps(contract),
+            )
+
+            with self.assertRaisesRegex(
+                WorkflowDagError, "completed result builder requires its own result"
+            ):
+                validate_repository(root)
+
+    def test_completed_result_builder_required_job_must_exist(self) -> None:
+        with self._repository() as directory:
+            root = Path(directory)
+            self._write(
+                root / ".github" / "workflows" / "release.yml",
+                self._valid_workflow(),
+            )
+            self._write(
+                root / "scripts" / "release_qualification.py",
+                'REQUIRED_RESULT_JOB_IDS = ("missing",)\n',
+            )
+            contract = self._contract()
+            contract["completedResultBuilders"][0]["requiredResults"] = ["missing"]
+            self._write(
+                root / "release" / "workflow-dag-contract.json",
+                json.dumps(contract),
+            )
+
+            with self.assertRaisesRegex(
+                WorkflowDagError, "references unknown required job.*missing"
+            ):
+                validate_repository(root)
+
+    def test_completed_result_builder_requires_direct_need(self) -> None:
+        with self._repository() as directory:
+            root = Path(directory)
+            source = self._valid_workflow().replace(
+                "  qualification-finalizer:\n",
+                "  intermediate:\n"
+                "    runs-on: ubuntu-24.04\n"
+                "    timeout-minutes: 10\n"
+                "    needs: build\n"
+                "    steps:\n"
+                "      - run: echo observed\n"
+                "  qualification-finalizer:\n",
+            ).replace(
+                "    needs: build\n    steps:\n      - run: python -m release.cli build-prepublication-candidate-input",
+                "    needs: intermediate\n    steps:\n      - run: python -m release.cli build-prepublication-candidate-input",
+            )
+            self._write(root / ".github" / "workflows" / "release.yml", source)
+            self._write(
+                root / "release" / "workflow-dag-contract.json",
+                json.dumps(self._contract()),
+            )
+
+            with self.assertRaisesRegex(
+                WorkflowDagError, "completed result builder result is not a direct need.*build"
+            ):
+                validate_repository(root)
+
+    def test_completed_result_builder_constant_must_exactly_match_contract(self) -> None:
+        with self._repository() as directory:
+            root = Path(directory)
+            self._write(
+                root / ".github" / "workflows" / "release.yml",
+                self._valid_workflow(),
+            )
+            self._write(
+                root / "scripts" / "release_qualification.py",
+                'REQUIRED_RESULT_JOB_IDS = ("publish",)\n',
+            )
+            self._write(
+                root / "release" / "workflow-dag-contract.json",
+                json.dumps(self._contract()),
+            )
+
+            with self.assertRaisesRegex(
+                WorkflowDagError, "contract does not match source constant"
+            ):
+                validate_repository(root)
+
+    def test_job_cannot_read_its_own_needs_result(self) -> None:
+        with self._repository() as directory:
+            root = Path(directory)
+            source = self._valid_workflow().replace(
+                "    needs: build\n    steps:\n      - run: python -m release.cli build-prepublication-candidate-input",
+                "    needs: build\n"
+                "    env:\n"
+                "      IMPOSSIBLE_SELF_RESULT: ${{ needs.qualification-finalizer.result }}\n"
+                "    steps:\n"
+                "      - run: python -m release.cli build-prepublication-candidate-input",
+            )
+            self._write(root / ".github" / "workflows" / "release.yml", source)
+            self._write(
+                root / "release" / "workflow-dag-contract.json",
+                json.dumps(self._contract()),
+            )
+
+            with self.assertRaisesRegex(WorkflowDagError, "job reads its own needs result"):
+                validate_repository(root)
+
+    def test_builder_cannot_default_current_or_future_authority(self) -> None:
+        with self._repository() as directory:
+            root = Path(directory)
+            self._write(
+                root / ".github" / "workflows" / "release.yml",
+                self._valid_workflow(),
+            )
+            self._write(
+                root / "scripts" / "release_qualification.py",
+                "REQUIRED_RESULT_JOB_IDS = ('build',)\n"
+                "def build(*, status='completed', conclusion='success'):\n"
+                "    return status, conclusion\n",
+            )
+            self._write(
+                root / "release" / "workflow-dag-contract.json",
+                json.dumps(self._contract()),
+            )
+
+            with self.assertRaisesRegex(
+                WorkflowDagError, "hardcodes current or future authority"
             ):
                 validate_repository(root)
 

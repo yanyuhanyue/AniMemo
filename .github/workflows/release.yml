@@ -594,6 +594,14 @@ jobs:
             '[.artifacts[] | select(.name == ("release-qualification-" + $id) and (.workflow_run.id|tostring) == $id)][0]' \
             "$RUNNER_TEMP/qualification-artifacts.json" \
             > "$RUNNER_TEMP/qualification-artifact.json"
+          controller_count="$(jq --arg id "$QUALIFICATION_RUN_ID" \
+            '[.artifacts[] | select(.name == ("controller-authority-" + $id) and (.workflow_run.id|tostring) == $id)] | length' \
+            "$RUNNER_TEMP/qualification-artifacts.json")"
+          test "$controller_count" = "1"
+          jq -c --arg id "$QUALIFICATION_RUN_ID" \
+            '[.artifacts[] | select(.name == ("controller-authority-" + $id) and (.workflow_run.id|tostring) == $id)][0]' \
+            "$RUNNER_TEMP/qualification-artifacts.json" \
+            > "$RUNNER_TEMP/controller-artifact.json"
           archive_url="$(jq -r '.archive_download_url // empty' "$RUNNER_TEMP/qualification-artifact.json")"
           metadata_digest="$(jq -r '.digest // empty' "$RUNNER_TEMP/qualification-artifact.json")"
           artifact_expired="$(jq -r '.expired' "$RUNNER_TEMP/qualification-artifact.json")"
@@ -602,11 +610,27 @@ jobs:
           [[ "$metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           test "$artifact_expired" = "false"
           test "$artifact_head" = "${{ needs.preflight.outputs.candidate_sha }}"
+          controller_artifact_id="$(jq -r '.id // empty' "$RUNNER_TEMP/controller-artifact.json")"
+          controller_archive_url="$(jq -r '.archive_download_url // empty' "$RUNNER_TEMP/controller-artifact.json")"
+          controller_metadata_digest="$(jq -r '.digest // empty' "$RUNNER_TEMP/controller-artifact.json")"
+          controller_expired="$(jq -r '.expired' "$RUNNER_TEMP/controller-artifact.json")"
+          controller_head="$(jq -r '.workflow_run.head_sha // empty' "$RUNNER_TEMP/controller-artifact.json")"
+          [[ "$controller_artifact_id" =~ ^[1-9][0-9]*$ ]]
+          test -n "$controller_archive_url"
+          [[ "$controller_metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$controller_expired" = "false"
+          test "$controller_head" = "${{ needs.preflight.outputs.candidate_sha }}"
           curl --fail --location --silent --show-error \
             -H "Authorization: Bearer $GH_TOKEN" \
             "$archive_url" -o "$RUNNER_TEMP/qualification-archive/evidence.zip"
           actual_digest="sha256:$(sha256sum "$RUNNER_TEMP/qualification-archive/evidence.zip" | awk '{print $1}')"
           test "$actual_digest" = "$metadata_digest"
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "$controller_archive_url" \
+            -o "$RUNNER_TEMP/qualification-archive/controller-authority.zip"
+          controller_actual_digest="sha256:$(sha256sum "$RUNNER_TEMP/qualification-archive/controller-authority.zip" | awk '{print $1}')"
+          test "$controller_actual_digest" = "$controller_metadata_digest"
           python -m release.cli extract-qualification-artifact \
             --archive "$RUNNER_TEMP/qualification-archive/evidence.zip" \
             --destination "$RUNNER_TEMP/qualification" \
@@ -708,6 +732,64 @@ jobs:
             test -f "$candidate_root/$name"
             test ! -L "$candidate_root/$name"
           done
+          phase_b_request="$RUNNER_TEMP/phase-b-controller-request.json"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow_name "Release Producer" \
+            --arg workflow_path ".github/workflows/release.yml" \
+            --arg workflow_ref "$qualification_workflow_ref" \
+            --arg workflow_sha "$run_head" \
+            --arg run_id "$QUALIFICATION_RUN_ID" \
+            --argjson run_attempt "$run_attempt" \
+            --arg event "workflow_dispatch" \
+            --arg candidate_sha "${{ needs.preflight.outputs.candidate_sha }}" \
+            --arg candidate_tree "$candidate_tree" \
+            --arg upgrade_base_sha "${{ inputs.upgrade_base_sha }}" \
+            --arg channel "${{ inputs.channel }}" \
+            --arg target_version "${{ needs.preflight.outputs.target_version }}" \
+            --arg release_tag "${{ needs.preflight.outputs.release_tag }}" \
+            --argjson final_id "$containing_artifact_id" \
+            --arg final_digest "$metadata_digest" \
+            --argjson controller_id "$controller_artifact_id" \
+            --arg controller_digest "$controller_metadata_digest" \
+            '{
+              repository: $repository,
+              workflow: {
+                name: $workflow_name,
+                path: $workflow_path,
+                ref: $workflow_ref,
+                sha: $workflow_sha
+              },
+              run: {id: $run_id, attempt: $run_attempt, event: $event},
+              candidate_sha: $candidate_sha,
+              candidate_tree: $candidate_tree,
+              upgrade_base_sha: $upgrade_base_sha,
+              channel: $channel,
+              target_version: $target_version,
+              release_tag: $release_tag,
+              final_artifact: {
+                id: $final_id,
+                name: ("release-qualification-" + $run_id),
+                api_digest: $final_digest
+              },
+              controller_artifact: {
+                id: $controller_id,
+                name: ("controller-authority-" + $run_id),
+                api_digest: $controller_digest
+              }
+            }' > "$phase_b_request"
+          python -m release.qualification_finalization phase-b \
+            --request "$phase_b_request" \
+            --artifacts-metadata "$RUNNER_TEMP/qualification-artifacts.json" \
+            --archive "$RUNNER_TEMP/qualification-archive/evidence.zip" \
+            --controller-archive \
+              "$RUNNER_TEMP/qualification-archive/controller-authority.zip" \
+            --qualification-directory "$RUNNER_TEMP/qualification" \
+            --verified-candidate-directory "$candidate_root" \
+            --output "$RUNNER_TEMP/phase-b-controller-verification.json" \
+            > "$RUNNER_TEMP/phase-b-controller-verification-result.json"
+          test "$(jq -er '.status' "$RUNNER_TEMP/phase-b-controller-verification.json")" = "PASS"
+          test "$(jq -er '.candidateBytesRebuildCount' "$RUNNER_TEMP/phase-b-controller-verification.json")" = "0"
           python -m release.cli decode-candidate-acceptance-receipt \
             --value "${{ inputs.candidate_acceptance_receipt_b64url }}" \
             --output "$RUNNER_TEMP/candidate-acceptance-receipt.json" \
@@ -742,7 +824,6 @@ jobs:
           TARGET_VERSION: ${{ needs.preflight.outputs.target_version }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
-          QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/qualification/release-qualification-${{ inputs.qualification_run_id }}.json
           RELEASE_GRAPH_CONTRACT: animemo.release-gate.jobs/v2
         shell: bash
         run: |
@@ -750,11 +831,30 @@ jobs:
           export QUALIFICATION_RUN_METADATA="$(cat "$RUNNER_TEMP/qualification-metadata-run.json")"
           export QUALIFICATION_ARTIFACT_METADATA="$(cat "$RUNNER_TEMP/qualification-metadata-artifact.json")"
           export QUALIFICATION_ARCHIVE_SHA256="$(jq -r '.digest' "$RUNNER_TEMP/qualification-metadata-artifact.json")"
+          export QUALIFICATION_EVIDENCE_SHA256="$(jq -er \
+            '.qualificationEvidenceSha256 | select(test("^sha256:[0-9a-f]{64}$"))' \
+            "$RUNNER_TEMP/phase-b-controller-verification.json")"
           export QUALIFICATION_WORKFLOW_REF="$(cat "$RUNNER_TEMP/qualification-workflow-ref.txt")"
           export QUALIFICATION_WORKFLOW_SHA="$(cat "$RUNNER_TEMP/qualification-workflow-sha.txt")"
           export RELEASE_NOTES_IDENTITY="$(jq -r '.identity' "$RUNNER_TEMP/qualification/release-notes.json")"
           export RELEASE_NOTES_MARKDOWN_SHA256="sha256:$(sha256sum "$RUNNER_TEMP/qualification/release-notes.md" | awk '{print $1}')"
-          python -m scripts.release_authority
+          qualification_artifact="$RUNNER_TEMP/qualification/release-qualification-$QUALIFICATION_RUN_ID.json"
+          test -d "$RUNNER_TEMP/qualification"
+          test ! -L "$RUNNER_TEMP/qualification"
+          test -f "$qualification_artifact"
+          test ! -L "$qualification_artifact"
+          test "$(stat --format='%h' -- "$qualification_artifact")" = "1"
+          qualification_size="$(stat --format='%s' -- "$qualification_artifact")"
+          [[ "$qualification_size" =~ ^[1-9][0-9]*$ ]]
+          (( qualification_size <= 8 * 1024 * 1024 ))
+          authority_root="$RUNNER_TEMP/phase-b-authority-input"
+          test ! -e "$authority_root"
+          test ! -L "$authority_root"
+          install -d -m 0700 -- "$authority_root"
+          install -m 0600 -- "$qualification_artifact" \
+            "$authority_root/qualification-evidence.json"
+          cd "$authority_root"
+          PYTHONPATH="$GITHUB_WORKSPACE" python -m scripts.release_authority
       - name: Stage the validated release input for Phase B production
         if: ${{ inputs.operation == 'publish' }}
         env:
@@ -794,18 +894,48 @@ jobs:
           install -m 0600 \
             "$RUNNER_TEMP/qualification/deployment-contract.json" \
             validated-release-input/deployment-contract.json
+          freshness_qualification="validated-release-input/metadata-freshness-qualification"
+          test ! -e "$freshness_qualification" && test ! -L "$freshness_qualification"
+          install -d -m 0700 "$freshness_qualification"
+          freshness_qualification_members=(
+            release-qualification.json
+            platform-qualification.json
+            release-notes-input.json
+            release-notes.json
+            release-notes.md
+            release-notes-readback.json
+            release-notes-preflight.json
+            prepublication-materials.json
+            installer-materials.tar
+            deployment-contract.json
+          )
+          for name in "${freshness_qualification_members[@]}"; do
+            source="validated-release-input/$name"
+            test -f "$source" && test ! -L "$source"
+            install -m 0600 "$source" "$freshness_qualification/$name"
+            cmp "$source" "$freshness_qualification/$name"
+          done
+          expected_freshness_members="$(printf '%s\n' \
+            "${freshness_qualification_members[@]}" | LC_ALL=C sort)"
+          actual_freshness_members="$(find "$freshness_qualification" \
+            -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
+          unsafe_freshness_members="$(find "$freshness_qualification" \
+            -mindepth 1 -maxdepth 1 ! -type f -print)"
+          test "$actual_freshness_members" = "$expected_freshness_members"
+          test -z "$unsafe_freshness_members"
           install -m 0600 \
             "$RUNNER_TEMP/candidate-acceptance-receipt.json" \
             validated-release-input/candidate-acceptance-receipt.json
           install -m 0600 \
             "$RUNNER_TEMP/publish-candidate-plan.json" \
             validated-release-input/publish-candidate-plan.json
-          for name in evidence.zip; do
+          for name in evidence.zip controller-authority.zip; do
             install -m 0600 "$RUNNER_TEMP/qualification-archive/$name" \
               "validated-release-input/qualification-authority/$name"
           done
           for name in qualification-run.json qualification-jobs.json \
-            qualification-artifacts.json qualification-artifact.json; do
+            qualification-artifacts.json qualification-artifact.json \
+            controller-artifact.json phase-b-controller-verification.json; do
             install -m 0600 "$RUNNER_TEMP/$name" \
               "validated-release-input/qualification-authority/$name"
           done
@@ -927,7 +1057,7 @@ jobs:
           candidate_tree="$(git rev-parse "$INTENDED_MAIN_SHA^{tree}")"
           python -m release.cli verify-metadata-freshness \
             --artifact-directory "$RUNNER_TEMP/metadata-freshness" \
-            --qualification-directory validated-release-input \
+            --qualification-directory validated-release-input/metadata-freshness-qualification \
             --expected-workflow-run-id "$FRESHNESS_RUN_ID" \
             --expected-candidate-sha "$INTENDED_MAIN_SHA" \
             --expected-candidate-tree "$candidate_tree" \
@@ -957,7 +1087,7 @@ jobs:
           retention-days: 1
 
   dry-run:
-    name: phase-a-qualification-evidence
+    name: candidate-byte-producer
     if: ${{ always() && inputs.operation == 'qualify' && needs.preflight.result == 'success' && needs.full-ci.result == 'success' && needs.full-release-gate.result == 'success' && ((inputs.channel == 'rc' && needs.performance.result == 'success') || (inputs.channel == 'beta' && needs.performance.result == 'skipped')) && needs.platform-qualification.result == 'success' && needs.release-authority.result == 'success' }}
     needs: [preflight, full-ci, full-release-gate, performance, platform-qualification, release-authority]
     runs-on: ubuntu-24.04
@@ -968,8 +1098,9 @@ jobs:
       actions: read
       contents: read
     outputs:
-      artifact_id: ${{ steps.qualification_artifact.outputs.artifact-id }}
-      artifact_digest: ${{ format('sha256:{0}', steps.qualification_artifact.outputs.artifact-digest) }}
+      provisional_artifact_id: ${{ steps.provisional_artifact.outputs.artifact-id }}
+      provisional_artifact_digest: ${{ format('sha256:{0}', steps.provisional_artifact.outputs.artifact-digest) }}
+      candidate_production_receipt_sha256: ${{ steps.candidate_production_receipt.outputs.receipt_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -1358,67 +1489,32 @@ jobs:
               "$(jq -cS '.artifacts.deploymentContract' release-output/stable-manifest.dry-run.json)"
           fi
           ANIMEMO_PRODUCER
-      - name: Close the read-only Candidate authority receipt
+      - name: Stage and close the non-authoritative Candidate production transaction
+        id: candidate_production_receipt
         env:
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
-          API_DIGEST: ${{ steps.api.outputs.digest }}
-          WEB_DIGEST: ${{ steps.web.outputs.digest }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$ANIMEMO_CANDIDATE_BUILD_AUTHORITY" = "AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER"
-          candidate_tree="$(git rev-parse "$CANDIDATE_SHA^{tree}")"
-          jq -cS -n \
-            --arg schema "animemo.read-only-candidate-authority/v1" \
-            --arg authority "$ANIMEMO_CANDIDATE_BUILD_AUTHORITY" \
-            --arg candidate_sha "$CANDIDATE_SHA" --arg candidate_tree "$candidate_tree" \
-            --arg release_tag "$RELEASE_TAG" --arg api_digest "$API_DIGEST" \
-            --arg web_digest "$WEB_DIGEST" \
-            '{schema:$schema,authority:$authority,candidate_sha:$candidate_sha,candidate_tree:$candidate_tree,release_tag:$release_tag,api_digest:$api_digest,web_digest:$web_digest,large_byte_payloads:[]}' \
-            > "$RUNNER_TEMP/animemo-release-producer-output/dry-run-authority-receipt.json"
-      - id: dry_run_artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-dry-run-${{ needs.preflight.outputs.release_tag }}
-          path: ${{ runner.temp }}/animemo-release-producer-output/dry-run-authority-receipt.json
-          if-no-files-found: error
-          retention-days: 7
-      - name: Generate qualification evidence from the single Candidate byte producer
-        env:
-          OPERATION: qualify
+          OPERATION: produce
           CHANNEL: ${{ inputs.channel }}
-          NEEDS_JSON: ${{ toJSON(needs) }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
           UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}
           TARGET_VERSION: ${{ needs.preflight.outputs.target_version }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           CREATED_AT: ${{ needs.preflight.outputs.created_at }}
-          QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/release-qualification-${{ github.run_id }}.json
-          RELEASE_NOTES_IDENTITY_FILE: release-output/release-notes.json
-          RELEASE_NOTES_MARKDOWN_FILE: release-output/release-notes.md
-          PLATFORM_ARTIFACT_ID: ${{ needs.platform-qualification.outputs.artifact_id }}
-          PLATFORM_ARTIFACT_DIGEST: ${{ needs.platform-qualification.outputs.artifact_digest }}
-          DRY_RUN_ARTIFACT_ID: ${{ steps.dry_run_artifact.outputs.artifact-id }}
-          DRY_RUN_ARTIFACT_DIGEST: sha256:${{ steps.dry_run_artifact.outputs.artifact-digest }}
         shell: bash
         run: |
+          set -euo pipefail
+          test "$ANIMEMO_CANDIDATE_BUILD_AUTHORITY" = \
+            "AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER"
           bash scripts/run-in-release-producer.sh \
-            OPERATION CHANNEL NEEDS_JSON WORKFLOW_REF WORKFLOW_SHA RUN_ID \
+            OPERATION CHANNEL WORKFLOW_REF WORKFLOW_SHA RUN_ID \
             RUN_ATTEMPT EVENT_NAME CANDIDATE_SHA UPGRADE_BASE_SHA TARGET_VERSION \
-            RELEASE_TAG CREATED_AT QUALIFICATION_ARTIFACT_PATH \
-            RELEASE_NOTES_IDENTITY_FILE RELEASE_NOTES_MARKDOWN_FILE \
-            PLATFORM_ARTIFACT_ID PLATFORM_ARTIFACT_DIGEST DRY_RUN_ARTIFACT_ID \
-            DRY_RUN_ARTIFACT_DIGEST -- bash -seu <<'ANIMEMO_PRODUCER'
-          export RELEASE_NOTES_IDENTITY="$(jq -r '.identity // empty' "$RELEASE_NOTES_IDENTITY_FILE")"
-          export RELEASE_NOTES_MARKDOWN_SHA256="sha256:$(sha256sum "$RELEASE_NOTES_MARKDOWN_FILE" | awk '{print $1}')"
-          [[ "$RELEASE_NOTES_IDENTITY" =~ ^sha256:[0-9a-f]{64}$ ]]
+            RELEASE_TAG CREATED_AT -- bash -seu <<'ANIMEMO_PRODUCER'
           candidate_tree="$(git rev-parse "$CANDIDATE_SHA^{tree}")"
+          export CANDIDATE_TREE="$candidate_tree"
           python -m release.cli verify-prepublication-materials \
             --prepublication release-output/prepublication-materials.json \
             --installer-materials release-output/installer-materials.tar \
@@ -1428,10 +1524,7 @@ jobs:
           python -c 'from pathlib import Path; from release.producer_toolchain import validate_producer_toolchain_receipt; validate_producer_toolchain_receipt(Path("release-output/release-producer-toolchain-receipt.json"), expected_candidate_sha="'"$CANDIDATE_SHA"'")'
           test "$(jq -er '.byteAuthority.releaseProducer.imageId' release-output/release-producer-toolchain-receipt.json)" = \
             "$ANIMEMO_RELEASE_PRODUCER_IMAGE_ID"
-          python -m scripts.release_authority
-          mkdir -p release-qualification
-          install -m 0600 "$QUALIFICATION_ARTIFACT_PATH" \
-            "release-qualification/release-qualification-${RUN_ID}.json"
+          test -z "$(find release-qualification -mindepth 1 -print -quit)"
           python scripts/platform_qualification.py verify \
             --input platform-qualification-input/platform-qualification.json \
             --candidate-sha "$CANDIDATE_SHA" \
@@ -1465,37 +1558,186 @@ jobs:
             release-qualification/release-producer-toolchain-receipt.json
           cp -a release-output/candidate-runtime \
             release-qualification/candidate-runtime
-          [[ "$PLATFORM_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
-          [[ "$DRY_RUN_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
-          [[ "$PLATFORM_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$DRY_RUN_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          python -m release.cli build-prepublication-candidate-input \
-            --root release-qualification \
-            --qualification-run-id "$RUN_ID" \
-            --qualification-run-attempt "$RUN_ATTEMPT" \
-            --source-sha "$CANDIDATE_SHA" --source-tree "$candidate_tree" \
-            --platform-artifact-id "$PLATFORM_ARTIFACT_ID" \
-            --platform-artifact-digest "$PLATFORM_ARTIFACT_DIGEST" \
-            --dry-run-artifact-id "$DRY_RUN_ARTIFACT_ID" \
-            --dry-run-artifact-digest "$DRY_RUN_ARTIFACT_DIGEST" \
-            --generated-at "$CREATED_AT" \
-            --output release-qualification/candidate-input.json
-          test "$(find release-qualification -maxdepth 1 -type f | wc -l)" = "14"
+          python -m scripts.release_authority
+          test -f release-qualification/candidate-production-receipt.json
+          test "$(find release-qualification -maxdepth 1 -type f | wc -l)" = "13"
+          test "$(find release-qualification -mindepth 1 -maxdepth 1 | wc -l)" = "14"
           test "$(find release-qualification/candidate-runtime -type f | wc -l)" -gt "8"
           ANIMEMO_PRODUCER
-      - name: Upload the sole Candidate large-byte artifact
+          receipt="$RUNNER_TEMP/animemo-release-qualification-output/candidate-production-receipt.json"
+          receipt_sha256="sha256:$(sha256sum "$receipt" | awk '{print $1}')"
+          [[ "$receipt_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "receipt_sha256=$receipt_sha256" >> "$GITHUB_OUTPUT"
+      - name: Upload the short-lived non-authoritative Candidate transaction
+        id: provisional_artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-materials-${{ github.run_id }}
+          path: ${{ runner.temp }}/animemo-release-qualification-output/
+          if-no-files-found: error
+          retention-days: 3
+
+  qualification-finalizer:
+    name: qualification-finalizer
+    if: ${{ always() && inputs.operation == 'qualify' && needs.preflight.result == 'success' && needs.full-ci.result == 'success' && needs.full-release-gate.result == 'success' && ((inputs.channel == 'rc' && needs.performance.result == 'success') || (inputs.channel == 'beta' && needs.performance.result == 'skipped')) && needs.platform-qualification.result == 'success' && needs.release-authority.result == 'success' && needs.dry-run.result == 'success' }}
+    needs: [preflight, full-ci, full-release-gate, performance, platform-qualification, release-authority, dry-run]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      final_artifact_id: ${{ steps.qualification_artifact.outputs.artifact-id }}
+      final_artifact_digest: ${{ format('sha256:{0}', steps.qualification_artifact.outputs.artifact-digest) }}
+      candidate_tree: ${{ steps.finalize.outputs.candidate_tree }}
+      target_version: ${{ needs.preflight.outputs.target_version }}
+      release_tag: ${{ needs.preflight.outputs.release_tag }}
+      created_at: ${{ needs.preflight.outputs.created_at }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Gate exact GitHub CLI security baseline for Qualification finalization
+        uses: ./.github/actions/setup-pinned-gh-cli
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r release/requirements.lock
+      - name: Verify the provisional Candidate transaction and finalize Qualification v3
+        id: finalize
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          PLATFORM_ARTIFACT_ID: ${{ needs.platform-qualification.outputs.artifact_id }}
+          PLATFORM_ARTIFACT_DIGEST: ${{ needs.platform-qualification.outputs.artifact_digest }}
+          PROVISIONAL_ARTIFACT_ID: ${{ needs.dry-run.outputs.provisional_artifact_id }}
+          PROVISIONAL_ARTIFACT_DIGEST: ${{ needs.dry-run.outputs.provisional_artifact_digest }}
+          CANDIDATE_PRODUCTION_RECEIPT_SHA256: ${{ needs.dry-run.outputs.candidate_production_receipt_sha256 }}
+          TARGET_VERSION: ${{ needs.preflight.outputs.target_version }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+          CREATED_AT: ${{ needs.preflight.outputs.created_at }}
+          UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}
+          CHANNEL: ${{ inputs.channel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PLATFORM_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PLATFORM_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$PROVISIONAL_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PROVISIONAL_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$CANDIDATE_PRODUCTION_RECEIPT_SHA256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          candidate_tree="$(git rev-parse "$CANDIDATE_SHA^{tree}")"
+          test "$CANDIDATE_SHA" = "$GITHUB_SHA"
+          test "$GITHUB_WORKFLOW_SHA" = "$CANDIDATE_SHA"
+          artifacts_metadata="$RUNNER_TEMP/qualification-artifacts.json"
+          provisional_archive="$RUNNER_TEMP/candidate-materials.zip"
+          finalizer_request="$RUNNER_TEMP/qualification-finalizer-request.json"
+          final_output="$RUNNER_TEMP/release-qualification-final"
+          test ! -e "$final_output"
+          gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+            > "$artifacts_metadata"
+          jq -e --argjson id "$PROVISIONAL_ARTIFACT_ID" \
+            '[.artifacts[] | select(.id == $id)] | length == 1' \
+            "$artifacts_metadata" >/dev/null
+          gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${PROVISIONAL_ARTIFACT_ID}/zip" \
+            > "$provisional_archive"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow_name "$GITHUB_WORKFLOW" \
+            --arg workflow_path ".github/workflows/release.yml" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg workflow_sha "$GITHUB_WORKFLOW_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg event "$GITHUB_EVENT_NAME" \
+            --arg candidate_sha "$CANDIDATE_SHA" \
+            --arg candidate_tree "$candidate_tree" \
+            --arg upgrade_base_sha "$UPGRADE_BASE_SHA" \
+            --arg channel "$CHANNEL" \
+            --arg target_version "$TARGET_VERSION" \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg created_at "$CREATED_AT" \
+            --arg receipt_sha256 "$CANDIDATE_PRODUCTION_RECEIPT_SHA256" \
+            --argjson platform_id "$PLATFORM_ARTIFACT_ID" \
+            --arg platform_digest "$PLATFORM_ARTIFACT_DIGEST" \
+            --argjson provisional_id "$PROVISIONAL_ARTIFACT_ID" \
+            --arg provisional_digest "$PROVISIONAL_ARTIFACT_DIGEST" \
+            --argjson needs "$NEEDS_JSON" \
+            '{
+              repository: $repository,
+              workflow: {
+                name: $workflow_name,
+                path: $workflow_path,
+                ref: $workflow_ref,
+                sha: $workflow_sha
+              },
+              run: {id: $run_id, attempt: $run_attempt, event: $event},
+              current_job_id: "qualification-finalizer",
+              required_result_jobs: [
+                "preflight",
+                "full-ci",
+                "full-release-gate",
+                "performance",
+                "platform-qualification",
+                "release-authority",
+                "dry-run"
+              ],
+              needs: $needs,
+              candidate_sha: $candidate_sha,
+              candidate_tree: $candidate_tree,
+              upgrade_base_sha: $upgrade_base_sha,
+              channel: $channel,
+              target_version: $target_version,
+              release_tag: $release_tag,
+              created_at: $created_at,
+              candidate_production_receipt_sha256: $receipt_sha256,
+              platform_artifact: {
+                id: $platform_id,
+                api_digest: $platform_digest
+              },
+              provisional_artifact: {
+                id: $provisional_id,
+                name: ("candidate-materials-" + $run_id),
+                api_digest: $provisional_digest
+              }
+            }' > "$finalizer_request"
+          python -m release.qualification_finalization finalize \
+            --request "$finalizer_request" \
+            --artifacts-metadata "$artifacts_metadata" \
+            --archive "$provisional_archive" \
+            --output "$final_output" \
+            > "$RUNNER_TEMP/qualification-finalization-result.json"
+          test "$(jq -er '.status' "$RUNNER_TEMP/qualification-finalization-result.json")" = "PASS"
+          test "$(jq -er '.candidateBytesRebuildCount' "$RUNNER_TEMP/qualification-finalization-result.json")" = "0"
+          test "$(find "$final_output" -maxdepth 1 -type f | wc -l)" = "15"
+          test -f "$final_output/candidate-production-receipt.json"
+          test -f "$final_output/candidate-input.json"
+          test -f "$final_output/release-qualification-${GITHUB_RUN_ID}.json"
+          test -d "$final_output/candidate-runtime"
+          test ! -e "$final_output/verified-candidate.json"
+          echo "candidate_tree=$candidate_tree" >> "$GITHUB_OUTPUT"
+      - name: Upload the sole final Qualification Artifact
         id: qualification_artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-qualification-${{ github.run_id }}
-          path: ${{ runner.temp }}/animemo-release-qualification-output/
+          path: ${{ runner.temp }}/release-qualification-final/
           if-no-files-found: error
           retention-days: 30
 
   controller-authority:
     name: controller-authority
-    if: ${{ always() && inputs.operation == 'qualify' && needs.dry-run.result == 'success' }}
-    needs: [dry-run]
+    if: ${{ always() && inputs.operation == 'qualify' && needs.qualification-finalizer.result == 'success' }}
+    needs: [qualification-finalizer]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -1515,47 +1757,99 @@ jobs:
       - name: Build the exact remote controller authority
         env:
           GH_TOKEN: ${{ github.token }}
-          QUALIFICATION_ARTIFACT_ID: ${{ needs.dry-run.outputs.artifact_id }}
-          QUALIFICATION_ARTIFACT_DIGEST: ${{ needs.dry-run.outputs.artifact_digest }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          QUALIFICATION_ARTIFACT_ID: ${{ needs.qualification-finalizer.outputs.final_artifact_id }}
+          QUALIFICATION_ARTIFACT_DIGEST: ${{ needs.qualification-finalizer.outputs.final_artifact_digest }}
+          CANDIDATE_TREE: ${{ needs.qualification-finalizer.outputs.candidate_tree }}
+          TARGET_VERSION: ${{ needs.qualification-finalizer.outputs.target_version }}
+          RELEASE_TAG: ${{ needs.qualification-finalizer.outputs.release_tag }}
+          CREATED_AT: ${{ needs.qualification-finalizer.outputs.created_at }}
+          UPGRADE_BASE_SHA: ${{ inputs.upgrade_base_sha }}
+          CHANNEL: ${{ inputs.channel }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$QUALIFICATION_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$QUALIFICATION_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          artifact_metadata="$(gh api --method GET \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${QUALIFICATION_ARTIFACT_ID}" \
-            --jq '[.id, .name, .expired, .size_in_bytes, .digest, .workflow_run.id, .workflow_run.head_sha] | @tsv')"
-          IFS=$'\t' read -r artifact_id artifact_name artifact_expired \
-            artifact_size artifact_digest artifact_run_id artifact_head_sha extra \
-            <<< "$artifact_metadata"
-          test -z "${extra:-}"
-          test "$artifact_id" = "$QUALIFICATION_ARTIFACT_ID"
-          test "$artifact_name" = "release-qualification-${GITHUB_RUN_ID}"
-          test "$artifact_expired" = "false"
-          [[ "$artifact_size" =~ ^[1-9][0-9]*$ ]]
-          test "$artifact_digest" = "$QUALIFICATION_ARTIFACT_DIGEST"
-          test "$artifact_run_id" = "$GITHUB_RUN_ID"
-          test "$artifact_head_sha" = "$GITHUB_SHA"
+          [[ "$CANDIDATE_TREE" =~ ^[0-9a-f]{40}$ ]]
+          artifacts_metadata="$RUNNER_TEMP/controller-artifacts.json"
+          qualification_archive="$RUNNER_TEMP/release-qualification.zip"
+          controller_request="$RUNNER_TEMP/controller-authority-request.json"
           gh api --method GET \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${QUALIFICATION_ARTIFACT_ID}/zip" |
-            python -m release.cli build-prepublication-controller-authority \
-              --archive-stdin --expected-archive-size "$artifact_size" \
-              --containing-artifact-id "$QUALIFICATION_ARTIFACT_ID" \
-              --containing-artifact-api-digest "$QUALIFICATION_ARTIFACT_DIGEST" \
-              --output controller-authority
-          test "$(find controller-authority -maxdepth 1 -type f | wc -l)" = "2"
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+            > "$artifacts_metadata"
+          jq -e --argjson id "$QUALIFICATION_ARTIFACT_ID" \
+            '[.artifacts[] | select(.id == $id)] | length == 1' \
+            "$artifacts_metadata" >/dev/null
+          gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${QUALIFICATION_ARTIFACT_ID}/zip" \
+            > "$qualification_archive"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow_name "$GITHUB_WORKFLOW" \
+            --arg workflow_path ".github/workflows/release.yml" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg workflow_sha "$GITHUB_WORKFLOW_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg event "$GITHUB_EVENT_NAME" \
+            --arg candidate_sha "$GITHUB_SHA" \
+            --arg candidate_tree "$CANDIDATE_TREE" \
+            --arg upgrade_base_sha "$UPGRADE_BASE_SHA" \
+            --arg channel "$CHANNEL" \
+            --arg target_version "$TARGET_VERSION" \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg created_at "$CREATED_AT" \
+            --argjson final_id "$QUALIFICATION_ARTIFACT_ID" \
+            --arg final_digest "$QUALIFICATION_ARTIFACT_DIGEST" \
+            --argjson needs "$NEEDS_JSON" \
+            '{
+              repository: $repository,
+              workflow: {
+                name: $workflow_name,
+                path: $workflow_path,
+                ref: $workflow_ref,
+                sha: $workflow_sha
+              },
+              run: {id: $run_id, attempt: $run_attempt, event: $event},
+              current_job_id: "controller-authority",
+              required_result_jobs: ["qualification-finalizer"],
+              needs: $needs,
+              candidate_sha: $candidate_sha,
+              candidate_tree: $candidate_tree,
+              upgrade_base_sha: $upgrade_base_sha,
+              channel: $channel,
+              target_version: $target_version,
+              release_tag: $release_tag,
+              created_at: $created_at,
+              final_artifact: {
+                id: $final_id,
+                name: ("release-qualification-" + $run_id),
+                api_digest: $final_digest
+              }
+            }' > "$controller_request"
+          cd "$RUNNER_TEMP"
+          PYTHONPATH="$GITHUB_WORKSPACE" \
+            python -m release.qualification_finalization verify \
+              --request "$controller_request" \
+              --artifacts-metadata "$artifacts_metadata" \
+              --archive "$qualification_archive" \
+              --output controller-authority \
+              > controller-authority-result.json
+          test "$(find controller-authority -maxdepth 1 -type f | wc -l)" = "3"
           test -f controller-authority/candidate-input.json
           test -f controller-authority/verified-candidate.json
+          test -f controller-authority/controller-authority.json
           test ! -e controller-authority/candidate-runtime
       - name: Upload the small remote controller authority
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: controller-authority-${{ github.run_id }}
-          path: controller-authority/
+          path: ${{ runner.temp }}/controller-authority/
           if-no-files-found: error
           retention-days: 30
 
@@ -1606,8 +1900,8 @@ jobs:
           actual_files="$(find validated-release-input -maxdepth 1 -type f \
             -printf '%f\n' | LC_ALL=C sort)"
           test "$actual_files" = "$expected_files"
-          expected_directories="$(printf '%s\n' qualification-authority \
-            verified-candidate-state | LC_ALL=C sort)"
+          expected_directories="$(printf '%s\n' metadata-freshness-qualification \
+            qualification-authority verified-candidate-state | LC_ALL=C sort)"
           actual_directories="$(find validated-release-input -mindepth 1 \
             -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort)"
           test "$actual_directories" = "$expected_directories"
@@ -1633,7 +1927,7 @@ jobs:
             --expected-candidate-tree-sha "$candidate_tree"
           python -m release.cli verify-metadata-freshness \
             --artifact-directory validated-metadata-freshness \
-            --qualification-directory validated-release-input \
+            --qualification-directory validated-release-input/metadata-freshness-qualification \
             --expected-workflow-run-id "${{ inputs.metadata_freshness_run_id }}" \
             --expected-candidate-sha "$GITHUB_SHA" \
             --expected-candidate-tree "$candidate_tree" \
@@ -1773,7 +2067,7 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = "${{ needs.metadata-freshness-authority.outputs.candidate_tree }}"
           python -m release.cli verify-metadata-freshness \
             --artifact-directory validated-metadata-freshness \
-            --qualification-directory validated-release-input \
+            --qualification-directory validated-release-input/metadata-freshness-qualification \
             --expected-workflow-run-id "${{ inputs.metadata_freshness_run_id }}" \
             --expected-candidate-sha "$GITHUB_SHA" \
             --expected-candidate-tree "${{ needs.metadata-freshness-authority.outputs.candidate_tree }}" \
@@ -1865,18 +2159,72 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
           PORTABLE_ASSET="animemo-$RELEASE_TAG-portable.tar"
+          qualification_source="release-output/release-qualification.json"
+          test -f "$qualification_source" && test ! -L "$qualification_source"
+          qualification_bytes_sha256="$(sha256sum "$qualification_source" \
+            | awk '{print $1}')"
+          publication_qualification="$(mktemp "$RUNNER_TEMP/publication-qualification-compat.XXXXXX.json")"
+          cleanup_publication_qualification() {
+            rm -f -- "$publication_qualification"
+          }
+          trap cleanup_publication_qualification EXIT
+          qualification_identity="$(
+            python - "$qualification_source" "$publication_qualification" <<'PY'
+          import json
+          import stat
+          import sys
+          from pathlib import Path
+
+          from scripts.release_qualification import validate_qualification_evidence
+
+          source_path = Path(sys.argv[1])
+          destination = Path(sys.argv[2])
+          source = json.loads(source_path.read_bytes())
+          qualification = validate_qualification_evidence(source)
+          if qualification["schema"] != "animemo.release-qualification/v3":
+              raise SystemExit("unsupported publication Qualification schema")
+          qualification_identity = qualification["qualification_sha256"]
+          compatibility = dict(qualification)
+          compatibility.pop("qualification_sha256")
+          compatibility["artifact_sha256"] = qualification_identity
+          expected_keys = (
+              set(qualification) - {"qualification_sha256"}
+          ) | {"artifact_sha256"}
+          if set(compatibility) != expected_keys:
+              raise SystemExit("publication Qualification projection differs")
+          destination_stat = destination.lstat()
+          if not stat.S_ISREG(destination_stat.st_mode) or destination_stat.st_nlink != 1:
+              raise SystemExit("publication Qualification projection is unsafe")
+          destination.write_bytes(
+              (json.dumps(compatibility, sort_keys=True, separators=(",", ":")) + "\n").encode(
+                  "utf-8"
+              )
+          )
+          print(qualification_identity)
+          PY
+          )"
           python -m release.cli plan-publication-files \
             --repository "$GITHUB_REPOSITORY" \
             --channel "${{ inputs.channel }}" \
             --tag "$RELEASE_TAG" --commit "$GITHUB_SHA" \
-            --qualification release-output/release-qualification.json \
+            --qualification "$publication_qualification" \
             --release-notes release-output/release-notes.json \
             --release-notes-markdown release-output/release-notes.md \
             --asset-directory release-output \
             --portable "release-output/$PORTABLE_ASSET" \
             --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
             --output release-output/publication-plan.json
+          cleanup_publication_qualification
+          test ! -e "$publication_qualification" && test ! -L "$publication_qualification"
+          trap - EXIT
+          test "$(sha256sum "$qualification_source" | awk '{print $1}')" = \
+            "$qualification_bytes_sha256"
+          test "$(jq -er '.qualification_sha256' "$qualification_source")" = \
+            "$qualification_identity"
+          test "$(jq -er '.qualification_identity' \
+            release-output/publication-plan.json)" = "$qualification_identity"
           OPERATION=portable python -m scripts.release_authority \
             > release-output/portable-pipeline-authority.json
           test "$(jq -r '.external_mutation_mode' release-output/publication-plan.json)" = "PLAN_ONLY"

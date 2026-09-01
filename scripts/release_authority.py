@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import stat
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -20,9 +23,12 @@ from release.publication import (
 
 _PORTABLE_PUBLICATION_PLAN = Path("release-output/publication-plan.json")
 _PORTABLE_BUILD_RECEIPT = Path("release-output/portable-build-receipt.json")
+_FIXED_QUALIFICATION_ARTIFACT = "qualification-evidence.json"
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 try:
     from scripts.release_qualification import (
+        MAX_QUALIFICATION_ARTIFACT_BYTES,
         QualificationError,
         build_qualification_evidence,
         read_qualification_evidence,
@@ -30,6 +36,7 @@ try:
     )
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from release_qualification import (
+        MAX_QUALIFICATION_ARTIFACT_BYTES,
         QualificationError,
         build_qualification_evidence,
         read_qualification_evidence,
@@ -39,6 +46,66 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
 
 class ReleaseAuthorityError(ValueError):
     pass
+
+
+def _read_fixed_qualification_artifact(expected_sha256: str) -> bytes:
+    """Read the fixed Phase B input once, without following a final symlink."""
+
+    if type(expected_sha256) is not str or not _SHA256.fullmatch(expected_sha256):
+        raise ReleaseAuthorityError("qualification evidence digest is invalid")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(_FIXED_QUALIFICATION_ARTIFACT, flags)
+    except OSError as error:
+        raise ReleaseAuthorityError("qualification evidence input is unavailable") from error
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > MAX_QUALIFICATION_ARTIFACT_BYTES
+        ):
+            raise ReleaseAuthorityError("qualification evidence file authority is invalid")
+        chunks: list[bytes] = []
+        remaining = MAX_QUALIFICATION_ARTIFACT_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    value = b"".join(chunks)
+    if (
+        not stat.S_ISREG(after.st_mode)
+        or after.st_nlink != 1
+        or len(value) != before.st_size
+        or len(value) > MAX_QUALIFICATION_ARTIFACT_BYTES
+        or (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+    ):
+        raise ReleaseAuthorityError("qualification evidence changed while being read")
+    actual_sha256 = "sha256:" + hashlib.sha256(value).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ReleaseAuthorityError("qualification evidence digest mismatch")
+    return value
 
 
 def validate_portable_pipeline_authority(
@@ -138,16 +205,20 @@ def validate_phase_a_authority(
             run_id=str(identity["run_id"]),
             run_attempt=int(identity["run_attempt"]),
             candidate_sha=str(identity["candidate_sha"]),
+            candidate_tree=str(identity["candidate_tree"]),
             upgrade_base_sha=str(identity["upgrade_base_sha"]),
             channel=channel,
             target_version=str(identity["target_version"]),
             release_tag=str(identity["release_tag"]),
             needs=needs,
+            current_job_id=str(identity["current_job_id"]),
+            candidate_production_receipt_sha256=str(
+                identity["candidate_production_receipt_sha256"]
+            ),
+            producer_job_observation=identity["producer_job_observation"],
+            provisional_artifact=identity["provisional_artifact"],
             created_at=str(identity.get("created_at", "1970-01-01T00:00:00Z")),
-            qualification_results=identity.get("qualification_results"),
             event=str(identity.get("event", "workflow_dispatch")),
-            status=str(identity.get("status", "completed")),
-            conclusion=str(identity.get("conclusion", "success")),
             release_notes_identity=identity.get("release_notes_identity"),
             release_notes_markdown_sha256=identity.get(
                 "release_notes_markdown_sha256"
@@ -245,6 +316,51 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = validate_portable_pipeline_authority(plan, receipt)
         print(json.dumps(result, sort_keys=True))
         return 0
+    if operation == "produce":
+        from release.materials import build_candidate_production_receipt
+
+        root = Path("release-qualification")
+        identity = {
+            "repository": os.getenv("GITHUB_REPOSITORY", "yanyuhanyue/AniMemo"),
+            "workflow_ref": os.getenv("WORKFLOW_REF", os.getenv("GITHUB_WORKFLOW_REF", "")),
+            "workflow_sha": os.getenv("WORKFLOW_SHA", os.getenv("GITHUB_SHA", "")),
+            "run_id": os.getenv("RUN_ID", os.getenv("GITHUB_RUN_ID", "")),
+            "run_attempt": int(
+                os.getenv("RUN_ATTEMPT", os.getenv("GITHUB_RUN_ATTEMPT", "1"))
+            ),
+            "event": os.getenv(
+                "EVENT_NAME", os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+            ),
+            "candidate_sha": os.getenv("CANDIDATE_SHA", ""),
+            "candidate_tree": os.getenv("CANDIDATE_TREE", ""),
+            "target_version": os.getenv("TARGET_VERSION", ""),
+            "release_tag": os.getenv("RELEASE_TAG", ""),
+            "channel": os.getenv("CHANNEL", ""),
+        }
+        receipt = build_candidate_production_receipt(root=root, identity=identity)
+        encoded = (
+            json.dumps(
+                receipt,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        path = root / "candidate-production-receipt.json"
+        path.write_bytes(encoded)
+        print(
+            json.dumps(
+                {
+                    "operation": "produce",
+                    "receipt_path": path.as_posix(),
+                    "schema": receipt.get("schema"),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     channel = os.getenv("CHANNEL", "")
     raw_needs = os.getenv("NEEDS_JSON", "")
     try:
@@ -260,16 +376,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "run_id": os.getenv("RUN_ID", os.getenv("GITHUB_RUN_ID", "")),
             "run_attempt": os.getenv("RUN_ATTEMPT", os.getenv("GITHUB_RUN_ATTEMPT", "1")),
             "candidate_sha": os.getenv("CANDIDATE_SHA", ""),
+            "candidate_tree": os.getenv("CANDIDATE_TREE", ""),
             "upgrade_base_sha": os.getenv("UPGRADE_BASE_SHA", ""),
             "target_version": os.getenv("TARGET_VERSION", ""),
             "release_tag": os.getenv("RELEASE_TAG", ""),
             "created_at": os.getenv("CREATED_AT", "1970-01-01T00:00:00Z"),
-            "qualification_results": (
-                json.loads(os.getenv("QUALIFICATION_RESULTS_JSON", "{}"))
-                if os.getenv("QUALIFICATION_RESULTS_JSON", "")
-                else None
-            ),
-            "emit_evidence": bool(os.getenv("QUALIFICATION_ARTIFACT_PATH", "")),
+            "emit_evidence": False,
             "event": os.getenv("EVENT_NAME", os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")),
             "release_notes_identity": os.getenv("RELEASE_NOTES_IDENTITY", "") or None,
             "release_notes_markdown_sha256": os.getenv(
@@ -278,17 +390,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             or None,
         }
         result = validate_phase_a_authority(channel, needs, identity=identity)
-        artifact_path = os.getenv("QUALIFICATION_ARTIFACT_PATH", "")
-        if artifact_path:
-            Path(artifact_path).write_text(
-                json.dumps(result["evidence"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
     elif operation == "publish":
-        artifact_path = os.getenv("QUALIFICATION_ARTIFACT_PATH", "")
-        if not artifact_path:
-            raise ReleaseAuthorityError("QUALIFICATION_ARTIFACT_PATH is required for publish")
-        qualification = read_qualification_evidence(Path(artifact_path))
+        qualification = read_qualification_evidence(
+            _read_fixed_qualification_artifact(
+                os.getenv("QUALIFICATION_EVIDENCE_SHA256", "")
+            )
+        )
         expected = {
             "qualification_run_id": os.getenv("QUALIFICATION_RUN_ID", ""),
             "candidate_sha": os.getenv("CANDIDATE_SHA", ""),

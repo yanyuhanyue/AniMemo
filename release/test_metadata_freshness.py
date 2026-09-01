@@ -12,6 +12,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from release.candidate import canonical_json_bytes, sha256_bytes
+from release.materials import (
+    MaterialContractError,
+    build_candidate_production_receipt,
+    extract_qualification_artifact,
+)
 from release.metadata_freshness import (
     ARTIFACT_FILES,
     WORKFLOW_PATH,
@@ -33,7 +38,10 @@ from release.release_notes_preflight import (
 from release.release_notes_preflight import (
     canonical_json_bytes as release_notes_json_bytes,
 )
-from scripts.release_qualification import REQUIRED_GATES, build_qualification_evidence
+from scripts.release_qualification import (
+    REQUIRED_RESULT_JOB_IDS,
+    build_qualification_evidence,
+)
 
 CANDIDATE = "e65f9beb0b5a19be2b4562206b38bb6d00adff7e"
 TREE = "b21598e5352654985a17146b3272775df0694fbe"
@@ -75,39 +83,75 @@ def _run_metadata(
 
 
 def _artifact_listing(
-    *, run_id: int, artifact_id: int, name: str, digest: str
+    *,
+    run_id: int,
+    artifact_id: int,
+    name: str,
+    digest: str,
+    include_controller: bool = False,
 ) -> dict[str, object]:
-    return {
-        "total_count": 1,
-        "artifacts": [
+    artifacts = [
+        {
+            "id": artifact_id,
+            "name": name,
+            "expired": False,
+            "digest": digest,
+            "archive_download_url": (
+                "https://api.github.com/repos/yanyuhanyue/AniMemo/"
+                f"actions/artifacts/{artifact_id}/zip"
+            ),
+            "workflow_run": {"id": run_id, "head_sha": CANDIDATE},
+        }
+    ]
+    if include_controller:
+        controller_id = artifact_id + 1
+        artifacts.append(
             {
-                "id": artifact_id,
-                "name": name,
+                "id": controller_id,
+                "name": f"controller-authority-{run_id}",
                 "expired": False,
-                "digest": digest,
+                "digest": "sha256:" + "f" * 64,
                 "archive_download_url": (
                     "https://api.github.com/repos/yanyuhanyue/AniMemo/"
-                    f"actions/artifacts/{artifact_id}/zip"
+                    f"actions/artifacts/{controller_id}/zip"
                 ),
                 "workflow_run": {"id": run_id, "head_sha": CANDIDATE},
             }
-        ],
-    }
+        )
+    return {"total_count": len(artifacts), "artifacts": artifacts}
 
 
 def _qualification_jobs() -> dict[str, object]:
     return {
-        "total_count": 2,
+        "total_count": 4,
         "jobs": [
             {
-                "name": "phase-a-qualification-evidence",
+                "name": "candidate-byte-producer",
                 "status": "completed",
                 "conclusion": "success",
+                "run_id": QUALIFICATION_RUN_ID,
+                "head_sha": CANDIDATE,
+            },
+            {
+                "name": "qualification-finalizer",
+                "status": "completed",
+                "conclusion": "success",
+                "run_id": QUALIFICATION_RUN_ID,
+                "head_sha": CANDIDATE,
+            },
+            {
+                "name": "controller-authority",
+                "status": "completed",
+                "conclusion": "success",
+                "run_id": QUALIFICATION_RUN_ID,
+                "head_sha": CANDIDATE,
             },
             {
                 "name": "publish-immutable-prerelease",
                 "status": "completed",
                 "conclusion": "skipped",
+                "run_id": QUALIFICATION_RUN_ID,
+                "head_sha": CANDIDATE,
             },
         ],
     }
@@ -203,13 +247,10 @@ class MetadataFreshnessTests(unittest.TestCase):
             },
             files=frozen_files,
         )
-        needs = {name: {"result": "success"} for name in REQUIRED_GATES}
-        needs.update(
-            {
-                "release-authority": {"result": "success"},
-                "dry-run": {"result": "success"},
-            }
-        )
+        needs = {
+            name: {"result": "success"} for name in REQUIRED_RESULT_JOB_IDS
+        }
+        provisional_digest = "sha256:" + "7" * 64
         evidence = build_qualification_evidence(
             workflow_ref=(
                 "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main"
@@ -218,11 +259,21 @@ class MetadataFreshnessTests(unittest.TestCase):
             run_id=str(QUALIFICATION_RUN_ID),
             run_attempt=1,
             candidate_sha=CANDIDATE,
+            candidate_tree=TREE,
             upgrade_base_sha=BASE,
             channel="rc",
             target_version="v1.1.0",
             release_tag="v1.1.0-rc.9",
             needs=needs,
+            current_job_id="qualification-finalizer",
+            candidate_production_receipt_sha256="sha256:" + "6" * 64,
+            producer_job_observation={"id": "dry-run", "result": "success"},
+            provisional_artifact={
+                "id": 7001,
+                "name": f"candidate-materials-{QUALIFICATION_RUN_ID}",
+                "api_digest": provisional_digest,
+                "archive_sha256": provisional_digest,
+            },
             release_notes_identity=self.notes["identity"],
             release_notes_markdown_sha256=(
                 "sha256:" + hashlib.sha256(markdown).hexdigest()
@@ -361,6 +412,129 @@ class MetadataFreshnessTests(unittest.TestCase):
         )
         return clock
 
+    def _build_full_qualification_archive(
+        self,
+        *,
+        wrong_receipt_binding: bool = False,
+        mutate_closed_member: bool = False,
+    ) -> tuple[Path, str]:
+        """Build the real final-archive shape consumed before ten-file projection."""
+
+        from release.test_candidate import candidate_input
+
+        staging = self.root / (
+            "full-qualification-"
+            + str(int(wrong_receipt_binding))
+            + "-"
+            + str(int(mutate_closed_member))
+        )
+        staging.mkdir()
+        evidence_name = f"release-qualification-{QUALIFICATION_RUN_ID}.json"
+        for source in self.qualification.iterdir():
+            if source.name != evidence_name:
+                shutil.copyfile(source, staging / source.name)
+        for name in (
+            "checksums.txt",
+            "release-manifest.json",
+            "release-producer-toolchain-receipt.json",
+        ):
+            (staging / name).write_bytes((name + "\n").encode())
+
+        candidate = candidate_input()
+        candidate["qualification_run_id"] = QUALIFICATION_RUN_ID
+        candidate["qualification_workflow_identity"]["sha"] = CANDIDATE
+        candidate["source_sha"] = CANDIDATE
+        candidate["source_tree"] = TREE
+        candidate["candidate_version"] = "v1.1.0-rc.9"
+        candidate["candidate_sequence"] = 9
+        for item in candidate["candidate_runtime_file_inventory"]:
+            target = staging / str(item["path"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"x")
+
+        receipt_identity = {
+            "repository": "yanyuhanyue/AniMemo",
+            "workflow_ref": (
+                "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main"
+            ),
+            "workflow_sha": CANDIDATE,
+            "run_id": str(QUALIFICATION_RUN_ID),
+            "run_attempt": 1,
+            "event": "workflow_dispatch",
+            "candidate_sha": CANDIDATE,
+            "candidate_tree": TREE,
+            "target_version": "v1.1.0",
+            "release_tag": "v1.1.0-rc.9",
+            "channel": "rc",
+        }
+        production_receipt = build_candidate_production_receipt(
+            root=staging,
+            identity=receipt_identity,
+        )
+        receipt_bytes = canonical_json_bytes(production_receipt)
+        (staging / "candidate-production-receipt.json").write_bytes(receipt_bytes)
+
+        needs = {
+            name: {"result": "success"} for name in REQUIRED_RESULT_JOB_IDS
+        }
+        provisional_digest = "sha256:" + "7" * 64
+        receipt_digest = sha256_bytes(receipt_bytes)
+        if wrong_receipt_binding:
+            receipt_digest = "sha256:" + "8" * 64
+        qualification = build_qualification_evidence(
+            workflow_ref=receipt_identity["workflow_ref"],
+            workflow_sha=CANDIDATE,
+            run_id=str(QUALIFICATION_RUN_ID),
+            run_attempt=1,
+            candidate_sha=CANDIDATE,
+            candidate_tree=TREE,
+            upgrade_base_sha=BASE,
+            channel="rc",
+            target_version="v1.1.0",
+            release_tag="v1.1.0-rc.9",
+            needs=needs,
+            current_job_id="qualification-finalizer",
+            candidate_production_receipt_sha256=receipt_digest,
+            producer_job_observation={"id": "dry-run", "result": "success"},
+            provisional_artifact={
+                "id": 7001,
+                "name": f"candidate-materials-{QUALIFICATION_RUN_ID}",
+                "api_digest": provisional_digest,
+                "archive_sha256": provisional_digest,
+            },
+            created_at="2026-08-23T12:00:00Z",
+            release_notes_identity=self.notes["identity"],
+            release_notes_markdown_sha256=sha256_bytes(
+                (staging / "release-notes.md").read_bytes()
+            ),
+        )
+        (staging / evidence_name).write_bytes(_json_bytes(qualification))
+        (staging / "candidate-input.json").write_bytes(canonical_json_bytes(candidate))
+        if mutate_closed_member:
+            (staging / "checksums.txt").write_bytes(b"changed-after-close\n")
+
+        archive_path = staging.with_suffix(".zip")
+        with zipfile.ZipFile(archive_path, mode="w") as archive:
+            for source in sorted(path for path in staging.rglob("*") if path.is_file()):
+                archive.write(source, arcname=source.relative_to(staging).as_posix())
+        return archive_path, sha256_bytes(archive_path.read_bytes())
+
+    def _project_freshness_inputs(self, extracted: Path, destination: Path) -> None:
+        destination.mkdir()
+        for name in (
+            f"release-qualification-{QUALIFICATION_RUN_ID}.json",
+            "platform-qualification.json",
+            "release-notes-input.json",
+            "release-notes.json",
+            "release-notes.md",
+            "release-notes-readback.json",
+            "release-notes-preflight.json",
+            "prepublication-materials.json",
+            "installer-materials.tar",
+            "deployment-contract.json",
+        ):
+            shutil.copyfile(extracted / name, destination / name)
+
     def test_module_has_no_live_pull_request_query_surface(self) -> None:
         source = (Path(__file__).with_name("metadata_freshness.py")).read_text(
             encoding="utf-8"
@@ -411,6 +585,69 @@ class MetadataFreshnessTests(unittest.TestCase):
                 "requests": [],
             },
         )
+
+    def test_full_final_archive_is_verified_before_ten_file_projection(self) -> None:
+        archive, digest = self._build_full_qualification_archive()
+        extracted = self.root / "full-extracted"
+        result = extract_qualification_artifact(
+            archive,
+            extracted,
+            qualification_run_id=QUALIFICATION_RUN_ID,
+            expected_sha256=digest,
+            require_candidate_contract=True,
+        )
+        self.assertEqual(result["status"], "PASS")
+        self.assertIn("candidate-production-receipt.json", {path.name for path in extracted.iterdir()})
+
+        projection = self.root / "freshness-projection"
+        self._project_freshness_inputs(extracted, projection)
+        self.assertEqual(len(list(projection.iterdir())), 10)
+        collect_metadata_freshness(
+            repository_root=self.repository,
+            qualification_directory=projection,
+            output_directory=self.output,
+            identity=self.identity,
+            candidate_acceptance_receipt=self.candidate_receipt,
+            clock=FakeClock(),
+        )
+        self.assertEqual({path.name for path in self.output.iterdir()}, ARTIFACT_FILES)
+
+    def test_full_archive_rejects_receipt_digest_and_closed_inventory_tampering(self) -> None:
+        for label, options in (
+            ("receipt binding", {"wrong_receipt_binding": True}),
+            ("closed inventory", {"mutate_closed_member": True}),
+        ):
+            archive, digest = self._build_full_qualification_archive(**options)
+            with self.subTest(label=label), self.assertRaises(MaterialContractError):
+                extract_qualification_artifact(
+                    archive,
+                    self.root / ("rejected-" + label.replace(" ", "-")),
+                    qualification_run_id=QUALIFICATION_RUN_ID,
+                    expected_sha256=digest,
+                    require_candidate_contract=True,
+                )
+
+    def test_projection_rejects_legacy_schema_and_embedded_future_run_state(self) -> None:
+        evidence_path = self.qualification / (
+            f"release-qualification-{QUALIFICATION_RUN_ID}.json"
+        )
+        original = json.loads(evidence_path.read_bytes())
+        cases = []
+        legacy = copy.deepcopy(original)
+        legacy["schema"] = "animemo.release-qualification/v2"
+        cases.append(legacy)
+        future_state = copy.deepcopy(original)
+        future_state["run"]["status"] = "completed"
+        future_state["run"]["conclusion"] = "success"
+        cases.append(future_state)
+        for evidence in cases:
+            with self.subTest(schema=evidence["schema"]):
+                evidence_path.write_bytes(_json_bytes(evidence))
+                with self.assertRaisesRegex(
+                    MetadataFreshnessError, "qualification evidence binding differs"
+                ):
+                    self._collect()
+        evidence_path.write_bytes(_json_bytes(original))
 
     def test_verifier_binds_the_single_frozen_preflight_authority(self) -> None:
         clock = FakeClock(advance_sleep=False)
@@ -635,6 +872,7 @@ class MetadataFreshnessTests(unittest.TestCase):
                 artifact_id=QUALIFICATION_ARTIFACT_ID,
                 name=f"release-qualification-{QUALIFICATION_RUN_ID}",
                 digest=qualification_digest,
+                include_controller=True,
             ),
             expected_run_id=QUALIFICATION_RUN_ID,
             expected_sha=CANDIDATE,
@@ -703,6 +941,7 @@ class MetadataFreshnessTests(unittest.TestCase):
             artifact_id=QUALIFICATION_ARTIFACT_ID,
             name=f"release-qualification-{QUALIFICATION_RUN_ID}",
             digest="sha256:" + "1" * 64,
+            include_controller=True,
         )
         cases: list[tuple[object, object, object]] = []
         wrong_workflow = copy.deepcopy(qualification_run)
@@ -711,18 +950,45 @@ class MetadataFreshnessTests(unittest.TestCase):
         failed_run = copy.deepcopy(qualification_run)
         failed_run["conclusion"] = "failure"
         cases.append((failed_run, _qualification_jobs(), qualification_artifacts))
-        failed_jobs = _qualification_jobs()
-        failed_jobs["jobs"][0]["conclusion"] = "failure"
-        cases.append((qualification_run, failed_jobs, qualification_artifacts))
+        in_progress_run = copy.deepcopy(qualification_run)
+        in_progress_run["status"] = "in_progress"
+        in_progress_run["conclusion"] = None
+        cases.append((in_progress_run, _qualification_jobs(), qualification_artifacts))
+        for index in range(4):
+            failed_jobs = _qualification_jobs()
+            failed_jobs["jobs"][index]["conclusion"] = "failure"
+            cases.append((qualification_run, failed_jobs, qualification_artifacts))
+            in_progress_jobs = _qualification_jobs()
+            in_progress_jobs["jobs"][index]["status"] = "in_progress"
+            in_progress_jobs["jobs"][index]["conclusion"] = None
+            cases.append((qualification_run, in_progress_jobs, qualification_artifacts))
+        duplicate_finalizer = _qualification_jobs()
+        duplicate_finalizer["jobs"].append(copy.deepcopy(duplicate_finalizer["jobs"][1]))
+        duplicate_finalizer["total_count"] += 1
+        cases.append((qualification_run, duplicate_finalizer, qualification_artifacts))
         wrong_head = copy.deepcopy(qualification_run)
         wrong_head["head_sha"] = "2" * 40
         cases.append((wrong_head, _qualification_jobs(), qualification_artifacts))
         expired = copy.deepcopy(qualification_artifacts)
         expired["artifacts"][0]["expired"] = True
         cases.append((qualification_run, _qualification_jobs(), expired))
+        malformed_digest = copy.deepcopy(qualification_artifacts)
+        malformed_digest["artifacts"][0]["digest"] = "sha256:not-a-digest"
+        cases.append((qualification_run, _qualification_jobs(), malformed_digest))
+        wrong_artifact_head = copy.deepcopy(qualification_artifacts)
+        wrong_artifact_head["artifacts"][0]["workflow_run"]["head_sha"] = "4" * 40
+        cases.append((qualification_run, _qualification_jobs(), wrong_artifact_head))
         duplicate = copy.deepcopy(qualification_artifacts)
         duplicate["artifacts"].append(copy.deepcopy(duplicate["artifacts"][0]))
         cases.append((qualification_run, _qualification_jobs(), duplicate))
+        missing_controller = copy.deepcopy(qualification_artifacts)
+        missing_controller["artifacts"] = [
+            artifact
+            for artifact in missing_controller["artifacts"]
+            if artifact["name"] != f"controller-authority-{QUALIFICATION_RUN_ID}"
+        ]
+        missing_controller["total_count"] = len(missing_controller["artifacts"])
+        cases.append((qualification_run, _qualification_jobs(), missing_controller))
         for run, jobs, artifacts in cases:
             with self.subTest(run=run, jobs=jobs, artifacts=artifacts), self.assertRaises(
                 MetadataFreshnessError

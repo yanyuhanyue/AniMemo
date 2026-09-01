@@ -348,8 +348,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             commands,
         )
 
-        self.assertEqual(len(invocations), 29)
-        self.assertEqual(len(package_modules), 23)
+        self.assertEqual(len(invocations), 28)
+        self.assertEqual(len(package_modules), 22)
         self.assertEqual(len(direct_scripts), 2)
         repository_families = {
             module
@@ -414,14 +414,28 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("trusted Linux CI must run the real Producer image test", producer_tests)
 
     def test_release_producer_binds_host_visible_output_staging(self):
+        release = workflow("release.yml")
         producer = (ROOT / "scripts" / "run-in-release-producer.sh").read_text(
             encoding="utf-8"
         )
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        qualification = source[
-            source.index("  dry-run:\n") : source.index("  publish:\n")
+        producer_source = source[
+            source.index("  dry-run:\n") : source.index(
+                "  qualification-finalizer:\n"
+            )
+        ]
+        producer_job = release["jobs"]["dry-run"]
+        receipt_step = next(
+            step
+            for step in producer_job["steps"]
+            if step.get("id") == "candidate_production_receipt"
+        )
+        uploads = [
+            step
+            for step in producer_job["steps"]
+            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
         ]
 
         self.assertIn(
@@ -443,20 +457,35 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             'dst=$GITHUB_WORKSPACE/release-qualification"',
             producer,
         )
-        self.assertIn(
-            '> "$RUNNER_TEMP/animemo-release-producer-output/'
-            'dry-run-authority-receipt.json"',
-            qualification,
+        self.assertEqual(receipt_step["env"]["OPERATION"], "produce")
+        authority_guard = (
+            'test "$ANIMEMO_CANDIDATE_BUILD_AUTHORITY" = \\'
+            + "\n"
+            + '  "AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER"'
         )
-        self.assertIn(
-            "path: ${{ runner.temp }}/animemo-release-producer-output/"
-            "dry-run-authority-receipt.json",
-            qualification,
+        self.assertEqual(receipt_step["run"].count(authority_guard), 1)
+        self.assertLess(
+            receipt_step["run"].index(authority_guard),
+            receipt_step["run"].index("bash scripts/run-in-release-producer.sh"),
         )
+        self.assertIn("export CANDIDATE_TREE", receipt_step["run"])
+        self.assertIn("python -m scripts.release_authority", receipt_step["run"])
         self.assertIn(
-            "path: ${{ runner.temp }}/animemo-release-qualification-output/",
-            qualification,
+            "release-qualification/candidate-production-receipt.json",
+            receipt_step["run"],
         )
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(
+            uploads[0]["with"],
+            {
+                "name": "candidate-materials-${{ github.run_id }}",
+                "path": "${{ runner.temp }}/animemo-release-qualification-output/",
+                "if-no-files-found": "error",
+                "retention-days": "3",
+            },
+        )
+        self.assertNotIn("release-qualification-${{ github.run_id }}", producer_source)
+        self.assertNotIn("candidate-input.json", producer_source)
 
     def test_release_producer_forwards_heredoc_stdin_into_the_container(self):
         producer = (ROOT / "scripts" / "run-in-release-producer.sh").read_text(
@@ -469,82 +498,160 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        qualification = source[source.index("  dry-run:\n") : source.index("  publish:\n")]
+        producer = source[
+            source.index("  dry-run:\n") : source.index(
+                "  qualification-finalizer:\n"
+            )
+        ]
+        finalizer = source[
+            source.index("  qualification-finalizer:\n") : source.index(
+                "  controller-authority:\n"
+            )
+        ]
+        producer_uploads = [
+            step
+            for step in release["jobs"]["dry-run"]["steps"]
+            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+        ]
+        finalizer_uploads = [
+            step
+            for step in release["jobs"]["qualification-finalizer"]["steps"]
+            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+        ]
 
         self.assertNotIn("qualification-evidence", release["jobs"])
-        self.assertEqual(qualification.count("Build API OCI artifact without publishing"), 1)
-        self.assertEqual(qualification.count("Build Web OCI artifact without publishing"), 1)
-        self.assertEqual(qualification.count("Build the digest-pinned release byte producer"), 1)
+        self.assertEqual(producer.count("Build API OCI artifact without publishing"), 1)
+        self.assertEqual(producer.count("Build Web OCI artifact without publishing"), 1)
+        self.assertEqual(producer.count("Build the digest-pinned release byte producer"), 1)
+        self.assertEqual(len(producer_uploads), 1)
         self.assertEqual(
-            qualification.count(
-                "path: ${{ runner.temp }}/animemo-release-qualification-output/"
-            ),
-            1,
+            producer_uploads[0]["with"]["name"],
+            "candidate-materials-${{ github.run_id }}",
         )
-        self.assertNotIn("path: release-output/\n", qualification)
-        self.assertIn(
-            "path: ${{ runner.temp }}/animemo-release-producer-output/"
-            "dry-run-authority-receipt.json",
-            qualification,
+        self.assertEqual(producer_uploads[0]["with"]["retention-days"], "3")
+        self.assertIn("candidate-production-receipt.json", producer)
+        self.assertNotIn("path: release-output/\n", producer)
+        self.assertNotIn("release-qualification-${{ github.run_id }}", producer)
+        self.assertEqual(len(finalizer_uploads), 1)
+        self.assertEqual(
+            finalizer_uploads[0]["with"]["name"],
+            "release-qualification-${{ github.run_id }}",
         )
-        self.assertIn('large_byte_payloads:[]', qualification)
-        self.assertNotIn("Rebuild the exact qualification byte producer", source)
+        self.assertEqual(finalizer_uploads[0]["with"]["retention-days"], "30")
+        self.assertIn("candidateBytesRebuildCount", finalizer)
+        self.assertNotIn("docker/build-push-action", finalizer)
+        self.assertNotIn("docker build", finalizer)
+        self.assertNotIn("generate-manifest", finalizer)
         self.assertNotIn("release-producer-toolchain-${{ github.run_id }}", source)
 
     def test_qualification_emits_exact_remote_controller_authority(self):
+        release = workflow("release.yml")
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        authority = source[
-            source.index("  dry-run:\n") : source.index("  publish:\n")
+        finalizer_source = source[
+            source.index("  qualification-finalizer:\n") : source.index(
+                "  controller-authority:\n"
+            )
         ]
-        controller = authority[
-            authority.index("- name: Build the exact remote controller authority") :
-            authority.index("- name: Upload the small remote controller authority")
+        controller_source = source[
+            source.index("  controller-authority:\n") : source.index(
+                "  publish:\n"
+            )
         ]
-        self.assertIn("build-prepublication-controller-authority", authority)
+        finalizer = release["jobs"]["qualification-finalizer"]
+        controller = release["jobs"]["controller-authority"]
+        expected_finalizer_needs = {
+            "preflight",
+            "full-ci",
+            "full-release-gate",
+            "performance",
+            "platform-qualification",
+            "release-authority",
+            "dry-run",
+        }
+
+        self.assertEqual(set(finalizer["needs"]), expected_finalizer_needs)
+        self.assertEqual(len(finalizer["needs"]), len(expected_finalizer_needs))
+        self.assertEqual(
+            finalizer["permissions"], {"actions": "read", "contents": "read"}
+        )
+        self.assertIn("actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100", finalizer_source)
         self.assertIn(
-            "QUALIFICATION_ARTIFACT_ID: "
-            "${{ needs.dry-run.outputs.artifact_id }}",
-            authority,
+            "actions/artifacts/${PROVISIONAL_ARTIFACT_ID}/zip",
+            finalizer_source,
+        )
+        self.assertIn("candidate_production_receipt_sha256", finalizer_source)
+        self.assertIn(
+            "Verify the provisional Candidate transaction and finalize Qualification v3",
+            finalizer_source,
+        )
+        self.assertIn("current_job_id: \"qualification-finalizer\"", finalizer_source)
+        self.assertIn("required_result_jobs:", finalizer_source)
+        self.assertIn("python -m release.qualification_finalization finalize", finalizer_source)
+        self.assertIn("candidate-input.json", finalizer_source)
+        self.assertIn("release-qualification-${GITHUB_RUN_ID}.json", finalizer_source)
+        self.assertIn("candidateBytesRebuildCount", finalizer_source)
+        for forbidden in (
+            "docker/build-push-action",
+            "docker build",
+            "build-installer-materials",
+            "generate-manifest",
+            "normalize-candidate-oci-layout",
+            "crane pull",
+        ):
+            self.assertNotIn(forbidden, finalizer_source)
+
+        final_uploads = [
+            step
+            for step in finalizer["steps"]
+            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+        ]
+        self.assertEqual(len(final_uploads), 1)
+        self.assertEqual(
+            final_uploads[0]["with"]["name"],
+            "release-qualification-${{ github.run_id }}",
+        )
+
+        self.assertEqual(controller["needs"], ["qualification-finalizer"])
+        self.assertEqual(
+            controller["permissions"], {"actions": "read", "contents": "read"}
         )
         self.assertIn(
-            "QUALIFICATION_ARTIFACT_DIGEST: "
-            "${{ needs.dry-run.outputs.artifact_digest }}",
-            authority,
+            "${{ needs.qualification-finalizer.outputs.final_artifact_id }}",
+            controller_source,
+        )
+        self.assertIn(
+            "${{ needs.qualification-finalizer.outputs.final_artifact_digest }}",
+            controller_source,
         )
         self.assertIn(
             '"repos/${GITHUB_REPOSITORY}/actions/artifacts/'
             '${QUALIFICATION_ARTIFACT_ID}/zip"',
-            authority,
+            controller_source,
         )
         self.assertIn(
             "name: Gate exact GitHub CLI security baseline for controller authority",
-            authority,
+            controller_source,
         )
-        self.assertIn(f"uses: {PINNED_GH_ACTION}", authority)
+        self.assertIn(f"uses: {PINNED_GH_ACTION}", controller_source)
         self.assertLess(
-            authority.index(
+            controller_source.index(
                 "name: Gate exact GitHub CLI security baseline for controller authority"
             ),
-            authority.index("- name: Build the exact remote controller authority"),
+            controller_source.index("- name: Build the exact remote controller authority"),
         )
-        self.assertIn("--archive-stdin", controller)
-        self.assertIn('--expected-archive-size "$artifact_size"', controller)
-        self.assertNotIn("--root", controller)
-        self.assertNotIn('> "$qualification_archive"', controller)
-        self.assertIn(".size_in_bytes", controller)
-        self.assertIn(".workflow_run.head_sha", controller)
-        self.assertIn("needs: [dry-run]", authority)
-        self.assertIn("actions: read", authority)
-        self.assertIn("candidate-input.json", authority)
-        self.assertIn("verified-candidate.json", authority)
+        self.assertIn("python -m release.qualification_finalization verify", controller_source)
+        self.assertIn("current_job_id: \"controller-authority\"", controller_source)
+        self.assertIn('required_result_jobs: ["qualification-finalizer"]', controller_source)
+        self.assertIn("candidate-input.json", controller_source)
+        self.assertIn("verified-candidate.json", controller_source)
         self.assertIn(
-            "name: controller-authority-${{ github.run_id }}", authority
+            "name: controller-authority-${{ github.run_id }}", controller_source
         )
-        self.assertIn("path: controller-authority/", authority)
-        self.assertEqual(authority.count("name: controller-authority-"), 1)
-        self.assertEqual(authority.count("path: controller-authority/"), 1)
+        self.assertIn("path: ${{ runner.temp }}/controller-authority/", controller_source)
+        self.assertEqual(controller_source.count("name: controller-authority-"), 1)
+        self.assertEqual(controller_source.count("path: ${{ runner.temp }}/controller-authority/"), 1)
 
         for workflow_name, job_names in {
             "performance.yml": (
@@ -921,10 +1028,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("ASTRBOT_ROOT:", source)
 
     def test_qualification_evidence_paths_are_runner_scoped_and_validated(self):
+        release = workflow("release.yml")
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        publish = source[
+        phase_b_readback = source[
             source.index("      - name: Download and verify Phase A qualification evidence") :
             source.index("      - name: Stage the validated release input")
         ]
@@ -932,31 +1040,55 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             source.index("      - name: Stage the validated release input") :
             source.index("      - uses: actions/upload-artifact@", source.index("      - name: Stage the validated release input"))
         ]
+        finalizer = source[
+            source.index("  qualification-finalizer:\n") : source.index(
+                "  controller-authority:\n"
+            )
+        ]
 
         run_id_guard = '[[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]'
         evidence_path = (
             'evidence_file="$RUNNER_TEMP/qualification/'
             'release-qualification-$QUALIFICATION_RUN_ID.json"'
         )
-        authority_path = (
-            "QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/qualification/"
-            "release-qualification-${{ inputs.qualification_run_id }}.json"
-        )
+        authority_root = 'authority_root="$RUNNER_TEMP/phase-b-authority-input"'
         self.assertIn(
             "QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}",
             stage,
         )
-        self.assertIn(run_id_guard, publish)
-        self.assertIn(evidence_path, publish)
-        self.assertIn(authority_path, publish)
-        self.assertLess(publish.index(run_id_guard), publish.index(evidence_path))
-        self.assertLess(publish.index(evidence_path), publish.index(authority_path))
-        self.assertIn(
-            "QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/"
-            "release-qualification-${{ github.run_id }}.json",
-            source,
+        self.assertIn(run_id_guard, phase_b_readback)
+        self.assertIn(evidence_path, phase_b_readback)
+        self.assertIn(authority_root, phase_b_readback)
+        self.assertLess(
+            phase_b_readback.index(run_id_guard),
+            phase_b_readback.index(evidence_path),
         )
-        self.assertEqual(source.count("QUALIFICATION_ARTIFACT_PATH:"), 2)
+        self.assertLess(
+            phase_b_readback.index(evidence_path),
+            phase_b_readback.index(authority_root),
+        )
+        self.assertIn(
+            'final_output="$RUNNER_TEMP/release-qualification-final"',
+            finalizer,
+        )
+        self.assertIn(
+            'finalizer_request="$RUNNER_TEMP/qualification-finalizer-request.json"',
+            finalizer,
+        )
+        self.assertIn(
+            'test -f "$final_output/release-qualification-${GITHUB_RUN_ID}.json"',
+            finalizer,
+        )
+        final_upload = next(
+            step
+            for step in release["jobs"]["qualification-finalizer"]["steps"]
+            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+        )
+        self.assertEqual(
+            final_upload["with"]["path"],
+            "${{ runner.temp }}/release-qualification-final/",
+        )
+        self.assertEqual(source.count("QUALIFICATION_ARTIFACT_PATH:"), 0)
 
     def test_all_workflows_reject_duplicate_mapping_keys(self):
         for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
@@ -1277,6 +1409,52 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(authority["permissions"], {"contents": "read", "actions": "read"})
         self.assertIn("run_attempt=\"$(jq -r '.run_attempt // empty'", authority_source)
         self.assertIn('test "$run_attempt" = "1"', authority_source)
+
+    def test_phase_b_release_authority_opens_only_a_fixed_digest_bound_artifact(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        authority_source = (ROOT / "scripts" / "release_authority.py").read_text(
+            encoding="utf-8"
+        )
+        phase_b = source[
+            source.index("      - name: Enforce Phase B Release Producer authority") :
+            source.index("      - name: Stage the validated release input")
+        ]
+
+        for guard in (
+            (
+                'qualification_artifact="$RUNNER_TEMP/qualification/'
+                'release-qualification-$QUALIFICATION_RUN_ID.json"'
+            ),
+            'test ! -L "$RUNNER_TEMP/qualification"',
+            'test -f "$qualification_artifact"',
+            'test ! -L "$qualification_artifact"',
+            'test "$(stat --format=\'%h\' -- "$qualification_artifact")" = "1"',
+            "(( qualification_size <= 8 * 1024 * 1024 ))",
+            '.qualificationEvidenceSha256 | select(test(',
+            'authority_root="$RUNNER_TEMP/phase-b-authority-input"',
+            'test ! -e "$authority_root"',
+            'install -d -m 0700 -- "$authority_root"',
+            '"$authority_root/qualification-evidence.json"',
+            'cd "$authority_root"',
+            'PYTHONPATH="$GITHUB_WORKSPACE" python -m scripts.release_authority',
+        ):
+            self.assertIn(guard, phase_b)
+        self.assertNotIn("QUALIFICATION_ARTIFACT_PATH", authority_source)
+        self.assertNotIn("sys.stdin", authority_source)
+        self.assertIn(
+            "os.open(_FIXED_QUALIFICATION_ARTIFACT, flags)",
+            authority_source,
+        )
+        self.assertIn(
+            'getattr(os, "O_NOFOLLOW", 0)',
+            authority_source,
+        )
+        self.assertIn(
+            'os.getenv("QUALIFICATION_EVIDENCE_SHA256", "")',
+            authority_source,
+        )
 
     def test_phase_b_publish_scheduling_is_skip_safe_and_fail_closed(self):
         release = workflow("release.yml")
@@ -1694,6 +1872,106 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             stage,
         )
 
+    def test_publication_plan_adapts_validated_v3_identity_without_mutating_it(self):
+        release = workflow("release.yml")
+        publish_steps = release["jobs"]["publish"]["steps"]
+        plan_step = next(
+            step
+            for step in publish_steps
+            if step.get("name")
+            == "Generate the closed publication plan without mutation"
+        )
+        command = plan_step["run"]
+
+        for guard in (
+            'qualification_source="release-output/release-qualification.json"',
+            'test -f "$qualification_source" && test ! -L "$qualification_source"',
+            'qualification_bytes_sha256="$(sha256sum "$qualification_source"',
+            (
+                'publication_qualification="$(mktemp "$RUNNER_TEMP/'
+                'publication-qualification-compat.XXXXXX.json")"'
+            ),
+            (
+                "from scripts.release_qualification import "
+                "validate_qualification_evidence"
+            ),
+            "qualification = validate_qualification_evidence(source)",
+            'qualification["schema"] != "animemo.release-qualification/v3"',
+            'qualification_identity = qualification["qualification_sha256"]',
+            'compatibility.pop("qualification_sha256")',
+            'compatibility["artifact_sha256"] = qualification_identity',
+            'trap cleanup_publication_qualification EXIT',
+            '--qualification "$publication_qualification"',
+            'cleanup_publication_qualification\n',
+            'trap - EXIT',
+            (
+                'test ! -e "$publication_qualification" && '
+                'test ! -L "$publication_qualification"'
+            ),
+            'test "$(sha256sum "$qualification_source"',
+            (
+                'test "$(jq -er \'.qualification_sha256\' '
+                '"$qualification_source")" = \\'
+            ),
+            'test "$(jq -er \'.qualification_identity\' \\',
+            'release-output/publication-plan.json)" = "$qualification_identity"',
+        ):
+            self.assertIn(guard, command)
+        self.assertNotIn(
+            "--qualification release-output/release-qualification.json", command
+        )
+        self.assertNotIn(
+            "release-output/publication-qualification-compat", command
+        )
+        plan_position = command.index(
+            "python -m release.cli plan-publication-files"
+        )
+        cleanup_position = command.index(
+            "cleanup_publication_qualification\n", plan_position
+        )
+        absence_position = command.index(
+            'test ! -e "$publication_qualification"', cleanup_position
+        )
+        trap_clear_position = command.index("trap - EXIT", absence_position)
+        self.assertLess(plan_position, cleanup_position)
+        self.assertLess(cleanup_position, absence_position)
+        self.assertLess(absence_position, trap_clear_position)
+
+        publication_uploads = [
+            str(step.get("with", {}).get("path", ""))
+            for step in publish_steps
+            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+        ]
+        self.assertTrue(publication_uploads)
+        self.assertTrue(
+            all(
+                "publication-qualification-compat" not in path
+                for path in publication_uploads
+            )
+        )
+
+        production_call_sites: dict[str, int] = {}
+        production_paths = []
+        for production_root in (ROOT / ".github", ROOT / "release", ROOT / "scripts"):
+            production_paths.extend(
+                path
+                for path in production_root.rglob("*")
+                if path.is_file()
+                and path.suffix in {".py", ".sh", ".ps1", ".yml", ".yaml"}
+                and "tests" not in path.relative_to(ROOT).parts
+                and not path.name.startswith("test_")
+            )
+        for path in production_paths:
+            count = path.read_text(encoding="utf-8").count(
+                "release.cli plan-publication-files"
+            )
+            if count:
+                production_call_sites[path.relative_to(ROOT).as_posix()] = count
+        self.assertEqual(
+            production_call_sites,
+            {".github/workflows/release.yml": 1},
+        )
+
     def test_release_verifier_is_built_offline_from_a_pinned_go_toolchain(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
@@ -1868,6 +2146,17 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("qualification_workflow_ref", release_authority)
         self.assertIn("QUALIFICATION_WORKFLOW_SHA", release_authority)
         self.assertIn("extract-qualification-artifact", release_authority)
+        self.assertIn('"controller-authority-" + $id', release_authority)
+        self.assertIn("controller-authority.zip", release_authority)
+        self.assertIn(
+            "release.qualification_finalization phase-b", release_authority
+        )
+        self.assertIn(
+            '--verified-candidate-directory "$candidate_root"', release_authority
+        )
+        self.assertIn("phase-b-controller-verification.json", release_authority)
+        self.assertIn("for name in evidence.zip controller-authority.zip", release_authority)
+        self.assertIn("controller-artifact.json phase-b-controller-verification.json", release_authority)
         self.assertIn(
             '--expected-sha256 "$metadata_digest"', release_authority
         )
@@ -1890,9 +2179,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("GH_REQUIRED_VERSION", promotion)
         self.assertNotIn("GH_REQUIRED_LINUX_AMD64_SHA256", release)
         self.assertNotIn("GH_REQUIRED_LINUX_AMD64_SHA256", promotion)
-        self.assertEqual(release.count(gate), 4)
+        self.assertEqual(release.count(gate), 5)
         self.assertEqual(promotion.count(gate), 2)
-        self.assertEqual(release.count(f"uses: {PINNED_GH_ACTION}"), 4)
+        self.assertEqual(release.count(f"uses: {PINNED_GH_ACTION}"), 5)
         self.assertEqual(promotion.count(f"uses: {PINNED_GH_ACTION}"), 2)
 
     def test_pinned_github_cli_action_is_digest_bound_and_fail_closed(self):
@@ -2681,9 +2970,11 @@ cp "$FIXTURE_ARCHIVE" "$output"
         module = (ROOT / "release" / "metadata_freshness.py").read_text()
         for guard in (
             "QUALIFICATION_WORKFLOW_NAME = \"Release Producer\"",
-            'job.get("name") == "phase-a-qualification-evidence"',
-            'job.get("name") == "publish-immutable-prerelease"',
-            'job.get("conclusion") == "skipped"',
+            '("candidate-byte-producer", "success")',
+            '("qualification-finalizer", "success")',
+            '("controller-authority", "success")',
+            '("publish-immutable-prerelease", "skipped")',
+            'expected_name=f"controller-authority-{expected_run_id}"',
             "artifact.get(\"expired\") is not False",
             "fileCount",
         ):
@@ -2735,6 +3026,93 @@ cp "$FIXTURE_ARCHIVE" "$output"
         self.assertNotIn("pull-requests: read", source)
         self.assertNotIn("runtime_clock.sleep(MINIMUM_SNAPSHOT_INTERVAL_SECONDS)", module)
 
+    def test_release_uses_closed_metadata_freshness_qualification_projection(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        stage = source[
+            source.index("      - name: Stage the validated release input") : source.index(
+                "  metadata-freshness-authority:\n"
+            )
+        ]
+        expected_members = (
+            "release-qualification.json",
+            "platform-qualification.json",
+            "release-notes-input.json",
+            "release-notes.json",
+            "release-notes.md",
+            "release-notes-readback.json",
+            "release-notes-preflight.json",
+            "prepublication-materials.json",
+            "installer-materials.tar",
+            "deployment-contract.json",
+        )
+        member_match = re.search(
+            r"freshness_qualification_members=\(\n"
+            r"(?P<members>(?:\s+[a-z0-9.-]+\n)+)\s+\)",
+            stage,
+        )
+        self.assertIsNotNone(member_match)
+        assert member_match is not None
+        self.assertEqual(
+            tuple(line.strip() for line in member_match["members"].splitlines()),
+            expected_members,
+        )
+        for guard in (
+            (
+                'freshness_qualification="validated-release-input/'
+                'metadata-freshness-qualification"'
+            ),
+            (
+                'test ! -e "$freshness_qualification" && '
+                'test ! -L "$freshness_qualification"'
+            ),
+            'install -d -m 0700 "$freshness_qualification"',
+            'for name in "${freshness_qualification_members[@]}"; do',
+            'source="validated-release-input/$name"',
+            'test -f "$source" && test ! -L "$source"',
+            'install -m 0600 "$source" "$freshness_qualification/$name"',
+            'cmp "$source" "$freshness_qualification/$name"',
+            'actual_freshness_members="$(find "$freshness_qualification"',
+            "-mindepth 1 -maxdepth 1 -type f",
+            'unsafe_freshness_members="$(find "$freshness_qualification"',
+            "-mindepth 1 -maxdepth 1 ! -type f",
+            'test "$actual_freshness_members" = "$expected_freshness_members"',
+            'test -z "$unsafe_freshness_members"',
+        ):
+            self.assertIn(guard, stage)
+
+        qualification_arguments = [
+            line.strip().removesuffix("\\").rstrip()
+            for line in source.splitlines()
+            if "--qualification-directory validated-release-input" in line
+        ]
+        self.assertEqual(
+            qualification_arguments,
+            [
+                (
+                    "--qualification-directory validated-release-input/"
+                    "metadata-freshness-qualification"
+                )
+            ]
+            * 3,
+        )
+        self.assertNotIn(
+            "--qualification-directory validated-release-input \\", source
+        )
+
+        publish = source[source.index("  publish:\n") :]
+        directory_contract = publish[
+            publish.index('expected_directories="') : publish.index(
+                'candidate_state="'
+            )
+        ]
+        self.assertIn("metadata-freshness-qualification", directory_contract)
+        self.assertIn(
+            'test "$actual_directories" = "$expected_directories"',
+            directory_contract,
+        )
+
     def test_publish_authenticates_freshness_producer_bindings_and_ttl(self):
         release = workflow("release.yml")
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -2767,31 +3145,46 @@ cp "$FIXTURE_ARCHIVE" "$output"
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        dry_run = source[source.index("  dry-run:\n") : source.index("  publish:\n")]
-        qualification = dry_run
+        producer = source[
+            source.index("  dry-run:\n") : source.index(
+                "  qualification-finalizer:\n"
+            )
+        ]
+        finalizer = source[
+            source.index("  qualification-finalizer:\n") : source.index(
+                "  controller-authority:\n"
+            )
+        ]
         publish = source[source.index("  publish:\n") :]
-        self.assertEqual(dry_run.count("outputs: type=oci"), 2)
-        self.assertEqual(dry_run.count("normalize-candidate-oci-layout"), 4)
-        self.assertIn('local layout="$root/oci/$role"', dry_run)
-        self.assertIn('test ! -e "$layout" && test ! -L "$layout"', dry_run)
-        self.assertIn('crane pull "$reference" "$layout" --format=oci', dry_run)
-        self.assertIn('test -d "$layout" && test ! -L "$layout"', dry_run)
+        self.assertEqual(producer.count("outputs: type=oci"), 2)
+        self.assertEqual(producer.count("normalize-candidate-oci-layout"), 4)
+        self.assertIn('local layout="$root/oci/$role"', producer)
+        self.assertIn('test ! -e "$layout" && test ! -L "$layout"', producer)
+        self.assertIn('crane pull "$reference" "$layout" --format=oci', producer)
+        self.assertIn('test -d "$layout" && test ! -L "$layout"', producer)
         self.assertIn(
             'test -f "$layout/oci-layout" && test ! -L "$layout/oci-layout"',
-            dry_run,
+            producer,
         )
         self.assertIn(
             'test -f "$layout/index.json" && test ! -L "$layout/index.json"',
-            dry_run,
+            producer,
         )
-        self.assertIn('test -d "$layout/blobs" && test ! -L "$layout/blobs"', dry_run)
-        self.assertNotIn('local archive="$RUNNER_TEMP/$role.oci.tar"', dry_run)
-        self.assertNotIn("extract-candidate-oci-archive", dry_run)
-        self.assertIn("build-prepublication-candidate-input", qualification)
-        self.assertIn("PLATFORM_ARTIFACT_DIGEST", qualification)
-        self.assertIn("DRY_RUN_ARTIFACT_DIGEST", qualification)
-        self.assertIn("release-qualification/candidate-runtime", qualification)
-        self.assertNotIn(".dockerbuild", qualification)
+        self.assertIn(
+            'test -d "$layout/blobs" && test ! -L "$layout/blobs"', producer
+        )
+        self.assertNotIn('local archive="$RUNNER_TEMP/$role.oci.tar"', producer)
+        self.assertNotIn("extract-candidate-oci-archive", producer)
+        self.assertIn("release-qualification/candidate-runtime", producer)
+        self.assertIn("candidate-production-receipt.json", producer)
+        self.assertNotIn("candidate-input.json", producer)
+        self.assertIn("PLATFORM_ARTIFACT_DIGEST", finalizer)
+        self.assertIn("PROVISIONAL_ARTIFACT_DIGEST", finalizer)
+        self.assertIn("release.qualification_finalization finalize", finalizer)
+        self.assertIn("candidate-input.json", finalizer)
+        self.assertIn("candidateBytesRebuildCount", finalizer)
+        self.assertNotIn("DRY_RUN_ARTIFACT_DIGEST", source)
+        self.assertNotIn(".dockerbuild", producer + finalizer)
         self.assertEqual(source.count("--require-candidate-contract"), 1)
         freshness_source = (
             ROOT / ".github" / "workflows" / "release-metadata-freshness.yml"
@@ -2807,31 +3200,70 @@ cp "$FIXTURE_ARCHIVE" "$output"
 
     def test_qualification_producer_uses_only_explicit_run_authority(self):
         release = workflow("release.yml")
-        qualification_step = next(
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        producer_source = source[
+            source.index("  dry-run:\n") : source.index(
+                "  qualification-finalizer:\n"
+            )
+        ]
+        finalizer_source = source[
+            source.index("  qualification-finalizer:\n") : source.index(
+                "  controller-authority:\n"
+            )
+        ]
+        controller_source = source[
+            source.index("  controller-authority:\n") : source.index(
+                "  publish:\n"
+            )
+        ]
+        finalizer_step = next(
             step
-            for step in release["jobs"]["dry-run"]["steps"]
+            for step in release["jobs"]["qualification-finalizer"]["steps"]
             if step.get("name")
-            == "Generate qualification evidence from the single Candidate byte producer"
+            == "Verify the provisional Candidate transaction and finalize Qualification v3"
         )
-        qualification = qualification_step["run"]
+        qualification = finalizer_step["run"]
 
-        self.assertIn(
-            'install -m 0600 "$QUALIFICATION_ARTIFACT_PATH"', qualification
+        self.assertEqual(
+            finalizer_step["env"]["NEEDS_JSON"], "${{ toJSON(needs) }}"
         )
         self.assertIn(
-            '"release-qualification/release-qualification-${RUN_ID}.json"',
+            'run: {id: $run_id, attempt: $run_attempt, event: $event}',
             qualification,
         )
-        self.assertIn('--run-id "$RUN_ID"', qualification)
-        self.assertIn('--run-attempt "$RUN_ATTEMPT"', qualification)
-        self.assertIn('--qualification-run-id "$RUN_ID"', qualification)
-        self.assertIn('--qualification-run-attempt "$RUN_ATTEMPT"', qualification)
-        self.assertNotIn("$GITHUB_RUN_ID", qualification)
-        self.assertNotIn("$GITHUB_RUN_ATTEMPT", qualification)
-        self.assertEqual(qualification_step["env"]["RUN_ID"], "${{ github.run_id }}")
-        self.assertEqual(
-            qualification_step["env"]["RUN_ATTEMPT"], "${{ github.run_attempt }}"
+        self.assertIn('current_job_id: "qualification-finalizer"', qualification)
+        self.assertIn(
+            '"dry-run"',
+            qualification,
         )
+        self.assertIn('--arg run_id "$GITHUB_RUN_ID"', qualification)
+        self.assertIn('--argjson run_attempt "$GITHUB_RUN_ATTEMPT"', qualification)
+        self.assertIn('--argjson needs "$NEEDS_JSON"', qualification)
+        self.assertNotIn("needs.dry-run.result", producer_source)
+        self.assertNotIn("qualification-finalizer.result", finalizer_source)
+        self.assertNotIn("controller-authority.result", controller_source)
+        self.assertNotIn("QUALIFICATION_RESULTS_JSON", source)
+        for forbidden in (
+            'status: "completed"',
+            'conclusion: "success"',
+            '"status": "completed"',
+            '"conclusion": "success"',
+            "job.status",
+            "github.job.status",
+        ):
+            self.assertNotIn(
+                forbidden,
+                producer_source + finalizer_source + controller_source,
+            )
+        self.assertNotIn("release-qualification/v3", producer_source)
+        self.assertNotIn("candidate-input.json", producer_source)
+        self.assertNotIn(
+            "name: release-qualification-${{ github.run_id }}", producer_source
+        )
+        self.assertIn("needs.qualification-finalizer.result", controller_source)
+        self.assertIn('required_result_jobs: ["qualification-finalizer"]', controller_source)
 
     def test_publish_consumes_the_candidate_accepted_bytes_without_rebuilding(self):
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -2874,21 +3306,43 @@ cp "$FIXTURE_ARCHIVE" "$output"
             "steps.platform_artifact.outputs.artifact-digest) }}",
         )
         self.assertEqual(
-            release["jobs"]["dry-run"]["outputs"]["artifact_digest"],
+            release["jobs"]["dry-run"]["outputs"][
+                "provisional_artifact_digest"
+            ],
+            "${{ format('sha256:{0}', "
+            "steps.provisional_artifact.outputs.artifact-digest) }}",
+        )
+        self.assertEqual(
+            release["jobs"]["qualification-finalizer"]["outputs"][
+                "final_artifact_digest"
+            ],
             "${{ format('sha256:{0}', "
             "steps.qualification_artifact.outputs.artifact-digest) }}",
         )
         source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        qualification = source[source.index("  dry-run:\n") : source.index("  publish:\n")]
+        finalizer = source[
+            source.index("  qualification-finalizer:\n") : source.index(
+                "  controller-authority:\n"
+            )
+        ]
+        controller = source[
+            source.index("  controller-authority:\n") : source.index(
+                "  publish:\n"
+            )
+        ]
         self.assertIn(
             '[[ "$PLATFORM_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
-            qualification,
+            finalizer,
         )
         self.assertIn(
-            '[[ "$DRY_RUN_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
-            qualification,
+            '[[ "$PROVISIONAL_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
+            finalizer,
+        )
+        self.assertIn(
+            '[[ "$QUALIFICATION_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
+            controller,
         )
 
     def test_every_external_release_mutation_is_after_the_freshness_gate(self):
