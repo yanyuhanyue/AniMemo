@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -22,6 +23,7 @@ _CONTRACT_FIELDS = {
     "skipAuthorities",
     "requiredGateReachability",
     "candidateAuthority",
+    "completedResultBuilders",
 }
 _NEEDS_OUTPUT = re.compile(
     r"needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)"
@@ -33,6 +35,21 @@ _ARTIFACT_NEEDS_OUTPUT = re.compile(
     r"\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)\s*\}\}"
 )
 _GITHUB_EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
+_NEEDS_RESULT = re.compile(
+    r"needs(?:\.([A-Za-z0-9_-]+)|\[['\"]([A-Za-z0-9_-]+)['\"]\])\.result"
+)
+_FUTURE_AUTHORITY_ARGUMENTS = {
+    "status",
+    "conclusion",
+    "run_status",
+    "run_conclusion",
+    "job_status",
+    "job_conclusion",
+    "current_job_result",
+    "finalizer_result",
+    "controller_result",
+}
+_FUTURE_AUTHORITY_LITERALS = {"completed", "success"}
 
 
 class WorkflowDagError(ValueError):
@@ -182,6 +199,17 @@ def _validate_output_references(
                     raise WorkflowDagError(
                         "needs output has no reachable producer: "
                         f"{workflow_path}:{consumer} -> {producer}.{output}"
+                    )
+            for dotted, indexed in _NEEDS_RESULT.findall(text):
+                producer = dotted or indexed
+                if producer == consumer:
+                    raise WorkflowDagError(
+                        f"job reads its own needs result: {workflow_path}:{consumer}"
+                    )
+                if producer not in dependencies[consumer]:
+                    raise WorkflowDagError(
+                        "needs result has no direct producer: "
+                        f"{workflow_path}:{consumer} -> {producer}.result"
                     )
 
 
@@ -620,6 +648,9 @@ def _validate_candidate_authority(
         or not isinstance(forbidden, list)
         or not forbidden
         or any(not isinstance(item, str) or not item for item in forbidden)
+        or len(markers) != len(set(markers))
+        or len(forbidden) != len(set(forbidden))
+        or not set(markers).issubset(forbidden)
     ):
         raise WorkflowDagError("candidate authority marker inventory is invalid")
     producer_text = "\n".join(_strings(producer))
@@ -728,6 +759,171 @@ def _validate_candidate_authority(
         )
     return expected_producer, len(non_authoritative)
 
+
+def _builder_required_result_ids(
+    root: Path, module_path: object, constant_name: object
+) -> tuple[str, ...]:
+    if (
+        not isinstance(module_path, str)
+        or not module_path
+        or Path(module_path).is_absolute()
+        or "\\" in module_path
+        or any(part in {"", ".", ".."} for part in module_path.split("/"))
+        or not module_path.endswith(".py")
+    ):
+        raise WorkflowDagError("completed result builder module path is invalid")
+    if (
+        not isinstance(constant_name, str)
+        or not re.fullmatch(r"[A-Z][A-Z0-9_]*", constant_name)
+    ):
+        raise WorkflowDagError("completed result builder constant name is invalid")
+    source_path = root.joinpath(*module_path.split("/"))
+    try:
+        source = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=module_path)
+    except (OSError, UnicodeError, SyntaxError) as error:
+        raise WorkflowDagError(
+            f"completed result builder module is unreadable: {module_path}"
+        ) from error
+
+    definitions: list[ast.expr] = []
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == constant_name
+            for target in statement.targets
+        ) or (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == constant_name
+            and statement.value is not None
+        ):
+            definitions.append(statement.value)
+    if len(definitions) != 1:
+        raise WorkflowDagError(
+            "completed result builder must define exactly one required-results constant"
+        )
+    try:
+        value = ast.literal_eval(definitions[0])
+    except (ValueError, TypeError, SyntaxError) as error:
+        raise WorkflowDagError(
+            "completed result builder required-results constant must be literal"
+        ) from error
+    if (
+        not isinstance(value, tuple)
+        or not value
+        or any(not isinstance(item, str) or not item for item in value)
+        or len(value) != len(set(value))
+    ):
+        raise WorkflowDagError(
+            "completed result builder required-results constant is invalid"
+        )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        positional = [*node.args.posonlyargs, *node.args.args]
+        default_pairs = zip(positional[-len(node.args.defaults) :], node.args.defaults)
+        keyword_pairs = zip(node.args.kwonlyargs, node.args.kw_defaults)
+        for argument, default in [*default_pairs, *keyword_pairs]:
+            if (
+                default is not None
+                and argument.arg in _FUTURE_AUTHORITY_ARGUMENTS
+                and isinstance(default, ast.Constant)
+                and default.value in _FUTURE_AUTHORITY_LITERALS
+            ):
+                raise WorkflowDagError(
+                    "completed result builder hardcodes current or future authority: "
+                    f"{module_path}:{node.name}:{argument.arg}"
+                )
+    return value
+
+
+def _validate_completed_result_builders(
+    root: Path,
+    workflows: Mapping[str, Mapping[str, Any]],
+    dependencies: Mapping[str, Mapping[str, set[str]]],
+    contract: Mapping[str, Any],
+) -> tuple[int, int]:
+    records = _contract_records(
+        contract.get("completedResultBuilders"), label="completedResultBuilders"
+    )
+    builder_keys: set[tuple[str, str]] = set()
+    required_result_count = 0
+    for record in records:
+        if set(record) != {
+            "workflow",
+            "job",
+            "builderModule",
+            "requiredResultsConstant",
+            "requiredResults",
+        }:
+            raise WorkflowDagError(
+                "completed result builder has unknown or missing fields"
+            )
+        workflow, job_id, job = _job_from_contract(
+            workflows, record, label="completed result builder"
+        )
+        builder_key = (workflow, job_id)
+        if builder_key in builder_keys:
+            raise WorkflowDagError("completed result builder job must be unique")
+        builder_keys.add(builder_key)
+
+        required = record.get("requiredResults")
+        if (
+            not isinstance(required, list)
+            or not required
+            or any(not isinstance(item, str) or not item for item in required)
+            or len(required) != len(set(required))
+        ):
+            raise WorkflowDagError("completed result builder inventory is invalid")
+        source_required = _builder_required_result_ids(
+            root,
+            record.get("builderModule"),
+            record.get("requiredResultsConstant"),
+        )
+        if tuple(required) != source_required:
+            raise WorkflowDagError(
+                "completed result builder contract does not match source constant"
+            )
+
+        jobs = workflows[workflow]["jobs"]
+        assert isinstance(jobs, Mapping)
+        unknown = sorted(set(required) - set(jobs))
+        if unknown:
+            raise WorkflowDagError(
+                "completed result builder references unknown required job: "
+                f"{workflow}:{job_id} -> {', '.join(unknown)}"
+            )
+        if job_id in required:
+            raise WorkflowDagError(
+                f"completed result builder requires its own result: {workflow}:{job_id}"
+            )
+        direct_needs = dependencies[workflow][job_id]
+        non_direct = sorted(set(required) - direct_needs)
+        if non_direct:
+            raise WorkflowDagError(
+                "completed result builder result is not a direct need: "
+                f"{workflow}:{job_id} -> {', '.join(non_direct)}"
+            )
+
+        referenced_results = {
+            first or second
+            for text in _strings(job)
+            for first, second in _NEEDS_RESULT.findall(text)
+        }
+        if job_id in referenced_results:
+            raise WorkflowDagError(
+                f"job reads its own needs result: {workflow}:{job_id}"
+            )
+        unreachable_references = sorted(referenced_results - direct_needs)
+        if unreachable_references:
+            raise WorkflowDagError(
+                "job result reference is not a direct need: "
+                f"{workflow}:{job_id} -> {', '.join(unreachable_references)}"
+            )
+        required_result_count += len(required)
+    return len(records), required_result_count
+
 def validate_repository(
     root: Path, contract_path: Path | None = None
 ) -> dict[str, object]:
@@ -830,6 +1026,11 @@ def validate_repository(
     candidate_producer, non_authoritative_build_count = _validate_candidate_authority(
         workflows, contract
     )
+    completed_result_builder_count, completed_result_requirement_count = (
+        _validate_completed_result_builders(
+            root, workflows, dependency_graphs, contract
+        )
+    )
     return {
         "schemaVersion": "animemo.workflow-dag-validation-receipt/v1",
         "status": "PASS",
@@ -847,6 +1048,8 @@ def validate_repository(
         "unreachableGateCount": 0,
         "candidateAuthorityProducer": candidate_producer,
         "nonAuthoritativeBuildCount": non_authoritative_build_count,
+        "completedResultBuilderCount": completed_result_builder_count,
+        "completedResultRequirementCount": completed_result_requirement_count,
     }
 
 

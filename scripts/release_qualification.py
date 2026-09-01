@@ -1,9 +1,9 @@
-"""Strict qualification evidence for the two-phase Release Producer.
+"""Fail-closed Qualification v3 evidence for the two-phase Release Producer.
 
-Qualification is deliberately a small, self-contained contract.  The Phase A
-run creates one canonical JSON document after all required gates pass.  A later
-publish run may consume that document only after independently authenticating
-the originating workflow run and comparing every release identity field.
+The in-run Finalizer may attest only facts that already exist: completed direct
+``needs`` results, a closed Candidate Production Receipt, and an already
+uploaded provisional Artifact. The workflow run's completed/success state
+remains an external Phase B observation made after that run has ended.
 """
 
 from __future__ import annotations
@@ -16,12 +16,22 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-QUALIFICATION_SCHEMA = "animemo.release-qualification/v1"
-QUALIFICATION_SCHEMA_V2 = "animemo.release-qualification/v2"
+QUALIFICATION_SCHEMA = "animemo.release-qualification/v3"
 RELEASE_WORKFLOW_PATH = ".github/workflows/release.yml"
 RELEASE_WORKFLOW_NAME = "Release Producer"
 RELEASE_GRAPH_CONTRACT = "animemo.release-gate.jobs/v2"
 REPOSITORY = "yanyuhanyue/AniMemo"
+QUALIFICATION_FINALIZER_JOB_ID = "qualification-finalizer"
+PRODUCER_JOB_ID = "dry-run"
+REQUIRED_RESULT_JOB_IDS = (
+    "preflight",
+    "full-ci",
+    "full-release-gate",
+    "performance",
+    "platform-qualification",
+    "release-authority",
+    "dry-run",
+)
 REQUIRED_GATES = ("preflight", "full-ci", "full-release-gate", "performance")
 REQUIRED_QUALIFICATION_RESULTS = (
     "full_ci",
@@ -30,7 +40,6 @@ REQUIRED_QUALIFICATION_RESULTS = (
     "dr_rehearsal",
     "rc_performance",
     "release_authority",
-    "read_only_release_dry_run",
     "rc_stable_parity",
 )
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -74,6 +83,13 @@ def _sha(value: Any, label: str) -> str:
     return value
 
 
+def _digest(value: Any, label: str) -> str:
+    value = _text(value, label)
+    if not _DIGEST.fullmatch(value):
+        raise QualificationError(f"{label} must be a sha256 digest")
+    return value
+
+
 def _run_id(value: Any, label: str) -> str:
     value = _text(value, label)
     if not re.fullmatch(r"[1-9][0-9]*", value):
@@ -87,53 +103,90 @@ def _attempt(value: Any) -> int:
     return value
 
 
+def _artifact_id(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise QualificationError("provisional_artifact.id must be a positive integer")
+    return value
+
+
 def _require_exact_keys(value: Any, expected: set[str], label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or set(value) != expected:
         raise QualificationError(f"{label} has unknown or missing fields")
     return value
 
 
-def _normalize_gate_results(needs: Mapping[str, Any]) -> dict[str, str]:
+def _normalize_completed_results(
+    needs: Mapping[str, Any], *, channel: str, current_job_id: str
+) -> dict[str, str]:
+    current = _text(current_job_id, "current_job_id")
+    if current in REQUIRED_RESULT_JOB_IDS:
+        raise QualificationError("SelfResultReference: current job cannot be a required result")
+    if current != QUALIFICATION_FINALIZER_JOB_ID:
+        raise QualificationError("current qualification job identity mismatch")
+    if not isinstance(needs, Mapping) or set(needs) != set(REQUIRED_RESULT_JOB_IDS):
+        raise QualificationError("IncompleteUpstreamResult: needs has unknown or missing jobs")
+
     results: dict[str, str] = {}
-    for name in REQUIRED_GATES:
+    for name in REQUIRED_RESULT_JOB_IDS:
         item = needs.get(name)
         result = item.get("result") if isinstance(item, Mapping) else None
         if not isinstance(result, str):
-            raise QualificationError(f"gate result missing: {name}")
+            raise QualificationError(f"IncompleteUpstreamResult: result missing: {name}")
+        expected_result = "skipped" if name == "performance" and channel == "beta" else "success"
+        if result != expected_result:
+            raise QualificationError(f"upstream job {name} did not satisfy qualification policy")
         results[name] = result
     return results
 
 
-def _result(needs: Mapping[str, Any], name: str) -> str:
-    item = needs.get(name)
-    value = item.get("result") if isinstance(item, Mapping) else None
-    if not isinstance(value, str):
-        raise QualificationError(f"qualification result missing: {name}")
-    return value
-
-
-def _normalize_qualification_results(
-    needs: Mapping[str, Any], channel: str, supplied: Mapping[str, Any] | None
-) -> dict[str, str]:
-    if supplied is not None:
-        if not isinstance(supplied, Mapping) or set(supplied) != set(REQUIRED_QUALIFICATION_RESULTS):
-            raise QualificationError("qualification_results has unknown or missing fields")
-        return {name: _text(supplied[name], f"qualification_results.{name}") for name in REQUIRED_QUALIFICATION_RESULTS}
-
-    full_gate = _result(needs, "full-release-gate")
-    performance = _result(needs, "performance")
-    dry_run = _result(needs, "dry-run")
-    authority = _result(needs, "release-authority")
-    parity = dry_run if channel == "rc" else "skipped"
+def _qualification_results(results: Mapping[str, str], channel: str) -> dict[str, str]:
+    full_gate = results["full-release-gate"]
     return {
-        "full_ci": _result(needs, "full-ci"),
+        "full_ci": results["full-ci"],
         "full_release_gate": full_gate,
         "stateful_upgrade": full_gate,
         "dr_rehearsal": full_gate,
-        "rc_performance": performance,
-        "release_authority": authority,
-        "read_only_release_dry_run": dry_run,
-        "rc_stable_parity": parity,
+        "rc_performance": results["performance"],
+        "release_authority": results["release-authority"],
+        "rc_stable_parity": results[PRODUCER_JOB_ID] if channel == "rc" else "skipped",
+    }
+
+
+def _normalize_producer_observation(
+    value: Mapping[str, Any], results: Mapping[str, str]
+) -> dict[str, str]:
+    observation = _require_exact_keys(value, {"id", "result"}, "producer_job_observation")
+    job_id = _text(observation["id"], "producer_job_observation.id")
+    result = _text(observation["result"], "producer_job_observation.result")
+    if job_id != PRODUCER_JOB_ID or result != results[PRODUCER_JOB_ID]:
+        raise QualificationError("producer observation does not match downstream direct needs")
+    if result != "success":
+        raise QualificationError("producer job did not complete successfully")
+    return {"id": job_id, "result": result}
+
+
+def _normalize_provisional_artifact(
+    value: Mapping[str, Any], *, run_id: str
+) -> dict[str, Any]:
+    artifact = _require_exact_keys(
+        value,
+        {"id", "name", "api_digest", "archive_sha256"},
+        "provisional_artifact",
+    )
+    name = _text(artifact["name"], "provisional_artifact.name")
+    if name != f"candidate-materials-{run_id}":
+        raise QualificationError("provisional Artifact name mismatch")
+    api_digest = _digest(artifact["api_digest"], "provisional_artifact.api_digest")
+    archive_sha256 = _digest(
+        artifact["archive_sha256"], "provisional_artifact.archive_sha256"
+    )
+    if archive_sha256 != api_digest:
+        raise QualificationError("provisional Artifact archive digest mismatch")
+    return {
+        "id": _artifact_id(artifact["id"]),
+        "name": name,
+        "api_digest": api_digest,
+        "archive_sha256": archive_sha256,
     }
 
 
@@ -147,27 +200,33 @@ def build_qualification_evidence(
     run_id: str,
     run_attempt: int,
     candidate_sha: str,
+    candidate_tree: str,
     upgrade_base_sha: str,
     channel: str,
     target_version: str,
     release_tag: str,
     needs: Mapping[str, Any],
+    current_job_id: str,
+    candidate_production_receipt_sha256: str,
+    producer_job_observation: Mapping[str, Any],
+    provisional_artifact: Mapping[str, Any],
     created_at: str = "1970-01-01T00:00:00Z",
-    qualification_results: Mapping[str, Any] | None = None,
     event: str = "workflow_dispatch",
-    status: str = "completed",
-    conclusion: str = "success",
     release_graph_contract: str = RELEASE_GRAPH_CONTRACT,
     release_notes_identity: str | None = None,
     release_notes_markdown_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Build and validate a canonical Phase A qualification document."""
+    """Build Qualification v3 only from completed downstream-visible facts."""
 
-    if (release_notes_identity is None) != (release_notes_markdown_sha256 is None):
+    normalized_channel = _text(channel, "channel").lower()
+    run_identity = _run_id(run_id, "run.id")
+    results = _normalize_completed_results(
+        needs, channel=normalized_channel, current_job_id=current_job_id
+    )
+    if release_notes_identity is None or release_notes_markdown_sha256 is None:
         raise QualificationError("release note qualification binding must be complete")
-    schema = QUALIFICATION_SCHEMA_V2 if release_notes_identity is not None else QUALIFICATION_SCHEMA
     payload: dict[str, Any] = {
-        "schema": schema,
+        "schema": QUALIFICATION_SCHEMA,
         "repository": _text(repository, "repository"),
         "workflow": {
             "name": _text(workflow_name, "workflow.name"),
@@ -176,42 +235,52 @@ def build_qualification_evidence(
             "sha": _sha(workflow_sha, "workflow.sha"),
         },
         "run": {
-            "id": _run_id(run_id, "run.id"),
+            "id": run_identity,
             "attempt": _attempt(run_attempt),
             "event": _text(event, "run.event"),
-            "status": _text(status, "run.status"),
-            "conclusion": _text(conclusion, "run.conclusion"),
         },
         "candidate_sha": _sha(candidate_sha, "candidate_sha"),
+        "candidate_tree": _sha(candidate_tree, "candidate_tree"),
         "upgrade_base_sha": _sha(upgrade_base_sha, "upgrade_base_sha"),
-        "channel": _text(channel, "channel").lower(),
+        "channel": normalized_channel,
         "target_version": _text(target_version, "target_version"),
         "release_tag": _text(release_tag, "release_tag"),
         "release_graph_contract": _text(release_graph_contract, "release_graph_contract"),
-        "gate_results": _normalize_gate_results(needs),
+        "gate_results": {name: results[name] for name in REQUIRED_GATES},
+        "qualification_results": _qualification_results(results, normalized_channel),
+        "candidate_production_receipt_sha256": _digest(
+            candidate_production_receipt_sha256,
+            "candidate_production_receipt_sha256",
+        ),
+        "producer_job_observation": _normalize_producer_observation(
+            producer_job_observation, results
+        ),
+        "provisional_artifact": _normalize_provisional_artifact(
+            provisional_artifact, run_id=run_identity
+        ),
+        "local_finalization_result": "PASS",
+        "final_run_state_authority": "EXTERNAL_PHASE_B_REQUIRED",
+        "release_notes": {
+            "snapshot_identity": _digest(
+                release_notes_identity, "release_notes.snapshot_identity"
+            ),
+            "markdown_sha256": _digest(
+                release_notes_markdown_sha256, "release_notes.markdown_sha256"
+            ),
+        },
         "created_at": _text(created_at, "created_at"),
-        "qualification_results": _normalize_qualification_results(needs, channel, qualification_results),
     }
-    if release_notes_identity is not None:
-        if not _DIGEST.fullmatch(release_notes_identity) or not _DIGEST.fullmatch(
-            release_notes_markdown_sha256 or ""
-        ):
-            raise QualificationError("release note qualification identities are invalid")
-        payload["release_notes"] = {
-            "snapshot_identity": release_notes_identity,
-            "markdown_sha256": release_notes_markdown_sha256,
-        }
     return finalize_qualification_evidence(payload)
 
 
 def finalize_qualification_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Add the canonical checksum and validate the complete document."""
+    """Add the canonical Qualification checksum and validate the document."""
 
     unsigned = copy.deepcopy(dict(payload))
-    unsigned.pop("artifact_sha256", None)
+    unsigned.pop("qualification_sha256", None)
     validate_qualification_evidence(unsigned, require_checksum=False)
     result = dict(unsigned)
-    result["artifact_sha256"] = _checksum(unsigned)
+    result["qualification_sha256"] = _checksum(unsigned)
     validate_qualification_evidence(result)
     return result
 
@@ -222,7 +291,7 @@ def validate_qualification_evidence(
     require_checksum: bool = True,
     expected: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Validate strict schema, immutable identity, gate status, and checksum."""
+    """Validate the v3 closed schema and its external identity bindings."""
 
     required = {
         "schema",
@@ -230,49 +299,52 @@ def validate_qualification_evidence(
         "workflow",
         "run",
         "candidate_sha",
+        "candidate_tree",
         "upgrade_base_sha",
         "channel",
         "target_version",
         "release_tag",
         "release_graph_contract",
         "gate_results",
-        "created_at",
         "qualification_results",
-        "artifact_sha256",
+        "candidate_production_receipt_sha256",
+        "producer_job_observation",
+        "provisional_artifact",
+        "local_finalization_result",
+        "final_run_state_authority",
+        "release_notes",
+        "created_at",
+        "qualification_sha256",
     }
     if not isinstance(payload, Mapping):
         raise QualificationError("qualification evidence must be an object")
-    keys = set(payload)
-    schema = payload.get("schema")
-    if schema == QUALIFICATION_SCHEMA_V2:
-        required = required | {"release_notes"}
-    elif schema != QUALIFICATION_SCHEMA:
+    if payload.get("schema") != QUALIFICATION_SCHEMA:
         raise QualificationError("unsupported qualification schema")
+    keys = set(payload)
     if require_checksum:
         if keys != required:
             raise QualificationError("qualification evidence has unknown or missing fields")
-    elif keys - (required - {"artifact_sha256"}):
-        raise QualificationError("qualification evidence has unknown fields")
+    elif keys != required - {"qualification_sha256"}:
+        raise QualificationError("qualification evidence has unknown or missing fields")
 
     if payload.get("repository") != REPOSITORY:
         raise QualificationError("qualification repository mismatch")
-    workflow = _require_exact_keys(payload.get("workflow"), {"name", "path", "ref", "sha"}, "workflow")
+    workflow = _require_exact_keys(
+        payload.get("workflow"), {"name", "path", "ref", "sha"}, "workflow"
+    )
     if workflow["name"] != RELEASE_WORKFLOW_NAME or workflow["path"] != RELEASE_WORKFLOW_PATH:
         raise QualificationError("qualification workflow mismatch")
     _text(workflow["ref"], "workflow.ref")
     _sha(workflow["sha"], "workflow.sha")
 
-    run = _require_exact_keys(
-        payload.get("run"), {"id", "attempt", "event", "status", "conclusion"}, "run"
-    )
+    run = _require_exact_keys(payload.get("run"), {"id", "attempt", "event"}, "run")
     _run_id(run["id"], "run.id")
     _attempt(run["attempt"])
     if run["event"] != "workflow_dispatch":
         raise QualificationError("qualification run must use workflow_dispatch")
-    if run["status"] != "completed" or run["conclusion"] != "success":
-        raise QualificationError("qualification run must complete successfully")
 
     candidate = _sha(payload.get("candidate_sha"), "candidate_sha")
+    _sha(payload.get("candidate_tree"), "candidate_tree")
     base = _sha(payload.get("upgrade_base_sha"), "upgrade_base_sha")
     if candidate == base:
         raise QualificationError("candidate and upgrade base must differ")
@@ -291,80 +363,88 @@ def validate_qualification_evidence(
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", created_at):
         raise QualificationError("created_at must be an RFC3339 UTC timestamp")
 
-    gates = payload.get("gate_results")
-    if not isinstance(gates, Mapping) or set(gates) != set(REQUIRED_GATES):
-        raise QualificationError("gate_results has unknown or missing fields")
+    gates = _require_exact_keys(payload.get("gate_results"), set(REQUIRED_GATES), "gate_results")
     for name in REQUIRED_GATES:
-        result = gates[name]
-        if not isinstance(result, str):
-            raise QualificationError(f"gate result is invalid: {name}")
-        expected_result = "success" if name != "performance" or channel == "rc" else "skipped"
-        if result != expected_result:
+        expected_result = "skipped" if name == "performance" and channel == "beta" else "success"
+        if gates[name] != expected_result:
             raise QualificationError(f"gate {name} did not satisfy qualification policy")
 
-    qualification_results = payload.get("qualification_results")
-    if not isinstance(qualification_results, Mapping) or set(qualification_results) != set(
-        REQUIRED_QUALIFICATION_RESULTS
-    ):
-        raise QualificationError("qualification_results has unknown or missing fields")
+    qualification_results = _require_exact_keys(
+        payload.get("qualification_results"),
+        set(REQUIRED_QUALIFICATION_RESULTS),
+        "qualification_results",
+    )
     for name in REQUIRED_QUALIFICATION_RESULTS:
-        result = qualification_results[name]
-        expected_result = "success"
-        if name in {"rc_performance", "rc_stable_parity"} and channel == "beta":
-            expected_result = "skipped"
-        if result != expected_result:
+        expected_result = "skipped" if name in {"rc_performance", "rc_stable_parity"} and channel == "beta" else "success"
+        if qualification_results[name] != expected_result:
             raise QualificationError(f"qualification result {name} did not succeed")
 
-    if schema == QUALIFICATION_SCHEMA_V2:
-        notes = _require_exact_keys(
-            payload.get("release_notes"),
-            {"snapshot_identity", "markdown_sha256"},
-            "release_notes",
-        )
-        if not _DIGEST.fullmatch(str(notes["snapshot_identity"])):
-            raise QualificationError("release note snapshot identity is invalid")
-        if not _DIGEST.fullmatch(str(notes["markdown_sha256"])):
-            raise QualificationError("release note markdown identity is invalid")
+    _digest(
+        payload.get("candidate_production_receipt_sha256"),
+        "candidate_production_receipt_sha256",
+    )
+    producer = _require_exact_keys(
+        payload.get("producer_job_observation"),
+        {"id", "result"},
+        "producer_job_observation",
+    )
+    if producer != {"id": PRODUCER_JOB_ID, "result": "success"}:
+        raise QualificationError("producer observation is invalid")
+    _normalize_provisional_artifact(payload.get("provisional_artifact"), run_id=run["id"])
+    if payload.get("local_finalization_result") != "PASS":
+        raise QualificationError("local finalization did not pass")
+    if payload.get("final_run_state_authority") != "EXTERNAL_PHASE_B_REQUIRED":
+        raise QualificationError("FutureRunStateClaim: final run state authority is invalid")
+
+    notes = _require_exact_keys(
+        payload.get("release_notes"),
+        {"snapshot_identity", "markdown_sha256"},
+        "release_notes",
+    )
+    _digest(notes["snapshot_identity"], "release_notes.snapshot_identity")
+    _digest(notes["markdown_sha256"], "release_notes.markdown_sha256")
 
     if require_checksum:
-        checksum = payload.get("artifact_sha256")
-        if not isinstance(checksum, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", checksum):
-            raise QualificationError("artifact_sha256 is invalid")
+        checksum = _digest(payload.get("qualification_sha256"), "qualification_sha256")
         unsigned = copy.deepcopy(dict(payload))
-        unsigned.pop("artifact_sha256", None)
+        unsigned.pop("qualification_sha256", None)
         if checksum != _checksum(unsigned):
-            raise QualificationError("qualification artifact checksum mismatch")
+            raise QualificationError("qualification checksum mismatch")
 
     if expected:
         for field in (
             "repository",
             "candidate_sha",
+            "candidate_tree",
             "upgrade_base_sha",
             "channel",
             "target_version",
             "release_tag",
             "release_graph_contract",
+            "candidate_production_receipt_sha256",
         ):
             if field in expected and payload[field] != expected[field]:
                 raise QualificationError(f"qualification {field} mismatch")
         if "qualification_run_id" in expected and run["id"] != str(expected["qualification_run_id"]):
             raise QualificationError("qualification run id mismatch")
+        if (
+            "qualification_run_attempt" in expected
+            and run["attempt"] != expected["qualification_run_attempt"]
+        ):
+            raise QualificationError("qualification run attempt mismatch")
         if "workflow_ref" in expected and workflow["ref"] != expected["workflow_ref"]:
             raise QualificationError("qualification workflow ref mismatch")
         if "workflow_sha" in expected and workflow["sha"] != expected["workflow_sha"]:
             raise QualificationError("qualification workflow sha mismatch")
-        if "release_notes_identity" in expected:
-            notes = payload.get("release_notes")
-            if not isinstance(notes, Mapping) or notes.get("snapshot_identity") != expected[
-                "release_notes_identity"
-            ]:
-                raise QualificationError("qualification release notes snapshot mismatch")
-        if "release_notes_markdown_sha256" in expected:
-            notes = payload.get("release_notes")
-            if not isinstance(notes, Mapping) or notes.get("markdown_sha256") != expected[
-                "release_notes_markdown_sha256"
-            ]:
-                raise QualificationError("qualification release notes markdown mismatch")
+        if "created_at" in expected and payload["created_at"] != expected["created_at"]:
+            raise QualificationError("qualification created_at mismatch")
+        if "release_notes_identity" in expected and notes["snapshot_identity"] != expected["release_notes_identity"]:
+            raise QualificationError("qualification release notes snapshot mismatch")
+        if (
+            "release_notes_markdown_sha256" in expected
+            and notes["markdown_sha256"] != expected["release_notes_markdown_sha256"]
+        ):
+            raise QualificationError("qualification release notes markdown mismatch")
     return dict(payload)
 
 
@@ -377,11 +457,7 @@ def resolve_qualification_evidence(
     evidence: Mapping[str, Any] | None = None,
     archive_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve Phase B evidence from already queried run and artifact metadata.
-
-    The caller must fetch these records from GitHub.  This function intentionally
-    refuses to infer identity from the caller's event or from a mutable tag.
-    """
+    """Resolve Phase B evidence from a prior completed run and final Artifact."""
 
     requested_id = _run_id(qualification_run_id, "qualification_run_id")
     if str(run_metadata.get("id", "")) != requested_id:
@@ -407,7 +483,7 @@ def resolve_qualification_evidence(
     if not artifact.get("archive_download_url"):
         raise QualificationError("qualification artifact download identity is missing")
     metadata_digest = artifact.get("digest")
-    if not isinstance(metadata_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", metadata_digest):
+    if not isinstance(metadata_digest, str) or not _DIGEST.fullmatch(metadata_digest):
         raise QualificationError("qualification artifact archive digest is missing")
     if archive_sha256 is None or archive_sha256 != metadata_digest:
         raise QualificationError("qualification artifact archive digest cannot be proven")
@@ -443,9 +519,13 @@ def write_qualification_evidence(path: Path, payload: Mapping[str, Any]) -> None
     path.write_bytes(_canonical_bytes(validated))
 
 
-def read_qualification_evidence(path: Path, *, expected: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def read_qualification_evidence(
+    path: Path, *, expected: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys)
+        payload = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys
+        )
     except (OSError, json.JSONDecodeError) as error:
         raise QualificationError(f"unable to read qualification artifact: {path}") from error
     return validate_qualification_evidence(payload, expected=expected)

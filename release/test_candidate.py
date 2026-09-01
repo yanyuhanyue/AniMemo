@@ -30,6 +30,7 @@ from release.candidate import (
     CandidateContractError,
     _build_verified_candidate_identity,
     _extract_candidate_archive,
+    _verify_embedded_platform_qualification,
     _verify_qualification_intrinsics,
     _verify_runtime,
     aggregate_receipt_digest,
@@ -55,7 +56,12 @@ from release.contract import (
     REDIS_DIGEST,
     REDIS_REPOSITORY,
 )
-from release.materials import MaterialContractError, extract_qualification_artifact
+from release.materials import (
+    CANDIDATE_PRODUCTION_RECEIPT_NAME,
+    MaterialContractError,
+    build_candidate_production_receipt,
+    extract_qualification_artifact,
+)
 from release.producer_toolchain import DOCKERFILE_PATH, LOCK_PATH
 from scripts.release_qualification import build_qualification_evidence
 from updater.oci import (
@@ -309,56 +315,59 @@ def verification_execution_receipt() -> dict[str, object]:
     return value
 
 
-def _write_intrinsic_evidence(root: Path, candidate: dict[str, object]) -> Path:
+def _candidate_production_identity(
+    candidate: dict[str, object],
+) -> dict[str, object]:
     workflow = candidate["qualification_workflow_identity"]
     assert isinstance(workflow, dict)
-    needs = {
+    return {
+        "repository": candidate["repository"],
+        "workflow_ref": workflow["ref"],
+        "workflow_sha": candidate["source_sha"],
+        "run_id": str(candidate["qualification_run_id"]),
+        "run_attempt": candidate["qualification_run_attempt"],
+        "event": "workflow_dispatch",
+        "candidate_sha": candidate["source_sha"],
+        "candidate_tree": candidate["source_tree"],
+        "target_version": candidate["target_version"],
+        "release_tag": candidate["candidate_version"],
+        "channel": "rc",
+    }
+
+
+def _qualification_needs() -> dict[str, dict[str, str]]:
+    return {
         name: {"result": "success"}
         for name in (
             "preflight",
             "full-ci",
             "full-release-gate",
             "performance",
-            "dry-run",
+            "platform-qualification",
             "release-authority",
+            "dry-run",
         )
     }
-    qualification = build_qualification_evidence(
-        workflow_ref=str(workflow["ref"]),
-        workflow_sha=str(candidate["source_sha"]),
-        run_id=str(candidate["qualification_run_id"]),
-        run_attempt=1,
-        candidate_sha=str(candidate["source_sha"]),
-        upgrade_base_sha="d" * 40,
-        channel="rc",
-        target_version=str(candidate["target_version"]),
-        release_tag=str(candidate["candidate_version"]),
-        needs=needs,
-        created_at="2026-08-25T12:00:00Z",
-        release_notes_identity=DIGEST,
-        release_notes_markdown_sha256=str(
-            candidate["release_notes_markdown_sha256"]
-        ),
-    )
-    qualification_path = root / (
-        f"release-qualification-{candidate['qualification_run_id']}.json"
-    )
-    qualification_path.write_bytes(
-        (
-            json.dumps(
-                qualification,
-                ensure_ascii=False,
-                allow_nan=False,
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
-        ).encode("utf-8")
-    )
-    (root / "release-notes.json").write_bytes(
-        canonical_json_bytes({"identity": DIGEST})
-    )
 
+
+def _controller_artifact_metadata() -> dict[str, object]:
+    artifact_id = 100
+    return {
+        "id": artifact_id,
+        "name": f"controller-authority-{RUN_ID}",
+        "expired": False,
+        "digest": "sha256:" + "c" * 64,
+        "archive_download_url": (
+            "https://api.github.com/repos/yanyuhanyue/AniMemo/actions/"
+            f"artifacts/{artifact_id}/zip"
+        ),
+        "workflow_run": {"id": RUN_ID, "head_sha": SHA},
+    }
+
+
+def _platform_qualification_bytes(candidate: dict[str, object]) -> bytes:
+    workflow = candidate["qualification_workflow_identity"]
+    assert isinstance(workflow, dict)
     platform = finalize_platform_qualification(
         {
             "schema": "animemo.platform-qualification/v1",
@@ -371,7 +380,7 @@ def _write_intrinsic_evidence(root: Path, candidate: dict[str, object]) -> Path:
             },
             "run": {
                 "id": str(candidate["qualification_run_id"]),
-                "attempt": 1,
+                "attempt": candidate["qualification_run_attempt"],
             },
             "observedAt": "2026-08-25T12:00:00Z",
             "host": {
@@ -399,12 +408,126 @@ def _write_intrinsic_evidence(root: Path, candidate: dict[str, object]) -> Path:
             "rehearsals": {name: "PASS" for name in REQUIRED_REHEARSALS},
         }
     )
-    platform_bytes = canonical_platform_qualification_bytes(platform)
+    return canonical_platform_qualification_bytes(platform)
+
+
+def _qualification_bytes(
+    candidate: dict[str, object], production_receipt_bytes: bytes
+) -> bytes:
+    workflow = candidate["qualification_workflow_identity"]
+    artifact_ids = candidate["qualification_artifact_ids"]
+    artifact_digests = candidate["qualification_artifact_api_digests"]
+    assert isinstance(workflow, dict)
+    assert isinstance(artifact_ids, dict)
+    assert isinstance(artifact_digests, dict)
+    qualification = build_qualification_evidence(
+        workflow_ref=str(workflow["ref"]),
+        workflow_sha=str(candidate["source_sha"]),
+        run_id=str(candidate["qualification_run_id"]),
+        run_attempt=int(candidate["qualification_run_attempt"]),
+        candidate_sha=str(candidate["source_sha"]),
+        candidate_tree=str(candidate["source_tree"]),
+        upgrade_base_sha="d" * 40,
+        channel="rc",
+        target_version=str(candidate["target_version"]),
+        release_tag=str(candidate["candidate_version"]),
+        needs=_qualification_needs(),
+        current_job_id="qualification-finalizer",
+        candidate_production_receipt_sha256=_digest(production_receipt_bytes),
+        producer_job_observation={"id": "dry-run", "result": "success"},
+        provisional_artifact={
+            "id": artifact_ids["release_dry_run"],
+            "name": f"candidate-materials-{candidate['qualification_run_id']}",
+            "api_digest": artifact_digests["release_dry_run"],
+            "archive_sha256": artifact_digests["release_dry_run"],
+        },
+        created_at="2026-08-25T12:00:00Z",
+        release_notes_identity=DIGEST,
+        release_notes_markdown_sha256=str(
+            candidate["release_notes_markdown_sha256"]
+        ),
+    )
+    return (
+        json.dumps(
+            qualification,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _write_intrinsic_evidence(root: Path, candidate: dict[str, object]) -> Path:
+    (root / "release-notes.json").write_bytes(
+        canonical_json_bytes({"identity": DIGEST})
+    )
+    platform_bytes = _platform_qualification_bytes(candidate)
     (root / "platform-qualification.json").write_bytes(platform_bytes)
-    embedded = root / "installer-root" / "release" / "platform-qualification.json"
-    embedded.parent.mkdir(parents=True)
-    embedded.write_bytes(platform_bytes)
+    production_receipt = build_candidate_production_receipt(
+        root=root,
+        identity=_candidate_production_identity(candidate),
+    )
+    production_receipt_bytes = canonical_json_bytes(production_receipt)
+    (root / CANDIDATE_PRODUCTION_RECEIPT_NAME).write_bytes(
+        production_receipt_bytes
+    )
+    qualification_path = root / (
+        f"release-qualification-{candidate['qualification_run_id']}.json"
+    )
+    qualification_path.write_bytes(
+        _qualification_bytes(candidate, production_receipt_bytes)
+    )
     return qualification_path
+
+
+def _final_archive_roots(
+    candidate: dict[str, object],
+    *,
+    overrides: dict[str, bytes] | None = None,
+) -> dict[str, bytes]:
+    provisional = {
+        "checksums.txt": b"x",
+        "deployment-contract.json": b"x",
+        "installer-materials.tar": b"x",
+        "platform-qualification.json": _platform_qualification_bytes(candidate),
+        "prepublication-materials.json": b"x",
+        "release-producer-toolchain-receipt.json": (
+            producer_toolchain_receipt_bytes()
+        ),
+        "release-manifest.json": b"x",
+        "release-notes.json": canonical_json_bytes({"identity": DIGEST}),
+        "release-notes.md": b"x",
+        "release-notes-input.json": b"x",
+        "release-notes-readback.json": b"x",
+        "release-notes-preflight.json": b"x",
+        **{
+            str(item["path"]): b"x"
+            for item in candidate["candidate_runtime_file_inventory"]
+        },
+    }
+    if overrides:
+        provisional.update(overrides)
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        for name, encoded in provisional.items():
+            target = root.joinpath(*name.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(encoded)
+        production_receipt = build_candidate_production_receipt(
+            root=root,
+            identity=_candidate_production_identity(candidate),
+        )
+    production_receipt_bytes = canonical_json_bytes(production_receipt)
+    return {
+        **provisional,
+        "candidate-input.json": canonical_json_bytes(candidate),
+        CANDIDATE_PRODUCTION_RECEIPT_NAME: production_receipt_bytes,
+        f"release-qualification-{candidate['qualification_run_id']}.json": (
+            _qualification_bytes(candidate, production_receipt_bytes)
+        ),
+    }
 
 
 def aggregate_receipt() -> dict[str, object]:
@@ -1047,25 +1170,7 @@ class CandidateArchiveTests(unittest.TestCase):
     def _archive(self, extra: tuple[str, bytes, int | None] | None = None) -> Path:
         candidate = candidate_input()
         archive_path = self.root / ("candidate-" + str(len(list(self.root.iterdir()))) + ".zip")
-        roots = {
-            "candidate-input.json": canonical_json_bytes(candidate),
-            "checksums.txt": b"x",
-            "deployment-contract.json": b"x",
-            "installer-materials.tar": b"x",
-            "platform-qualification.json": b"x",
-            "prepublication-materials.json": b"x",
-            "release-producer-toolchain-receipt.json": (
-                producer_toolchain_receipt_bytes()
-            ),
-            "release-manifest.json": b"x",
-            "release-notes.json": b"x",
-            "release-notes.md": b"x",
-            "release-notes-input.json": b"x",
-            "release-notes-readback.json": b"x",
-            "release-notes-preflight.json": b"x",
-            f"release-qualification-{RUN_ID}.json": b"x",
-            **{item["path"]: b"x" for item in candidate["candidate_runtime_file_inventory"]},
-        }
+        roots = _final_archive_roots(candidate)
         with zipfile.ZipFile(archive_path, "w") as archive:
             for name, value in roots.items():
                 archive.writestr(name, value)
@@ -1081,7 +1186,7 @@ class CandidateArchiveTests(unittest.TestCase):
         destination = self.root / "out"
         candidate, _, count = _extract_candidate_archive(self._archive(), destination)
         self.assertEqual(candidate["qualification_run_id"], RUN_ID)
-        self.assertEqual(count, 26)
+        self.assertEqual(count, 27)
 
     def test_publish_extraction_accepts_current_candidate_archive(self):
         archive = self._archive()
@@ -1093,7 +1198,7 @@ class CandidateArchiveTests(unittest.TestCase):
             expected_sha256=_digest(archive.read_bytes()),
             require_candidate_contract=True,
         )
-        self.assertEqual(result["fileCount"], 26)
+        self.assertEqual(result["fileCount"], 27)
         receipt = producer_toolchain_receipt_bytes()
         receipt_identity = next(
             item
@@ -1125,6 +1230,32 @@ class CandidateArchiveTests(unittest.TestCase):
                 expected_sha256=_digest(missing.read_bytes()),
                 require_candidate_contract=True,
             )
+
+    def test_final_archive_requires_exact_production_receipt_and_inventory(self):
+        archive = self._archive()
+        attacks = (
+            (CANDIDATE_PRODUCTION_RECEIPT_NAME, None),
+            (CANDIDATE_PRODUCTION_RECEIPT_NAME, b"{}\n"),
+            ("checksums.txt", b"different"),
+        )
+        for index, (target, replacement) in enumerate(attacks):
+            tampered = self.root / f"receipt-attack-{index}.zip"
+            with zipfile.ZipFile(archive, "r") as source, zipfile.ZipFile(
+                tampered, "w"
+            ) as output:
+                for entry in source.infolist():
+                    if entry.filename == target:
+                        if replacement is not None:
+                            output.writestr(entry, replacement)
+                        continue
+                    output.writestr(entry, source.read(entry))
+            with self.subTest(
+                target=target, replacement=replacement
+            ), self.assertRaises(CandidateContractError):
+                _extract_candidate_archive(
+                    tampered,
+                    self.root / f"receipt-attack-output-{index}",
+                )
 
     def test_zip_slip_absolute_drive_link_duplicate_and_case_collision_fail(self):
         attacks = (
@@ -1269,28 +1400,14 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 "archive": {},
                 "materials": [],
             }
-            files = {
-                "candidate-input.json": canonical_json_bytes(candidate),
-                "checksums.txt": b"x",
-                "deployment-contract.json": canonical_json_bytes(deployment),
-                "installer-materials.tar": b"x",
-                "platform-qualification.json": b"{}\n",
-                "prepublication-materials.json": b"{}\n",
-                "release-producer-toolchain-receipt.json": (
-                    producer_toolchain_receipt_bytes()
-                ),
-                "release-manifest.json": b"{}\n",
-                "release-notes.json": b"{}\n",
-                "release-notes.md": b"x",
-                "release-notes-input.json": b"x",
-                "release-notes-readback.json": b"x",
-                "release-notes-preflight.json": b"x",
-                f"release-qualification-{RUN_ID}.json": b"{}\n",
-                **{
-                    item["path"]: b"x"
-                    for item in candidate["candidate_runtime_file_inventory"]
+            files = _final_archive_roots(
+                candidate,
+                overrides={
+                    "deployment-contract.json": canonical_json_bytes(deployment),
+                    "prepublication-materials.json": b"{}\n",
+                    "release-manifest.json": b"{}\n",
                 },
-            }
+            )
             for name, encoded in files.items():
                 target = root.joinpath(*name.split("/"))
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -1325,7 +1442,9 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 return dict(value)
 
             def extract_materials(_archive, _contract, destination):
-                destination.mkdir(parents=True)
+                embedded = destination / "release" / "platform-qualification.json"
+                embedded.parent.mkdir(parents=True)
+                embedded.write_bytes(_platform_qualification_bytes(candidate))
 
             outputs = []
             with (
@@ -1441,24 +1560,25 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                         ),
                         "workflow_run": {"id": RUN_ID, "head_sha": SHA},
                     },
-                    *[
-                        {
-                            "id": candidate["qualification_artifact_ids"][role],
-                            "name": (
-                                f"platform-qualification-{RUN_ID}"
-                                if role == "platform_qualification"
-                                else "release-dry-run-v1.1.0-rc.14"
-                            ),
-                            "expired": False,
-                            "digest": candidate[
-                                "qualification_artifact_api_digests"
-                            ][role],
-                            "workflow_run": {"id": RUN_ID, "head_sha": SHA},
-                        }
-                        for role in ("platform_qualification", "release_dry_run")
-                    ],
+                    {
+                        "id": candidate["qualification_artifact_ids"][
+                            "platform_qualification"
+                        ],
+                        "name": f"platform-qualification-{RUN_ID}",
+                        "expired": False,
+                        "digest": candidate[
+                            "qualification_artifact_api_digests"
+                        ]["platform_qualification"],
+                        "workflow_run": {"id": RUN_ID, "head_sha": SHA},
+                    },
+                    _controller_artifact_metadata(),
                 ],
             }
+            self.assertNotIn(
+                candidate["qualification_artifact_ids"]["release_dry_run"],
+                {item["id"] for item in artifacts["artifacts"]},
+                "the final archive must remain verifiable after provisional expiry",
+            )
             run = {
                 "id": RUN_ID,
                 "name": "Release Producer",
@@ -1472,10 +1592,20 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 "head_sha": SHA,
             }
             jobs = {
-                "total_count": 2,
+                "total_count": 4,
                 "jobs": [
                     {
-                        "name": "phase-a-qualification-evidence",
+                        "name": "candidate-byte-producer",
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                    {
+                        "name": "qualification-finalizer",
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                    {
+                        "name": "controller-authority",
                         "status": "completed",
                         "conclusion": "success",
                     },
@@ -1667,12 +1797,75 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
             qualification_path = _write_intrinsic_evidence(root, candidate)
 
             _verify_qualification_intrinsics(root, candidate)
+            qualification = json.loads(
+                qualification_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                qualification["schema"], "animemo.release-qualification/v3"
+            )
+            self.assertEqual(qualification["candidate_tree"], TREE)
+            self.assertEqual(
+                set(qualification["run"]), {"id", "attempt", "event"}
+            )
 
-            qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
+            embedded = (
+                root
+                / "installer-root"
+                / "release"
+                / "platform-qualification.json"
+            )
+            embedded.parent.mkdir(parents=True)
+            embedded.write_bytes((root / "platform-qualification.json").read_bytes())
+            _verify_embedded_platform_qualification(root)
+            embedded.write_bytes(b"{}\n")
+            with self.assertRaisesRegex(
+                CandidateContractError, "CANDIDATE_PLATFORM_QUALIFICATION_MISMATCH"
+            ):
+                _verify_embedded_platform_qualification(root)
+
             qualification["candidate_sha"] = "e" * 40
             qualification_path.write_bytes(canonical_json_bytes(qualification))
             with self.assertRaisesRegex(
                 CandidateContractError, "CANDIDATE_QUALIFICATION_EVIDENCE_INVALID"
+            ):
+                _verify_qualification_intrinsics(root, candidate)
+
+    def test_v3_receipt_bytes_identity_and_provisional_inventory_are_exact(self):
+        candidate = candidate_input()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_intrinsic_evidence(root, candidate)
+            receipt_path = root / CANDIDATE_PRODUCTION_RECEIPT_NAME
+            receipt_path.write_bytes(receipt_path.read_bytes() + b"\n")
+            with self.assertRaisesRegex(
+                CandidateContractError,
+                "CANDIDATE_PRODUCTION_RECEIPT_BINDING_MISMATCH",
+            ):
+                _verify_qualification_intrinsics(root, candidate)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            qualification_path = _write_intrinsic_evidence(root, candidate)
+            receipt_path = root / CANDIDATE_PRODUCTION_RECEIPT_NAME
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["identity"]["candidate_tree"] = "e" * 40
+            receipt_bytes = canonical_json_bytes(receipt)
+            receipt_path.write_bytes(receipt_bytes)
+            qualification_path.write_bytes(
+                _qualification_bytes(candidate, receipt_bytes)
+            )
+            with self.assertRaisesRegex(
+                CandidateContractError, "CANDIDATE_PRODUCTION_RECEIPT_INVALID"
+            ):
+                _verify_qualification_intrinsics(root, candidate)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_intrinsic_evidence(root, candidate)
+            platform_path = root / "platform-qualification.json"
+            platform_path.write_bytes(platform_path.read_bytes() + b"\n")
+            with self.assertRaisesRegex(
+                CandidateContractError, "CANDIDATE_PRODUCTION_RECEIPT_INVALID"
             ):
                 _verify_qualification_intrinsics(root, candidate)
 
@@ -1688,34 +1881,20 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 "archive": {},
                 "materials": [],
             }
-            roots = {
-                "candidate-input.json": canonical_json_bytes(candidate),
-                "checksums.txt": b"x",
-                "deployment-contract.json": canonical_json_bytes(deployment),
-                "installer-materials.tar": b"x",
-                "platform-qualification.json": b"{}\n",
-                "prepublication-materials.json": b"{}\n",
-                "release-producer-toolchain-receipt.json": (
-                    producer_toolchain_receipt_bytes()
-                ),
-                "release-manifest.json": b"{}\n",
-                "release-notes.json": b"{}\n",
-                "release-notes.md": b"x",
-                "release-notes-input.json": b"x",
-                "release-notes-readback.json": b"x",
-                "release-notes-preflight.json": b"x",
-                f"release-qualification-{RUN_ID}.json": b"{}\n",
-                **{
-                    item["path"]: b"x"
-                    for item in candidate["candidate_runtime_file_inventory"]
+            roots = _final_archive_roots(
+                candidate,
+                overrides={
+                    "deployment-contract.json": canonical_json_bytes(deployment),
+                    "prepublication-materials.json": b"{}\n",
+                    "release-manifest.json": b"{}\n",
                 },
-            }
+            )
             with zipfile.ZipFile(archive, "w") as output:
                 for name, value in roots.items():
                     output.writestr(name, value)
             archive_digest = _digest(archive.read_bytes())
             artifacts = {
-                "total_count": 3,
+                "total_count": 4,
                 "artifacts": [
                     {
                         "id": 99,
@@ -1734,7 +1913,7 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                             "name": (
                                 f"platform-qualification-{RUN_ID}"
                                 if role == "platform_qualification"
-                                else "release-dry-run-v1.1.0-rc.14"
+                                else f"candidate-materials-{RUN_ID}"
                             ),
                             "expired": False,
                             "digest": candidate[
@@ -1744,6 +1923,7 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                         }
                         for role in ("platform_qualification", "release_dry_run")
                     ],
+                    _controller_artifact_metadata(),
                 ],
             }
             run = {
@@ -1759,10 +1939,20 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 "head_sha": SHA,
             }
             jobs = {
-                "total_count": 2,
+                "total_count": 4,
                 "jobs": [
                     {
-                        "name": "phase-a-qualification-evidence",
+                        "name": "candidate-byte-producer",
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                    {
+                        "name": "qualification-finalizer",
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                    {
+                        "name": "controller-authority",
                         "status": "completed",
                         "conclusion": "success",
                     },
@@ -1796,7 +1986,9 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 return dict(value)
 
             def extract_materials(_archive, _contract, destination):
-                destination.mkdir(parents=True)
+                embedded = destination / "release" / "platform-qualification.json"
+                embedded.parent.mkdir(parents=True)
+                embedded.write_bytes(_platform_qualification_bytes(candidate))
 
             with mock.patch(
                 "release.candidate.validate_candidate_input",
@@ -2210,13 +2402,16 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
             archive.write_bytes(b"not-a-zip")
             digest = _digest(archive.read_bytes())
             metadata = {
-                "total_count": 1,
-                "artifacts": [{
-                    "id": 99, "name": f"release-qualification-{RUN_ID}",
-                    "expired": False, "digest": digest,
-                    "archive_download_url": "https://api.github.com/repos/yanyuhanyue/AniMemo/actions/artifacts/99/zip",
-                    "workflow_run": {"id": RUN_ID, "head_sha": SHA},
-                }],
+                "total_count": 2,
+                "artifacts": [
+                    {
+                        "id": 99, "name": f"release-qualification-{RUN_ID}",
+                        "expired": False, "digest": digest,
+                        "archive_download_url": "https://api.github.com/repos/yanyuhanyue/AniMemo/actions/artifacts/99/zip",
+                        "workflow_run": {"id": RUN_ID, "head_sha": SHA},
+                    },
+                    _controller_artifact_metadata(),
+                ],
             }
             run = {
                 "id": RUN_ID, "name": "Release Producer",
@@ -2225,8 +2420,10 @@ class CandidateOciAndAuthorityTests(unittest.TestCase):
                 "repository": {"full_name": "yanyuhanyue/AniMemo"},
                 "head_branch": "main", "head_sha": SHA,
             }
-            jobs = {"total_count": 2, "jobs": [
-                {"name": "phase-a-qualification-evidence", "status": "completed", "conclusion": "success"},
+            jobs = {"total_count": 4, "jobs": [
+                {"name": "candidate-byte-producer", "status": "completed", "conclusion": "success"},
+                {"name": "qualification-finalizer", "status": "completed", "conclusion": "success"},
+                {"name": "controller-authority", "status": "completed", "conclusion": "success"},
                 {"name": "publish-immutable-prerelease", "status": "completed", "conclusion": "skipped"},
             ]}
             with self.assertRaisesRegex(CandidateContractError, "CONTAINING_ARTIFACT_MISMATCH"):

@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from scripts.release_qualification import (
+    QualificationError,
+    validate_qualification_evidence,
+)
+
 from .materials import DuplicateJsonFieldError, reject_duplicate_json_keys
 from .notes import render_release_notes, validate_release_notes
 from .release_notes_preflight import (
@@ -381,7 +386,7 @@ def validate_qualification_run_metadata(
     expected_run_id: int,
     expected_sha: str,
 ) -> dict[str, Any]:
-    """Validate Phase A producer, qualify-only job proof and exact artifact."""
+    """Validate the completed qualify-only DAG and its exact final Artifact."""
 
     _workflow_run_identity(
         run_metadata,
@@ -397,30 +402,39 @@ def validate_qualification_run_metadata(
     jobs = jobs_metadata["jobs"]
     if jobs_metadata.get("total_count") != len(jobs):
         raise MetadataFreshnessError("qualification job listing is incomplete")
-    phase_a = [
-        job
-        for job in jobs
-        if isinstance(job, dict)
-        and job.get("name") == "phase-a-qualification-evidence"
-        and job.get("status") == "completed"
-        and job.get("conclusion") == "success"
-    ]
-    publish = [
-        job
-        for job in jobs
-        if isinstance(job, dict)
-        and job.get("name") == "publish-immutable-prerelease"
-        and job.get("status") == "completed"
-        and job.get("conclusion") == "skipped"
-    ]
-    if len(phase_a) != 1 or len(publish) != 1:
-        raise MetadataFreshnessError("qualification operation proof differs")
-    return _select_artifact_metadata(
+    for name, conclusion in (
+        ("candidate-byte-producer", "success"),
+        ("qualification-finalizer", "success"),
+        ("controller-authority", "success"),
+        ("publish-immutable-prerelease", "skipped"),
+    ):
+        matches = [job for job in jobs if isinstance(job, dict) and job.get("name") == name]
+        if len(matches) != 1:
+            raise MetadataFreshnessError("qualification operation proof differs")
+        job = matches[0]
+        if (
+            job.get("status") != "completed"
+            or job.get("conclusion") != conclusion
+        ):
+            raise MetadataFreshnessError("qualification operation proof differs")
+    qualification = _select_artifact_metadata(
         artifacts_metadata,
         expected_run_id=expected_run_id,
         expected_sha=expected_sha,
         expected_name=f"release-qualification-{expected_run_id}",
     )
+    controller = _select_artifact_metadata(
+        artifacts_metadata,
+        expected_run_id=expected_run_id,
+        expected_sha=expected_sha,
+        expected_name=f"controller-authority-{expected_run_id}",
+    )
+    return {
+        **qualification,
+        "controllerArtifactId": controller["artifactId"],
+        "controllerArtifactDigest": controller["digest"],
+        "controllerArtifactName": controller["name"],
+    }
 
 
 def validate_freshness_run_metadata(
@@ -520,27 +534,37 @@ def _load_qualification(
         raise MetadataFreshnessError("qualified release notes Markdown is unsafe")
     markdown_bytes = markdown_path.read_bytes()
 
-    run = evidence_value.get("run")
-    workflow = evidence_value.get("workflow")
-    release_notes = evidence_value.get("release_notes")
+    try:
+        validated_qualification = validate_qualification_evidence(
+            evidence_value,
+            expected={
+                "repository": REPOSITORY,
+                "qualification_run_id": identity.qualification_run_id,
+                "candidate_sha": identity.candidate_sha,
+                "candidate_tree": identity.candidate_tree,
+                "release_tag": notes["context"]["release_tag"],
+                "channel": notes["context"]["channel"],
+                "target_version": notes["context"]["target_version"],
+                "workflow_sha": identity.candidate_sha,
+                "release_notes_identity": notes["identity"],
+                "release_notes_markdown_sha256": _digest_bytes(markdown_bytes),
+            },
+        )
+    except (QualificationError, KeyError, TypeError) as error:
+        raise MetadataFreshnessError("qualification evidence binding differs") from error
+    run = validated_qualification["run"]
+    workflow = validated_qualification["workflow"]
     if (
-        evidence_value.get("schema") != "animemo.release-qualification/v2"
-        or evidence_value.get("repository") != REPOSITORY
-        or evidence_value.get("candidate_sha") != identity.candidate_sha
-        or evidence_value.get("release_tag") != notes["context"]["release_tag"]
-        or not isinstance(run, dict)
-        or run.get("id") != str(identity.qualification_run_id)
-        or run.get("attempt") != 1
-        or run.get("event") != "workflow_dispatch"
-        or run.get("status") != "completed"
-        or run.get("conclusion") != "success"
-        or not isinstance(workflow, dict)
+        validated_qualification.get("schema") != "animemo.release-qualification/v3"
+        or run != {
+            "id": str(identity.qualification_run_id),
+            "attempt": 1,
+            "event": "workflow_dispatch",
+        }
         or workflow.get("name") != "Release Producer"
         or workflow.get("path") != ".github/workflows/release.yml"
-        or workflow.get("sha") != identity.candidate_sha
-        or not isinstance(release_notes, dict)
-        or release_notes.get("snapshot_identity") != notes["identity"]
-        or release_notes.get("markdown_sha256") != _digest_bytes(markdown_bytes)
+        or validated_qualification.get("final_run_state_authority")
+        != "EXTERNAL_PHASE_B_REQUIRED"
     ):
         raise MetadataFreshnessError("qualification evidence binding differs")
     if (

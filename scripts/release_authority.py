@@ -138,16 +138,20 @@ def validate_phase_a_authority(
             run_id=str(identity["run_id"]),
             run_attempt=int(identity["run_attempt"]),
             candidate_sha=str(identity["candidate_sha"]),
+            candidate_tree=str(identity["candidate_tree"]),
             upgrade_base_sha=str(identity["upgrade_base_sha"]),
             channel=channel,
             target_version=str(identity["target_version"]),
             release_tag=str(identity["release_tag"]),
             needs=needs,
+            current_job_id=str(identity["current_job_id"]),
+            candidate_production_receipt_sha256=str(
+                identity["candidate_production_receipt_sha256"]
+            ),
+            producer_job_observation=identity["producer_job_observation"],
+            provisional_artifact=identity["provisional_artifact"],
             created_at=str(identity.get("created_at", "1970-01-01T00:00:00Z")),
-            qualification_results=identity.get("qualification_results"),
             event=str(identity.get("event", "workflow_dispatch")),
-            status=str(identity.get("status", "completed")),
-            conclusion=str(identity.get("conclusion", "success")),
             release_notes_identity=identity.get("release_notes_identity"),
             release_notes_markdown_sha256=identity.get(
                 "release_notes_markdown_sha256"
@@ -245,6 +249,51 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = validate_portable_pipeline_authority(plan, receipt)
         print(json.dumps(result, sort_keys=True))
         return 0
+    if operation == "produce":
+        from release.materials import build_candidate_production_receipt
+
+        root = Path("release-qualification")
+        identity = {
+            "repository": os.getenv("GITHUB_REPOSITORY", "yanyuhanyue/AniMemo"),
+            "workflow_ref": os.getenv("WORKFLOW_REF", os.getenv("GITHUB_WORKFLOW_REF", "")),
+            "workflow_sha": os.getenv("WORKFLOW_SHA", os.getenv("GITHUB_SHA", "")),
+            "run_id": os.getenv("RUN_ID", os.getenv("GITHUB_RUN_ID", "")),
+            "run_attempt": int(
+                os.getenv("RUN_ATTEMPT", os.getenv("GITHUB_RUN_ATTEMPT", "1"))
+            ),
+            "event": os.getenv(
+                "EVENT_NAME", os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+            ),
+            "candidate_sha": os.getenv("CANDIDATE_SHA", ""),
+            "candidate_tree": os.getenv("CANDIDATE_TREE", ""),
+            "target_version": os.getenv("TARGET_VERSION", ""),
+            "release_tag": os.getenv("RELEASE_TAG", ""),
+            "channel": os.getenv("CHANNEL", ""),
+        }
+        receipt = build_candidate_production_receipt(root=root, identity=identity)
+        encoded = (
+            json.dumps(
+                receipt,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        path = root / "candidate-production-receipt.json"
+        path.write_bytes(encoded)
+        print(
+            json.dumps(
+                {
+                    "operation": "produce",
+                    "receipt_path": path.as_posix(),
+                    "schema": receipt.get("schema"),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     channel = os.getenv("CHANNEL", "")
     raw_needs = os.getenv("NEEDS_JSON", "")
     try:
@@ -260,15 +309,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "run_id": os.getenv("RUN_ID", os.getenv("GITHUB_RUN_ID", "")),
             "run_attempt": os.getenv("RUN_ATTEMPT", os.getenv("GITHUB_RUN_ATTEMPT", "1")),
             "candidate_sha": os.getenv("CANDIDATE_SHA", ""),
+            "candidate_tree": os.getenv("CANDIDATE_TREE", ""),
             "upgrade_base_sha": os.getenv("UPGRADE_BASE_SHA", ""),
             "target_version": os.getenv("TARGET_VERSION", ""),
             "release_tag": os.getenv("RELEASE_TAG", ""),
             "created_at": os.getenv("CREATED_AT", "1970-01-01T00:00:00Z"),
-            "qualification_results": (
-                json.loads(os.getenv("QUALIFICATION_RESULTS_JSON", "{}"))
-                if os.getenv("QUALIFICATION_RESULTS_JSON", "")
-                else None
-            ),
             "emit_evidence": bool(os.getenv("QUALIFICATION_ARTIFACT_PATH", "")),
             "event": os.getenv("EVENT_NAME", os.getenv("GITHUB_EVENT_NAME", "workflow_dispatch")),
             "release_notes_identity": os.getenv("RELEASE_NOTES_IDENTITY", "") or None,

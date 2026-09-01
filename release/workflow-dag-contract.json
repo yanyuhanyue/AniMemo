@@ -215,6 +215,19 @@
     },
     {
       "workflow": ".github/workflows/release.yml",
+      "job": "qualification-finalizer",
+      "requiredGates": [
+        "preflight",
+        "full-ci",
+        "full-release-gate",
+        "performance",
+        "platform-qualification",
+        "release-authority",
+        "dry-run"
+      ]
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
       "job": "publish",
       "requiredGates": [
         "preflight",
@@ -246,22 +259,44 @@
     "consumers": [
       {
         "workflow": ".github/workflows/release.yml",
+        "job": "qualification-finalizer"
+      },
+      {
+        "workflow": ".github/workflows/release.yml",
         "job": "publish"
       }
     ],
     "producerMarkers": [
+      "docker buildx build",
       "Build API OCI artifact without publishing",
       "Build Web OCI artifact without publishing",
+      "build-attestation-verifier",
+      "formal_windows_pretrust build",
+      "build-initial-trust-kit",
       "build-installer-materials",
+      "generate-deployment-contract",
+      "build-prepublication-materials",
       "generate-manifest",
-      "build-prepublication-candidate-input"
+      "write-checksums",
+      "generate-provenance-plan",
+      "promote-manifest"
     ],
     "forbiddenConsumerBuildMarkers": [
       "docker build",
+      "docker buildx build",
       "docker/build-push-action@",
+      "Build API OCI artifact without publishing",
+      "Build Web OCI artifact without publishing",
+      "build-attestation-verifier",
+      "formal_windows_pretrust build",
+      "build-initial-trust-kit",
       "build-installer-materials",
+      "generate-deployment-contract",
+      "build-prepublication-materials",
       "generate-manifest",
-      "build-prepublication-candidate-input"
+      "write-checksums",
+      "generate-provenance-plan",
+      "promote-manifest"
     ],
     "nonAuthoritativeBuilds": [
       {
@@ -280,5 +315,22 @@
         "annotation": "NON_AUTHORITATIVE_ISOLATED_TEST_ONLY"
       }
     ]
-  }
+  },
+  "completedResultBuilders": [
+    {
+      "workflow": ".github/workflows/release.yml",
+      "job": "qualification-finalizer",
+      "builderModule": "scripts/release_qualification.py",
+      "requiredResultsConstant": "REQUIRED_RESULT_JOB_IDS",
+      "requiredResults": [
+        "preflight",
+        "full-ci",
+        "full-release-gate",
+        "performance",
+        "platform-qualification",
+        "release-authority",
+        "dry-run"
+      ]
+    }
+  ]
 }

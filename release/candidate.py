@@ -53,6 +53,7 @@ from .contract import (
     validate_manifest,
 )
 from .materials import (
+    CANDIDATE_PRODUCTION_RECEIPT_NAME,
     CANDIDATE_QUALIFICATION_ROOT_FILES,
     MAX_MATERIAL_TOTAL_BYTES,
     AtomicReleaseFile,
@@ -60,6 +61,7 @@ from .materials import (
     VerifiedMaterialSet,
     extract_installer_materials,
     reject_duplicate_json_keys,
+    validate_candidate_production_receipt,
     validate_material_contract,
     verify_prepublication_material_identity,
 )
@@ -895,7 +897,6 @@ def _validate_bound_artifacts(candidate: Mapping[str, Any], metadata: object) ->
     result: list[dict[str, object]] = []
     expected_names = {
         "platform_qualification": f"platform-qualification-{candidate['qualification_run_id']}",
-        "release_dry_run": f"release-dry-run-{candidate['candidate_version']}",
     }
     for role in sorted(expected_names):
         artifact_id = candidate["qualification_artifact_ids"][role]
@@ -917,6 +918,10 @@ def _validate_bound_artifacts(candidate: Mapping[str, Any], metadata: object) ->
                 "api_digest": item["digest"],
             }
         )
+    # Candidate Input v1 keeps ``release_dry_run`` only as a compatibility
+    # transport role.  Qualification v3 and the production receipt validate
+    # that short-lived provisional identity from the final archive itself;
+    # Candidate authority must remain verifiable after it expires.
     return result
 
 
@@ -1007,6 +1012,7 @@ def _extract_candidate_archive_stream(
                 if written != entry.file_size:
                     _reject("CANDIDATE_ARCHIVE_MEMBER_SIZE_MISMATCH")
                 os.chmod(target, 0o600)
+        _verify_qualification_intrinsics(destination, candidate)
     except CandidateContractError:
         raise
     except (OSError, zipfile.BadZipFile, RuntimeError) as error:
@@ -1355,6 +1361,10 @@ def _verify_qualification_intrinsics(
         qualification_path,
         code="CANDIDATE_QUALIFICATION_EVIDENCE_INVALID",
     )
+    production_receipt, production_receipt_bytes = _strict_json_file(
+        root / CANDIDATE_PRODUCTION_RECEIPT_NAME,
+        code="CANDIDATE_PRODUCTION_RECEIPT_INVALID",
+    )
     notes, _ = _strict_json_file(
         root / "release-notes.json",
         code="CANDIDATE_RELEASE_NOTES_INVALID",
@@ -1375,6 +1385,7 @@ def _verify_qualification_intrinsics(
                 "repository": REPOSITORY,
                 "qualification_run_id": candidate["qualification_run_id"],
                 "candidate_sha": candidate["source_sha"],
+                "candidate_tree": candidate["source_tree"],
                 "channel": "rc",
                 "target_version": candidate["target_version"],
                 "release_tag": candidate["candidate_version"],
@@ -1402,10 +1413,45 @@ def _verify_qualification_intrinsics(
     ).encode("utf-8")
     if (
         qualification_bytes != canonical_qualification
-        or validated["run"]["attempt"] != 1
+        or validated["run"]["attempt"]
+        != candidate["qualification_run_attempt"]
         or validated["workflow"] != candidate["qualification_workflow_identity"]
     ):
         _reject("CANDIDATE_QUALIFICATION_EVIDENCE_MISMATCH")
+    provisional = validated["provisional_artifact"]
+    if (
+        provisional["id"]
+        != candidate["qualification_artifact_ids"]["release_dry_run"]
+        or provisional["api_digest"]
+        != candidate["qualification_artifact_api_digests"]["release_dry_run"]
+        or provisional["archive_sha256"] != provisional["api_digest"]
+        or sha256_bytes(production_receipt_bytes)
+        != validated["candidate_production_receipt_sha256"]
+    ):
+        _reject("CANDIDATE_PRODUCTION_RECEIPT_BINDING_MISMATCH")
+    receipt_identity = {
+        "repository": validated["repository"],
+        "workflow_ref": validated["workflow"]["ref"],
+        "workflow_sha": validated["workflow"]["sha"],
+        "run_id": validated["run"]["id"],
+        "run_attempt": validated["run"]["attempt"],
+        "event": validated["run"]["event"],
+        "candidate_sha": validated["candidate_sha"],
+        "candidate_tree": validated["candidate_tree"],
+        "target_version": validated["target_version"],
+        "release_tag": validated["release_tag"],
+        "channel": validated["channel"],
+    }
+    try:
+        validate_candidate_production_receipt(
+            production_receipt,
+            root=root,
+            identity=receipt_identity,
+        )
+    except MaterialContractError as error:
+        raise CandidateContractError(
+            "CANDIDATE_PRODUCTION_RECEIPT_INVALID"
+        ) from error
 
     workflow_ref = candidate["qualification_workflow_identity"]["ref"]
     platform_ref = workflow_ref.partition("@")[2]
@@ -1413,10 +1459,6 @@ def _verify_qualification_intrinsics(
         _reject("CANDIDATE_QUALIFICATION_EVIDENCE_MISMATCH")
     platform_bytes = _read_regular_file(
         root / "platform-qualification.json",
-        maximum=MAX_JSON_BYTES,
-    )
-    embedded_platform_bytes = _read_regular_file(
-        root / "installer-root" / "release" / "platform-qualification.json",
         maximum=MAX_JSON_BYTES,
     )
     try:
@@ -1427,7 +1469,6 @@ def _verify_qualification_intrinsics(
         ) from error
     if (
         platform_bytes != canonical_platform_qualification_bytes(platform)
-        or platform_bytes != embedded_platform_bytes
         or platform.candidate_sha != candidate["source_sha"]
         or dict(platform.workflow) != {
             "path": QUALIFICATION_WORKFLOW_PATH,
@@ -1436,13 +1477,26 @@ def _verify_qualification_intrinsics(
         }
         or dict(platform.run) != {
             "id": str(candidate["qualification_run_id"]),
-            "attempt": 1,
+            "attempt": candidate["qualification_run_attempt"],
         }
         or dict(platform.image_digests) != {
             "postgres": f"{POSTGRES_REPOSITORY}@{POSTGRES_DIGEST}",
             "redis": f"{REDIS_REPOSITORY}@{REDIS_DIGEST}",
         }
     ):
+        _reject("CANDIDATE_PLATFORM_QUALIFICATION_MISMATCH")
+
+
+def _verify_embedded_platform_qualification(root: Path) -> None:
+    platform_bytes = _read_regular_file(
+        root / "platform-qualification.json",
+        maximum=MAX_JSON_BYTES,
+    )
+    embedded_platform_bytes = _read_regular_file(
+        root / "installer-root" / "release" / "platform-qualification.json",
+        maximum=MAX_JSON_BYTES,
+    )
+    if platform_bytes != embedded_platform_bytes:
         _reject("CANDIDATE_PLATFORM_QUALIFICATION_MISMATCH")
 
 
@@ -1527,7 +1581,7 @@ def build_prepublication_controller_authority(
             material_contract,
             root / "installer-root",
         )
-        _verify_qualification_intrinsics(root, candidate)
+        _verify_embedded_platform_qualification(root)
         verified = _build_verified_candidate_identity(
             candidate=candidate,
             candidate_digest=candidate_digest,
@@ -1768,7 +1822,7 @@ def verify_prepublication_candidate(
             material_contract,
             staging / "installer-root",
         )
-        _verify_qualification_intrinsics(staging, candidate)
+        _verify_embedded_platform_qualification(staging)
         verified = _build_verified_candidate_identity(
             candidate=candidate,
             candidate_digest=candidate_digest,
