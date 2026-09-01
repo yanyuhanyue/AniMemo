@@ -277,7 +277,7 @@ jobs:
             --channel "$CHANNEL"
       - name: Upload the sole run-scoped Release Notes authority
         if: ${{ inputs.operation == 'qualify' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-notes-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-notes-preflight/
@@ -483,7 +483,7 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --workflow-path .github/workflows/release.yml
       - id: platform_artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: platform-qualification-${{ github.run_id }}
           path: platform-qualification/platform-qualification.json
@@ -950,7 +950,7 @@ jobs:
             "validated-release-input/verified-candidate-state/${candidate_input_digest#sha256:}/candidate-input.json"
           cmp "$candidate_root/verified-candidate.json" \
             "validated-release-input/verified-candidate-state/${candidate_input_digest#sha256:}/verified-candidate.json"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ inputs.operation == 'publish' }}
         with:
           name: validated-release-input-${{ github.run_id }}
@@ -1079,7 +1079,7 @@ jobs:
           find "$RUNNER_TEMP/metadata-freshness" -mindepth 1 -maxdepth 1 -type f \
             -exec install -m 0600 '{}' validated-metadata-freshness/ \;
           test "$(find validated-metadata-freshness -mindepth 1 -maxdepth 1 -type f | wc -l)" = "10"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: validated-metadata-freshness-${{ github.run_id }}
           path: validated-metadata-freshness/
@@ -1570,7 +1570,7 @@ jobs:
           echo "receipt_sha256=$receipt_sha256" >> "$GITHUB_OUTPUT"
       - name: Upload the short-lived non-authoritative Candidate transaction
         id: provisional_artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-materials-${{ github.run_id }}
           path: ${{ runner.temp }}/animemo-release-qualification-output/
@@ -1727,7 +1727,7 @@ jobs:
           echo "candidate_tree=$candidate_tree" >> "$GITHUB_OUTPUT"
       - name: Upload the sole final Qualification Artifact
         id: qualification_artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-qualification-${{ github.run_id }}
           path: ${{ runner.temp }}/release-qualification-final/
@@ -1846,7 +1846,7 @@ jobs:
           test -f controller-authority/controller-authority.json
           test ! -e controller-authority/candidate-runtime
       - name: Upload the small remote controller authority
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: controller-authority-${{ github.run_id }}
           path: ${{ runner.temp }}/controller-authority/
@@ -2469,7 +2469,7 @@ jobs:
             --repository-path . --remote origin \
             --receipt release-output/publication-transaction-ledger.json
       - name: Preserve the finalized RC publication transaction before post-publication checks
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-publication-transaction-${{ needs.preflight.outputs.release_tag }}-${{ github.run_attempt }}
           path: release-output/publication-transaction-ledger.json
@@ -2548,7 +2548,7 @@ jobs:
             --actions-subject "web-image=oci://$WEB_REPOSITORY@$WEB_DIGEST" \
             --output "release-output/animemo-$RELEASE_TAG-release-attestation.json" \
             > release-output/release-attestation-acquisition-receipt.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-publication-metadata-${{ needs.preflight.outputs.release_tag }}
           path: |
