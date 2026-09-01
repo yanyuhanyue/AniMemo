@@ -285,11 +285,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER",
         )
 
-    def test_release_producer_import_readiness_is_real_unique_and_earliest(self):
+    def test_release_producer_runtime_readiness_is_real_unique_and_earliest(self):
         release = workflow("release.yml")
         steps = release["jobs"]["dry-run"]["steps"]
         names = [step.get("name", "") for step in steps]
-        readiness_name = "Verify release Producer repository import readiness"
+        readiness_name = "Verify release Producer runtime readiness"
 
         self.assertEqual(names.count(readiness_name), 1)
         build = names.index("Build the digest-pinned release byte producer")
@@ -300,7 +300,19 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "Start and accept the exact locally built API and Web images"
         )
         close = names.index("Close and verify all four Candidate OCI layouts")
+        setup_python = next(
+            index
+            for index, step in enumerate(steps)
+            if str(step.get("uses", "")).startswith("actions/setup-python@")
+        )
+        setup_go = next(
+            index
+            for index, step in enumerate(steps)
+            if str(step.get("uses", "")).startswith("actions/setup-go@")
+        )
         self.assertEqual(readiness, build + 1)
+        self.assertLess(readiness, setup_python)
+        self.assertLess(readiness, setup_go)
         self.assertLess(readiness, api)
         self.assertLess(api, web)
         self.assertLess(web, rehearsal)
@@ -308,7 +320,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
         command = steps[readiness]["run"]
         self.assertIn("scripts/run-in-release-producer.sh", command)
-        self.assertIn("python -P -B -m release.cli --help", command)
+        self.assertIn(
+            "scripts/release-producer-runtime-readiness.sh check", command
+        )
         self.assertNotIn("continue-on-error", steps[readiness])
 
     def test_phase_a_python_invocation_inventory_includes_early_readiness(self):
@@ -334,8 +348,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             commands,
         )
 
-        self.assertEqual(len(invocations), 30)
-        self.assertEqual(len(package_modules), 24)
+        self.assertEqual(len(invocations), 29)
+        self.assertEqual(len(package_modules), 23)
         self.assertEqual(len(direct_scripts), 2)
         repository_families = {
             module
@@ -1684,6 +1698,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
+        helper = (
+            ROOT / "scripts" / "release-producer-runtime-readiness.sh"
+        ).read_text(encoding="utf-8")
         self.assertEqual(
             release.count(
                 "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16"
@@ -1693,37 +1710,27 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(release.count("go-version: '1.26.6'"), 1)
         self.assertEqual(release.count("cache: false"), 1)
         self.assertNotIn("cache-dependency-path", release)
-        self.assertEqual(release.count("go mod download"), 1)
-        self.assertEqual(release.count("GOPROXY=off GOSUMDB=off go mod verify"), 1)
-        self.assertEqual(
-            release.count("GOPROXY=off GOSUMDB=off go test ./..."), 1
-        )
+        self.assertNotIn("go mod download", release)
+        self.assertNotIn("go mod verify", release)
+        self.assertNotIn("go test ./...", release)
+        self.assertNotIn("go build -mod=readonly", release)
         self.assertEqual(
             release.count(
-                "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 "
-                "GOPROXY=off GOSUMDB=off"
+                "scripts/release-producer-runtime-readiness.sh check"
             ),
             1,
         )
         self.assertEqual(
             release.count(
-                "CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "
-                "GOPROXY=off GOSUMDB=off"
+                "scripts/release-producer-runtime-readiness.sh "
+                "build-attestation-verifier"
             ),
             1,
         )
-        self.assertEqual(
-            release.count(
-                "go build -mod=readonly -trimpath -o offline-release-verifier ."
-            ),
-            1,
-        )
-        self.assertEqual(
-            release.count(
-                '-o "../../$formal_pretrust_work/formal-release-verifier.exe" .'
-            ),
-            1,
-        )
+        self.assertEqual(helper.count("go mod download"), 1)
+        self.assertEqual(helper.count("go mod verify"), 1)
+        self.assertEqual(helper.count("go test -mod=readonly ./..."), 1)
+        self.assertEqual(helper.count("go build -mod=readonly -trimpath"), 2)
         self.assertEqual(
             release.count(
                 "test -x release/release_attestation_verifier/offline-release-verifier"

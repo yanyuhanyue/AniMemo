@@ -575,28 +575,33 @@ class DependencySecurityContractTests(unittest.TestCase):
             )
         ]
         publish = release_workflow[release_workflow.index("  publish:\n") :]
+        helper = (
+            ROOT / "scripts" / "release-producer-runtime-readiness.sh"
+        ).read_text(encoding="utf-8")
         setup_go = "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16"
         linux_verifier_build = (
-            "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOPROXY=off GOSUMDB=off \\\n"
-            "              go build -mod=readonly -trimpath "
-            "-o offline-release-verifier ."
+            "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOPROXY=off GOSUMDB=off"
         )
         windows_verifier_build = (
-            "CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOPROXY=off GOSUMDB=off \\\n"
-            "              go build -mod=readonly -trimpath \\\n"
-            "                -o \"../../$formal_pretrust_work/"
-            "formal-release-verifier.exe\" ."
+            "CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOPROXY=off GOSUMDB=off"
         )
 
         self.assertEqual(release_workflow.count("go-version: '1.26.6'"), 1)
         self.assertEqual(dry_run.count(setup_go), 1)
         self.assertEqual(dry_run.count("go-version: '1.26.6'"), 1)
-        self.assertEqual(dry_run.count(linux_verifier_build), 1)
-        self.assertEqual(dry_run.count(windows_verifier_build), 1)
+        self.assertNotIn("go mod download", dry_run)
+        self.assertNotIn("go mod verify", dry_run)
+        self.assertNotIn("go test ./...", dry_run)
+        self.assertNotIn("go build -mod=readonly", dry_run)
+        self.assertEqual(dry_run.count("release-producer-runtime-readiness.sh"), 2)
+        self.assertEqual(helper.count(linux_verifier_build), 1)
+        self.assertEqual(helper.count(windows_verifier_build), 1)
+        self.assertEqual(helper.count("go build -mod=readonly -trimpath"), 2)
         self.assertEqual(publish.count(setup_go), 0)
         self.assertEqual(publish.count("go-version: '1.26.6'"), 0)
         self.assertEqual(publish.count(linux_verifier_build), 0)
         self.assertEqual(publish.count(windows_verifier_build), 0)
+        self.assertEqual(publish.count("release-producer-runtime-readiness.sh"), 0)
         self.assertEqual(publish.count("build-initial-trust-kit"), 0)
         self.assertNotIn("go-version: '1.25.8'", release_workflow)
 
@@ -604,6 +609,92 @@ class DependencySecurityContractTests(unittest.TestCase):
             (verifier / "INSTALLATION_CONTRACT_V2.json").read_text(encoding="utf-8")
         )
         self.assertEqual(contract["build"]["minimumGoVersion"], "1.26.6")
+
+    def test_release_producer_go_state_and_supply_chain_are_closed(self) -> None:
+        wrapper = (ROOT / "scripts" / "run-in-release-producer.sh").read_text(
+            encoding="utf-8"
+        )
+        entrypoint = (
+            ROOT / "scripts" / "release-producer-entrypoint.sh"
+        ).read_text(encoding="utf-8")
+        helper = (
+            ROOT / "scripts" / "release-producer-runtime-readiness.sh"
+        ).read_text(encoding="utf-8")
+        dockerfile = (
+            ROOT / "deploy" / "release-producer.Dockerfile"
+        ).read_text(encoding="utf-8")
+
+        for boundary in (
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "animemo-release-producer-session.XXXXXXXXXX",
+            'GOENV=off',
+            'GOTOOLCHAIN=local',
+            'GOWORK=off',
+            'GOSUMDB=sum.golang.org',
+            'GOINSECURE=',
+        ):
+            self.assertIn(boundary, wrapper)
+        self.assertNotIn('--mount "type=bind,src=/go', wrapper)
+        self.assertNotIn('dst=/go', wrapper)
+        self.assertNotIn("--privileged", wrapper)
+
+        allowlist = wrapper[wrapper.index("allowed=") : wrapper.index("environment=()")]
+        for forbidden in (
+            "GOPATH",
+            "GOMODCACHE",
+            "GOCACHE",
+            "GOTMPDIR",
+            "GOENV",
+            "GOTOOLCHAIN",
+            "GOWORK",
+            "GOPROXY",
+            "GOSUMDB",
+            "GOPRIVATE",
+            "GONOSUMDB",
+            "GONOPROXY",
+            "GOINSECURE",
+            "GOFLAGS",
+            "GOTELEMETRY",
+            "GOTELEMETRYDIR",
+            "HOME",
+            "XDG_",
+            "ANIMEMO_RELEASE_PRODUCER_SESSION_ROOT",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, allowlist)
+
+        self.assertIn("go telemetry off", entrypoint)
+        self.assertIn("GOTELEMETRYDIR", entrypoint)
+        self.assertIn("go version go1.26.6 linux/amd64", entrypoint)
+        self.assertIn("GOPROXY=https://proxy.golang.org,direct", helper)
+        self.assertIn("GOSUMDB=sum.golang.org", helper)
+        self.assertIn("GOPROXY=off GOSUMDB=off", helper)
+        self.assertIn("go mod verify", helper)
+        self.assertIn("runtime-output", helper)
+        self.assertIn("-type l", entrypoint)
+        self.assertIn("animemo-release-producer-session", entrypoint)
+        self.assertIn("validate_output_staging", entrypoint)
+        self.assertIn("animemo-release-producer-output", entrypoint)
+        self.assertIn("animemo-release-qualification-output", entrypoint)
+        self.assertIn("stat -c '%d:%i'", entrypoint)
+        self.assertIn("! -w /go", entrypoint)
+        self.assertIn("! -w /root", entrypoint)
+        self.assertNotIn("eval ", helper)
+        self.assertNotIn("go mod download", dockerfile)
+        self.assertNotIn("go mod verify", dockerfile)
+        self.assertNotIn("go build", dockerfile)
+        self.assertNotIn("COPY .", dockerfile)
+        for bounded_error in (
+            "release producer Go session authority is invalid",
+            "release producer Go writable state is invalid",
+            "release producer Go supply-chain environment is invalid",
+            "release producer Go module authority is invalid",
+        ):
+            self.assertIn(bounded_error, entrypoint)
+        self.assertNotIn("env |", entrypoint)
+        self.assertNotIn("go env -json", entrypoint)
 
 
 if __name__ == "__main__":
