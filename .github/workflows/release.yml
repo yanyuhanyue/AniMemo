@@ -982,7 +982,7 @@ jobs:
         with:
           python-version: "3.12.10"
       - run: python -m pip install --require-hashes -r release/requirements.lock
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: validated-release-input-${{ github.run_id }}
           path: validated-release-input
@@ -1108,7 +1108,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Download the exact frozen Release Notes authority
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-notes-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-notes-preflight-input
@@ -1189,7 +1189,7 @@ jobs:
           install -d -m 0700 "$output"
           find release-notes-preflight-input -mindepth 1 -maxdepth 1 -type f \
             -exec install -m 0600 '{}' "$output/" \;
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: platform-qualification-${{ github.run_id }}
           path: platform-qualification-input
@@ -1878,11 +1878,11 @@ jobs:
         with:
           python-version: "3.12.10"
       - run: python -m pip install --require-hashes -r release/requirements.lock
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: validated-release-input-${{ github.run_id }}
           path: validated-release-input
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: validated-metadata-freshness-${{ github.run_id }}
           path: validated-metadata-freshness
