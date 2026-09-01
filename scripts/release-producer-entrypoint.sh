@@ -175,8 +175,14 @@ validate_output_staging "$producer_output" "$producer_output_source" || \
   fail_go_state
 validate_output_staging "$qualification_output" "$qualification_output_source" || \
   fail_go_state
-[[ -d /go && ! -L /go && ! -w /go && \
-   -d /root && ! -L /root && ! -w /root ]] || fail_go_state
+root_mount_options="$(
+  awk '$5 == "/" { print $6; found = 1; exit }
+       END { if (!found) exit 1 }' /proc/self/mountinfo
+)" || fail_go_state
+[[ ",$root_mount_options," == *,ro,* && \
+   -d /go && ! -L /go && -d /root && ! -L /root ]] || fail_go_state
+require_not_mountpoint /go || fail_go_state
+require_not_mountpoint /root || fail_go_state
 
 expected_gh_config="$XDG_CONFIG_HOME/gh"
 [[ "${GH_CONFIG_DIR:-}" == "$expected_gh_config" && \
