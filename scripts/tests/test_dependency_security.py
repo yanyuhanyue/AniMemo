@@ -500,6 +500,66 @@ class DependencySecurityContractTests(unittest.TestCase):
         )
         self.assertIn(npm_sha512, frontend)
 
+    def test_release_producer_repository_import_authority_is_fail_closed(self) -> None:
+        wrapper = (ROOT / "scripts" / "run-in-release-producer.sh").read_text(
+            encoding="utf-8"
+        )
+        entrypoint = (
+            ROOT / "scripts" / "release-producer-entrypoint.sh"
+        ).read_text(encoding="utf-8")
+        dockerfile = (
+            ROOT / "deploy" / "release-producer.Dockerfile"
+        ).read_text(encoding="utf-8")
+
+        allowlist = wrapper[wrapper.index("allowed=") : wrapper.index("environment=()")]
+        self.assertNotIn("PYTHONPATH", allowlist)
+        self.assertNotIn("PYTHONSAFEPATH", allowlist)
+        self.assertEqual(wrapper.count('--env "PYTHONSAFEPATH=1"'), 1)
+        self.assertEqual(wrapper.count('--env "PYTHONPATH=$GITHUB_WORKSPACE"'), 1)
+        self.assertNotIn("${PYTHONPATH", wrapper)
+        self.assertNotIn("PYTHONPATH=.", wrapper)
+        for boundary in (
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            '--env "HOME=$producer_home"',
+            '--env "GOTMPDIR=$producer_gotmp"',
+        ):
+            self.assertIn(boundary, wrapper)
+
+        for closed_check in (
+            '"${PYTHONSAFEPATH:-}" != "1"',
+            '"${PYTHONPATH:-}" != "$GITHUB_WORKSPACE"',
+            "pwd -P",
+            "python -I -S -B",
+            "importlib.util.find_spec",
+            ".resolve(strict=True)",
+            "sys.stdlib_module_names",
+            "release.cli",
+            "release.producer_toolchain",
+            "scripts.formal_windows_pretrust",
+            "scripts.release_authority",
+        ):
+            self.assertIn(closed_check, entrypoint)
+        self.assertIn("importlib.import_module", entrypoint)
+        self.assertIn('${BASH_SOURCE[0]}', wrapper)
+        self.assertIn('realpath -e -- "${BASH_SOURCE[0]}"', wrapper)
+        self.assertIn("allowed_workspace_roots", entrypoint)
+        self.assertIn("unexpected workspace import root", entrypoint)
+
+        self.assertIn("ENV LANG=C.UTF-8", dockerfile)
+        self.assertIn("PYTHONSAFEPATH=1", dockerfile)
+        self.assertEqual(
+            [line for line in dockerfile.splitlines() if line.startswith("COPY ")],
+            [
+                "COPY --from=python-runtime /usr/local/ /usr/local/",
+                "COPY release/requirements.lock /opt/animemo-locks/release.requirements.lock",
+                "COPY deploy/release-producer.Dockerfile /opt/animemo-locks/release-producer.Dockerfile",
+                "COPY scripts/release-producer-entrypoint.sh /usr/local/bin/release-producer-entrypoint",
+            ],
+        )
+        self.assertNotRegex(dockerfile, r"pip install[^\n]*(?:-e\s+\.|\s+\.)")
+
     def test_release_verifier_uses_patched_go_toolchain_and_grpc(self) -> None:
         verifier = ROOT / "release" / "release_attestation_verifier"
         go_mod = (verifier / "go.mod").read_text(encoding="utf-8")
