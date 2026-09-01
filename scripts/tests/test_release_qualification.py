@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import inspect
+import io
 import json
+import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from scripts.release_authority import (
     ReleaseAuthorityError,
+    _read_fixed_qualification_artifact,
     validate_phase_a_authority,
     validate_phase_b_authority,
 )
+from scripts.release_authority import main as release_authority_main
 from scripts.release_qualification import (
     REQUIRED_RESULT_JOB_IDS,
     QualificationError,
@@ -354,16 +361,111 @@ class QualificationV3ContractTests(unittest.TestCase):
                 expected=self._expected(),
             )
 
-    def test_read_evidence_rejects_duplicate_json_keys(self):
+    def test_read_evidence_accepts_only_bounded_bytes(self):
+        encoded = json.dumps(self.evidence).encode("utf-8")
+
+        class BytesSubclass(bytes):
+            pass
+
+        self.assertEqual(read_qualification_evidence(encoded), self.evidence)
+        hostile_inputs = {
+            "absolute path": Path("C:/outside/release-qualification-12345.json"),
+            "parent traversal": Path("../release-qualification-12345.json"),
+            "oversized bytes": b"x" * (8 * 1024 * 1024 + 1),
+            "bytes subclass": BytesSubclass(encoded),
+        }
+        for label, hostile_input in hostile_inputs.items():
+            with self.subTest(label=label), self.assertRaisesRegex(
+                QualificationError, "bytes|size"
+            ):
+                read_qualification_evidence(hostile_input)  # type: ignore[arg-type]
+
+    def test_publish_main_reads_fixed_file_and_binds_controller_digest(self):
+        encoded = json.dumps(self.evidence).encode("utf-8")
+        evidence_sha256 = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        artifact = self._artifact_metadata()
+        environment = {
+            "OPERATION": "publish",
+            "CHANNEL": "rc",
+            "NEEDS_JSON": json.dumps(self.needs),
+            "QUALIFICATION_RUN_ID": "12345",
+            "CANDIDATE_SHA": self.candidate,
+            "UPGRADE_BASE_SHA": self.base,
+            "TARGET_VERSION": "v1.0.0",
+            "RELEASE_TAG": "v1.0.0-rc.1",
+            "QUALIFICATION_WORKFLOW_REF": self.workflow_ref,
+            "QUALIFICATION_WORKFLOW_SHA": self.candidate,
+            "RELEASE_GRAPH_CONTRACT": "animemo.release-gate.jobs/v2",
+            "RELEASE_NOTES_IDENTITY": self.notes_identity,
+            "RELEASE_NOTES_MARKDOWN_SHA256": self.notes_markdown,
+            "QUALIFICATION_RUN_METADATA": json.dumps(self._run_metadata()),
+            "QUALIFICATION_ARTIFACT_METADATA": json.dumps(artifact),
+            "QUALIFICATION_ARCHIVE_SHA256": str(artifact["digest"]),
+            "QUALIFICATION_EVIDENCE_SHA256": evidence_sha256,
+        }
+        output = io.StringIO()
+        previous = Path.cwd()
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "release-qualification.json"
-            path.write_text(
-                json.dumps(self.evidence)[:-1]
-                + ', "schema": "animemo.release-qualification/v1"}\n',
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(QualificationError, "duplicate"):
-                read_qualification_evidence(path)
+            root = Path(temporary)
+            (root / "qualification-evidence.json").write_bytes(encoded)
+            try:
+                os.chdir(root)
+                with mock.patch.dict(
+                    "os.environ", environment, clear=True
+                ), redirect_stdout(output):
+                    self.assertEqual(release_authority_main(), 0)
+                with mock.patch.dict(
+                    "os.environ",
+                    {
+                        **environment,
+                        "QUALIFICATION_EVIDENCE_SHA256": "sha256:" + "0" * 64,
+                    },
+                    clear=True,
+                ), self.assertRaisesRegex(ReleaseAuthorityError, "digest mismatch"):
+                    release_authority_main()
+            finally:
+                os.chdir(previous)
+        self.assertEqual(json.loads(output.getvalue())["status"], "PASS")
+
+    def test_fixed_reader_rejects_post_read_hard_link_state(self):
+        encoded = json.dumps(self.evidence).encode("utf-8")
+        expected = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "qualification-evidence.json"
+            target.write_bytes(encoded)
+            metadata = target.stat()
+
+            def observed(nlink: int) -> mock.Mock:
+                return mock.Mock(
+                    st_mode=metadata.st_mode,
+                    st_nlink=nlink,
+                    st_size=metadata.st_size,
+                    st_dev=metadata.st_dev,
+                    st_ino=metadata.st_ino,
+                    st_mtime_ns=metadata.st_mtime_ns,
+                )
+
+            try:
+                os.chdir(root)
+                with mock.patch(
+                    "scripts.release_authority.os.fstat",
+                    side_effect=(observed(1), observed(2)),
+                ), self.assertRaisesRegex(
+                    ReleaseAuthorityError, "changed while being read"
+                ):
+                    _read_fixed_qualification_artifact(expected)
+            finally:
+                os.chdir(previous)
+
+    def test_read_evidence_rejects_duplicate_json_keys(self):
+        encoded = (
+            json.dumps(self.evidence)[:-1]
+            + ', "schema": "animemo.release-qualification/v1"}\n'
+        ).encode("utf-8")
+        with self.assertRaisesRegex(QualificationError, "duplicate"):
+            read_qualification_evidence(encoded)
 
 
 if __name__ == "__main__":

@@ -705,6 +705,9 @@ class QualificationFinalizerRedContractTests(unittest.TestCase):
                     request, observed, qualification, verified
                 )
             self.assertEqual(result["status"], "PASS")
+            self.assertEqual(
+                result["qualificationEvidenceSha256"], _digest(qualification_bytes)
+            )
             extract.assert_called_once_with(
                 controller_archive,
                 mock.ANY,
@@ -815,6 +818,97 @@ class QualificationFinalizerRedContractTests(unittest.TestCase):
 
 
 class CandidateProductionReceiptRedContractTests(unittest.TestCase):
+    def test_receipt_rejects_string_subclass_identity_key(self):
+        from release.materials import build_candidate_production_receipt
+
+        class SpoofedIdentityKey(str):
+            def __hash__(self) -> int:
+                return hash("repository")
+
+            def __eq__(self, other: object) -> bool:
+                return other == "repository"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "payload.bin").write_bytes(b"candidate")
+            identity = {
+                SpoofedIdentityKey("x"): "yanyuhanyue/AniMemo",
+                "workflow_ref": "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main",
+                "workflow_sha": SHA,
+                "run_id": str(RUN_ID),
+                "run_attempt": 1,
+                "event": "workflow_dispatch",
+                "candidate_sha": SHA,
+                "candidate_tree": TREE,
+                "target_version": "v1.1.0",
+                "release_tag": "v1.1.0-rc.19",
+                "channel": "rc",
+            }
+
+            with self.assertRaisesRegex(
+                ValueError, "unknown or missing fields"
+            ):
+                build_candidate_production_receipt(root=root, identity=identity)
+
+    def test_receipt_rejects_regex_injecting_channel_value(self):
+        from release.materials import build_candidate_production_receipt
+
+        class RegexInjectingChannel(str):
+            def __format__(self, format_spec: str) -> str:
+                return ".*"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "payload.bin").write_bytes(b"candidate")
+            identity = {
+                "repository": "yanyuhanyue/AniMemo",
+                "workflow_ref": "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main",
+                "workflow_sha": SHA,
+                "run_id": str(RUN_ID),
+                "run_attempt": 1,
+                "event": "workflow_dispatch",
+                "candidate_sha": SHA,
+                "candidate_tree": TREE,
+                "target_version": "v1.1.0",
+                "release_tag": "v1.1.0-untrusted.19",
+                "channel": RegexInjectingChannel("rc"),
+            }
+
+            with self.assertRaisesRegex(ValueError, "receipt identity is invalid"):
+                build_candidate_production_receipt(root=root, identity=identity)
+
+    def test_receipt_rejects_string_subclass_comparison_override(self):
+        from release.materials import build_candidate_production_receipt
+
+        class ComparisonBypass(str):
+            def __eq__(self, other: object) -> bool:
+                return True
+
+            def __ne__(self, other: object) -> bool:
+                return False
+
+            __hash__ = str.__hash__
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "payload.bin").write_bytes(b"candidate")
+            identity = {
+                "repository": "yanyuhanyue/AniMemo",
+                "workflow_ref": "yanyuhanyue/AniMemo/.github/workflows/release.yml@refs/heads/main",
+                "workflow_sha": SHA,
+                "run_id": str(RUN_ID),
+                "run_attempt": 1,
+                "event": "workflow_dispatch",
+                "candidate_sha": SHA,
+                "candidate_tree": TREE,
+                "target_version": ComparisonBypass("v2.0.0"),
+                "release_tag": "v1.1.0-rc.19",
+                "channel": "rc",
+            }
+
+            with self.assertRaisesRegex(ValueError, "receipt identity is invalid"):
+                build_candidate_production_receipt(root=root, identity=identity)
+
     def test_receipt_closes_exact_member_inventory_excluding_itself(self):
         from release.materials import (
             build_candidate_production_receipt,

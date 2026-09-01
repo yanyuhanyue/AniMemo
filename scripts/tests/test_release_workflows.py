@@ -1051,24 +1051,21 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             'evidence_file="$RUNNER_TEMP/qualification/'
             'release-qualification-$QUALIFICATION_RUN_ID.json"'
         )
-        authority_path = (
-            "QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/qualification/"
-            "release-qualification-${{ inputs.qualification_run_id }}.json"
-        )
+        authority_root = 'authority_root="$RUNNER_TEMP/phase-b-authority-input"'
         self.assertIn(
             "QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}",
             stage,
         )
         self.assertIn(run_id_guard, phase_b_readback)
         self.assertIn(evidence_path, phase_b_readback)
-        self.assertIn(authority_path, phase_b_readback)
+        self.assertIn(authority_root, phase_b_readback)
         self.assertLess(
             phase_b_readback.index(run_id_guard),
             phase_b_readback.index(evidence_path),
         )
         self.assertLess(
             phase_b_readback.index(evidence_path),
-            phase_b_readback.index(authority_path),
+            phase_b_readback.index(authority_root),
         )
         self.assertIn(
             'final_output="$RUNNER_TEMP/release-qualification-final"',
@@ -1091,7 +1088,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             final_upload["with"]["path"],
             "${{ runner.temp }}/release-qualification-final/",
         )
-        self.assertEqual(source.count("QUALIFICATION_ARTIFACT_PATH:"), 1)
+        self.assertEqual(source.count("QUALIFICATION_ARTIFACT_PATH:"), 0)
 
     def test_all_workflows_reject_duplicate_mapping_keys(self):
         for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
@@ -1412,6 +1409,52 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(authority["permissions"], {"contents": "read", "actions": "read"})
         self.assertIn("run_attempt=\"$(jq -r '.run_attempt // empty'", authority_source)
         self.assertIn('test "$run_attempt" = "1"', authority_source)
+
+    def test_phase_b_release_authority_opens_only_a_fixed_digest_bound_artifact(self):
+        source = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        authority_source = (ROOT / "scripts" / "release_authority.py").read_text(
+            encoding="utf-8"
+        )
+        phase_b = source[
+            source.index("      - name: Enforce Phase B Release Producer authority") :
+            source.index("      - name: Stage the validated release input")
+        ]
+
+        for guard in (
+            (
+                'qualification_artifact="$RUNNER_TEMP/qualification/'
+                'release-qualification-$QUALIFICATION_RUN_ID.json"'
+            ),
+            'test ! -L "$RUNNER_TEMP/qualification"',
+            'test -f "$qualification_artifact"',
+            'test ! -L "$qualification_artifact"',
+            'test "$(stat --format=\'%h\' -- "$qualification_artifact")" = "1"',
+            "(( qualification_size <= 8 * 1024 * 1024 ))",
+            '.qualificationEvidenceSha256 | select(test(',
+            'authority_root="$RUNNER_TEMP/phase-b-authority-input"',
+            'test ! -e "$authority_root"',
+            'install -d -m 0700 -- "$authority_root"',
+            '"$authority_root/qualification-evidence.json"',
+            'cd "$authority_root"',
+            'PYTHONPATH="$GITHUB_WORKSPACE" python -m scripts.release_authority',
+        ):
+            self.assertIn(guard, phase_b)
+        self.assertNotIn("QUALIFICATION_ARTIFACT_PATH", authority_source)
+        self.assertNotIn("sys.stdin", authority_source)
+        self.assertIn(
+            "os.open(_FIXED_QUALIFICATION_ARTIFACT, flags)",
+            authority_source,
+        )
+        self.assertIn(
+            'getattr(os, "O_NOFOLLOW", 0)',
+            authority_source,
+        )
+        self.assertIn(
+            'os.getenv("QUALIFICATION_EVIDENCE_SHA256", "")',
+            authority_source,
+        )
 
     def test_phase_b_publish_scheduling_is_skip_safe_and_fail_closed(self):
         release = workflow("release.yml")

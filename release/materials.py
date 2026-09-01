@@ -61,6 +61,11 @@ CANDIDATE_PRODUCTION_RECEIPT_IDENTITY_FIELDS = frozenset(
         "channel",
     }
 )
+_CANDIDATE_TARGET_VERSION = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
+_CANDIDATE_RELEASE_TAG = re.compile(
+    r"(?P<target_version>v[0-9]+\.[0-9]+\.[0-9]+)-"
+    r"(?P<channel>beta|rc)\.(?P<sequence>[1-9][0-9]*)"
+)
 CANDIDATE_QUALIFICATION_ROOT_FILES = frozenset(
     {
         "candidate-input.json",
@@ -1096,6 +1101,7 @@ def _normalize_candidate_production_identity(
 ) -> dict[str, object]:
     if (
         type(identity) is not dict
+        or any(type(key) is not str for key in identity)
         or set(identity) != CANDIDATE_PRODUCTION_RECEIPT_IDENTITY_FIELDS
     ):
         raise error_type("receipt identity has unknown or missing fields")
@@ -1115,30 +1121,40 @@ def _normalize_candidate_production_identity(
         f"{CANDIDATE_PRODUCTION_REPOSITORY}/.github/workflows/"
         "release.yml@refs/heads/main"
     )
+    string_values = (
+        repository,
+        workflow_ref,
+        workflow_sha,
+        run_id,
+        event,
+        candidate_sha,
+        candidate_tree,
+        target_version,
+        release_tag,
+        channel,
+    )
+    release_tag_match = (
+        _CANDIDATE_RELEASE_TAG.fullmatch(release_tag)
+        if type(release_tag) is str
+        else None
+    )
     if (
-        repository != CANDIDATE_PRODUCTION_REPOSITORY
+        any(type(value) is not str for value in string_values)
+        or repository != CANDIDATE_PRODUCTION_REPOSITORY
         or workflow_ref != expected_workflow_ref
-        or not isinstance(workflow_sha, str)
         or not re.fullmatch(r"[0-9a-f]{40}", workflow_sha)
-        or not isinstance(run_id, str)
         or not re.fullmatch(r"[1-9][0-9]*", run_id)
-        or not isinstance(run_attempt, int)
-        or isinstance(run_attempt, bool)
+        or type(run_attempt) is not int
         or run_attempt <= 0
         or event != "workflow_dispatch"
-        or not isinstance(candidate_sha, str)
         or not re.fullmatch(r"[0-9a-f]{40}", candidate_sha)
         or workflow_sha != candidate_sha
-        or not isinstance(candidate_tree, str)
         or not re.fullmatch(r"[0-9a-f]{40}", candidate_tree)
-        or not isinstance(target_version, str)
-        or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", target_version)
+        or not _CANDIDATE_TARGET_VERSION.fullmatch(target_version)
         or channel not in {"beta", "rc"}
-        or not isinstance(release_tag, str)
-        or not re.fullmatch(
-            rf"{re.escape(target_version)}-{channel}\.[1-9][0-9]*",
-            release_tag,
-        )
+        or release_tag_match is None
+        or release_tag_match.group("target_version") != target_version
+        or release_tag_match.group("channel") != channel
     ):
         raise error_type("receipt identity is invalid")
     return result

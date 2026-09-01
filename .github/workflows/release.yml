@@ -824,7 +824,6 @@ jobs:
           TARGET_VERSION: ${{ needs.preflight.outputs.target_version }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
-          QUALIFICATION_ARTIFACT_PATH: ${{ runner.temp }}/qualification/release-qualification-${{ inputs.qualification_run_id }}.json
           RELEASE_GRAPH_CONTRACT: animemo.release-gate.jobs/v2
         shell: bash
         run: |
@@ -832,11 +831,30 @@ jobs:
           export QUALIFICATION_RUN_METADATA="$(cat "$RUNNER_TEMP/qualification-metadata-run.json")"
           export QUALIFICATION_ARTIFACT_METADATA="$(cat "$RUNNER_TEMP/qualification-metadata-artifact.json")"
           export QUALIFICATION_ARCHIVE_SHA256="$(jq -r '.digest' "$RUNNER_TEMP/qualification-metadata-artifact.json")"
+          export QUALIFICATION_EVIDENCE_SHA256="$(jq -er \
+            '.qualificationEvidenceSha256 | select(test("^sha256:[0-9a-f]{64}$"))' \
+            "$RUNNER_TEMP/phase-b-controller-verification.json")"
           export QUALIFICATION_WORKFLOW_REF="$(cat "$RUNNER_TEMP/qualification-workflow-ref.txt")"
           export QUALIFICATION_WORKFLOW_SHA="$(cat "$RUNNER_TEMP/qualification-workflow-sha.txt")"
           export RELEASE_NOTES_IDENTITY="$(jq -r '.identity' "$RUNNER_TEMP/qualification/release-notes.json")"
           export RELEASE_NOTES_MARKDOWN_SHA256="sha256:$(sha256sum "$RUNNER_TEMP/qualification/release-notes.md" | awk '{print $1}')"
-          python -m scripts.release_authority
+          qualification_artifact="$RUNNER_TEMP/qualification/release-qualification-$QUALIFICATION_RUN_ID.json"
+          test -d "$RUNNER_TEMP/qualification"
+          test ! -L "$RUNNER_TEMP/qualification"
+          test -f "$qualification_artifact"
+          test ! -L "$qualification_artifact"
+          test "$(stat --format='%h' -- "$qualification_artifact")" = "1"
+          qualification_size="$(stat --format='%s' -- "$qualification_artifact")"
+          [[ "$qualification_size" =~ ^[1-9][0-9]*$ ]]
+          (( qualification_size <= 8 * 1024 * 1024 ))
+          authority_root="$RUNNER_TEMP/phase-b-authority-input"
+          test ! -e "$authority_root"
+          test ! -L "$authority_root"
+          install -d -m 0700 -- "$authority_root"
+          install -m 0600 -- "$qualification_artifact" \
+            "$authority_root/qualification-evidence.json"
+          cd "$authority_root"
+          PYTHONPATH="$GITHUB_WORKSPACE" python -m scripts.release_authority
       - name: Stage the validated release input for Phase B production
         if: ${{ inputs.operation == 'publish' }}
         env:

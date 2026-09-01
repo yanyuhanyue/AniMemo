@@ -807,6 +807,7 @@ def _verify_phase_b_controller_authority(
         "controllerArtifactApiDigest": controller_artifact["digest"],
         "controllerArtifactArchiveSha256": controller_archive_digest,
         "controllerAuthoritySha256": sha256_bytes(authority_bytes),
+        "qualificationEvidenceSha256": sha256_bytes(qualification_bytes),
         "finalRunStateAuthority": "COMPLETED_PRIOR_RUN_API_METADATA",
         "candidateBytesRebuildCount": 0,
     }

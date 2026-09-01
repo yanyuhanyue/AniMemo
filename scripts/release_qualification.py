@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+MAX_QUALIFICATION_ARTIFACT_BYTES = 8 * 1024 * 1024
+
 QUALIFICATION_SCHEMA = "animemo.release-qualification/v3"
 RELEASE_WORKFLOW_PATH = ".github/workflows/release.yml"
 RELEASE_WORKFLOW_NAME = "Release Producer"
@@ -520,12 +522,17 @@ def write_qualification_evidence(path: Path, payload: Mapping[str, Any]) -> None
 
 
 def read_qualification_evidence(
-    path: Path, *, expected: Mapping[str, Any] | None = None
+    value: bytes, *, expected: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
+    if type(value) is not bytes:
+        raise QualificationError("qualification artifact input must be bytes")
+    if not value or len(value) > MAX_QUALIFICATION_ARTIFACT_BYTES:
+        raise QualificationError("qualification artifact input exceeds its size authority")
     try:
         payload = json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys
+            value.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
         )
-    except (OSError, json.JSONDecodeError) as error:
-        raise QualificationError(f"unable to read qualification artifact: {path}") from error
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise QualificationError("unable to decode qualification artifact") from error
     return validate_qualification_evidence(payload, expected=expected)
