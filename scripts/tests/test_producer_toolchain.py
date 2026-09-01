@@ -187,6 +187,62 @@ class ReleaseProducerImportAuthorityContractTests(unittest.TestCase):
             self.assertIn(authority, entrypoint)
         self.assertIn("pwd -P", entrypoint)
 
+    def test_entrypoint_allows_only_the_known_node_dependency_root(self) -> None:
+        entrypoint = ENTRYPOINT_PATH.read_text(encoding="utf-8")
+        lines = entrypoint.splitlines()
+        start = lines.index(
+            "python -I -S -B <<'ANIMEMO_IMPORT_AUTHORITY' || fail_import"
+        )
+        end = lines.index("ANIMEMO_IMPORT_AUTHORITY", start + 1)
+        isolated_validator = "\n".join(lines[start + 1 : end])
+        self.assertIn('candidate.name == "node_modules"', isolated_validator)
+        self.assertIn("candidate.is_symlink()", isolated_validator)
+
+        with tempfile.TemporaryDirectory(prefix="animemo-node-root-") as temporary:
+            workspace = Path(temporary)
+            (workspace / "release").mkdir()
+            (workspace / "scripts").mkdir()
+            (workspace / "node_modules").mkdir()
+            for relative in (
+                "release/__init__.py",
+                "release/cli.py",
+                "release/producer_toolchain.py",
+                "scripts/formal_windows_pretrust.py",
+                "scripts/release_authority.py",
+            ):
+                (workspace / relative).write_text("", encoding="utf-8")
+            environment = {**os.environ, "GITHUB_WORKSPACE": str(workspace.resolve())}
+
+            allowed = _completed(
+                [sys.executable, "-I", "-S", "-B", "-c", isolated_validator],
+                cwd=workspace,
+                env=environment,
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+            (workspace / "jsonschema").mkdir()
+            shadowed = _completed(
+                [sys.executable, "-I", "-S", "-B", "-c", isolated_validator],
+                cwd=workspace,
+                env=environment,
+            )
+            self.assertEqual(shadowed.returncode, 2, shadowed.stderr)
+
+            if os.name != "nt":
+                (workspace / "jsonschema").rmdir()
+                (workspace / "node_modules").rmdir()
+                node_authority = workspace / ".node-authority"
+                node_authority.mkdir()
+                (workspace / "node_modules").symlink_to(
+                    node_authority, target_is_directory=True
+                )
+                linked = _completed(
+                    [sys.executable, "-I", "-S", "-B", "-c", isolated_validator],
+                    cwd=workspace,
+                    env=environment,
+                )
+                self.assertEqual(linked.returncode, 2, linked.stderr)
+
 
 @unittest.skipUnless(
     sys.platform.startswith("linux"),

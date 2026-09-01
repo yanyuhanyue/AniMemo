@@ -131,6 +131,7 @@ try:
         "docs",
         "durability",
         "installer",
+        "node_modules",
         "plugins",
         "public",
         "release",
@@ -146,6 +147,12 @@ try:
         ):
             if candidate.name not in allowed_workspace_roots:
                 raise ValueError("unexpected workspace import root")
+            if candidate.name == "node_modules" and (
+                candidate.is_symlink()
+                or not candidate.is_dir()
+                or candidate.resolve(strict=True) != candidate
+            ):
+                raise ValueError("linked node dependency root")
         for suffix in import_suffixes:
             if candidate.name.endswith(suffix):
                 import_name = candidate.name[: -len(suffix)]
