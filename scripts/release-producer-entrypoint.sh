@@ -43,6 +43,16 @@ require_not_mountpoint() {
   (( mountpoint_status == 32 ))
 }
 
+require_no_go_root_mounts() {
+  awk '
+    $5 == "/go" || index($5, "/go/") == 1 ||
+    $5 == "/root" || index($5, "/root/") == 1 {
+      forbidden = 1
+    }
+    END { if (forbidden) exit 1 }
+  ' /proc/self/mountinfo
+}
+
 validate_output_staging() {
   local target="$1"
   local source="$2"
@@ -183,6 +193,7 @@ root_mount_options="$(
    -d /go && ! -L /go && -d /root && ! -L /root ]] || fail_go_state
 require_not_mountpoint /go || fail_go_state
 require_not_mountpoint /root || fail_go_state
+require_no_go_root_mounts || fail_go_state
 
 expected_gh_config="$XDG_CONFIG_HOME/gh"
 [[ "${GH_CONFIG_DIR:-}" == "$expected_gh_config" && \
@@ -230,7 +241,8 @@ assert_go_env GOPATH "$GOPATH" fail_go_state
 assert_go_env GOMODCACHE "$GOMODCACHE" fail_go_state
 assert_go_env GOCACHE "$GOCACHE" fail_go_state
 assert_go_env GOTMPDIR "$GOTMPDIR" fail_go_state
-assert_go_env GOENV off fail_go_state
+# With process-level GOENV=off, cmd/go reports no environment-file path.
+assert_go_env GOENV "" fail_go_state
 assert_go_env GOTOOLCHAIN local fail_go_state
 assert_go_env GOWORK off fail_go_state
 assert_go_env GOPROXY https://proxy.golang.org,direct fail_go_supply

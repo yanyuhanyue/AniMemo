@@ -683,6 +683,11 @@ class DependencySecurityContractTests(unittest.TestCase):
         self.assertIn("root_mount_options", entrypoint)
         self.assertIn("require_not_mountpoint /go", entrypoint)
         self.assertIn("require_not_mountpoint /root", entrypoint)
+        self.assertIn('$5 == "/go" || index($5, "/go/") == 1', entrypoint)
+        self.assertIn(
+            '$5 == "/root" || index($5, "/root/") == 1', entrypoint
+        )
+        self.assertIn('assert_go_env GOENV "" fail_go_state', entrypoint)
         self.assertNotIn("eval ", helper)
         self.assertNotIn("go mod download", dockerfile)
         self.assertNotIn("go mod verify", dockerfile)

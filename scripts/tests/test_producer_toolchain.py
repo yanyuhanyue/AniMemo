@@ -546,6 +546,9 @@ exit 97
             "root_mount_options",
             "require_not_mountpoint /go",
             "require_not_mountpoint /root",
+            '$5 == "/go" || index($5, "/go/") == 1',
+            '$5 == "/root" || index($5, "/root/") == 1',
+            'assert_go_env GOENV "" fail_go_state',
             "release/release_attestation_verifier",
             "go.mod",
             "go.sum",
@@ -1151,6 +1154,14 @@ class RealReleaseProducerImageTests(unittest.TestCase):
             "release producer runtime readiness FAIL",
         )
 
+        go_state = self._wrapper(
+            "bash",
+            "-ceu",
+            'test "$GOENV" = off; test -z "$(go env GOENV)"; '
+            'test "$(go env GOTELEMETRY)" = off',
+        )
+        self.assertEqual(go_state.returncode, 0, go_state.stderr[-2000:])
+
     def test_real_runtime_readiness_detects_module_input_tampering(self) -> None:
         assert self.runtime_root is not None
         with tempfile.TemporaryDirectory(
@@ -1374,6 +1385,25 @@ class RealReleaseProducerImageTests(unittest.TestCase):
                 wrong_version.stderr.strip(),
                 "release producer Go writable state is invalid",
             )
+
+        for target in ("/go/pkg", "/root/.cache"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory(
+                dir=self.runtime_root.name,
+                prefix="animemo-forbidden-go-root-mount-",
+            ) as temporary:
+                source = Path(temporary)
+                source.chmod(0o700)
+                descendant_mount = self._direct_entrypoint(
+                    pythonpath=str(ROOT),
+                    extra_mounts=(
+                        f"type=bind,src={source},dst={target}",
+                    ),
+                )
+                self.assertEqual(descendant_mount.returncode, 2)
+                self.assertEqual(
+                    descendant_mount.stderr.strip(),
+                    "release producer Go writable state is invalid",
+                )
 
     def test_real_concurrent_wrappers_do_not_share_go_state(self) -> None:
         assert self.runtime_root is not None
