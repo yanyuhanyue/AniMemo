@@ -1014,12 +1014,12 @@ jobs:
           producer_image_id="$(docker image inspect --format '{{.Id}}' "animemo-release-producer:$GITHUB_SHA")"
           [[ "$producer_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "ANIMEMO_RELEASE_PRODUCER_IMAGE_ID=$producer_image_id" >> "$GITHUB_ENV"
-      - name: Verify release Producer repository import readiness
+      - name: Verify release Producer runtime readiness
         shell: bash
         run: |
           set -euo pipefail
           bash scripts/run-in-release-producer.sh -- \
-            python -P -B -m release.cli --help
+            bash scripts/release-producer-runtime-readiness.sh check
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12.10"
@@ -1240,19 +1240,10 @@ jobs:
             RELEASE_TAG CREATED_AT API_DIGEST WEB_DIGEST CANDIDATE_SHA CHANNEL \
             -- bash -seu <<'ANIMEMO_PRODUCER'
           formal_pretrust_work="release-output/.formal-pretrust-work"
-          rm -rf "$formal_pretrust_work"
+          test ! -e "$formal_pretrust_work"
+          test ! -L "$formal_pretrust_work"
           install -d -m 0700 "$formal_pretrust_work"
-          (
-            cd release/release_attestation_verifier
-            go mod download
-            GOPROXY=off GOSUMDB=off go mod verify
-            GOPROXY=off GOSUMDB=off go test ./...
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOPROXY=off GOSUMDB=off \
-              go build -mod=readonly -trimpath -o offline-release-verifier .
-            CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOPROXY=off GOSUMDB=off \
-              go build -mod=readonly -trimpath \
-                -o "../../$formal_pretrust_work/formal-release-verifier.exe" .
-          )
+          bash scripts/release-producer-runtime-readiness.sh build-attestation-verifier
           test -x release/release_attestation_verifier/offline-release-verifier
           test -s "$formal_pretrust_work/formal-release-verifier.exe"
           python -m release.cli build-initial-trust-kit \
