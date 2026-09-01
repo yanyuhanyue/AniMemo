@@ -285,6 +285,120 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "AUTHORITATIVE_CANDIDATE_BYTE_PRODUCER",
         )
 
+    def test_release_producer_import_readiness_is_real_unique_and_earliest(self):
+        release = workflow("release.yml")
+        steps = release["jobs"]["dry-run"]["steps"]
+        names = [step.get("name", "") for step in steps]
+        readiness_name = "Verify release Producer repository import readiness"
+
+        self.assertEqual(names.count(readiness_name), 1)
+        build = names.index("Build the digest-pinned release byte producer")
+        readiness = names.index(readiness_name)
+        api = names.index("Build API OCI artifact without publishing")
+        web = names.index("Build Web OCI artifact without publishing")
+        rehearsal = names.index(
+            "Start and accept the exact locally built API and Web images"
+        )
+        close = names.index("Close and verify all four Candidate OCI layouts")
+        self.assertEqual(readiness, build + 1)
+        self.assertLess(readiness, api)
+        self.assertLess(api, web)
+        self.assertLess(web, rehearsal)
+        self.assertLess(rehearsal, close)
+
+        command = steps[readiness]["run"]
+        self.assertIn("scripts/run-in-release-producer.sh", command)
+        self.assertIn("python -P -B -m release.cli --help", command)
+        self.assertNotIn("continue-on-error", steps[readiness])
+
+    def test_phase_a_python_invocation_inventory_includes_early_readiness(self):
+        release = workflow("release.yml")
+        producer_commands = []
+        for step in release["jobs"]["dry-run"]["steps"]:
+            command = step.get("run", "")
+            marker = "scripts/run-in-release-producer.sh"
+            if marker in command:
+                producer_commands.append(command[command.index(marker) :])
+        commands = "\n".join(producer_commands)
+        invocations = re.findall(
+            r'(?<![A-Za-z0-9_])python3?(?=(?:\s|"))|bin/python(?=")',
+            commands,
+        )
+        package_modules = re.findall(
+            r'(?:python3?|bin/python")\s+(?:-[A-Za-z]+\s+)*-m\s+'
+            r"([A-Za-z0-9_.]+)",
+            commands,
+        )
+        direct_scripts = re.findall(
+            r"(?m)^\s*python(?:\s+-[A-Za-z]+)*\s+scripts/[^\s]+\.py(?:\s|$)",
+            commands,
+        )
+
+        self.assertEqual(len(invocations), 30)
+        self.assertEqual(len(package_modules), 24)
+        self.assertEqual(len(direct_scripts), 2)
+        repository_families = {
+            module
+            for module in (
+                "release.cli",
+                "release.producer_toolchain",
+                "scripts.formal_windows_pretrust",
+                "scripts.release_authority",
+            )
+            if module in commands
+        }
+        entrypoint = (
+            ROOT / "scripts" / "release-producer-entrypoint.sh"
+        ).read_text(encoding="utf-8")
+        expected_provenance = {
+            "release.cli": "release/cli.py",
+            "release.producer_toolchain": "release/producer_toolchain.py",
+            "scripts.formal_windows_pretrust": "scripts/formal_windows_pretrust.py",
+            "scripts.release_authority": "scripts/release_authority.py",
+        }
+        inventory_blocks = re.findall(
+            r"expected_modules = \{\n(.*?)\n\}", entrypoint, flags=re.DOTALL
+        )
+        self.assertEqual(len(inventory_blocks), 2)
+        validated_inventories = [
+            dict(
+                re.findall(
+                    r'^\s+"([A-Za-z0-9_.]+)": "([^"\n]+)",$',
+                    block,
+                    flags=re.MULTILINE,
+                )
+            )
+            for block in inventory_blocks
+        ]
+        self.assertEqual(
+            validated_inventories,
+            [expected_provenance, expected_provenance],
+        )
+        self.assertEqual(repository_families, set(expected_provenance))
+
+    def test_trusted_premerge_cannot_route_around_real_producer_test(self):
+        premerge = workflow("pre-merge-full.yml")
+        ci = workflow("ci.yml")
+        plugins = ci["jobs"]["plugins"]
+        producer_tests = (ROOT / "scripts" / "tests" / "test_producer_toolchain.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(premerge["jobs"]["full-regression"]["with"]["force_full"], "true")
+        self.assertEqual(plugins["runs-on"], "ubuntu-24.04")
+        self.assertIn("needs.classify.outputs.run_plugins == 'true'", plugins["if"])
+        checkout = next(step for step in plugins["steps"] if "uses" in step)
+        self.assertEqual(
+            checkout["with"]["ref"],
+            "${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}",
+        )
+        self.assertIn(
+            'python -m unittest discover -s scripts/tests -p "test_*.py" -v',
+            [step.get("run", "") for step in plugins["steps"]],
+        )
+        self.assertIn('os.environ.get("GITHUB_ACTIONS") == "true"', producer_tests)
+        self.assertIn("trusted Linux CI must run the real Producer image test", producer_tests)
+
     def test_release_producer_binds_host_visible_output_staging(self):
         producer = (ROOT / "scripts" / "run-in-release-producer.sh").read_text(
             encoding="utf-8"

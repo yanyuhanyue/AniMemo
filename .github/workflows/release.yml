@@ -1014,6 +1014,12 @@ jobs:
           producer_image_id="$(docker image inspect --format '{{.Id}}' "animemo-release-producer:$GITHUB_SHA")"
           [[ "$producer_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "ANIMEMO_RELEASE_PRODUCER_IMAGE_ID=$producer_image_id" >> "$GITHUB_ENV"
+      - name: Verify release Producer repository import readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/run-in-release-producer.sh -- \
+            python -P -B -m release.cli --help
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12.10"

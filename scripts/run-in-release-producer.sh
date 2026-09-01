@@ -5,12 +5,43 @@ if [[ ! "${ANIMEMO_RELEASE_PRODUCER_IMAGE_ID:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; th
   echo "release producer image identity is absent or invalid" >&2
   exit 2
 fi
-if [[ -z "${GITHUB_WORKSPACE:-}" || -z "${RUNNER_TEMP:-}" ]]; then
+if [[ -z "${GITHUB_WORKSPACE:-}" || -z "${RUNNER_TEMP:-}" || \
+      "$GITHUB_WORKSPACE" != /* || "$RUNNER_TEMP" != /* || \
+      "$GITHUB_WORKSPACE" == *$'\n'* || "$GITHUB_WORKSPACE" == *$'\r'* || \
+      "$GITHUB_WORKSPACE" == *,* || \
+      "$RUNNER_TEMP" == *$'\n'* || "$RUNNER_TEMP" == *$'\r'* || \
+      "$RUNNER_TEMP" == *,* ]]; then
   echo "release producer mount authority is absent" >&2
   exit 2
 fi
-test -d "$GITHUB_WORKSPACE" && test ! -L "$GITHUB_WORKSPACE"
-test -d "$RUNNER_TEMP" && test ! -L "$RUNNER_TEMP"
+if [[ ! -d "$GITHUB_WORKSPACE" || -L "$GITHUB_WORKSPACE" || \
+      ! -d "$RUNNER_TEMP" || -L "$RUNNER_TEMP" ]]; then
+  echo "release producer mount authority is invalid" >&2
+  exit 2
+fi
+workspace_real="$(realpath -e -- "$GITHUB_WORKSPACE" 2>/dev/null)" || {
+  echo "release producer workspace authority is invalid" >&2
+  exit 2
+}
+runner_temp_real="$(realpath -e -- "$RUNNER_TEMP" 2>/dev/null)" || {
+  echo "release producer runner temporary authority is invalid" >&2
+  exit 2
+}
+wrapper_file="$(realpath -e -- "${BASH_SOURCE[0]}" 2>/dev/null)" || {
+  echo "release producer wrapper authority is invalid" >&2
+  exit 2
+}
+wrapper_root="$(realpath -e -- "$(dirname -- "$wrapper_file")/.." 2>/dev/null)" || {
+  echo "release producer wrapper authority is invalid" >&2
+  exit 2
+}
+if [[ "$workspace_real" != "$GITHUB_WORKSPACE" || \
+      "$workspace_real" != "$wrapper_root" || \
+      "$wrapper_file" != "$workspace_real/scripts/run-in-release-producer.sh" || \
+      "$runner_temp_real" != "$RUNNER_TEMP" ]]; then
+  echo "release producer mount authority is not canonical" >&2
+  exit 2
+fi
 test "$(docker image inspect --format '{{.Id}}' "$ANIMEMO_RELEASE_PRODUCER_IMAGE_ID")" = \
   "$ANIMEMO_RELEASE_PRODUCER_IMAGE_ID"
 
@@ -66,6 +97,9 @@ docker run --rm --init --interactive --read-only --cap-drop=ALL \
   --env "GOTMPDIR=$producer_gotmp" \
   --env "RUNNER_TEMP=$RUNNER_TEMP" \
   --env "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+  --env "PYTHONNOUSERSITE=1" \
+  --env "PYTHONSAFEPATH=1" \
+  --env "PYTHONPATH=$GITHUB_WORKSPACE" \
   --env "ANIMEMO_RELEASE_PRODUCER_IMAGE_ID=$ANIMEMO_RELEASE_PRODUCER_IMAGE_ID" \
   "${environment[@]}" \
   "$ANIMEMO_RELEASE_PRODUCER_IMAGE_ID" "$@"
