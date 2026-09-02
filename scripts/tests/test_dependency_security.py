@@ -564,7 +564,8 @@ class DependencySecurityContractTests(unittest.TestCase):
         verifier = ROOT / "release" / "release_attestation_verifier"
         go_mod = (verifier / "go.mod").read_text(encoding="utf-8")
         self.assertIn("go 1.26.6", go_mod.splitlines())
-        self.assertIn("google.golang.org/grpc v1.82.1", go_mod)
+        self.assertIn("google.golang.org/grpc v1.83.1", go_mod)
+        self.assertNotIn("google.golang.org/grpc v1.82.1", go_mod)
 
         release_workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
