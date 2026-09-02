@@ -10,7 +10,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from contextlib import nullcontext, redirect_stdout
+from contextlib import ExitStack, nullcontext, redirect_stdout
 from ctypes import wintypes
 from dataclasses import replace
 from pathlib import Path
@@ -2388,72 +2388,129 @@ class CandidateVmHarnessTests(unittest.TestCase):
         unrelated_running_sets = iter(
             frozenset({f"unrelated-{index}"}) for index in range(4)
         )
-        with mock.patch.object(provider, "_assert_tools"), mock.patch.object(
-            provider, "_acquire_provider_lease", return_value=mock.sentinel.lease
-        ), mock.patch.object(
-            provider, "_release_provider_lease"
-        ) as release_lease, mock.patch.object(
-            provider, "_hashes", return_value=dict(plan.original_vm_hashes)
-        ), mock.patch.object(
-            provider,
-            "_prepare_profile_authority",
-            side_effect=lambda value: events.append("prepare"),
-        ), mock.patch.object(
-            provider,
-            "_clone_full",
-             side_effect=lambda value, profile_authority, **_kwargs: (
-                 events.append("clone") or (authority.clone_root, authority.clone_vmx)
-             ),
-        ), mock.patch.object(
-            provider, "_vm_inventory", return_value={"fixed": (1, 2, 3)}
-        ), mock.patch.object(
-            provider,
-            "_running_vmx_paths",
-            side_effect=lambda: events.append("power")
-            or next(unrelated_running_sets),
-        ), mock.patch.object(
-            provider,
-            "_revert_clone",
-            side_effect=lambda *_args: events.append("revert"),
-        ) as revert, mock.patch.object(
-            provider,
-            "_validate_reverted_clone_disk_graph",
-            side_effect=lambda *_args, **_kwargs: events.append("validate") or (),
-        ), mock.patch.object(
-            provider,
-            "_clone_snapshot_disk_graph_identity",
-            return_value=profile.snapshot_disk_graph_identity,
-        ), mock.patch.object(
-            provider,
-            "_clone_snapshot_identity",
-            return_value=profile.snapshot_identity,
-        ), mock.patch.object(
-            provider,
-            "_disk_graph_content_digest",
-            return_value=runtime.disk_graph_digest,
-        ), mock.patch.object(
-            provider,
-            "_inject_guestinfo_challenge",
-            side_effect=lambda profile_authority, item: events.append("inject"),
-        ), mock.patch.object(
-            provider, "_start_clone", side_effect=lambda _value: events.append("start")
-        ) as start, mock.patch.object(
-            provider,
-            "_establish_clone_connection",
-            side_effect=lambda profile_authority, item, **_kwargs: (
-                events.append("identity") or verified
-            ),
-        ), mock.patch.object(
-            provider,
-            "_stage_candidate",
-            side_effect=lambda profile_authority, candidate_root, digest: (
-                events.append("stage") or "/fixed/candidate"
-            ),
-        ), mock.patch.object(
-            provider, "_run_profile_guest", return_value=receipt
-        ), mock.patch.object(provider, "_stop_clone") as stop, mock.patch.object(
-            provider, "_remove_clone"
-        ) as remove, mock.patch.object(provider, "_quarantine_clone") as quarantine:
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(provider, "_assert_tools"))
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_acquire_provider_lease",
+                    return_value=mock.sentinel.lease,
+                )
+            )
+            release_lease = stack.enter_context(
+                mock.patch.object(provider, "_release_provider_lease")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider, "_hashes", return_value=dict(plan.original_vm_hashes)
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_prepare_profile_authority",
+                    side_effect=lambda value: events.append("prepare"),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_clone_full",
+                    side_effect=lambda value, profile_authority, **_kwargs: (
+                        events.append("clone")
+                        or (authority.clone_root, authority.clone_vmx)
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider, "_vm_inventory", return_value={"fixed": (1, 2, 3)}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_running_vmx_paths",
+                    side_effect=lambda: events.append("power")
+                    or next(unrelated_running_sets),
+                )
+            )
+            revert = stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_revert_clone",
+                    side_effect=lambda *_args: events.append("revert"),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_validate_reverted_clone_disk_graph",
+                    side_effect=lambda *_args, **_kwargs: events.append("validate")
+                    or (),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_clone_snapshot_disk_graph_identity",
+                    return_value=profile.snapshot_disk_graph_identity,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_clone_snapshot_identity",
+                    return_value=profile.snapshot_identity,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_disk_graph_content_digest",
+                    return_value=runtime.disk_graph_digest,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_inject_guestinfo_challenge",
+                    side_effect=lambda profile_authority, item: events.append("inject"),
+                )
+            )
+            start = stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_start_clone",
+                    side_effect=lambda _value: events.append("start"),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_establish_clone_connection",
+                    side_effect=lambda profile_authority, item, **_kwargs: (
+                        events.append("identity") or verified
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_stage_candidate",
+                    side_effect=lambda profile_authority, candidate_root, digest: (
+                        events.append("stage") or "/fixed/candidate"
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(provider, "_run_profile_guest", return_value=receipt)
+            )
+            stop = stack.enter_context(mock.patch.object(provider, "_stop_clone"))
+            remove = stack.enter_context(mock.patch.object(provider, "_remove_clone"))
+            quarantine = stack.enter_context(
+                mock.patch.object(provider, "_quarantine_clone")
+            )
             observed = provider.execute_profile(
                 plan=profile,
                 harness_plan=plan,
@@ -4047,56 +4104,111 @@ class CandidateVmHarnessTests(unittest.TestCase):
                     if scenario["revert_error"] is not None:
                         raise scenario["revert_error"]
 
-                with mock.patch.object(provider, "_assert_tools"), mock.patch.object(
-                    provider,
-                    "_acquire_provider_lease",
-                    return_value=mock.sentinel.lease,
-                ), mock.patch.object(provider, "_release_provider_lease"), mock.patch.object(
-                    provider, "_hashes", return_value=dict(plan.original_vm_hashes)
-                ), mock.patch.object(
-                    provider, "_profile_authority", return_value=authority
-                ), mock.patch.object(provider, "_prepare_profile_authority"), mock.patch.object(
-                    provider,
-                    "_clone_full",
-                    return_value=(authority.clone_root, authority.clone_vmx),
-                ), mock.patch.object(
-                    provider, "_vm_inventory", return_value={"fixed": (1, 2, 3)}
-                ), mock.patch.object(
-                    provider,
-                    "_running_vmx_paths",
-                    side_effect=scenario["running"](clone_identity),
-                ), mock.patch.object(
-                    provider, "_revert_clone", side_effect=revert
-                ), mock.patch.object(
-                    provider,
-                    "_validate_reverted_clone_disk_graph",
-                    side_effect=scenario.get("validator_error"),
-                ) as validate, mock.patch.object(
-                    provider,
-                    "_clone_snapshot_disk_graph_identity",
-                    return_value=profile.snapshot_disk_graph_identity,
-                ), mock.patch.object(
-                    provider,
-                    "_clone_snapshot_identity",
-                    return_value=profile.snapshot_identity,
-                ), mock.patch.object(
-                    provider,
-                    "_disk_graph_content_digest",
-                    return_value="sha256:" + "a" * 64,
-                ), mock.patch.object(
-                    provider, "_inject_guestinfo_challenge"
-                ) as inject, mock.patch.object(provider, "_start_clone") as start, mock.patch.object(
-                    provider,
-                    "_contain_clone",
-                    side_effect=lambda _vmx: events.append("contain"),
-                ) as contain, mock.patch.object(
-                    provider,
-                    "_quarantine_clone",
-                    side_effect=lambda _authority: events.append("quarantine"),
-                ), self.assertRaisesRegex(
-                    harness.CandidateHarnessError,
-                    scenario["expected_code"],
-                ):
+                with ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(provider, "_assert_tools"))
+                    stack.enter_context(
+                        mock.patch.object(
+                            provider,
+                            "_acquire_provider_lease",
+                            return_value=mock.sentinel.lease,
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(provider, "_release_provider_lease")
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            provider,
+                            "_hashes",
+                            return_value=dict(plan.original_vm_hashes),
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            provider, "_profile_authority", return_value=authority
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(provider, "_prepare_profile_authority")
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            provider,
+                            "_clone_full",
+                            return_value=(authority.clone_root, authority.clone_vmx),
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            provider,
+                            "_vm_inventory",
+                            return_value={"fixed": (1, 2, 3)},
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            provider,
+                            "_running_vmx_paths",
+                            side_effect=scenario["running"](clone_identity),
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(provider, "_revert_clone", side_effect=revert)
+                    )
+                    validate = stack.enter_context(
+                        mock.patch.object(
+                            provider,
+                            "_validate_reverted_clone_disk_graph",
+                            side_effect=scenario.get("validator_error"),
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            provider,
+                            "_clone_snapshot_disk_graph_identity",
+                            return_value=profile.snapshot_disk_graph_identity,
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            provider,
+                            "_clone_snapshot_identity",
+                            return_value=profile.snapshot_identity,
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            provider,
+                            "_disk_graph_content_digest",
+                            return_value="sha256:" + "a" * 64,
+                        )
+                    )
+                    inject = stack.enter_context(
+                        mock.patch.object(provider, "_inject_guestinfo_challenge")
+                    )
+                    start = stack.enter_context(
+                        mock.patch.object(provider, "_start_clone")
+                    )
+                    contain = stack.enter_context(
+                        mock.patch.object(
+                            provider,
+                            "_contain_clone",
+                            side_effect=lambda _vmx: events.append("contain"),
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            provider,
+                            "_quarantine_clone",
+                            side_effect=lambda _authority: events.append("quarantine"),
+                        )
+                    )
+                    stack.enter_context(
+                        self.assertRaisesRegex(
+                            harness.CandidateHarnessError,
+                            scenario["expected_code"],
+                        )
+                    )
                     provider.execute_profile(
                         plan=profile,
                         harness_plan=plan,
@@ -4142,57 +4254,106 @@ class CandidateVmHarnessTests(unittest.TestCase):
         authority.profile_root.mkdir(parents=True)
         clone_root = authority.clone_root
         clone_vmx = authority.clone_vmx
-        with mock.patch.object(provider, "_assert_tools"), mock.patch.object(
-            provider, "_acquire_provider_lease", return_value=mock.sentinel.lease
-        ), mock.patch.object(
-            provider, "_release_provider_lease"
-        ), mock.patch.object(
-            provider, "_hashes", return_value=dict(plan.original_vm_hashes)
-        ), mock.patch.object(
-            provider, "_profile_authority", return_value=authority
-        ), mock.patch.object(
-            provider, "_prepare_profile_authority"
-        ), mock.patch.object(
-            provider, "_clone_full", return_value=(clone_root, clone_vmx)
-        ), mock.patch.object(
-            provider, "_vm_inventory", return_value={"fixed": (1, 2, 3)}
-        ), mock.patch.object(
-            provider, "_running_vmx_paths", return_value=frozenset()
-        ), mock.patch.object(provider, "_revert_clone"), mock.patch.object(
-            provider, "_validate_reverted_clone_disk_graph"
-        ), mock.patch.object(
-            provider,
-            "_clone_snapshot_disk_graph_identity",
-            return_value=profile.snapshot_disk_graph_identity,
-        ), mock.patch.object(
-            provider,
-            "_clone_snapshot_identity",
-            return_value=profile.snapshot_identity,
-        ), mock.patch.object(
-            provider,
-            "_disk_graph_content_digest",
-            return_value="sha256:" + "a" * 64,
-        ), mock.patch.object(
-            provider, "_inject_guestinfo_challenge"
-        ), mock.patch.object(
-            provider,
-            "_start_clone",
-            side_effect=harness.CandidateHarnessError("CANDIDATE_VM_CLONE_START_FAILED"),
-        ), mock.patch.object(
-            provider,
-            "_stop_clone",
-            side_effect=harness.CandidateHarnessError(
-                "CANDIDATE_VM_CLONE_SOFT_SHUTDOWN_FAILED"
-            ),
-        ), mock.patch.object(
-            provider, "_is_running", side_effect=[True] + [True] * 60 + [False]
-        ), mock.patch(
-            "scripts.candidate_vm_harness.time.sleep"
-        ), mock.patch.object(
-            provider, "_quarantine_clone"
-        ) as quarantine, self.assertRaisesRegex(
-            harness.CandidateHarnessError, "CLONE_START_FAILED"
-        ):
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(provider, "_assert_tools"))
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_acquire_provider_lease",
+                    return_value=mock.sentinel.lease,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(provider, "_release_provider_lease")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider, "_hashes", return_value=dict(plan.original_vm_hashes)
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(provider, "_profile_authority", return_value=authority)
+            )
+            stack.enter_context(
+                mock.patch.object(provider, "_prepare_profile_authority")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider, "_clone_full", return_value=(clone_root, clone_vmx)
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider, "_vm_inventory", return_value={"fixed": (1, 2, 3)}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider, "_running_vmx_paths", return_value=frozenset()
+                )
+            )
+            stack.enter_context(mock.patch.object(provider, "_revert_clone"))
+            stack.enter_context(
+                mock.patch.object(provider, "_validate_reverted_clone_disk_graph")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_clone_snapshot_disk_graph_identity",
+                    return_value=profile.snapshot_disk_graph_identity,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_clone_snapshot_identity",
+                    return_value=profile.snapshot_identity,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_disk_graph_content_digest",
+                    return_value="sha256:" + "a" * 64,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(provider, "_inject_guestinfo_challenge")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_start_clone",
+                    side_effect=harness.CandidateHarnessError(
+                        "CANDIDATE_VM_CLONE_START_FAILED"
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_stop_clone",
+                    side_effect=harness.CandidateHarnessError(
+                        "CANDIDATE_VM_CLONE_SOFT_SHUTDOWN_FAILED"
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    provider,
+                    "_is_running",
+                    side_effect=[True] + [True] * 60 + [False],
+                )
+            )
+            stack.enter_context(mock.patch("scripts.candidate_vm_harness.time.sleep"))
+            quarantine = stack.enter_context(
+                mock.patch.object(provider, "_quarantine_clone")
+            )
+            stack.enter_context(
+                self.assertRaisesRegex(
+                    harness.CandidateHarnessError, "CLONE_START_FAILED"
+                )
+            )
             provider.execute_profile(
                 plan=profile,
                 harness_plan=plan,
