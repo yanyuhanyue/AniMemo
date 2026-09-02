@@ -31,4 +31,4 @@ Dependabot 每周检查 npm、pip 和 GitHub Actions，限制同时打开的 PR 
 
 ## 安全边界
 
-升级时不得把生产 `.env`、数据库密码、Redis 密钥、OAuth secret、插件 HMAC secret 或真实 API token 写入 requirements、lock、日志或示例。Django 5.2.x、DRF 3.16.x 和现有生产 PostgreSQL/Redis 约束保持不变。
+升级时不得把生产 `.env`、数据库密码、Redis 密钥、OAuth secret、插件 HMAC secret 或真实 API token 写入 requirements、lock、日志或示例。Django 5.2.x、DRF `>=3.17.2,<3.18` 安全基线和现有生产 PostgreSQL/Redis 约束保持不变。
