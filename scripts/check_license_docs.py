@@ -46,7 +46,7 @@ RELEASE_DOCUMENTS = (
 
 EVIDENCE_SHA256 = {
     "package-lock.json": "c0aaa71bff7997dcaf6047f565e0764d3b98e2f072a77bb1d1a246f46259a1e2",
-    "backend/requirements.txt": "31206537e99d46777c1a73152fe7514bb88036219814cdc11cae6f1719724c8a",
+    "backend/requirements.txt": "4cc84f89cfb0b0cb01358b4995b49ae19070b48a0d79cabffb0f861b94171013",
     "release/requirements.txt": "9bb353ade1f549ca5c68ea08f7c3de3d1465864151bf6eb149705d5a06c4c363",
     "bridges/astrbot_plugin_animemo_bridge/requirements.txt": (
         "9d25b578e8e7489ee686d0eabaf1b2b2444b3b0761ac3d55548f9e00c99fb2de"
