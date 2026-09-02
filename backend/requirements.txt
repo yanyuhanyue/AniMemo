@@ -43,7 +43,7 @@ django==5.2.17
     #   drf-spectacular-sidecar
 django-cors-headers==4.9.0
     # via -r requirements.in
-django-redis==5.4.0
+django-redis==7.0.0
     # via -r requirements.in
 django-storages==1.14.6
     # via -r requirements.in
@@ -117,12 +117,9 @@ sqlparse==0.6.0
 typing-extensions==4.16.0
     # via
     #   dj-database-url
+    #   django-redis
     #   psycopg
     #   referencing
-tzdata==2026.3 ; sys_platform == "win32"
-    # via
-    #   django
-    #   psycopg
 uritemplate==4.2.0
     # via drf-spectacular
 urllib3==2.7.0
