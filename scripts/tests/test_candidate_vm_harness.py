@@ -2385,6 +2385,9 @@ class CandidateVmHarnessTests(unittest.TestCase):
             initial_platform_state=harness._initial_platform_state(profile.profile),
         )
         events = []
+        unrelated_running_sets = iter(
+            frozenset({f"unrelated-{index}"}) for index in range(4)
+        )
         with mock.patch.object(provider, "_assert_tools"), mock.patch.object(
             provider, "_acquire_provider_lease", return_value=mock.sentinel.lease
         ), mock.patch.object(
@@ -2398,11 +2401,24 @@ class CandidateVmHarnessTests(unittest.TestCase):
         ), mock.patch.object(
             provider,
             "_clone_full",
-            side_effect=lambda value, profile_authority, **_kwargs: (
-                events.append("clone") or (authority.clone_root, authority.clone_vmx)
-            ),
-        ), mock.patch.object(provider, "_revert_clone") as revert, mock.patch.object(
-            provider, "_validate_clone_disk_graph"
+             side_effect=lambda value, profile_authority, **_kwargs: (
+                 events.append("clone") or (authority.clone_root, authority.clone_vmx)
+             ),
+        ), mock.patch.object(
+            provider, "_vm_inventory", return_value={"fixed": (1, 2, 3)}
+        ), mock.patch.object(
+            provider,
+            "_running_vmx_paths",
+            side_effect=lambda: events.append("power")
+            or next(unrelated_running_sets),
+        ), mock.patch.object(
+            provider,
+            "_revert_clone",
+            side_effect=lambda *_args: events.append("revert"),
+        ) as revert, mock.patch.object(
+            provider,
+            "_validate_reverted_clone_disk_graph",
+            side_effect=lambda *_args, **_kwargs: events.append("validate") or (),
         ), mock.patch.object(
             provider,
             "_clone_snapshot_disk_graph_identity",
@@ -2445,6 +2461,20 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 initial_platform_state=harness._initial_platform_state(profile.profile),
             )
         self.assertEqual(observed, receipt)
+        self.assertEqual(
+            events[:9],
+            [
+                "prepare",
+                "clone",
+                "power",
+                "revert",
+                "power",
+                "validate",
+                "power",
+                "inject",
+                "power",
+            ],
+        )
         self.assertLess(events.index("inject"), events.index("start"))
         self.assertLess(events.index("start"), events.index("identity"))
         self.assertLess(events.index("identity"), events.index("stage"))
@@ -3490,6 +3520,258 @@ class CandidateVmHarnessTests(unittest.TestCase):
 
         self.assertNotEqual(first, second)
 
+    def _reverted_disk_fixture(
+        self,
+        name: str,
+        *,
+        new_delta: bool = True,
+        delta_preexisting: bool = False,
+    ) -> SimpleNamespace:
+        clone = self.root / name
+        clone.mkdir()
+        vmx = clone / f"{harness.SOURCE_VM_IDENTITY}.vmx"
+        snapshot_descriptor = harness.SNAPSHOT_DISK_FILES["FRESH_BASE"]
+        snapshot_extent = snapshot_descriptor.removesuffix(".vmdk") + "-s001.vmdk"
+        (clone / snapshot_descriptor).write_bytes(
+            b"# Disk DescriptorFile\n"
+            b"version=1\n"
+            b"CID=11111111\n"
+            b"parentCID=ffffffff\n"
+            b'createType="twoGbMaxExtentSparse"\n'
+            + f'RW 100 SPARSE "{snapshot_extent}"\n'.encode("utf-8")
+        )
+        (clone / snapshot_extent).write_bytes(b"sealed-snapshot-extent")
+        vmx.write_text(
+            f'scsi0:0.fileName = "{snapshot_descriptor}"\n', encoding="utf-8"
+        )
+        active_descriptor = f"{harness.SOURCE_VM_IDENTITY}-000004.vmdk"
+        active_extent = active_descriptor.removesuffix(".vmdk") + "-s001.vmdk"
+        fixture = SimpleNamespace(
+            clone=clone,
+            vmx=vmx,
+            snapshot_descriptor=snapshot_descriptor,
+            snapshot_extent=snapshot_extent,
+            active_descriptor=active_descriptor,
+            active_extent=active_extent,
+            expected_hashes={
+                snapshot_descriptor: harness._hash_regular_file(
+                    clone / snapshot_descriptor
+                ),
+                snapshot_extent: harness._hash_regular_file(clone / snapshot_extent),
+            },
+        )
+        if delta_preexisting:
+            self._write_revert_delta_descriptor(fixture)
+            (clone / active_extent).write_bytes(b"preexisting-delta-extent")
+            vmx.write_text(
+                f'scsi0:0.fileName = "{active_descriptor}"\n', encoding="utf-8"
+            )
+        fixture.pre_revert_inventory = (
+            harness.ClosedVmwareProvider._vm_inventory(clone)
+        )
+        if new_delta and not delta_preexisting:
+            self._write_revert_delta_descriptor(fixture)
+            (clone / active_extent).write_bytes(b"new-private-delta-extent")
+            vmx.write_text(
+                f'scsi0:0.fileName = "{active_descriptor}"\n', encoding="utf-8"
+            )
+        return fixture
+
+    @staticmethod
+    def _write_revert_delta_descriptor(
+        fixture: SimpleNamespace,
+        *,
+        parent_hint: str | None = None,
+        parent_cid: str = "11111111",
+        sectors: int = 100,
+        tail: bytes = b"",
+    ) -> None:
+        parent_hint = parent_hint or fixture.snapshot_descriptor
+        (fixture.clone / fixture.active_descriptor).write_bytes(
+            b"# Disk DescriptorFile\n"
+            b"version=1\n"
+            b"CID=22222222\n"
+            + f"parentCID={parent_cid}\n".encode("ascii")
+            + b'createType="twoGbMaxExtentSparse"\n'
+            + f'parentFileNameHint="{parent_hint}"\n'.encode("utf-8")
+            + f'RW {sectors} SPARSE "{fixture.active_extent}"\n'.encode("utf-8")
+            + tail
+        )
+
+    @staticmethod
+    def _validate_reverted_disk_fixture(fixture: SimpleNamespace):
+        return harness.ClosedVmwareProvider._validate_reverted_clone_disk_graph(
+            fixture.clone,
+            fixture.vmx,
+            profile="FRESH_BASE",
+            expected_original_hashes=fixture.expected_hashes,
+            pre_revert_inventory=fixture.pre_revert_inventory,
+        )
+
+    def test_reverted_clone_accepts_only_a_new_snapshot_bound_delta(self):
+        fixture = self._reverted_disk_fixture("reverted-private-delta")
+
+        graph = self._validate_reverted_disk_fixture(fixture)
+
+        self.assertEqual(
+            {
+                path.relative_to(fixture.clone).as_posix()
+                for path in graph
+                if path.suffix.casefold() == ".vmdk"
+            },
+            {
+                fixture.snapshot_descriptor,
+                fixture.snapshot_extent,
+                fixture.active_descriptor,
+                fixture.active_extent,
+            },
+        )
+
+    def test_reverted_clone_rejects_a_preexisting_unplanned_delta(self):
+        fixture = self._reverted_disk_fixture(
+            "preexisting-revert-delta",
+            delta_preexisting=True,
+        )
+
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED",
+        ):
+            self._validate_reverted_disk_fixture(fixture)
+
+    def test_reverted_clone_rejects_direct_immutable_snapshot_graph(self):
+        fixture = self._reverted_disk_fixture(
+            "reverted-direct-snapshot",
+            new_delta=False,
+        )
+
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED",
+        ):
+            self._validate_reverted_disk_fixture(fixture)
+
+    def test_reverted_clone_rejects_invalid_new_delta_authority(self):
+        cases = {
+            "wrong-parent": {"parent_hint": "other.vmdk"},
+            "wrong-parent-cid": {"parent_cid": "33333333"},
+            "wrong-sector-layout": {"sectors": 101},
+            "descriptor-tail-over-limit": {
+                "tail": b" " * harness.MAX_VM_CONFIGURATION_BYTES
+            },
+        }
+        for name, values in cases.items():
+            with self.subTest(name=name):
+                fixture = self._reverted_disk_fixture("invalid-" + name)
+                self._write_revert_delta_descriptor(fixture, **values)
+                with self.assertRaisesRegex(
+                    harness.CandidateHarnessError,
+                    "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED",
+                ):
+                    self._validate_reverted_disk_fixture(fixture)
+
+    def test_reverted_clone_rejects_swapped_split_extent_order(self):
+        clone = self.root / "swapped-split-extent-order"
+        clone.mkdir()
+        vmx = clone / f"{harness.SOURCE_VM_IDENTITY}.vmx"
+        snapshot_descriptor = harness.SNAPSHOT_DISK_FILES["FRESH_BASE"]
+        snapshot_stem = snapshot_descriptor.removesuffix(".vmdk")
+        snapshot_extents = [
+            f"{snapshot_stem}-s001.vmdk",
+            f"{snapshot_stem}-s002.vmdk",
+        ]
+        (clone / snapshot_descriptor).write_bytes(
+            b"# Disk DescriptorFile\n"
+            b"version=1\n"
+            b"CID=11111111\n"
+            b"parentCID=ffffffff\n"
+            b'createType="twoGbMaxExtentSparse"\n'
+            + f'RW 100 SPARSE "{snapshot_extents[0]}"\n'.encode("utf-8")
+            + f'RW 200 SPARSE "{snapshot_extents[1]}"\n'.encode("utf-8")
+        )
+        for name in snapshot_extents:
+            (clone / name).write_bytes(("snapshot:" + name).encode("utf-8"))
+        vmx.write_text(
+            f'scsi0:0.fileName = "{snapshot_descriptor}"\n', encoding="utf-8"
+        )
+        expected_hashes = {
+            name: harness._hash_regular_file(clone / name)
+            for name in (snapshot_descriptor, *snapshot_extents)
+        }
+        pre_revert_inventory = harness.ClosedVmwareProvider._vm_inventory(clone)
+
+        active_descriptor = f"{harness.SOURCE_VM_IDENTITY}-000004.vmdk"
+        active_stem = active_descriptor.removesuffix(".vmdk")
+        active_extents = [
+            f"{active_stem}-s001.vmdk",
+            f"{active_stem}-s002.vmdk",
+        ]
+        (clone / active_descriptor).write_bytes(
+            b"# Disk DescriptorFile\n"
+            b"version=1\n"
+            b"CID=22222222\n"
+            b"parentCID=11111111\n"
+            b'createType="twoGbMaxExtentSparse"\n'
+            + f'parentFileNameHint="{snapshot_descriptor}"\n'.encode("utf-8")
+            + f'RW 100 SPARSE "{active_extents[1]}"\n'.encode("utf-8")
+            + f'RW 200 SPARSE "{active_extents[0]}"\n'.encode("utf-8")
+        )
+        for name in active_extents:
+            (clone / name).write_bytes(("active:" + name).encode("utf-8"))
+        vmx.write_text(
+            f'scsi0:0.fileName = "{active_descriptor}"\n', encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED",
+        ):
+            harness.ClosedVmwareProvider._validate_reverted_clone_disk_graph(
+                clone,
+                vmx,
+                profile="FRESH_BASE",
+                expected_original_hashes=expected_hashes,
+                pre_revert_inventory=pre_revert_inventory,
+            )
+
+    def test_reverted_clone_rejects_duplicate_slot_or_extra_new_file(self):
+        duplicate_slot = self._reverted_disk_fixture("duplicate-disk-slot")
+        with duplicate_slot.vmx.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f'scsi0:1.fileName = "{duplicate_slot.active_descriptor}"\n'
+            )
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED",
+        ):
+            self._validate_reverted_disk_fixture(duplicate_slot)
+
+        extra_file = self._reverted_disk_fixture("extra-created-descriptor")
+        (extra_file.clone / f"{harness.SOURCE_VM_IDENTITY}-000005.vmdk").write_bytes(
+            b"# Disk DescriptorFile\n"
+        )
+        with self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED",
+        ):
+            self._validate_reverted_disk_fixture(extra_file)
+
+    def test_reverted_clone_rejects_target_graph_identity_replacement(self):
+        fixture = self._reverted_disk_fixture("target-identity-replacement")
+        observed = harness.ClosedVmwareProvider._vm_inventory(fixture.clone)
+        replaced = dict(observed)
+        size, device, inode = replaced[fixture.snapshot_extent]
+        replaced[fixture.snapshot_extent] = (size, device, inode + 1)
+        with mock.patch.object(
+            harness.ClosedVmwareProvider,
+            "_vm_inventory",
+            side_effect=[replaced, replaced],
+        ), self.assertRaisesRegex(
+            harness.CandidateHarnessError,
+            "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED",
+        ):
+            self._validate_reverted_disk_fixture(fixture)
+
     def test_source_host_hashes_detect_same_size_extent_drift(self):
         source = self.root / "source-extent-drift"
         extent = self._write_closed_source_disk_graph(source)
@@ -3640,6 +3922,211 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 expected_source_disk_graph_identity=DIGEST,
             )
 
+    def test_revert_power_failures_are_contained_before_quarantine(self):
+        scenarios = {
+            "pre-revert-running": {
+                "running": lambda identity: [frozenset({identity})],
+                "revert_error": None,
+                "expected_code": "CANDIDATE_VM_CLONE_POWER_STATE_INVALID",
+                "contain": True,
+                "revert_called": False,
+            },
+            "pre-revert-query-failure": {
+                "running": lambda _identity: [
+                    harness.CandidateHarnessError(
+                        "CANDIDATE_VM_INVENTORY_UNAVAILABLE"
+                    )
+                ],
+                "revert_error": None,
+                "expected_code": "CANDIDATE_VM_CLONE_POWER_STATE_INVALID",
+                "contain": True,
+                "revert_called": False,
+            },
+            "post-revert-running": {
+                "running": lambda identity: [
+                    frozenset(),
+                    frozenset({identity}),
+                ],
+                "revert_error": None,
+                "expected_code": "CANDIDATE_VM_CLONE_POWER_STATE_INVALID",
+                "contain": True,
+            },
+            "post-revert-query-failure": {
+                "running": lambda _identity: [
+                    frozenset(),
+                    harness.CandidateHarnessError(
+                        "CANDIDATE_VM_INVENTORY_UNAVAILABLE"
+                    ),
+                ],
+                "revert_error": None,
+                "expected_code": "CANDIDATE_VM_CLONE_POWER_STATE_INVALID",
+                "contain": True,
+            },
+            "revert-failure-stopped": {
+                "running": lambda _identity: [frozenset(), frozenset()],
+                "revert_error": harness.CandidateHarnessError(
+                    "CANDIDATE_VM_CLONE_REVERT_FAILED"
+                ),
+                "expected_code": "CANDIDATE_VM_CLONE_REVERT_FAILED",
+                "contain": False,
+            },
+            "revert-failure-query-unknown": {
+                "running": lambda _identity: [
+                    frozenset(),
+                    harness.CandidateHarnessError(
+                        "CANDIDATE_VM_INVENTORY_UNAVAILABLE"
+                    ),
+                ],
+                "revert_error": harness.CandidateHarnessError(
+                    "CANDIDATE_VM_CLONE_REVERT_FAILED"
+                ),
+                "expected_code": "CANDIDATE_VM_CLONE_REVERT_FAILED",
+                "contain": True,
+            },
+            "validator-failure-clone-running": {
+                "running": lambda identity: [
+                    frozenset(),
+                    frozenset(),
+                    frozenset({identity}),
+                ],
+                "revert_error": None,
+                "validator_error": harness.CandidateHarnessError(
+                    "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED"
+                ),
+                "expected_code": "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED",
+                "contain": True,
+                "validate_called": True,
+            },
+            "post-readback-query-failure": {
+                "running": lambda _identity: [
+                    frozenset(),
+                    frozenset(),
+                    harness.CandidateHarnessError(
+                        "CANDIDATE_VM_INVENTORY_UNAVAILABLE"
+                    ),
+                ],
+                "revert_error": None,
+                "expected_code": "CANDIDATE_VM_CLONE_POWER_STATE_INVALID",
+                "contain": True,
+                "validate_called": True,
+            },
+            "post-write-running": {
+                "running": lambda identity: [
+                    frozenset(),
+                    frozenset(),
+                    frozenset(),
+                    frozenset({identity}),
+                ],
+                "revert_error": None,
+                "expected_code": "CANDIDATE_VM_CLONE_POWER_STATE_INVALID",
+                "contain": True,
+                "validate_called": True,
+                "inject_called": True,
+            },
+        }
+        for name, scenario in scenarios.items():
+            with self.subTest(name=name):
+                plan = self._plan()
+                profile = plan.profiles[0]
+                provider = harness.ClosedVmwareProvider(
+                    runner=RecordingRunner(),
+                    windows_platform=FakeWindowsPlatform(),
+                    environment={},
+                )
+                authority = self._temporary_authority(
+                    harness.ClosedVmwareProvider._profile_authority(profile, plan)
+                )
+                authority.profile_root.mkdir(parents=True)
+                clone_identity = os.path.normcase(
+                    str(authority.clone_vmx.resolve(strict=False))
+                )
+                events = []
+
+                def revert(*_args):
+                    events.append("revert")
+                    if scenario["revert_error"] is not None:
+                        raise scenario["revert_error"]
+
+                with mock.patch.object(provider, "_assert_tools"), mock.patch.object(
+                    provider,
+                    "_acquire_provider_lease",
+                    return_value=mock.sentinel.lease,
+                ), mock.patch.object(provider, "_release_provider_lease"), mock.patch.object(
+                    provider, "_hashes", return_value=dict(plan.original_vm_hashes)
+                ), mock.patch.object(
+                    provider, "_profile_authority", return_value=authority
+                ), mock.patch.object(provider, "_prepare_profile_authority"), mock.patch.object(
+                    provider,
+                    "_clone_full",
+                    return_value=(authority.clone_root, authority.clone_vmx),
+                ), mock.patch.object(
+                    provider, "_vm_inventory", return_value={"fixed": (1, 2, 3)}
+                ), mock.patch.object(
+                    provider,
+                    "_running_vmx_paths",
+                    side_effect=scenario["running"](clone_identity),
+                ), mock.patch.object(
+                    provider, "_revert_clone", side_effect=revert
+                ), mock.patch.object(
+                    provider,
+                    "_validate_reverted_clone_disk_graph",
+                    side_effect=scenario.get("validator_error"),
+                ) as validate, mock.patch.object(
+                    provider,
+                    "_clone_snapshot_disk_graph_identity",
+                    return_value=profile.snapshot_disk_graph_identity,
+                ), mock.patch.object(
+                    provider,
+                    "_clone_snapshot_identity",
+                    return_value=profile.snapshot_identity,
+                ), mock.patch.object(
+                    provider,
+                    "_disk_graph_content_digest",
+                    return_value="sha256:" + "a" * 64,
+                ), mock.patch.object(
+                    provider, "_inject_guestinfo_challenge"
+                ) as inject, mock.patch.object(provider, "_start_clone") as start, mock.patch.object(
+                    provider,
+                    "_contain_clone",
+                    side_effect=lambda _vmx: events.append("contain"),
+                ) as contain, mock.patch.object(
+                    provider,
+                    "_quarantine_clone",
+                    side_effect=lambda _authority: events.append("quarantine"),
+                ), self.assertRaisesRegex(
+                    harness.CandidateHarnessError,
+                    scenario["expected_code"],
+                ):
+                    provider.execute_profile(
+                        plan=profile,
+                        harness_plan=plan,
+                        candidate_root=self.root,
+                        initial_platform_state=harness._initial_platform_state(
+                            profile.profile
+                        ),
+                    )
+
+                expected_events = []
+                if scenario.get("revert_called", True):
+                    expected_events.append("revert")
+                if scenario["contain"]:
+                    expected_events.append("contain")
+                    contain.assert_called_once_with(authority.clone_vmx)
+                else:
+                    contain.assert_not_called()
+                expected_events.append("quarantine")
+                self.assertEqual(events, expected_events)
+                if scenario.get("validate_called", False):
+                    validate.assert_called_once()
+                else:
+                    validate.assert_not_called()
+                if scenario.get("inject_called", False):
+                    inject.assert_called_once()
+                else:
+                    inject.assert_not_called()
+                start.assert_not_called()
+                shutil.rmtree(authority.session_root, ignore_errors=True)
+
     def test_partial_start_failure_is_contained_before_quarantine(self):
         plan = self._plan()
         profile = plan.profiles[0]
@@ -3667,8 +4154,12 @@ class CandidateVmHarnessTests(unittest.TestCase):
             provider, "_prepare_profile_authority"
         ), mock.patch.object(
             provider, "_clone_full", return_value=(clone_root, clone_vmx)
+        ), mock.patch.object(
+            provider, "_vm_inventory", return_value={"fixed": (1, 2, 3)}
+        ), mock.patch.object(
+            provider, "_running_vmx_paths", return_value=frozenset()
         ), mock.patch.object(provider, "_revert_clone"), mock.patch.object(
-            provider, "_validate_clone_disk_graph"
+            provider, "_validate_reverted_clone_disk_graph"
         ), mock.patch.object(
             provider,
             "_clone_snapshot_disk_graph_identity",
