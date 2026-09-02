@@ -863,6 +863,13 @@ class CandidateVmHarnessTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), result)
 
     @unittest.skipUnless(os.name == "nt", "Windows Candidate material authority")
+    def test_candidate_material_authority_closes_over_producer_receipt(self):
+        self.assertIn(
+            "release-producer-toolchain-receipt.json",
+            harness._CANDIDATE_AUTHORITY_ROOT_FILES,
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows Candidate material authority")
     def test_candidate_material_authority_is_private_held_and_transferable(self):
         candidate_digest = "sha256:" + "2" * 64
         candidate_leaf = candidate_digest.removeprefix("sha256:")

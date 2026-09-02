@@ -878,6 +878,7 @@ _CANDIDATE_AUTHORITY_ROOT_FILES = (
     "release-manifest.json",
     "release-notes.json",
     "release-notes.md",
+    "release-producer-toolchain-receipt.json",
     "verified-candidate.json",
 )
 
