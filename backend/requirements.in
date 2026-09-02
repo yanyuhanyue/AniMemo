@@ -6,7 +6,7 @@ drf-spectacular-sidecar==2026.8.1
 django-cors-headers>=4.9,<5
 django-redis>=5.4,<6
 redis>=8.1,<9
-dj-database-url>=2.3,<3
+dj-database-url>=3.1.2,<4
 psycopg[binary]>=3.3,<4
 django-storages[s3]>=1.14,<2
 boto3>=1.43,<2
