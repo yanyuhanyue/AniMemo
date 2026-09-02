@@ -3135,6 +3135,235 @@ class ClosedVmwareProvider:
         )
 
     @classmethod
+    def _validate_reverted_clone_disk_graph(
+        cls,
+        clone_root: Path,
+        clone_vmx: Path,
+        *,
+        profile: str,
+        expected_original_hashes: Mapping[str, str],
+        pre_revert_inventory: Mapping[str, tuple[int, int, int]],
+    ) -> tuple[Path, ...]:
+        """Authorize the exact private disk graph produced by snapshot revert."""
+
+        code = "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED"
+        snapshot_descriptor = SNAPSHOT_DISK_FILES.get(profile)
+        if snapshot_descriptor is None or not pre_revert_inventory:
+            raise CandidateHarnessError(code)
+        try:
+            boundary = clone_root.resolve(strict=True)
+            post_revert_inventory = cls._vm_inventory(clone_root)
+            if any(
+                stat.S_ISDIR(entry.lstat().st_mode)
+                for entry in boundary.iterdir()
+            ):
+                raise CandidateHarnessError(code)
+            active_graph_files = cls._validate_clone_disk_graph(
+                clone_root, clone_vmx
+            )
+            active_disk_names = {
+                path.relative_to(boundary).as_posix()
+                for path in active_graph_files
+                if path.suffix.casefold() == ".vmdk"
+            }
+            snapshot_disk_names = {
+                path.relative_to(boundary).as_posix()
+                for path in cls._validate_closed_disk_descriptors(
+                    clone_root, (snapshot_descriptor,)
+                )
+            }
+            if not snapshot_disk_names:
+                raise CandidateHarnessError(code)
+            for name in snapshot_disk_names:
+                expected = expected_original_hashes.get(name)
+                if (
+                    type(expected) is not str
+                    or not _DIGEST.fullmatch(expected)
+                    or pre_revert_inventory.get(name)
+                    != post_revert_inventory.get(name)
+                    or _hash_regular_file(boundary / name) != expected
+                ):
+                    raise CandidateHarnessError(code)
+
+            vmx_text = cls._configuration_text(
+                cls._configuration_prefix(clone_vmx, complete=True)
+            )
+            direct_disk_references: list[str] = []
+            for raw_line in vmx_text.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key = line.split("=", 1)[0].strip()
+                if not cls._disk_slot_key(key):
+                    continue
+                reference = cls._setting_value(line, key)
+                if reference is not None and reference.casefold().endswith(
+                    ".vmdk"
+                ):
+                    direct_disk_references.append(reference)
+            if len(direct_disk_references) != 1:
+                raise CandidateHarnessError(code)
+            direct_descriptor = cls._closed_disk_reference(
+                clone_root, direct_disk_references[0]
+            ).relative_to(boundary).as_posix()
+            created_names = set(post_revert_inventory) - set(pre_revert_inventory)
+            new_active_names = active_disk_names - snapshot_disk_names
+            if (
+                re.fullmatch(
+                    re.escape(SOURCE_VM_IDENTITY) + r"-[0-9]{6}\.vmdk",
+                    direct_descriptor,
+                    flags=re.IGNORECASE,
+                )
+                is None
+                or direct_descriptor not in new_active_names
+                or active_disk_names != snapshot_disk_names | new_active_names
+                or created_names != new_active_names
+                or any(name in pre_revert_inventory for name in new_active_names)
+            ):
+                raise CandidateHarnessError(code)
+            new_extent_names = new_active_names - {direct_descriptor}
+            new_extent_pattern = re.compile(
+                re.escape(direct_descriptor.removesuffix(".vmdk"))
+                + r"-s([0-9]{3})\.vmdk",
+                flags=re.IGNORECASE,
+            )
+            extent_numbers = []
+            for name in new_extent_names:
+                matched = new_extent_pattern.fullmatch(name)
+                if matched is None:
+                    raise CandidateHarnessError(code)
+                extent_numbers.append(int(matched.group(1)))
+            if sorted(extent_numbers) != list(
+                range(1, len(new_extent_names) + 1)
+            ):
+                raise CandidateHarnessError(code)
+
+            descriptor_text = cls._configuration_text(
+                cls._configuration_prefix(
+                    boundary / direct_descriptor, complete=True
+                )
+            )
+            if not descriptor_text.lstrip("\ufeff \t\r\n").startswith(
+                "# Disk DescriptorFile"
+            ):
+                raise CandidateHarnessError(code)
+
+            def unquoted_setting(text: str, key: str, pattern: str) -> str:
+                values = []
+                for raw_line in text.splitlines():
+                    if "=" not in raw_line:
+                        continue
+                    raw_key, raw_value = raw_line.split("=", 1)
+                    if raw_key.strip().casefold() != key.casefold():
+                        continue
+                    value = raw_value.strip().casefold()
+                    if re.fullmatch(pattern, value) is None:
+                        raise CandidateHarnessError(code)
+                    values.append(value)
+                if len(values) != 1:
+                    raise CandidateHarnessError(code)
+                return values[0]
+
+            def quoted_settings(text: str, key: str) -> list[str]:
+                return [
+                    value
+                    for raw_line in text.splitlines()
+                    if (
+                        value := cls._setting_value(raw_line.strip(), key)
+                    )
+                    is not None
+                ]
+
+            def sparse_extent_records(text: str) -> list[tuple[int, str]]:
+                records = []
+                for raw_line in text.splitlines():
+                    line = raw_line.strip()
+                    first = line.split(None, 1)[0].upper() if line else ""
+                    if first not in {"RW", "RDONLY", "NOACCESS"}:
+                        continue
+                    matched = re.fullmatch(
+                        r'RW\s+([1-9][0-9]*)\s+SPARSE\s+"([^"\r\n]+)"',
+                        line,
+                        flags=re.IGNORECASE,
+                    )
+                    if matched is None:
+                        raise CandidateHarnessError(code)
+                    records.append((int(matched.group(1)), matched.group(2)))
+                if not records:
+                    raise CandidateHarnessError(code)
+                return records
+
+            snapshot_descriptor_text = cls._configuration_text(
+                cls._configuration_prefix(
+                    boundary / snapshot_descriptor, complete=True
+                )
+            )
+            parent_references = quoted_settings(
+                descriptor_text, "parentFileNameHint"
+            )
+            create_types = quoted_settings(descriptor_text, "createType")
+            extent_records = sparse_extent_records(descriptor_text)
+            extent_references = [reference for _, reference in extent_records]
+            resolved_extent_names = [
+                cls._closed_disk_reference(
+                    clone_root,
+                    reference,
+                    base=(boundary / direct_descriptor).parent,
+                )
+                .relative_to(boundary)
+                .as_posix()
+                for reference in extent_references
+            ]
+            ordered_extent_names = [
+                direct_descriptor.removesuffix(".vmdk")
+                + f"-s{index:03d}.vmdk"
+                for index in range(1, len(extent_records) + 1)
+            ]
+            new_identities = {
+                metadata[1:] for name, metadata in post_revert_inventory.items()
+                if name in new_active_names
+            }
+            pre_identities = {
+                metadata[1:] for metadata in pre_revert_inventory.values()
+            }
+            if (
+                unquoted_setting(descriptor_text, "version", r"1") != "1"
+                or create_types != ["twoGbMaxExtentSparse"]
+                or parent_references != [snapshot_descriptor]
+                or unquoted_setting(
+                    descriptor_text, "parentCID", r"[0-9a-f]{8}"
+                )
+                != unquoted_setting(
+                    snapshot_descriptor_text, "CID", r"[0-9a-f]{8}"
+                )
+                or unquoted_setting(
+                    descriptor_text, "CID", r"[0-9a-f]{8}"
+                )
+                == "ffffffff"
+                or len(extent_references) != len(set(extent_references))
+                or resolved_extent_names != ordered_extent_names
+                or set(resolved_extent_names) != new_extent_names
+                or [sectors for sectors, _ in extent_records]
+                != [
+                    sectors
+                    for sectors, _ in sparse_extent_records(
+                        snapshot_descriptor_text
+                    )
+                ]
+                or len(new_identities) != len(new_active_names)
+                or bool(new_identities & pre_identities)
+                or cls._vm_inventory(clone_root) != post_revert_inventory
+            ):
+                raise CandidateHarnessError(code)
+            return active_graph_files
+        except CandidateHarnessError as error:
+            if error.code == code:
+                raise
+            raise CandidateHarnessError(code) from error
+        except (OSError, ValueError) as error:
+            raise CandidateHarnessError(code) from error
+
+    @classmethod
     def _validate_closed_disk_descriptors(
         cls,
         clone_root: Path,
@@ -4683,7 +4912,27 @@ class ClosedVmwareProvider:
         )
         verified_connection: VerifiedCloneConnection | None = None
         profile_failure: CandidateHarnessError | None = None
-        start_attempted = False
+        clone_power_state_untrusted = False
+        containment_required = False
+
+        def checked_running_vmx_paths() -> frozenset[str]:
+            nonlocal containment_required
+            try:
+                return self._running_vmx_paths()
+            except CandidateHarnessError as error:
+                containment_required = True
+                raise CandidateHarnessError(
+                    "CANDIDATE_VM_CLONE_POWER_STATE_INVALID"
+                ) from error
+
+        def reject_running_clone(paths: frozenset[str], identity: str) -> None:
+            nonlocal containment_required
+            if identity in paths:
+                containment_required = True
+                raise CandidateHarnessError(
+                    "CANDIDATE_VM_CLONE_POWER_STATE_INVALID"
+                )
+
         profile_authority_stack = ExitStack()
         clone_authority_stack = ExitStack()
         try:
@@ -4730,24 +4979,27 @@ class ClosedVmwareProvider:
                 raise CandidateHarnessError(
                     "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH"
                 )
+            clone_power_state_untrusted = True
+            clone_identity = os.path.normcase(
+                str(clone_vmx.resolve(strict=False))
+            )
+            running_before_revert = checked_running_vmx_paths()
+            reject_running_clone(running_before_revert, clone_identity)
             if self._hashes() != before_hashes:
                 raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
+            pre_revert_inventory = self._vm_inventory(clone_root)
             self._revert_clone(clone_vmx, plan.snapshot_name)
+            running_after_revert = checked_running_vmx_paths()
+            reject_running_clone(running_after_revert, clone_identity)
             if self._hashes() != before_hashes:
                 raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
-            active_graph_files = self._validate_clone_disk_graph(
+            self._validate_reverted_clone_disk_graph(
                 clone_root,
                 clone_vmx,
+                profile=plan.profile,
+                expected_original_hashes=harness_plan.original_vm_hashes,
+                pre_revert_inventory=pre_revert_inventory,
             )
-            active_disk_names = {
-                path.relative_to(clone_root.resolve(strict=True)).as_posix()
-                for path in active_graph_files
-                if path.suffix.casefold() == ".vmdk"
-            }
-            if not active_disk_names.issubset(harness_plan.original_vm_hashes):
-                raise CandidateHarnessError(
-                    "CANDIDATE_VM_REVERT_DISK_GRAPH_UNPLANNED"
-                )
             self._clone_snapshot_disk_graph_identity(
                 clone_root,
                 profile=plan.profile,
@@ -4755,7 +5007,6 @@ class ClosedVmwareProvider:
                     plan.snapshot_disk_graph_identity
                 ),
             )
-            self._inject_guestinfo_challenge(authority, plan)
             preboot_snapshot_identity = self._clone_snapshot_identity(
                 clone_root,
                 profile=plan.profile,
@@ -4764,7 +5015,11 @@ class ClosedVmwareProvider:
             preboot_disk_graph_digest = self._disk_graph_content_digest(
                 clone_root, clone_vmx
             )
-            start_attempted = True
+            running_after_readback = checked_running_vmx_paths()
+            reject_running_clone(running_after_readback, clone_identity)
+            self._inject_guestinfo_challenge(authority, plan)
+            running_after_write = checked_running_vmx_paths()
+            reject_running_clone(running_after_write, clone_identity)
             self._start_clone(clone_vmx)
             verified_connection = self._establish_clone_connection(
                 authority,
@@ -4804,6 +5059,7 @@ class ClosedVmwareProvider:
                 profile_failure = error
                 raise
             self._stop_clone(clone_vmx)
+            clone_power_state_untrusted = False
             if self._hashes() != before_hashes:
                 raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
             clone_authority_stack.close()
@@ -4812,11 +5068,13 @@ class ClosedVmwareProvider:
             return receipt
         except BaseException as error:
             if authority.profile_root.exists() or authority.profile_root.is_symlink():
-                if start_attempted and clone_vmx is not None:
-                    try:
-                        running = self._is_running(clone_vmx)
-                    except CandidateHarnessError:
-                        running = True
+                if clone_power_state_untrusted and clone_vmx is not None:
+                    running = containment_required
+                    if not running:
+                        try:
+                            running = self._is_running(clone_vmx)
+                        except CandidateHarnessError:
+                            running = True
                     if running:
                         try:
                             self._contain_clone(clone_vmx)
