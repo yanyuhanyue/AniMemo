@@ -1,5 +1,6 @@
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_protect
+from django.views.decorators.debug import sensitive_post_parameters, sensitive_variables
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -7,7 +8,11 @@ from rest_framework.views import APIView
 
 from journal.web_auth_adapter import no_store
 
-from .first_run import SetupCompletionError, complete_first_run_setup
+from .first_run import (
+    SetupCompletionError,
+    complete_first_run_setup,
+    mark_first_run_request_sensitive,
+)
 from .models import InstallationState
 from .serializers import (
     FirstRunSetupSerializer,
@@ -47,6 +52,9 @@ class InstallationStatusView(APIView):
         }))
 
 
+@method_decorator(
+    sensitive_post_parameters("code", "password", "password_confirm"), name="dispatch"
+)
 @method_decorator(csrf_protect, name="dispatch")
 class InstallationSetupView(APIView):
     authentication_classes = []
@@ -54,6 +62,14 @@ class InstallationSetupView(APIView):
     throttle_scope = "first_run_setup"
     account_throttle_scope = "first_run_setup"
     throttle_account_fields = ("username", "email")
+
+    @sensitive_variables()
+    def dispatch(self, request, *args, **kwargs):
+        # Protect aliases in parsing, throttling and serializer frames too,
+        # not only the local names used by post(). Keep the canonical DRF
+        # exception handler and its closed public/log responses unchanged.
+        mark_first_run_request_sensitive(request)
+        return super().dispatch(request, *args, **kwargs)
 
     @extend_schema(
         request=FirstRunSetupSerializer,

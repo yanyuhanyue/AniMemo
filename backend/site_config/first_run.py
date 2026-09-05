@@ -13,6 +13,8 @@ from django.contrib.sessions.models import Session
 from django.db import transaction
 from django.db.models import ExpressionWrapper, F, PositiveSmallIntegerField, Q
 from django.utils import timezone
+from django.views.debug import SafeExceptionReporterFilter
+from django.views.decorators.debug import sensitive_variables
 
 from .models import InstallationState
 
@@ -33,6 +35,23 @@ class SetupCompletionError(RuntimeError):
         self.code = code
         self.detail = detail
         self.status_code = status_code
+
+
+class FirstRunExceptionReporterFilter(SafeExceptionReporterFilter):
+    """Apply first-run credential annotations even for DEBUG diagnostics."""
+
+    def is_active(self, request):
+        return True
+
+
+def mark_first_run_request_sensitive(request):
+    """Limit this filter to the raw Django request behind the setup operation."""
+
+    raw_request = getattr(request, "_request", request)
+    if raw_request is None:
+        return
+    raw_request.exception_reporter_filter = FirstRunExceptionReporterFilter()
+    raw_request.sensitive_post_parameters = ("code", "password", "password_confirm")
 
 
 @dataclass(frozen=True)
@@ -207,11 +226,13 @@ def provision_first_run_setup():
         return ProvisionedSetupCode(code_path, False, expires_at)
 
 
+@sensitive_variables()
 def complete_first_run_setup(*, code, username, email, password, request):
     from django.contrib.auth import get_user_model
     from journal.models import AdminAuditLog, UserSettings
     from journal.network import client_ip
 
+    mark_first_run_request_sensitive(request)
     User = get_user_model()
     snapshot = InstallationState.objects.only(
         "status",
