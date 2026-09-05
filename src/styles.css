@@ -1725,6 +1725,54 @@ button.tag-chip { cursor: pointer; }
 .universe-art-hover-layer { pointer-events: auto; transition: transform .08s steps(1); will-change: transform; }
 .universe-art-image-layer { width: 100%; height: 100%; overflow: hidden; margin: 0; border: 5px solid var(--ink); background: #fff; box-shadow: 9px 9px 0 var(--yellow); transition: box-shadow .08s steps(1); will-change: box-shadow; }
 .universe-art-image-layer img { width: 100%; height: 100%; object-fit: cover; filter: grayscale(1) contrast(1.55); transition: filter .08s steps(1); will-change: filter; }
+.universe-art-brand-mark,
+.featured-portrait__brand-mark {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: linear-gradient(135deg, var(--teal) 0 42%, var(--cream) 42% 68%, var(--coral) 68%);
+}
+.universe-art-brand-mark::before,
+.featured-portrait__brand-mark::before {
+  content: "";
+  position: absolute;
+  width: 58%;
+  aspect-ratio: 1;
+  border: 5px solid var(--ink);
+  border-radius: 50%;
+  background: var(--yellow);
+  transform: rotate(-10deg);
+}
+.universe-art-brand-mark span,
+.featured-portrait__brand-mark span {
+  position: relative;
+  z-index: 2;
+  font-size: clamp(48px, 8vw, 120px);
+  color: var(--ink);
+}
+.universe-art-brand-mark i,
+.featured-portrait__brand-mark i {
+  position: absolute;
+  z-index: 2;
+  width: 16%;
+  height: 42%;
+  background: var(--coral);
+  border: 4px solid var(--ink);
+  transform: translate(30%, 14%) rotate(7deg);
+}
+.universe-art-brand-mark b,
+.featured-portrait__brand-mark b {
+  position: absolute;
+  z-index: 3;
+  width: 34%;
+  height: 10%;
+  background: var(--navy, #18264a);
+  border: 4px solid var(--ink);
+  transform: translate(-8%, 48%) rotate(-12deg);
+}
 @media (hover: hover) and (pointer: fine) {
   .universe-art-hover-layer:hover { transform: translate(5px, 5px) rotate(.5deg); }
   .universe-art-hover-layer:hover .universe-art-image-layer { box-shadow: 4px 4px 0 var(--teal); }

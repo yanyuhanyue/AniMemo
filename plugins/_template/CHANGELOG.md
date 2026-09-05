@@ -7,4 +7,4 @@
 
 ## 0.1.0
 
-- 初始化 Anime Journal 空白插件。
+- 初始化 AniMemo 空白插件。

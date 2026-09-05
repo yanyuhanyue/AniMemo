@@ -19,6 +19,12 @@ import { usePageColorTransition } from "../components/PageColorTransition.jsx";
 import { SharedShowcaseHeader } from "../components/SharedShowcaseHeader.jsx";
 import { useSiteSettings } from "../context/SiteSettingsContext.jsx";
 import { demoAnimeRecords, demoEnabled, getDemoUniverseOwner } from "@demo-data";
+import { hydrateDemoAnimeRecords, hydrateDemoUniverseOwner, reconcileDemoRecords } from "../lib/demoMedia.js";
+import {
+  ANIMEMO_AVATAR_PATH,
+  ANIMEMO_POSTER_FALLBACK_PATH,
+  normalizeBundledPosterPath,
+} from "../lib/mediaAssets.js";
 
 const RECORDS_STORAGE_KEY = "anime_journal_records_v1";
 const SETTINGS_STORAGE_KEY = "anime_journal_settings_v1";
@@ -26,6 +32,11 @@ const RECORDS_UPDATED_EVENT = "anime-journal:records-updated";
 const DEFAULT_FILTERS = { search: "", tag: "all", status: "all", year: "all", sort: "date-desc", quick: "all" };
 
 function apiToRecord(item, presetColors) {
+  const externalIdentities = Array.isArray(item.external_identities) ? item.external_identities : [];
+  const bangumiIdentity = externalIdentities.find((identity) => (
+    String(identity?.provider || "").toLowerCase() === "bangumi"
+    && String(identity?.external_id || "").trim()
+  ));
   return {
     id: item.id,
     title: item.title,
@@ -38,25 +49,39 @@ function apiToRecord(item, presetColors) {
     statusLabel: item.watch_status_display || { completed: "看过", watching: "在看", planned: "想看", on_hold: "搁置" }[item.watch_status] || "想看",
     tags: item.tags || [],
     tagColors: resolveTagColors(item.tags || [], item.tag_colors || {}, presetColors),
-    poster: item.poster || item.poster_url || "/assets/posters/poster-01.webp",
+    poster: normalizeBundledPosterPath(item.poster || item.poster_url),
     posterOriginal: item.poster_original || item.poster || item.poster_url || "",
     description: item.description || "",
     review: item.review || "",
-    baikeUrl: item.baike_url || "https://mzh.moegirl.org.cn/",
+    baikeUrl: item.baike_url || "",
+    externalIdentities,
+    resourceIdentity: bangumiIdentity ? {
+      provider: "bangumi",
+      externalId: String(bangumiIdentity.external_id).trim(),
+    } : null,
     watchHistory: [],
   };
 }
 
 function recordToFeaturedColumn(record) {
+  const bangumiIdentity = record.resourceIdentity || (record.externalIdentities || []).find((identity) => (
+    String(identity?.provider || "").toLowerCase() === "bangumi"
+    && String(identity?.external_id || "").trim()
+  ));
+  const canonicalUrl = bangumiIdentity?.canonicalUrl
+    || bangumiIdentity?.canonical_url
+    || (bangumiIdentity?.externalId ? `https://bgm.tv/subject/${bangumiIdentity.externalId}` : "")
+    || (bangumiIdentity?.external_id ? `https://bgm.tv/subject/${bangumiIdentity.external_id}` : "");
   return {
     id: `showcase-${record.id}`,
     anime: {
       title: record.title,
       japaneseTitle: record.japaneseTitle,
-      poster: record.poster,
-      posterOriginal: record.posterOriginal || record.poster,
-      externalUrl: record.baikeUrl,
-      externalSource: "萌娘百科",
+      poster: normalizeBundledPosterPath(record.poster),
+      posterOriginal: record.posterOriginal || "",
+      externalUrl: canonicalUrl || record.baikeUrl || "",
+      externalSource: canonicalUrl ? "Bangumi" : "外部资料",
+      resourceIdentity: record.resourceIdentity || null,
       period: record.period,
       score: record.score,
       studio: record.studio,
@@ -116,10 +141,10 @@ function periodSortValue(period) {
 
 function Header({ profile, sharedMode, siteSettings }) {
   const { isTransitioning, navigateWithTransition } = usePageColorTransition();
-  const nickname = profile?.nickname || "XuanHuang";
+  const nickname = profile?.nickname || "AniMemo";
   const title = sharedMode ? `${nickname} 的番剧汇总` : siteSettings.homepage_title;
   const subtitle = sharedMode ? (profile?.subtitle || "把每一次与动画相遇认真收藏。") : siteSettings.homepage_description;
-  const avatar = sharedMode ? (profile?.avatar || "/assets/avatar.png") : siteSettings.site_avatar_url;
+  const avatar = sharedMode ? (profile?.avatar || ANIMEMO_AVATAR_PATH) : siteSettings.site_avatar_url;
   return (
     <header className="showcase-hero">
       <div className="hero-grid" aria-hidden="true" />
@@ -211,6 +236,7 @@ export function ShowcasePage({ sharedMode = false }) {
   const [dataReady, setDataReady] = useState(false);
   const [bootComplete, setBootComplete] = useState(sharedMode);
   const [loaderVisible, setLoaderVisible] = useState(!sharedMode);
+  const demoMediaCacheRef = useRef(new Map());
   const changeCatalogView = useCallback((nextView) => {
     if (nextView === view) return;
 
@@ -273,7 +299,7 @@ export function ShowcasePage({ sharedMode = false }) {
 
     const loadDemoOwner = async () => {
       if (!demoEnabled || !publicSlug) return null;
-      return getDemoUniverseOwner(publicSlug);
+      return hydrateDemoUniverseOwner(getDemoUniverseOwner(publicSlug), { client: api, cache: demoMediaCacheRef.current });
     };
 
     const applyLocalRecords = async (providedDemo = null) => {
@@ -281,7 +307,7 @@ export function ShowcasePage({ sharedMode = false }) {
       const demo = providedDemo || await loadDemoOwner();
       if (cancelled) return;
       if (demo) {
-        setRecords(demo.records);
+        setRecords(await hydrateDemoAnimeRecords(demo.records, { client: api, cache: demoMediaCacheRef.current }));
         setRemoteStats(demo.stats);
         setProfile({
           nickname: demo.nickname,
@@ -293,16 +319,26 @@ export function ShowcasePage({ sharedMode = false }) {
       }
       let localRecords = readStoredRecords();
       if (!localRecords.length && demoEnabled) localRecords = demoAnimeRecords;
-      localRecords = localRecords.map((record) => normalizeLocalRecordColors(record));
+      if (demoEnabled) {
+        localRecords = reconcileDemoRecords(localRecords, demoAnimeRecords);
+        localRecords = await hydrateDemoAnimeRecords(localRecords, {
+          client: api,
+          cache: demoMediaCacheRef.current,
+        });
+      }
+      localRecords = localRecords.map((record) => ({
+        ...normalizeLocalRecordColors(record),
+        poster: normalizeBundledPosterPath(record.poster),
+      }));
       if (cancelled) return;
       if (ownerPreview) {
         const settings = readStoredPreviewSettings();
         setRecords(localRecords);
         setRemoteStats(null);
         setProfile({
-          nickname: settings.nickname || settings.email || "XuanHuang",
+          nickname: settings.nickname || settings.email || "AniMemo",
           subtitle: settings.subtitle || "把每一次与动画相遇认真收藏。",
-          avatar: settings.avatar || "/assets/avatar.png",
+          avatar: settings.avatar || ANIMEMO_AVATAR_PATH,
           public_slug: publicSlug || "local-preview",
         });
         setOwnerPublicStatus(settings.publicStatus || "private");
@@ -313,7 +349,7 @@ export function ShowcasePage({ sharedMode = false }) {
       setProfile(sharedMode ? {
         nickname: "公开同好",
         subtitle: "这位同好正在公开分享自己的观看轨道。",
-        avatar: "/assets/avatar.png",
+        avatar: ANIMEMO_AVATAR_PATH,
         public_slug: publicSlug || "",
       } : null);
     };

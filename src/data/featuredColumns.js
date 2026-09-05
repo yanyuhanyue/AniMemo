@@ -1,4 +1,5 @@
 import { animeRecords } from "./anime.js";
+import { ANIMEMO_AVATAR_PATH, ANIMEMO_POSTER_FALLBACK_PATH } from "../lib/mediaAssets.js";
 
 const articleBodies = [
   [
@@ -44,9 +45,9 @@ const articleBodies = [
 ];
 
 const source = [
-  ["restart-life", 2, "《回复术士的重启人生》", "回復術士のやり直し", "烧人棍这一次", "双叶夏洛", "2021-1", 8.9, ["异世界", "奇幻", "黑暗", "后宫"]],
-  ["happy-sugar-life", 6, "《Happy Sugar Life 砂糖的幸福生活》", "ハッピーシュガーライフ", "甜蜜与危险共享同一种颜色", "XuanHuang", "2018-7", 9.0, ["真百", "悬疑", "黑暗", "入坑之作", "轩皇力推"]],
-  ["yuri-spectrum", 11, "百合动画入门：从轻松日常到浓烈情感", "百合作品の感情スペクトル", "八部作品，八种靠近彼此的方式", "XuanHuang", "2026-4", 9.4, ["真百", "轻百", "日常", "轩皇力推"]],
+  ["restart-life", 295017, "《回复术士的重来人生》", "回復術士のやり直し", "烧人棍这一次", "双叶夏洛", "2021-1", 8.9, ["异世界", "奇幻", "黑暗", "后宫"]],
+  ["happy-sugar-life", 240828, "《Happy Sugar Life 砂糖的幸福生活》", "ハッピーシュガーライフ", "甜蜜与危险共享同一种颜色", "AniMemo 编辑部", "2018-7", 9.0, ["真百", "悬疑", "黑暗", "入坑之作", "AniMemo 精选"]],
+  ["yuri-spectrum", 11, "百合动画入门：从轻松日常到浓烈情感", "百合作品の感情スペクトル", "八部作品，八种靠近彼此的方式", "AniMemo 编辑部", "2026-4", 9.4, ["真百", "轻百", "日常", "AniMemo 精选"]],
   ["frieren-time", 5, "为什么《葬送的芙莉莲》如此擅长表现时间", "葬送のフリーレン・時間論", "从留白、旅程与迟到的理解开始", "NorthStar", "2026-1", 9.5, ["奇幻", "冒险", "演出分析"]],
   ["season-afterglow", 16, "这一季最舍不得完结的六部动画", "季節の余韻を集めて", "不只看分数，也记录陪伴留下的余温", "Mochi", "2025-10", 9.8, ["日常", "治愈", "季度总结"]],
   ["music-fireworks", 6, "当音乐响起：动画舞台上的情绪烟花", "音楽が物語になる瞬間", "声音、剪辑与角色关系的同步抵达", "Hikari", "2026-1", 9.9, ["音乐", "原创", "剧场版", "演出分析"]],
@@ -65,7 +66,13 @@ const featuredAnimeOverrides = {
     tags: ["异世界", "奇幻", "黑暗", "后宫"],
     description: "回复术士凯亚尔在被利用与夺走一切后，借由贤者之石让时间回到四年前。他保留了上一轮人生的记忆，并试图重新掌握自己的命运。",
     review: "作品把复仇、权力与创伤推到非常极端的位置。它并不适合所有观众，但鲜明的冲突和角色动机确实留下了强烈记忆。",
-    baikeUrl: "https://mzh.moegirl.org.cn/回复术士的重启人生",
+    resourceIdentity: { provider: "bangumi", externalId: "295017" },
+    bangumiTitle: "回复术士的重来人生",
+    bangumiJapaneseTitle: "回復術士のやり直し",
+    poster: ANIMEMO_POSTER_FALLBACK_PATH,
+    posterOriginal: "",
+    externalUrl: "https://bgm.tv/subject/295017",
+    externalSource: "Bangumi",
   },
   "happy-sugar-life": {
     title: "《Happy Sugar Life 砂糖的幸福生活》",
@@ -74,10 +81,16 @@ const featuredAnimeOverrides = {
     studio: "Ezo'la",
     episodes: "12",
     score: 9.0,
-    tags: ["真百", "悬疑", "黑暗", "入坑之作", "轩皇力推"],
+    tags: ["真百", "悬疑", "黑暗", "入坑之作", "AniMemo 精选"],
     description: "松坂砂糖与神户盐共同生活在一间与外界隔绝的公寓里。为了守护自己认定的幸福，砂糖不断跨越道德与法律的边界。",
     review: "甜美视觉与危险关系的反差至今仍很有冲击力。角色的三观普遍偏离常态，却因此形成了一套完整而令人不安的叙事逻辑。",
-    baikeUrl: "https://mzh.moegirl.org.cn/Happy_Sugar_Life",
+    resourceIdentity: { provider: "bangumi", externalId: "240828" },
+    bangumiTitle: "Happy Sugar Life",
+    bangumiJapaneseTitle: "ハッピーシュガーライフ",
+    poster: ANIMEMO_POSTER_FALLBACK_PATH,
+    posterOriginal: "",
+    externalUrl: "https://bgm.tv/subject/240828",
+    externalSource: "Bangumi",
   },
 };
 
@@ -90,17 +103,19 @@ const representativeAnimeBySlug = {
   "three-episode-watch": 9,
 };
 
-function buildFeaturedAnime(slug, posterNumber, cover) {
+function buildFeaturedAnime(slug, linkedId) {
   const override = featuredAnimeOverrides[slug];
-  const linkedId = representativeAnimeBySlug[slug] ?? posterNumber;
   const record = override || animeRecords.find((anime) => anime.id === linkedId) || {};
   return {
     title: record.title || "未命名番剧",
     japaneseTitle: record.japaneseTitle || "",
-    poster: cover,
-    posterOriginal: cover,
-    externalUrl: record.baikeUrl || "",
-    externalSource: "萌娘百科",
+    poster: record.poster || ANIMEMO_POSTER_FALLBACK_PATH,
+    posterOriginal: record.posterOriginal || "",
+    externalUrl: record.externalUrl || "",
+    externalSource: record.externalSource || "Bangumi",
+    resourceIdentity: record.resourceIdentity,
+    bangumiTitle: record.bangumiTitle,
+    bangumiJapaneseTitle: record.bangumiJapaneseTitle,
     period: record.period || "未定档",
     score: record.score ?? null,
     studio: record.studio || "待补充",
@@ -111,8 +126,8 @@ function buildFeaturedAnime(slug, posterNumber, cover) {
   };
 }
 
-export const featuredColumns = source.map(([slug, posterNumber, title, japaneseTitle, summary, author, period, score, tags], index) => {
-  const cover = `/assets/posters/poster-${String(posterNumber).padStart(2, "0")}.webp`;
+export const featuredColumns = source.map(([slug, linkedId, title, japaneseTitle, summary, author, period, score, tags], index) => {
+  const anime = buildFeaturedAnime(slug, representativeAnimeBySlug[slug] ?? linkedId);
   return {
     id: slug,
     slug,
@@ -121,8 +136,8 @@ export const featuredColumns = source.map(([slug, posterNumber, title, japaneseT
     japaneseTitle,
     summary,
     author,
-    authorAvatar: index % 2 === 0 ? "/assets/avatar.png" : `/assets/posters/poster-${String(((posterNumber + 3) % 16) + 1).padStart(2, "0")}.webp`,
-    cover,
+    authorAvatar: ANIMEMO_AVATAR_PATH,
+    cover: anime.poster || ANIMEMO_POSTER_FALLBACK_PATH,
     period,
     year: period.split("-")[0],
     status: index === 7 ? "watching" : "completed",
@@ -131,7 +146,7 @@ export const featuredColumns = source.map(([slug, posterNumber, title, japaneseT
     tags,
     body: articleBodies[index],
     relatedAnime: animeRecords.slice(index % 8, (index % 8) + 3),
-    anime: buildFeaturedAnime(slug, posterNumber, cover),
+    anime,
   };
 });
 

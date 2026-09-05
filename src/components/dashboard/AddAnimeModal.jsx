@@ -34,7 +34,7 @@ function normalizeCatalogRecord(item) {
     studio: item.studio || "",
     episodes: item.episodes || "",
     poster: item.poster || item.poster_url || "",
-    baikeUrl: item.baike_url || item.baikeUrl || "",
+    baikeUrl: item.canonical_url || item.canonicalUrl || item.baike_url || item.baikeUrl || "",
     tagsText: Array.isArray(item.tags) ? item.tags.join("，") : "",
     description: item.description || "",
     status: "planned",
@@ -58,7 +58,7 @@ function normalizeBangumi(item) {
     studio: item.studio || "",
     episodes: item.episodes || "",
     poster: item.posterUrl || "",
-    baikeUrl: rawTitle ? `https://zh.moegirl.org.cn/${encodeURIComponent(rawTitle)}` : "",
+    baikeUrl: item.canonicalUrl || item.canonical_url || "",
     tagsText: Array.isArray(item.tags) ? item.tags.slice(0, 8).join(",") : "",
     description: item.summary || "",
     status: "planned",
@@ -578,7 +578,7 @@ export function AddAnimeModal({ onClose, onSubmit, isDemo = false, catalogRecord
                 <label data-smart-fill-piece><span>放送季度 <b>*</b></span><input value={draft.period} onChange={(event) => update("period", event.target.value)} placeholder="例如 2026-4" required /></label>
                 <label data-smart-fill-piece><span>制作公司</span><input value={draft.studio} onChange={(event) => update("studio", event.target.value)} /></label>
                 <label data-smart-fill-piece><span>话数情况</span><input value={draft.episodes} onChange={(event) => update("episodes", event.target.value)} placeholder="例如 12、12+1" /></label>
-                <label data-smart-fill-piece><span>萌娘百科 URL</span><input value={draft.baikeUrl} onChange={(event) => update("baikeUrl", event.target.value)} placeholder="https://zh.moegirl.org.cn/..." /></label>
+                <label data-smart-fill-piece><span>外部资料 URL</span><input value={draft.baikeUrl} onChange={(event) => update("baikeUrl", event.target.value)} placeholder="https://bgm.tv/subject/..." /></label>
               </div>
               <label data-smart-fill-piece><span>公共标签</span><input value={draft.tagsText} onChange={(event) => update("tagsText", event.target.value)} placeholder="使用逗号分隔，例如：日常，治愈，原创" /></label>
               <div className="dashboard-add-bottom-grid">

@@ -98,7 +98,7 @@ class PosterSourceTests(APITestCase):
         response = self.client.patch(
             reverse("entry-detail", kwargs={"pk": entry.pk}),
             {
-                "custom_poster_url": "https://bgm-img-proxy.xhcytus100.workers.dev/pic/cover/l/custom.jpg",
+                "custom_poster_url": "https://img.re-anime.cc/posters/custom.jpg",
             },
             format="json",
         )
@@ -107,7 +107,7 @@ class PosterSourceTests(APITestCase):
         self.assertEqual(response.data["poster_source"], "trusted_url")
         self.assertEqual(
             response.data["poster"],
-            "https://bgm-img-proxy.xhcytus100.workers.dev/pic/cover/l/custom.jpg",
+            "https://img.re-anime.cc/posters/custom.jpg",
         )
         entry.refresh_from_db()
         self.assertEqual(entry.poster_url, "https://lain.bgm.tv/pic/cover/l/default.jpg")

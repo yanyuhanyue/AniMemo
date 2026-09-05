@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 from datetime import date
-from urllib.parse import quote
 from uuid import uuid4
 
 from django.conf import settings
@@ -242,9 +241,12 @@ def _metadata_tag(value):
     return bool(label and (DATE_TAG_RE.match(label) or YEAR_TAG_RE.match(label)))
 
 
-def _moegirl_url(title):
-    normalized = str(title or "").strip()
-    return f"https://mzh.moegirl.org.cn/{quote(normalized, safe='')}" if normalized else ""
+def _bangumi_url(subject_id):
+    try:
+        normalized = int(subject_id)
+    except (TypeError, ValueError):
+        return ""
+    return f"https://bgm.tv/subject/{normalized}" if normalized > 0 else ""
 
 
 class WatchHistoryPlugin:
@@ -438,7 +440,7 @@ class WatchHistoryPlugin:
                     "episodes": str(resolution.get("episodes") or ""),
                     "description": resolution.get("description") or "",
                     "poster_url": resolution.get("poster_url") or "",
-                    "baike_url": _moegirl_url(resolution.get("title") or group["source_title"]),
+                    "baike_url": _bangumi_url(resolution.get("bangumi_id")),
                     "tags": [tag for tag in tags if tag],
                     "watch_status": "completed",
                     "visibility": "private",

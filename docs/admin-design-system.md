@@ -1,4 +1,4 @@
-# Anime Journal Admin Design System
+# AniMemo Admin Design System
 
 ## Intent
 

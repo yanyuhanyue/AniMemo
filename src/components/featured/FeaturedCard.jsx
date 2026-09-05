@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { TagChip } from "../TagChip.jsx";
 import { FeaturedDateBadge } from "./FeaturedDateBadge.jsx";
 import { FeaturedScoreMeter } from "./FeaturedScoreMeter.jsx";
+import { fallbackAvatarImage, fallbackPosterImage } from "../../lib/mediaAssets.js";
 
 function formatAnimeTitle(title) {
   const value = String(title || "未命名番剧").trim();
@@ -26,11 +27,11 @@ export function FeaturedCard({ column, onOpen }) {
   return (
     <article ref={cardRef} className="featured-card" role="button" tabIndex={0} aria-haspopup="dialog" onClick={open} onKeyDown={handleKeyDown} aria-label={`打开番剧档案：${animeTitle}`}>
       <div className="featured-card__cover">
-        <img src={column.cover} alt={`${animeTitle} 封面`} loading="lazy" decoding="async" />
+        <img src={column.cover} alt={`${animeTitle} 封面`} loading="lazy" decoding="async" onError={fallbackPosterImage} />
         <span className="featured-card__status">{column.statusLabel}</span>
       </div>
       <div className="featured-card__content">
-        <div className="featured-author"><img src={column.authorAvatar} alt="" /><span>由 <b>{column.author}</b> 撰写</span></div>
+        <div className="featured-author"><img src={column.authorAvatar} alt="" onError={fallbackAvatarImage} /><span>由 <b>{column.author}</b> 撰写</span></div>
         <div className="featured-card__titles">
           <h2>{animeTitle}</h2>
           <p className="featured-card__jp" lang="ja">{animeJapaneseTitle}</p>

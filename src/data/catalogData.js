@@ -40,7 +40,7 @@ export const tagColors = {
   悬疑: "slate",
   职场: "slate",
   游戏改: "slate",
-  轩皇力推: "purple",
+  "AniMemo 精选": "purple",
 };
 
 const hasOvaMarker = (record) => /(^|\s|《)OVA($|\s|》)/i.test(`${record.title || ""} ${record.japaneseTitle || ""}`)

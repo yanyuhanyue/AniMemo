@@ -1,13 +1,18 @@
+from django.conf import settings
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_protect
+from django.views.decorators.debug import sensitive_post_parameters, sensitive_variables
 from drf_spectacular.utils import OpenApiParameter, extend_schema
+from journal.web_auth_adapter import no_store
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from journal.web_auth_adapter import no_store
-
-from .first_run import SetupCompletionError, complete_first_run_setup
+from .first_run import (
+    SetupCompletionError,
+    complete_first_run_setup,
+    mark_first_run_request_sensitive,
+)
 from .models import InstallationState
 from .serializers import (
     FirstRunSetupSerializer,
@@ -40,14 +45,22 @@ class InstallationStatusView(APIView):
             installation = InstallationState.load()
         except InstallationState.DoesNotExist:
             return installation_state_unavailable_response()
+        accepting_setup = (
+            installation.accepting_setup
+            and installation.failed_attempts < settings.FIRST_RUN_SETUP_MAX_ATTEMPTS
+        )
         return no_store(Response({
             "state": installation.status,
-            "accepting_setup": installation.accepting_setup,
-            "expires_at": installation.setup_code_expires_at if installation.accepting_setup else None,
+            "accepting_setup": accepting_setup,
+            "expires_at": installation.setup_code_expires_at if accepting_setup else None,
         }))
 
 
 @method_decorator(csrf_protect, name="dispatch")
+@method_decorator(
+    sensitive_post_parameters("code", "password", "password_confirm"),
+    name="dispatch",
+)
 class InstallationSetupView(APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
@@ -76,7 +89,9 @@ class InstallationSetupView(APIView):
             )
         ],
     )
+    @sensitive_variables("request", "serializer", "payload")
     def post(self, request):
+        mark_first_run_request_sensitive(request)
         serializer = FirstRunSetupSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         payload = serializer.validated_data

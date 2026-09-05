@@ -6,17 +6,17 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
+from accounts.models import UserSecurityProfile
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.sessions.models import Session
 from django.db import transaction
 from django.db.models import ExpressionWrapper, F, PositiveSmallIntegerField, Q
 from django.utils import timezone
-
-from accounts.models import UserSecurityProfile
+from django.views.debug import SafeExceptionReporterFilter
+from django.views.decorators.debug import sensitive_variables
 
 from .models import InstallationState
-
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,27 @@ class SetupCompletionError(RuntimeError):
         self.code = code
         self.detail = detail
         self.status_code = status_code
+
+
+class FirstRunExceptionReporterFilter(SafeExceptionReporterFilter):
+    """Keep first-run secrets filtered even when Django DEBUG is enabled."""
+
+    def is_active(self, request):
+        return True
+
+
+def mark_first_run_request_sensitive(request):
+    """Attach Django's exception filter to either a DRF or Django request."""
+
+    raw_request = getattr(request, "_request", request)
+    if raw_request is None:
+        return
+    raw_request.exception_reporter_filter = FirstRunExceptionReporterFilter()
+    raw_request.sensitive_post_parameters = (
+        "code",
+        "password",
+        "password_confirm",
+    )
 
 
 @dataclass(frozen=True)
@@ -59,7 +80,7 @@ def rotate_authentication_epoch():
 
 
 def _record_failed_setup_attempt(snapshot):
-    InstallationState.objects.filter(
+    return InstallationState.objects.filter(
         pk=1,
         status=InstallationState.Status.UNINITIALIZED,
         setup_code_hash=snapshot.setup_code_hash,
@@ -186,7 +207,10 @@ def provision_first_run_setup():
         if installation.status == InstallationState.Status.INITIALIZING:
             raise FirstRunBootstrapError("Installation is already initializing.")
 
-        if installation.accepting_setup:
+        if (
+            installation.accepting_setup
+            and installation.failed_attempts < settings.FIRST_RUN_SETUP_MAX_ATTEMPTS
+        ):
             existing = read_private_setup_code(code_path)
             if existing and check_password(existing, installation.setup_code_hash):
                 return ProvisionedSetupCode(code_path, True, installation.setup_code_expires_at)
@@ -209,16 +233,19 @@ def provision_first_run_setup():
         return ProvisionedSetupCode(code_path, False, expires_at)
 
 
+@sensitive_variables("code", "password", "request")
 def complete_first_run_setup(*, code, username, email, password, request):
     from django.contrib.auth import get_user_model
     from journal.models import AdminAuditLog, UserSettings
     from journal.network import client_ip
 
+    mark_first_run_request_sensitive(request)
     User = get_user_model()
     snapshot = InstallationState.objects.only(
         "status",
         "setup_code_hash",
         "setup_code_expires_at",
+        "failed_attempts",
     ).get(pk=1)
     now = timezone.now()
     if snapshot.status == InstallationState.Status.INITIALIZED:
@@ -227,6 +254,12 @@ def complete_first_run_setup(*, code, username, email, password, request):
         raise SetupCompletionError(
             "installation_initializing",
             "安装初始化正在进行。",
+            409,
+        )
+    if snapshot.failed_attempts >= settings.FIRST_RUN_SETUP_MAX_ATTEMPTS:
+        raise SetupCompletionError(
+            "setup_code_attempt_limit_reached",
+            "初始化码尝试次数已达上限，请在服务器上重新生成。",
             409,
         )
     if not snapshot.setup_code_hash or not snapshot.setup_code_expires_at:
@@ -246,7 +279,17 @@ def complete_first_run_setup(*, code, username, email, password, request):
     )
 
     if not code_matches and snapshot.setup_code_expires_at > now:
-        _record_failed_setup_attempt(snapshot)
+        attempts_updated = _record_failed_setup_attempt(snapshot)
+        if not attempts_updated and InstallationState.objects.filter(
+            pk=1,
+            status=InstallationState.Status.UNINITIALIZED,
+            failed_attempts__gte=settings.FIRST_RUN_SETUP_MAX_ATTEMPTS,
+        ).exists():
+            raise SetupCompletionError(
+                "setup_code_attempt_limit_reached",
+                "初始化码尝试次数已达上限，请在服务器上重新生成。",
+                409,
+            )
         raise SetupCompletionError("invalid_setup_code", "初始化码无效。", 400)
 
     rejection = None
@@ -267,6 +310,12 @@ def complete_first_run_setup(*, code, username, email, password, request):
             rejection = SetupCompletionError(
                 "setup_code_changed",
                 "初始化码已经变化，请读取服务器上的当前初始化码后重试。",
+                409,
+            )
+        elif installation.failed_attempts >= settings.FIRST_RUN_SETUP_MAX_ATTEMPTS:
+            rejection = SetupCompletionError(
+                "setup_code_attempt_limit_reached",
+                "初始化码尝试次数已达上限，请在服务器上重新生成。",
                 409,
             )
         elif installation.setup_code_expires_at <= now:

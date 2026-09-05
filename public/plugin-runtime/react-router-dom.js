@@ -1,5 +1,5 @@
 const runtime = globalThis.__ANIME_JOURNAL_REACT_RUNTIME__?.ReactRouterDOM;
-if (!runtime) throw new Error("Anime Journal router runtime is not ready");
+if (!runtime) throw new Error("AniMemo router runtime is not ready");
 export const {
   Await, BrowserRouter, Form, HashRouter, Link, MemoryRouter, NavLink, Navigate,
   Outlet, Route, Router, RouterProvider, Routes, ScrollRestoration, useActionData,

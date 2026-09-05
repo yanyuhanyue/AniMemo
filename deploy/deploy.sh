@@ -57,7 +57,7 @@ EOF
 }
 
 die() {
-    echo "Anime Journal legacy deploy: $*" >&2
+    echo "AniMemo legacy deploy: $*" >&2
     exit 1
 }
 

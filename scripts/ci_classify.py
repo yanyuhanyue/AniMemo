@@ -115,6 +115,62 @@ def _name(path: str) -> str:
     return PurePosixPath(path).name.lower()
 
 
+def _is_python_route_module(path: str) -> bool:
+    lower = path.lower()
+    if not lower.endswith(".py"):
+        return False
+    stem = PurePosixPath(lower).stem
+    route_stems = ("urls", "routes", "router", "routing")
+    return (
+        stem in route_stems
+        or stem.startswith(tuple(f"{route}_" for route in route_stems))
+        or stem.endswith(tuple(f"_{route}" for route in route_stems))
+        or any(f"/{route}/" in f"/{lower}/" for route in route_stems)
+    )
+
+
+def _is_frontend_setup_route(path: str) -> bool:
+    lower = path.lower()
+    if not lower.startswith("src/") or PurePosixPath(lower).suffix not in {
+        ".js",
+        ".jsx",
+        ".mjs",
+        ".mts",
+        ".ts",
+        ".tsx",
+    }:
+        return False
+    source_path = PurePosixPath(lower)
+    stem = source_path.stem
+    route_parts = {"route", "routes", "router", "routing"}
+    setup_parts = {"setup", "first-run", "first_run", "firstrun"}
+    root_app = lower in {
+        "src/app.js",
+        "src/app.jsx",
+        "src/app.ts",
+        "src/app.tsx",
+    }
+    setup_named = _has(stem, "setup", "first-run", "first_run", "firstrun")
+    setup_directory = any(part in setup_parts for part in source_path.parts)
+    route_module = (
+        any(part in route_parts for part in source_path.parts)
+        or stem in route_parts
+        or stem.startswith(tuple(f"{route}_" for route in route_parts))
+        or stem.endswith(tuple(f"_{route}" for route in route_parts))
+    )
+    return root_app or setup_directory or (setup_named and ("pages" in source_path.parts or route_module))
+
+
+def _is_release_image_rehearsal(path: str) -> bool:
+    lower = path.lower()
+    return (
+        lower.startswith(("release/", "scripts/", "tests/"))
+        and "release" in lower
+        and "image" in lower
+        and _has(lower, "rehearse", "rehearsal")
+    )
+
+
 def _is_ci_authority(path: str) -> bool:
     return (
         path.startswith((".github/", "scripts/tests/test_ci_"))
@@ -135,11 +191,16 @@ def _is_ci_authority(path: str) -> bool:
 
 
 def _is_release_core(path: str) -> bool:
-    return path.startswith(("release/", "scripts/tests/test_release_")) or path in {
-        "scripts/release_authority.py",
-        "scripts/tests/test_deployment_updater_contract.py",
-        "tests/release-gate.test.mjs",
-    }
+    return (
+        path.startswith(("release/", "scripts/tests/test_release_"))
+        or _is_release_image_rehearsal(path)
+        or path
+        in {
+            "scripts/release_authority.py",
+            "scripts/tests/test_deployment_updater_contract.py",
+            "tests/release-gate.test.mjs",
+        }
+    )
 
 
 def _is_updater(path: str) -> bool:
@@ -179,6 +240,12 @@ def _is_first_run(path: str) -> bool:
     if _is_docs(path):
         return False
     lower = path.lower()
+    site_config_entrypoint = lower.startswith("backend/site_config/") and (
+        _is_python_route_module(lower)
+        or PurePosixPath(lower).stem == "views"
+        or PurePosixPath(lower).stem.endswith("_views")
+        or "/views/" in f"/{lower}/"
+    )
     return _has(
         lower,
         "first_run",
@@ -186,8 +253,7 @@ def _is_first_run(path: str) -> bool:
         "bootstrap_animemo",
         "provision_first_run",
         "ci_first_run",
-    ) or path in {
-        "src/pages/SetupPage.jsx",
+    ) or site_config_entrypoint or _is_frontend_setup_route(lower) or lower in {
         "public/bootstrap.css",
         "tests/first-run-setup.test.mjs",
     }
@@ -245,7 +311,7 @@ def _is_api_contract(path: str) -> bool:
         and lower.startswith("backend/")
         and (
             _has(lower, "openapi", "api_contract", "/api/")
-            or name == "urls.py"
+            or _is_python_route_module(lower)
             or name.startswith("serializers")
             or name in {"api_errors.py", "api_renderers.py", "rest_exceptions.py"}
         )
@@ -254,11 +320,32 @@ def _is_api_contract(path: str) -> bool:
 
 def _is_plugin_contract(path: str) -> bool:
     lower = path.lower()
+    name = _name(lower)
+    plugin_schema = (
+        lower.startswith("plugins/")
+        and PurePosixPath(lower).suffix in {".json", ".yaml", ".yml"}
+        and (
+            ".schema." in name
+            or name.startswith("schema.")
+            or name.endswith(
+                (
+                    "_schema.json",
+                    "_schema.yaml",
+                    "_schema.yml",
+                    "-schema.json",
+                    "-schema.yaml",
+                    "-schema.yml",
+                )
+            )
+            or any(part in {"schema", "schemas"} for part in PurePosixPath(lower).parts)
+        )
+    )
     return (
         lower.startswith("backend/plugin_host/")
+        or plugin_schema
         or (
             lower.startswith("plugins/")
-            and _name(lower) in {"manifest.json", "package.json", "package-lock.json"}
+            and name in {"manifest.json", "package.json", "package-lock.json"}
         )
         or _has(
             lower,
@@ -339,7 +426,12 @@ def _is_dependency(path: str) -> bool:
 
 def _is_sensitive_documentation(path: str) -> bool:
     lower = path.lower()
-    return _is_docs(path) and (
+    return lower in {
+        "license",
+        "notice",
+        "third_party_notices",
+        "trademarks",
+    } or _is_docs(path) and (
         lower in FROZEN_CONTRACT_DOCUMENTS
         or lower.startswith("docs/contracts/")
         or _has(
@@ -378,7 +470,7 @@ RULES = (
     RiskRule(
         "release-core",
         "CRITICAL",
-        "Release producer, manifest, provenance, or release authority code changed.",
+        "Release producer, image rehearsal, manifest, provenance, or release authority code changed.",
         ("deployment",),
         _is_release_core,
     ),
@@ -406,7 +498,7 @@ RULES = (
     RiskRule(
         "first-run-security-boundary",
         "CRITICAL",
-        "First-run setup or bootstrap administrator security behavior changed.",
+        "First-run public setup entrypoint, route lock, or bootstrap administrator security behavior changed.",
         ("backend", "auth", "first_run"),
         _is_first_run,
     ),
@@ -441,7 +533,7 @@ RULES = (
     RiskRule(
         "plugin-contract",
         "HIGH",
-        "Plugin host, SDK, package manifest, or plugin validation contract changed.",
+        "Plugin host, SDK, package manifest/schema, or plugin validation contract changed.",
         ("backend", "plugin"),
         _is_plugin_contract,
     ),
@@ -827,7 +919,7 @@ def write_outputs(result: dict[str, str], output_path: str) -> None:
 def self_test() -> None:
     cases = {
         "LOW": ["docs/architecture.md", "README.md"],
-        "STANDARD": ["src/App.jsx"],
+        "STANDARD": ["src/pages/Journal.jsx"],
         "HIGH": ["backend/journal/migrations/0002_add.py"],
         "CRITICAL": ["updater/agent.py"],
     }

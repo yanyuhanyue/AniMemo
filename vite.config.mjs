@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 
 const securityHeaders = {
-  "Content-Security-Policy": "default-src 'self'; script-src 'self' 'sha256-xjQsrThiVsL5TEjVM6dTosT1AwZvcPBi17BPpLuouCM=' https://challenges.cloudflare.com; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https://media.re-anime.cc https://img.re-anime.cc https://lain.bgm.tv https://bgm-img-proxy.xhcytus100.workers.dev; font-src 'self' data:; connect-src 'self' https://api.bgm.tv wss://re-anime.cc; frame-src https://challenges.cloudflare.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+  "Content-Security-Policy": "default-src 'self'; script-src 'self' 'sha256-xjQsrThiVsL5TEjVM6dTosT1AwZvcPBi17BPpLuouCM=' https://challenges.cloudflare.com; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https://media.re-anime.cc https://img.re-anime.cc https://lain.bgm.tv; font-src 'self' data:; connect-src 'self' https://api.bgm.tv wss://re-anime.cc; frame-src https://challenges.cloudflare.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
   "X-Frame-Options": "DENY",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "strict-origin-when-cross-origin",

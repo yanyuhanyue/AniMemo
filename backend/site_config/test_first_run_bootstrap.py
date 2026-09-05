@@ -1,5 +1,7 @@
 import os
+import secrets
 import stat
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -8,24 +10,26 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from accounts.models import PendingRegistration
 from django.conf import settings
-from django.contrib.auth.hashers import check_password
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import check_password
 from django.core.cache import cache
-from django.core.management import call_command, CommandError
+from django.core.management import CommandError, call_command
 from django.db import close_old_connections, connection, connections
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase, override_settings, skipUnlessDBFeature
 from django.urls import reverse
 from django.utils import timezone
+from django.views.debug import ExceptionReporter
+from journal.models import AdminAuditLog, UserSettings
+from plugin_host.models import PluginDeployment
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIRequestFactory, APITestCase
 
 from .models import InstallationState, SiteSettings
-from journal.models import AdminAuditLog, UserSettings
-from accounts.models import PendingRegistration
-from plugin_host.models import PluginDeployment
-
+from .serializers import FirstRunSetupSerializer
+from .views import InstallationSetupView
 
 User = get_user_model()
 
@@ -88,6 +92,17 @@ class FirstRunSetupApiTests(APITestCase):
             self.assertTrue(code_path.is_file())
             self.assertTrue(self.installation.accepting_setup)
             self.assertTrue(SiteSettings.objects.filter(pk=1).exists())
+
+    def test_application_bootstrap_uses_animemo_identity_defaults(self):
+        SiteSettings.objects.all().delete()
+        site = SiteSettings.load()
+        self.assertEqual(site.site_name, "AniMemo")
+        self.assertEqual(site.homepage_title, "AniMemo · 我的动漫记忆库")
+        self.assertEqual(
+            site.homepage_description,
+            "把想看、在看与看完的作品收进同一条记忆轨迹，随时回望每一次与动画相遇的时刻。",
+        )
+        self.assertEqual(site.social_handle, "X: @ANIMEMO")
 
     def test_valid_code_creates_exactly_one_superuser_and_locks_setup(self):
         with TemporaryDirectory() as directory:
@@ -219,7 +234,7 @@ class FirstRunSetupApiTests(APITestCase):
         self.assertFalse(code_path.exists())
         self.assertFalse(User.objects.filter(username="first-admin").exists())
 
-    def test_remote_wrong_attempts_cannot_invalidate_valid_setup_code(self):
+    def test_attempt_limit_invalidates_current_setup_code(self):
         with TemporaryDirectory() as directory:
             private_root = Path(directory) / "private"
             private_root.mkdir(mode=0o700)
@@ -258,7 +273,61 @@ class FirstRunSetupApiTests(APITestCase):
                 self.assertEqual(self.installation.setup_code_hash, original_hash)
                 self.assertEqual(self.installation.setup_code_expires_at, original_expiry)
                 self.assertEqual(self.installation.failed_attempts, 3)
-                self.assertTrue(self.installation.accepting_setup)
+                setup_status = self.client.get(reverse("setup-status"))
+
+                completed = self.client.post(
+                    reverse("setup-complete"),
+                    {
+                        "code": valid_code,
+                        "username": "first-admin",
+                        "email": "first-admin@example.com",
+                        "password": "StrongPass123!RC",
+                        "password_confirm": "StrongPass123!RC",
+                    },
+                    format="json",
+                    HTTP_X_CSRFTOKEN=csrf,
+                    REMOTE_ADDR="203.0.113.44",
+                )
+                code_file_remains = code_path.exists()
+
+        self.assertEqual(setup_status.status_code, status.HTTP_200_OK)
+        self.assertFalse(setup_status.data["accepting_setup"])
+        self.assertIsNone(setup_status.data["expires_at"])
+        self.assertEqual(completed.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(completed.data["code"], "setup_code_attempt_limit_reached")
+        self.installation.refresh_from_db()
+        self.assertEqual(self.installation.status, InstallationState.Status.UNINITIALIZED)
+        self.assertEqual(self.installation.setup_code_hash, original_hash)
+        self.assertTrue(code_file_remains)
+        self.assertFalse(User.objects.filter(username="first-admin").exists())
+
+    def test_valid_code_below_attempt_limit_still_completes_setup(self):
+        with TemporaryDirectory() as directory:
+            private_root = Path(directory) / "private"
+            private_root.mkdir(mode=0o700)
+            code_path = private_root / "setup-code"
+            with override_settings(
+                FIRST_RUN_SETUP_CODE_PATH=code_path,
+                FIRST_RUN_SETUP_MAX_ATTEMPTS=3,
+            ):
+                call_command("provision_first_run_setup", verbosity=0)
+                valid_code = code_path.read_text(encoding="utf-8").strip()
+                csrf = self.client.get(reverse("csrf-token")).data["csrf_token"]
+                for index in range(2):
+                    response = self.client.post(
+                        reverse("setup-complete"),
+                        {
+                            "code": f"wrong-code-{index}",
+                            "username": f"remote-attacker-{index}",
+                            "email": f"remote-attacker-{index}@example.com",
+                            "password": "StrongPass123!RC",
+                            "password_confirm": "StrongPass123!RC",
+                        },
+                        format="json",
+                        HTTP_X_CSRFTOKEN=csrf,
+                        REMOTE_ADDR="198.51.100.24",
+                    )
+                    self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
                 with self.captureOnCommitCallbacks(execute=True):
                     completed = self.client.post(
@@ -272,21 +341,137 @@ class FirstRunSetupApiTests(APITestCase):
                         },
                         format="json",
                         HTTP_X_CSRFTOKEN=csrf,
-                        REMOTE_ADDR="203.0.113.44",
+                        REMOTE_ADDR="203.0.113.45",
                     )
 
         self.assertEqual(completed.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(User.objects.filter(username="first-admin", is_superuser=True).exists())
+
+    def test_local_reprovision_rotates_locked_code_and_resets_attempts(self):
+        with TemporaryDirectory() as directory:
+            private_root = Path(directory) / "private"
+            private_root.mkdir(mode=0o700)
+            code_path = private_root / "setup-code"
+            with override_settings(
+                FIRST_RUN_SETUP_CODE_PATH=code_path,
+                FIRST_RUN_SETUP_MAX_ATTEMPTS=3,
+            ):
+                call_command("provision_first_run_setup", verbosity=0)
+                old_code = code_path.read_text(encoding="utf-8").strip()
+                csrf = self.client.get(reverse("csrf-token")).data["csrf_token"]
+                for index in range(3):
+                    self.client.post(
+                        reverse("setup-complete"),
+                        {
+                            "code": f"wrong-code-{index}",
+                            "username": f"remote-attacker-{index}",
+                            "email": f"remote-attacker-{index}@example.com",
+                            "password": "StrongPass123!RC",
+                            "password_confirm": "StrongPass123!RC",
+                        },
+                        format="json",
+                        HTTP_X_CSRFTOKEN=csrf,
+                        REMOTE_ADDR="198.51.100.25",
+                    )
+
+                self.installation.refresh_from_db()
+                locked_hash = self.installation.setup_code_hash
+                self.assertEqual(self.installation.failed_attempts, 3)
+                call_command("provision_first_run_setup", verbosity=0)
+                new_code = code_path.read_text(encoding="utf-8").strip()
+                self.installation.refresh_from_db()
+
+                self.assertNotEqual(new_code, old_code)
+                self.assertNotEqual(self.installation.setup_code_hash, locked_hash)
+                self.assertTrue(check_password(new_code, self.installation.setup_code_hash))
+                self.assertEqual(self.installation.failed_attempts, 0)
+
+                old_code_response = self.client.post(
+                    reverse("setup-complete"),
+                    {
+                        "code": old_code,
+                        "username": "old-code-admin",
+                        "email": "old-code-admin@example.com",
+                        "password": "StrongPass123!RC",
+                        "password_confirm": "StrongPass123!RC",
+                    },
+                    format="json",
+                    HTTP_X_CSRFTOKEN=csrf,
+                    REMOTE_ADDR="203.0.113.46",
+                )
+                with self.captureOnCommitCallbacks(execute=True):
+                    completed = self.client.post(
+                        reverse("setup-complete"),
+                        {
+                            "code": new_code,
+                            "username": "first-admin",
+                            "email": "first-admin@example.com",
+                            "password": "StrongPass123!RC",
+                            "password_confirm": "StrongPass123!RC",
+                        },
+                        format="json",
+                        HTTP_X_CSRFTOKEN=csrf,
+                        REMOTE_ADDR="203.0.113.47",
+                    )
+
+        self.assertEqual(old_code_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(old_code_response.data["code"], "invalid_setup_code")
+        self.assertEqual(completed.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(User.objects.filter(username="old-code-admin").exists())
+        self.assertTrue(User.objects.filter(username="first-admin", is_superuser=True).exists())
+
+    def test_valid_submission_rechecks_attempt_limit_after_hash_verification(self):
+        with TemporaryDirectory() as directory:
+            private_root = Path(directory) / "private"
+            private_root.mkdir(mode=0o700)
+            code_path = private_root / "setup-code"
+            with override_settings(
+                FIRST_RUN_SETUP_CODE_PATH=code_path,
+                FIRST_RUN_SETUP_MAX_ATTEMPTS=3,
+            ):
+                call_command("provision_first_run_setup", verbosity=0)
+                valid_code = code_path.read_text(encoding="utf-8").strip()
+                self.installation.failed_attempts = 2
+                self.installation.save(update_fields=["failed_attempts", "updated_at"])
+                csrf = self.client.get(reverse("csrf-token")).data["csrf_token"]
+
+                def reach_limit_during_hash_verification(_candidate, _encoded):
+                    InstallationState.objects.filter(pk=1).update(failed_attempts=3)
+                    return True
+
+                with patch(
+                    "site_config.first_run.check_password",
+                    side_effect=reach_limit_during_hash_verification,
+                ):
+                    response = self.client.post(
+                        reverse("setup-complete"),
+                        {
+                            "code": valid_code,
+                            "username": "boundary-admin",
+                            "email": "boundary-admin@example.com",
+                            "password": "StrongPass123!RC",
+                            "password_confirm": "StrongPass123!RC",
+                        },
+                        format="json",
+                        HTTP_X_CSRFTOKEN=csrf,
+                    )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "setup_code_attempt_limit_reached")
         self.installation.refresh_from_db()
-        self.assertEqual(self.installation.status, InstallationState.Status.INITIALIZED)
-        self.assertEqual(self.installation.setup_code_hash, "")
-        self.assertFalse(code_path.exists())
+        self.assertEqual(self.installation.status, InstallationState.Status.UNINITIALIZED)
+        self.assertEqual(self.installation.failed_attempts, 3)
+        self.assertFalse(User.objects.filter(username="boundary-admin").exists())
 
     def test_wrong_setup_codes_are_bounded_by_ip_throttle_without_consuming_code(self):
         with TemporaryDirectory() as directory:
             private_root = Path(directory) / "private"
             private_root.mkdir(mode=0o700)
             code_path = private_root / "setup-code"
-            with override_settings(FIRST_RUN_SETUP_CODE_PATH=code_path):
+            with override_settings(
+                FIRST_RUN_SETUP_CODE_PATH=code_path,
+                FIRST_RUN_SETUP_MAX_ATTEMPTS=8,
+            ):
                 call_command("provision_first_run_setup", verbosity=0)
                 valid_code = code_path.read_text(encoding="utf-8").strip()
                 self.installation.refresh_from_db()
@@ -310,9 +495,18 @@ class FirstRunSetupApiTests(APITestCase):
                     for index in range(11)
                 ]
 
-                self.assertEqual([item.status_code for item in responses[:10]], [400] * 10)
+                self.assertEqual(
+                    [item.status_code for item in responses[:10]],
+                    [400] * 8 + [409] * 2,
+                )
                 self.assertTrue(
-                    all(item.data["code"] == "invalid_setup_code" for item in responses[:10])
+                    all(item.data["code"] == "invalid_setup_code" for item in responses[:8])
+                )
+                self.assertTrue(
+                    all(
+                        item.data["code"] == "setup_code_attempt_limit_reached"
+                        for item in responses[8:10]
+                    )
                 )
                 self.assertEqual(responses[10].status_code, status.HTTP_429_TOO_MANY_REQUESTS)
                 self.assertEqual(responses[10].data["code"], "rate_limited")
@@ -324,7 +518,9 @@ class FirstRunSetupApiTests(APITestCase):
                     settings.FIRST_RUN_SETUP_MAX_ATTEMPTS,
                 )
                 self.assertEqual(code_path.read_text(encoding="utf-8").strip(), valid_code)
-                self.assertTrue(self.installation.accepting_setup)
+                setup_status = self.client.get(reverse("setup-status"))
+                self.assertFalse(setup_status.data["accepting_setup"])
+                self.assertIsNone(setup_status.data["expires_at"])
 
     def test_repeated_provisioning_reuses_the_active_code_without_rotation(self):
         with TemporaryDirectory() as directory:
@@ -517,6 +713,105 @@ class FirstRunSetupApiTests(APITestCase):
         self.assertTrue(code_file_remains)
         self.assertFalse(User.objects.filter(username="first-admin").exists())
 
+    def test_exception_reporter_redacts_first_run_json_secrets(self):
+        with TemporaryDirectory() as directory:
+            private_root = Path(directory) / "private"
+            private_root.mkdir(mode=0o700)
+            code_path = private_root / "setup-code"
+            with override_settings(
+                DEBUG=True,
+                FIRST_RUN_SETUP_CODE_PATH=code_path,
+            ):
+                call_command("provision_first_run_setup", verbosity=0)
+                setup_code = code_path.read_text(encoding="utf-8").strip()
+                setup_password = f"Aa1!{secrets.token_urlsafe(24)}"
+                setup_password_confirm = f"Bb2@{secrets.token_urlsafe(24)}"
+                request = APIRequestFactory().post(
+                    reverse("setup-complete"),
+                    {
+                        "code": setup_code,
+                        "username": "reporter-admin",
+                        "email": "reporter-admin@example.com",
+                        "password": setup_password,
+                        "password_confirm": setup_password_confirm,
+                    },
+                    format="json",
+                )
+
+                try:
+                    with patch.object(
+                        FirstRunSetupSerializer,
+                        "validate",
+                        autospec=True,
+                        side_effect=lambda _serializer, attrs: attrs,
+                    ), patch(
+                        "journal.models.AdminAuditLog.objects.create",
+                        side_effect=RuntimeError("injected reporter failure"),
+                    ):
+                        InstallationSetupView.as_view()(request)
+                except RuntimeError:
+                    exc_type, exc_value, traceback = sys.exc_info()
+                    traceback = traceback.tb_next
+                    reporter = ExceptionReporter(
+                        request,
+                        exc_type,
+                        exc_value,
+                        traceback,
+                    )
+                    reports = (
+                        reporter.get_traceback_text(),
+                        reporter.get_traceback_html(),
+                    )
+                else:
+                    self.fail("Injected first-run failure did not propagate")
+
+        for report in reports:
+            self.assertNotIn(setup_code, report)
+            self.assertNotIn(setup_password, report)
+            self.assertNotIn(setup_password_confirm, report)
+
+    @override_settings(DEBUG=True)
+    def test_debug_technical_500_redacts_first_run_json_secrets(self):
+        with TemporaryDirectory() as directory:
+            private_root = Path(directory) / "private"
+            private_root.mkdir(mode=0o700)
+            code_path = private_root / "setup-code"
+            with override_settings(FIRST_RUN_SETUP_CODE_PATH=code_path):
+                call_command("provision_first_run_setup", verbosity=0)
+                setup_code = code_path.read_text(encoding="utf-8").strip()
+                setup_password = f"Aa1!{secrets.token_urlsafe(24)}"
+                setup_password_confirm = f"Bb2@{secrets.token_urlsafe(24)}"
+                self.client.raise_request_exception = False
+                with patch.object(
+                    FirstRunSetupSerializer,
+                    "validate",
+                    autospec=True,
+                    side_effect=lambda _serializer, attrs: attrs,
+                ), patch(
+                    "journal.models.AdminAuditLog.objects.create",
+                    side_effect=RuntimeError("injected DEBUG reporter failure"),
+                ):
+                    response = self.client.post(
+                        reverse("setup-complete"),
+                        {
+                            "code": setup_code,
+                            "username": "debug-reporter-admin",
+                            "email": "debug-reporter-admin@example.com",
+                            "password": setup_password,
+                            "password_confirm": setup_password_confirm,
+                        },
+                        format="json",
+                    )
+
+        report = response.content.decode("utf-8", errors="replace")
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertNotIn(setup_code, report)
+        self.assertNotIn(setup_password, report)
+        self.assertNotIn(setup_password_confirm, report)
+        self.installation.refresh_from_db()
+        self.assertEqual(self.installation.status, InstallationState.Status.UNINITIALIZED)
+        self.assertFalse(User.objects.filter(username="debug-reporter-admin").exists())
+
     def test_unsafe_plaintext_cleanup_rolls_back_initialization(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -681,6 +976,58 @@ class InstallationStateFreshMigrationTests(TransactionTestCase):
         self.assertEqual(installation.setup_code_hash, "")
 
 
+class AniMemoIdentityMigrationTests(TransactionTestCase):
+    migrate_from = [("site", "0004_installation_authentication_epoch")]
+    migrate_to = [("site", "0005_animemo_identity_defaults")]
+
+    def setUp(self):
+        super().setUp()
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_from)
+        old_apps = executor.loader.project_state(self.migrate_from).apps
+        OldSiteSettings = old_apps.get_model("site", "SiteSettings")
+        self.legacy_site = OldSiteSettings.objects.create(
+            site_name=bytes.fromhex("416e696d65204a6f75726e616c").decode(),
+            homepage_title=bytes.fromhex(
+                "5875616e4875616e6720e79a84e795aae589a7e6b187e680bb"
+            ).decode(),
+            homepage_description=bytes.fromhex(
+                "e7b2bee5bf83e694b6e5bd95203230303720e5b9b4e887b3e4bb8a"
+                "e79a84e4bc98e8b4a8e58aa8e6bcabe4bd9ce59381efbc8ce58c85"
+                "e590abe8afa6e7bb86e79a84e9a298e69d90e58886e7b1bbe38081"
+                "e5ada3e5baa6e58892e58886e4b88ee4b8bbe8a782e8af84e4bbb7"
+                "e7ad89e38082"
+            ).decode(),
+            social_handle=bytes.fromhex("583a2040414e494d455f4a4f55524e414c").decode(),
+        )
+        self.custom_site = OldSiteSettings.objects.create(
+            site_name="我的站点",
+            homepage_title="我的首页",
+            homepage_description="这是管理员自己的文案。",
+            social_handle="Mastodon: @owner@example.social",
+        )
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_to)
+        self.apps = executor.loader.project_state(self.migrate_to).apps
+
+    def test_retired_defaults_migrate_without_overwriting_custom_identity(self):
+        MigratedSiteSettings = self.apps.get_model("site", "SiteSettings")
+        migrated = MigratedSiteSettings.objects.get(pk=self.legacy_site.pk)
+        custom = MigratedSiteSettings.objects.get(pk=self.custom_site.pk)
+
+        self.assertEqual(migrated.site_name, "AniMemo")
+        self.assertEqual(migrated.homepage_title, "AniMemo · 我的动漫记忆库")
+        self.assertEqual(
+            migrated.homepage_description,
+            "把想看、在看与看完的作品收进同一条记忆轨迹，随时回望每一次与动画相遇的时刻。",
+        )
+        self.assertEqual(migrated.social_handle, "X: @ANIMEMO")
+        self.assertEqual(custom.site_name, "我的站点")
+        self.assertEqual(custom.homepage_title, "我的首页")
+        self.assertEqual(custom.homepage_description, "这是管理员自己的文案。")
+        self.assertEqual(custom.social_handle, "Mastodon: @owner@example.social")
+
+
 @skipUnlessDBFeature("has_select_for_update")
 class FirstRunSetupPostgreSQLConcurrencyTests(TransactionTestCase):
     reset_sequences = True
@@ -738,3 +1085,75 @@ class FirstRunSetupPostgreSQLConcurrencyTests(TransactionTestCase):
         installation = InstallationState.load()
         self.assertEqual(installation.status, InstallationState.Status.INITIALIZED)
         self.assertIn(installation.initialized_by.username, {result[1] for result in results})
+
+    def test_valid_snapshot_cannot_cross_attempt_limit_during_concurrent_wrong_request(self):
+        valid_hash_started = threading.Event()
+        release_valid_hash = threading.Event()
+        original_check_password = check_password
+
+        self.installation.failed_attempts = 2
+        self.installation.save(update_fields=["failed_attempts", "updated_at"])
+
+        def coordinated_check_password(candidate, encoded):
+            if candidate == self.code:
+                valid_hash_started.set()
+                if not release_valid_hash.wait(timeout=10):
+                    raise AssertionError("valid setup hash check was not released")
+            return original_check_password(candidate, encoded)
+
+        def submit(payload, remote_addr):
+            close_old_connections()
+            try:
+                client = type(self.client)()
+                return client.post(
+                    reverse("setup-complete"),
+                    payload,
+                    format="json",
+                    REMOTE_ADDR=remote_addr,
+                )
+            finally:
+                connections.close_all()
+
+        valid_payload = {
+            "code": self.code,
+            "username": "concurrent-boundary-admin",
+            "email": "concurrent-boundary-admin@example.com",
+            "password": "StrongPass123!RC",
+            "password_confirm": "StrongPass123!RC",
+        }
+        wrong_payload = {
+            "code": "concurrent-boundary-wrong-code",
+            "username": "concurrent-boundary-attacker",
+            "email": "concurrent-boundary-attacker@example.com",
+            "password": "StrongPass123!RC",
+            "password_confirm": "StrongPass123!RC",
+        }
+
+        with override_settings(FIRST_RUN_SETUP_MAX_ATTEMPTS=3):
+            with patch(
+                "site_config.first_run.check_password",
+                side_effect=coordinated_check_password,
+            ):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    valid_future = executor.submit(
+                        submit,
+                        valid_payload,
+                        "203.0.113.81",
+                    )
+                    self.assertTrue(valid_hash_started.wait(timeout=10))
+                    wrong_response = executor.submit(
+                        submit,
+                        wrong_payload,
+                        "203.0.113.82",
+                    ).result(timeout=10)
+                    release_valid_hash.set()
+                    valid_response = valid_future.result(timeout=10)
+
+        self.assertEqual(wrong_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(wrong_response.data["code"], "invalid_setup_code")
+        self.assertEqual(valid_response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(valid_response.data["code"], "setup_code_attempt_limit_reached")
+        self.installation.refresh_from_db()
+        self.assertEqual(self.installation.failed_attempts, 3)
+        self.assertEqual(self.installation.status, InstallationState.Status.UNINITIALIZED)
+        self.assertFalse(User.objects.filter(username="concurrent-boundary-admin").exists())

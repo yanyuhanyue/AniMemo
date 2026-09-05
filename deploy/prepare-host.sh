@@ -46,6 +46,6 @@ mkdir -p "$private_directory"
 chown "$APP_UID:$APP_GID" "$private_directory"
 chmod 0700 "$private_directory"
 
-echo "Anime Journal host directories are ready under $DATA_ROOT."
+echo "AniMemo host directories are ready under $DATA_ROOT."
 echo "Writable API directories use owner $APP_UID:$APP_GID and mode 0755."
 echo "First-run private state uses owner $APP_UID:$APP_GID and mode 0700."

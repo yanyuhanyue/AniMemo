@@ -299,6 +299,32 @@ class CiGateAuthorityTests(unittest.TestCase):
                         self.assertEqual(result["risk_level"], expected_risk)
                         self.assertEqual(result["execution_force_full"], force_full)
 
+    def test_real_classifier_boundary_paths_preserve_release_authority_selection(self):
+        cases = (
+            ("CRITICAL", "backend/site_config/views.py", True),
+            ("CRITICAL", "src/App.jsx", True),
+            ("CRITICAL", "scripts/rehearse-release-images.sh", True),
+            ("HIGH", "backend/config/api_urls.py", False),
+            ("HIGH", "plugins/plugin.schema.json", False),
+        )
+        for expected_risk, path, updater_selected in cases:
+            with self.subTest(path=path):
+                outputs = classify_paths([path])
+                self.assertEqual(outputs["risk_level"], expected_risk)
+                result = validate_gate_authority(
+                    real_classification_needs(
+                        outputs, workflow="release", event_name="pull_request"
+                    ),
+                    workflow="release",
+                    event_name="pull_request",
+                )
+                self.assertEqual(result["status"], "PASS")
+                self.assertEqual(
+                    "updater-isolated" in result["selected_jobs"], updater_selected
+                )
+                self.assertIn("docker", result["selected_jobs"])
+                self.assertIn("stateful-upgrade", result["selected_jobs"])
+
     def test_policy_semantics_reject_gate_downgrades_and_escalations(self):
         cases = (
             (

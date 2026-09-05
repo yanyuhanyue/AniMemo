@@ -1,3 +1,3 @@
-"""Blank Anime Journal plugin."""
+"""Blank AniMemo plugin."""
 
 __version__ = "0.1.0"

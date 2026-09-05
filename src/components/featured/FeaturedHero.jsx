@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { Icon } from "../Icon.jsx";
 import { useSiteSettings } from "../../context/SiteSettingsContext.jsx";
+import { ANIMEMO_AVATAR_PATH } from "../../lib/mediaAssets.js";
 
 export function FeaturedHero() {
   const { settings } = useSiteSettings();
@@ -17,8 +18,8 @@ export function FeaturedHero() {
         <div className="featured-hero__art" aria-hidden="true">
           <span className="featured-hero__account">{settings.social_handle}</span>
           <div className="featured-hero__burst"><Icon name="star" /></div>
-          <div className="featured-portrait featured-portrait--back"><img src="/assets/posters/poster-11.webp" alt="" /></div>
-          <div className="featured-portrait featured-portrait--front"><img src="/assets/avatar.png" alt="" /></div>
+          <div className="featured-portrait featured-portrait--back"><div className="featured-portrait__brand-mark" aria-hidden="true"><span>✦</span><i /><b /></div></div>
+          <div className="featured-portrait featured-portrait--front"><img src={ANIMEMO_AVATAR_PATH} alt="" /></div>
         </div>
       </div>
     </header>

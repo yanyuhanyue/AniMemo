@@ -9,6 +9,9 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from check_license_docs import (
+    ANIMEMO_AVATAR_PATH,
+    ANIMEMO_FALLBACK_POSTER_PATH,
+    DEMO_SUBJECT_IDS,
     POLYFORM_BLOB,
     POLYFORM_LINES,
     POLYFORM_PATH,
@@ -17,11 +20,15 @@ from check_license_docs import (
     PRODUCT_IDENTITY,
     README_ASSET_WARNING,
     ROOT_LICENSE_PATH,
+    REMOVED_BUNDLED_POSTERS,
     ValidationError,
     _git_blob,
+    _lf_bytes,
     _logical_lines,
     validate_all,
     validate_documents,
+    validate_legacy_identity_boundaries,
+    validate_media_policy,
     validate_polyform,
 )
 
@@ -31,7 +38,7 @@ class LicenseDocumentationTests(unittest.TestCase):
         validate_all()
 
     def test_polyform_official_fingerprints(self):
-        payload = (ROOT / POLYFORM_PATH).read_bytes()
+        payload = _lf_bytes((ROOT / POLYFORM_PATH).read_bytes())
         self.assertEqual(_git_blob(payload), POLYFORM_BLOB)
         self.assertEqual(__import__("hashlib").sha256(payload).hexdigest(), POLYFORM_SHA256)
         self.assertEqual(len(payload), POLYFORM_SIZE)
@@ -46,15 +53,26 @@ class LicenseDocumentationTests(unittest.TestCase):
 
     def test_root_license_is_byte_identical_to_named_polyform_copy(self):
         self.assertEqual(
-            (ROOT / ROOT_LICENSE_PATH).read_bytes(),
-            (ROOT / POLYFORM_PATH).read_bytes(),
+            _lf_bytes((ROOT / ROOT_LICENSE_PATH).read_bytes()),
+            _lf_bytes((ROOT / POLYFORM_PATH).read_bytes()),
         )
+
+    def test_media_policy_keeps_only_original_brand_and_fallback_assets(self):
+        self.assertGreater((ROOT / ANIMEMO_AVATAR_PATH).stat().st_size, 0)
+        self.assertGreater((ROOT / ANIMEMO_FALLBACK_POSTER_PATH).stat().st_size, 0)
+        self.assertTrue(all(not (ROOT / path).exists() for path in REMOVED_BUNDLED_POSTERS))
+        self.assertEqual(len(DEMO_SUBJECT_IDS), 16)
+        self.assertEqual(len(set(DEMO_SUBJECT_IDS)), 16)
+        validate_media_policy()
 
     def test_release_documents_have_no_legacy_provenance_markers(self):
         validate_documents()
 
+    def test_legacy_identity_literals_stay_inside_migration_or_compatibility_boundaries(self):
+        validate_legacy_identity_boundaries()
+
     def test_polyform_validator_rejects_changed_bytes(self):
-        payload = (ROOT / POLYFORM_PATH).read_bytes()
+        payload = _lf_bytes((ROOT / POLYFORM_PATH).read_bytes())
         self.assertNotEqual(_git_blob(payload + b"\n"), POLYFORM_BLOB)
         self.assertNotEqual(_logical_lines(payload + b"\n"), POLYFORM_LINES)
 

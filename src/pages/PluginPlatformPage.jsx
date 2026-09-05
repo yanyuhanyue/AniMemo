@@ -214,7 +214,7 @@ export function PluginPlatformPage({ authUser }) {
             return <article className="plugin-market-card" key={plugin.slug}>
               <div className="plugin-market-card__title"><span><Icon name="puzzle" /></span><div><h2>{plugin.name}</h2><code>{plugin.slug}</code></div></div>
               <p>{plugin.description}</p>
-              <dl><div><dt>版本</dt><dd>{current?.version || "-"}</dd></div><div><dt>运行时</dt><dd>{current?.runtime_types?.join(" + ") || "frontend"}</dd></div><div><dt>发布者</dt><dd>{plugin.owner || "Anime Journal"}</dd></div></dl>
+              <dl><div><dt>版本</dt><dd>{current?.version || "-"}</dd></div><div><dt>运行时</dt><dd>{current?.runtime_types?.join(" + ") || "frontend"}</dd></div><div><dt>发布者</dt><dd>{plugin.owner || "AniMemo"}</dd></div></dl>
               {tab === "installed" && !plugin.published && <small className="plugin-market-card__notice">此版本已从市场下架，你的现有安装仍保留。</small>}
               {tab === "installed" && !plugin.available && <small className="plugin-market-card__notice is-danger">当前 Runtime 不可用。</small>}
               {tab === "installed" && plugin.settings?.length > 0 && <div className="plugin-market-card__settings">

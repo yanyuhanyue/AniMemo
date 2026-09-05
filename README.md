@@ -2,7 +2,7 @@
 
 AniMemo 是一套可自托管的动漫记忆与私人观影手账，提供条目管理、观看历史、公开展示、专栏、导入导出、插件与外部集成能力。产品以清晰的数据所有权、可独立部署和可维护的前后端契约为核心，不以任何外部网站作为正式来源或产品身份。
 
-> 仓库内的演示媒体与示例数据不因源码许可证而获得授权；在授权状态明确或完成替换前，不应将其作为公开发行素材。
+> `public/assets/avatar.png` 与 `public/assets/posters/poster-01.webp` 是 AniMemo 原创品牌/缺省封面资产；动漫作品封面与 Bangumi 数据由外部 Provider 提供，不因 AniMemo 源码许可证获得授权。
 
 ## License / 许可证
 
@@ -26,7 +26,7 @@ AniMemo 是一套可自托管的动漫记忆与私人观影手账，提供条目
 ```text
 AniMemo/
 ├─ src/                 React 页面、组件与样式
-├─ public/assets/       本地演示图片
+├─ public/assets/       AniMemo 品牌头像与缺省封面
 ├─ backend/             Django 项目与 journal API
 ├─ deploy/              Docker Compose、Nginx 与宿主机部署脚本
 ├─ .env.example         全部环境变量模板

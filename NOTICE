@@ -19,8 +19,8 @@ No legal rights-holder name is inferred or inserted by this notice. The reposito
 - Bangumi APIs, names, metadata, images, and other returned material are external to AniMemo source licensing. Code that calls those interfaces may be AniMemo-owned, but the responses and upstream service are not relicensed.
 - AstrBot, React, Django, Django REST Framework, requests, httpx, and other dependencies remain under their respective terms; their use by an AniMemo component does not bring them under PolyForm.
 - External media and media metadata are not cleared by the source-code license.
-- The source-code license does not clear or grant rights in `public/assets/avatar.png` or `public/assets/posters/poster-01.webp` through `poster-16.webp`. Authorization or replacement remains required before release.
-- The source-code license does not clear or grant rights in the provenance-sensitive demo content in `src/data/anime.js`. That file and concrete coordinator-owned UI/demo-data work are intentionally untouched here.
+- `public/assets/avatar.png` is an AniMemo-original brand mascot asset, and `public/assets/posters/poster-01.webp` is an AniMemo-original missing-cover fallback. The former numbered anime poster files `poster-02.webp` through `poster-16.webp` are removed from the repository.
+- Demo anime records carry Bangumi Subject identities and resolve Provider-owned posters at runtime; failed or unavailable lookups use the AniMemo fallback. Titles, Subject identities, and returned media must not be treated as AniMemo-owned assets.
 - Stable technical identifiers containing `anime-journal`, including package IDs and module paths, are compatibility identifiers only. They are not statements of product provenance, affiliation, or legal ownership.
 - Names and marks are addressed separately in `TRADEMARKS`; no trademark permission should be inferred from the source-code license.
 

@@ -1,4 +1,5 @@
 import { Icon } from "../Icon.jsx";
+import { fallbackPosterImage } from "../../lib/mediaAssets.js";
 import {
   buildSmartReminders,
   formatEpisodeRange,
@@ -32,7 +33,7 @@ export function ContinueWatchingSection({ records, onOpen, onRecord, onComplete,
           {watching.map((record) => (
             <article className="continue-watching-card" key={record.id}>
               <button className="continue-watching-card__poster" type="button" onClick={(event) => onOpen(record, event.currentTarget)} aria-label={`打开 ${record.title}`}>
-                <img src={record.poster} alt="" />
+                <img src={record.poster} alt="" onError={fallbackPosterImage} />
               </button>
               <div className="continue-watching-card__copy">
                 <span className="continue-watching-card__status">在看</span>

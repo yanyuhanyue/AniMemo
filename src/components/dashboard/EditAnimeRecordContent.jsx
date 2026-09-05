@@ -378,8 +378,8 @@ export function EditAnimeRecordContent({
             <label className={`anime-edit-modal__source-field${posterUrlError ? " has-error" : ""}`} htmlFor="anime-modal-poster-url">受信任图片 URL<input id="anime-modal-poster-url" type="url" value={draft.customPosterUrl || ""} onChange={(event) => updatePosterUrl(event.target.value)} placeholder="https://lain.bgm.tv/..." aria-invalid={Boolean(posterUrlError)} aria-describedby="anime-modal-poster-help" /></label>
             <p id="anime-modal-poster-help" className={`anime-edit-modal__source-help${posterUrlError ? " has-error" : ""}`}>{posterUrlError || `允许域名：${trustedHostLabel}`}</p>
             <button className="anime-edit-modal__restore-poster" type="button" onClick={restoreDefaultPoster} disabled={!hasCustomPoster || busy}><Icon name="reset" /> 恢复公共 / Bangumi 封面</button>
-            <label className="anime-edit-modal__source-field" htmlFor="anime-modal-baike-url">萌娘百科 URL<input id="anime-modal-baike-url" type="url" value={draft.baikeUrl || ""} onChange={(event) => update("baikeUrl", event.target.value)} placeholder="https://mzh.moegirl.org.cn/..." /></label>
-            {baikeEnabled ? <a className="anime-edit-modal__baike" href={draft.baikeUrl.trim()} target="_blank" rel="noreferrer"><Icon name="book" /> 前往萌娘百科</a> : <span className="anime-edit-modal__baike is-disabled" aria-disabled="true"><Icon name="warning" /> 请输入有效的 HTTP(S) 地址</span>}
+            <label className="anime-edit-modal__source-field" htmlFor="anime-modal-baike-url">外部资料 URL<input id="anime-modal-baike-url" type="url" value={draft.baikeUrl || ""} onChange={(event) => update("baikeUrl", event.target.value)} placeholder="https://bgm.tv/subject/..." /></label>
+            {baikeEnabled ? <a className="anime-edit-modal__baike" href={draft.baikeUrl.trim()} target="_blank" rel="noreferrer"><Icon name="book" /> 前往外部资料页</a> : <span className="anime-edit-modal__baike is-disabled" aria-disabled="true"><Icon name="warning" /> 请输入有效的 HTTP(S) 地址</span>}
           </aside>
 
           <div className="anime-edit-modal__main">

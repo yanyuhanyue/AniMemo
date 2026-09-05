@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { Icon } from "./Icon.jsx";
 import { RatingDisplay } from "./RatingDisplay.jsx";
+import { fallbackAvatarImage, fallbackPosterImage } from "../lib/mediaAssets.js";
 
 const PHOTO_LAYOUTS = {
   1: [
@@ -57,16 +58,6 @@ function getPhotoState(count, index, stateName) {
   return motion[stateName];
 }
 
-function fallbackPoster(event) {
-  const image = event.currentTarget;
-  if (image.dataset.fallback) {
-    image.style.visibility = "hidden";
-    return;
-  }
-  image.dataset.fallback = "true";
-  image.src = "/assets/posters/poster-01.webp";
-}
-
 function TopPickPhotoStack({ owner, picks, photoRefs, onPhotoEnter, onPhotoLeave }) {
   return (
     <div className="owner-poster-stage">
@@ -98,7 +89,7 @@ function TopPickPhotoStack({ owner, picks, photoRefs, onPhotoEnter, onPhotoLeave
                 alt={`${pick.title || `高分作品 ${index + 1}`} 海报`}
                 width="400"
                 height="600"
-                onError={fallbackPoster}
+                onError={fallbackPosterImage}
               />
             </div>
             <figcaption>
@@ -369,7 +360,7 @@ export function UniverseOwnerCard({ owner, onOpen }) {
       >
         <div className="journal-owner-card__surface" ref={surfaceRef}>
           <header className="journal-owner-card__header">
-            <img className="journal-owner-card__avatar" src={owner.avatar} alt={`${owner.nickname} 的头像`} width="108" height="108" onError={fallbackPoster} />
+            <img className="journal-owner-card__avatar" src={owner.avatar} alt={`${owner.nickname} 的头像`} width="108" height="108" onError={fallbackAvatarImage} />
             <div className="journal-owner-card__identity">
               <span className="owner-badge">JOURNAL OWNER</span>
               <h3>{owner.nickname}</h3>

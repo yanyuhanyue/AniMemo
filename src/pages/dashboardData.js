@@ -1,9 +1,10 @@
 import { resolveTagColors } from "../lib/tagPresets.js";
+import { ANIMEMO_AVATAR_PATH, ANIMEMO_POSTER_FALLBACK_PATH, normalizeBundledPosterPath } from "../lib/mediaAssets.js";
 
 export const STORAGE_KEY = "anime_journal_records_v1";
 export const SETTINGS_KEY = "anime_journal_settings_v1";
 export const FILTERS_KEY = "anime_journal_quick_filters_v1";
-export const DEFAULT_SETTINGS = { email: "", nickname: "XuanHuang", subtitle: "把每一次与动画相遇认真收藏。", avatar: "/assets/avatar.png", accent: "#4ecdc4", publicProfile: false, publicSlug: "", publicStatus: "private", isStaff: false, isSuperuser: false, twoFactorEnabled: false };
+export const DEFAULT_SETTINGS = { email: "", nickname: "AniMemo", subtitle: "把每一次与动画相遇认真收藏。", avatar: ANIMEMO_AVATAR_PATH, accent: "#4ecdc4", publicProfile: false, publicSlug: "", publicStatus: "private", isStaff: false, isSuperuser: false, twoFactorEnabled: false };
 
 export const STATUS_OPTIONS = [
   ["all", "全部状态"],
@@ -43,10 +44,10 @@ export const blankRecord = () => ({
   status: "planned",
   statusLabel: "想看",
   tags: ["日常"],
-  poster: "/assets/posters/poster-01.webp",
+  poster: ANIMEMO_POSTER_FALLBACK_PATH,
   description: "写下这部作品的剧情简介。",
   review: "",
-  baikeUrl: "https://mzh.moegirl.org.cn/",
+  baikeUrl: "",
   watchHistory: [],
   watchHistoryCount: 0,
   firstWatchedOn: null,
@@ -73,14 +74,14 @@ export function apiToRecord(item, presetColors) {
     tags: item.tags || [],
     savedTagColors: item.tag_colors || {},
     tagColors: resolveTagColors(item.tags || [], item.tag_colors || {}, presetColors),
-    poster: item.poster || item.poster_url || "/assets/posters/poster-01.webp",
+    poster: normalizeBundledPosterPath(item.poster || item.poster_url),
     posterUrl: item.poster_url || "",
     customPosterUrl: item.custom_poster_url || "",
     posterSource: item.poster_source || (item.poster_file ? "upload" : item.poster_url ? "default_url" : "none"),
     clearCustomPoster: false,
     description: item.description || "",
     review: item.review || "",
-    baikeUrl: item.baike_url || "https://mzh.moegirl.org.cn/",
+    baikeUrl: item.baike_url || "",
     watchHistory: [],
     watchHistoryCount: Number(item.watch_history_count || 0),
     firstWatchedOn: item.first_watched_on || null,
@@ -149,7 +150,7 @@ export function parseLocalImportRecords(raw, presetColors) {
       statusLabel: statusLabels[status] || "想看",
       tags,
       tagColors: resolveTagColors(tags, item.tag_colors || {}, presetColors),
-      poster: customPosterUrl || posterUrl || "/assets/posters/poster-01.webp",
+      poster: normalizeBundledPosterPath(customPosterUrl || posterUrl),
       posterUrl,
       customPosterUrl,
       posterSource: customPosterUrl ? "trusted_url" : posterUrl ? "default_url" : "none",

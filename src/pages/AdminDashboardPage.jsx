@@ -23,14 +23,14 @@ const EMPTY = {
 };
 
 const EMPTY_SITE_SETTINGS = {
-  site_name: "Anime Journal",
-  homepage_title: "XuanHuang 的番剧汇总",
+  site_name: "AniMemo",
+  homepage_title: "AniMemo · 我的动漫记忆库",
   homepage_owner_id: null,
   homepage_owner_options: [],
   site_avatar_url: "/assets/avatar.png",
   homepage_description: "",
   universe_description: "",
-  social_handle: "X: @ANIME_JOURNAL",
+  social_handle: "X: @ANIMEMO",
   registration_enabled: true,
   email_delivery_enabled: true,
   email_sender_name: "",
@@ -549,7 +549,7 @@ function SiteSettingsPanel({ settings, draft, loading, saving, avatarPreview, em
             </label>
           </div>
           <div className="admin-email-settings__grid">
-            <label><span>发件人名称</span><input value={draft.email_sender_name} onChange={(event) => onChange("email_sender_name", event.target.value)} maxLength="120" placeholder={draft.site_name || "Anime Journal"} /></label>
+            <label><span>发件人名称</span><input value={draft.email_sender_name} onChange={(event) => onChange("email_sender_name", event.target.value)} maxLength="120" placeholder={draft.site_name || "AniMemo"} /></label>
             <label><span>发件邮箱</span><input type="email" value={draft.email_sender_address} onChange={(event) => onChange("email_sender_address", event.target.value)} placeholder="noreply@mail.example.com" /></label>
             <label className="admin-email-key-field"><span>Resend API Key</span><input type="password" value={draft.resend_api_key} onChange={(event) => { onChange("resend_api_key", event.target.value); onChange("clear_resend_api_key", false); }} autoComplete="new-password" placeholder={settings.resend_api_key_configured ? "已配置，留空表示保持不变" : "re_xxxxxxxxx"} /><small>当前来源：{settings.resend_api_key_source === "database" ? "管理员后台" : settings.resend_api_key_source === "environment" ? "服务器环境变量" : "未配置"}</small></label>
             <div className="admin-email-key-actions"><button type="button" className={draft.clear_resend_api_key ? "is-clearing" : ""} disabled={!settings.resend_api_key_configured && !draft.resend_api_key} onClick={() => { onChange("resend_api_key", ""); onChange("clear_resend_api_key", !draft.clear_resend_api_key); }}><Icon name="trash" /> {draft.clear_resend_api_key ? "保存后清除" : "清除已存密钥"}</button><small>实际发件人：{settings.effective_email_from || "保存后生成"}</small></div>

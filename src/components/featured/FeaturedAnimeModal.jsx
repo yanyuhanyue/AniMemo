@@ -6,6 +6,7 @@ import { TagChip } from "../TagChip.jsx";
 import { FeaturedModalScore } from "./FeaturedModalScore.jsx";
 import { useModalViewportSize } from "./useModalViewportSize.js";
 import { WatchHistoryList } from "../WatchHistoryList.jsx";
+import { ANIMEMO_POSTER_FALLBACK_PATH, fallbackPosterImage } from "../../lib/mediaAssets.js";
 
 function displayPeriod(period = "") {
   if (!period || period === "未定档") return "未定档";
@@ -112,7 +113,7 @@ export function FeaturedAnimeModal({ column, onClosed }) {
   }, [modalSize.height, modalSize.width]);
 
   const posterUrl = useMemo(() => {
-    const source = anime?.posterOriginal || anime?.poster;
+    const source = anime?.posterOriginal;
     if (!source) return "";
     try {
       return new URL(source, window.location.origin).href;
@@ -120,6 +121,12 @@ export function FeaturedAnimeModal({ column, onClosed }) {
       return source;
     }
   }, [anime?.poster, anime?.posterOriginal]);
+
+  const posterSourceLabel = posterUrl
+    ? `${anime.externalSource || "外部 Provider"} 图片`
+    : anime.poster === ANIMEMO_POSTER_FALLBACK_PATH
+      ? "AniMemo 原创缺省图"
+      : "未提供外部图片";
 
   const finishClose = useCallback(() => {
     if (closedRef.current) return;
@@ -310,7 +317,7 @@ export function FeaturedAnimeModal({ column, onClosed }) {
             <div className="featured-anime-modal__main">
               <aside className="featured-anime-modal__poster-column">
                 <div className="featured-anime-modal__poster-viewer" data-featured-modal-piece>
-                  <img src={anime.poster} alt={`${anime.title} 海报`} />
+                  <img src={anime.poster || ANIMEMO_POSTER_FALLBACK_PATH} alt={`${anime.title} 海报`} onError={fallbackPosterImage} />
                   {posterUrl && (
                     <a className="featured-anime-modal__poster-action" href={posterUrl} target="_blank" rel="noreferrer" aria-label={`查看${anime.title}原始海报`}>
                       <Icon name="arrow-up-right" />
@@ -319,8 +326,8 @@ export function FeaturedAnimeModal({ column, onClosed }) {
                   )}
                 </div>
                 <div className="featured-anime-modal__source" data-featured-modal-piece>
-                  <p>当前海报来源 · {posterUrl ? "本地原图" : "暂无原图"}</p>
-                  <div className="featured-anime-modal__source-url" title={posterUrl || undefined}>{posterUrl || "未提供原图地址"}</div>
+                  <p>当前海报来源 · {posterSourceLabel}</p>
+                  <div className="featured-anime-modal__source-url" title={posterUrl || undefined}>{posterUrl || "AniMemo 缺省图，无外部原图地址"}</div>
                 </div>
                 {anime.externalUrl && (
                   <a className="featured-anime-modal__external" href={anime.externalUrl} target="_blank" rel="noreferrer" data-featured-modal-piece>

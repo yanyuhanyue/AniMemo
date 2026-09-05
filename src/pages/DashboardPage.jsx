@@ -352,7 +352,7 @@ export function DashboardPage() {
       clearCustomPoster: false,
       description: draft.description || "",
       review: draft.review || "",
-      baikeUrl: draft.baikeUrl || "https://mzh.moegirl.org.cn/",
+      baikeUrl: draft.baikeUrl || "",
       watchHistory: [],
       watchHistoryCount: 0,
       firstWatchedOn: null,

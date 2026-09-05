@@ -90,6 +90,15 @@ class CiClassificationTests(unittest.TestCase):
                 self.assertEqual(result["docs_only"], "false")
                 self.assertEqual(result["full_gate"], "true")
 
+    def test_root_license_and_notice_documents_are_high_risk_release_inputs(self):
+        for path in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES", "TRADEMARKS"):
+            with self.subTest(path=path):
+                result = self.assert_risk("HIGH", path)
+                rules = json.loads(result["matched_rules"])[0]["rules"]
+                self.assertIn("sensitive-release-documentation", rules)
+                self.assertEqual(result["docs_only"], "false")
+                self.assertEqual(result["full_gate"], "true")
+
     def test_sensitive_source_path_survives_real_git_rename(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             repository = Path(temporary_directory)
@@ -187,6 +196,81 @@ class CiClassificationTests(unittest.TestCase):
             with self.subTest(path=path):
                 result = self.assert_risk("HIGH", path)
                 self.assertEqual(result["full_gate"], "true")
+
+    def test_first_run_public_entrypoints_and_setup_routes_are_critical(self):
+        paths = (
+            "backend/site_config/views.py",
+            "backend/site_config/api_views.py",
+            "backend/site_config/urls.py",
+            "src/App.jsx",
+            "src/App.tsx",
+            "src/router/setupRoutes.tsx",
+            "src/pages/SetupWizard.jsx",
+            "src/pages/FirstRunWizard.tsx",
+            "src/pages/setup/index.jsx",
+            "src/router/first-run/index.tsx",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                result = self.assert_risk("CRITICAL", path)
+                rules = json.loads(result["matched_rules"])[0]["rules"]
+                self.assertIn("first-run-security-boundary", rules)
+                self.assertEqual(result["critical_gate"], "true")
+                self.assertEqual(result["run_release_updater"], "true")
+
+    def test_non_setup_frontend_route_modules_remain_standard(self):
+        for path in (
+            "src/router/accountRoutes.tsx",
+            "src/pages/JournalRoutes.jsx",
+        ):
+            with self.subTest(path=path):
+                result = self.assert_risk("STANDARD", path)
+                rules = json.loads(result["matched_rules"])[0]["rules"]
+                self.assertNotIn("first-run-security-boundary", rules)
+                self.assertEqual(result["critical_gate"], "false")
+
+    def test_backend_api_route_modules_are_high_risk(self):
+        paths = (
+            "backend/config/api_urls.py",
+            "backend/journal/public_urls.py",
+            "backend/plugin_host/v2_urls.py",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                result = self.assert_risk("HIGH", path)
+                rules = json.loads(result["matched_rules"])[0]["rules"]
+                self.assertIn("api-core-contract", rules)
+                self.assertEqual(result["api_contract"], "true")
+                self.assertEqual(result["full_gate"], "true")
+
+    def test_plugin_schema_files_are_high_risk(self):
+        paths = (
+            "plugins/plugin.schema.json",
+            "plugins/contracts/manifest.schema.json",
+            "plugins/example/config.schema.yaml",
+            "plugins/contracts/schemas/plugin.json",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                result = self.assert_risk("HIGH", path)
+                rules = json.loads(result["matched_rules"])[0]["rules"]
+                self.assertIn("plugin-contract", rules)
+                self.assertEqual(result["plugin"], "true")
+                self.assertEqual(result["full_gate"], "true")
+
+    def test_release_image_rehearsal_paths_are_critical(self):
+        paths = (
+            "scripts/rehearse-release-images.sh",
+            "scripts/release/rehearse-images.ps1",
+            "tests/release-image-rehearsal.test.mjs",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                result = self.assert_risk("CRITICAL", path)
+                rules = json.loads(result["matched_rules"])[0]["rules"]
+                self.assertIn("release-core", rules)
+                self.assertEqual(result["critical_gate"], "true")
+                self.assertEqual(result["run_release_updater"], "true")
 
     def test_critical_release_updater_deployment_recovery_ci_and_first_run_paths(self):
         paths = (

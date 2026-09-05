@@ -6,8 +6,8 @@
   "files": [
     {
       "path": "backend/plugin.py",
-      "size": 26330,
-      "sha256": "8a5625c264448ada6996b68858a5dbc2738b29bf04d3ae6cc09c9f76d861b778"
+      "size": 26326,
+      "sha256": "4aa7173cd4c5d0fdb2c32d250b288ab9da113e99ef70ffaadb899d1821f8f37e"
     },
     {
       "path": "backend/src/__init__.py",
@@ -16,8 +16,8 @@
     },
     {
       "path": "backend/src/anime_journal_watch_history_importer/__init__.py",
-      "size": 57,
-      "sha256": "0cbbd09cc5deb53457480c27f237874d2a5cd72997b36bc57af06242dc1c6913"
+      "size": 51,
+      "sha256": "d1f3cfde534d18249cb8eff99bbad5f81c4959f8c5bb0f4f1e7038653ae80036"
     },
     {
       "path": "backend/src/anime_journal_watch_history_importer/bangumi.py",
@@ -41,8 +41,8 @@
     },
     {
       "path": "manifest.json",
-      "size": 2340,
-      "sha256": "0899ac8bcf51448b9d92fb4332900851fad0f7e0f27367e6b606257f688677d3"
+      "size": 2334,
+      "sha256": "a35f3d7be3b94e3f1fc70c8aca62e85eb35cefb08fd7fdbd79d1e9f300f2e699"
     }
   ]
 }

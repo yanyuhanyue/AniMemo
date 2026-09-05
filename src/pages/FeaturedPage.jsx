@@ -8,6 +8,11 @@ import { FeaturedHero } from "../components/featured/FeaturedHero.jsx";
 import { Icon } from "../components/Icon.jsx";
 import { api } from "../lib/api.js";
 import { demoEnabled, demoFeaturedColumns } from "@demo-data";
+import { hydrateDemoFeaturedColumns } from "../lib/demoMedia.js";
+import {
+  ANIMEMO_AVATAR_PATH,
+  normalizeBundledPosterPath,
+} from "../lib/mediaAssets.js";
 
 const defaults = { q: "", tag: "all", status: "all", year: "all", sort: "date-desc", quick: "all" };
 
@@ -16,6 +21,7 @@ function normalizeFeaturedApiColumn(column) {
   const year = published ? String(new Date(published).getFullYear()) : "";
   const month = published ? String(new Date(published).getMonth() + 1).padStart(2, "0") : "";
   const anime = column.anime || {};
+  const resourceIdentity = anime.resourceIdentity || anime.resource_identity || null;
   return {
     id: column.slug || column.id,
     slug: column.slug || String(column.id),
@@ -24,8 +30,8 @@ function normalizeFeaturedApiColumn(column) {
     japaneseTitle: column.japanese_title || anime.japaneseTitle || anime.japanese_title || "",
     summary: column.summary || "",
     author: column.author_name || "未署名作者",
-    authorAvatar: column.author_avatar || "/assets/avatar.png",
-    cover: column.cover || anime.poster || anime.poster_url || "",
+    authorAvatar: column.author_avatar || ANIMEMO_AVATAR_PATH,
+    cover: normalizeBundledPosterPath(anime.poster || anime.poster_url || column.cover),
     period: published ? `${year}-${month}` : (anime.period || anime.airing_period || "未定档"),
     year: year || String(anime.period || anime.airing_period || "").slice(0, 4),
     status: anime.status || anime.watch_status || "completed",
@@ -37,10 +43,13 @@ function normalizeFeaturedApiColumn(column) {
     anime: {
       title: anime.title || column.title || "未命名番剧",
       japaneseTitle: anime.japaneseTitle || anime.japanese_title || "",
-      poster: anime.poster || anime.poster_url || column.cover || "",
-      posterOriginal: anime.posterOriginal || anime.poster_original || anime.poster || anime.poster_url || column.cover || "",
-      externalUrl: anime.externalUrl || anime.baike_url || "",
-      externalSource: anime.externalSource || "萌娘百科",
+      poster: normalizeBundledPosterPath(anime.poster || anime.poster_url || column.cover),
+      posterOriginal: anime.posterOriginal || anime.poster_original || anime.poster_url || "",
+      externalUrl: anime.externalUrl || anime.external_url || anime.baike_url || "",
+      externalSource: anime.externalSource || (resourceIdentity?.provider === "bangumi" ? "Bangumi" : "外部资料"),
+      resourceIdentity,
+      bangumiTitle: anime.bangumiTitle || anime.bangumi_title || "",
+      bangumiJapaneseTitle: anime.bangumiJapaneseTitle || anime.bangumi_japanese_title || anime.japanese_title || "",
       period: anime.period || anime.airing_period || "未定档",
       score: anime.score ?? anime.personal_score ?? null,
       studio: anime.studio || "待补充",
@@ -67,6 +76,7 @@ export function FeaturedPage() {
   const [syncError, setSyncError] = useState("");
   const [selectedColumn, setSelectedColumn] = useState(null);
   const [modalSourceElement, setModalSourceElement] = useState(null);
+  const demoMediaCacheRef = useRef(new Map());
   const filters = readFilters(searchParams);
 
   const openAnimeFile = useCallback((column, sourceElement) => {
@@ -87,12 +97,12 @@ export function FeaturedPage() {
         const result = Array.isArray(data?.results) ? data.results : data;
         if (cancelled) return;
         if (Array.isArray(result) && result.length) setColumns(result.map(normalizeFeaturedApiColumn));
-        else if (demoEnabled) setColumns(demoFeaturedColumns);
+        else if (demoEnabled) setColumns(await hydrateDemoFeaturedColumns(demoFeaturedColumns, { client: api, cache: demoMediaCacheRef.current }));
         else setColumns([]);
         setSyncError("");
       } catch {
         if (!cancelled && demoEnabled) {
-          setColumns(demoFeaturedColumns);
+          setColumns(await hydrateDemoFeaturedColumns(demoFeaturedColumns, { client: api, cache: demoMediaCacheRef.current }));
         } else if (!cancelled) {
           setColumns([]);
           setSyncError("精选专栏加载失败，请检查服务器连接。");

@@ -3,6 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, getStoredTokens, readableApiError } from "../lib/api.js";
 import { useServerStateRevision } from "../lib/serverState.js";
 import { buildPresetColorMap, FALLBACK_TAG_PRESETS, normalizeTagPresets, resolveTagColors } from "../lib/tagPresets.js";
+import { hydrateDemoAnimeRecords, reconcileDemoRecords } from "../lib/demoMedia.js";
+import { normalizeBundledPosterPath } from "../lib/mediaAssets.js";
 import { demoAnimeRecords, demoEnabled } from "@demo-data";
 
 import {
@@ -86,6 +88,7 @@ export function useDashboardData({ navigate, entryQuery = {} }) {
   const entryViewRevisionRef = useRef(0);
   const requestControllerRef = useRef(null);
   const loadingMoreRef = useRef(false);
+  const demoMediaCacheRef = useRef(new Map());
   const mountedRef = useRef(false);
   const metadataHydratedRef = useRef(false);
   const [analytics, setAnalytics] = useState(null);
@@ -149,19 +152,48 @@ export function useDashboardData({ navigate, entryQuery = {} }) {
   }, [access, navigate]);
 
   useEffect(() => {
+    let cancelled = false;
     if (!isDemo) {
       setDemoCatalogRecords([]);
       return undefined;
     }
-    setDemoCatalogRecords(demoAnimeRecords);
-    if (!localStorage.getItem(STORAGE_KEY)) {
-      setRecords(demoAnimeRecords.map((record) => ({
+    const refreshDemoMedia = async () => {
+      const hydratedCatalog = await hydrateDemoAnimeRecords(demoAnimeRecords, {
+        client: api,
+        cache: demoMediaCacheRef.current,
+      });
+      if (cancelled) return;
+      const decorate = (record) => ({
         ...record,
-        tagColors: resolveTagColors(record.tags, record.tagColors, presetColors),
-        shared: record.score >= 9.5,
-      })));
-    }
-    return undefined;
+        poster: normalizeBundledPosterPath(record.poster),
+        tagColors: resolveTagColors(record.tags || [], record.tagColors, presetColors),
+      });
+      setDemoCatalogRecords(hydratedCatalog.map(decorate));
+      setRecords((current) => {
+        const source = current.length
+          ? reconcileDemoRecords(current, hydratedCatalog)
+          : hydratedCatalog.map((record) => ({ ...record, shared: record.score >= 9.5 }));
+        return source.map((record) => {
+          const canonical = hydratedCatalog.find((item) => String(item.id) === String(record.id) && item.title === record.title);
+          return decorate(canonical ? {
+            ...record,
+            resourceIdentity: canonical.resourceIdentity,
+            bangumiTitle: canonical.bangumiTitle,
+            bangumiJapaneseTitle: canonical.bangumiJapaneseTitle,
+            poster: canonical.poster,
+            posterOriginal: canonical.posterOriginal,
+            posterUrl: canonical.posterUrl,
+            posterSource: canonical.posterSource,
+            externalIdentities: canonical.externalIdentities || record.externalIdentities || [],
+            externalUrl: canonical.externalUrl || record.externalUrl || "",
+            externalSource: canonical.externalSource || record.externalSource || "Bangumi",
+            baikeUrl: canonical.baikeUrl || record.baikeUrl || "",
+          } : record);
+        });
+      });
+    };
+    void refreshDemoMedia();
+    return () => { cancelled = true; };
   }, [isDemo, presetColors]);
 
   useEffect(() => {

@@ -8,16 +8,20 @@ import { useSiteSettings } from "../context/SiteSettingsContext.jsx";
 import { usePageColorTransition } from "../components/PageColorTransition.jsx";
 import { api, getStoredTokens } from "../lib/api.js";
 import { demoEnabled, demoUniverseOwners } from "@demo-data";
+import { hydrateDemoUniverseOwners } from "../lib/demoMedia.js";
+import { ANIMEMO_AVATAR_PATH, ANIMEMO_POSTER_FALLBACK_PATH } from "../lib/mediaAssets.js";
 
-async function loadDemoUniverseOwners() {
-  return demoEnabled ? demoUniverseOwners : [];
+async function loadDemoUniverseOwners(cache) {
+  return demoEnabled
+    ? hydrateDemoUniverseOwners(demoUniverseOwners, { client: api, cache })
+    : [];
 }
 
 function apiEntryToPick(entry) {
   return {
     id: entry.id,
     title: entry.title,
-    poster: entry.poster || entry.poster_url || "/assets/posters/poster-01.webp",
+    poster: entry.poster || entry.poster_url || ANIMEMO_POSTER_FALLBACK_PATH,
     score: entry.personal_score === null ? null : Number(entry.personal_score),
   };
 }
@@ -27,7 +31,7 @@ function normalizeOwner(owner, index) {
     id: owner.public_slug || index,
     nickname: owner.nickname || owner.username || "未命名手账",
     subtitle: owner.subtitle || "把每一次与动画相遇认真收藏。",
-    avatar: owner.avatar_url || "/assets/avatar.png",
+    avatar: owner.avatar_url || ANIMEMO_AVATAR_PATH,
     public_slug: owner.public_slug || "",
     stats: owner.stats || {},
     top_picks: (owner.top_picks || []).map(apiEntryToPick),
@@ -94,6 +98,7 @@ export function UniversePage() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const demoMediaCacheRef = useRef(new Map());
 
   useEffect(() => {
     let cancelled = false;
@@ -104,11 +109,11 @@ export function UniversePage() {
         if (cancelled) return;
         const results = Array.isArray(data.results) ? data.results.map(normalizeOwner) : [];
         if (results.length || !demoEnabled) setOwners(results);
-        else setOwners(await loadDemoUniverseOwners());
+        else setOwners(await loadDemoUniverseOwners(demoMediaCacheRef.current));
         setLoadError("");
       } catch {
         if (!cancelled) {
-          setOwners(await loadDemoUniverseOwners());
+          setOwners(await loadDemoUniverseOwners(demoMediaCacheRef.current));
           setLoadError(demoEnabled ? "" : "公开手账信号加载失败，请检查服务器连接。");
         }
       } finally {

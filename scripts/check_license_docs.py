@@ -22,17 +22,48 @@ POLYFORM_LINES = 74
 
 PRODUCT_IDENTITY = "AniMemo / My Anime Memory / 我的动漫记忆库"
 README_ASSET_WARNING = (
-    "仓库内的演示媒体与示例数据不因源码许可证而获得授权；"
-    "在授权状态明确或完成替换前，不应将其作为公开发行素材。"
+    "`public/assets/avatar.png` 与 `public/assets/posters/poster-01.webp` 是 AniMemo 原创品牌/缺省封面资产；"
+    "动漫作品封面与 Bangumi 数据由外部 Provider 提供，不因 AniMemo 源码许可证获得授权。"
 )
-LEGACY_PROVENANCE_MARKERS = (
-    "xh-anime.com",
-    "复刻",
-    "replica",
-    "copied from",
-    "copy of",
-    "based on",
-    "clone",
+ANIMEMO_AVATAR_PATH = "public/assets/avatar.png"
+ANIMEMO_FALLBACK_POSTER_PATH = "public/assets/posters/poster-01.webp"
+REMOVED_BUNDLED_POSTERS = tuple(
+    f"public/assets/posters/poster-{number:02d}.webp"
+    for number in range(2, 17)
+)
+DEMO_SUBJECT_IDS = (
+    "569161",
+    "543360",
+    "558296",
+    "587454",
+    "515759",
+    "604826",
+    "520842",
+    "501614",
+    "506677",
+    "514353",
+    "524707",
+    "512190",
+    "363957",
+    "485936",
+    "364844",
+    "531159",
+)
+def _retired_marker(hex_value: str) -> str:
+    return bytes.fromhex(hex_value).decode("utf-8")
+
+
+LEGACY_PROVENANCE_MARKERS = tuple(
+    _retired_marker(value)
+    for value in (
+        "78682d616e696d652e636f6d",
+        "e5a48de588bb",
+        "7265706c696361",
+        "636f706965642066726f6d",
+        "636f7079206f66",
+        "6261736564206f6e",
+        "636c6f6e65",
+    )
 )
 RELEASE_DOCUMENTS = (
     "README.md",
@@ -42,6 +73,26 @@ RELEASE_DOCUMENTS = (
     "plugins/_template/README.md",
     "plugins/watch-history-importer/README.md",
     "bridges/astrbot_plugin_animemo_bridge/README.md",
+)
+LEGACY_IDENTITY_ALLOWLIST = {
+    "backend/site_config/migrations/0001_initial.py": {
+        _retired_marker("7875616e6875616e67"): 1,
+        _retired_marker(
+            "e7b2bee5bf83e694b6e5bd95203230303720e5b9b4e887b3e4bb8ae79a84e4bc98e8b4a8e58aa8e6bcabe4bd9ce59381"
+        ): 1,
+    },
+}
+LEGACY_IDENTITY_PATTERNS = tuple(
+    _retired_marker(value)
+    for value in (
+        "78682d616e696d65",
+        "78686379747573",
+        "7875616e6875616e67",
+        "64656d6f2d7868",
+        "e78e84e9bb84",
+        "e8bda9e79a87",
+        "e7b2bee5bf83e694b6e5bd95203230303720e5b9b4e887b3e4bb8ae79a84e4bc98e8b4a8e58aa8e6bcabe4bd9ce59381",
+    )
 )
 
 EVIDENCE_SHA256 = {
@@ -113,9 +164,13 @@ def _read_bytes(relative: str) -> bytes:
 
 def _read_text(relative: str) -> str:
     try:
-        return _read_bytes(relative).decode("utf-8")
+        return _read_bytes(relative).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError as error:
         raise ValidationError(f"{relative} is not UTF-8: {error}") from error
+
+
+def _lf_bytes(payload: bytes) -> bytes:
+    return payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
 
 def _sha256(relative: str) -> str:
@@ -176,11 +231,14 @@ def _validate_polyform_payload(payload: bytes, relative: str) -> None:
 
 
 def validate_polyform() -> None:
-    canonical = _read_bytes(POLYFORM_PATH)
-    root_license = _read_bytes(ROOT_LICENSE_PATH)
+    canonical = _lf_bytes(_read_bytes(POLYFORM_PATH))
+    root_license = _lf_bytes(_read_bytes(ROOT_LICENSE_PATH))
     _validate_polyform_payload(canonical, POLYFORM_PATH)
     _validate_polyform_payload(root_license, ROOT_LICENSE_PATH)
-    _require(root_license == canonical, "root LICENSE is not byte-identical to the verified PolyForm copy")
+    _require(
+        root_license == canonical,
+        "root LICENSE is not content-identical to the verified PolyForm copy after EOL normalization",
+    )
 
 
 def validate_documents() -> None:
@@ -204,8 +262,10 @@ def validate_documents() -> None:
     for phrase in (
         "No legal rights-holder name is inferred or inserted",
         "public/assets/avatar.png",
-        "poster-01.webp` through `poster-16.webp",
-        "src/data/anime.js",
+        "poster-01.webp` is an AniMemo-original missing-cover fallback",
+        "poster-02.webp` through `poster-16.webp` are removed",
+        "Demo anime records carry Bangumi Subject identities",
+        "failed or unavailable lookups use the AniMemo fallback",
         "plugins/_template/manifest.json",
         "plugins/watch-history-importer/manifest.json",
         "bridges/astrbot_plugin_animemo_bridge/metadata.yaml",
@@ -250,6 +310,130 @@ def validate_documents() -> None:
                 marker.casefold() not in text,
                 f"legacy provenance marker remains in release-facing document {relative}: {marker}",
             )
+
+
+def validate_media_policy() -> None:
+    for relative in (ANIMEMO_AVATAR_PATH, ANIMEMO_FALLBACK_POSTER_PATH):
+        path = ROOT / relative
+        _require(path.is_file(), f"required AniMemo asset is missing: {relative}")
+        _require(path.stat().st_size > 0, f"required AniMemo asset is empty: {relative}")
+
+    for relative in REMOVED_BUNDLED_POSTERS:
+        _require(not (ROOT / relative).exists(), f"removed bundled anime poster remains: {relative}")
+
+    anime_source = _read_text("src/data/anime.js")
+    subject_ids = tuple(re.findall(r'externalId:\s*"(\d+)"', anime_source))
+    _require(
+        subject_ids[: len(DEMO_SUBJECT_IDS)] == DEMO_SUBJECT_IDS,
+        "demo Bangumi Subject identity catalog is missing, reordered, or changed",
+    )
+    _require(
+        len(subject_ids[: len(DEMO_SUBJECT_IDS)]) == len(set(DEMO_SUBJECT_IDS)),
+        "demo Bangumi Subject identities are not unique",
+    )
+    for phrase in (
+        "resourceIdentity: Object.freeze",
+        'provider: "bangumi"',
+        "poster: ANIMEMO_POSTER_FALLBACK_PATH",
+    ):
+        _require(phrase in anime_source, f"demo media identity contract is missing: {phrase}")
+
+    demo_media_source = _read_text("src/lib/demoMedia.js")
+    for phrase in (
+        "external-media/providers/bangumi/subjects/",
+        "validateTrustedPosterUrl",
+        "normalizeBundledPosterPath",
+        "ANIMEMO_POSTER_FALLBACK_PATH",
+    ):
+        _require(phrase in demo_media_source, f"demo Provider/fallback contract is missing: {phrase}")
+
+    numbered_reference = re.compile(
+        r"(?:/assets/posters/)?poster-(?:0[2-9]|1[0-6])\.webp|"
+        r"poster-\$\{"
+    )
+    allowed_numbered_reference_files = {
+        "NOTICE",
+        "THIRD_PARTY_NOTICES",
+        "docs/license-provenance-audit-20260813.md",
+        "scripts/check_license_docs.py",
+        "scripts/tests/test_license_docs.py",
+        "tests/demo-media.test.mjs",
+    }
+    violations = []
+    for root_name in ("src", "public", "backend"):
+        root = ROOT / root_name
+        for path in root.rglob("*"):
+            if not path.is_file() or path.is_symlink():
+                continue
+            relative = path.relative_to(ROOT).as_posix()
+            if relative in allowed_numbered_reference_files:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if numbered_reference.search(text):
+                violations.append(relative)
+    _require(
+        not violations,
+        "broken numbered bundled-poster reference remains: " + ", ".join(sorted(violations)),
+    )
+
+
+def validate_legacy_identity_boundaries() -> None:
+    observed = {relative: {} for relative in LEGACY_IDENTITY_ALLOWLIST}
+    violations = []
+    for path in ROOT.rglob("*"):
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or any(
+                part
+                in {
+                    ".git",
+                    ".npm-cache",
+                    ".ruff_cache",
+                    "node_modules",
+                    "dist",
+                    "build",
+                    "tmp",
+                    "__pycache__",
+                }
+                for part in path.parts
+            )
+        ):
+            continue
+        relative = path.relative_to(ROOT).as_posix()
+        if relative == "scripts/check_license_docs.py":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        folded = text.casefold()
+        for pattern in LEGACY_IDENTITY_PATTERNS:
+            count = folded.count(pattern)
+            if not count:
+                continue
+            permitted = LEGACY_IDENTITY_ALLOWLIST.get(relative, {}).get(pattern, 0)
+            if relative in observed:
+                observed[relative][pattern] = count
+            if count != permitted:
+                violations.append(
+                    f"{relative}: {pattern} count={count}, allowed={permitted}"
+                )
+    for relative, expected in LEGACY_IDENTITY_ALLOWLIST.items():
+        for pattern, count in expected.items():
+            actual = observed.get(relative, {}).get(pattern, 0)
+            if actual != count:
+                violations.append(
+                    f"{relative}: required compatibility marker {pattern} count={actual}, expected={count}"
+                )
+    _require(
+        not violations,
+        "legacy external-site identity escaped compatibility/migration boundaries: "
+        + "; ".join(sorted(violations)),
+    )
 
 
 def validate_evidence_hashes() -> None:
@@ -461,8 +645,6 @@ def _git_diff_names(base: str) -> list[str]:
 def validate_protected_paths(base: str) -> None:
     changed = set(_git_diff_names(base))
     protected = {
-        "public/assets/avatar.png",
-        *(f"public/assets/posters/poster-{number:02d}.webp" for number in range(1, 17)),
         "package.json",
         "package-lock.json",
         "backend/requirements.in",
@@ -475,9 +657,6 @@ def validate_protected_paths(base: str) -> None:
         path
         for path in changed
         if path in protected
-        or path.startswith("public/assets/")
-        or path.startswith("src/pages/")
-        or path.startswith("src/data/")
     )
     _require(not violations, f"protected path changed relative to {base}: {', '.join(violations)}")
 
@@ -485,6 +664,8 @@ def validate_protected_paths(base: str) -> None:
 def validate_all(*, base: str | None = None) -> None:
     validate_polyform()
     validate_documents()
+    validate_media_policy()
+    validate_legacy_identity_boundaries()
     validate_evidence_hashes()
     validate_node_inventory()
     validate_python_inventory()

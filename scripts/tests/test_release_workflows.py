@@ -179,7 +179,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("CSRF_COOKIE_SECURE=false", source)
         self.assertIn("REFRESH_COOKIE_SECURE=false", source)
         self.assertIn("ALLOW_INSECURE_PRODUCTION_COOKIES=true", source)
-        self.assertGreaterEqual(source.count("actions/upload-artifact@v4"), 4)
+        self.assertGreaterEqual(source.count("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"), 4)
         self.assertIn("scripts/perf/regression_gate.py", source)
         self.assertIn("Require every performance evidence producer to succeed", source)
         self.assertIn("toJSON(needs)", source)

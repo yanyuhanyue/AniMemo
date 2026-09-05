@@ -4,3 +4,5 @@ plugins/**/*.json text eol=lf
 plugins/**/*.md text eol=lf
 plugins/**/*.mjs text eol=lf
 plugins/**/*.py text eol=lf
+LICENSE text eol=lf
+PolyForm-Noncommercial-1.0.0.md text eol=lf
