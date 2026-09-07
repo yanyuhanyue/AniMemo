@@ -13,13 +13,14 @@ export function createWebApiTransport({ baseURL, session, onMutationSuccess } = 
   const api = axios.create(options);
   let unauthorizedHandler = null;
 
+  // Capture identity during the API call, before a same-turn login can replace it.
   api.interceptors.request.use((config) => {
     config._authGeneration ??= session.getGeneration();
     if (!session.isCurrent(config._authGeneration)) throw createAuthSessionChangedError();
     const accessToken = session.getAccessToken();
     if (accessToken) config.headers.Authorization = `Bearer ${accessToken}`;
     return config;
-  });
+  }, undefined, { synchronous: true });
 
   api.interceptors.response.use(
     (response) => {
