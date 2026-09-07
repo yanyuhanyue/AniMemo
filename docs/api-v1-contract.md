@@ -71,9 +71,12 @@ variants. Their anonymous responses retain public caching eligibility and vary
 on identity headers. Public homepage, site settings, presets, showcase discovery
 and shared content retain their public response policy.
 
-The response middleware applies this contract from resolved API permissions.
+The response middleware applies this contract from resolved API permissions,
+including known personal routes rejected by earlier middleware. Setup credential
+validation and Plugin backend dispatch errors also receive the private policy.
 New `AllowAny` views that exchange credentials or return optional personal state
-must be included in its explicit identity variants and covered by HTTP tests.
+must be included in its explicit private views or identity variants and covered
+by HTTP tests.
 Reverse proxies must preserve these upstream cache headers; an external CDN
 requires separate deployment verification.
 
