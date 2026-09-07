@@ -232,6 +232,10 @@ jobs:
         run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env config
       - name: Build production images
         run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env build api web
+      - name: Verify actual image resources without network or source mounts
+        run: >-
+          python scripts/smoke_distribution_images.py
+          --api-image animemo-api:release-gate --web-image animemo-web:release-gate
       - name: Start production-like stack
         run: |
           # NEGATIVE_TEST_FIXTURE: legacy ordering only: up -d --wait --wait-timeout 120 postgres redis

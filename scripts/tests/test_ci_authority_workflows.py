@@ -18,6 +18,13 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
             next_job = source.find("\n  ", next_job + 1)
         return source[start:] if next_job == -1 else source[start:next_job]
 
+    def test_actual_image_resource_smoke_runs_after_build_before_stack_start(self):
+        docker = self.job(self.source("release-gate.yml"), "docker")
+        smoke = docker.index("python scripts/smoke_distribution_images.py")
+        self.assertLess(docker.index("build api web"), smoke)
+        self.assertLess(smoke, docker.index("name: Start production-like stack"))
+        self.assertIn("--api-image animemo-api:release-gate --web-image animemo-web:release-gate", docker)
+
     def test_release_mirror_never_executes_pull_request_code_or_writes_github(self):
         source = self.source("release-mirror.yml")
         header = source[: source.index("jobs:")]
