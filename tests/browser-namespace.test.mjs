@@ -29,8 +29,8 @@ test("active browser identities use the AniMemo namespace", () => {
 
   const adapter = readFileSync(join(srcRoot, "lib/webAuthAdapter.js"), "utf8");
   assert.match(adapter, /Security denylist: remove obsolete browser-stored tokens without accepting them/);
-  assert.match(adapter, /removeItem\(INSECURE_LEGACY_ACCESS_KEY\)/);
-  assert.match(adapter, /removeItem\(INSECURE_LEGACY_REFRESH_KEY\)/);
+  assert.match(adapter, /\[INSECURE_LEGACY_ACCESS_KEY, INSECURE_LEGACY_REFRESH_KEY\]/);
+  assert.match(adapter, /removeItem\(key\)/);
   assert.doesNotMatch(adapter, /getItem\(INSECURE_LEGACY/);
 });
 
