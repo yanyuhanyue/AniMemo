@@ -153,6 +153,13 @@ Candidate/Formal profile's read-only plan. Its fresh runtime installs the exact
 locked wheelhouse offline; probes run outside the checkout with the materials
 as their only product source and reject network, subprocess, and filesystem
 mutations. This smoke test grants no Qualification or Release Authority.
+The allowed Release Gate Docker job also builds a separate Linux Installer tar
+from the current source, real locked compiler outputs, verified public TUF roots,
+and hash-locked Linux wheels, then runs the same offline material probes. Its
+platform document is `scripts/tests/fixtures/installer-platform-schema.sample.json`,
+an explicitly `NON_AUTHORITATIVE_SCHEMA_FIXTURE` used only to exercise parsing and
+resource closure. The helper does not invoke a Qualification producer, publish an
+artifact, or prove platform compatibility; its report preserves that distinction.
 The existing Docker gate separately probes the built API/Web image IDs with no
 network or source mounts, checking Django templates, the password dictionary,
 certificate and distribution resources, migration imports, static manifests,

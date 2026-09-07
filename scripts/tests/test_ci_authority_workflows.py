@@ -25,6 +25,14 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertLess(smoke, docker.index("name: Start production-like stack"))
         self.assertIn("--api-image animemo-api:release-gate --web-image animemo-web:release-gate", docker)
 
+    def test_linux_material_smoke_uses_existing_docker_job_without_qualification(self):
+        docker = self.job(self.source("release-gate.yml"), "docker")
+        smoke = docker.index("python -B -m scripts.ci_smoke_installer_linux")
+        self.assertLess(docker.index("build api web"), smoke)
+        self.assertLess(smoke, docker.index("name: Start production-like stack"))
+        self.assertIn('"$RUNNER_TEMP/installer-materials-smoke"', docker)
+        self.assertIn("non-authoritative platform schema fixture", docker)
+
     def test_release_mirror_never_executes_pull_request_code_or_writes_github(self):
         source = self.source("release-mirror.yml")
         header = source[: source.index("jobs:")]

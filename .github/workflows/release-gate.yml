@@ -236,6 +236,10 @@ jobs:
         run: >-
           python scripts/smoke_distribution_images.py
           --api-image animemo-api:release-gate --web-image animemo-web:release-gate
+      - name: Verify Linux Installer code and resources with a non-authoritative platform schema fixture
+        run: >-
+          python -B -m scripts.ci_smoke_installer_linux
+          --output "$RUNNER_TEMP/installer-materials-smoke"
       - name: Start production-like stack
         run: |
           # NEGATIVE_TEST_FIXTURE: legacy ordering only: up -d --wait --wait-timeout 120 postgres redis
