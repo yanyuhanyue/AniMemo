@@ -65,7 +65,11 @@ class WatchHistoryCollectionView(APIView):
         entry = _entry_for(request, entry_id)
         serializer = WatchHistoryWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        record, created = add_history(user=request.user, entry=entry, record=serializer.validated_data)
+        try:
+            record, created = add_history(user=request.user, entry=entry, record=serializer.validated_data)
+        except WatchHistoryValidationError as error:
+            failure_status = status.HTTP_409_CONFLICT if error.code == "duplicate_watch_history" else status.HTTP_400_BAD_REQUEST
+            return Response({"code": error.code, "detail": error.detail}, status=failure_status)
         return Response(
             {"created": created, "record": WatchHistoryRecordSerializer(record).data},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
@@ -82,7 +86,8 @@ class WatchHistoryCollectionView(APIView):
                 records=serializer.validated_data["records"],
             )
         except WatchHistoryValidationError as error:
-            return Response({"code": error.code, "detail": error.detail}, status=status.HTTP_400_BAD_REQUEST)
+            failure_status = status.HTTP_409_CONFLICT if error.code == "duplicate_watch_history" else status.HTTP_400_BAD_REQUEST
+            return Response({"code": error.code, "detail": error.detail}, status=failure_status)
         return Response({"count": len(records), "results": WatchHistoryRecordSerializer(records, many=True).data})
 
 
