@@ -31,6 +31,87 @@ try {
   }
   process.stdout.write(`Owned preview PID ${server.pid}, loopback ${origin}\n`);
   browser = await chromium.launch({ headless: true });
+  {
+    const page = await browser.newPage({ reducedMotion: "reduce", serviceWorkers: "block" });
+    const errors = [];
+    const restrictedRequests = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    let pendingRefresh;
+    let pendingStatus;
+    let resolveRefresh;
+    let resolveStatus;
+    let refreshCalls = 0;
+    let statusCalls = 0;
+    const refreshReceived = new Promise((done) => { resolveRefresh = done; });
+    const statusReceived = new Promise((done) => { resolveStatus = done; });
+    const waitForLatch = async (promise, label) => {
+      let timer;
+      try {
+        return await Promise.race([promise, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} was not observed`)), 5000);
+        })]);
+      } finally { clearTimeout(timer); }
+    };
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      assert.equal(url.origin, origin, "The bootstrap regression must not contact an external service");
+      if (!url.pathname.startsWith("/api/")) return route.continue();
+      const path = url.pathname.replace(/^\/api\/v1\//, "");
+      const json = (body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+      if (path === "token/refresh/") {
+        refreshCalls += 1;
+        pendingRefresh = route;
+        resolveRefresh();
+        return;
+      }
+      if (path === "setup/status/") {
+        statusCalls += 1;
+        pendingStatus = route;
+        resolveStatus();
+        return;
+      }
+      if (path === "auth/csrf/") return json({ csrf_token: "synthetic-csrf" });
+      if (path === "auth/me/") return json({ detail: "Unauthenticated" }, 401);
+      restrictedRequests.push(path);
+      if (path === "plugins/enabled/") return json({ plugins: [], manifests: {} });
+      if (path === "site-settings/") return json({ site_name: "AniMemo", trusted_poster_hosts: [] });
+      return json({});
+    });
+    await page.goto(`${origin}/login?next=%2Fdashboard`, { waitUntil: "domcontentloaded" });
+    await waitForLatch(refreshReceived, "Held startup refresh");
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    assert.equal(refreshCalls, 1);
+    assert.equal(statusCalls, 0, "Installation status must wait for startup authentication to settle");
+    assert.deepEqual(restrictedRequests, []);
+    assert.equal(await page.locator("input").count(), 0);
+    const refreshDelivered = page.waitForResponse((response) => response.request() === pendingRefresh.request(), { timeout: 5000 });
+    await pendingRefresh.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ detail: "Unauthenticated" }) });
+    const refreshResponse = await refreshDelivered;
+    assert.equal(refreshResponse.status(), 401);
+    assert.equal(await refreshResponse.finished(), null);
+    assert.deepEqual(await refreshResponse.json(), { detail: "Unauthenticated" });
+    await waitForLatch(statusReceived, "Status after anonymous refresh");
+    await page.locator(".app-auth-bootstrap").waitFor({ state: "visible" });
+    assert.deepEqual(restrictedRequests, [], "Unknown status must keep product and plugin APIs closed");
+    assert.equal(await page.locator("input").count(), 0);
+    const initialized = { state: "initialized", accepting_setup: false };
+    const statusDelivered = page.waitForResponse((response) => response.request() === pendingStatus.request(), { timeout: 5000 });
+    await pendingStatus.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(initialized) });
+    const statusResponse = await statusDelivered;
+    assert.equal(statusResponse.status(), 200);
+    assert.equal(await statusResponse.finished(), null);
+    assert.deepEqual(await statusResponse.json(), initialized);
+    await page.getByPlaceholder("请输入用户名或注册邮箱").waitFor({ state: "visible", timeout: 5000 });
+    assert.equal(new URL(page.url()).pathname, "/login");
+    assert.equal(new URL(page.url()).searchParams.get("next"), "/dashboard");
+    assert.equal(await page.getByRole("button", { name: "重新检查" }).count(), 0);
+    assert.equal(await page.getByRole("heading", { name: "创建首位管理员" }).count(), 0);
+    assert.equal(statusCalls, 1);
+    assert.equal(refreshCalls, 1);
+    assert.deepEqual(errors, []);
+    await page.close();
+    process.stdout.write("PASS healthy anonymous startup: refresh settles before status and login opens without retry\n");
+  }
   for (const scenario of ["503", "network", "malformed", "initializing", "missing"]) {
     const page = await browser.newPage({ viewport: { width: scenario === "network" ? 390 : 1440, height: 900 }, reducedMotion: "reduce" });
     const errors = [];

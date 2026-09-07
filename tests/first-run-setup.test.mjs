@@ -29,7 +29,8 @@ test("unknown and unavailable installation states keep product routes closed and
   assert.match(appSource, /if \(installation\.state === "unavailable"\)/);
   assert.match(appSource, /暂时无法确认站点状态/);
   assert.match(appSource, /setInstallationAttempt\(\(value\) => value \+ 1\)/);
-  assert.match(appSource, /\}, \[installationAttempt\]\)/);
+  assert.match(appSource, /useEffect\(\(\) => \{\s*if \(!authReady\) return;\s*let active = true;\s*setupApi\.status\(\)/);
+  assert.match(appSource, /\}, \[authReady, installationAttempt\]\)/);
   assert.doesNotMatch(appSource, /installation\?\.state !== "initialized"/);
 });
 

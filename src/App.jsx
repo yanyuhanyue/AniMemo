@@ -110,6 +110,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!authReady) return;
     let active = true;
     setupApi.status()
       .then(({ data }) => {
@@ -121,7 +122,7 @@ export function App() {
         if (active) setInstallation({ state: "unavailable", accepting_setup: false });
       });
     return () => { active = false; };
-  }, [installationAttempt]);
+  }, [authReady, installationAttempt]);
 
   if (installation.state === "unavailable") {
     return (
@@ -157,7 +158,7 @@ export function App() {
               </Routes>
             </Suspense>
           ) : (
-            <PluginRuntimeProvider authUser={authUser}>
+            <PluginRuntimeProvider key={authUser?.id ?? "anonymous"} authUser={authUser}>
               <AppRoutes authUser={authUser} />
             </PluginRuntimeProvider>
           )}

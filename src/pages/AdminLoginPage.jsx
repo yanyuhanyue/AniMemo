@@ -95,7 +95,7 @@ export function AdminLoginPage() {
         new URLSearchParams(location.search).get("next") || "",
         turnstileToken,
       );
-      storeTokens(data);
+      if (!storeTokens(data)) return;
       setForm((current) => ({ ...current, otp: "", recoveryCode: "" }));
       const next = new URLSearchParams(location.search).get("next");
       if (next && data.admin_access) {
