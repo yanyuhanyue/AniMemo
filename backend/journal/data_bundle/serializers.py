@@ -8,7 +8,6 @@ from journal.serializers_entries import JournalEntrySerializer
 from journal.watch_history.validation import HISTORY_CONTENT_FIELDS
 
 PROVIDER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,49}$")
-MAX_IDENTITY_METADATA_BYTES = 64 * 1024
 
 
 class RejectUnknownFieldsMixin:
@@ -81,11 +80,11 @@ class ExternalIdentityDataSerializer(RejectUnknownFieldsSerializer):
         if not isinstance(value, dict):
             raise serializers.ValidationError("metadata 必须是对象。")
         try:
-            encoded = json.dumps(value, ensure_ascii=True, sort_keys=True).encode("utf-8")
+            json.dumps(value, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as error:
             raise serializers.ValidationError("metadata 必须是有效 JSON。") from error
-        if len(encoded) > MAX_IDENTITY_METADATA_BYTES:
-            raise serializers.ValidationError("metadata 不能超过 64 KiB。")
+        # Accepted provider snapshots share the complete bundle's UTF-8 budget;
+        # an additional ASCII-escaped cap would reject legal Unicode snapshots.
         return value
 
 

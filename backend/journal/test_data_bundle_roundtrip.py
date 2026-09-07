@@ -9,7 +9,9 @@ from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from django.utils import timezone
+from requests import Response as ProviderResponse
 from rest_framework.test import APITestCase
+from site_config.models import InstallationState
 
 from journal.data_bundle import DataBundleError, export_data_bundle, import_data_bundle, preview_data_bundle
 from journal.domain_services import JournalEntryService
@@ -194,6 +196,76 @@ class DataBundleRoundTripBoundariesTests(APITestCase):
                 self.assert_restored(source, target, first)
                 self.assertEqual(JournalEntry.objects.get(user=target).tag_colors, value)
 
+    def test_real_provider_unicode_snapshot_roundtrips_with_the_aggregate_utf8_budget(self):
+        state = InstallationState.load()
+        state.status = InstallationState.Status.INITIALIZED
+        state.save(update_fields=["status"])
+        subject = {
+            "id": 990001,
+            "name": "🌠" * 500,
+            "name_cn": "🎬" * 500,
+            "summary": "🌌" * 5000,
+            "eps": 12,
+            "date": "2026-09-01",
+            "tags": [{"name": f"{index}" + "星" * 99} for index in range(8)],
+        }
+        calls = []
+
+        def provider_transport(method, url, **kwargs):
+            self.assertEqual(method, "get")
+            self.assertTrue(kwargs["stream"])
+            self.assertIn(url, {
+                "https://api.bgm.tv/v0/subjects/990001",
+                "https://api.bgm.tv/v0/subjects/990001/persons",
+            })
+            calls.append(url)
+            response = ProviderResponse()
+            response.status_code = 200
+            response._content = encoded([] if url.endswith("/persons") else subject)
+            response._content_consumed = True
+            response.headers["Content-Length"] = str(len(response.content))
+            return response
+
+        self.client.force_authenticate(self.source)
+        with patch("journal.bangumi.client.requests.request", side_effect=provider_transport):
+            written = self.client.post("/api/v1/entries/", {
+                "title": "真实规格的 Unicode 资料快照",
+                "external_identity": {"provider": "bangumi", "external_id": "990001"},
+            }, format="json")
+        self.assertEqual(written.status_code, 201, written.data)
+        self.assertEqual(len(calls), 2)
+        identity = ExternalMediaIdentity.objects.get(entry__user=self.source)
+        self.assertEqual(identity.metadata["summary"], subject["summary"])
+        self.assertEqual(identity.metadata["title"], subject["name_cn"])
+        self.assertEqual(identity.metadata["japanese_title"], subject["name"])
+        self.assertEqual(identity.metadata["tags"], [item["name"] for item in subject["tags"]])
+        self.assertGreater(len(json.dumps(identity.metadata, ensure_ascii=True).encode("utf-8")), 64 * 1024)
+
+        exported = self.client.get("/api/v1/export/")
+        self.assertEqual(exported.status_code, 200)
+        first = exported.data
+        self.assertLess(len(exported.content), settings.IMPORT_FILE_MAX_BYTES)
+        self.client.force_authenticate(self.target)
+        preview = self.client.post("/api/v1/import/?preview=true", first, format="json")
+        self.assertEqual(preview.status_code, 200, preview.data)
+        self.assertEqual(preview.data["ready"], 1)
+        restored = self.client.post("/api/v1/import/", first, format="json")
+        self.assertEqual(restored.status_code, 201, restored.data)
+        self.assert_restored(self.source, self.target, first)
+
+        empty = User.objects.create_user(username="provider-budget-target")
+        expanded = copy.deepcopy(first)
+        second = copy.deepcopy(first["entries"][0])
+        second["external_identities"][0]["external_id"] = "990002"
+        expanded["entries"].append(second)
+        with override_settings(IMPORT_FILE_MAX_BYTES=len(encoded(first)) + 100):
+            self.assertEqual(preview_data_bundle(user=empty, payload=first)["ready"], 1)
+            with patch.object(JournalEntryService, "create_from_fields") as create:
+                with self.assertRaises(DataBundleError):
+                    import_data_bundle(user=empty, payload=expanded)
+                create.assert_not_called()
+        self.assertFalse(JournalEntry.objects.filter(user=empty).exists())
+
     def test_nested_type_and_domain_limits_reject_the_complete_bundle_before_writes(self):
         self.populate(self.source, 2)
         first = export_data_bundle(user=self.source)
@@ -201,7 +273,8 @@ class DataBundleRoundTripBoundariesTests(APITestCase):
             ("entry", "title", "界" * 201),
             ("entry", "tags", ["有效", {"invalid": "tag"}]),
             ("entry", "personal_score", "10.01"),
-            ("identity", "metadata", {"large": "x" * (64 * 1024)}),
+            ("identity", "metadata", ["not-an-object"]),
+            ("identity", "metadata", {"large": "x" * settings.IMPORT_FILE_MAX_BYTES}),
             ("history", "notes", ["x"] * 21),
             ("history", "notes", ["x" * 501]),
             ("history", "metadata", {"large": "x" * 4096}),
@@ -256,15 +329,14 @@ class DataBundleRoundTripBoundariesTests(APITestCase):
         self.assertEqual(response.status_code, 400, response.data)
         self.assertFalse(JournalEntry.objects.filter(user=self.target).exists())
 
-    def test_maximum_supported_history_and_identity_metadata_roundtrip(self):
+    def test_maximum_supported_history_and_large_identity_metadata_roundtrip(self):
         entry = JournalEntry.objects.create(user=self.source, title="历史边界")
         records = [
             {"watched_on": (date(2025, 1, 1) + timedelta(days=index)).isoformat(), "brush_number": 32767, "brush_label": "重看", "episode_start": 1, "episode_end": 32767}
             for index in range(500)
         ]
         records[0]["notes"] = ["感" * 500 for _ in range(20)]
-        metadata_prefix_bytes = len(json.dumps({"value": ""}, ensure_ascii=True, sort_keys=True).encode("utf-8"))
-        metadata = {"value": "x" * (64 * 1024 - metadata_prefix_bytes)}
+        metadata = {"value": "x" * (96 * 1024)}
         ExternalMediaIdentity.objects.create(
             entry=entry, provider="bangumi", external_id="123", canonical_url="https://bgm.tv/subject/123",
             metadata=metadata, metadata_schema_version=1, is_metadata_source=True,
