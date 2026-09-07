@@ -37,8 +37,8 @@ test("keeps JWTs out of browser storage and restores access through the refresh 
   assert.doesNotMatch(apiSource, /localStorage\.setItem\([^\n]*(?:access|refresh)/i);
   assert.doesNotMatch(apiSource, /sessionStorage\.setItem\([^\n]*(?:access|refresh)/i);
   assert.match(authSessionSource, /let accessToken = null/);
-  assert.match(webAuthSource, /storage\?\.removeItem\(INSECURE_LEGACY_ACCESS_KEY\)/);
-  assert.match(webAuthSource, /storage\?\.removeItem\(INSECURE_LEGACY_REFRESH_KEY\)/);
+  assert.match(webAuthSource, /\[INSECURE_LEGACY_ACCESS_KEY, INSECURE_LEGACY_REFRESH_KEY\]/);
+  assert.match(webAuthSource, /storage\?\.removeItem\(key\)/);
   assert.match(webAuthSource, /cookiePost\(AUTH_ENDPOINTS\.refresh\)/);
   assert.match(webAuthSource, /"X-CSRFToken"/);
   assert.match(webTransportSource, /withCredentials: true/);

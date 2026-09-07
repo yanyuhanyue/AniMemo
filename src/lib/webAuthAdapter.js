@@ -10,9 +10,20 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
   let refreshPromise = null;
 
   function scrubLegacyTokens() {
-    for (const storage of [browser?.localStorage, browser?.sessionStorage]) {
-      storage?.removeItem(INSECURE_LEGACY_ACCESS_KEY);
-      storage?.removeItem(INSECURE_LEGACY_REFRESH_KEY);
+    for (const name of ["localStorage", "sessionStorage"]) {
+      let storage;
+      try {
+        storage = browser?.[name];
+      } catch {
+        continue;
+      }
+      for (const key of [INSECURE_LEGACY_ACCESS_KEY, INSECURE_LEGACY_REFRESH_KEY]) {
+        try {
+          storage?.removeItem(key);
+        } catch {
+          // Restricted storage must not prevent in-memory authentication cleanup.
+        }
+      }
     }
   }
 
