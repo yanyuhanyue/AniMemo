@@ -9,6 +9,13 @@ export function createAuthSession() {
   let accessToken = null;
   let authUser = null;
   const listeners = new Set();
+  const generationListeners = new Set();
+
+  const advanceGeneration = () => {
+    generation += 1;
+    generationListeners.forEach((listener) => listener(generation));
+    return generation;
+  };
 
   const notify = () => {
     const snapshot = Object.freeze({ access: accessToken, user: authUser, generation });
@@ -18,9 +25,10 @@ export function createAuthSession() {
   return Object.freeze({
     getGeneration: () => generation,
     isCurrent: (expectedGeneration) => expectedGeneration === generation,
-    advanceGeneration() {
-      generation += 1;
-      return generation;
+    advanceGeneration,
+    subscribeGeneration(listener) {
+      generationListeners.add(listener);
+      return () => generationListeners.delete(listener);
     },
     setAccessToken(value, expectedGeneration = generation) {
       if (expectedGeneration !== generation) return false;
@@ -36,7 +44,7 @@ export function createAuthSession() {
     },
     store({ access, user } = {}, expectedGeneration) {
       if (expectedGeneration !== undefined && expectedGeneration !== generation) return false;
-      if (expectedGeneration === undefined) generation += 1;
+      if (expectedGeneration === undefined) advanceGeneration();
       accessToken = access || null;
       if (user !== undefined) authUser = user || null;
       notify();
@@ -50,7 +58,7 @@ export function createAuthSession() {
     },
     clear(expectedGeneration = generation) {
       if (expectedGeneration !== generation) return false;
-      generation += 1;
+      advanceGeneration();
       accessToken = null;
       authUser = null;
       notify();

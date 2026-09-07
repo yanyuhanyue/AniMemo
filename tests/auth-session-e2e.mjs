@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 
 import { chromium } from "@playwright/test";
 
@@ -23,8 +24,8 @@ let browser;
 try {
   for (let attempt = 0; ; attempt += 1) {
     if (server.exitCode !== null) throw new Error("Owned Vite server exited before startup; the port may be occupied.");
-    try { if (startupOutput.includes("Local:") && (await fetch(origin)).ok) break; } catch { /* Owned loopback startup. */ }
-    if (attempt >= 100) throw new Error("Owned Vite server did not start.");
+    try { if (stripVTControlCharacters(startupOutput).includes("Local:") && (await fetch(origin)).ok) break; } catch { /* Owned loopback startup. */ }
+    if (attempt >= 400) throw new Error(`Owned Vite server did not start: ${startupOutput}`);
     await new Promise((done) => setTimeout(done, 50));
   }
   process.stdout.write(`Owned Vite PID ${server.pid}, loopback ${origin}\n`);

@@ -13,10 +13,16 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
   let refreshGeneration = null;
   let initializationPromise = null;
   let initializationGeneration = null;
+  let pendingLoginGeneration = null;
   const loginGenerations = new WeakMap();
 
   function assertCurrent(generation) {
     if (!session.isCurrent(generation)) throw createAuthSessionChangedError();
+  }
+
+  function assertCookieSessionReady(generation) {
+    assertCurrent(generation);
+    if (pendingLoginGeneration === generation) throw createAuthSessionChangedError();
   }
 
   function scrubLegacyTokens() {
@@ -56,6 +62,7 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
 
   async function cookiePost(path, data = {}, { includeAccess = false, generation = session.getGeneration() } = {}) {
     assertCurrent(generation);
+    if (path !== AUTH_ENDPOINTS.login && path !== AUTH_ENDPOINTS.staffLogin) assertCookieSessionReady(generation);
     const accessToken = session.getAccessToken();
     const token = await ensureCsrfToken({ generation });
     assertCurrent(generation);
@@ -73,11 +80,16 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
 
   function storeTokens(value = {}) {
     scrubLegacyTokens();
-    return session.store(value, loginGenerations.get(value));
+    const loginGeneration = loginGenerations.get(value);
+    if (loginGeneration !== undefined && !session.isCurrent(loginGeneration)) return false;
+    // The committed identity also invalidates requests issued while login was pending.
+    const stored = session.store(value);
+    if (pendingLoginGeneration === loginGeneration) pendingLoginGeneration = null;
+    return stored;
   }
 
   function refreshAccessToken(generation = session.getGeneration()) {
-    assertCurrent(generation);
+    assertCookieSessionReady(generation);
     if (!refreshPromise || refreshGeneration !== generation) {
       const request = cookiePost(AUTH_ENDPOINTS.refresh, {}, { generation })
         .then(({ data }) => {
@@ -127,35 +139,38 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
     return initializationPromise;
   }
 
+  async function loginWithCookie(path, payload) {
+    const generation = session.advanceGeneration();
+    pendingLoginGeneration = generation;
+    try {
+      const { data } = await cookiePost(
+        path,
+        payload,
+        { generation },
+      );
+      assertCurrent(generation);
+      clearCsrfToken();
+      await ensureCsrfToken({ force: true, generation });
+      assertCurrent(generation);
+      loginGenerations.set(data, generation);
+      return { data };
+    } catch (error) {
+      if (pendingLoginGeneration === generation) pendingLoginGeneration = null;
+      // A response may already have changed cookies even when its body/CSRF step fails.
+      clearTokens(generation);
+      throw error;
+    }
+  }
+
   const authApi = Object.freeze({
-    login: async (username, password, challenge = "") => {
-      const generation = session.advanceGeneration();
-      const { data } = await cookiePost(
-        AUTH_ENDPOINTS.login,
-        withAntiAbuseChallenge({ username, password }, challenge),
-        { generation },
-      );
-      assertCurrent(generation);
-      clearCsrfToken();
-      await ensureCsrfToken({ force: true, generation });
-      assertCurrent(generation);
-      loginGenerations.set(data, generation);
-      return { data };
-    },
-    staffLogin: async (username, password, otp = "", recoveryCode = "", next = "", challenge = "") => {
-      const generation = session.advanceGeneration();
-      const { data } = await cookiePost(
-        AUTH_ENDPOINTS.staffLogin,
-        withAntiAbuseChallenge({ username, password, otp, recovery_code: recoveryCode, next }, challenge),
-        { generation },
-      );
-      assertCurrent(generation);
-      clearCsrfToken();
-      await ensureCsrfToken({ force: true, generation });
-      assertCurrent(generation);
-      loginGenerations.set(data, generation);
-      return { data };
-    },
+    login: (username, password, challenge = "") => loginWithCookie(
+      AUTH_ENDPOINTS.login,
+      withAntiAbuseChallenge({ username, password }, challenge),
+    ),
+    staffLogin: (username, password, otp = "", recoveryCode = "", next = "", challenge = "") => loginWithCookie(
+      AUTH_ENDPOINTS.staffLogin,
+      withAntiAbuseChallenge({ username, password, otp, recovery_code: recoveryCode, next }, challenge),
+    ),
     logout: async () => {
       const generation = session.advanceGeneration();
       try {
@@ -181,13 +196,20 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
       AUTH_ENDPOINTS.passwordResetConfirm,
       withAntiAbuseChallenge(payload, challenge),
     ),
-    changePassword: (payload) => api.post(AUTH_ENDPOINTS.passwordChange, payload),
-    deleteAccount: (payload) => api.delete(AUTH_ENDPOINTS.account, { data: payload }),
+    changePassword: async (payload) => {
+      assertCookieSessionReady(session.getGeneration());
+      return api.post(AUTH_ENDPOINTS.passwordChange, payload);
+    },
+    deleteAccount: async (payload) => {
+      assertCookieSessionReady(session.getGeneration());
+      return api.delete(AUTH_ENDPOINTS.account, { data: payload });
+    },
   });
 
   const csrfApi = Object.freeze({
     async post(path, data = {}, config = {}) {
       const generation = session.getGeneration();
+      assertCookieSessionReady(generation);
       const token = await ensureCsrfToken({ generation });
       assertCurrent(generation);
       return api.post(path, data, {

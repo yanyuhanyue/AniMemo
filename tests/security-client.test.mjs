@@ -96,7 +96,8 @@ test("turns HTTP 429 into a retryable user-facing message", () => {
 });
 
 test("rotates staff CSRF and sends the current access token before logout cleanup", () => {
-  assert.match(webAuthSource, /cookiePost\(\s*AUTH_ENDPOINTS\.staffLogin/);
+  assert.match(webAuthSource, /staffLogin:.*=> loginWithCookie\(\s*AUTH_ENDPOINTS\.staffLogin/);
+  assert.match(webAuthSource, /async function loginWithCookie\(path, payload\)[\s\S]*await cookiePost\(\s*path,\s*payload,/);
   assert.match(webAuthSource, /ensureCsrfToken\(\{ force: true, generation \}\)/);
   assert.match(webAuthSource, /includeAccess: true/);
   assert.match(webAuthSource, /headers\.Authorization = `Bearer \$\{accessToken\}`/);
@@ -114,7 +115,8 @@ test("keeps the staff dashboard refresh interval bounded without four-second pol
 
 test("uses the shared CSRF cookie flow for ordinary login and handles unavailable security services", () => {
   assert.match(webAuthSource, /withAntiAbuseChallenge\(\{ username, password \}, challenge\)/);
-  assert.match(webAuthSource, /const authApi = Object\.freeze\(\{[\s\S]*clearCsrfToken\(\);[\s\S]*ensureCsrfToken\(\{ force: true, generation \}\)/);
+  assert.match(webAuthSource, /login:.*=> loginWithCookie\(\s*AUTH_ENDPOINTS\.login/);
+  assert.match(webAuthSource, /async function loginWithCookie\(path, payload\)[\s\S]*clearCsrfToken\(\);[\s\S]*ensureCsrfToken\(\{ force: true, generation \}\)/);
   assert.match(apiCoreSource, /next\["cf-turnstile-response"\] = challenge\.token/);
   assert.match(apiSource, /status === 503/);
   assert.match(apiSource, /安全服务暂时繁忙/);
@@ -137,7 +139,7 @@ test("rejects oversized journal imports before uploading", () => {
 });
 
 test("requires a staff second factor before self-account deletion", () => {
-  assert.match(apiSource, /deleteAccount: \(payload\).*data: payload/);
+  assert.match(apiSource, /deleteAccount: async \(payload\) => \{\s*assertCookieSessionReady\(session.getGeneration\(\)\);\s*return api.delete\(AUTH_ENDPOINTS.account, \{ data: payload \}\)/);
   assert.match(dashboardSource, /工作人员二次验证/);
   assert.match(dashboardSource, /verificationMode === "otp"/);
   assert.match(dashboardSource, /recovery_code:/);
