@@ -361,12 +361,29 @@ class CiAuthorityWorkflowTests(unittest.TestCase):
         self.assertIn("scripts.tests.test_recovery_migration_contracts", contract)
         self.assertIn("python scripts/ci_classify.py --self-test", contract)
         self.assertIn("python -m compileall -q", contract)
-        self.assertIn("git diff --check", contract)
+        self.assertIn("python scripts/check_committed_text.py", classify)
         self.assertIn("Validate CI authority contracts", self.job(ci, "fast-fail"))
         self.assertIn(".signals.ci", self.job(ci, "fast-fail"))
         self.assertNotIn("execution_profile:", classify)
         self.assertNotIn("run_contract_validation:", classify)
         self.assertNotIn("run_release_dr:", classify)
+
+    def test_committed_text_runs_before_classification_for_every_event_and_docs(self):
+        for name, base_input in (("ci.yml", "comparison_base_sha"), ("release-gate.yml", "upgrade_base_sha")):
+            with self.subTest(workflow=name):
+                source = self.source(name)
+                classify = self.job(source, "classify")
+                check = classify.split("- name: Validate committed text for the exact event scope", 1)[1].split("- id: classify", 1)[0]
+                self.assertIn("python scripts/check_committed_text.py", check)
+                self.assertNotIn("\n        if:", check)
+                self.assertIn("--fetch-missing", check)
+                self.assertIn(f"inputs.{base_input}", check)
+                self.assertIn("github.event.pull_request.base.sha", check)
+                self.assertIn("github.event.merge_group.base_sha", check)
+                self.assertIn("github.event.before", check)
+                self.assertIn('fetch-depth: 0', classify)
+                self.assertNotIn("run: git diff --check", source)
+        self.assertIn("scripts.tests.test_ci_committed_text", self.job(self.source("ci.yml"), "fast-fail"))
 
     def test_release_gate_uses_only_the_canonical_explicit_job_compose_contract(self):
         release = self.source("release-gate.yml")

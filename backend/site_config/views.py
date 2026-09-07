@@ -1,13 +1,16 @@
-from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_protect
+from django.views.decorators.debug import sensitive_variables
 from drf_spectacular.utils import OpenApiParameter, extend_schema
+from journal.web_auth_adapter import no_store
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from journal.web_auth_adapter import no_store
-
-from .first_run import SetupCompletionError, complete_first_run_setup
+from .first_run import (
+    SetupCompletionError,
+    complete_first_run_setup,
+    mark_first_run_request_sensitive,
+)
 from .models import InstallationState
 from .serializers import (
     FirstRunSetupSerializer,
@@ -47,13 +50,20 @@ class InstallationStatusView(APIView):
         }))
 
 
-@method_decorator(csrf_protect, name="dispatch")
 class InstallationSetupView(APIView):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
     throttle_scope = "first_run_setup"
     account_throttle_scope = "first_run_setup"
     throttle_account_fields = ("username", "email")
+
+    @sensitive_variables()
+    def dispatch(self, request, *args, **kwargs):
+        # Install diagnostics protection before CSRF can parse a form body.
+        # The sensitive_variables frame also encloses CSRF's parser failures,
+        # as well as DRF parsing, throttling and serializer failures.
+        mark_first_run_request_sensitive(request)
+        return csrf_protect(super().dispatch)(request, *args, **kwargs)
 
     @extend_schema(
         request=FirstRunSetupSerializer,
