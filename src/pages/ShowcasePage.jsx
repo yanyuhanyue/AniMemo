@@ -12,7 +12,7 @@ import { AppBootLoader } from "../components/AppBootLoader.jsx";
 import { AnimeCatalog } from "../components/catalog/AnimeCatalog.jsx";
 import { CatalogFilterLab } from "../components/catalog/CatalogFilterLab.jsx";
 import { CatalogMeta } from "../components/catalog/CatalogMeta.jsx";
-import { api, authApi, clearTokens, getStoredTokens } from "../lib/api.js";
+import { api, authApi, getStoredTokens } from "../lib/api.js";
 import { buildPresetColorMap, normalizeTagPresets, resolveTagColors } from "../lib/tagPresets.js";
 import { pressBeforeOpen } from "../lib/modalMotion.js";
 import { usePageColorTransition } from "../components/PageColorTransition.jsx";
@@ -439,10 +439,13 @@ export function ShowcasePage({ sharedMode = false }) {
   const returnOwnerPreviewHome = useCallback(async () => {
     try {
       await authApi.logout();
+    } catch {
+      // The adapter completes local logout even when the server is unavailable.
     } finally {
-      clearTokens();
-      localStorage.removeItem("animemo_demo");
-      navigate("/", { replace: true });
+      if (!getStoredTokens().access) {
+        try { localStorage.removeItem("animemo_demo"); } catch { /* Optional demo storage. */ }
+        navigate("/", { replace: true });
+      }
     }
   }, [navigate]);
 

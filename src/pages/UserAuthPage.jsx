@@ -199,7 +199,7 @@ export function UserAuthPage() {
     try {
       if (mode === "login") {
         const { data } = await authApi.login(form.account.trim(), form.password, turnstileToken);
-        storeTokens(data);
+        if (!storeTokens(data)) return;
         navigate("/dashboard", { replace: true });
       } else if (mode === "register") {
         await authApi.registerRequest(form.email.trim(), turnstileToken);

@@ -1,17 +1,32 @@
+export function createAuthSessionChangedError() {
+  const error = new Error("登录状态已变化，请重试。");
+  error.code = "AUTH_SESSION_CHANGED";
+  return error;
+}
+
 export function createAuthSession() {
+  let generation = 0;
   let accessToken = null;
   let authUser = null;
   const listeners = new Set();
 
   const notify = () => {
-    const snapshot = Object.freeze({ access: accessToken, user: authUser });
+    const snapshot = Object.freeze({ access: accessToken, user: authUser, generation });
     listeners.forEach((listener) => listener(snapshot));
   };
 
   return Object.freeze({
-    setAccessToken(value) {
+    getGeneration: () => generation,
+    isCurrent: (expectedGeneration) => expectedGeneration === generation,
+    advanceGeneration() {
+      generation += 1;
+      return generation;
+    },
+    setAccessToken(value, expectedGeneration = generation) {
+      if (expectedGeneration !== generation) return false;
       accessToken = value || null;
       notify();
+      return true;
     },
     getAccessToken: () => accessToken,
     getUser: () => authUser,
@@ -19,20 +34,27 @@ export function createAuthSession() {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    store({ access, user } = {}) {
+    store({ access, user } = {}, expectedGeneration) {
+      if (expectedGeneration !== undefined && expectedGeneration !== generation) return false;
+      if (expectedGeneration === undefined) generation += 1;
       accessToken = access || null;
       if (user !== undefined) authUser = user || null;
       notify();
+      return true;
     },
-    mergeUser(user) {
+    mergeUser(user, expectedGeneration = generation) {
+      if (expectedGeneration !== generation) return null;
       authUser = { ...(authUser || {}), ...(user || {}) };
       notify();
       return authUser;
     },
-    clear() {
+    clear(expectedGeneration = generation) {
+      if (expectedGeneration !== generation) return false;
+      generation += 1;
       accessToken = null;
       authUser = null;
       notify();
+      return true;
     },
   });
 }

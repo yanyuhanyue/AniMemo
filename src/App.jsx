@@ -142,7 +142,7 @@ export function App() {
               </Routes>
             </Suspense>
           ) : (
-            <PluginRuntimeProvider authUser={authUser}>
+            <PluginRuntimeProvider key={authUser?.id ?? "anonymous"} authUser={authUser}>
               <AppRoutes authUser={authUser} />
             </PluginRuntimeProvider>
           )}

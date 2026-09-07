@@ -41,10 +41,14 @@ Token core accepts raw token credentials and must not read Django/DRF requests, 
 1. Login and staff login obtain a CSRF token, submit credentials with the CSRF header, receive an access token response and an HttpOnly refresh cookie, then rotate the CSRF token.
 2. The caller stores the access token and user claims in `authSession`; refresh material never enters the session object.
 3. Authenticated requests add `Authorization: Bearer <access>` in the Web transport.
-4. A non-auth request that receives 401 may trigger one shared refresh operation. Concurrent failures join the same promise and each original request is retried at most once.
+4. A non-auth request that receives 401 may trigger one shared refresh operation within its session generation. Concurrent failures join the same promise and each original request is retried at most once.
 5. Refresh uses the HttpOnly cookie plus CSRF, rotates the refresh credential on the server and replaces the in-memory access token.
 6. Logout sends the current access token and cookie-backed CSRF request before clearing memory and cached CSRF state. Server-side refresh/access revocation semantics remain authoritative.
 7. Initialization refreshes the session, then merges `/auth/me/` profile data without discarding staff or role claims returned by refresh.
+
+Login, staff login, logout and explicit replacement through `storeTokens` establish a new session generation. Refresh and profile updates stay within their captured generation. Success, failure and final cleanup from an earlier generation cannot write or clear the current session, replace its CSRF cache, discard its in-flight request, or retry an old API call using a different identity. Login responses remain bound to their generation until the caller stores them; a stale `storeTokens` returns `false` and its caller stops navigation.
+
+The transport rejects stale success and error responses with `AUTH_SESSION_CHANGED`, without exposing an old 401/403 as a current-user authentication failure. Initialization shares both refresh and profile work for repeated calls in one generation, including React StrictMode. When the authenticated user ID changes, the private page and plugin state are recreated so prior personal data cannot remain visible. Page logout handlers rely on the adapter's scoped cleanup and do not clear a later session again.
 
 Auth infrastructure requests themselves are never recursively refreshed after a 401.
 
