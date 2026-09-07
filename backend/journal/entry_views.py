@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from plugin_host.permissions import plugin_permissions_for_user
 from plugin_host.sdk import ColumnHookContext, run_hook
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Case, Count, F, IntegerField, Max, Min, OuterRef, Q, Subquery, Value, When
 from django.db.models.expressions import RawSQL
 from django.utils import timezone
@@ -10,9 +10,11 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import filters, permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from site_config.media_storage.storage import atomic_media_mutation
 
 from .external_media.services import (
     bind_external_identity,
@@ -20,7 +22,7 @@ from .external_media.services import (
     set_metadata_source,
     unbind_external_identity,
 )
-from .domain_services import JournalEntryService
+from .domain_services import JournalEntryService, JournalEntryServiceError
 from .models import Column, JournalEntry, QuickFilter, UserSettings, WatchHistoryRecord
 from .pagination import FlexiblePageNumberPagination
 from .permissions import IsOwner
@@ -198,8 +200,24 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         JournalEntryService(self.request.user).create(serializer, source="api")
 
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        with atomic_media_mutation():
+            instance = self.get_object()
+            serializer = self.get_serializer(instance, data=request.data, partial=partial)
+            self.perform_update(serializer)
+            # Rebuild the response projection while the mutation still owns the
+            # row lock; request filters may no longer match changed fields.
+            current = self.get_base_queryset().get(pk=serializer.instance.pk)
+            return Response(self.get_serializer(current).data)
+
     def perform_update(self, serializer):
-        JournalEntryService(self.request.user).update(serializer, source="api")
+        try:
+            JournalEntryService(self.request.user).update(serializer, source="api")
+        except JournalEntryServiceError as error:
+            if error.status_code == 404:
+                raise NotFound() from error
+            raise ValidationError(error.detail) from error
 
     def perform_destroy(self, instance):
         JournalEntryService(self.request.user).delete(instance.pk, source="api")
