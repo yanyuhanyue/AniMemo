@@ -12,6 +12,8 @@ AniMemo 不携带默认管理员用户名、邮箱或密码，也不会把已有
 
 用户数量、固定用户名和环境变量都不参与运行时状态判断。迁移已有数据库时，只要旧库已经存在账号，就保守地标记为 `initialized`，避免升级把公网首装入口重新打开。迁移不会修改任何已有账号权限。
 
+浏览器查询期间使用 `unknown`，查询失败、缺少状态或收到尚不能用于路由的状态时使用 `unavailable`。这两种客户端状态都不会加载产品页面或开放首装能力；`unavailable` 保留当前 URL，展示状态查询错误和可用键盘操作的“重新检查”。只有服务器显式返回 `uninitialized` 才转到 `/setup`，只有显式返回 `initialized` 才恢复普通路由。重试仅重新读取状态，不执行初始化。
+
 ## 全新安装
 
 1. 由 canonical Installer 的受限 root preparation 创建固定 `/data/animemo` 持久目录；不接受自定义 root。`private` 必须由 API 进程 UID/GID 拥有并使用 `0700`，所有 privileged write 都拒绝 symlink/junction、非目录与不安全 owner/mode。
