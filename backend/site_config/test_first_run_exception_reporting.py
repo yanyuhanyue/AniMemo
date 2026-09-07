@@ -5,15 +5,19 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from urllib.parse import urlencode
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.core.exceptions import TooManyFieldsSent
 from django.core.management import call_command
+from django.middleware.csrf import _get_new_csrf_string
 from django.test import override_settings
 from django.urls import reverse
 from django.views.debug import ExceptionReporter
 from rest_framework.settings import api_settings
-from rest_framework.test import APIRequestFactory, APITestCase
+from rest_framework.test import APIClient, APIRequestFactory, APITestCase
 
 from .models import InstallationState
 from .serializers import FirstRunSetupSerializer
@@ -56,6 +60,49 @@ class FirstRunExceptionReportingTests(APITestCase):
         for value in (self.code, self.password, self.confirmation):
             # Do not include the report or a credential in assertion output.
             self.assertFalse(value in report, "first-run credential appeared in diagnostics")
+
+    def _oversized_form(self):
+        return urlencode({**self._payload(), **{
+            f"extra_{index}": "x" for index in range(settings.DATA_UPLOAD_MAX_NUMBER_FIELDS + 1)
+        }})
+
+    @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=8)
+    def test_csrf_form_parsing_failure_redacts_real_http_diagnostics(self):
+        for debug in (False, True):
+            with self.subTest(debug=debug), override_settings(DEBUG=debug):
+                client = APIClient(enforce_csrf_checks=True)
+                token = _get_new_csrf_string()
+                client.cookies[settings.CSRF_COOKIE_NAME] = token
+                response = client.post(
+                    reverse("setup-complete"), self._oversized_form(),
+                    content_type="application/x-www-form-urlencoded", HTTP_X_CSRFTOKEN=token,
+                )
+                self.assertEqual(response.status_code, 400)
+                self._assert_no_credentials(response.content.decode("utf-8", errors="replace"))
+                self._assert_rolled_back()
+
+    @override_settings(DATA_UPLOAD_MAX_NUMBER_FIELDS=8)
+    def test_csrf_form_parsing_failure_redacts_exception_reporter_frames(self):
+        for debug in (False, True):
+            with self.subTest(debug=debug), override_settings(DEBUG=debug):
+                request = APIRequestFactory(enforce_csrf_checks=True).post(
+                    reverse("setup-complete"), self._oversized_form(),
+                    content_type="application/x-www-form-urlencoded",
+                )
+                token = _get_new_csrf_string()
+                request.COOKIES[settings.CSRF_COOKIE_NAME] = token
+                request.META[settings.CSRF_HEADER_NAME] = token
+                try:
+                    InstallationSetupView.as_view()(request)
+                except TooManyFieldsSent as error:
+                    # Match Django's exception handler before rendering the report.
+                    request._mark_post_parse_error()
+                    reporter = ExceptionReporter(request, type(error), error, error.__traceback__)
+                    self._assert_no_credentials(reporter.get_traceback_text())
+                    self._assert_no_credentials(reporter.get_traceback_html())
+                else:
+                    self.fail("The malformed form unexpectedly passed CSRF parsing.")
+                self._assert_rolled_back()
 
     def _render_failure(self, request):
         # Observe a real exception at the existing DRF handler boundary without
