@@ -85,6 +85,7 @@ def frozen_prepublication_fixture(directory: Path):
         "scripts/candidate_profile_runner.py",
         "scripts/closed_runtime_inventory.py",
         "scripts/formal_profile_runner.py",
+        "scripts/release_qualification.py",
     ):
         target = source / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -832,7 +833,7 @@ class FrozenPrepublicationMaterialTests(unittest.TestCase):
                     payload["pretrust"]["aggregateSha256"],
                 ),
                 (
-                    "sha256:123a31a8a40c00d1fcb7d8f759c9e64ba34f3cd7d9501309f190c84f25af60ec",
+                    "sha256:458839428615a1b63da57500dbcf1bf6b153cce9e990909968c89de1119d2221",
                     "sha256:ca794441aa84a156fc47d0cf2efc2d04aef61517925e5dcccbbcc181ec98b93a",
                     "sha256:55b1e65bef2482487dfa419dde72f2e99e7db1a02118d7ecf5903c0359af7823",
                 ),

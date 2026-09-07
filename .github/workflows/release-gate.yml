@@ -81,11 +81,20 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 0
+      - name: Validate committed text for the exact event scope
+        env:
+          CI_TEXT_EVENT_NAME: ${{ inputs.force_full && 'workflow_call' || github.event_name }}
+          CI_BASE_SHA: ${{ inputs.upgrade_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.before)) }}
+          CI_HEAD_SHA: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
+        run: >-
+          python scripts/check_committed_text.py
+          --event-name "$CI_TEXT_EVENT_NAME" --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA"
+          --fetch-missing
       - id: classify
         env:
           GITHUB_EVENT_NAME: ${{ inputs.force_full && 'workflow_call' || github.event_name }}
           CI_FORCE_FULL: ${{ inputs.force_full || false }}
-          CI_BASE_SHA: ${{ inputs.upgrade_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before) }}
+          CI_BASE_SHA: ${{ inputs.upgrade_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.before)) }}
           CI_HEAD_SHA: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
         run: >-
           python scripts/ci_classify.py
@@ -112,7 +121,6 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
       - run: python scripts/ci_classify.py --self-test
-      - run: git diff --check
       - run: python -m compileall -q scripts
 
   updater-isolated:
@@ -232,6 +240,14 @@ jobs:
         run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env config
       - name: Build production images
         run: docker compose --project-name animemo-release-gate --env-file .ci-runtime.env build api web
+      - name: Verify actual image resources without network or source mounts
+        run: >-
+          python scripts/smoke_distribution_images.py
+          --api-image animemo-api:release-gate --web-image animemo-web:release-gate
+      - name: Verify Linux Installer code and resources with a non-authoritative platform schema fixture
+        run: >-
+          python -B -m scripts.ci_smoke_installer_linux
+          --output "$RUNNER_TEMP/installer-materials-smoke"
       - name: Start production-like stack
         run: |
           # NEGATIVE_TEST_FIXTURE: legacy ordering only: up -d --wait --wait-timeout 120 postgres redis
