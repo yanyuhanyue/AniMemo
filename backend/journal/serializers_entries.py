@@ -14,6 +14,7 @@ from .external_media.services import (
     lock_identity_owner,
     prepare_identity,
 )
+from .entry_validation import normalize_entry_tags, validate_entry_tag_colors
 from .image_security import delete_replaced_file, sanitize_uploaded_image
 from .models import ExternalMediaIdentity, JournalEntry
 from .poster_security import PosterUrlValidationError, validate_poster_url
@@ -110,9 +111,10 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         read_only_fields = ["share_slug", "created_at", "updated_at"]
 
     def validate_tags(self, value):
-        if not isinstance(value, list) or any(not isinstance(tag, str) for tag in value):
-            raise serializers.ValidationError("标签必须是字符串数组。")
-        return list(dict.fromkeys(tag.strip() for tag in value if tag.strip()))[:30]
+        return normalize_entry_tags(value)
+
+    def validate_tag_colors(self, value):
+        return validate_entry_tag_colors(value)
 
     def validate(self, attrs):
         attrs = super().validate(attrs)

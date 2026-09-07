@@ -274,6 +274,7 @@ class JournalApiTests(APITestCase):
 
     def test_public_catalog_supports_latest_page_and_hides_private_fields(self):
         owner = User.objects.create_user(username="primary", email="primary@example.com", password="StrongPass123!", is_staff=True)
+        UserSettings.objects.create(user=owner, public_status=UserSettings.PublicStatus.APPROVED, allow_sharing=True)
         for index in range(12):
             JournalEntry.objects.create(
                 user=owner,
@@ -282,6 +283,7 @@ class JournalApiTests(APITestCase):
                 airing_period="2026-1",
                 personal_score="9.8",
                 review="私人评价不应返回",
+                visibility=JournalEntry.Visibility.PUBLIC,
             )
         self.client.force_authenticate(self.user)
         response = self.client.get(reverse("public-catalog-search"), {"page": 2, "page_size": 10})
@@ -295,8 +297,9 @@ class JournalApiTests(APITestCase):
 
     def test_public_catalog_query_matches_studio_and_period(self):
         owner = User.objects.create_user(username="primary2", email="primary2@example.com", password="StrongPass123!", is_staff=True)
-        JournalEntry.objects.create(user=owner, title="春日番剧", studio="京都动画", airing_period="2022-10")
-        JournalEntry.objects.create(user=owner, title="夏日番剧", studio="另一家公司", airing_period="2023-7")
+        UserSettings.objects.create(user=owner, public_status=UserSettings.PublicStatus.APPROVED, allow_sharing=True)
+        JournalEntry.objects.create(user=owner, title="春日番剧", studio="京都动画", airing_period="2022-10", visibility=JournalEntry.Visibility.PUBLIC)
+        JournalEntry.objects.create(user=owner, title="夏日番剧", studio="另一家公司", airing_period="2023-7", visibility=JournalEntry.Visibility.PUBLIC)
         self.client.force_authenticate(self.user)
         response = self.client.get(reverse("public-catalog-search"), {"q": "京都动画"})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -366,8 +369,10 @@ class JournalApiTests(APITestCase):
     def test_public_catalog_combines_all_staff_entries(self):
         first_staff = User.objects.create_user(username="staff-one", password="StrongPass123!", is_staff=True)
         second_staff = User.objects.create_user(username="staff-two", password="StrongPass123!", is_staff=True)
-        JournalEntry.objects.create(user=first_staff, title="管理员番剧一")
-        JournalEntry.objects.create(user=second_staff, title="管理员番剧二")
+        for owner in (first_staff, second_staff):
+            UserSettings.objects.create(user=owner, public_status=UserSettings.PublicStatus.APPROVED, allow_sharing=True)
+        JournalEntry.objects.create(user=first_staff, title="管理员番剧一", visibility=JournalEntry.Visibility.PUBLIC)
+        JournalEntry.objects.create(user=second_staff, title="管理员番剧二", visibility=JournalEntry.Visibility.PUBLIC)
         JournalEntry.objects.create(user=self.other, title="普通用户私人番剧")
 
         response = self.client.get(reverse("public-catalog-search"), {"page_size": 10})
@@ -412,9 +417,14 @@ class JournalApiTests(APITestCase):
     def test_public_homepage_uses_live_staff_entries_only(self):
         staff = User.objects.create_user(username="homepage-owner", password="StrongPass123!", is_staff=True)
         inactive_staff = User.objects.create_user(username="inactive-owner", password="StrongPass123!", is_staff=True, is_active=False)
+        settings_obj = SiteSettings.load()
+        settings_obj.homepage_owner = staff
+        settings_obj.save()
+        UserSettings.objects.create(user=staff, public_status=UserSettings.PublicStatus.APPROVED, allow_sharing=True)
         JournalEntry.objects.create(
             user=staff,
             title="首页真实番剧",
+            visibility=JournalEntry.Visibility.PUBLIC,
             personal_score="9.7",
             watch_status=JournalEntry.WatchStatus.COMPLETED,
             tags=["剧场版"],

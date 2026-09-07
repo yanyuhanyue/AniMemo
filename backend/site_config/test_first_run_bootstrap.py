@@ -17,7 +17,7 @@ from django.core.cache import cache
 from django.core.management import CommandError, ManagementUtility, call_command
 from django.db import close_old_connections, connection, connections
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase, override_settings, skipUnlessDBFeature
+from django.test import SimpleTestCase, TransactionTestCase, override_settings, skipUnlessDBFeature
 from django.urls import reverse
 from django.utils import timezone
 from journal.models import AdminAuditLog, UserSettings
@@ -75,40 +75,6 @@ class FirstRunSetupApiTests(APITestCase):
             self.assertNotIn(plaintext, output.getvalue())
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(code_path.stat().st_mode), 0o600)
-
-    def test_provision_failure_uses_real_cli_safe_stderr(self):
-        failures = (
-            UnsafeSetupCodePath(
-                r"C:\private\setup-code token=SETUP_TOKEN_CANARY Traceback"
-            ),
-            OSError(
-                r"C:\private\setup-dir token=FILESYSTEM_TOKEN_CANARY Traceback"
-            ),
-        )
-        for failure in failures:
-            errors = StringIO()
-            with (
-                self.subTest(failure_type=type(failure).__name__),
-                patch(
-                    "site_config.management.commands.provision_first_run_setup.provision_first_run_setup",
-                    side_effect=failure,
-                ),
-                redirect_stderr(errors),
-                self.assertRaises(SystemExit) as raised,
-            ):
-                ManagementUtility(
-                    ["manage.py", "provision_first_run_setup", "--no-color"]
-                ).execute()
-
-            public_text = errors.getvalue()
-            self.assertEqual(raised.exception.code, 1)
-            self.assertRegex(
-                public_text,
-                r"^CommandError: first_run_provision_failed "
-                r"correlation_id=[0-9a-f]{32}\r?\n$",
-            )
-            self.assertNotIn(str(failure), public_text)
-            self.assertNotIn("Traceback", public_text)
 
     def test_application_bootstrap_applies_defaults_before_issuing_setup_code(self):
         SiteSettings.objects.all().delete()
@@ -714,6 +680,44 @@ class FirstRunSetupApiTests(APITestCase):
         self.assertEqual(registration.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(registration.data["code"], "installation_uninitialized")
         self.assertFalse(PendingRegistration.objects.filter(email="early-member@example.com").exists())
+
+
+class FirstRunProvisionCliTests(SimpleTestCase):
+    """The real CLI closes connections; it must run outside TestCase atomics."""
+
+    def test_provision_failure_uses_real_cli_safe_stderr(self):
+        failures = (
+            UnsafeSetupCodePath(
+                r"C:\private\setup-code token=SETUP_TOKEN_CANARY Traceback"
+            ),
+            OSError(
+                r"C:\private\setup-dir token=FILESYSTEM_TOKEN_CANARY Traceback"
+            ),
+        )
+        for failure in failures:
+            errors = StringIO()
+            with (
+                self.subTest(failure_type=type(failure).__name__),
+                patch(
+                    "site_config.management.commands.provision_first_run_setup.provision_first_run_setup",
+                    side_effect=failure,
+                ),
+                redirect_stderr(errors),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                ManagementUtility(
+                    ["manage.py", "provision_first_run_setup", "--no-color"]
+                ).execute()
+
+            public_text = errors.getvalue()
+            self.assertEqual(raised.exception.code, 1)
+            self.assertRegex(
+                public_text,
+                r"^CommandError: first_run_provision_failed "
+                r"correlation_id=[0-9a-f]{32}\r?\n$",
+            )
+            self.assertNotIn(str(failure), public_text)
+            self.assertNotIn("Traceback", public_text)
 
 
 class InstallationStateMigrationTests(TransactionTestCase):

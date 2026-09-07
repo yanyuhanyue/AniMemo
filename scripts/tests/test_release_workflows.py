@@ -349,8 +349,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
 
         self.assertEqual(len(invocations), 28)
-        self.assertEqual(len(package_modules), 22)
+        self.assertEqual(len(package_modules), 21)
         self.assertEqual(len(direct_scripts), 2)
+        self.assertEqual(commands.count('"$GITHUB_WORKSPACE/scripts/smoke_installer_materials.py"'), 1)
         repository_families = {
             module
             for module in (
@@ -2044,6 +2045,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             '"scripts/formal_profile_runner.py"',
             (ROOT / "release" / "materials.py").read_text(encoding="utf-8"),
         )
+        self.assertIn(
+            '"scripts/release_qualification.py"',
+            (ROOT / "release" / "materials.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn('"$GITHUB_WORKSPACE/scripts/smoke_installer_materials.py"', release)
+        self.assertIn('--archive "$GITHUB_WORKSPACE/release-output/installer-materials.tar"', release)
+        self.assertIn('--materials-root "$clean_materials"', release)
+        self.assertIn('/usr/bin/env -i -C "$RUNNER_TEMP"', release)
         self.assertIn(
             "scripts/closed_runtime_inventory.py | cmp - "
             "scripts/closed_runtime_inventory.py",

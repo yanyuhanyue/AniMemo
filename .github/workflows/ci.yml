@@ -87,11 +87,20 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
           fetch-depth: 0
+      - name: Validate committed text for the exact event scope
+        env:
+          CI_TEXT_EVENT_NAME: ${{ inputs.force_full && 'workflow_call' || github.event_name }}
+          CI_BASE_SHA: ${{ inputs.comparison_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.before)) }}
+          CI_HEAD_SHA: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
+        run: >-
+          python scripts/check_committed_text.py
+          --event-name "$CI_TEXT_EVENT_NAME" --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA"
+          --fetch-missing
       - id: classify
         env:
           GITHUB_EVENT_NAME: ${{ inputs.force_full && 'workflow_call' || github.event_name }}
           CI_FORCE_FULL: ${{ inputs.force_full || false }}
-          CI_BASE_SHA: ${{ inputs.comparison_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before) }}
+          CI_BASE_SHA: ${{ inputs.comparison_base_sha || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.before)) }}
           CI_HEAD_SHA: ${{ inputs.candidate_sha || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha) }}
         run: >-
           python scripts/ci_classify.py
@@ -126,10 +135,9 @@ jobs:
           scripts.tests.test_ci_classify
           scripts.tests.test_ci_gate_authority
           scripts.tests.test_ci_authority_workflows
+          scripts.tests.test_ci_committed_text
           scripts.tests.test_release_workflows
           -v
-      - name: Validate tracked text
-        run: git diff --check
 
   docs-only:
     name: docs-or-contract-validation
@@ -159,9 +167,6 @@ jobs:
           python -m compileall -q
           scripts/ci_classify.py
           scripts/tests/test_recovery_migration_contracts.py
-      - name: Validate tracked text
-        if: ${{ fromJSON(needs.classify.outputs.classification_json).execution.profile == 'CONTRACT_VALIDATION_ONLY' }}
-        run: git diff --check
 
   frontend:
     name: frontend
@@ -356,7 +361,7 @@ jobs:
       - run: python -c "import os, psycopg; psycopg.connect(os.environ['DATABASE_URL']).close(); print('PostgreSQL service is reachable')"
       - run: python manage.py shell -c "from django.db import connection; assert connection.vendor == 'postgresql', connection.vendor; print(connection.vendor)"
         working-directory: backend
-      - run: python manage.py test plugin_host.tests.test_concurrency.PluginPlatformPostgreSQLConcurrencyTests integrations.tests.test_concurrency.IntegrationReceiptPostgreSQLConcurrencyTests journal.test_external_account_concurrency.ExternalAccountRefreshPostgreSQLConcurrencyTests journal.test_external_media_concurrency.ExternalMediaIdentityPostgreSQLConcurrencyTests journal.test_watch_history_core.WatchHistoryPostgreSQLConcurrencyTests journal.test_external_sync_concurrency.ExternalCollectionSyncStatePostgreSQLConcurrencyTests journal.test_security.PostgreSQLRefreshTokenTests journal.test_profile_journal_queries journal.test_media_storage.StoragePostgreSQLConcurrencyTests journal.test_entry_mutation_consistency.EntryMutationPostgreSQLTests journal.test_entry_media_transactions.EntryMediaTransactionTests site_config.test_first_run_bootstrap.FirstRunSetupPostgreSQLConcurrencyTests --verbosity 2
+      - run: python manage.py test plugin_host.tests.test_concurrency.PluginPlatformPostgreSQLConcurrencyTests integrations.tests.test_concurrency.IntegrationReceiptPostgreSQLConcurrencyTests journal.test_external_account_concurrency.ExternalAccountRefreshPostgreSQLConcurrencyTests journal.test_external_media_concurrency.ExternalMediaIdentityPostgreSQLConcurrencyTests journal.test_watch_history_core.WatchHistoryPostgreSQLConcurrencyTests journal.test_watch_history_conflicts.WatchHistoryConflictPostgreSQLTests journal.test_external_sync_concurrency.ExternalCollectionSyncStatePostgreSQLConcurrencyTests journal.test_security.PostgreSQLRefreshTokenTests journal.test_profile_journal_queries journal.test_media_storage.StoragePostgreSQLConcurrencyTests journal.test_entry_mutation_consistency.EntryMutationPostgreSQLTests journal.test_entry_media_transactions.EntryMediaTransactionTests site_config.test_first_run_bootstrap.FirstRunSetupPostgreSQLConcurrencyTests --verbosity 2
         working-directory: backend
 
   plugins:

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.utils import timezone
 
 from journal.domain_services import JournalEntryService
 from journal.models import ExternalMediaIdentity, JournalEntry
-from journal.serializers_entries import JournalEntrySerializer
 from journal.watch_history import WatchHistoryValidationError, replace_history
 
-from .serializers import DataBundleSerializer
+from .serializers import DataBundleSerializer, EntryDataSerializer
 
 DATA_BUNDLE_FORMAT = "animemo-data-bundle"
 DATA_BUNDLE_SCHEMA_VERSION = 1
@@ -93,11 +94,26 @@ def export_data_bundle(*, user):
     }
 
 
+def _check_bundle_budget(payload):
+    encoder = DjangoJSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    size = 0
+    try:
+        for chunk in encoder.iterencode(payload):
+            size += len(chunk.encode("utf-8"))
+            if size > settings.IMPORT_FILE_MAX_BYTES:
+                raise DataBundleError("invalid_data_bundle", "数据包超出同步导入大小限制。")
+    except (TypeError, ValueError, RecursionError) as error:
+        if isinstance(error, DataBundleError):
+            raise
+        raise DataBundleError("invalid_data_bundle", "Data Bundle 必须是有效 JSON。") from error
+
+
 def _validate_bundle(payload):
     if not isinstance(payload, dict):
         raise DataBundleError("unsupported_import_schema", "仅支持 AniMemo Data Bundle v1。")
     if payload.get("format") != DATA_BUNDLE_FORMAT or payload.get("schema_version") != DATA_BUNDLE_SCHEMA_VERSION:
         raise DataBundleError("unsupported_import_schema", "仅支持 AniMemo Data Bundle v1。")
+    _check_bundle_budget(payload)
     serializer = DataBundleSerializer(data=payload)
     if not serializer.is_valid():
         raise DataBundleError("invalid_data_bundle", "Data Bundle 内容无效。", errors=serializer.errors)
@@ -117,6 +133,7 @@ def _validate_bundle(payload):
             item["watch_history"] = _normalize_history(item["watch_history"])
     except WatchHistoryValidationError as error:
         raise DataBundleError(error.code, error.detail) from error
+    _check_bundle_budget(serializer.validated_data)
     return entries
 
 
@@ -168,7 +185,7 @@ def import_data_bundle(*, user, payload):
         for item in entries:
             dto = service.create_from_fields(
                 item["entry"],
-                serializer_class=JournalEntrySerializer,
+                serializer_class=EntryDataSerializer,
                 source="bundle",
                 allowed_fields=set(item["entry"]),
             )

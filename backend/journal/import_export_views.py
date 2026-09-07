@@ -196,9 +196,9 @@ class ImportEntriesView(APIView):
                 text = raw.decode("utf-8-sig")
             except UnicodeDecodeError as error:
                 raise ValueError("导入文件必须使用 UTF-8 编码。") from error
-            if any(len(line) > settings.IMPORT_MAX_LINE_LENGTH for line in text.splitlines()):
-                raise ValueError("导入文件单行内容过长。")
             if upload.name.lower().endswith(".csv"):
+                if any(len(line) > settings.IMPORT_MAX_LINE_LENGTH for line in text.splitlines()):
+                    raise ValueError("导入文件单行内容过长。")
                 csv.field_size_limit(settings.IMPORT_FIELD_MAX_LENGTH)
                 try:
                     reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
@@ -222,7 +222,7 @@ class ImportEntriesView(APIView):
             elif upload.name.lower().endswith(".json"):
                 try:
                     payload = json.loads(text)
-                except json.JSONDecodeError as error:
+                except (json.JSONDecodeError, RecursionError) as error:
                     raise ValueError("JSON 文件格式不合法。") from error
                 payload_kind = "bundle"
             else:
@@ -353,4 +353,3 @@ class ImportEntriesView(APIView):
         }
         response_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return Response(response_data, status=response_status)
-
