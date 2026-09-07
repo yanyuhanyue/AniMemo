@@ -33,6 +33,7 @@ export function createWebApiTransport({ baseURL, session, onMutationSuccess } = 
   function bindRequest(config, includeAccess) {
     config._authGeneration ??= session.getGeneration();
     if (!session.isCurrent(config._authGeneration)) throw createAuthSessionChangedError();
+    if (includeAccess && session.isChangingIdentity()) throw createAuthSessionChangedError();
     const controller = new AbortController();
     const callerSignal = Object.hasOwn(config, "_authCallerSignal") ? config._authCallerSignal : config.signal;
     const abortFromCaller = () => controller.abort(callerSignal.reason);

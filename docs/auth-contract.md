@@ -52,6 +52,8 @@ The transport binds the generation and Bearer credential synchronously when the 
 
 Generation changes synchronously notify the Web transport so it aborts pending requests on both the Bearer and cookie clients before a new login can run. This prevents late refresh/login/logout/CSRF responses, and password/account mutation responses, from applying old `Set-Cookie` headers after the new session's cookies. Headers already processed before a transition are superseded by the new login; the old response body remains unable to update memory. Request cleanup removes caller-signal listeners, keeps caller cancellation working, and does not cancel requests from the new generation. Same-generation refresh/profile updates keep active requests intact.
 
+The session marks a pending identity change until its login result is stored or its own generation fails. During this transition the Bearer transport rejects every request before dispatch, including staff two-factor operations that rotate cookies outside the auth facade. The login flow retains access to its own cookie client and CSRF requests.
+
 Auth infrastructure requests themselves are never recursively refreshed after a 401.
 
 ## Anti-Abuse Challenge

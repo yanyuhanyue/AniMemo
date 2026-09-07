@@ -13,7 +13,6 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
   let refreshGeneration = null;
   let initializationPromise = null;
   let initializationGeneration = null;
-  let pendingLoginGeneration = null;
   const loginGenerations = new WeakMap();
 
   function assertCurrent(generation) {
@@ -22,7 +21,7 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
 
   function assertCookieSessionReady(generation) {
     assertCurrent(generation);
-    if (pendingLoginGeneration === generation) throw createAuthSessionChangedError();
+    if (session.isChangingIdentity()) throw createAuthSessionChangedError();
   }
 
   function scrubLegacyTokens() {
@@ -83,9 +82,7 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
     const loginGeneration = loginGenerations.get(value);
     if (loginGeneration !== undefined && !session.isCurrent(loginGeneration)) return false;
     // The committed identity also invalidates requests issued while login was pending.
-    const stored = session.store(value);
-    if (pendingLoginGeneration === loginGeneration) pendingLoginGeneration = null;
-    return stored;
+    return session.store(value);
   }
 
   function refreshAccessToken(generation = session.getGeneration()) {
@@ -140,8 +137,7 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
   }
 
   async function loginWithCookie(path, payload) {
-    const generation = session.advanceGeneration();
-    pendingLoginGeneration = generation;
+    const generation = session.beginIdentityChange();
     try {
       const { data } = await cookiePost(
         path,
@@ -155,7 +151,6 @@ export function createWebAuthAdapter({ api, cookieClient, session, browser = nul
       loginGenerations.set(data, generation);
       return { data };
     } catch (error) {
-      if (pendingLoginGeneration === generation) pendingLoginGeneration = null;
       // A response may already have changed cookies even when its body/CSRF step fails.
       clearTokens(generation);
       throw error;

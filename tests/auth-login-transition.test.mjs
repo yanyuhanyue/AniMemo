@@ -79,10 +79,12 @@ for (const phase of ["in flight", "returned but not stored"]) {
       () => adapter.authApi.changePassword({ password: "synthetic" }),
       () => adapter.authApi.deleteAccount({ current_password: "synthetic" }),
       () => adapter.csrfApi.post("protected/", {}),
+      () => transport.api.post("staff/security/two-factor/", { action: "regenerate" }),
+      () => transport.api.patch("entries/17/", { review: "prior identity" }),
     ]) {
       await assert.rejects(Promise.resolve().then(operation), { code: "AUTH_SESSION_CHANGED" });
     }
-    assert.equal(dispatched.length, requestCount, "The pending login is the exclusive cookie-changing operation");
+    assert.equal(dispatched.length, requestCount, "A pending identity change excludes all Bearer calls, including cookie rotations outside authApi");
     assert.deepEqual(session.getUser(), userA);
     finish.resolve();
     assert.equal(adapter.storeTokens((await login).data), true);

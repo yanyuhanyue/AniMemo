@@ -8,11 +8,13 @@ export function createAuthSession() {
   let generation = 0;
   let accessToken = null;
   let authUser = null;
+  let changingIdentity = false;
   const listeners = new Set();
   const generationListeners = new Set();
 
-  const advanceGeneration = () => {
+  const advanceGeneration = (identityChange = false) => {
     generation += 1;
+    changingIdentity = identityChange;
     generationListeners.forEach((listener) => listener(generation));
     return generation;
   };
@@ -25,7 +27,9 @@ export function createAuthSession() {
   return Object.freeze({
     getGeneration: () => generation,
     isCurrent: (expectedGeneration) => expectedGeneration === generation,
-    advanceGeneration,
+    advanceGeneration: () => advanceGeneration(),
+    beginIdentityChange: () => advanceGeneration(true),
+    isChangingIdentity: () => changingIdentity,
     subscribeGeneration(listener) {
       generationListeners.add(listener);
       return () => generationListeners.delete(listener);
