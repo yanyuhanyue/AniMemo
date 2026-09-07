@@ -174,7 +174,7 @@ class DataBundleV1Tests(APITestCase):
         self.client.force_authenticate(self.target_user)
 
         with patch(
-            "journal.data_bundle.serializers.validate_poster_url",
+            "journal.serializers_entries.validate_poster_url",
             side_effect=PosterUrlValidationError(marker),
         ):
             response = self.client.post("/api/import/", payload, format="json")

@@ -1421,11 +1421,14 @@ jobs:
             --find-links "$clean_materials/wheelhouse" \
             -r "$clean_materials/release/requirements.lock" \
             -r "$clean_materials/durability/requirements.lock"
-          /usr/bin/env -i -C "$clean_materials" \
+          /usr/bin/env -i -C "$RUNNER_TEMP" \
             HOME="$RUNNER_TEMP" PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             LANG=C.UTF-8 LC_ALL=C.UTF-8 \
             PYTHONPATH="$clean_materials" PYTHONSAFEPATH=1 \
-            "$clean_runtime/bin/python" -P -B -m installer --help >/dev/null
+            "$clean_runtime/bin/python" -P -B \
+            "$GITHUB_WORKSPACE/scripts/smoke_installer_materials.py" \
+            --archive "$GITHUB_WORKSPACE/release-output/installer-materials.tar" \
+            --materials-root "$clean_materials"
           python -m release.cli generate-deployment-contract \
             --root . --installer-materials release-output/installer-materials.tar \
             --output release-output/deployment-contract.json

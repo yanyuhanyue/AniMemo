@@ -1,12 +1,11 @@
 import json
 
 from django.conf import settings
-from django.db import transaction
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from site_config.media_storage.storage import (
-    cleanup_uncommitted_media_reference,
+    atomic_media_mutation,
     mark_media_reference_committed,
 )
 
@@ -15,6 +14,7 @@ from .external_media.services import (
     lock_identity_owner,
     prepare_identity,
 )
+from .entry_validation import normalize_entry_tags, validate_entry_tag_colors
 from .image_security import delete_replaced_file, sanitize_uploaded_image
 from .models import ExternalMediaIdentity, JournalEntry
 from .poster_security import PosterUrlValidationError, validate_poster_url
@@ -111,9 +111,10 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         read_only_fields = ["share_slug", "created_at", "updated_at"]
 
     def validate_tags(self, value):
-        if not isinstance(value, list) or any(not isinstance(tag, str) for tag in value):
-            raise serializers.ValidationError("标签必须是字符串数组。")
-        return list(dict.fromkeys(tag.strip() for tag in value if tag.strip()))[:30]
+        return normalize_entry_tags(value)
+
+    def validate_tag_colors(self, value):
+        return validate_entry_tag_colors(value)
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -242,17 +243,13 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         if validated_data.get("poster_file"):
             validated_data["custom_poster_url"] = ""
         instance = JournalEntry(**validated_data)
-        try:
-            with transaction.atomic():
-                if self._prepared_external_identity is not None:
-                    lock_identity_owner(instance.user)
-                instance.save()
-                if self._prepared_external_identity is not None:
-                    create_prepared_identity(instance, self._prepared_external_identity)
-        except Exception:
-            cleanup_uncommitted_media_reference(getattr(instance.poster_file, "name", ""))
-            raise
-        mark_media_reference_committed(getattr(instance.poster_file, "name", ""))
+        with atomic_media_mutation():
+            if self._prepared_external_identity is not None:
+                lock_identity_owner(instance.user)
+            instance.save()
+            if self._prepared_external_identity is not None:
+                create_prepared_identity(instance, self._prepared_external_identity)
+            mark_media_reference_committed(getattr(instance.poster_file, "name", ""))
         return instance
 
     def update(self, instance, validated_data):
@@ -267,14 +264,10 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             validated_data["custom_poster_url"] = ""
         elif replacing_with_url:
             validated_data["poster_file"] = None
-        try:
-            with transaction.atomic():
-                instance = super().update(instance, validated_data)
-        except Exception:
-            cleanup_uncommitted_media_reference(getattr(instance.poster_file, "name", ""))
-            raise
-        mark_media_reference_committed(getattr(instance.poster_file, "name", ""))
-        delete_replaced_file(previous_file, instance.poster_file)
+        with atomic_media_mutation():
+            instance = super().update(instance, validated_data)
+            mark_media_reference_committed(getattr(instance.poster_file, "name", ""))
+            delete_replaced_file(previous_file, instance.poster_file)
         return instance
 
     @extend_schema_field(OpenApiTypes.URI)
