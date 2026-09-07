@@ -18,10 +18,20 @@ const browserHarnessSources = [
 
 test("uninitialized installations are gated to the browser first-run route", () => {
   assert.match(appSource, /setupApi\.status\(\)/);
-  assert.match(appSource, /installation\?\.state !== "initialized"/);
+  assert.match(appSource, /const requiresFirstRun = installation\.state === "uninitialized"/);
   assert.match(appSource, /setInstallation\(\{ state: "unavailable", accepting_setup: false \}\)/);
   assert.match(appSource, /path="\/setup"/);
   assert.match(appSource, /<Navigate to="\/setup" replace \/>/);
+});
+
+test("unknown and unavailable installation states keep product routes closed and permit a status retry", () => {
+  assert.match(appSource, /state: "unknown", accepting_setup: false/);
+  assert.match(appSource, /if \(installation\.state === "unavailable"\)/);
+  assert.match(appSource, /暂时无法确认站点状态/);
+  assert.match(appSource, /setInstallationAttempt\(\(value\) => value \+ 1\)/);
+  assert.match(appSource, /useEffect\(\(\) => \{\s*if \(!authReady\) return;\s*let active = true;\s*setupApi\.status\(\)/);
+  assert.match(appSource, /\}, \[authReady, installationAttempt\]\)/);
+  assert.doesNotMatch(appSource, /installation\?\.state !== "initialized"/);
 });
 
 test("setup page collects only the one-time code and required first-admin fields", () => {

@@ -389,9 +389,10 @@ export function AdminDashboardPage() {
     setLoggingOut(true);
     try {
       await authApi.logout();
+    } catch {
+      // The adapter completes local logout even when the server is unavailable.
     } finally {
-      clearTokens();
-      navigate("/admin-login", { replace: true });
+      if (!getStoredTokens().access) navigate("/admin-login", { replace: true });
       setLoggingOut(false);
     }
   };

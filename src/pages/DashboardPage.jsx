@@ -11,7 +11,7 @@ import { AnimeCatalog } from "../components/catalog/AnimeCatalog.jsx";
 import { CatalogFilterLab } from "../components/catalog/CatalogFilterLab.jsx";
 import { CatalogMeta } from "../components/catalog/CatalogMeta.jsx";
 import { Icon } from "../components/Icon.jsx";
-import { api, authApi, clearTokens, readableApiError } from "../lib/api.js";
+import { api, authApi, getStoredTokens, readableApiError } from "../lib/api.js";
 import { resolveTagColors } from "../lib/tagPresets.js";
 import { pressBeforeOpen } from "../lib/modalMotion.js";
 import { matchesActivityFilter, runBounded } from "../lib/journalExperience.js";
@@ -698,11 +698,14 @@ export function DashboardPage() {
     setProfileMenuOpen(false);
     try {
       await authApi.logout();
+    } catch {
+      // The adapter completes local logout even when the server is unavailable.
     } finally {
-      clearTokens();
-      localStorage.removeItem("animemo_demo");
-      setAuthSnapshot({});
-      navigate("/login");
+      if (!getStoredTokens().access) {
+        try { localStorage.removeItem("animemo_demo"); } catch { /* Optional demo storage. */ }
+        setAuthSnapshot({});
+        navigate("/login");
+      }
     }
   };
 
@@ -710,11 +713,14 @@ export function DashboardPage() {
     setProfileMenuOpen(false);
     try {
       await authApi.logout();
+    } catch {
+      // The adapter completes local logout even when the server is unavailable.
     } finally {
-      clearTokens();
-      localStorage.removeItem("animemo_demo");
-      setAuthSnapshot({});
-      navigate("/", { replace: true });
+      if (!getStoredTokens().access) {
+        try { localStorage.removeItem("animemo_demo"); } catch { /* Optional demo storage. */ }
+        setAuthSnapshot({});
+        navigate("/", { replace: true });
+      }
     }
   };
   const openProfilePanel = (tab = "profile") => {

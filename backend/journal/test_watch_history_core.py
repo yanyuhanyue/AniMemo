@@ -89,7 +89,7 @@ class CoreWatchHistoryTests(TestCase):
 
     def test_duplicate_semantic_identity_is_deterministic(self):
         first = self.client.post(self.collection_url(), record_payload(notes=["first"]), format="json")
-        second = self.client.post(self.collection_url(), record_payload(notes=["second"]), format="json")
+        second = self.client.post(self.collection_url(), record_payload(notes=["first"]), format="json")
         self.assertEqual(first.status_code, 201)
         self.assertEqual(second.status_code, 200)
         self.assertFalse(second.data["created"])

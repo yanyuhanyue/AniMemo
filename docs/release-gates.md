@@ -316,6 +316,20 @@ true` always selects both jobs.
 
 ## Base resolution
 
+Both classification jobs first run `scripts/check_committed_text.py` on the
+checked-out exact head, including documentation-only changes and main pushes.
+PR, merge-group, reusable, and manual events check the unique base/head merge-base
+through head, using the same comparison direction as the changed-file classifier.
+Merge groups use the event's `merge_group.base_sha`; reusable/manual runs retain
+their existing explicit base inputs. A normal push checks its exact `before` to
+head span and requires observed ancestry. Only an explicit all-zero push base
+checks the entire head tree against Git's empty tree, including root commits.
+Missing or invalid bases, reversed refs, unavailable objects, and missing merge
+bases fail explicitly. CI may retrieve only the exact validated commits from
+`origin` and complete shallow history before checking; it never substitutes an
+empty diff. This text check does not change the following upgrade-base resolver,
+risk classification, job selection, or authority contracts.
+
 Base/Head resolution is shared by both gates:
 
 - Pull request: `github.event.pull_request.base.sha` -> `github.sha`.
