@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 
 import { chromium } from "@playwright/test";
 
@@ -23,7 +24,7 @@ try {
   for (let attempt = 0; ; attempt += 1) {
     if (server.exitCode !== null) throw new Error("Owned preview exited before startup; the port may already be occupied.");
     try {
-      if (startupOutput.includes("Local:") && (await fetch(origin)).ok) break;
+      if (stripVTControlCharacters(startupOutput).includes("Local:") && (await fetch(origin)).ok) break;
     } catch { /* Wait only for this loopback preview. */ }
     if (attempt >= 100) throw new Error("Owned preview did not start.");
     await new Promise((done) => setTimeout(done, 50));
