@@ -1084,7 +1084,7 @@ class TwoFactorSecurityTests(APITestCase):
     def test_first_bind_uses_pending_secret_and_standard_uri(self):
         begin = self.begin()
         self.assertEqual(begin.status_code, status.HTTP_200_OK)
-        self.assertEqual(begin["Cache-Control"], "no-store")
+        self.assertEqual(begin["Cache-Control"], "private, no-store")
         parsed = urlparse(begin.data["otpauth_uri"])
         self.assertEqual(parsed.scheme, "otpauth")
         self.assertEqual(parsed.netloc, "totp")

@@ -59,6 +59,24 @@ All JSON errors use the canonical shape:
 
 Page-number pagination remains `{count, next, previous, results}`. Entry queries retain `page`, `page_size`, `search`, `ordering`, `watch_status`, `tags`, `priority`, `activity` and Quick Filter semantics already covered by Dashboard regression tests. A future cursor contract requires a new documented version or an additive endpoint; it cannot silently replace v1 page semantics.
 
+## Personal Response Caching
+
+Personal Core API responses, including authentication failures, validation errors,
+permission failures and server errors, use `Cache-Control: private, no-store`.
+`Vary: Authorization, Cookie` is merged with existing response variants.
+The canonical `/api/v1/` routes and their `/api/` aliases share this policy.
+
+Public showcase owner previews and authenticated plugin discovery are personal
+variants. Their anonymous responses retain public caching eligibility and vary
+on identity headers. Public homepage, site settings, presets, showcase discovery
+and shared content retain their public response policy.
+
+The response middleware applies this contract from resolved API permissions.
+New `AllowAny` views that exchange credentials or return optional personal state
+must be included in its explicit identity variants and covered by HTTP tests.
+Reverse proxies must preserve these upstream cache headers; an external CDN
+requires separate deployment verification.
+
 ## Stable Resource Identity
 
 | Resource | Stable identity | Notes |
