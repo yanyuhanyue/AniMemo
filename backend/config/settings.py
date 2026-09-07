@@ -340,6 +340,7 @@ INSTALLED_APPS = [
 AUTH_USER_MODEL = "accounts.User"
 
 MIDDLEWARE = [
+    "config.cache_policy.PrivateApiCacheMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "config.security_middleware.ContentSecurityPolicyMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
