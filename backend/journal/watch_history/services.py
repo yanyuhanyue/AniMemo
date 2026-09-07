@@ -6,11 +6,14 @@ from django.db.models import Max
 from journal.models import JournalEntry, WatchHistoryRecord
 
 from .validation import (
+    HISTORY_CONTENT_FIELDS,
     MAX_WATCH_HISTORY_RECORDS,
     WatchHistoryValidationError,
     normalize_watch_history_record,
     normalize_watch_history_records,
+    require_equivalent_watch_history,
     semantic_digest,
+    watch_history_content_equal,
 )
 
 
@@ -27,12 +30,14 @@ def list_history(*, user, entry, offset=0, limit=None, newest_first=False):
 
 
 def add_history(*, user, entry, record):
+    """Create a memory or accept a retry only when its complete content matches."""
     normalized = normalize_watch_history_record(record)
     with transaction.atomic():
         locked = _lock_entry(user, entry.pk)
         key = semantic_digest(normalized)
         existing = locked.watch_history_records.filter(semantic_key=key).first()
         if existing is not None:
+            require_equivalent_watch_history(_stored_content(existing), normalized)
             return existing, False
         if locked.watch_history_records.count() >= MAX_WATCH_HISTORY_RECORDS:
             raise WatchHistoryValidationError(
@@ -49,6 +54,7 @@ def add_history(*, user, entry, record):
                 )
         except IntegrityError:
             existing = locked.watch_history_records.get(semantic_key=key)
+            require_equivalent_watch_history(_stored_content(existing), normalized)
             return existing, False
         return created, True
 
@@ -82,9 +88,16 @@ def delete_history(*, user, entry, record_id):
 
 
 def replace_history(*, user, entry, records):
+    """Replace the collection only after its entire input is unambiguous."""
     normalized = normalize_watch_history_records(records)
     with transaction.atomic():
         locked = _lock_entry(user, entry.pk)
+        existing = list(locked.watch_history_records.all())
+        if len(existing) == len(normalized) and all(
+            watch_history_content_equal(_stored_content(current), incoming)
+            for current, incoming in zip(existing, normalized, strict=True)
+        ):
+            return existing
         locked.watch_history_records.all().delete()
         created = [
             WatchHistoryRecord(
@@ -109,6 +122,10 @@ def merge_history(*, user, entry, records):
             (record, semantic_digest(record))
             for record in normalized
         ]
+        for record, key in incoming:
+            existing = existing_by_key.get(key)
+            if existing is not None:
+                require_equivalent_watch_history(_stored_content(existing), record)
         new_count = sum(key not in existing_by_key for _record, key in incoming)
         if len(existing_records) + new_count > MAX_WATCH_HISTORY_RECORDS:
             raise WatchHistoryValidationError(
@@ -149,6 +166,10 @@ def _model_values(record):
         "notes": record["notes"],
         "metadata": record.get("metadata") or {},
     }
+
+
+def _stored_content(record):
+    return {field: getattr(record, field) for field in HISTORY_CONTENT_FIELDS}
 
 
 def _assert_owner(user, entry):

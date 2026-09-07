@@ -95,8 +95,8 @@ function AppRoutes({ authUser }) {
 export function App() {
   const [authReady, setAuthReady] = useState(false);
   const [authUser, setAuthUser] = useState(() => getAuthUser());
-  const [installationReady, setInstallationReady] = useState(false);
-  const [installation, setInstallation] = useState(null);
+  const [installation, setInstallation] = useState({ state: "unknown", accepting_setup: false });
+  const [installationAttempt, setInstallationAttempt] = useState(0);
 
   useEffect(() => subscribeAuth(({ user }) => setAuthUser(user)), []);
 
@@ -113,22 +113,37 @@ export function App() {
     let active = true;
     setupApi.status()
       .then(({ data }) => {
-        if (active) setInstallation(data || { state: "unavailable", accepting_setup: false });
+        if (active) setInstallation(data?.state === "initialized" || data?.state === "uninitialized"
+          ? data
+          : { state: "unavailable", accepting_setup: false });
       })
       .catch(() => {
         if (active) setInstallation({ state: "unavailable", accepting_setup: false });
-      })
-      .finally(() => {
-        if (active) setInstallationReady(true);
       });
     return () => { active = false; };
-  }, []);
+  }, [installationAttempt]);
 
-  if (!authReady || !installationReady) {
-    return <main className="app-auth-bootstrap" aria-label="正在恢复登录状态" />;
+  if (installation.state === "unavailable") {
+    return (
+      <main className="app-auth-bootstrap">
+        <section className="installation-status" aria-labelledby="installation-status-title">
+          <span className="micro-label">ANIMEMO / 站点状态</span>
+          <h1 id="installation-status-title">暂时无法确认站点状态</h1>
+          <p role="alert">状态查询暂时不可用，请稍后重试。</p>
+          <button className="auth-submit installation-status__retry" type="button" onClick={() => {
+            setInstallation({ state: "unknown", accepting_setup: false });
+            setInstallationAttempt((value) => value + 1);
+          }}>重新检查</button>
+        </section>
+      </main>
+    );
   }
 
-  const requiresFirstRun = installation?.state !== "initialized";
+  if (!authReady || installation.state === "unknown") {
+    return <main className="app-auth-bootstrap" aria-busy="true" aria-label={installation.state === "unknown" ? "正在确认站点状态" : "正在恢复登录状态"} />;
+  }
+
+  const requiresFirstRun = installation.state === "uninitialized";
 
   return (
       <SiteSettingsProvider>

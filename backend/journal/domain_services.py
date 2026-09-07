@@ -3,6 +3,7 @@ from __future__ import annotations
 from django.db import transaction
 from django.db.models import Q
 from rest_framework.exceptions import ValidationError
+from site_config.media_storage.storage import atomic_media_mutation
 
 from .mutation_ports import JournalMutationContext, publish_event
 from .models import JournalEntry
@@ -86,18 +87,17 @@ class JournalEntryService:
         return self.create(serializer, source=source)
 
     def update(self, serializer, *, source="core"):
+        """Revalidate request input against the row held by this transaction."""
         self._require_user()
-        entry = serializer.instance
-        if entry.user_id != self.user.pk or entry.deleted_at is not None:
-            raise JournalEntryServiceError("entry_not_found", "番剧条目不存在。", 404)
-        try:
-            entry = serializer.save()
-        except ValidationError as error:
-            raise JournalEntryServiceError("invalid_entry", error.detail) from error
-        publish_event(
-            "journal.after_update",
-            JournalMutationContext(user_id=entry.user_id, journal_entry_id=entry.pk, source=source),
+        entry = self._apply_update(
+            serializer.instance.pk,
+            serializer.initial_data,
+            serializer_class=type(serializer),
+            partial=serializer.partial,
+            context=serializer.context,
+            source=source,
         )
+        serializer.instance = entry
         return self.to_dto(entry)
 
     def update_from_fields(
@@ -111,16 +111,35 @@ class JournalEntryService:
         allowed_fields=None,
     ):
         self._require_user()
-        with transaction.atomic():
+        entry = self._apply_update(
+            entry_id,
+            self.validate_fields(fields, allowed_fields=allowed_fields),
+            serializer_class=serializer_class,
+            partial=True,
+            context=context or {},
+            source=source,
+        )
+        return self.to_dto(entry)
+
+    def _apply_update(self, entry_id, fields, *, serializer_class, partial, context, source):
+        with atomic_media_mutation():
             entry = self._owned_entry(entry_id, lock=True)
             serializer = serializer_class(
                 entry,
-                data=self.validate_fields(fields, allowed_fields=allowed_fields),
-                partial=True,
-                context=context or {},
+                data=fields,
+                partial=partial,
+                context=context,
             )
             self._validate(serializer)
-            return self.update(serializer, source=source)
+            try:
+                entry = serializer.save()
+            except ValidationError as error:
+                raise JournalEntryServiceError("invalid_entry", error.detail) from error
+            publish_event(
+                "journal.after_update",
+                JournalMutationContext(user_id=entry.user_id, journal_entry_id=entry.pk, source=source),
+            )
+            return entry
 
     def delete(self, entry_id, *, source="core"):
         """Permanently delete one owner-scoped entry and emit one mutation hook."""
