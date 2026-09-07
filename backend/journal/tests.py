@@ -412,9 +412,14 @@ class JournalApiTests(APITestCase):
     def test_public_homepage_uses_live_staff_entries_only(self):
         staff = User.objects.create_user(username="homepage-owner", password="StrongPass123!", is_staff=True)
         inactive_staff = User.objects.create_user(username="inactive-owner", password="StrongPass123!", is_staff=True, is_active=False)
+        settings_obj = SiteSettings.load()
+        settings_obj.homepage_owner = staff
+        settings_obj.save()
+        UserSettings.objects.create(user=staff, public_status=UserSettings.PublicStatus.APPROVED, allow_sharing=True)
         JournalEntry.objects.create(
             user=staff,
             title="首页真实番剧",
+            visibility=JournalEntry.Visibility.PUBLIC,
             personal_score="9.7",
             watch_status=JournalEntry.WatchStatus.COMPLETED,
             tags=["剧场版"],
