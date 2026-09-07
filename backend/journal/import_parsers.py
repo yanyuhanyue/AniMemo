@@ -42,6 +42,6 @@ class LimitedImportJSONParser(JSONParser):
             raise ParseError("导入内容必须使用 UTF-8 编码。") from error
         try:
             payload = json.loads(text)
-        except json.JSONDecodeError as error:
+        except (json.JSONDecodeError, RecursionError) as error:
             raise ParseError("JSON 格式不正确。") from error
         return payload
