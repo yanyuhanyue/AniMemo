@@ -42,7 +42,9 @@ assert importlib.metadata.version("psycopg-binary") == psycopg.__version__
 ssl.create_default_context(cafile=certifi.where())
 ZoneInfo("Asia/Shanghai")
 migrations = MigrationLoader(None, ignore_no_migrations=True).disk_migrations
-assert {"journal", "plugin_host", "site_config", "integrations"} <= {app for app, name in migrations}
+required_migration_apps = {"journal", "plugin_host", "site", "integrations"}
+migration_apps = {app for app, name in migrations}
+assert required_migration_apps <= migration_apps, f"Missing migration apps: {sorted(required_migration_apps - migration_apps)}"
 root = Path("/app/backend/staticfiles")
 manifest = json.loads((root / "staticfiles.json").read_text(encoding="utf-8"))
 assert manifest["paths"]
