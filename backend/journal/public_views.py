@@ -2,7 +2,7 @@ import hashlib
 
 from config.api_errors import public_failure
 from django.contrib.auth import get_user_model
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions, status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -24,10 +24,25 @@ from .serializers import (
     StaffSiteSettingsSerializer,
     TestEmailSerializer,
 )
+from .serializers_public import (
+    PublicCatalogEntrySerializer,
+    PublicHomepageEntrySerializer,
+)
 from .staff_services import StaffCapabilityPermission, record_audit
 from .view_helpers import build_public_stats
 
 User = get_user_model()
+
+
+def _published_entries():
+    """Discovery reflects both entry visibility and the owner's live consent."""
+    return JournalEntry.objects.filter(
+        visibility=JournalEntry.Visibility.PUBLIC,
+        deleted_at__isnull=True,
+        user__is_active=True,
+        user__journal_settings__allow_sharing=True,
+        user__journal_settings__public_status=UserSettings.PublicStatus.APPROVED,
+    )
 
 
 class PublicSiteSettingsView(APIView):
@@ -141,7 +156,11 @@ class PublicShowcaseView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, public_slug):
-        owner_settings = get_object_or_404(UserSettings.objects.select_related("user"), public_slug=public_slug)
+        owner_settings = get_object_or_404(
+            UserSettings.objects.select_related("user"),
+            public_slug=public_slug,
+            user__is_active=True,
+        )
         is_owner_preview = request.user.is_authenticated and request.user.pk == owner_settings.user_id
         if not is_owner_preview and (
             owner_settings.public_status != UserSettings.PublicStatus.APPROVED
@@ -151,7 +170,7 @@ class PublicShowcaseView(APIView):
         showcase_entries = JournalEntry.objects.filter(
             user=owner_settings.user,
             deleted_at__isnull=True,
-        ).prefetch_related("external_identities")
+        ).annotate(watch_history_count=Count("watch_history_records", distinct=True)).prefetch_related("external_identities")
         if not is_owner_preview:
             showcase_entries = showcase_entries.filter(visibility=JournalEntry.Visibility.PUBLIC)
         summary_records = list(showcase_entries.values(
@@ -195,6 +214,7 @@ class PublicShowcaseListView(APIView):
         settings_items = UserSettings.objects.select_related("user").filter(
             public_status=UserSettings.PublicStatus.APPROVED,
             allow_sharing=True,
+            user__is_active=True,
             user__journal_entries__visibility=JournalEntry.Visibility.PUBLIC,
             user__journal_entries__deleted_at__isnull=True,
         ).distinct().order_by("-updated_at")
@@ -208,10 +228,8 @@ class PublicShowcaseListView(APIView):
 
         results = []
         for settings_obj in settings_items[:60]:
-            public_entries = JournalEntry.objects.filter(
-                user=settings_obj.user,
-                visibility=JournalEntry.Visibility.PUBLIC,
-                deleted_at__isnull=True,
+            public_entries = _published_entries().filter(user=settings_obj.user).annotate(
+                watch_history_count=Count("watch_history_records", distinct=True),
             ).prefetch_related("external_identities")
             summary_records = list(public_entries.values(
                 "title", "airing_period", "tags", "personal_score", "watch_status",
@@ -242,6 +260,7 @@ class SharedEntryView(APIView):
             JournalEntry.objects.prefetch_related("external_identities"),
             share_slug=share_slug,
             deleted_at__isnull=True,
+            user__is_active=True,
         )
         settings_obj, _ = UserSettings.objects.get_or_create(user=entry.user, defaults={"nickname": entry.user.username})
         if (
@@ -277,10 +296,9 @@ class PublicCatalogSearchView(APIView):
         except (TypeError, ValueError):
             page = 1
 
-        entries = JournalEntry.objects.filter(
+        entries = _published_entries().filter(
             user__is_staff=True,
-            deleted_at__isnull=True,
-        ).prefetch_related("external_identities")
+        )
         if query:
             entries = entries.filter(
                 Q(title__icontains=query)
@@ -293,12 +311,7 @@ class PublicCatalogSearchView(APIView):
         pages = max(1, (count + page_size - 1) // page_size)
         page = min(page, pages)
         entries = entries[(page - 1) * page_size: page * page_size]
-        serialized = JournalEntrySerializer(entries, many=True, context={"request": request}).data
-        public_fields = [
-            "id", "title", "japanese_title", "airing_period", "studio", "episodes",
-            "description", "poster_url", "poster", "baike_url", "tags",
-        ]
-        results = [{key: item.get(key) for key in public_fields} for item in serialized]
+        results = PublicCatalogEntrySerializer(entries, many=True, context={"request": request}).data
         return Response({
             "count": count,
             "page": page,
@@ -315,18 +328,17 @@ class PublicHomepageView(APIView):
 
     def get(self, request):
         site_settings = SiteSettings.load()
-        owner = site_settings.homepage_owner
-        if not owner or not owner.is_staff or not owner.is_active:
-            owner = User.objects.filter(is_staff=True, is_active=True).order_by("id").first()
-        entries = JournalEntry.objects.filter(
-            user=owner,
-            deleted_at__isnull=True,
-        ).prefetch_related("external_identities").order_by("-updated_at", "-id") if owner else JournalEntry.objects.none()
+        owner_id = site_settings.homepage_owner_id
+        entries = _published_entries().filter(
+            user_id=owner_id,
+            user__is_staff=True,
+        ).annotate(watch_history_count=Count("watch_history_records", distinct=True)).order_by(
+            "-updated_at", "-id",
+        ) if owner_id else JournalEntry.objects.none()
         summary_records = list(entries.values(
             "title", "airing_period", "tags", "personal_score", "watch_status",
         ))
         return Response({
             "stats": build_public_stats(summary_records),
-            "results": JournalEntrySerializer(entries, many=True, context={"request": request}).data,
+            "results": PublicHomepageEntrySerializer(entries, many=True, context={"request": request}).data,
         })
-

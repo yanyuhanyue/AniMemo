@@ -10,6 +10,14 @@ MAX_WATCH_HISTORY_INTEGER = 32767
 MAX_WATCH_HISTORY_NOTES = 20
 MAX_WATCH_HISTORY_NOTE_LENGTH = 500
 MAX_WATCH_HISTORY_METADATA_BYTES = 4096
+HISTORY_CONTENT_FIELDS = (
+    "watched_on", "watched_label", "brush_number", "brush_label",
+    "episode_start", "episode_end", "notes", "metadata",
+)
+_STANDARD_BRUSH_NUMBERS = {
+    "首刷": 1, "一刷": 1, "二刷": 2, "三刷": 3, "四刷": 4, "五刷": 5,
+    "六刷": 6, "七刷": 7, "八刷": 8, "九刷": 9, "十刷": 10,
+}
 CORE_FIELDS = {
     "id",
     "watched_on",
@@ -130,6 +138,14 @@ def normalize_watch_history_record(raw_record, *, index=0):
     brush_label = _bounded_text(
         raw_record.get("brush_label"), maximum=20, label="刷次标签", index=index, default="首刷"
     )
+    label_number = _STANDARD_BRUSH_NUMBERS.get(brush_label)
+    if brush_label.endswith("刷") and brush_label[:-1].isdecimal():
+        label_number = int(brush_label[:-1])
+    if brush_number is not None and label_number is not None and brush_number != label_number:
+        raise WatchHistoryValidationError(
+            f"{_record_prefix(index)}的刷次编号与刷次标签不一致。",
+            code="invalid_brush_number",
+        )
     watched_label = _bounded_text(
         raw_record.get("watched_label"), maximum=80, label="观看日期标签", index=index
     )
@@ -192,6 +208,27 @@ def semantic_digest_from_values(watched_on, brush_label, episode_start, episode_
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _content_identity(record):
+    content = {field: record[field] for field in HISTORY_CONTENT_FIELDS}
+    if isinstance(content["watched_on"], date):
+        content["watched_on"] = content["watched_on"].isoformat()
+    # JSON identity preserves distinctions such as metadata true versus 1;
+    # ordinary Python dictionary equality would silently conflate them.
+    return json.dumps(content, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def watch_history_content_equal(first, second):
+    return _content_identity(first) == _content_identity(second)
+
+
+def require_equivalent_watch_history(first, second):
+    if not watch_history_content_equal(first, second):
+        raise WatchHistoryValidationError(
+            "相同日期、刷次和话数范围的观看记录内容冲突，未保存任何更改。",
+            code="duplicate_watch_history",
+        )
+
+
 def normalize_watch_history_records(records):
     if not isinstance(records, list):
         raise WatchHistoryValidationError("观看记录必须是数组。")
@@ -202,7 +239,12 @@ def normalize_watch_history_records(records):
     normalized_by_key = {}
     for index, raw_record in enumerate(records):
         normalized = normalize_watch_history_record(raw_record, index=index)
-        normalized_by_key[semantic_digest(normalized)] = normalized
+        key = semantic_digest(normalized)
+        existing = normalized_by_key.get(key)
+        if existing is not None:
+            require_equivalent_watch_history(existing, normalized)
+        else:
+            normalized_by_key[key] = normalized
     return list(normalized_by_key.values())
 
 
@@ -225,15 +267,23 @@ def preserve_watch_history_metadata(existing_records, normalized_records):
 def merge_watch_history_records(existing_records, incoming_records):
     normalized = normalize_watch_history_records(incoming_records)
     merged = list(existing_records) if isinstance(existing_records, list) else []
-    keys = {semantic_digest(item) for item in merged if isinstance(item, dict)}
+    existing_by_key = {
+        semantic_digest(item): item for item in normalize_watch_history_records(merged)
+    }
+    new_records = []
     created = 0
     skipped = 0
     for record in normalized:
         key = semantic_digest(record)
-        if key in keys:
+        existing = existing_by_key.get(key)
+        if existing is not None:
+            require_equivalent_watch_history(existing, record)
             skipped += 1
             continue
-        merged.append(record)
-        keys.add(key)
+        new_records.append(record)
         created += 1
-    return merged[-MAX_WATCH_HISTORY_RECORDS:], created, skipped
+    if len(merged) + created > MAX_WATCH_HISTORY_RECORDS:
+        raise WatchHistoryValidationError(
+            f"单部番剧最多保存 {MAX_WATCH_HISTORY_RECORDS} 条观看记录。"
+        )
+    return [*merged, *new_records], created, skipped

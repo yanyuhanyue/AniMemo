@@ -59,6 +59,26 @@ All JSON errors use the canonical shape:
 
 Page-number pagination remains `{count, next, previous, results}`. Entry queries retain `page`, `page_size`, `search`, `ordering`, `watch_status`, `tags`, `priority`, `activity` and Quick Filter semantics already covered by Dashboard regression tests. A future cursor contract requires a new documented version or an additive endpoint; it cannot silently replace v1 page semantics.
 
+## Entry mutation order
+
+HTTP PUT/PATCH and host capability entry updates reload the owner-scoped live
+entry under a database row lock. Validation and application use that current
+instance in the same transaction. Non-overlapping patches retain both changes;
+the last transaction to acquire the lock wins for a field submitted by both
+requests. This contract does not require a client version or ETag and does not
+provide optimistic same-field conflict detection.
+
+A deleted or recycled entry found during the locked read returns not found;
+an earlier request snapshot cannot reinsert or restore it. Response history and
+identity projections are refreshed while the HTTP mutation holds its lock.
+Mutation events publish after commit, and failed transactions do not publish
+them. Replaced media is removed after commit; a failed media save retains the
+previous reference and cleans the new uncommitted object.
+
+The PostgreSQL mutation regression uses independent connections and explicit
+read barriers for disjoint/same-field writes, delete/recycle/restore, media
+replacement and commit/rollback events.
+
 ## Stable Resource Identity
 
 | Resource | Stable identity | Notes |

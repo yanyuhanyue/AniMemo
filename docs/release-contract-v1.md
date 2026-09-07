@@ -145,6 +145,26 @@ duplicates, uncontracted members, and size/count excess fail closed. The
 Installer never resolves packages online or fills missing bytes from a source
 checkout.
 
+The profile includes the Candidate/Formal runners' shared
+`scripts/release_qualification.py` validator. Immediately after building the
+archive, `scripts/smoke_installer_materials.py` checks its actual extracted
+members and schemas, all delivered Python entrypoint imports/help, and each
+Candidate/Formal profile's read-only plan. Its fresh runtime installs the exact
+locked wheelhouse offline; probes run outside the checkout with the materials
+as their only product source and reject network, subprocess, and filesystem
+mutations. This smoke test grants no Qualification or Release Authority.
+The allowed Release Gate Docker job also builds a separate Linux Installer tar
+from the current source, real locked compiler outputs, verified public TUF roots,
+and hash-locked Linux wheels, then runs the same offline material probes. Its
+platform document is `scripts/tests/fixtures/installer-platform-schema.sample.json`,
+an explicitly `NON_AUTHORITATIVE_SCHEMA_FIXTURE` used only to exercise parsing and
+resource closure. The helper does not invoke a Qualification producer, publish an
+artifact, or prove platform compatibility; its report preserves that distinction.
+The existing Docker gate separately probes the built API/Web image IDs with no
+network or source mounts, checking Django templates, the password dictionary,
+certificate and distribution resources, migration imports, static manifests,
+and the Web entrypoint's referenced assets before starting the test stack.
+
 The material profile includes `installer/platform_bootstrap.py`. The formal
 online Stage0 may call that module only after the exact GitHub Immutable Release,
 mirror candidate, root-owned protected copy, and loaded module bytes have all
