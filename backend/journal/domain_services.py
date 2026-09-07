@@ -3,6 +3,7 @@ from __future__ import annotations
 from django.db import transaction
 from django.db.models import Q
 from rest_framework.exceptions import ValidationError
+from site_config.media_storage.storage import atomic_media_mutation
 
 from .mutation_ports import JournalMutationContext, publish_event
 from .models import JournalEntry
@@ -121,7 +122,7 @@ class JournalEntryService:
         return self.to_dto(entry)
 
     def _apply_update(self, entry_id, fields, *, serializer_class, partial, context, source):
-        with transaction.atomic():
+        with atomic_media_mutation():
             entry = self._owned_entry(entry_id, lock=True)
             serializer = serializer_class(
                 entry,

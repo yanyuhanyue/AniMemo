@@ -14,6 +14,7 @@ from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from site_config.media_storage.storage import atomic_media_mutation
 
 from .external_media.services import (
     bind_external_identity,
@@ -201,7 +202,7 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop("partial", False)
-        with transaction.atomic():
+        with atomic_media_mutation():
             instance = self.get_object()
             serializer = self.get_serializer(instance, data=request.data, partial=partial)
             self.perform_update(serializer)
