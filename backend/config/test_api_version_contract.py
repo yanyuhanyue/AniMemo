@@ -22,6 +22,7 @@ def concrete_path(path):
         "public_slug": UUID_SAMPLE,
         "share_slug": UUID_SAMPLE,
         "preview_id": UUID_SAMPLE,
+        "session_id": UUID_SAMPLE,
     }
 
     def replace(match):
