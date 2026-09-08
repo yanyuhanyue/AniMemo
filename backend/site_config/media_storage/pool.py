@@ -10,6 +10,7 @@ from site_config.models import MediaObject, MediaStorageBackend, MediaStoragePoo
 from .common import MediaStorageExhausted, MediaStorageOffline, MediaStorageSetupRequired, UnsafeObjectKey, safe_object_key
 from .local import DynamicLocalBackend
 from .r2 import DynamicR2Backend
+from .receipts import cleanup_rolled_back_upload, physical_transaction
 from .usage import account_budget, effective_account_usage, effective_storage_usage, managed_usage_bytes
 
 
@@ -119,10 +120,9 @@ class StoragePoolService:
         expires_at = now + timedelta(
             seconds=max(60, int(getattr(settings, "MEDIA_WRITE_RESERVATION_TTL_SECONDS", 3600)))
         )
-        with transaction.atomic():
-            # Only the short reservation transaction holds the pool and
-            # backend row locks. The following adapter.write happens after
-            # this transaction has committed.
+        with physical_transaction():
+            # The existing physical reservation commits independently of any
+            # outer business transaction. Storage I/O does not hold pool locks.
             pool = MediaStoragePoolSettings.objects.select_for_update().get_or_create(pk=1)[0]
             candidate_ids = []
             if pool.preferred_write_backend_id:
@@ -145,6 +145,9 @@ class StoragePoolService:
                     continue
                 if not cls.state_for(candidate, incoming_size_bytes=len(data)).writable:
                     continue
+                if (MediaObject.objects.filter(storage_backend=candidate, object_key=object_key).exists()
+                    or MediaWriteReservation.objects.filter(storage_backend=candidate, object_key=object_key).exclude(status="abandoned").exists()):
+                    raise MediaStorageExhausted("媒体对象位置已被占用。")
                 reservation = MediaWriteReservation.objects.create(
                     storage_backend=candidate,
                     object_key=object_key,
@@ -160,25 +163,14 @@ class StoragePoolService:
         raise MediaStorageExhausted("所有媒体存储当前均不可用。")
 
     @staticmethod
-    def _abandon_reservation(reservation):
-        with transaction.atomic():
-            current = MediaWriteReservation.objects.select_for_update().get(pk=reservation.pk)
-            if current.status == MediaWriteReservation.Status.PENDING:
-                current.status = MediaWriteReservation.Status.ABANDONED
-                current.abandoned_at = timezone.now()
-                current.save(update_fields=["status", "abandoned_at"])
-
-    @staticmethod
     def _finalize_reservation(reservation):
         with transaction.atomic():
             current = MediaWriteReservation.objects.select_for_update().get(pk=reservation.pk)
             if current.status != MediaWriteReservation.Status.PENDING:
                 raise MediaStorageExhausted("媒体写入预留已不再有效。")
-            if current.expires_at <= timezone.now():
-                current.status = MediaWriteReservation.Status.ABANDONED
-                current.abandoned_at = timezone.now()
-                current.save(update_fields=["status", "abandoned_at"])
-                raise MediaStorageExhausted("媒体写入预留已过期。")
+            from .identity import absolute_public_url, url_identity_digest
+
+            public_url = absolute_public_url(StoragePoolService.adapter_for(current.storage_backend).url(current.object_key))
             media = MediaObject.objects.create(
                 id=current.pk,
                 storage_backend=current.storage_backend,
@@ -186,6 +178,9 @@ class StoragePoolService:
                 size_bytes=current.size_bytes,
                 content_type=current.content_type,
                 sha256=current.sha256,
+                public_url_snapshot=public_url,
+                public_url_identity=url_identity_digest(public_url),
+                reference_inventory_complete=True,
             )
             current.status = MediaWriteReservation.Status.FINALIZED
             current.finalized_at = timezone.now()
@@ -216,37 +211,35 @@ class StoragePoolService:
             adapter = None
             try:
                 adapter = cls.adapter_for(backend)
+                adapter.reservation_id = reservation.pk
                 adapter.write(object_key, data, content_type=content_type)
             except MediaStorageOffline as error:
                 last_error = error
                 excluded_backend_ids.add(backend.pk)
-                cls._abandon_reservation(reservation)
+                cleanup_rolled_back_upload(reservation, adapter or cls.adapter_for(backend))
                 continue
             except Exception:
-                cls._abandon_reservation(reservation)
+                cleanup_rolled_back_upload(reservation, adapter or cls.adapter_for(backend))
                 raise
 
             try:
                 media = cls._finalize_reservation(reservation)
             except Exception:
-                cls._abandon_reservation(reservation)
-                try:
-                    adapter.delete(object_key)
-                except Exception:
-                    # Preserve the original transaction error. The abandoned
-                    # reservation records the exact object for later audit;
-                    # maintenance never deletes remote objects implicitly.
-                    pass
+                cleanup_rolled_back_upload(reservation, adapter)
                 raise
             break
         media._storage_adapter = adapter
+        media._write_reservation = reservation
         return media
 
     @classmethod
     def delete_media(cls, media):
-        backend = media.storage_backend
-        cls.adapter_for(backend).delete(media.object_key)
-        media.delete()
+        from journal.media_references import cleanup_media, schedule_media_cleanup
+
+        if transaction.get_connection().in_atomic_block:
+            schedule_media_cleanup(media.pk)
+            return
+        return cleanup_media(media.pk)
 
     @classmethod
     def resolve_reference(cls, reference_name):

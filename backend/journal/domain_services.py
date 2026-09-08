@@ -7,6 +7,7 @@ from site_config.media_storage.storage import atomic_media_mutation
 
 from .mutation_ports import JournalMutationContext, publish_event
 from .models import JournalEntry
+from .media_references import MEDIA_FIELDS, lock_media_owner
 
 
 class JournalEntryServiceError(ValueError):
@@ -59,15 +60,16 @@ class JournalEntryService:
 
     def create(self, serializer, *, source="core"):
         self._require_user()
-        try:
-            entry = serializer.save(user=self.user)
-        except ValidationError as error:
-            raise JournalEntryServiceError("invalid_entry", error.detail) from error
-        publish_event(
-            "journal.after_create",
-            JournalMutationContext(user_id=entry.user_id, journal_entry_id=entry.pk, source=source),
-        )
-        return self.to_dto(entry)
+        with atomic_media_mutation():
+            try:
+                entry = serializer.save(user=self.user)
+            except ValidationError as error:
+                raise JournalEntryServiceError("invalid_entry", error.detail) from error
+            publish_event(
+                "journal.after_create",
+                JournalMutationContext(user_id=entry.user_id, journal_entry_id=entry.pk, source=source),
+            )
+            return self.to_dto(entry)
 
     def create_from_fields(
         self,
@@ -123,6 +125,8 @@ class JournalEntryService:
 
     def _apply_update(self, entry_id, fields, *, serializer_class, partial, context, source):
         with atomic_media_mutation():
+            if set(fields) & MEDIA_FIELDS:
+                lock_media_owner(self.user.pk)
             entry = self._owned_entry(entry_id, lock=True)
             serializer = serializer_class(
                 entry,
@@ -145,6 +149,7 @@ class JournalEntryService:
         """Permanently delete one owner-scoped entry and emit one mutation hook."""
         self._require_user()
         with transaction.atomic():
+            lock_media_owner(self.user.pk)
             entry = self._owned_entry(entry_id, lock=True)
             user_id = entry.user_id
             entry.delete()

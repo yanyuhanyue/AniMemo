@@ -939,6 +939,25 @@ class ImmutableComposeDeployment:
         ):
             raise StateError("AniMemo Web health probe failed")
 
+    def quiesce_database_writers(self, manifest: dict[str, object]) -> None:
+        allowed = {"postgres", "redis", "api", "web"}
+
+        def running_services():
+            result = self._compose(manifest, "ps", "--services", "--status", "running", timeout=30)
+            running = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+            if running - allowed:
+                raise StateError("Unrecognized database writer prevents contract migration")
+            return running
+
+        if "api" in running_services():
+            self._container_id(manifest, "api")
+            self._compose(manifest, "stop", "--timeout", "30", "api", timeout=60)
+        remaining = running_services()
+        if "api" in remaining:
+            raise StateError("Previous API writer did not stop before contract migration")
+        if "postgres" not in remaining:
+            raise StateError("Database is unavailable after stopping previous writers")
+
     def migrate(self, manifest: dict[str, object]) -> None:
         self._compose(
             manifest,
@@ -952,6 +971,14 @@ class ImmutableComposeDeployment:
         )
 
     def bootstrap(self, manifest: dict[str, object]) -> None:
+        if manifest["compatibility"]["database"]["contract"] == "animemo-db-v2":
+            # Restored or upgraded databases must reconstruct holdings before
+            # the target application is started. Failure retains recovery state.
+            self._compose(
+                manifest, "run", "--pull", "never", "--rm", "--no-deps",
+                "api", "python", "manage.py", "reconcile_media_references",
+                "--apply", "--all-batches", timeout=600,
+            )
         self._compose(
             manifest,
             "run",

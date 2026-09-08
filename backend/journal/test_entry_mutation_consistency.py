@@ -1,11 +1,13 @@
 """Owner mutations use current rows, including when request reads overlap."""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
+from time import monotonic, sleep
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -101,9 +103,10 @@ class EntryMutationPostgreSQLTests(TransactionTestCase):
         state.status = InstallationState.Status.INITIALIZED
         state.save(update_fields=["status"])
 
-    def overlapping_patch(self, fields, earlier_mutation, *, request_format="json"):
+    def overlapping_patch(self, fields, earlier_mutation, *, request_format="json", media_mutation=False):
         """Worker reads the old row while the first connection owns its lock."""
         read_done = Event()
+        worker_connection_pids = []
         original_get_object = JournalEntryViewSet.get_object
 
         def observed_get_object(view):
@@ -114,6 +117,10 @@ class EntryMutationPostgreSQLTests(TransactionTestCase):
         def worker():
             close_old_connections()
             try:
+                if media_mutation:
+                    with connections["default"].cursor() as cursor:
+                        cursor.execute("SELECT pg_backend_pid()")
+                        worker_connection_pids.append(cursor.fetchone()[0])
                 client = APIClient()
                 client.force_authenticate(get_user_model().objects.get(pk=self.user.pk))
                 response = client.patch(reverse("entry-detail", args=[self.entry.pk]), fields, format=request_format)
@@ -123,9 +130,30 @@ class EntryMutationPostgreSQLTests(TransactionTestCase):
 
         with patch.object(JournalEntryViewSet, "get_object", observed_get_object), ThreadPoolExecutor(max_workers=1) as pool:
             with transaction.atomic():
+                if media_mutation:
+                    # A media writer owns the owner lock before its entry lock.
+                    get_user_model().objects.select_for_update().only("pk").get(pk=self.user.pk)
                 locked = JournalEntry.objects.select_for_update().get(pk=self.entry.pk)
                 future = pool.submit(worker)
                 self.assertTrue(read_done.wait(10), "second connection did not read the old row")
+                if media_mutation:
+                    with connections["default"].cursor() as cursor:
+                        cursor.execute("SELECT pg_backend_pid()")
+                        blocker_pid = cursor.fetchone()[0]
+                        self.assertNotEqual(blocker_pid, worker_connection_pids[0])
+                        deadline = monotonic() + 5
+                        blockers = []
+                        while monotonic() < deadline:
+                            cursor.execute("SELECT pg_blocking_pids(%s)", [worker_connection_pids[0]])
+                            blockers = cursor.fetchone()[0]
+                            if blocker_pid in blockers:
+                                break
+                            sleep(0.01)
+                        self.assertIn(blocker_pid, blockers, "media request did not wait for the first writer")
+                        print("PG_LOCK_OBSERVATION " + json.dumps({
+                            "case": "concurrent_media_replacements", "blocker_pid": blocker_pid,
+                            "waiter_pid": worker_connection_pids[0], "blocking_pids": blockers,
+                        }), flush=True)
                 earlier_mutation(locked)
             return future.result(timeout=15)
 
@@ -231,7 +259,9 @@ class EntryMutationPostgreSQLTests(TransactionTestCase):
                 entry.refresh_from_db()
                 first_names.append(entry.poster_file.name)
 
-            status_code, body = self.overlapping_patch({"poster_file": self.upload("blue")}, first, request_format="multipart")
+            status_code, body = self.overlapping_patch(
+                {"poster_file": self.upload("blue")}, first, request_format="multipart", media_mutation=True,
+            )
             self.assertEqual(status_code, 200, body)
             self.entry.refresh_from_db()
             self.assertNotIn(self.entry.poster_file.name, [original_name, *first_names])

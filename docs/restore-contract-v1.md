@@ -143,6 +143,16 @@ Artifact structure、authentication、checksum、database stream 或 member iden
 
 未知不能归类为 “probably works”。Classification engine 由 [Compatibility Matrix v1](compatibility-matrix-v1.md) 冻结。
 
+### Managed-media schema path
+
+当前 production adapter 允许同一 verified exact release 的受支持恢复，以及 `animemo-db-v1` → `animemo-db-v2` 单跳 forward 恢复。不同 source/target release 时，目标 SemVer 必须严格更高；双方分别回到同一 transport policy 下的 exact release/material authority 验证。备份 source 的 version、commit、channel、deployment digest 与原 contracts 必须符合 verified source，不能用 target identity 改写 source metadata。
+
+双方均须为 deployment schema 2、`v1.1-instance-scoped`、`linux/amd64`，固定 Compose `files` 和 `deploy/` 材料清单相同，postgres/redis 的完整 image 描述相同。程序材料可以随经过验证的 release 改变；这不是任意布局或 datastore 升级协议。
+
+Target 必须显式接受 source DB contract，声明 required additive migration，与 source 保持相同且受支持的 configuration contract；启用 Plugin APIs 必须同时受 source/target 支持。数据库传输仅接受匹配 target platform qualification 的 plain dump；备份 server major、pg_dump major、psql major、target server major 必须一致，qualification 还绑定 target candidate SHA 和 datastore image identities。缺证为 UNSUPPORTED，不按版本猜路径、不跨多个 hop、不降级、不做 PostgreSQL major 转换。
+
+接受计划使用既有 `APPLY_FORWARD_MIGRATION` action，绑定独立 source/target identities。恢复文件和数据库后，target bootstrap 在启动 API 前执行 `reconcile_media_references --apply --all-batches` 并要求 READY。缺行、LOCAL 缺失/损坏字节、owner/origin 歧义、未知用量、未决写入或需新增却无法核验的 R2 URL 持有使恢复停在 `RECOVERY_REQUIRED`，保留恢复状态且不发布。R2 既有直接字段可以在元数据和关系完整时通过此门，但 inventory 的 `UNVERIFIED_REMOTE_BYTES` 标记仍保留，远端 dependency/bytes coverage 必须由 Restore 的相应验证独立证明。
+
 ## 8. Restore plan acceptance
 
 进入 RESTORE 前必须：
@@ -256,6 +266,8 @@ Secret transport 和 redaction 服从 [Migration Secret Envelope v1](migration-s
 - backend/object key 未被猜测或重写；
 - file exists、size/SHA 匹配；
 - owner/mode 和 approved local root 正确。
+
+LOCAL 字节验证还包括持有图：entry/owner/slot/value 必须与对象一致，软删除持有和其他已有图像角色参与保护。`validate_restore_integrity` 的既有 `memory.mi5.destructive_ambiguity` 检查现在要求 `inspect_media_references()` 返回 READY，不新增公开验证字段。`durable.write` 通过实际 `InstallationState` 模型更新同一 authentication epoch 并回滚，缺少安装行时失败。仅成功 import SQL、运行 migration 或完成回填不能替代全部 Restore validation、authentication rotation、Updater adoption 和 publish 门。
 
 ### R2 captured
 

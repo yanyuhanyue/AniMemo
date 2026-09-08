@@ -83,12 +83,16 @@ class FakeRunner:
         self.web_release_identity = {}
         self.web_proxy_ip = "172.30.0.5"
         self.migration_plans = []
+        self.running_services = ["postgres", "redis", "api", "web"]
+        self.ignore_stop = False
 
     def run(self, argv, **kwargs):
         self.calls.append((tuple(argv), kwargs))
         stdout = ""
         if "ps" in argv and "--services" in argv:
-            stdout = "postgres\nredis\napi\nweb\n"
+            stdout = "\n".join(self.running_services) + "\n"
+        elif "stop" in argv and not self.ignore_stop:
+            self.running_services.remove("api")
         elif "ps" in argv and "-q" in argv:
             stdout = f"{argv[-1]}-container\n"
         elif argv[:2] == ["/usr/bin/docker", "inspect"]:
@@ -578,6 +582,43 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
                     "ghcr.io/yanyuhanyue/animemo-api@"
                     + target["images"]["api"]["digest"],
                 )
+
+    def test_quiescence_verifies_instance_and_observes_writer_stopped(self):
+        for negative in (None, "foreign-owner", "unknown-service", "stop-failed", "postgres-missing"):
+            with self.subTest(negative=negative), tempfile.TemporaryDirectory() as directory:
+                deployment, runner, _ = self.make(directory)
+                if negative == "foreign-owner":
+                    runner.container_labels["api"]["io.animemo.instance-id"] = "foreign-instance"
+                elif negative == "unknown-service":
+                    runner.running_services.append("unrecognized-writer")
+                elif negative == "stop-failed":
+                    runner.ignore_stop = True
+                elif negative == "postgres-missing":
+                    runner.running_services.remove("postgres")
+                if negative is None:
+                    deployment.quiesce_database_writers(manifest())
+                    self.assertNotIn("api", runner.running_services)
+                    self.assertIn("postgres", runner.running_services)
+                else:
+                    with self.assertRaises(StateError):
+                        deployment.quiesce_database_writers(manifest())
+                commands = [call[0] for call in runner.calls]
+                if negative in {"foreign-owner", "unknown-service"}:
+                    self.assertFalse(any("stop" in call for call in commands))
+                else:
+                    stops = [call for call in commands if "stop" in call]
+                    self.assertEqual(len(stops), 1)
+                    self.assertEqual(stops[0][-4:], ("stop", "--timeout", "30", "api"))
+
+    def test_v2_bootstrap_reconciles_media_before_application_bootstrap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            target = manifest()
+            target["compatibility"]["database"]["contract"] = "animemo-db-v2"
+            deployment.bootstrap(target)
+            commands = [call[0] for call in runner.calls]
+            self.assertEqual(commands[0][-3:], ("reconcile_media_references", "--apply", "--all-batches"))
+            self.assertEqual(commands[1][-1], "bootstrap")
 
     def test_runtime_contract_inspection_uses_the_running_api_without_mutation(self):
         with tempfile.TemporaryDirectory() as directory:

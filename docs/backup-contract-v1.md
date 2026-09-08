@@ -158,6 +158,8 @@ pg_dump logical plain SQL
 
 `pg_dump` 非零退出、timeout、broken pipe、空输出、gzip/checksum 失败都使整个 Backup 失败。禁止 tar、rsync、snapshot 或复制 live `postgres/` 目录冒充正式 database backup。
 
+媒体 holder 信息属于完整逻辑数据库备份：`MediaObject` 的 backend/key、size/SHA、upload owner、public URL identity、inventory/lifecycle 状态，`JournalMediaReference` 的 entry/owner/slot/value，以及 `MediaWriteReservation` 的占用和清理状态，均随业务条目与软删除状态保留。这不向 Portable Bundle 增加内部对象权威，也不改变 Backup v1 成员格式。LOCAL 文件仍按清单保留校验；缺失字节不能由关系记录重建。旧 schema 备份通过明确 forward 兼容门重建持有，不可把缺表解释为无引用。
+
 ## 9. Filesystem inclusion allowlist
 
 | Source class | Included | Excluded / rule |

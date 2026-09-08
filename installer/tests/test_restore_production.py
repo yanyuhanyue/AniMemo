@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import json
+import copy
 import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from durability import backup, restore, secret_envelope
 from durability.canonical import canonical_json_bytes
+from durability.compatibility import CompatibilityOutcome, Dimension
 from durability.instance import instance_namespace
+from durability.platform import (
+    REQUIRED_CAPABILITIES, REQUIRED_REHEARSALS,
+    canonical_platform_qualification_bytes, finalize_platform_qualification,
+)
 from durability.managed_config import LocalManagedConfigStore
 from installer import restore_production
 from installer.operations import RestoreOperationJournal
@@ -23,6 +30,7 @@ from installer.restore_production import (
 )
 from installer.runtime import (
     InstallerError,
+    InstallOutcome,
     ListenRequest,
     PlatformEvidence,
     ReleaseEvidence,
@@ -47,17 +55,59 @@ class _PgDump:
 
 
 class _Materials:
-    def __init__(self, manifest):
+    """Unit authority/platform fixtures; no live qualification is asserted."""
+
+    def __init__(self, manifest, root):
         self.manifest = manifest
+        self.deployment_contract = {
+            "schemaVersion": 2, "profile": "v1.1-instance-scoped", "platform": "linux/amd64",
+            "files": [{"path": "deploy/docker-compose.yml", "sha256": digest("d")},
+                      {"path": "updater/docker-compose.runtime.yml", "sha256": digest("e")}],
+            "materials": [{"path": "deploy/updater/animemo-updater", "sha256": digest("f"), "size": 10, "mode": 0o755}],
+        }
+        self.qualification = finalize_platform_qualification({
+            "schema": "animemo.platform-qualification/v1", "profile": "v1.1-standard-linux-amd64",
+            "candidateSha": manifest["release"]["commit"],
+            "workflow": {"path": ".github/workflows/platform-qualification.yml", "ref": "refs/heads/main", "sha": manifest["release"]["commit"]},
+            "run": {"id": "1", "attempt": 1}, "observedAt": "2026-09-08T00:00:00Z",
+            "host": {"os": "linux", "architecture": "amd64", "distributionId": "ubuntu", "distributionVersion": "24.04",
+                     "kernel": "unit-fixture", "systemdVersion": "unit-fixture", "dockerVersion": "unit-fixture", "composeVersion": "unit-fixture"},
+            "databasePath": {"dumpFormat": "plain", "sourceServerMajor": 16, "pgDumpMajor": 16, "psqlMajor": 16, "targetServerMajor": 16},
+            "imageDigests": {role: self.image(role) for role in ("postgres", "redis")},
+            "capabilities": {name: True for name in REQUIRED_CAPABILITIES},
+            "rehearsals": {name: "PASS" for name in REQUIRED_REHEARSALS},
+        })
+        root.mkdir(parents=True)
+        self.qualification_path = root / "platform-qualification.json"
+        self.qualification_path.write_bytes(canonical_platform_qualification_bytes(self.qualification))
+
+    def image(self, role):
+        image = self.manifest["images"][role]
+        return image["repository"] + "@" + image["digest"]
+
+    def material(self, relative):
+        if relative != "release/platform-qualification.json":
+            raise AssertionError(relative)
+        return self.qualification_path
 
 
 class _Releases:
-    def __init__(self, manifest):
-        self.materials = _Materials(manifest)
+    def __init__(self, manifest, root, evidence):
+        self.materials = _Materials(manifest, root)
+        self.releases = {evidence.version: (evidence, self.materials)}
+        self.reads = []
 
     def materials_for(self, evidence):
-        del evidence
-        return self.materials
+        registered, materials = self.releases[evidence.version]
+        if registered != evidence:
+            raise InstallerError("INSTALL_RELEASE_CHANGED", outcome=InstallOutcome.VALIDATION_FAILED)
+        return materials
+
+    def read_exact(self, version, *, refresh):
+        self.reads.append((version, refresh))
+        if version not in self.releases:
+            raise InstallerError("INSTALL_RELEASE_VERIFICATION_FAILED", outcome=InstallOutcome.VALIDATION_FAILED)
+        return self.releases[version][0]
 
 
 class _Fresh:
@@ -167,8 +217,8 @@ class ProductionRestorePlanTests(unittest.TestCase):
             },
             "compatibility": {
                 "database": {
-                    "contract": "animemo.database/v1",
-                    "appAccepts": ["animemo.database/v1"],
+                    "contract": "animemo-db-v1",
+                    "appAccepts": ["animemo-db-v1"],
                     "migration": {"required": False, "policy": "none"},
                 },
                 "configuration": {
@@ -177,16 +227,22 @@ class ProductionRestorePlanTests(unittest.TestCase):
                 },
                 "pluginSdk": {"supportedApis": [2]},
             },
+            "minimumUpdaterVersion": "1.0.1",
+            "images": {
+                "postgres": {"repository": "docker.io/library/postgres", "digest": digest("a")},
+                "redis": {"repository": "docker.io/library/redis", "digest": digest("b")},
+            },
         }
+        self.releases = _Releases(self.release_manifest, self.root / "materials", self.release)
         self.port = ProductionRestoreRuntimePort(
-            releases=_Releases(self.release_manifest),
+            releases=self.releases,
             configuration=self.configuration,
             fresh=_Fresh(),
         )
         self.platform = PlatformEvidence(
             compatible=True,
             profile="v1.1-standard-linux-amd64",
-            evidence_digest=digest("4"),
+            evidence_digest=self.releases.materials.qualification.evidence_digest,
             reason_code="PLATFORM_QUALIFIED",
         )
         self.target = TargetEvidence(TargetClass.ABSENT, digest("5"))
@@ -234,7 +290,7 @@ class ProductionRestorePlanTests(unittest.TestCase):
                     "digest": self.release.deployment_identity_digest,
                 },
                 database_contract={
-                    "id": "animemo.database/v1",
+                    "id": "animemo-db-v1",
                     "serverMajor": 16,
                 },
                 configuration_contract={"id": "animemo.configuration/v1"},
@@ -261,6 +317,103 @@ class ProductionRestorePlanTests(unittest.TestCase):
             pg_dump_runner=_PgDump(),
             clock=lambda: next(moments),
         ).path
+
+    def _forward_target(self, label="forward", *, version="v1.1.0-rc.2"):
+        target = replace(self.release, version=version, commit="b" * 40,
+                         manifest_digest=digest("7"), deployment_identity_digest=digest("8"),
+                         material_identity_digest=digest("9"))
+        manifest = copy.deepcopy(self.release_manifest)
+        manifest["release"] = {"version": target.version, "commit": target.commit, "channel": target.channel}
+        manifest["compatibility"]["database"] = {
+            "contract": "animemo-db-v2", "appAccepts": ["animemo-db-v1", "animemo-db-v2"],
+            "migration": {"required": True, "policy": "additive-backward-compatible"},
+        }
+        materials = _Materials(manifest, self.root / ("target-materials-" + label))
+        self.releases.releases[target.version] = (target, materials)
+        platform = replace(self.platform, evidence_digest=materials.qualification.evidence_digest)
+        return target, materials, platform
+
+    def _prepare_target(self, artifact, target, platform, *, operation="d" * 32):
+        return self.port.prepare(operation_id=operation, backup_root=artifact,
+                                 release=target, target=self.target, platform=platform,
+                                 protection=RestoreProtectionRequest(RestoreProtectionKind.NONE))
+
+    def test_forward_plan_retains_distinct_source_and_target_identities(self):
+        artifact = self._backup()
+        original = (artifact / backup.MANIFEST_NAME).read_bytes()
+        target, materials, platform = self._forward_target()
+        evidence = self._prepare_target(artifact, target, platform)
+        plan = self.port._contexts[evidence.operation_id].restore_plan
+        self.assertEqual(plan.decision.outcome, CompatibilityOutcome.REQUIRES_UPGRADE)
+        exact = next(item for item in plan.decision.evaluated_dimensions if item.name is Dimension.EXACT_RELEASE_IDENTITY)
+        self.assertEqual(exact.source["manifestDigest"], self.release.manifest_digest)
+        self.assertEqual(exact.target["manifestDigest"], target.manifest_digest)
+        self.assertNotEqual(exact.source["deploymentDigest"], exact.target["deploymentDigest"])
+        self.assertEqual(len(plan.decision.actions), 1)
+        self.assertEqual(plan.decision.actions[0].output_identity["databaseContract"], "animemo-db-v2")
+        self.assertTrue(self.releases.reads)
+        self.assertTrue(all(refresh for _version, refresh in self.releases.reads))
+        self.assertEqual((artifact / backup.MANIFEST_NAME).read_bytes(), original)
+        self.port.revalidate(evidence)
+        materials.manifest["release"]["commit"] = "c" * 40
+        with self.assertRaises(InstallerError):
+            self.port.revalidate(evidence)
+
+    def test_forward_restore_rejects_unsupported_transitions_before_mutation(self):
+        artifact = self._backup()
+        changes = {
+            "pg-image": lambda m: m.manifest["images"]["postgres"].update(digest=digest("c")),
+            "redis-image": lambda m: m.manifest["images"]["redis"].update(digest=digest("c")),
+            "layout-profile": lambda m: m.deployment_contract.update(profile="unsupported-layout"),
+            "compose": lambda m: m.deployment_contract["files"][0].update(sha256=digest("c")),
+            "launcher": lambda m: m.deployment_contract["materials"][0].update(sha256=digest("c")),
+            "db-accepts": lambda m: m.manifest["compatibility"]["database"].update(appAccepts=["animemo-db-v2"]),
+            "migration-required": lambda m: m.manifest["compatibility"]["database"]["migration"].update(required=False),
+            "migration-none": lambda m: m.manifest["compatibility"]["database"]["migration"].update(policy="none"),
+            "migration-breaking": lambda m: m.manifest["compatibility"]["database"]["migration"].update(policy="breaking-blocked"),
+            "db-multihop": lambda m: m.manifest["compatibility"]["database"].update(contract="animemo-db-v3"),
+            "config": lambda m: m.manifest["compatibility"]["configuration"].update(contract="new-config"),
+            "plugin": lambda m: m.manifest["compatibility"]["pluginSdk"].update(supportedApis=[]),
+            "qualification-missing": lambda m: m.qualification_path.unlink(),
+        }
+        for index, (name, change) in enumerate(changes.items(), start=1):
+            with self.subTest(name=name):
+                target, materials, platform = self._forward_target(name)
+                change(materials)
+                with self.assertRaises(InstallerError):
+                    self._prepare_target(artifact, target, platform, operation=f"{index:032x}")
+        target, _materials, platform = self._forward_target("downgrade", version="v1.0.9-rc.1")
+        with self.assertRaises(InstallerError):
+            self._prepare_target(artifact, target, platform)
+
+    def test_exact_source_unavailable_or_changed_never_falls_back_to_target(self):
+        artifact = self._backup()
+        target, _materials, platform = self._forward_target()
+        original = self.releases.releases.pop(self.release.version)
+        with self.assertRaisesRegex(InstallerError, "RESTORE_EXACT_RELEASE_UNAVAILABLE"):
+            self._prepare_target(artifact, target, platform)
+        self.releases.releases[self.release.version] = (replace(self.release, commit="c" * 40), original[1])
+        with self.assertRaisesRegex(InstallerError, "RESTORE_EXACT_RELEASE_UNAVAILABLE"):
+            self._prepare_target(artifact, target, platform)
+
+    def test_same_version_different_identity_is_rejected(self):
+        artifact = self._backup()
+        target, _materials, platform = self._forward_target(version=self.release.version)
+        with self.assertRaisesRegex(InstallerError, "RESTORE_EXACT_RELEASE_UNAVAILABLE"):
+            self._prepare_target(artifact, target, platform)
+
+    def test_restore_database_path_requires_the_observed_dump_major(self):
+        artifact = self._backup()
+        target, materials, platform = self._forward_target()
+        port = restore_production.ProductionRestoreRelease(self.releases, target)
+        checker = restore_production.ProductionRestoreCompatibility(selected=target, platform=platform,
+                                                                    manifest=materials.manifest, release_port=port)
+        manifest = json.loads((artifact / backup.MANIFEST_NAME).read_bytes())
+        self.assertTrue(checker._database_path(manifest, materials)[0])
+        for field, value in (("serverMajor", 17), ("toolVersion", "pg_dump (PostgreSQL) 17.1"), ("toolVersion", "unverified tool")):
+            changed = copy.deepcopy(manifest)
+            changed["database"][field] = value
+            self.assertFalse(checker._database_path(changed, materials)[0])
 
     def test_none_protection_accepts_distinct_target_instance_identity(self) -> None:
         artifact = self._backup()

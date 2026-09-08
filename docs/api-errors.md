@@ -36,6 +36,10 @@ HTTP status 仍然权威，错误不会被改成 200：400、401、403、404、4
 | `rate_limited` | 429 | 触发限流；等待时间仅通过 `Retry-After` header 返回 |
 | `service_unavailable` | 502/503/504 | 安全服务或外部 provider 暂时不可用 |
 | `storage_exhausted` | 507 | 媒体存储空间不足 |
+| `media_hold_unavailable` | 400 | 无法确认新增托管封面持有条件 |
+| `media_usage_unknown` | 400 | 未知历史用量使本次增加无法核验 |
+| `poster_quota_exceeded` | 400 | 本次净增加超过个人封面配额 |
+| `media_owner_change_denied` | 400 | 拒绝转移条目或媒体所属用户 |
 
 认证流程还会使用已有的 `invalid_credentials`、`session_expired`、`session_revoked`、`two_factor_required` 和 `csrf_failed` 语义。外部账号、导入和同步继续保留已有 domain-specific code，例如 `external_identity_changed`、`sync_preview_stale`、`sync_context_changed`、`unsupported_import_schema` 和 `provider_unavailable`。
 

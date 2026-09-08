@@ -7,7 +7,8 @@ from uuid import UUID
 from config.credentials import CredentialCipher, CredentialCipherError
 from django.contrib.sessions.models import Session
 from django.core.management.base import BaseCommand, CommandError
-from django.db import connection, transaction
+from django.db import transaction
+from django.db.models import F
 from journal.external_sync.canonical import validate_baselines
 from journal.models import (
     ExternalCollectionSyncState,
@@ -23,7 +24,6 @@ from site_config.models import (
     CloudflareR2Account,
     InstallationState,
     MediaStorageBackend,
-    MediaWriteReservation,
     SiteSettings,
 )
 
@@ -100,12 +100,9 @@ class Command(BaseCommand):
     def _durable_write() -> bool:
         try:
             with transaction.atomic():
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "UPDATE site_config_installationstate "
-                        "SET authentication_epoch = authentication_epoch WHERE id = 1"
-                    )
-                    passed = cursor.rowcount == 1
+                passed = InstallationState.objects.filter(pk=1).update(
+                    authentication_epoch=F("authentication_epoch")
+                ) == 1
                 transaction.set_rollback(True)
             return passed
         except Exception:  # noqa: BLE001 - only a stable boolean leaves this probe
@@ -184,9 +181,9 @@ class Command(BaseCommand):
 
     @staticmethod
     def _mi5_destructive_ambiguity() -> bool:
-        return not MediaWriteReservation.objects.filter(
-            status=MediaWriteReservation.Status.PENDING
-        ).exists()
+        from journal.media_inventory import inspect_media_references
+
+        return inspect_media_references()["status"] == "READY"
 
     def handle(self, *args, **options):
         del args, options

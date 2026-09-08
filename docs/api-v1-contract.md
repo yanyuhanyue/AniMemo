@@ -43,17 +43,7 @@ The generated `/api/schema/` document is the exhaustive method-level inventory a
 
 ## Error Contract
 
-All JSON errors use the canonical shape:
-
-```json
-{
-  "code": "validation_error",
-  "detail": "请求参数无效。",
-  "fields": { "title": ["该字段不能为空。"] }
-}
-```
-
-`code` and HTTP status are machine contracts. `detail` is human-readable and may be reworded. `fields` and non-sensitive `metadata` are optional. Every OpenAPI operation references `ApiError` for applicable common statuses and for its default error response. Frontend behavior must branch on `code`, never translated text.
+All JSON errors use the canonical `{code, detail, correlation_id}` shape defined in [API errors](api-errors.md). HTTP status and registered `code` are machine contracts; `detail` is the public message associated with that code. Field details, object identity, size, holders, provider metadata and internal exceptions are not included. Personal errors retain `Cache-Control: private, no-store` and `Vary: Authorization, Cookie`.
 
 ## Pagination And Query Stability
 
@@ -72,12 +62,19 @@ A deleted or recycled entry found during the locked read returns not found;
 an earlier request snapshot cannot reinsert or restore it. Response history and
 identity projections are refreshed while the HTTP mutation holds its lock.
 Mutation events publish after commit, and failed transactions do not publish
-them. Replaced media is removed after commit; a failed media save retains the
-previous reference and cleans the new uncommitted object.
+them. Replacing or clearing media releases only the affected poster business slots. Post-commit cleanup removes the old object only when no authoritative holder, existing image role or unresolved write still protects it. Failed transactions preserve the previous fields, holdings and logical usage and track cleanup of their uncommitted uploads.
 
 The PostgreSQL mutation regression uses independent connections and explicit
 read barriers for disjoint/same-field writes, delete/recycle/restore, media
 replacement and commit/rollback events.
+
+## Managed custom poster URLs
+
+Existing legal `custom_poster_url` input needs no new opt-in field. If server metadata uniquely identifies a same-owner managed LOCAL object and complete bytes can be verified, the mutation creates a durable holding and counts its stored size toward poster quota. Each real poster slot counts once, including soft-deleted entries. Deleting or changing the source entry releases only its slot; other successful holders retain their original URL and bytes.
+
+Third-party, cross-owner and unidentifiable URLs retain link-only behavior. The server does not fetch them, grant additional media access or promise permanent availability. Client stable `poster_file` references, internal UUIDs, object keys and server paths cannot replace an upload. Accepted URLs are not rewritten to internal identities. Full identity, historical-origin, quota and cleanup rules are in [Media Storage Pool](media-storage.md).
+
+The configured quota is unchanged. Historical over-quota usage can remain equal or decrease; new increases fail. Unknown usage is not treated as zero and blocks dependent increases while safe releases and unrelated writes remain available. These failures use the canonical error envelope; no new success-response holding or quota field is introduced.
 
 ## Personal Response Caching
 

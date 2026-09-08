@@ -7,7 +7,7 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from .image_security import sanitize_uploaded_image, schedule_file_delete
 from site_config.models import SiteSettings
 from accounts.models import StaffProfile
-from .models import Column, JournalEntry, UserSettings
+from .models import Column, JournalEntry, JournalMediaReference, UserSettings
 
 @receiver(pre_save, sender=get_user_model())
 def normalize_user_email(sender, instance, raw=False, **_kwargs):
@@ -117,6 +117,13 @@ def cleanup_user_avatar(sender, instance, **kwargs):
 @receiver(post_delete, sender=JournalEntry)
 def cleanup_entry_poster(sender, instance, **kwargs):
     _cleanup_model_file(sender, instance, "poster_file", **kwargs)
+
+
+@receiver(post_delete, sender=JournalMediaReference)
+def cleanup_deleted_media_holding(sender, instance, **kwargs):
+    from .media_references import schedule_media_cleanup
+
+    schedule_media_cleanup(instance.media_id)
 
 
 @receiver(post_delete, sender=Column)

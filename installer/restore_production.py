@@ -12,6 +12,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import stat
@@ -21,6 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
+from packaging.version import Version
 
 from durability import backup, restore
 from durability.canonical import canonical_json_bytes, sha256_identity
@@ -32,6 +34,7 @@ from durability.compatibility import (
     UpgradeAction,
 )
 from durability.instance import InstanceNamespace, instance_locator_digest
+from durability.platform import parse_platform_qualification, PlatformQualificationError
 from durability.managed_config import (
     derive_runtime_environment,
 )
@@ -307,7 +310,7 @@ class ProductionRestoreRelease:
         self.releases = releases
         self.selected = selected
 
-    def verify(self, manifest: Mapping[str, object]) -> restore.ReleaseEvidence:
+    def source_for(self, manifest: Mapping[str, object]):
         source = manifest.get("source")
         if not isinstance(source, Mapping):
             raise RestorePreflightError("RESTORE_RELEASE_IDENTITY_INVALID")
@@ -315,15 +318,41 @@ class ProductionRestoreRelease:
         deployment = source.get("deploymentContract")
         if not isinstance(release, Mapping) or not isinstance(deployment, Mapping):
             raise RestorePreflightError("RESTORE_RELEASE_IDENTITY_INVALID")
-        selected_manifest = self.releases.materials_for(self.selected).manifest
+        target_materials = self.releases.materials_for(self.selected)
+        version = release.get("version")
+        if not isinstance(version, str):
+            raise RestorePreflightError("RESTORE_RELEASE_IDENTITY_INVALID")
+        if version == self.selected.version:
+            source_evidence = self.selected
+            source_materials = target_materials
+        else:
+            reader = getattr(self.releases, "read_exact", None)
+            if reader is None:
+                raise RestorePreflightError("RESTORE_EXACT_RELEASE_UNAVAILABLE")
+            try:
+                source_evidence = reader(version, refresh=True)
+                source_materials = self.releases.materials_for(source_evidence)
+            except InstallerError:
+                raise RestorePreflightError("RESTORE_EXACT_RELEASE_UNAVAILABLE") from None
+        source_manifest = source_materials.manifest
+        selected_manifest = target_materials.manifest
         if (
-            release.get("version") != self.selected.version
-            or release.get("commit") != self.selected.commit
-            or deployment.get("digest") != self.selected.deployment_identity_digest
+            release.get("version") != source_evidence.version
+            or release.get("commit") != source_evidence.commit
+            or release.get("channel", source_evidence.channel) != source_evidence.channel
+            or deployment.get("digest") != source_evidence.deployment_identity_digest
+            or source_manifest["release"]["version"] != source_evidence.version
+            or source_manifest["release"]["commit"] != source_evidence.commit
+            or source_evidence.transport_source != self.selected.transport_source
+            or source_evidence.transport_policy_identity != self.selected.transport_policy_identity
             or selected_manifest["release"]["version"] != self.selected.version
             or selected_manifest["release"]["commit"] != self.selected.commit
         ):
             raise RestorePreflightError("RESTORE_EXACT_RELEASE_UNAVAILABLE")
+        return source_evidence, source_materials, target_materials
+
+    def verify(self, manifest: Mapping[str, object]) -> restore.ReleaseEvidence:
+        self.source_for(manifest)
         return restore.ReleaseEvidence(
             release_identity_digest=self.selected.manifest_digest,
             deployment_identity_digest=self.selected.deployment_identity_digest,
@@ -384,10 +413,63 @@ class ProductionRestoreCompatibility:
         selected: ReleaseEvidence,
         platform: PlatformEvidence,
         manifest: Mapping[str, object],
+        release_port: ProductionRestoreRelease,
     ) -> None:
         self.selected = selected
         self.platform = platform
         self.release_manifest = manifest
+        self.release_port = release_port
+
+    @staticmethod
+    def _release_identity(evidence):
+        return {
+            "version": evidence.version, "commit": evidence.commit,
+            "manifestDigest": evidence.manifest_digest,
+            "deploymentDigest": evidence.deployment_identity_digest,
+            "materialsDigest": evidence.material_identity_digest,
+        }
+
+    @staticmethod
+    def _same_layout(source, target):
+        # Full identity is verified for both material sets. Only these existing
+        # layout invariants may remain equal while versioned program bytes change.
+        before, after = source.deployment_contract, target.deployment_contract
+        if any(contract.get("schemaVersion") != 2
+               or contract.get("profile") != "v1.1-instance-scoped"
+               or contract.get("platform") != "linux/amd64"
+               for contract in (before, after)):
+            return False
+        if before.get("files") != after.get("files"):
+            return False
+        def deployment_files(contract):
+            return [item for item in contract.get("materials", []) if item.get("path", "").startswith("deploy/")]
+        return deployment_files(before) == deployment_files(after)
+
+    def _database_path(self, backup_manifest, target_materials):
+        try:
+            qualification = parse_platform_qualification(
+                target_materials.material("release/platform-qualification.json").read_bytes()
+            )
+            database = backup_manifest["database"]
+            tool = re.fullmatch(r"pg_dump \(PostgreSQL\) (\d+)(?:[.][^\r\n ]+)?(?: [^\r\n]*)?", database["toolVersion"])
+            path = qualification.database_path
+            supported = (
+                self.platform.compatible
+                and self.platform.profile == qualification.profile
+                and self.platform.evidence_digest == qualification.evidence_digest
+                and qualification.candidate_sha == self.selected.commit
+                and qualification.image_digests["postgres"] == target_materials.image("postgres")
+                and qualification.image_digests["redis"] == target_materials.image("redis")
+                and database["dumpProfile"]["format"] == "plain"
+                and path.dump_format == "plain"
+                and tool is not None
+                and database["serverMajor"] == path.source_server_major
+                and int(tool.group(1)) == path.pg_dump_major
+                and path.source_server_major == path.pg_dump_major == path.psql_major == path.target_server_major
+            )
+            return supported, {"databasePath": path.as_dict(), "qualificationDigest": qualification.evidence_digest}
+        except (OSError, ValueError, KeyError, TypeError, PlatformQualificationError):
+            return False, {"qualification": "UNAVAILABLE_OR_UNSUPPORTED"}
 
     @staticmethod
     def _assessment(
@@ -414,6 +496,10 @@ class ProductionRestoreCompatibility:
         source_config = source.get("configurationContract")
         source_deployment = source.get("deploymentContract")
         compatibility = self.release_manifest["compatibility"]
+        source_release, source_materials, target_materials = self.release_port.source_for(manifest)
+        if release_evidence != self.release_port.verify_for_selected():
+            raise RestorePreflightError("RESTORE_RELEASE_CHANGED")
+        source_compatibility = source_materials.manifest["compatibility"]
         target_db = compatibility["database"]
         target_config = compatibility["configuration"]
         if not all(
@@ -426,13 +512,34 @@ class ProductionRestoreCompatibility:
         db_target = target_db["contract"]
         config_target = target_config["contract"]
         actions: tuple[UpgradeAction, ...] = ()
-        if db_id == db_target:
+        source_contracts_supported = (
+            db_id in source_compatibility["database"]["appAccepts"]
+            and config_id in source_compatibility["configuration"]["appAccepts"]
+        )
+        plugins = set(source.get("pluginSdkApis", []))
+        plugin_contracts = [
+            {f"animemo.plugin/v{api}" for api in item["pluginSdk"]["supportedApis"]}
+            for item in (source_compatibility, compatibility)
+        ]
+        source_contracts_supported = source_contracts_supported and all(plugins <= supported for supported in plugin_contracts)
+        same_release = source_release == self.selected
+        one_hop = (db_id, db_target) == ("animemo-db-v1", "animemo-db-v2")
+        forward_version = Version(self.selected.version.removeprefix("v")) > Version(source_release.version.removeprefix("v"))
+        path_supported = same_release or (one_hop and forward_version)
+        layout_supported = (
+            self._same_layout(source_materials, target_materials)
+            and source_deployment.get("schemaVersion") == 2
+            and all(source_materials.manifest["images"][role] == target_materials.manifest["images"][role]
+                    for role in ("postgres", "redis"))
+        )
+        platform_supported, database_path = self._database_path(manifest, target_materials)
+        if db_id == db_target and db_id in target_db["appAccepts"]:
             schema_outcome = CompatibilityOutcome.COMPATIBLE
             schema_reason = ReasonCode.SCHEMA_CONTRACTS_SUPPORTED
         elif (
-            db_id in target_db["appAccepts"]
+            one_hop and db_id in target_db["appAccepts"]
             and target_db["migration"]["required"] is True
-            and target_db["migration"]["policy"] == "forward-only"
+            and target_db["migration"]["policy"] == "additive-backward-compatible"
         ):
             schema_outcome = CompatibilityOutcome.REQUIRES_UPGRADE
             schema_reason = ReasonCode.SCHEMA_MIGRATION_REQUIRED
@@ -440,25 +547,32 @@ class ProductionRestoreCompatibility:
                 UpgradeAction(
                     order=1,
                     kind="APPLY_FORWARD_MIGRATION",
-                    input_identity={"databaseContract": db_id},
-                    output_identity={"databaseContract": db_target},
+                    input_identity={"databaseContract": db_id, "configurationContract": config_id,
+                                    "manifestDigest": source_release.manifest_digest},
+                    output_identity={"databaseContract": db_target, "configurationContract": config_target},
                     required_release_identity={
-                        "manifestDigest": self.selected.manifest_digest
+                        **self._release_identity(self.selected),
+                        "minimumUpdaterVersion": self.release_manifest["minimumUpdaterVersion"],
+                        "validation": "media-reference-inventory-ready-before-bootstrap",
                     },
                 ),
             )
         else:
             schema_outcome = CompatibilityOutcome.UNSUPPORTED
             schema_reason = ReasonCode.SCHEMA_CONTRACT_UNSUPPORTED
-        if config_id not in target_config["appAccepts"]:
+        if (not source_contracts_supported or config_id != config_target
+            or config_id not in target_config["appAccepts"]):
             schema_outcome = CompatibilityOutcome.UNSUPPORTED
             schema_reason = ReasonCode.SCHEMA_CONTRACT_UNSUPPORTED
             actions = ()
+        if not (layout_supported and platform_supported and path_supported):
+            actions = ()
+        ordered_path = bool(actions)
         dimensions = (
             self._assessment(
                 Dimension.DEPLOYMENT_CONTRACT,
-                CompatibilityOutcome.COMPATIBLE,
-                ReasonCode.DEPLOYMENT_CONTRACT_SUPPORTED,
+                CompatibilityOutcome.COMPATIBLE if layout_supported else CompatibilityOutcome.UNSUPPORTED,
+                ReasonCode.DEPLOYMENT_CONTRACT_SUPPORTED if layout_supported else ReasonCode.DEPLOYMENT_CONTRACT_UNSUPPORTED,
                 {"digest": source_deployment.get("digest")},
                 {"digest": release_evidence.deployment_identity_digest},
             ),
@@ -473,20 +587,22 @@ class ProductionRestoreCompatibility:
                 Dimension.EXACT_RELEASE_IDENTITY,
                 CompatibilityOutcome.COMPATIBLE,
                 ReasonCode.RELEASE_IDENTITY_VERIFIED,
-                {"manifestDigest": release_evidence.release_identity_digest},
-                {"manifestDigest": self.selected.manifest_digest},
+                self._release_identity(source_release),
+                self._release_identity(self.selected),
             ),
             self._assessment(
                 Dimension.PLATFORM_RUNTIME,
-                CompatibilityOutcome.COMPATIBLE,
-                ReasonCode.PLATFORM_RUNTIME_SUPPORTED,
-                {"profile": self.platform.profile},
+                CompatibilityOutcome.COMPATIBLE if platform_supported else CompatibilityOutcome.UNSUPPORTED,
+                ReasonCode.PLATFORM_RUNTIME_SUPPORTED if platform_supported else ReasonCode.PLATFORM_RUNTIME_UNSUPPORTED,
+                {"profile": self.platform.profile, **database_path},
                 {"evidenceDigest": self.platform.evidence_digest},
             ),
             self._assessment(
                 Dimension.SUPPORTED_PATH,
-                CompatibilityOutcome.COMPATIBLE,
-                ReasonCode.DIRECT_PATH_SUPPORTED,
+                (CompatibilityOutcome.REQUIRES_UPGRADE if ordered_path else CompatibilityOutcome.COMPATIBLE)
+                if path_supported else CompatibilityOutcome.UNSUPPORTED,
+                (ReasonCode.ORDERED_PATH_REQUIRED if ordered_path else ReasonCode.DIRECT_PATH_SUPPORTED)
+                if path_supported else ReasonCode.SUPPORTED_PATH_UNAVAILABLE,
                 {"mode": "restore-to-new"},
                 {"destination": destination.classification.value},
             ),
@@ -1040,6 +1156,7 @@ class ProductionRestoreRuntimePort:
                 selected=release,
                 platform=platform,
                 manifest=self.releases.materials_for(release).manifest,
+                release_port=release_port,
             ),
             database=ProductionRestoreDatabase(mutation),
             mutation=mutation,
@@ -1052,6 +1169,8 @@ class ProductionRestoreRuntimePort:
                 error.code,
                 outcome=InstallOutcome.VALIDATION_FAILED,
             ) from None
+        if restore_plan.decision.outcome in {CompatibilityOutcome.UNSUPPORTED, CompatibilityOutcome.CORRUPT}:
+            raise InstallerError("RESTORE_COMPATIBILITY_REJECTED", outcome=InstallOutcome.COMPATIBILITY_BLOCKED)
         evidence = RestorePlanEvidence(
             operation_id=operation_id,
             instance_id=restore_plan.instance_id,

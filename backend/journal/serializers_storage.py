@@ -220,7 +220,7 @@ class MediaStorageBackendSerializer(serializers.ModelSerializer):
         if instance is None or not (
             instance.media_objects.exists()
             or instance.media_write_reservations.filter(
-                status="pending",
+                status__in=["pending", "cleanup_ready", "cleanup_failed"],
             ).exists()
         ):
             return

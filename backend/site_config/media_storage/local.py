@@ -1,7 +1,6 @@
 import io
 import os
 import shutil
-import tempfile
 import uuid
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -94,8 +93,9 @@ class DynamicLocalBackend:
         replaced = False
         try:
             target = self.path_for(key, create_parent=True)
-            descriptor, temporary = tempfile.mkstemp(prefix=".upload-", dir=target.parent)
-            with os.fdopen(descriptor, "wb") as output:
+            token = getattr(self, "reservation_id", None) or uuid.uuid4()
+            temporary = self.upload_temporary_path(key, token)
+            with temporary.open("xb") as output:
                 if hasattr(os, "fchmod"):
                     os.fchmod(output.fileno(), PUBLIC_FILE_MODE)
                 output.write(content)
@@ -114,6 +114,23 @@ class DynamicLocalBackend:
                 except OSError:
                     pass
             raise MediaStorageOffline(safe_error_summary(error)) from error
+
+    def upload_temporary_path(self, key, reservation_id):
+        token = uuid.UUID(str(reservation_id)).hex
+        return self.path_for(key).parent / (".upload-" + token)
+
+    def delete_owned_write(self, key, reservation_id):
+        """Retry both exact locations owned by one completed upload attempt."""
+        errors = []
+        for path in (self.path_for(key), self.upload_temporary_path(key, reservation_id)):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                errors.append(error)
+        if errors:
+            raise MediaStorageOffline(safe_error_summary(errors[0])) from errors[0]
 
     def open(self, key):
         try:

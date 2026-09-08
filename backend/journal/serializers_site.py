@@ -8,7 +8,7 @@ from django.db.models import Count, Q
 from rest_framework import serializers
 
 from site_config.models import SiteSettings
-from site_config.media_storage.storage import cleanup_uncommitted_media_reference, mark_media_reference_committed
+from site_config.media_storage.storage import atomic_media_mutation, mark_media_reference_committed
 
 from .image_security import delete_replaced_file, sanitize_uploaded_image
 
@@ -49,6 +49,8 @@ class SiteSettingsSerializer(serializers.ModelSerializer):
         }
 
     def validate_site_avatar(self, value):
+        if value is None:
+            return None
         return sanitize_uploaded_image(
             value,
             max_bytes=settings.AVATAR_UPLOAD_MAX_BYTES,
@@ -59,13 +61,12 @@ class SiteSettingsSerializer(serializers.ModelSerializer):
             output_max_height=1024,
         )
 
+    @atomic_media_mutation()
     def update(self, instance, validated_data):
         previous_file = instance.site_avatar if "site_avatar" in validated_data else None
-        try:
-            instance = super().update(instance, validated_data)
-        except Exception:
-            cleanup_uncommitted_media_reference(getattr(instance.site_avatar, "name", ""))
-            raise
+        for name, value in validated_data.items():
+            setattr(instance, name, value)
+        instance.save(update_fields=set(validated_data) | {"updated_at"})
         mark_media_reference_committed(getattr(instance.site_avatar, "name", ""))
         delete_replaced_file(previous_file, instance.site_avatar)
         return instance
@@ -216,7 +217,7 @@ class StaffSiteSettingsSerializer(SiteSettingsSerializer):
         clear_api_key = validated_data.pop("clear_resend_api_key", False)
         turnstile_secret = validated_data.pop("turnstile_secret", "")
         clear_turnstile_secret = validated_data.pop("clear_turnstile_secret", False)
-        with transaction.atomic():
+        with atomic_media_mutation():
             instance = super().update(instance, validated_data)
             update_fields = set()
             if clear_api_key:

@@ -138,6 +138,8 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         return _validate_poster_url(value)
 
     def validate_poster_file(self, value):
+        if value is None:
+            return None
         sanitized = sanitize_uploaded_image(
             value,
             max_bytes=settings.POSTER_UPLOAD_MAX_BYTES,
@@ -148,20 +150,6 @@ class JournalEntrySerializer(serializers.ModelSerializer):
             output_max_height=2400,
             output_quality=88,
         )
-        request = self.context.get("request")
-        user = getattr(request, "user", None)
-        if user and user.is_authenticated:
-            total = 0
-            queryset = user.journal_entries.exclude(pk=getattr(self.instance, "pk", None))
-            for entry in queryset.only("poster_file"):
-                if not entry.poster_file:
-                    continue
-                try:
-                    total += entry.poster_file.size
-                except (OSError, ValueError):
-                    continue
-            if total + sanitized.size > settings.POSTER_STORAGE_QUOTA_BYTES:
-                raise serializers.ValidationError("个人封面存储已达到 500MB 配额。")
         return sanitized
 
     @extend_schema_field(OpenApiTypes.URI)
@@ -265,7 +253,11 @@ class JournalEntrySerializer(serializers.ModelSerializer):
         elif replacing_with_url:
             validated_data["poster_file"] = None
         with atomic_media_mutation():
-            instance = super().update(instance, validated_data)
+            # Explicit fields prevent a non-media save from replaying cached
+            # image values after another transaction replaced them.
+            for name, value in validated_data.items():
+                setattr(instance, name, value)
+            instance.save(update_fields=set(validated_data) | {"updated_at"})
             mark_media_reference_committed(getattr(instance.poster_file, "name", ""))
             delete_replaced_file(previous_file, instance.poster_file)
         return instance

@@ -71,6 +71,14 @@ Stable Manifest 保留 RC 的应用 commit、四镜像 identity、deployment con
 
 Agent 不把 Django migration 文件号当 database schema version，不执行 reverse migration，不自动 restore database。迁移成功后若新应用 health 失败，仅在 PREVIOUS 接受全部 live database/configuration/Plugin SDK contracts 时回退应用；应用回退只替换 API/Web，live 数据与配置契约保持不变。
 
+媒体持有 schema 声明 `animemo-db-v2`，应用接受 `animemo-db-v1` 和 `animemo-db-v2`，迁移 policy 为 `additive-backward-compatible`，application rollback 为 `conditional`，最低 Updater 为 `1.0.1`。additive schema 不代表旧清理器理解新 holder。live contract 为 v2 后，未接受 v2 的旧 Manifest 必须判为 Unsafe Downgrade。
+
+如果目标 database contract 不在 CURRENT 的 `appAccepts` 中，executor 在持久化 pending database transition 后、migration 前执行固定 writer 屏障。它只接受既有 postgres/redis/api/web 服务集合，验证并停止旧 api，再重读确认 api 已停止且 postgres 仍在；未知服务、stop 失败或 writer 仍运行时不得迁移。目标 v2 bootstrap 先完成 media reference backfill 并要求 READY，随后才启动目标应用。备份期间的临时停写不能替代迁移屏障。
+
+Migration 或 bootstrap 失败进入 `manual_recovery_required`，保留数据库与 holder，不反向迁移，不恢复忽略 holder 的旧 writer。只有接受 live contracts 的应用可提供后续读取和安全释放。`reconcile` 仍按 exact operation、真实 migration snapshot和CURRENT兼容性裁决；如果CURRENT拒绝已提交v2，它保持阻断，不自动选择新目标。需要兼容的 fix-forward 发布与受控恢复步骤，不能手改 live contract、删除 holder/schema 或绕过 barrier 来启动旧应用。
+
+Reverse migration 同样受实际保护：存在任何 `JournalMediaReference` 时不移除 holder schema；存在 `MediaObject` 或占用中的物理回执时不移除 lifecycle schema。新表/列和历史证明必须保留。
+
 ## Operation lifecycle
 
 每次 apply/rollback 都先创建持久 Operation，HTTP/RPC 调用立即返回；后台线程更新 journal。全局跨进程 lock 防止 update/rollback 并发执行。
@@ -83,6 +91,7 @@ idle
 → backup (when migration is required)
 → pulling
 → migrating (when required)
+→ bootstrapping
 → switching
 → verifying_health
 → succeeded
@@ -99,7 +108,9 @@ Preflight 固定检查至少 2 GiB 可用磁盘、至少 512 MiB `MemAvailable`�
 ```text
 pull API@sha256
 pull Web@sha256
-optional migration job
+record database transition, then stop incompatible CURRENT API writer
+optional forward migration job
+media reference READY gate for animemo-db-v2
 bootstrap job
 up --no-deps --force-recreate api web
 stable health observations
