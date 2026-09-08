@@ -168,6 +168,14 @@ pg_dump logical plain SQL
 | Plugins | DB-referenced package CAS、user-uploaded package bytes 与明确登记的 plugin durable content | `runtime/` 由 DB + verified CAS 重建；`previews/`、`staging/`、`.locks/` 与临时解压不迁移 |
 | Local media | `media/` 下所有 regular files，逐文件 path/size/SHA/mode；验证 DB-referenced MediaObject bytes | 不删除 unknown local file；未分类文件必须在 Manifest 中标为 preserved-unreferenced，不能静默遗漏 |
 | Private | 仅由 Backup Contract registry 识别的 durable private member | plaintext `setup-code`、临时文件与未知 private member 不进入 Backup；未知项阻断 finalize |
+
+Portable Bundle 恢复上传使用固定 `<dataRoot>/bundle-restore-staging`，不属于
+`filesystem/private`，也不加入 durable private registry 或 Backup v1 payload。
+该目录只由 API 使用，0700、10001:10001，块文件为 0600，Web 没有挂载。
+Backup 的 PostgreSQL dump 保留会话和完成收据；暂存字节不随之恢复。
+Restore-to-New 在已验证的新目标上使未完成会话失效，保留 completed 收据，
+用户需要重新上传原数据包。暂存仍存在时，正常 Backup 不应将其作为未知
+private 成员拒绝，也不能递归复制该目录或将其提升为 durable payload。
 | Updater locator | source locator identity/digest，供 Restore 规划 | source absolute roots 不能直接发布为 target locator |
 | Release slots/history | 仅 validated Manifest/deployment/checksum identity 与必要 history | 不把 embedded metadata 当 Release Authority |
 | Operation/plan/runtime state | durable journal、PENDING/recovery barrier、runtime contracts 与 enabled Plugin APIs | 不丢弃或改写状态；raw logs 不进入 Backup |

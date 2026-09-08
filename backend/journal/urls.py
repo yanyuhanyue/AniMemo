@@ -22,6 +22,11 @@ from .entry_views import (
     UserSettingsView,
 )
 from .import_export_views import ExportEntriesView, ImportEntriesView
+from .data_bundle.restore_views import (
+    BundleRestoreCancelView, BundleRestoreChunkView, BundleRestoreCommitView,
+    BundleRestoreCreateView, BundleRestoreCurrentView, BundleRestoreStatusView,
+    BundleRestoreValidateView,
+)
 from .public_views import (
     FeaturedColumnsView,
     PublicCatalogSearchView,
@@ -65,6 +70,13 @@ urlpatterns = [
     path("settings/me/", UserSettingsView.as_view(), name="settings"),
     path("public-journal/status/", PublicJournalStatusView.as_view(), name="public-journal-status"),
     path("import/", ImportEntriesView.as_view(), name="import"),
+    path("bundle-restores/", BundleRestoreCreateView.as_view(), name="bundle-restore-create"),
+    path("bundle-restores/current/", BundleRestoreCurrentView.as_view(), name="bundle-restore-current"),
+    path("bundle-restores/<uuid:session_id>/", BundleRestoreStatusView.as_view(), name="bundle-restore-status"),
+    path("bundle-restores/<uuid:session_id>/chunks/", BundleRestoreChunkView.as_view(), name="bundle-restore-chunk"),
+    path("bundle-restores/<uuid:session_id>/validate/", BundleRestoreValidateView.as_view(), name="bundle-restore-validate"),
+    path("bundle-restores/<uuid:session_id>/commit/", BundleRestoreCommitView.as_view(), name="bundle-restore-commit"),
+    path("bundle-restores/<uuid:session_id>/cancel/", BundleRestoreCancelView.as_view(), name="bundle-restore-cancel"),
     path("export/", ExportEntriesView.as_view(), name="export"),
     path("showcase/<uuid:public_slug>/", PublicShowcaseView.as_view(), name="showcase"),
     path("showcases/", PublicShowcaseListView.as_view(), name="showcase-list"),

@@ -147,6 +147,22 @@ Artifact structure、authentication、checksum、database stream 或 member iden
 
 当前 production adapter 允许同一 verified exact release 的受支持恢复，以及 `animemo-db-v1` → `animemo-db-v2` 单跳 forward 恢复。不同 source/target release 时，目标 SemVer 必须严格更高；双方分别回到同一 transport policy 下的 exact release/material authority 验证。备份 source 的 version、commit、channel、deployment digest 与原 contracts 必须符合 verified source，不能用 target identity 改写 source metadata。
 
+Portable Bundle 恢复会话为 `animemo-db-v2` 的 additive migration。另允许一条
+严格向前的 v2 → v2 路径：两个已验证的 runtime Compose 之间仅增加固定
+`BUNDLE_RESTORE_ROOT=/app/runtime/bundle-restore-staging` 和 API/作业的
+`<dataRoot>/bundle-restore-staging` 挂载；其余 Compose 字节、部署文件与
+`deploy/` 材料必须相同。该路径明确执行 forward migration；原 v1 → v2
+路径也可接受这一个固定布局转换。其它布局变化、版本倒退或迁移策略放宽
+继续拒绝，不通过忽略 source 材料摘要来宣布兼容。
+
+新目标的 stage 根由 Installer 创建为 0700、10001:10001，不恢复源 stage
+字节。API 启动前，控制器在 exact target API 镜像内确认
+`invalidate_restored_bundle_sessions` 属于 journal、
+`journal.0009_bundle_restore_sessions` 已应用且会话表存在，再调用该命令。
+命令只在目标 stage 已验证为空时使未完成会话失效、释放对应暂存占用，
+并保留 completed 收据。旧目标没有这个已验证布局时不调用新命令；普通
+升级也不调用失效命令。命令、schema 或空目录检查失败均阻断 Restore 启动。
+
 双方均须为 deployment schema 2、`v1.1-instance-scoped`、`linux/amd64`，固定 Compose `files` 和 `deploy/` 材料清单相同，postgres/redis 的完整 image 描述相同。程序材料可以随经过验证的 release 改变；这不是任意布局或 datastore 升级协议。
 
 Target 必须显式接受 source DB contract，声明 required additive migration，与 source 保持相同且受支持的 configuration contract；启用 Plugin APIs 必须同时受 source/target 支持。数据库传输仅接受匹配 target platform qualification 的 plain dump；备份 server major、pg_dump major、psql major、target server major 必须一致，qualification 还绑定 target candidate SHA 和 datastore image identities。缺证为 UNSUPPORTED，不按版本猜路径、不跨多个 hop、不降级、不做 PostgreSQL major 转换。

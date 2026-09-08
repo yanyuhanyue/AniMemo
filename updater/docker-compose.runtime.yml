@@ -4,6 +4,7 @@ x-effective-release: &effective-release
   ANIMEMO_RELEASE_CHANNEL: ${ANIMEMO_RELEASE_CHANNEL:?verified release channel is required}
   ANIMEMO_DATABASE_CONTRACT: ${ANIMEMO_DATABASE_CONTRACT:?verified database contract is required}
   ANIMEMO_CONFIGURATION_CONTRACT: ${ANIMEMO_CONFIGURATION_CONTRACT:?verified configuration contract is required}
+  BUNDLE_RESTORE_ROOT: /app/runtime/bundle-restore-staging
 
 x-instance-labels: &instance-labels
   io.animemo.instance-name: ${ANIMEMO_INSTANCE_NAME:?ANIMEMO_INSTANCE_NAME is required}
@@ -19,6 +20,7 @@ x-api-runtime: &api-runtime
     - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/backups:/app/backups
     - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/media:/data/animemo/media
     - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/private:/app/runtime/private
+    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/bundle-restore-staging:/app/runtime/bundle-restore-staging
 
 services:
   postgres:
@@ -50,6 +52,7 @@ services:
       - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/backups:/app/backups
       - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/media:/data/animemo/media
       - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/private:/app/runtime/private
+      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/bundle-restore-staging:/app/runtime/bundle-restore-staging
       - ${ANIMEMO_UPDATER_RUNTIME_ROOT:?ANIMEMO_UPDATER_RUNTIME_ROOT is required}:/run/animemo-updater:rw
     labels: *instance-labels
 
