@@ -28,7 +28,9 @@ HTTP JSON、JSON 文件和直接调用的 preview/import service 共用完整预
 | 标签颜色 | 普通写入校验 JSON 对象，恢复共用校验并兼容历史上 Core 已接受的空 JSON 值与键值对数组，原样保存。对象内保留既有 JSON 值；不额外收紧为 30 项或 20 字符。复杂颜色值与其他条目数据共同受总字节预算约束；Core 无法读取的非对象在写入前拒绝。 |
 | 外部身份 | provider 50 字符、external_id 200 字符、规范 URL 1000 字符；metadata 为有效 JSON 对象，与所有其他字段共同受完整 bundle 的 UTF-8 字节预算约束；schema version 为 1–32767。每条目同 provider 唯一、最多一个 metadata source，同一目标用户的 provider/external_id 唯一。 |
 | 观看记录 | 每条目最多 500 条；刷次/话数为 1–32767；日期标签 80 字符、刷次标签 20 字符；备注最多 20 条、每条 500 字符；metadata 最多 4096 字节。使用 Core 的内容等价与冲突规则，等价重试归并，不等价记忆在写入前拒绝。 |
-| 媒体 | 远程封面、自定义封面、百科 URL 最多 1000 字符；封面沿用可信来源规则。恢复不下载媒体，也不读取或嵌入本地封面文件。 |
+| 媒体 | 远程封面、自定义封面、百科 URL 最多 1000 字符；封面沿用可信来源规则。导入不下载 URL 或把图片字节嵌入包。当前实例、同 owner 的可识别托管 URL 经统一持有边界验证已有 LOCAL 字节、建立关系并计入逻辑额度；其他链接保持 link-only。 |
+
+托管 URL 的 owner 来自当前认证或明确服务身份，包内不携带持有授权。`poster_file` 稳定引用、内部 UUID、服务器 key、路径和图片字节不加入 v1 schema。后期某条目因持有或额度准入失败时，同次导入的条目、关系和用量全部回滚。跨实例或跨 owner URL 不认领源对象；同步 2 MiB 预算、空手账要求和大包恢复缺口保持原合同。
 
 bundle、item、entry、external identity 和 watch history 的顶层未知字段均拒绝；扩展数据应放在已有 `metadata` 内。owner 由当前认证用户决定，不能由数据包指定。导入保留领域字段、关系和顺序；本地 ID、share slug、创建/更新时间与 `exported_at` 可重新生成。
 

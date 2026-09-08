@@ -19,3 +19,16 @@ The package blob SHA-256 remains unchanged in purpose: it addresses the exact
 content does not merge CAS blobs generally. During official sync, an equivalent
 new archive is simply not stored for an existing `slug + version`; the historical
 blob remains authoritative.
+
+Package storage and garbage collection serialize on the same blob SHA lock.
+Storage keeps that lock until the blob registration commits; version uploads
+and official registration commit the protecting version in the same boundary.
+GC rechecks the row and its references under that lock before removing bytes.
+A rolled-back GC deletion restores the canonical file from its tombstone.
+
+The host's standalone blob-store and GC services must own their transaction
+commit. They reject an enclosing application transaction or manually disabled
+autocommit before changing package bytes. Business registration uses the shared
+internal transaction boundary; callers must not register a version after a
+standalone store inside a separate transaction. Publication follows the completed
+official registration transaction.

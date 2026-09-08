@@ -2,9 +2,9 @@ import os
 
 from django.conf import settings
 from django.core.files.storage import FileSystemStorage, default_storage
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
-from site_config.models import SiteSettings
+from site_config.models import MediaObject, MediaWriteReservation, SiteSettings
 from journal.models import Column, JournalEntry, UserSettings
 
 
@@ -18,6 +18,9 @@ class Command(BaseCommand):
         if not isinstance(default_storage, FileSystemStorage):
             self.stdout.write("当前媒体存储不是本地 FileSystemStorage，命令只执行数据库引用审计，不枚举远程对象。")
             return
+
+        if options["delete"] and (MediaObject.objects.exists() or MediaWriteReservation.objects.exclude(status="abandoned").exists()):
+            raise CommandError("存在托管媒体或写入保护，不能使用旧路径清理器删除文件。")
 
         referenced = set()
         for queryset, field_name in (

@@ -622,6 +622,17 @@ class ProductionReleasePort:
         *,
         refresh: bool,
     ) -> ReleaseEvidence:
+        return self._resolve(selector, refresh=refresh, select=True)
+
+    def read_exact(self, version: str, *, refresh: bool = True) -> ReleaseEvidence:
+        """Verify one source release without changing the selected target.
+
+        The existing source owns transport and authority. In particular, a
+        single-version offline bundle cannot fall back to a network reader.
+        """
+        return self._resolve(ReleaseSelector(version=version), refresh=refresh, select=False)
+
+    def _resolve(self, selector: ReleaseSelector, *, refresh: bool, select: bool) -> ReleaseEvidence:
         if selector.version is not None:
             version = selector.version
         else:
@@ -646,6 +657,8 @@ class ProductionReleasePort:
                 "INSTALL_RELEASE_VERIFICATION_FAILED",
                 outcome=InstallOutcome.VALIDATION_FAILED,
             ) from None
+        if manifest["release"]["version"] != version:
+            raise InstallerError("INSTALL_RELEASE_VERSION_MISMATCH", outcome=InstallOutcome.VALIDATION_FAILED)
         if selector.channel is not None:
             requested = selector.channel
             actual = str(manifest["release"]["channel"])
@@ -667,17 +680,15 @@ class ProductionReleasePort:
             transport_policy_identity=self.transport_policy.identity,
         )
         self._materials[evidence.manifest_digest] = materials
-        self._latest = materials
-        self._latest_evidence = evidence
+        if select:
+            self._latest = materials
+            self._latest_evidence = evidence
         return evidence
 
     def materials_for(self, evidence: ReleaseEvidence) -> VerifiedReleaseMaterials:
         materials = self._materials.get(evidence.manifest_digest)
         if materials is None:
-            refreshed = self.resolve(
-                ReleaseSelector(version=evidence.version),
-                refresh=True,
-            )
+            refreshed = self.read_exact(evidence.version, refresh=True)
             if refreshed.as_dict() != evidence.as_dict():
                 raise InstallerError(
                     "INSTALL_RELEASE_CHANGED",
@@ -686,6 +697,12 @@ class ProductionReleasePort:
             materials = self._materials[evidence.manifest_digest]
         for identity in materials.verified.files:
             materials.material(identity.path)
+        if (
+            _manifest_digest(materials.manifest) != evidence.manifest_digest
+            or materials.identity_digest != evidence.material_identity_digest
+            or materials.manifest["deployment"]["contractSha256"] != evidence.deployment_identity_digest
+        ):
+            raise InstallerError("INSTALL_RELEASE_CHANGED", outcome=InstallOutcome.VALIDATION_FAILED)
         return materials
 
     def acquire_images(self, evidence: ReleaseEvidence) -> ImageAcquisitionReceipt:

@@ -720,12 +720,18 @@ class FirstRunProvisionCliTests(SimpleTestCase):
             self.assertNotIn("Traceback", public_text)
 
 
+def restore_latest_schema():
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes())
+
+
 class InstallationStateMigrationTests(TransactionTestCase):
     migrate_from = [("site", "0002_media_write_reservation")]
     migrate_to = [("site", "0004_installation_authentication_epoch")]
 
     def setUp(self):
         super().setUp()
+        self.addCleanup(restore_latest_schema)
         executor = MigrationExecutor(connection)
         executor.migrate(self.migrate_from)
         old_apps = executor.loader.project_state(self.migrate_from).apps
@@ -755,6 +761,7 @@ class InstallationStateFreshMigrationTests(TransactionTestCase):
 
     def setUp(self):
         super().setUp()
+        self.addCleanup(restore_latest_schema)
         executor = MigrationExecutor(connection)
         executor.migrate(self.migrate_from)
         executor = MigrationExecutor(connection)

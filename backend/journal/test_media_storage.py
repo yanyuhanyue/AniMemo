@@ -544,7 +544,7 @@ class StoragePoolSelectionTests(TestCase):
                 return DynamicLocalBackend(backend) if backend.pk == local.pk else r2_adapter
 
             with patch.object(StoragePoolService, "adapter_for", side_effect=adapter_for), patch(
-                "site_config.media_storage.local.tempfile.mkstemp",
+                "site_config.media_storage.local.Path.open",
                 side_effect=OSError(errno.ENOSPC, "disk full"),
             ):
                 media = StoragePoolService.create_media("users/1/enospc.webp", b"payload")
@@ -566,7 +566,7 @@ class StoragePoolSelectionTests(TestCase):
 
 
 @override_settings(CREDENTIAL_ENCRYPTION_KEY=TEST_CREDENTIAL_KEY)
-class MediaIdentityAndRuntimeTests(TestCase):
+class MediaIdentityAndRuntimeTests(TransactionTestCase):
     class FakeAdapter:
         def __init__(self, prefix):
             self.prefix = prefix
@@ -592,7 +592,8 @@ class MediaIdentityAndRuntimeTests(TestCase):
     def test_historical_media_and_cross_storage_replace_keep_backend_identity(self):
         first = r2_backend("history-a", 10, used=0, warning=800, limit=900)
         second = r2_backend("history-b", 20, used=0, warning=800, limit=900)
-        old = MediaObject.objects.create(storage_backend=first, object_key="users/1/old.webp", size_bytes=4)
+        old = MediaObject.objects.create(storage_backend=first, object_key="users/1/old.webp", size_bytes=4,
+                                        reference_inventory_complete=True)
         pool = MediaStoragePoolSettings.load()
         pool.preferred_write_backend = second
         pool.save(update_fields=["preferred_write_backend", "updated_at"])
@@ -1118,6 +1119,14 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
 
         def delete(self, _key):
             return None
+
+        def url(self, key):
+            adapter_class = (
+                DynamicR2Backend
+                if self.backend.backend_type == MediaStorageBackend.BackendType.CLOUDFLARE_R2
+                else DynamicLocalBackend
+            )
+            return adapter_class(self.backend).url(key)
 
     @staticmethod
     def _upload(key):

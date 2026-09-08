@@ -431,37 +431,41 @@ class LocalPluginPackageStorage:
         digest = hashlib.sha256(raw).hexdigest()
         if sha256 and digest != sha256:
             raise PluginPackageError("Package SHA-256 校验失败")
-        destination = self.package_path(digest)
         with self.package_lock(digest):
-            try:
-                ensure_directory(
-                    self.root,
-                    destination.parent,
-                    mode=PRIVATE_DIRECTORY_MODE,
-                )
-            except PluginFilesystemSecurityError as error:
-                raise PluginPackageError("CAS Package 目录不安全") from error
-            if destination.is_file():
-                existing = self._read_verified_cas_blob(digest, inspect=False)
-                if len(existing) != len(raw) or hashlib.sha256(existing).hexdigest() != digest:
-                    raise PluginPackageError("CAS 中存在损坏的同 SHA 文件")
-                return destination
-            free = shutil.disk_usage(self.root).free
-            if free - len(raw) < int(minimum_free_bytes):
-                raise PluginPackageError("插件存储空间不足，无法保存 Package。")
-            temporary = destination.with_name(f".{digest}.{os.getpid()}.{uuid4().hex}.tmp")
-            try:
-                write_secure_bytes(
-                    self.root,
-                    temporary,
-                    raw,
-                    directory_mode=PRIVATE_DIRECTORY_MODE,
-                    file_mode=PRIVATE_FILE_MODE,
-                )
-                os.replace(temporary, destination)
-                secure_file(self.root, destination, mode=PRIVATE_FILE_MODE)
-            finally:
-                temporary.unlink(missing_ok=True)
+            return self._store_package_locked(raw, digest, minimum_free_bytes=minimum_free_bytes)
+
+    def _store_package_locked(self, raw, digest, *, minimum_free_bytes=0):
+        """Persist validated bytes while the caller holds this root's digest lock."""
+        destination = self.package_path(digest)
+        try:
+            ensure_directory(
+                self.root,
+                destination.parent,
+                mode=PRIVATE_DIRECTORY_MODE,
+            )
+        except PluginFilesystemSecurityError as error:
+            raise PluginPackageError("CAS Package 目录不安全") from error
+        if destination.is_file():
+            existing = self._read_verified_cas_blob(digest, inspect=False)
+            if len(existing) != len(raw) or hashlib.sha256(existing).hexdigest() != digest:
+                raise PluginPackageError("CAS 中存在损坏的同 SHA 文件")
+            return destination
+        free = shutil.disk_usage(self.root).free
+        if free - len(raw) < int(minimum_free_bytes):
+            raise PluginPackageError("插件存储空间不足，无法保存 Package。")
+        temporary = destination.with_name(f".{digest}.{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            write_secure_bytes(
+                self.root,
+                temporary,
+                raw,
+                directory_mode=PRIVATE_DIRECTORY_MODE,
+                file_mode=PRIVATE_FILE_MODE,
+            )
+            os.replace(temporary, destination)
+            secure_file(self.root, destination, mode=PRIVATE_FILE_MODE)
+        finally:
+            temporary.unlink(missing_ok=True)
         return destination
 
     @staticmethod

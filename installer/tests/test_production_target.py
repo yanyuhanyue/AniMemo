@@ -44,6 +44,7 @@ from updater.local_bundle import (
 from updater.oci import AcquiredRuntimeImage, ImageAcquisitionReceipt
 from updater.source import VerifiedReleaseMaterials
 from updater.tests.test_deployment import manifest
+from updater.tests.test_executor import manifest as update_manifest
 from updater.tests.test_source import stable_manifest
 from updater.transport import ExplicitTransportPolicy
 
@@ -144,6 +145,73 @@ class EmptyRuntimeRunner:
 
 
 class ProductionTargetPortTests(unittest.TestCase):
+    def test_exact_source_read_preserves_selected_target_and_transport_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            policy = ExplicitTransportPolicy.github()
+            candidates = {}
+            for version, character in (("v1.0.0", "1"), ("v1.1.0-rc.1", "2")):
+                candidate = update_manifest(version, character)
+                candidates[version] = VerifiedReleaseMaterials(
+                    manifest=candidate, deployment_contract={},
+                    verified=VerifiedMaterialSet(root=Path(directory), archive_sha256=digest("a"), files=()),
+                    identity_digest=digest(character),
+                )
+
+            class Source:
+                transport_policy = policy
+
+                def __init__(self):
+                    self.reads = []
+
+                def fetch_verified_materials(self, version, **kwargs):
+                    self.reads.append((version, kwargs))
+                    return candidates[version]
+
+            source = Source()
+            releases = ProductionReleasePort(source=source)
+            target = releases.resolve(ReleaseSelector(version="v1.1.0-rc.1"), refresh=True)
+            old = releases.read_exact("v1.0.0")
+            self.assertEqual(old.version, "v1.0.0")
+            self.assertEqual(releases.latest_evidence(), target)
+            self.assertIs(releases.latest_materials(), candidates[target.version])
+            self.assertEqual(releases.transport_policy.identity, policy.identity)
+            self.assertTrue(source.reads[-1][1]["refresh"])
+            with self.assertRaisesRegex(InstallerError, "INSTALL_RELEASE_VERIFICATION_FAILED"):
+                releases.read_exact("v0.9.0")
+            self.assertEqual(releases.latest_evidence(), target)
+            candidates["v1.0.0"] = candidates[target.version]
+            with self.assertRaisesRegex(InstallerError, "INSTALL_RELEASE_VERSION_MISMATCH"):
+                releases.read_exact("v1.0.0")
+            self.assertEqual(releases.latest_evidence(), target)
+
+    def test_offline_source_read_cannot_request_another_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = stable_manifest()
+            materials = VerifiedReleaseMaterials(
+                manifest=candidate, deployment_contract={},
+                verified=VerifiedMaterialSet(root=Path(directory), archive_sha256=digest("a"), files=()),
+                identity_digest=digest("b"),
+            )
+
+            class SingleVersion(LocalBundleReleaseSource):
+                def __init__(self):
+                    self.reads = []
+
+                def fetch_verified_materials(self, version, **kwargs):
+                    self.reads.append(version)
+                    if version != "v1.0.0":
+                        raise ValueError("LOCAL_BUNDLE_RELEASE_VERSION_MISMATCH")
+                    return materials
+
+            source = SingleVersion()
+            releases = ProductionReleasePort(source=source, transport_source=InstallTransportSource.LOCAL_BUNDLE,
+                                             transport_policy=LocalBundleTransportPolicy())
+            target = releases.resolve(ReleaseSelector(version="v1.0.0"), refresh=True)
+            with self.assertRaisesRegex(InstallerError, "INSTALL_RELEASE_VERIFICATION_FAILED"):
+                releases.read_exact("v0.9.0")
+            self.assertEqual(releases.latest_evidence(), target)
+            self.assertEqual(source.reads, ["v1.0.0", "v0.9.0"])
+
     def test_non_directory_instance_root_is_foreign(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "default"

@@ -77,6 +77,33 @@ class JournalEntry(models.Model):
     def __str__(self):
         return f"{self.title} · {self.user}"
 
+    def save(self, *args, **kwargs):
+        from .media_references import save_entry_with_media
+
+        return save_entry_with_media(self, lambda: super(JournalEntry, self).save(*args, **kwargs), kwargs)
+
+
+class JournalMediaReference(models.Model):
+    """One authoritative holding for each persisted poster business field."""
+
+    class Slot(models.TextChoices):
+        POSTER_FILE = "poster_file", "上传封面"
+        CUSTOM_URL = "custom_poster_url", "托管封面 URL"
+
+    entry = models.ForeignKey(JournalEntry, on_delete=models.CASCADE, related_name="media_references")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="journal_media_references")
+    slot = models.CharField(max_length=24, choices=Slot.choices)
+    value = models.CharField(max_length=1000)
+    media = models.ForeignKey("site.MediaObject", on_delete=models.PROTECT, related_name="journal_references")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["entry", "slot"], name="journal_media_entry_slot_uq"),
+            models.CheckConstraint(condition=models.Q(slot__in=["poster_file", "custom_poster_url"]), name="journal_media_slot_ck"),
+        ]
+        indexes = [models.Index(fields=["owner", "media"], name="journal_media_owner_idx")]
+
 
 class ExternalMediaIdentity(models.Model):
     entry = models.ForeignKey(JournalEntry, on_delete=models.CASCADE, related_name="external_identities")
@@ -365,6 +392,12 @@ class UserSettings(models.Model):
     def __str__(self):
         return self.nickname or self.user.get_username()
 
+    def save(self, *args, **kwargs):
+        from site_config.media_storage.storage import save_model_image
+
+        return save_model_image(self, "avatar", lambda: super(UserSettings, self).save(*args, **kwargs),
+                                owner_id=self.user_id, update_fields=kwargs.get("update_fields"))
+
 
 class QuickFilter(models.Model):
     class MatchMode(models.TextChoices):
@@ -433,6 +466,12 @@ class Column(models.Model):
 
     def __str__(self):
         return self.title
+
+    def save(self, *args, **kwargs):
+        from site_config.media_storage.storage import save_model_image
+
+        return save_model_image(self, "cover", lambda: super(Column, self).save(*args, **kwargs),
+                                owner_id=self.author_id, update_fields=kwargs.get("update_fields"))
 
 
 class AdminAuditLog(models.Model):

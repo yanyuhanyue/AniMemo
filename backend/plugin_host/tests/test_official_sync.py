@@ -429,7 +429,7 @@ class OfficialPluginSyncTests(TestCase):
         with (
             patch.dict(os.environ, {"CI": "true"}),
             patch(
-                "plugin_host.management.commands.sync_official_plugins.store_package_blob",
+                "plugin_host.management.commands.sync_official_plugins._store_package_blob_locked",
                 side_effect=PluginFilesystemSecurityError(
                     sentinel, diagnostic_code="dacl_read"
                 ),
@@ -490,7 +490,7 @@ class OfficialPluginSyncTests(TestCase):
         with (
             patch.dict(os.environ, {"CI": "true"}),
             patch(
-                "plugin_host.management.commands.sync_official_plugins.store_package_blob",
+                "plugin_host.management.commands.sync_official_plugins._store_package_blob_locked",
                 side_effect=failure,
             ),
             self.assertRaisesRegex(

@@ -129,7 +129,10 @@ class SiteSettings(models.Model):
 
     def save(self, *args, **kwargs):
         self.pk = 1
-        super().save(*args, **kwargs)
+        from .media_storage.storage import save_model_image
+
+        return save_model_image(self, "site_avatar", lambda: super(SiteSettings, self).save(*args, **kwargs),
+                                update_fields=kwargs.get("update_fields"))
 
     def delete(self, *args, **kwargs):
         return None
@@ -340,7 +343,7 @@ class MediaStorageBackend(models.Model):
                 previous = type(self).objects.select_for_update().filter(pk=self.pk).first()
                 has_active_reservation = MediaWriteReservation.objects.filter(
                     storage_backend_id=self.pk,
-                    status=MediaWriteReservation.Status.PENDING,
+                    status__in=["pending", "cleanup_ready", "cleanup_failed"],
                 ).exists()
                 if previous and previous.physical_identity() != self.physical_identity() and (
                     previous.media_objects.exists() or has_active_reservation
@@ -417,12 +420,27 @@ class MediaStoragePoolSettings(models.Model):
 
 
 class MediaObject(models.Model):
+    class Lifecycle(models.TextChoices):
+        ACTIVE = "active", "可持有"
+        DELETING = "deleting", "正在清理"
+        DELETE_FAILED = "delete_failed", "清理失败"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     storage_backend = models.ForeignKey(MediaStorageBackend, on_delete=models.PROTECT, related_name="media_objects")
     object_key = models.CharField(max_length=500)
     size_bytes = models.PositiveBigIntegerField(default=0)
     content_type = models.CharField(max_length=120, blank=True, default="")
     sha256 = models.CharField(max_length=64, blank=True, default="")
+    upload_owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="uploaded_media_objects", editable=False,
+    )
+    public_url_snapshot = models.CharField(max_length=1000, blank=True, default="", editable=False)
+    public_url_identity = models.CharField(max_length=64, blank=True, default="", db_index=True, editable=False)
+    reference_inventory_complete = models.BooleanField(default=False, editable=False)
+    inventory_error = models.CharField(max_length=120, blank=True, default="", editable=False)
+    lifecycle = models.CharField(max_length=16, choices=Lifecycle.choices, default=Lifecycle.ACTIVE, editable=False)
+    cleanup_error = models.CharField(max_length=120, blank=True, default="", editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -444,6 +462,8 @@ class MediaWriteReservation(models.Model):
         PENDING = "pending", "写入中"
         FINALIZED = "finalized", "已完成"
         ABANDONED = "abandoned", "已放弃"
+        CLEANUP_READY = "cleanup_ready", "等待回滚清理"
+        CLEANUP_FAILED = "cleanup_failed", "回滚清理失败"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     storage_backend = models.ForeignKey(
@@ -460,6 +480,7 @@ class MediaWriteReservation(models.Model):
     expires_at = models.DateTimeField()
     finalized_at = models.DateTimeField(blank=True, null=True)
     abandoned_at = models.DateTimeField(blank=True, null=True)
+    cleanup_error = models.CharField(max_length=120, blank=True, default="", editable=False)
 
     class Meta:
         ordering = ["-created_at"]
@@ -470,7 +491,7 @@ class MediaWriteReservation(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["storage_backend", "object_key"],
-                condition=Q(status="pending"),
+                condition=Q(status__in=["pending", "cleanup_ready", "cleanup_failed"]),
                 name="unique_pending_media_reservation",
             ),
         ]

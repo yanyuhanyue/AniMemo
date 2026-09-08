@@ -100,7 +100,7 @@ ANIMEMO_ARTIFACT_CHANNEL = os.getenv(
     "ANIMEMO_ARTIFACT_CHANNEL", ANIMEMO_RELEASE_CHANNEL
 )
 ANIMEMO_DATABASE_CONTRACT = os.getenv(
-    "ANIMEMO_DATABASE_CONTRACT", "animemo-db-v1"
+    "ANIMEMO_DATABASE_CONTRACT", "animemo-db-v2"
 )
 ANIMEMO_CONFIGURATION_CONTRACT = os.getenv(
     "ANIMEMO_CONFIGURATION_CONTRACT", "animemo-config-v1"
@@ -430,7 +430,7 @@ STORAGES = {
 }
 
 if DEBUG:
-    STORAGES["default"] = {"BACKEND": "django.core.files.storage.FileSystemStorage"}
+    STORAGES["default"] = {"BACKEND": "site_config.media_storage.development.DevelopmentFileStorage"}
     MEDIA_URL = "/media/"
     MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", BASE_DIR / "media"))
 else:

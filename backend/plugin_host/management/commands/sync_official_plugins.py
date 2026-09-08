@@ -23,7 +23,7 @@ from plugin_host.package import (
     PluginPackageError,
     inspect_package,
 )
-from plugin_host.services import store_package_blob
+from plugin_host.services import _package_blob_transaction, _store_package_blob_locked
 
 LEGACY_OFFICIAL_PLUGIN_IDS = {
     "watch-history-importer": {"com.anime-journal.watch-history-importer"},
@@ -116,87 +116,89 @@ class Command(BaseCommand):
             inspected = inspect_package(package_payload)
             manifest = inspected["manifest"]
             current_content_digest = canonical_content_digest_from_descriptor(inspected["files"])
-            self._failure_stage = "project_lookup"
-            project_by_id = PluginProject.objects.filter(plugin_id=manifest["id"]).first()
-            project_by_slug = PluginProject.objects.filter(slug=manifest["slug"]).first()
-            if (
-                project_by_id is not None
-                and project_by_slug is not None
-                and project_by_id.pk != project_by_slug.pk
-            ):
-                raise _command_failure() from None
-            if project_by_id is not None and project_by_id.slug != manifest["slug"]:
-                raise _command_failure() from None
-            project = project_by_id or project_by_slug
-            if project is not None and project.plugin_id != manifest["id"]:
-                legacy_ids = LEGACY_OFFICIAL_PLUGIN_IDS.get(manifest["slug"], set())
-                if project.plugin_id not in legacy_ids:
+            storage = LocalPluginPackageStorage(settings.PLUGIN_ROOT)
+            with _package_blob_transaction(storage, inspected["sha256"]):
+                self._failure_stage = "project_lookup"
+                project_by_id = PluginProject.objects.filter(plugin_id=manifest["id"]).first()
+                project_by_slug = PluginProject.objects.filter(slug=manifest["slug"]).first()
+                if (
+                    project_by_id is not None
+                    and project_by_slug is not None
+                    and project_by_id.pk != project_by_slug.pk
+                ):
                     raise _command_failure() from None
-                project.plugin_id = manifest["id"]
-                project.save(update_fields=["plugin_id", "updated_at"])
-            version = None
-            if project is not None:
-                version = (
-                    PluginVersion.objects.select_related("plugin", "package_blob")
-                    .filter(plugin=project, version=manifest["version"])
-                    .first()
-                )
-            if version is not None:
-                self._failure_stage = "existing_package_verify"
-                existing_content_digest = _existing_official_content_digest(version)
-                if existing_content_digest != current_content_digest:
+                if project_by_id is not None and project_by_id.slug != manifest["slug"]:
                     raise _command_failure() from None
-                blob = version.package_blob
-            else:
-                self._failure_stage = "package_store"
-                blob, _, _, _ = store_package_blob(package_payload)
-            self._failure_stage = "project_upsert"
-            project, _ = PluginProject.objects.get_or_create(
-                plugin_id=manifest["id"],
-                defaults={
-                    "slug": manifest["slug"], "name": manifest["name"], "description": manifest["description"],
-                    "installation_mode": manifest["installationMode"],
-                    "owner": actor,
-                },
-            )
-            if project.slug != manifest["slug"]:
-                raise _command_failure() from None
-            project_updates = []
-            for field, value in (
-                ("name", manifest["name"]),
-                ("description", manifest["description"]),
-                ("installation_mode", manifest["installationMode"]),
-            ):
-                if getattr(project, field) != value:
-                    setattr(project, field, value)
-                    project_updates.append(field)
-            if project.owner_id is None and actor is not None:
-                project.owner = actor
-                project_updates.append("owner")
-            if project_updates:
-                project.save(update_fields=[*project_updates, "updated_at"])
-            if version is None:
-                self._failure_stage = "version_upsert"
-                version, created = PluginVersion.objects.get_or_create(
-                    plugin=project,
-                    version=manifest["version"],
-                    defaults={
-                        "package_blob": blob, "manifest_snapshot": manifest,
-                        "runtime_types": manifest.get("runtimes") or [],
-                        "review_status": PluginVersion.ReviewStatus.APPROVED,
-                        "created_by": actor,
-                    },
-                )
-                if not created and version.package_blob_id != blob.pk:
-                    existing_content_digest = _existing_official_content_digest(
-                        PluginVersion.objects.select_related("plugin", "package_blob").get(pk=version.pk)
+                project = project_by_id or project_by_slug
+                if project is not None and project.plugin_id != manifest["id"]:
+                    legacy_ids = LEGACY_OFFICIAL_PLUGIN_IDS.get(manifest["slug"], set())
+                    if project.plugin_id not in legacy_ids:
+                        raise _command_failure() from None
+                    project.plugin_id = manifest["id"]
+                    project.save(update_fields=["plugin_id", "updated_at"])
+                version = None
+                if project is not None:
+                    version = (
+                        PluginVersion.objects.select_related("plugin", "package_blob")
+                        .filter(plugin=project, version=manifest["version"])
+                        .first()
                     )
+                if version is not None:
+                    self._failure_stage = "existing_package_verify"
+                    existing_content_digest = _existing_official_content_digest(version)
                     if existing_content_digest != current_content_digest:
                         raise _command_failure() from None
-            self._failure_stage = "version_status_update"
-            if version.review_status != PluginVersion.ReviewStatus.APPROVED:
-                version.review_status = PluginVersion.ReviewStatus.APPROVED
-                version.save(update_fields=["review_status"])
+                    blob = version.package_blob
+                else:
+                    self._failure_stage = "package_store"
+                    blob, _, _, _ = _store_package_blob_locked(storage, package_payload, inspected)
+                self._failure_stage = "project_upsert"
+                project, _ = PluginProject.objects.get_or_create(
+                    plugin_id=manifest["id"],
+                    defaults={
+                        "slug": manifest["slug"], "name": manifest["name"], "description": manifest["description"],
+                        "installation_mode": manifest["installationMode"],
+                        "owner": actor,
+                    },
+                )
+                if project.slug != manifest["slug"]:
+                    raise _command_failure() from None
+                project_updates = []
+                for field, value in (
+                    ("name", manifest["name"]),
+                    ("description", manifest["description"]),
+                    ("installation_mode", manifest["installationMode"]),
+                ):
+                    if getattr(project, field) != value:
+                        setattr(project, field, value)
+                        project_updates.append(field)
+                if project.owner_id is None and actor is not None:
+                    project.owner = actor
+                    project_updates.append("owner")
+                if project_updates:
+                    project.save(update_fields=[*project_updates, "updated_at"])
+                if version is None:
+                    self._failure_stage = "version_upsert"
+                    version, created = PluginVersion.objects.get_or_create(
+                        plugin=project,
+                        version=manifest["version"],
+                        defaults={
+                            "package_blob": blob, "manifest_snapshot": manifest,
+                            "runtime_types": manifest.get("runtimes") or [],
+                            "review_status": PluginVersion.ReviewStatus.APPROVED,
+                            "created_by": actor,
+                        },
+                    )
+                    if not created and version.package_blob_id != blob.pk:
+                        existing_content_digest = _existing_official_content_digest(
+                            PluginVersion.objects.select_related("plugin", "package_blob").get(pk=version.pk)
+                        )
+                        if existing_content_digest != current_content_digest:
+                            raise _command_failure() from None
+                self._failure_stage = "version_status_update"
+                if version.review_status != PluginVersion.ReviewStatus.APPROVED:
+                    version.review_status = PluginVersion.ReviewStatus.APPROVED
+                    version.save(update_fields=["review_status"])
             self._failure_stage = "deployment_lookup"
             current_id = PluginDeployment.objects.filter(plugin=project).values_list("current_version_id", flat=True).first()
             if current_id == version.pk:

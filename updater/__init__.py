@@ -5,4 +5,4 @@ local RPC protocol; Docker and release-filesystem authority stay inside the
 host process.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"

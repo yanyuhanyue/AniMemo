@@ -2,7 +2,7 @@ from django.conf import settings
 from rest_framework import serializers
 
 from accounts.models import UserSecurityProfile
-from site_config.media_storage.storage import cleanup_uncommitted_media_reference, mark_media_reference_committed
+from site_config.media_storage.storage import atomic_media_mutation, mark_media_reference_committed
 
 from .image_security import delete_replaced_file, sanitize_uploaded_image
 from .models import Column, JournalEntry, QuickFilter, UserSettings
@@ -41,6 +41,8 @@ class UserSettingsSerializer(serializers.ModelSerializer):
         return bool(profile and profile.two_factor_enabled)
 
     def validate_avatar(self, value):
+        if value is None:
+            return None
         return sanitize_uploaded_image(
             value,
             max_bytes=settings.AVATAR_UPLOAD_MAX_BYTES,
@@ -51,24 +53,20 @@ class UserSettingsSerializer(serializers.ModelSerializer):
             output_max_height=1024,
         )
 
+    @atomic_media_mutation()
     def update(self, instance, validated_data):
         previous_file = instance.avatar if "avatar" in validated_data else None
-        try:
-            instance = super().update(instance, validated_data)
-        except Exception:
-            cleanup_uncommitted_media_reference(getattr(instance.avatar, "name", ""))
-            raise
+        for name, value in validated_data.items():
+            setattr(instance, name, value)
+        instance.save(update_fields=set(validated_data) | {"updated_at"})
         mark_media_reference_committed(getattr(instance.avatar, "name", ""))
         delete_replaced_file(previous_file, instance.avatar)
         return instance
 
+    @atomic_media_mutation()
     def create(self, validated_data):
         instance = UserSettings(**validated_data)
-        try:
-            instance.save()
-        except Exception:
-            cleanup_uncommitted_media_reference(getattr(instance.avatar, "name", ""))
-            raise
+        instance.save()
         mark_media_reference_committed(getattr(instance.avatar, "name", ""))
         return instance
 
@@ -105,6 +103,8 @@ class ColumnSerializer(serializers.ModelSerializer):
         return value
 
     def validate_cover(self, value):
+        if value is None:
+            return None
         return sanitize_uploaded_image(
             value,
             max_bytes=settings.COLUMN_COVER_UPLOAD_MAX_BYTES,
@@ -115,26 +115,25 @@ class ColumnSerializer(serializers.ModelSerializer):
             output_max_height=2400,
         )
 
+    @atomic_media_mutation()
     def update(self, instance, validated_data):
         previous_file = instance.cover if "cover" in validated_data else None
-        try:
-            instance = super().update(instance, validated_data)
-        except Exception:
-            cleanup_uncommitted_media_reference(getattr(instance.cover, "name", ""))
-            raise
+        entries = validated_data.pop("entries", None)
+        for name, value in validated_data.items():
+            setattr(instance, name, value)
+        instance.save(update_fields=set(validated_data) | {"updated_at"})
+        if entries is not None:
+            instance.entries.set(entries)
         mark_media_reference_committed(getattr(instance.cover, "name", ""))
         delete_replaced_file(previous_file, instance.cover)
         return instance
 
+    @atomic_media_mutation()
     def create(self, validated_data):
         entries = validated_data.pop("entries", [])
         instance = Column(**validated_data)
-        try:
-            instance.save()
-            if entries:
-                instance.entries.set(entries)
-        except Exception:
-            cleanup_uncommitted_media_reference(getattr(instance.cover, "name", ""))
-            raise
+        instance.save()
+        if entries:
+            instance.entries.set(entries)
         mark_media_reference_committed(getattr(instance.cover, "name", ""))
         return instance

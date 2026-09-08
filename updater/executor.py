@@ -413,6 +413,13 @@ class UpdateExecutor:
                         "migrating",
                         detail="running target API image migration",
                     )
+                    target_contract = target_manifest["compatibility"]["database"]["contract"]
+                    if target_contract not in current["compatibility"]["database"]["appAccepts"]:
+                        # Old writers may delete media using rules that ignore
+                        # the new schema. The durable pending transition is
+                        # already recorded; any uncertain stop/migration failure
+                        # keeps recovery blocked and never resumes those writers.
+                        self.deployment.quiesce_database_writers(current)
                     self.deployment.migrate(target_manifest)
                     self.runtime_state.update(
                         databaseContract=target_manifest["compatibility"]["database"][

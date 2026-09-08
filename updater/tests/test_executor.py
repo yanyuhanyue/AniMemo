@@ -98,6 +98,7 @@ class FakeDeployment:
     def backup_database(self, operation_id): self._call("backup_database", operation_id); return "backup.sql.gz"
     def pull(self, manifest): self._call("pull", manifest["release"]["version"])
     def migrate(self, manifest): self._call("migrate", manifest["release"]["version"])
+    def quiesce_database_writers(self, manifest): self._call("quiesce_database_writers", manifest["release"]["version"])
     def bootstrap(self, manifest): self._call("bootstrap", manifest["release"]["version"])
     def switch(self, manifest, *, live_contracts=None):
         self._call("switch", manifest["release"]["version"])
@@ -406,6 +407,30 @@ class UpdateExecutorTests(unittest.TestCase):
                     "enabledPluginApis": [2],
                 },
             )
+
+    def test_incompatible_previous_writers_stop_before_schema_migration(self):
+        for failure in (None, "quiesce_database_writers", "migrate"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                current = manifest("v1.0.0", "1")
+                target = manifest("v1.1.0", "2", migration=True, rollback="conditional",
+                                  contract="animemo-db-v2", accepts=["animemo-db-v1", "animemo-db-v2"])
+                deployment = FakeDeployment(fail_at=failure)
+                executor, store, slots = self.setup_executor(directory, current, target, deployment)
+                operation = store.create("apply_update", {"version": "v1.1.0"})
+                executor.apply(operation["id"], target)
+                names = [call[0] for call in deployment.calls]
+                self.assertLess(names.index("pull"), names.index("quiesce_database_writers"))
+                if failure == "quiesce_database_writers":
+                    self.assertNotIn("migrate", names)
+                else:
+                    self.assertLess(names.index("quiesce_database_writers"), names.index("migrate"))
+                if failure:
+                    self.assertNotIn("switch", names)
+                    self.assertEqual(store.get(operation["id"])["status"], "manual_recovery_required")
+                    self.assertIn("database", store.get(operation["id"])["recovery"]["pendingContractTransitions"])
+                    self.assertEqual(slots.read()["current"], current)
+                else:
+                    self.assertEqual(store.get(operation["id"])["status"], "succeeded")
 
     def test_modern_release_source_binds_verified_materials_and_policy_to_image_acquisition(self):
         class ModernSource:

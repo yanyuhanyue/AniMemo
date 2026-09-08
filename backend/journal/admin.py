@@ -1,4 +1,6 @@
 from django.contrib import admin
+from django.db import transaction
+from site_config.media_storage.storage import atomic_media_mutation
 
 from accounts.models import LoginEvent, PendingRegistration, StaffProfile, UserSecurityProfile
 from site_config.models import CloudflareR2Account, MediaObject, MediaStorageBackend, MediaStoragePoolSettings, SiteSettings, TagDefinition
@@ -11,6 +13,16 @@ from .models import (
     UserExternalAccountConnection,
     UserSettings,
 )
+
+
+class MediaMutationAdmin(admin.ModelAdmin):
+    def changeform_view(self, request, object_id=None, form_url="", extra_context=None):
+        # This scope must enclose Django Admin's transaction, including the
+        # later save_related and audit-log writes, to observe its rollback.
+        if request.method == "POST":
+            with atomic_media_mutation():
+                return super().changeform_view(request, object_id, form_url, extra_context)
+        return super().changeform_view(request, object_id, form_url, extra_context)
 
 
 @admin.register(PendingRegistration)
@@ -32,7 +44,7 @@ class PendingRegistrationAdmin(admin.ModelAdmin):
 
 
 @admin.register(SiteSettings)
-class SiteSettingsAdmin(admin.ModelAdmin):
+class SiteSettingsAdmin(MediaMutationAdmin):
     fieldsets = (
         ("基础品牌", {"fields": ("site_name", "site_avatar", "social_handle")}),
         ("公共页面文案", {"fields": ("homepage_owner", "homepage_title", "homepage_description", "universe_description")}),
@@ -138,11 +150,47 @@ class MediaObjectAdmin(admin.ModelAdmin):
 
 
 @admin.register(JournalEntry)
-class JournalEntryAdmin(admin.ModelAdmin):
+class JournalEntryAdmin(MediaMutationAdmin):
     list_display = ("title", "user", "watch_status", "personal_score", "visibility", "updated_at")
     list_filter = ("watch_status", "visibility")
     search_fields = ("title", "japanese_title", "user__username", "user__email")
     readonly_fields = ("share_slug", "created_at", "updated_at")
+
+    def get_readonly_fields(self, request, obj=None):
+        return self.readonly_fields + (("user",) if obj else ())
+
+    def save_model(self, request, obj, form, change):
+        from .media_references import MEDIA_FIELDS, lock_media_owner
+        from site_config.media_storage.storage import atomic_media_mutation
+
+        with atomic_media_mutation():
+            if not change:
+                # Admin is an explicit server-side owner selection, not an
+                # authorization to transfer an existing object between owners.
+                obj.save()
+                return
+            if set(form.changed_data) & MEDIA_FIELDS:
+                lock_media_owner(obj.user_id)
+            current = JournalEntry.objects.select_for_update().get(pk=obj.pk)
+            changed = set(form.changed_data) - {"user"}
+            for name in changed:
+                setattr(current, name, getattr(obj, name))
+            current.save(update_fields=changed | {"updated_at"})
+            for field in obj._meta.concrete_fields:
+                setattr(obj, field.attname, getattr(current, field.attname))
+
+    def delete_queryset(self, request, queryset):
+        from .media_references import lock_media_owner
+
+        with transaction.atomic():
+            owner_ids = sorted(set(queryset.values_list("user_id", flat=True)))
+            for owner_id in owner_ids:
+                lock_media_owner(owner_id)
+            list(queryset.select_for_update().order_by("pk"))
+            queryset.delete()
+
+    def delete_model(self, request, obj):
+        self.delete_queryset(request, JournalEntry.objects.filter(pk=obj.pk))
 
 
 @admin.register(ExternalMediaIdentity)
@@ -189,7 +237,7 @@ class UserExternalAccountConnectionAdmin(admin.ModelAdmin):
 
 
 @admin.register(UserSettings)
-class UserSettingsAdmin(admin.ModelAdmin):
+class UserSettingsAdmin(MediaMutationAdmin):
     list_display = ("nickname", "user", "public_status", "allow_sharing", "updated_at")
     list_filter = ("public_status", "allow_sharing")
     search_fields = ("nickname", "user__username", "user__email")
@@ -214,7 +262,7 @@ class TagDefinitionAdmin(admin.ModelAdmin):
 
 
 @admin.register(Column)
-class ColumnAdmin(admin.ModelAdmin):
+class ColumnAdmin(MediaMutationAdmin):
     list_display = ("title", "author", "status", "featured", "published_at", "updated_at")
     list_filter = ("status", "featured")
     search_fields = ("title", "summary", "author__username")

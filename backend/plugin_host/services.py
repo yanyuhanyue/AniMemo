@@ -4,6 +4,7 @@ import ast
 import io
 import os
 import re
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import PurePosixPath
 from uuid import uuid4
@@ -208,16 +209,33 @@ def static_security_scan(payload, inspected):
     return stable_security_report(report)
 
 
-def store_package_blob(payload, *, root=None, minimum_free_bytes=0):
-    raw = payload.read() if hasattr(payload, "read") else bytes(payload)
-    inspected = inspect_package(raw)
-    storage = LocalPluginPackageStorage(root or settings.PLUGIN_ROOT)
+def _require_package_commit_boundary():
+    connection = transaction.get_connection()
+    if not connection.get_autocommit() and not connection.in_atomic_block:
+        raise PluginWorkflowError("插件包操作需要独立的提交边界。")
+    if connection.in_atomic_block:
+        try:
+            # Durable blocks reject real nesting and retain Django's TestCase
+            # isolation exception. No package bytes have changed at this point.
+            with transaction.atomic(durable=True):
+                pass
+        except RuntimeError as error:
+            raise PluginWorkflowError("插件包操作需要独立的提交边界。") from error
+
+
+@contextmanager
+def _package_blob_transaction(storage, digest):
+    _require_package_commit_boundary()
     ensure_plugin_layout(storage)
-    path = storage.store_package(
-        raw,
-        sha256=inspected["sha256"],
-        minimum_free_bytes=minimum_free_bytes,
-    )
+    # GC uses the same CAS -> database lock order. Commit the blob and any
+    # protecting version before another process can acquire the CAS lock.
+    with storage.package_lock(digest):
+        with transaction.atomic(durable=True):
+            yield
+
+
+def _store_package_blob_locked(storage, raw, inspected, *, minimum_free_bytes=0):
+    path = storage._store_package_locked(raw, inspected["sha256"], minimum_free_bytes=minimum_free_bytes)
     secure_file(storage.packages, path, mode=PRIVATE_FILE_MODE)
     relative = path.relative_to(storage.root).as_posix()
     try:
@@ -232,6 +250,14 @@ def store_package_blob(payload, *, root=None, minimum_free_bytes=0):
     if blob.size_bytes != len(raw) or blob.storage_path != relative:
         raise PluginWorkflowError("CAS 数据库记录与物理文件不一致。")
     return blob, inspected, raw, created
+
+
+def store_package_blob(payload, *, root=None, minimum_free_bytes=0):
+    raw = payload.read() if hasattr(payload, "read") else bytes(payload)
+    inspected = inspect_package(raw)
+    storage = LocalPluginPackageStorage(root or settings.PLUGIN_ROOT)
+    with _package_blob_transaction(storage, inspected["sha256"]):
+        return _store_package_blob_locked(storage, raw, inspected, minimum_free_bytes=minimum_free_bytes)
 
 
 def _record_upload_attempt(actor, size_bytes):
@@ -286,7 +312,8 @@ def upload_plugin_version(project, uploaded_file, *, actor):
             raise PluginPackageError("插件包超过大小限制")
         inspected = inspect_package(raw)
         manifest = inspected["manifest"]
-        with transaction.atomic():
+        storage = LocalPluginPackageStorage(settings.PLUGIN_ROOT)
+        with _package_blob_transaction(storage, inspected["sha256"]):
             locked_project = PluginProject.objects.select_for_update().get(pk=project.pk)
             if locked_project.owner_id != actor.pk and not actor.is_superuser:
                 raise PluginWorkflowError("只能向自己的插件项目上传版本。")
@@ -321,7 +348,7 @@ def upload_plugin_version(project, uploaded_file, *, actor):
             # must pass before the AST/CSS security scan does any work.
             report = static_security_scan(raw, inspected)
             minimum_free = int(getattr(settings, "PLUGIN_MIN_FREE_DISK_MB", 2048)) * 1024 * 1024
-            blob, _, _, _ = store_package_blob(raw, minimum_free_bytes=minimum_free)
+            blob, _, _, _ = _store_package_blob_locked(storage, raw, inspected, minimum_free_bytes=minimum_free)
             locked_blob = PluginPackageBlob.objects.select_for_update().get(pk=blob.pk)
             version = PluginVersion.objects.create(
                 plugin=locked_project,
@@ -565,6 +592,7 @@ def _reconcile_gc_tombstones(storage):
 
 
 def garbage_collect_package_blobs(*, root=None):
+    _require_package_commit_boundary()
     storage = LocalPluginPackageStorage(root or settings.PLUGIN_ROOT)
     ensure_plugin_layout(storage)
     report = {
@@ -588,7 +616,7 @@ def garbage_collect_package_blobs(*, root=None):
         committed = False
         with storage.package_lock(digest):
             try:
-                with transaction.atomic():
+                with transaction.atomic(durable=True):
                     blob = PluginPackageBlob.objects.select_for_update().filter(sha256=digest).first()
                     if blob is None or blob.created_at > cutoff or blob.versions.exists():
                         continue

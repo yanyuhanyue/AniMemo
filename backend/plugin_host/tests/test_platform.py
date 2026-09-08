@@ -729,7 +729,7 @@ class PluginPlatformApiTests(APITestCase):
 
         with patch("plugin_host.services.inspect_package") as inspect, \
                 patch("plugin_host.services.static_security_scan") as scan, \
-                patch("plugin_host.services.store_package_blob") as store:
+                patch("plugin_host.services._store_package_blob_locked") as store:
             with self.assertRaises(PluginWorkflowError):
                 upload_plugin_version(project, UnreadUpload(), actor=self.owner)
 
@@ -752,7 +752,7 @@ class PluginPlatformApiTests(APITestCase):
 
         with override_settings(PLUGIN_MAX_PACKAGE_BYTES=1024), \
                 patch("plugin_host.services.inspect_package") as inspect, \
-                patch("plugin_host.services.store_package_blob") as store:
+                patch("plugin_host.services._store_package_blob_locked") as store:
             with self.assertRaises(PluginPackageError) as raised:
                 upload_plugin_version(project, UnreadUpload(), actor=self.owner)
 

@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "minimumUpdaterVersion": "1.0.0",
+  "minimumUpdaterVersion": "1.0.1",
   "database": {
-    "contract": "animemo-db-v1",
-    "appAccepts": ["animemo-db-v1"],
+    "contract": "animemo-db-v2",
+    "appAccepts": ["animemo-db-v1", "animemo-db-v2"],
     "migration": {
       "required": true,
       "policy": "additive-backward-compatible"

@@ -4,7 +4,8 @@ import math
 
 import requests
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import BigIntegerField, OuterRef, Subquery, Sum, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from site_config.models import CloudflareR2Account, MediaObject, MediaStorageBackend, MediaWriteReservation
@@ -46,15 +47,22 @@ class CloudflareAnalyticsInvalidResponse(CloudflareAnalyticsError):
 def managed_usage_bytes(backend_or_id):
     """Return bytes currently indexed by AniMemo for one backend."""
     backend_id = getattr(backend_or_id, "pk", backend_or_id)
-    media_total = MediaObject.objects.filter(storage_backend_id=backend_id).aggregate(
-        total=Sum("size_bytes")
-    )["total"]
-    reserved_total = MediaWriteReservation.objects.filter(
-        storage_backend_id=backend_id,
-        status=MediaWriteReservation.Status.PENDING,
-        expires_at__gt=timezone.now(),
-    ).aggregate(total=Sum("size_bytes"))["total"]
-    return max(0, int(media_total or 0) + int(reserved_total or 0))
+    return sum(total for _backend, total in _managed_totals(MediaStorageBackend.objects.filter(pk=backend_id)))
+
+
+def _managed_totals(backends):
+    # Both sides of the reservation -> MediaObject handoff use one SQL snapshot.
+    # Two aggregate queries under READ COMMITTED can otherwise miss both sides
+    # when the business transaction commits between the queries.
+    media = MediaObject.objects.filter(storage_backend_id=OuterRef("pk")).order_by().values("storage_backend_id").annotate(total=Sum("size_bytes")).values("total")
+    pending = MediaWriteReservation.objects.filter(
+        storage_backend_id=OuterRef("pk"), status__in=["pending", "cleanup_ready", "cleanup_failed"],
+    ).order_by().values("storage_backend_id").annotate(total=Sum("size_bytes")).values("total")
+    rows = backends.annotate(
+        managed_total=Coalesce(Subquery(media), Value(0), output_field=BigIntegerField())
+        + Coalesce(Subquery(pending), Value(0), output_field=BigIntegerField()),
+    )
+    return [(backend, max(0, int(backend.managed_total))) for backend in rows]
 
 
 def account_backends(account_or_backend):
@@ -69,15 +77,7 @@ def account_backends(account_or_backend):
 
 
 def account_managed_usage_bytes(account_or_backend):
-    media_total = MediaObject.objects.filter(
-        storage_backend__in=account_backends(account_or_backend),
-    ).aggregate(total=Sum("size_bytes"))["total"]
-    reserved_total = MediaWriteReservation.objects.filter(
-        storage_backend__in=account_backends(account_or_backend),
-        status=MediaWriteReservation.Status.PENDING,
-        expires_at__gt=timezone.now(),
-    ).aggregate(total=Sum("size_bytes"))["total"]
-    return max(0, int(media_total or 0) + int(reserved_total or 0))
+    return sum(total for _backend, total in _managed_totals(account_backends(account_or_backend)))
 
 
 def account_actual_usage_bytes(account_or_backend):
@@ -92,24 +92,12 @@ def account_actual_usage_bytes(account_or_backend):
 
 
 def effective_account_usage(account_or_backend):
-    backends = list(account_backends(account_or_backend))
-    if not backends:
-        return 0
-    managed_rows = MediaObject.objects.filter(storage_backend__in=backends).values("storage_backend_id").annotate(total=Sum("size_bytes"))
-    managed_by_backend = {row["storage_backend_id"]: max(0, int(row["total"] or 0)) for row in managed_rows}
-    reserved_rows = MediaWriteReservation.objects.filter(
-        storage_backend__in=backends,
-        status=MediaWriteReservation.Status.PENDING,
-        expires_at__gt=timezone.now(),
-    ).values("storage_backend_id").annotate(total=Sum("size_bytes"))
-    for row in reserved_rows:
-        managed_by_backend[row["storage_backend_id"]] = managed_by_backend.get(row["storage_backend_id"], 0) + max(0, int(row["total"] or 0))
     return sum(
         max(
-            managed_by_backend.get(backend.pk, 0),
+            total,
             int(backend.snapshot_bytes or 0) if backend.usage_refreshed_at else 0,
         )
-        for backend in backends
+        for backend, total in _managed_totals(account_backends(account_or_backend))
     )
 
 

@@ -278,6 +278,8 @@ source 必须先结构健康且可解释；无法读取 live contract、PENDING 
 
 严格执行 VERIFY → COMPATIBILITY PLAN → RESTORE。只有 COMPATIBLE，或操作者显式接受完整 REQUIRES_UPGRADE actions，才可 mutation。
 
+当前单跳媒体数据库恢复路径及其 exact source/target、布局、datastore 与 platform qualification 限制见 [Restore Contract 的 Managed-media schema path](restore-contract-v1.md#managed-media-schema-path)；不得从 additive migration 推导任意 release、布局或 major 版本迁移受支持。
+
 ### Migration
 
 除 Backup/Restore dimensions 外，必须覆盖 source/target deployment profile、Migration Bundle、Secret Envelope、media/R2 dependency 与 Public Origin/listen reconfiguration。
