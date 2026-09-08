@@ -318,7 +318,7 @@ class ReleaseCliTests(unittest.TestCase):
                 "--installer-materials", installer_materials,
                 "--output", target,
             )
-            self.run_cli("validate-manifest", "--manifest", target, "--updater-version", "1.0.0")
+            self.run_cli("validate-manifest", "--manifest", target)
             self.run_cli(
                 "write-checksums", "--output", checksums,
                 target, deployment_contract, installer_materials

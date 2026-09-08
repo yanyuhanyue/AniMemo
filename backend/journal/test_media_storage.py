@@ -1120,6 +1120,14 @@ class StoragePostgreSQLConcurrencyTests(TransactionTestCase):
         def delete(self, _key):
             return None
 
+        def url(self, key):
+            adapter_class = (
+                DynamicR2Backend
+                if self.backend.backend_type == MediaStorageBackend.BackendType.CLOUDFLARE_R2
+                else DynamicLocalBackend
+            )
+            return adapter_class(self.backend).url(key)
+
     @staticmethod
     def _upload(key):
         close_old_connections()
