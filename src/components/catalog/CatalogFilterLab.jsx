@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Icon } from "../Icon.jsx";
 import { ResetFilterButton } from "../ResetFilterButton.jsx";
+import { PublicFacetControl } from "./PublicFacetControl.jsx";
 
 const DEFAULT_STATUS_OPTIONS = [
   ["all", "全部状态"],
@@ -40,6 +41,8 @@ export function CatalogFilterLab({
   statusOptions = DEFAULT_STATUS_OPTIONS,
   sortOptions = DEFAULT_SORT_OPTIONS,
   activityOptions = DEFAULT_ACTIVITY_OPTIONS,
+  publicCatalog = null,
+  onFacetSelect,
 }) {
   const [expanded, setExpanded] = useState(() => window.innerWidth >= 768);
 
@@ -63,9 +66,10 @@ export function CatalogFilterLab({
         <div className="filter-grid">
           <label className="filter-field">
             <span>搜索番名 / 日文名</span>
-            <div className="input-with-icon"><Icon name="search" /><input value={filters.search} onChange={(event) => onFilterChange("search", event.target.value)} placeholder="输入番剧中文或日文名..." /></div>
+            <div className="input-with-icon"><Icon name="search" /><input value={filters.search} maxLength={publicCatalog ? 1000 : undefined} onChange={(event) => onFilterChange("search", event.target.value)} placeholder="输入番剧中文或日文名..." /></div>
           </label>
-          <label className="filter-field">
+          {publicCatalog ? <PublicFacetControl name="tags" label="标签过滤" selected={filters.tag_ref || (filters.tag !== "all" ? `value:${filters.tag}` : "")} selectedLabel={filters.tag_label}
+            facet={publicCatalog.facets.tags} catalog={publicCatalog} onSelect={(item) => onFacetSelect("tag", item)} /> : <label className="filter-field">
             <span>标签过滤</span>
             <span className="filter-control-hitbox">
               <select aria-label="标签过滤" value={filters.tag} onChange={(event) => onFilterChange("tag", event.target.value)}>
@@ -73,7 +77,7 @@ export function CatalogFilterLab({
                 {tags.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
               </select>
             </span>
-          </label>
+          </label>}
           <label className="filter-field">
             <span>观看状态</span>
             <span className="filter-control-hitbox">
@@ -82,7 +86,8 @@ export function CatalogFilterLab({
               </select>
             </span>
           </label>
-          <label className="filter-field">
+          {publicCatalog ? <PublicFacetControl name="years" label="年份区间" selected={filters.year_ref || (filters.year !== "all" ? `value:${filters.year}` : "")} selectedLabel={filters.year_label}
+            facet={publicCatalog.facets.years} catalog={publicCatalog} onSelect={(item) => onFacetSelect("year", item)} /> : <label className="filter-field">
             <span>年份区间</span>
             <span className="filter-control-hitbox">
               <select aria-label="年份区间" value={filters.year} onChange={(event) => onFilterChange("year", event.target.value)}>
@@ -90,7 +95,7 @@ export function CatalogFilterLab({
                 {years.map((year) => <option key={year} value={year}>{year}</option>)}
               </select>
             </span>
-          </label>
+          </label>}
           {Object.hasOwn(filters, "activity") && <label className="filter-field">
             <span>活动与资料</span>
             <span className="filter-control-hitbox">

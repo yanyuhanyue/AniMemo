@@ -3,6 +3,24 @@
 Baseline: `bbff1354f235a180a48c3f216b94c8b295f1cd96`
 Contract date: `2026-08-11`
 
+## Portable Bundle Restore Sessions
+
+The additive `/api/v1/bundle-restores/` family restores the unchanged Data Bundle v1 through bounded upload and one atomic business transaction. Every endpoint authenticates the current owner. The `/api/` aliases use the same views and contract. Existing synchronous `/import/` retains its 2 MiB budget.
+
+| Method / suffix | Request | Response |
+|---|---|---|
+| POST `bundle-restores/` | `idempotency_key` UUID, `expected_bytes` positive integer, lowercase `sha256`, `schema_version: 1`; no extra fields | Owner-bound session; same key and content returns the same session; conflicting content is 409 |
+| GET `bundle-restores/current/` | None | `{session: status-or-null}` for the current unfinished session |
+| GET `bundle-restores/<uuid>/` | None | Bounded status, preview and completed receipt |
+| PUT `bundle-restores/<uuid>/chunks/?offset=N&generation=N` | `application/octet-stream`, exactly 1 MiB except the final remainder | Updated acknowledged offset; identical retries succeed, conflicting/missing/out-of-order chunks fail |
+| POST `bundle-restores/<uuid>/validate/` | `{generation: N}` | Whole-file hash and domain validation; `ready` plus bounded preview |
+| POST `bundle-restores/<uuid>/commit/` | `{generation: N}` | `completed` and durable receipt; repeated completion does not write again |
+| POST `bundle-restores/<uuid>/cancel/` | `{generation: N}` | Terminal status; already completed business is preserved |
+
+Status contains `id`, `generation`, `state`, `schema_version`, `expected_bytes`, `received_bytes`, `sha256`, `chunk_bytes`, `preview`, `receipt`, `error_code`, `cleanup_pending`, and `expires_at`. States are receiving/validating/ready/committing/completed/cancelled/failed/expired. `preview.items` includes at most 50 titles and rows, with total/ready and `items_truncated`; successful compact JSON is at most 65,536 bytes. Receipt includes format/schema_version/created/total/skipped_duplicates/errors and is kept for seven days after terminal completion. Every personal success and error is private/no-store and varies on Authorization/Cookie.
+
+Create and operation JSON bodies are limited to 16 KiB. Errors retain exactly code/detail/correlation_id. Capacity returns `bundle_restore_capacity` (413), identity/offset/generation conflicts return stable 409 codes, and unavailable staging returns `bundle_restore_storage` (507). Tokens, UUIDs and hashes do not grant authority. A lost commit response must be reconciled through status before retrying. Operational capacity, private staging, cleanup and upgrade rules are specified in [Data Bundle v1](data-bundle-v1.md#分块恢复会话).
+
 ## Contract Status
 
 `/api/v1/` is the canonical AniMemo Core client contract. Existing `/api/` Core routes are compatibility aliases backed by the same Django URL patterns, Views, Serializers, permissions and domain implementation. They are not a second API and must not receive legacy-only endpoints.
@@ -32,6 +50,7 @@ The generated `/api/schema/` document is the exhaustive method-level inventory a
 | Import/export | `/api/v1/import/`, `/api/v1/export/` | POST, GET | Bearer + current user | Data Bundle v1 / file responses, `ApiError` | Web; Mobile deferred |
 | Columns | `/api/v1/columns/`, `/api/v1/columns/{id}/`, submit/removal actions | GET, POST, PUT, PATCH, DELETE | Bearer + author/workflow permission | column serializers, `ApiError` | Web; Mobile optional |
 | Public discovery | `/api/v1/homepage/`, `featured/`, `showcases/`, `showcase/{public_slug}/`, `shared/{share_slug}/`, `site-settings/`, `tag-presets/` | GET | Public or optional Bearer | public DTO serializers, `ApiError` | Web, future Mobile |
+| Bounded public catalogue | `/api/v1/public/homepage/...`, `/api/v1/public/showcase/{public_slug}/...`, `/api/v1/public/showcases/` | GET | Public or server-selected owner preview | explicit page/summary/facet/detail/field envelopes, `ApiError`; [contract](public-catalog-contract.md) | Web, future Mobile, frontend Plugin |
 | Public catalog | `/api/v1/catalog/public-search/` | GET | Bearer | paginated catalog DTO, query parameters, `ApiError` | Web, future Mobile |
 | External media | `/api/v1/external-media/providers/{provider}/...` | GET | Public or Bearer depending on operation | provider-neutral media DTOs, `ApiError` | Web, future Mobile |
 | External accounts | `/api/v1/external-accounts/...` | GET, POST, DELETE | Bearer except provider callback | provider capability/connection/import DTOs, `ApiError` | Web, future Mobile adapter |
@@ -48,6 +67,13 @@ All JSON errors use the canonical `{code, detail, correlation_id}` shape defined
 ## Pagination And Query Stability
 
 Page-number pagination remains `{count, next, previous, results}`. Entry queries retain `page`, `page_size`, `search`, `ordering`, `watch_status`, `tags`, `priority`, `activity` and Quick Filter semantics already covered by Dashboard regression tests. A future cursor contract requires a new documented version or an additive endpoint; it cannot silently replace v1 page semantics.
+
+The additive `public/...` catalogue uses its own documented live keyset contract:
+default 50/max 100 entries, actual success JSON at most 524288 bytes, and complete
+revision-bound field access. Its summary covers the full authorized scope.
+See [Bounded public catalogue](public-catalog-contract.md) for the migration of
+old homepage/showcase/directory operations to fixed 410 responses, including
+their `/api/` aliases. This leaves authenticated Entries pagination unchanged.
 
 ## Entry mutation order
 

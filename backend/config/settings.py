@@ -13,6 +13,32 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR.parent / ".env")
 
+# Portable restore budgets are operational limits, not Bundle v1 field limits.
+# The reference profile and larger-recovery configuration are validated together.
+BUNDLE_RESTORE_ROOT = Path(os.getenv(
+    "BUNDLE_RESTORE_ROOT", str(BASE_DIR.parent / "runtime" / "bundle-restore-staging")
+))
+BUNDLE_RESTORE_CHUNK_BYTES = 1024 * 1024
+BUNDLE_RESTORE_RAW_BYTES = int(os.getenv("BUNDLE_RESTORE_RAW_BYTES", str(256 * 1024 * 1024)))
+BUNDLE_RESTORE_NORMALIZED_BYTES = int(os.getenv("BUNDLE_RESTORE_NORMALIZED_BYTES", str(512 * 1024 * 1024)))
+BUNDLE_RESTORE_SINGLE_BYTES = int(os.getenv("BUNDLE_RESTORE_SINGLE_BYTES", str(128 * 1024 * 1024)))
+BUNDLE_RESTORE_INDEX_BYTES = int(os.getenv("BUNDLE_RESTORE_INDEX_BYTES", str(32 * 1024 * 1024)))
+BUNDLE_RESTORE_DISK_BYTES = int(os.getenv("BUNDLE_RESTORE_DISK_BYTES", str(2 * 1024 * 1024 * 1024)))
+BUNDLE_RESTORE_OPERATION_SECONDS = int(os.getenv("BUNDLE_RESTORE_OPERATION_SECONDS", "300"))
+BUNDLE_RESTORE_HEADER_BYTES = int(os.getenv("BUNDLE_RESTORE_HEADER_BYTES", "4096"))
+BUNDLE_RESTORE_MAX_DEPTH = int(os.getenv("BUNDLE_RESTORE_MAX_DEPTH", "128"))
+BUNDLE_RESTORE_IDLE_SECONDS = 86400
+BUNDLE_RESTORE_LIFETIME_SECONDS = 604800
+BUNDLE_RESTORE_RECEIPT_SECONDS = 604800
+if not BUNDLE_RESTORE_ROOT.is_absolute() or min(
+    BUNDLE_RESTORE_RAW_BYTES, BUNDLE_RESTORE_NORMALIZED_BYTES, BUNDLE_RESTORE_SINGLE_BYTES,
+    BUNDLE_RESTORE_INDEX_BYTES, BUNDLE_RESTORE_DISK_BYTES, BUNDLE_RESTORE_OPERATION_SECONDS,
+    BUNDLE_RESTORE_HEADER_BYTES, BUNDLE_RESTORE_MAX_DEPTH,
+) < 1:
+    raise ImproperlyConfigured("Bundle restore requires an absolute staging root and positive budgets.")
+if BUNDLE_RESTORE_INDEX_BYTES < 8192:
+    raise ImproperlyConfigured("Bundle restore identity index requires at least 8192 bytes.")
+
 
 def env_list(name, default=""):
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]

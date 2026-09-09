@@ -7,6 +7,10 @@ import { FeaturedModalScore } from "./FeaturedModalScore.jsx";
 import { useModalViewportSize } from "./useModalViewportSize.js";
 import { WatchHistoryList } from "../WatchHistoryList.jsx";
 import { normalizeHttpUrl } from "../../lib/safeUrl.js";
+import { PublicFieldReader } from "../catalog/PublicCatalogControls.jsx";
+
+const PUBLIC_FIELD_LABELS = { title: "番剧标题", japanese_title: "日文名", airing_period: "放送时间", studio: "制作公司", episodes: "话数情况",
+  description: "剧情简介", review: "个人评价", tags: "全部标签", tag_colors: "标签颜色", poster_url: "海报地址", poster: "海报", baike_url: "资料地址" };
 
 function displayPeriod(period = "") {
   if (!period || period === "未定档") return "未定档";
@@ -69,7 +73,7 @@ function StudioMarquee({ value }) {
   );
 }
 
-export function FeaturedAnimeModal({ column, onClosed }) {
+export function FeaturedAnimeModal({ column, onClosed, publicRead = null }) {
   const rootRef = useRef(null);
   const backdropRef = useRef(null);
   const panelRef = useRef(null);
@@ -80,9 +84,13 @@ export function FeaturedAnimeModal({ column, onClosed }) {
   const closedRef = useRef(false);
   const [phase, setPhase] = useState("opening");
   const [activeTab, setActiveTab] = useState("summary");
+  const [readingField, setReadingField] = useState("");
   const titleId = useId();
   const tabPanelId = useId();
   const anime = column?.anime;
+  const incompleteFields = publicRead?.detail.entry ? Object.entries(publicRead.detail.entry.fields).filter(([, value]) => !value.complete).map(([name]) => name) : [];
+  const fieldState = publicRead?.field.target?.type === "entry" && publicRead.field.target.field === readingField ? publicRead.field : null;
+  const readField = (name) => { setReadingField(name); setActiveTab("fields"); publicRead.readEntryField(name); };
   const modalSize = useModalViewportSize();
   const modalStyle = useMemo(() => {
     const scaled = (ratio, minimum, maximum) => Math.round(
@@ -280,7 +288,6 @@ export function FeaturedAnimeModal({ column, onClosed }) {
       <div
         className="featured-anime-modal__backdrop"
         ref={backdropRef}
-        aria-hidden="true"
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) requestClose();
         }}
@@ -296,15 +303,15 @@ export function FeaturedAnimeModal({ column, onClosed }) {
             <header className="featured-anime-modal__header" data-featured-modal-piece>
               <div>
                 <span className="featured-anime-modal__eyebrow">ANIME FILE / 番剧档案</span>
-                <h2 id={titleId}>{anime.title}</h2>
-                <p>{anime.japaneseTitle}</p>
+                <h2 id={titleId}>{publicRead?.detail.status === "error" ? "番剧档案暂时不可用" : anime.title}</h2>
+                <p>{publicRead?.detail.status === "error" ? "" : anime.japaneseTitle}</p>
               </div>
               <button ref={closeRef} className="featured-anime-modal__close-top" type="button" onClick={requestClose} aria-label="关闭番剧档案">
                 <Icon name="close" />
               </button>
             </header>
 
-            <div className="featured-anime-modal__main">
+            {publicRead?.detail.status === "error" ? <div className="featured-anime-modal__main" role="alert"><p>{publicRead.detail.error?.detail} 请关闭后重新打开记录。</p></div> : <div className="featured-anime-modal__main">
               <aside className="featured-anime-modal__poster-column">
                 <div className="featured-anime-modal__poster-viewer" data-featured-modal-piece>
                   <img src={anime.poster} alt={`${anime.title} 海报`} />
@@ -341,20 +348,29 @@ export function FeaturedAnimeModal({ column, onClosed }) {
                 </div>
 
                 <div className="featured-anime-modal__content-piece" data-featured-modal-piece>
-                  <div className={`featured-anime-modal__tabs${anime.watchHistory?.length ? " has-history" : ""}`} role="tablist" aria-label="番剧档案内容">
+                  <div className={`featured-anime-modal__tabs${anime.watchHistory?.length || incompleteFields.length ? " has-history" : ""}`} role="tablist" aria-label="番剧档案内容">
                     <button type="button" role="tab" aria-selected={activeTab === "summary"} aria-controls={tabPanelId} className={activeTab === "summary" ? "is-active" : ""} onClick={() => setActiveTab("summary")}><Icon name="list" /> 剧情简介</button>
                     <button type="button" role="tab" aria-selected={activeTab === "review"} aria-controls={tabPanelId} className={activeTab === "review" ? "is-active" : ""} onClick={() => setActiveTab("review")}><Icon name="edit" /> 个人评价</button>
                     {anime.watchHistory?.length > 0 && <button type="button" role="tab" aria-selected={activeTab === "history"} aria-controls={tabPanelId} className={activeTab === "history" ? "is-active" : ""} onClick={() => setActiveTab("history")}><Icon name="history" /> 观看情况</button>}
+                    {incompleteFields.length > 0 && <button type="button" role="tab" aria-selected={activeTab === "fields"} aria-controls={tabPanelId} className={activeTab === "fields" ? "is-active" : ""} onClick={() => setActiveTab("fields")}><Icon name="list" /> 完整字段</button>}
                   </div>
 
-                  <div className="featured-anime-modal__copy" id={tabPanelId} role="tabpanel" tabIndex={0} aria-label={activeTab === "summary" ? "剧情简介" : activeTab === "review" ? "个人评价" : "观看情况"}>
+                  <div className="featured-anime-modal__copy" id={tabPanelId} role="tabpanel" tabIndex={0} aria-label={activeTab === "summary" ? "剧情简介" : activeTab === "review" ? "个人评价" : activeTab === "fields" ? "完整字段" : "观看情况"}>
                     {activeTab === "summary" && renderParagraphs(anime.summary, "暂无剧情简介。")}
+                    {activeTab === "summary" && incompleteFields.includes("description") && <p>此处为简介预览。<button type="button" onClick={() => readField("description")}>读取完整简介</button></p>}
                     {activeTab === "review" && renderParagraphs(anime.personalReview, "暂未记录个人评价。")}
+                    {activeTab === "review" && incompleteFields.includes("review") && <p>此处为评价预览。<button type="button" onClick={() => readField("review")}>读取完整评价</button></p>}
                     {activeTab === "history" && <WatchHistoryList records={anime.watchHistory || []} />}
+                    {activeTab === "fields" && <>
+                      <p>以下字段还有后续内容，可分段阅读或下载完整字段。</p>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>{incompleteFields.map((name) => <button type="button" key={name} onClick={() => readField(name)}>{PUBLIC_FIELD_LABELS[name] || name}</button>)}</div>
+                      {readingField && <PublicFieldReader field={fieldState} onRead={(direction) => publicRead.readEntryField(readingField, direction)}
+                        onDownload={() => publicRead.exportEntryField(readingField)} exporting={publicRead.exporting} onCancel={publicRead.cancelExport} />}
+                    </>}
                   </div>
                 </div>
               </div>
-            </div>
+            </div>}
 
             <footer className="featured-anime-modal__footer">
               <button type="button" onClick={requestClose}>关闭</button>

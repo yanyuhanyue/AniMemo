@@ -39,7 +39,13 @@ test("production routes never substitute local demonstration data", () => {
   assert.match(dashboard, /if \(!demoEnabled && !access\) navigate\("\/login", \{ replace: true \}\)/);
   assert.match(showcase, /return demoEnabled\s*&&\s*localStorage\.getItem\("animemo_demo"\) === "true"/);
   assert.doesNotMatch(showcase, /^import .*getDemoUniverseOwner.*data\/universe/m);
-  assert.match(showcase, /if \(demoEnabled\) await applyLocalRecords\(\);\s*else \{\s*setRecords\(\[\]\)/);
+  assert.match(showcase, /const localMode = demoEnabled && Boolean/);
+  assert.match(showcase, /enabled: !localMode/);
+  assert.match(showcase, /if \(!localMode\) \{ setLocalRecords\(\[\]\)/);
+  assert.doesNotMatch(showcase, /api\.get\(["`]showcase\/|api\.get\("homepage\/"/);
+  assert.match(community, /const localMode = demoEnabled && localStorage/);
+  assert.match(community, /kind: "directory"[\s\S]*enabled: !localMode/);
+  assert.doesNotMatch(community, /api\.get\("showcases\/"/);
   assert.doesNotMatch(community, /^import .*demoUniverseOwners.*data\/universe/m);
   assert.match(community, /navigate\("\/login", \{ state: \{ from: "\/featured\/submit" \} \}\)/);
   assert.doesNotMatch(community, /setOwners\(demoUniverseOwners\);\s*\}\s*finally/);

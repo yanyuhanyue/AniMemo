@@ -22,17 +22,27 @@ from .entry_views import (
     UserSettingsView,
 )
 from .import_export_views import ExportEntriesView, ImportEntriesView
+from .data_bundle.restore_views import (
+    BundleRestoreCancelView, BundleRestoreChunkView, BundleRestoreCommitView,
+    BundleRestoreCreateView, BundleRestoreCurrentView, BundleRestoreStatusView,
+    BundleRestoreValidateView,
+)
+from .public_catalog_views import (
+    PublicCatalogDetailView,
+    PublicCatalogDirectoryView,
+    PublicCatalogEntriesView,
+    PublicCatalogFacetsView,
+    PublicCatalogFieldView,
+    PublicCatalogSummaryView,
+    RetiredPublicCatalogView,
+)
 from .public_views import (
     FeaturedColumnsView,
     PublicCatalogSearchView,
-    PublicHomepageView,
-    PublicShowcaseListView,
-    PublicShowcaseView,
     PublicSiteSettingsView,
     SharedEntryView,
     TagPresetListView,
 )
-
 
 router = DefaultRouter()
 router.register("entries", JournalEntryViewSet, basename="entry")
@@ -50,7 +60,18 @@ urlpatterns = [
     path("staff/", include("journal.staff_urls")),
     path("site-settings/", PublicSiteSettingsView.as_view(), name="site-settings"),
     path("tag-presets/", TagPresetListView.as_view(), name="tag-presets"),
-    path("homepage/", PublicHomepageView.as_view(), name="homepage"),
+    path("homepage/", RetiredPublicCatalogView.as_view(), name="homepage"),
+    path("public/homepage/entries/", PublicCatalogEntriesView.as_view(), name="public-homepage-entries"),
+    path("public/homepage/summary/", PublicCatalogSummaryView.as_view(), name="public-homepage-summary"),
+    path("public/homepage/facets/", PublicCatalogFacetsView.as_view(), name="public-homepage-facets"),
+    path("public/homepage/entries/<int:entry_id>/", PublicCatalogDetailView.as_view(), name="public-homepage-detail"),
+    path("public/homepage/entries/<int:entry_id>/fields/<str:field>/", PublicCatalogFieldView.as_view(), name="public-homepage-field"),
+    path("public/showcase/<uuid:public_slug>/entries/", PublicCatalogEntriesView.as_view(scope_kind="showcase"), name="public-showcase-entries"),
+    path("public/showcase/<uuid:public_slug>/summary/", PublicCatalogSummaryView.as_view(scope_kind="showcase"), name="public-showcase-summary"),
+    path("public/showcase/<uuid:public_slug>/facets/", PublicCatalogFacetsView.as_view(scope_kind="showcase"), name="public-showcase-facets"),
+    path("public/showcase/<uuid:public_slug>/entries/<int:entry_id>/", PublicCatalogDetailView.as_view(scope_kind="showcase"), name="public-showcase-detail"),
+    path("public/showcase/<uuid:public_slug>/entries/<int:entry_id>/fields/<str:field>/", PublicCatalogFieldView.as_view(scope_kind="showcase"), name="public-showcase-field"),
+    path("public/showcases/", PublicCatalogDirectoryView.as_view(), name="public-showcase-directory"),
     path("auth/register/request/", RegisterView.as_view(), name="register-request"),
     path("auth/register/verify/", VerifyRegistrationView.as_view(), name="register-verify"),
     path("auth/register/complete/", CompleteRegistrationView.as_view(), name="register-complete"),
@@ -65,9 +86,16 @@ urlpatterns = [
     path("settings/me/", UserSettingsView.as_view(), name="settings"),
     path("public-journal/status/", PublicJournalStatusView.as_view(), name="public-journal-status"),
     path("import/", ImportEntriesView.as_view(), name="import"),
+    path("bundle-restores/", BundleRestoreCreateView.as_view(), name="bundle-restore-create"),
+    path("bundle-restores/current/", BundleRestoreCurrentView.as_view(), name="bundle-restore-current"),
+    path("bundle-restores/<uuid:session_id>/", BundleRestoreStatusView.as_view(), name="bundle-restore-status"),
+    path("bundle-restores/<uuid:session_id>/chunks/", BundleRestoreChunkView.as_view(), name="bundle-restore-chunk"),
+    path("bundle-restores/<uuid:session_id>/validate/", BundleRestoreValidateView.as_view(), name="bundle-restore-validate"),
+    path("bundle-restores/<uuid:session_id>/commit/", BundleRestoreCommitView.as_view(), name="bundle-restore-commit"),
+    path("bundle-restores/<uuid:session_id>/cancel/", BundleRestoreCancelView.as_view(), name="bundle-restore-cancel"),
     path("export/", ExportEntriesView.as_view(), name="export"),
-    path("showcase/<uuid:public_slug>/", PublicShowcaseView.as_view(), name="showcase"),
-    path("showcases/", PublicShowcaseListView.as_view(), name="showcase-list"),
+    path("showcase/<uuid:public_slug>/", RetiredPublicCatalogView.as_view(), name="showcase"),
+    path("showcases/", RetiredPublicCatalogView.as_view(), name="showcase-list"),
     path("shared/<uuid:share_slug>/", SharedEntryView.as_view(), name="shared-entry"),
     path("featured/", FeaturedColumnsView.as_view(), name="featured"),
     path("catalog/public-search/", PublicCatalogSearchView.as_view(), name="public-catalog-search"),

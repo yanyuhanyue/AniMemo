@@ -2593,6 +2593,7 @@ class ProductionFreshInstallPort:
                 (Path(str(self.namespace.data_root / "plugins")), 0o755),
                 (Path(str(self.namespace.data_root / "media")), 0o755),
                 (Path(str(self.namespace.data_root / "private")), 0o700),
+                (Path(str(self.namespace.data_root / "bundle-restore-staging")), 0o700),
                 (Path(str(self.namespace.data_root / "backups")), 0o770),
                 (Path(str(self.namespace.data_root / "logs")), 0o755),
                 (Path(str(self.namespace.updater_state_root)), 0o700),
@@ -2733,6 +2734,7 @@ class ProductionFreshInstallPort:
                 ("media", 0o755),
                 ("logs", 0o755),
                 ("private", 0o700),
+                ("bundle-restore-staging", 0o700),
                 ("backups", 0o770),
             ):
                 path = Path(str(self.namespace.data_root / relative))

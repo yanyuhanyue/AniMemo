@@ -8,6 +8,21 @@ from journal.serializers_entries import JournalEntrySerializer
 from journal.watch_history.validation import HISTORY_CONTENT_FIELDS
 
 PROVIDER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,49}$")
+DATABASE_INVALID_STRING_RE = re.compile(r"[\x00\ud800-\udfff]")
+
+
+def validate_database_strings(value):
+    """Reject JSON strings PostgreSQL cannot store, before any business write."""
+    if isinstance(value, str):
+        if DATABASE_INVALID_STRING_RE.search(value):
+            raise serializers.ValidationError("数据包含数据库无法保存的字符。")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            validate_database_strings(key)
+            validate_database_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            validate_database_strings(item)
 
 
 class RejectUnknownFieldsMixin:
@@ -28,12 +43,12 @@ class RejectUnknownFieldsSerializer(RejectUnknownFieldsMixin, serializers.Serial
 
 class EntryDataSerializer(RejectUnknownFieldsMixin, JournalEntrySerializer):
     class Meta(JournalEntrySerializer.Meta):
-        fields = [
+        fields = (
             "title", "japanese_title", "airing_period", "studio", "episodes",
             "description", "poster_url", "custom_poster_url", "baike_url", "tags",
             "tag_colors", "personal_score", "watch_status", "review", "visibility",
-        ]
-        read_only_fields = []
+        )
+        read_only_fields = ()
 
     def get_fields(self):
         fields = super().get_fields()
@@ -92,6 +107,10 @@ class BundleEntrySerializer(RejectUnknownFieldsSerializer):
     entry = EntryDataSerializer()
     external_identities = ExternalIdentityDataSerializer(many=True, default=list)
     watch_history = serializers.ListField(child=serializers.DictField(), default=list)
+
+    def validate(self, value):
+        validate_database_strings(value)
+        return value
 
     def validate_watch_history(self, value):
         for index, record in enumerate(value):

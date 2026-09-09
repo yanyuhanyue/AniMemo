@@ -1,11 +1,14 @@
 import json
 
 from django.core.management.base import BaseCommand, CommandError
-
-from journal.media_inventory import backfill_media_references, inspect_media_references
-from journal.models import JournalEntry
-from journal.media_references import cleanup_media
 from site_config.models import MediaObject
+
+from journal.media_inventory import (
+    backfill_all_media_references,
+    backfill_media_references,
+    inspect_media_references,
+)
+from journal.media_references import cleanup_media
 
 
 class Command(BaseCommand):
@@ -25,19 +28,11 @@ class Command(BaseCommand):
             for media_id in candidates.iterator():
                 cleanup_results.append({"media_id": str(media_id), "reclaimed": cleanup_media(media_id)})
         if options["apply"]:
-            result = backfill_media_references(after_entry=options["after_entry"], limit=options["limit"])
-            if options["all_batches"]:
-                # Bound this invocation using the remaining snapshot. Concurrent
-                # writes already maintain their own references; any unresolved
-                # or unexpected extra work still fails the final READY gate.
-                remaining = JournalEntry.objects.filter(pk__gt=result["next_after_entry"]).count()
-                for _ in range(remaining // options["limit"] + 1):
-                    if not result["more"]:
-                        break
-                    cursor = result["next_after_entry"]
-                    result = backfill_media_references(after_entry=cursor, limit=options["limit"])
-                    if result["more"] and result["next_after_entry"] <= cursor:
-                        raise CommandError("持有回填游标未前进。")
+            apply = backfill_all_media_references if options["all_batches"] else backfill_media_references
+            try:
+                result = apply(after_entry=options["after_entry"], limit=options["limit"])
+            except ValueError as error:
+                raise CommandError(str(error)) from None
         else:
             if options["all_batches"]:
                 raise CommandError("--all-batches 需要 --apply。")

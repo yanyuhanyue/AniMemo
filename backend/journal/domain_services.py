@@ -61,6 +61,9 @@ class JournalEntryService:
     def create(self, serializer, *, source="core"):
         self._require_user()
         with atomic_media_mutation():
+            # All supported creates participate in the empty-journal restore
+            # decision, including CSV/provider/SDK calls without media fields.
+            lock_media_owner(self.user.pk)
             try:
                 entry = serializer.save(user=self.user)
             except ValidationError as error:

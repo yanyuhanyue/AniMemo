@@ -5,6 +5,12 @@ from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
+from .bundle_restore_models import (  # noqa: F401 - register feature models
+    BundleRestoreAdmission,
+    BundleRestoreChunk,
+    BundleRestoreSession,
+)
+
 
 def poster_upload_to(instance, filename):
     return f"users/{instance.user_id}/posters/{uuid.uuid4().hex}-{filename}"
@@ -72,6 +78,7 @@ class JournalEntry(models.Model):
         indexes = [
             models.Index(fields=["user", "watch_status"]),
             models.Index(fields=["visibility", "updated_at"]),
+            models.Index(fields=["poster_file"], name="journal_poster_file_idx"),
         ]
 
     def __str__(self):
