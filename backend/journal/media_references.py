@@ -60,10 +60,11 @@ def file_name(entry):
 
 def owner_evidence(media):
     """Only persisted associations establish ownership, never a key or URL."""
-    owners = set(JournalEntry.objects.filter(poster_file=media.reference_name).values_list("user_id", flat=True))
-    owners.update(UserSettings.objects.filter(avatar=media.reference_name).values_list("user_id", flat=True))
-    owners.update(Column.objects.filter(cover=media.reference_name).values_list("author_id", flat=True))
-    owners.update(media.journal_references.values_list("owner_id", flat=True))
+    direct = JournalEntry.objects.filter(poster_file=media.reference_name).order_by().values_list("user_id", flat=True)
+    avatars = UserSettings.objects.filter(avatar=media.reference_name).order_by().values_list("user_id", flat=True)
+    covers = Column.objects.filter(cover=media.reference_name).order_by().values_list("author_id", flat=True)
+    references = media.journal_references.order_by().values_list("owner_id", flat=True)
+    owners = set(direct.union(avatars, covers, references, all=True))
     if media.upload_owner_id is not None:
         owners.add(media.upload_owner_id)
     return owners
@@ -121,7 +122,7 @@ class PosterUsage:
         return "UNKNOWN_USAGE" if self.unknown_slots else "KNOWN"
 
 
-def _entry_slot_sizes(entry, references=None, url_cache=None):
+def _entry_slot_sizes(entry, references=None, url_cache=None, *, read_source=None):
     references = references if references is not None else {ref.slot: ref for ref in entry.media_references.select_related("media")}
     url_cache = url_cache if url_cache is not None else {}
     sizes = {}
@@ -138,7 +139,10 @@ def _entry_slot_sizes(entry, references=None, url_cache=None):
             sizes[slot] = trustworthy_size(ref.media) if valid else None
             continue
         if slot == "poster_file":
-            media = MediaObject.objects.filter(pk=managed_id(value)).first() if managed_id(value) else None
+            if read_source is None:
+                media = MediaObject.objects.filter(pk=managed_id(value)).first() if managed_id(value) else None
+            else:
+                media = read_source.media_for_id(managed_id(value))
             if media is None and isinstance(entry.poster_file.storage, FileSystemStorage):
                 try:
                     size = entry.poster_file.size
@@ -149,17 +153,22 @@ def _entry_slot_sizes(entry, references=None, url_cache=None):
                 sizes[slot] = trustworthy_size(media)
             continue
         if value not in url_cache:
-            url_cache[value] = resolve_url_candidates(value)
+            url_cache[value] = (resolve_url_candidates(value) if read_source is None
+                                else read_source.resolve_candidates(value))
         candidates = url_cache[value]
-        owned = [media for media in candidates if owns_media(media, entry.user_id)]
+        owned = [media for media in candidates if
+                 (owns_media(media, entry.user_id) if read_source is None
+                  else read_source.owners_for(media) == {entry.user_id})]
         sizes[slot] = trustworthy_size(owned[0]) if len(candidates) == 1 and len(owned) == 1 else (None if owned else 0)
     return sizes
 
 
 def poster_usage(owner_id):
     total, unknown, url_cache = 0, [], {}
-    entries = JournalEntry.objects.filter(user_id=owner_id).prefetch_related("media_references__media").order_by("pk")
-    for entry in entries:
+    entries = (JournalEntry.objects.filter(user_id=owner_id)
+               .only("id", "user_id", "poster_file", "custom_poster_url")
+               .prefetch_related("media_references__media").order_by("pk"))
+    for entry in entries.iterator(chunk_size=256):
         refs = {ref.slot: ref for ref in entry.media_references.all()}
         for slot, size in _entry_slot_sizes(entry, refs, url_cache).items():
             if size is None:

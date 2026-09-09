@@ -78,6 +78,7 @@ class JournalEntry(models.Model):
         indexes = [
             models.Index(fields=["user", "watch_status"]),
             models.Index(fields=["visibility", "updated_at"]),
+            models.Index(fields=["poster_file"], name="journal_poster_file_idx"),
         ]
 
     def __str__(self):

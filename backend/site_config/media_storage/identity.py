@@ -35,7 +35,7 @@ def url_identity(value):
         port = 443 if parts.port is None else parts.port
         if port == 0:
             return None
-        if re.search(r"%(?![0-9a-fA-F]{2})|%(?:2f|5c|25)", parts.path, re.I):
+        if re.search(r"%(?![0-9a-fA-F]{2})|%(?:2f|5c|25)", parts.path, re.IGNORECASE):
             return None
         path = unquote(parts.path, encoding="utf-8", errors="strict")
     except (ValueError, UnicodeError):
@@ -70,13 +70,27 @@ def url_identity_digest(value):
     return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest() if identity else ""
 
 
-def resolve_url_candidates(value):
+class _DatabaseCandidates:
+    """Live data access for the shared identity-union algorithm."""
+
+    def backends(self):
+        return MediaStorageBackend.objects.all().order_by("pk")
+
+    def at_location(self, backend, key):
+        return MediaObject.objects.select_related("storage_backend").filter(storage_backend=backend, object_key=key)
+
+    def with_snapshot_digest(self, digest):
+        return MediaObject.objects.select_related("storage_backend").filter(public_url_identity=digest)
+
+
+def resolve_url_candidates(value, *, source=None):
     """Return every possible identity, keeping ambiguity visible to the caller."""
     identity = url_identity(value)
     if identity is None:
         return []
+    source = source if source is not None else _DatabaseCandidates()
     matches = {}
-    for backend in MediaStorageBackend.objects.all().order_by("pk"):
+    for backend in source.backends():
         for base in backend_public_bases(backend):
             prefix = url_identity(str(base).rstrip("/") + "/")
             if prefix is None or identity[:3] != prefix[:3] or not identity[3].startswith(prefix[3]):
@@ -84,11 +98,11 @@ def resolve_url_candidates(value):
             key = identity[3][len(prefix[3]):]
             if not key:
                 continue
-            for media in MediaObject.objects.filter(storage_backend=backend, object_key=key):
+            for media in source.at_location(backend, key):
                 matches[media.pk] = media
     # New uploads preserve the server-authorized origin across later base URL
     # configuration changes. A snapshot is identity evidence, never ownership.
-    for media in MediaObject.objects.filter(public_url_identity=url_identity_digest(value)):
+    for media in source.with_snapshot_digest(url_identity_digest(value)):
         if url_identity(media.public_url_snapshot) == identity:
             matches[media.pk] = media
     return sorted(matches.values(), key=lambda media: str(media.pk))
