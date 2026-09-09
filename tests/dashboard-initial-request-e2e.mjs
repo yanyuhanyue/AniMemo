@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
@@ -48,6 +49,13 @@ const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const entryRequests = [];
 let importPreviewRequests = 0;
+const bundleFile = Buffer.from(JSON.stringify({ format: "animemo-data-bundle", schema_version: 1, entries: [{
+  entry: { title: "会话导入回归番剧", japanese_title: "", watch_status: "planned", visibility: "private" },
+  watch_history: [], external_identities: [],
+}] }));
+const bundleDigest = createHash("sha256").update(bundleFile).digest("hex");
+const bundleRequests = { create: 0, chunks: 0, validate: 0, cancel: 0 };
+let bundleSession = null;
 const consoleErrors = [];
 page.on("console", (message) => {
   if (message.type() === "error") consoleErrors.push(message.text());
@@ -100,6 +108,45 @@ try {
         items: [{ row: 1, title: "导入回归番剧", status: "ready", reason: "等待导入" }],
       });
     }
+    if (path === "bundle-restores/current/") return json(route, { session: bundleSession });
+    if (path === "bundle-restores/" && request.method() === "POST") {
+      bundleRequests.create += 1;
+      const payload = request.postDataJSON();
+      assert.deepEqual(Object.keys(payload).sort(), ["idempotency_key", "expected_bytes", "sha256", "schema_version"].sort());
+      assert.match(payload.idempotency_key, /^[0-9a-f-]{36}$/);
+      assert.equal(payload.sha256, bundleDigest);
+      assert.equal(payload.expected_bytes, bundleFile.length);
+      assert.equal(payload.schema_version, 1);
+      bundleSession = {
+        id: "07000000-0000-4000-8000-000000000001", generation: 1, state: "receiving",
+        expected_bytes: bundleFile.length, received_bytes: 0, sha256: bundleDigest,
+        chunk_bytes: 1048576, preview: {}, receipt: {}, error_code: "", cleanup_pending: false,
+      };
+      return json(route, bundleSession);
+    }
+    if (bundleSession && path.startsWith(`bundle-restores/${bundleSession.id}/`)) {
+      if (path.endsWith("chunks/") && request.method() === "PUT") {
+        bundleRequests.chunks += 1;
+        assert.equal(request.headers()["content-type"], "application/octet-stream");
+        assert.equal(url.searchParams.get("offset"), "0");
+        assert.equal(url.searchParams.get("generation"), "1");
+        assert.deepEqual(request.postDataBuffer(), bundleFile);
+        bundleSession.received_bytes = bundleFile.length;
+      } else if (path.endsWith("validate/") && request.method() === "POST") {
+        bundleRequests.validate += 1;
+        assert.deepEqual(request.postDataJSON(), { generation: 1 });
+        assert.equal(bundleSession.received_bytes, bundleFile.length);
+        bundleSession.state = "ready";
+        bundleSession.preview = { total: 1, ready: 1, skipped_duplicates: 0, errors: [],
+          items: [{ row: 1, title: "会话导入回归番剧", status: "ready" }], items_truncated: false };
+      } else if (path.endsWith("cancel/") && request.method() === "POST") {
+        bundleRequests.cancel += 1;
+        assert.deepEqual(request.postDataJSON(), { generation: 1 });
+        bundleSession.state = "cancelled";
+        bundleSession.generation += 1;
+      } else assert.equal(request.method(), "GET");
+      return json(route, bundleSession);
+    }
     if (path === "entries/" && request.method() === "GET") {
       entryRequests.push(url);
       return json(route, {
@@ -137,18 +184,34 @@ try {
 
   const importInput = page.locator('input[type="file"][accept*=".json"]');
   await importInput.setInputFiles({
-    name: "critical-import.json",
-    mimeType: "application/json",
-    buffer: Buffer.from(JSON.stringify({ format: "animemo-data-bundle", schema_version: 1, entries: [] })),
+    name: "critical-import.csv",
+    mimeType: "text/csv",
+    buffer: Buffer.from("title,watch_status,visibility\n导入回归番剧,planned,private\n"),
   });
   const importDialog = page.getByRole("dialog", { name: "确认导入手账" });
   await importDialog.waitFor({ state: "visible" });
-  await importDialog.getByText("critical-import.json", { exact: true }).waitFor({ state: "visible" });
+  await importDialog.getByText("critical-import.csv", { exact: true }).waitFor({ state: "visible" });
   await importDialog.getByText("导入回归番剧", { exact: true }).waitFor({ state: "visible" });
-  assert.equal(importPreviewRequests, 1, "opening import preview must issue exactly one multipart request");
+  assert.equal(importPreviewRequests, 1, "opening a CSV preview must issue exactly one multipart request");
   assert.equal(entryRequests.length, 1, "import preview must not invalidate or reload journal entries");
   await importDialog.getByRole("button", { name: "取消" }).click();
   await importDialog.waitFor({ state: "detached" });
+
+  await importInput.setInputFiles({ name: "critical-import.json", mimeType: "application/json", buffer: bundleFile });
+  const restoreDialog = page.getByRole("dialog", { name: "恢复手账数据包" });
+  await restoreDialog.waitFor({ state: "visible" });
+  await restoreDialog.getByText("校验完成，等待确认恢复", { exact: true }).waitFor({ state: "visible" });
+  await restoreDialog.getByText("critical-import.json", { exact: true }).waitFor({ state: "visible" });
+  await restoreDialog.getByText("会话导入回归番剧", { exact: true }).waitFor({ state: "visible" });
+  assert.deepEqual(bundleRequests, { create: 1, chunks: 1, validate: 1, cancel: 0 });
+  assert.equal(importPreviewRequests, 1, "JSON must use restore sessions without a multipart fallback");
+  assert.equal(entryRequests.length, 1, "JSON upload and validation must not invalidate or reload journal entries");
+  await restoreDialog.getByRole("button", { name: "取消恢复", exact: true }).click();
+  await restoreDialog.getByText("恢复已取消", { exact: true }).waitFor({ state: "visible" });
+  assert.equal(bundleRequests.cancel, 1);
+  assert.equal(entryRequests.length, 1, "cancelling a preview must not reload journal entries");
+  await restoreDialog.getByRole("button", { name: "关闭", exact: true }).last().click();
+  await restoreDialog.waitFor({ state: "detached" });
 
   const search = page.getByPlaceholder("输入番剧中文或日文名...");
   await search.fill("进击的巨人");

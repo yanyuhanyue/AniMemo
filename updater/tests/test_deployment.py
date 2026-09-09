@@ -249,6 +249,9 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             http_probe=http_probe,
             release_probe=release_probe,
         )
+        # This runner models Compose only. The fixed-directory host boundary is
+        # exercised independently by test_bundle_restore_deployment fixtures.
+        deployment.prepare_bundle_restore_staging = mock.Mock()
         return deployment, runner, probes
 
     def test_container_ownership_label_mismatch_fails_closed(self):

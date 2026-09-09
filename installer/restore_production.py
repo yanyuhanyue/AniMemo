@@ -80,12 +80,59 @@ from installer.runtime import (
     TargetClass,
     TargetEvidence,
 )
-from updater.deployment import ImmutableComposeDeployment
+from updater.deployment import (
+    BUNDLE_RESTORE_STAGE_NAME,
+    ImmutableComposeDeployment,
+)
 from updater.runtime import InitialAdoptionRequest
 from updater.slots import ReleaseSlots
 from updater.state import UpdateLock
 
 _SAFE_SOURCE_MODES = frozenset({0o600, 0o640, 0o644, 0o700, 0o750, 0o755})
+_BUNDLE_RUNTIME_MATERIAL = "updater/docker-compose.runtime.yml"
+_BUNDLE_LAYOUT_INSERTIONS = (
+    (
+        b"  ANIMEMO_CONFIGURATION_CONTRACT: ${ANIMEMO_CONFIGURATION_CONTRACT:?verified configuration contract is required}\n",
+        b"  BUNDLE_RESTORE_ROOT: /app/runtime/bundle-restore-staging\n",
+    ),
+    (
+        b"    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/private:/app/runtime/private\n",
+        b"    - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/bundle-restore-staging:/app/runtime/bundle-restore-staging\n",
+    ),
+    (
+        b"      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/private:/app/runtime/private\n",
+        b"      - ${ANIMEMO_DATA_ROOT:?ANIMEMO_DATA_ROOT is required}/bundle-restore-staging:/app/runtime/bundle-restore-staging\n",
+    ),
+)
+
+
+def _bound_layout_material(materials, relative: str) -> bytes:
+    """Recheck the exact material bytes used for the one supported layout delta."""
+    contract = materials.deployment_contract
+    entries = [item for item in contract.get("materials", []) if item.get("path") == relative]
+    files = [item for item in contract.get("files", []) if item.get("path") == relative]
+    if len(entries) != 1 or len(files) != 1 or entries[0].get("sha256") != files[0].get("sha256"):
+        raise ValueError("Missing bound layout material")
+    path = materials.material(relative)
+    value = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(value.st_mode) or value.st_nlink != 1 or value.st_size > 256 * 1024:
+        raise ValueError("Unsafe layout material")
+    raw = path.read_bytes()
+    if len(raw) != entries[0].get("size") or sha256_identity(raw) != entries[0].get("sha256"):
+        raise ValueError("Changed layout material")
+    return raw
+
+
+def _has_bundle_restore_layout(materials) -> bool:
+    if not any(item.get("path") == _BUNDLE_RUNTIME_MATERIAL
+               for item in materials.deployment_contract.get("materials", [])):
+        return False
+    try:
+        raw = _bound_layout_material(materials, _BUNDLE_RUNTIME_MATERIAL)
+    except (OSError, ValueError):
+        raise RestoreAdapterError("RESTORE_RELEASE_MATERIAL_CHANGED") from None
+    lines = raw.splitlines(keepends=True)
+    return all(lines.count(addition) == 1 for _anchor, addition in _BUNDLE_LAYOUT_INSERTIONS)
 
 
 def _stable_restore_error(code: str) -> RestoreAdapterError:
@@ -445,6 +492,41 @@ class ProductionRestoreCompatibility:
             return [item for item in contract.get("materials", []) if item.get("path", "").startswith("deploy/")]
         return deployment_files(before) == deployment_files(after)
 
+    @staticmethod
+    def _bundle_restore_layout_transition(source, target):
+        """Accept only the three fixed additions to the verified runtime overlay."""
+        before, after = source.deployment_contract, target.deployment_contract
+        if any(
+            contract.get("schemaVersion") != 2
+            or contract.get("profile") != "v1.1-instance-scoped"
+            or contract.get("platform") != "linux/amd64"
+            for contract in (before, after)
+        ):
+            return False
+        expected_paths = ["deploy/docker-compose.yml", _BUNDLE_RUNTIME_MATERIAL]
+        if any([item.get("path") for item in contract.get("files", [])] != expected_paths
+               for contract in (before, after)):
+            return False
+        if before["files"][0] != after["files"][0]:
+            return False
+        if [item for item in before.get("materials", []) if item.get("path", "").startswith("deploy/")] != [
+            item for item in after.get("materials", []) if item.get("path", "").startswith("deploy/")
+        ]:
+            return False
+        try:
+            old = _bound_layout_material(source, _BUNDLE_RUNTIME_MATERIAL)
+            new = _bound_layout_material(target, _BUNDLE_RUNTIME_MATERIAL)
+        except (OSError, ValueError):
+            return False
+        if b"BUNDLE_RESTORE_ROOT" in old or b"bundle-restore-staging" in old or b"\r" in old:
+            return False
+        lines = old.splitlines(keepends=True)
+        if any(lines.count(anchor) != 1 for anchor, _addition in _BUNDLE_LAYOUT_INSERTIONS):
+            return False
+        additions = dict(_BUNDLE_LAYOUT_INSERTIONS)
+        expected = b"".join(line + additions.get(line, b"") for line in lines)
+        return new == expected
+
     def _database_path(self, backup_manifest, target_materials):
         try:
             qualification = parse_platform_qualification(
@@ -524,20 +606,22 @@ class ProductionRestoreCompatibility:
         source_contracts_supported = source_contracts_supported and all(plugins <= supported for supported in plugin_contracts)
         same_release = source_release == self.selected
         one_hop = (db_id, db_target) == ("animemo-db-v1", "animemo-db-v2")
+        bundle_layout_transition = self._bundle_restore_layout_transition(source_materials, target_materials)
+        bundle_forward = db_id == db_target == "animemo-db-v2" and bundle_layout_transition
         forward_version = Version(self.selected.version.removeprefix("v")) > Version(source_release.version.removeprefix("v"))
-        path_supported = same_release or (one_hop and forward_version)
+        path_supported = same_release or ((one_hop or bundle_forward) and forward_version)
         layout_supported = (
-            self._same_layout(source_materials, target_materials)
+            (self._same_layout(source_materials, target_materials) or bundle_layout_transition)
             and source_deployment.get("schemaVersion") == 2
             and all(source_materials.manifest["images"][role] == target_materials.manifest["images"][role]
                     for role in ("postgres", "redis"))
         )
         platform_supported, database_path = self._database_path(manifest, target_materials)
-        if db_id == db_target and db_id in target_db["appAccepts"]:
+        if db_id == db_target and db_id in target_db["appAccepts"] and not bundle_forward:
             schema_outcome = CompatibilityOutcome.COMPATIBLE
             schema_reason = ReasonCode.SCHEMA_CONTRACTS_SUPPORTED
         elif (
-            one_hop and db_id in target_db["appAccepts"]
+            (one_hop or bundle_forward) and db_id in target_db["appAccepts"]
             and target_db["migration"]["required"] is True
             and target_db["migration"]["policy"] == "additive-backward-compatible"
         ):
@@ -553,7 +637,10 @@ class ProductionRestoreCompatibility:
                     required_release_identity={
                         **self._release_identity(self.selected),
                         "minimumUpdaterVersion": self.release_manifest["minimumUpdaterVersion"],
-                        "validation": "media-reference-inventory-ready-before-bootstrap",
+                        "validation": (
+                            "bundle-restore-schema-and-empty-staging-before-bootstrap"
+                            if bundle_forward else "media-reference-inventory-ready-before-bootstrap"
+                        ),
                     },
                 ),
             )
@@ -876,6 +963,11 @@ class ProductionRestoreMutation:
         plan = self._plan()
         try:
             deployment = self.fresh.deployment_for(plan)
+            materials = self.fresh.releases.materials_for(plan.release)
+            if _has_bundle_restore_layout(materials):
+                # Only the exact target API can establish command/schema
+                # capability; old targets never receive the new command.
+                deployment.invalidate_restored_bundle_sessions(self.fresh.manifest_for(plan))
             if self.reconfigure_names:
                 deployment.apply_restore_secret_disposition(
                     self.fresh.manifest_for(plan),
@@ -953,6 +1045,15 @@ class ProductionRestoreValidation:
             Path(str(self.mutation.namespace.data_root / "media")): 0o755,
             Path(str(self.mutation.namespace.data_root / "private")): 0o700,
         }
+        install = self.mutation._plan()
+        materials = self.mutation.fresh.releases.materials_for(install.release)
+        if _has_bundle_restore_layout(materials):
+            stage = Path(str(self.mutation.namespace.data_root / BUNDLE_RESTORE_STAGE_NAME))
+            required[stage] = 0o700
+            try:
+                ImmutableComposeDeployment._validate_bundle_restore_staging(stage)
+            except OSError:
+                raise RestoreAdapterError("RESTORE_FILESYSTEM_LAYOUT_INVALID") from None
         for path, mode in required.items():
             metadata = path.lstat()
             if (

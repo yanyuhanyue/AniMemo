@@ -61,6 +61,49 @@ MIGRATION_PLAN_LINE = re.compile(
     r"^\s*\[(?P<state>[ X])\]\s+(?P<name>[A-Za-z0-9_]+\.[^\s]+)\s*$"
 )
 CANDIDATE_NETWORK_OVERRIDE_TEXT = "networks:\n  animemo:\n    internal: true\n"
+BUNDLE_RESTORE_STAGE_NAME = "bundle-restore-staging"
+BUNDLE_RESTORE_CONTAINER_ROOT = "/app/runtime/bundle-restore-staging"
+BUNDLE_RESTORE_STAGE_INIT = """import json, os, stat
+root = os.open('/animemo-instance-data', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    parent = os.fstat(root)
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0 or parent.st_mode & 0o022:
+        raise RuntimeError('BUNDLE_RESTORE_DATA_ROOT_UNSAFE')
+    created = False
+    try:
+        os.mkdir('bundle-restore-staging', mode=0o700, dir_fd=root)
+        created = True
+    except FileExistsError:
+        pass
+    stage = os.open('bundle-restore-staging', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+    try:
+        value = os.fstat(stage)
+        if not stat.S_ISDIR(value.st_mode):
+            raise RuntimeError('BUNDLE_RESTORE_STAGE_UNSAFE')
+        if created:
+            os.fchown(stage, 10001, 10001)
+            os.fchmod(stage, 0o700)
+        value = os.fstat(stage)
+        if (value.st_uid, value.st_gid, stat.S_IMODE(value.st_mode)) != (10001, 10001, 0o700):
+            raise RuntimeError('BUNDLE_RESTORE_STAGE_UNSAFE')
+        os.fsync(stage)
+        os.fsync(root)
+        print(json.dumps({'created': created, 'uid': 10001, 'gid': 10001, 'mode': '0700'}))
+    finally:
+        os.close(stage)
+finally:
+    os.close(root)
+"""
+BUNDLE_RESTORE_CAPABILITY_PROBE = """import json
+from django.apps import apps
+from django.core.management import get_commands
+from django.db import connection
+from django.db.migrations.recorder import MigrationRecorder
+command = get_commands().get('invalidate_restored_bundle_sessions') == 'journal'
+model = apps.get_model('journal', 'BundleRestoreSession') if command else None
+schema = bool(model and MigrationRecorder.Migration.objects.filter(app='journal', name='0009_bundle_restore_sessions').exists() and model._meta.db_table in connection.introspection.table_names())
+print(json.dumps({'command': command, 'schema': schema}))
+"""
 
 
 class _InitialHttpTransportUnavailable(StateError):
@@ -516,6 +559,8 @@ class ImmutableComposeDeployment:
         timeout: int = 300,
         live_contracts: dict[str, str] | None = None,
     ):
+        if args and args[0] in {"run", "up"}:
+            self.prepare_bundle_restore_staging(manifest)
         env_files = ["--env-file", str(self.paths.managed_env_path)]
         if self.runtime_env.exists() or self.runtime_env.is_symlink():
             _read_private_text(self.paths.state_root, self.runtime_env)
@@ -557,6 +602,103 @@ class ImmutableComposeDeployment:
             cwd=self.paths.app_root,
             env=self._environment(manifest, live_contracts=live_contracts),
             timeout=timeout,
+        )
+
+    def prepare_bundle_restore_staging(self, manifest: dict[str, object]) -> None:
+        """Prepare only the fixed private child of this bound instance data root."""
+        if manifest["compatibility"]["database"]["contract"] != "animemo-db-v2":
+            return
+        overlay = self.updater_compose_file.read_text(encoding="utf-8")
+        if f"  BUNDLE_RESTORE_ROOT: {BUNDLE_RESTORE_CONTAINER_ROOT}\n" not in overlay:
+            return
+        root = self.paths.data_root
+        stage = root / BUNDLE_RESTORE_STAGE_NAME
+        try:
+            for path in (root, *root.parents):
+                value = path.lstat()
+                if (
+                    path.is_symlink()
+                    or getattr(value, "st_file_attributes", 0) & 0x400
+                    or not stat.S_ISDIR(value.st_mode)
+                ):
+                    raise OSError("Unsafe instance data root")
+            if os.name == "posix":
+                value = root.lstat()
+                if value.st_uid != 0 or value.st_mode & 0o022:
+                    raise OSError("Unsafe instance data root permissions")
+            if stage.exists() or stage.is_symlink():
+                self._validate_bundle_restore_staging(stage)
+                return
+        except OSError as error:
+            raise StateError("Bundle restore staging authority is unsafe") from error
+        image = self.image_environment(manifest)["ANIMEMO_API_IMAGE"]
+        if not re.fullmatch(re.escape(API_REPOSITORY) + r"@sha256:[0-9a-f]{64}", image):
+            raise StateError("Bundle restore staging requires the bound immutable API image")
+        result = self.runner.run(
+            [
+                "/usr/bin/docker", "run", "--pull", "never", "--rm",
+                "--network", "none", "--read-only", "--user", "0:0",
+                "--label", f"io.animemo.instance-name={self.paths.instance_name}",
+                "--label", f"io.animemo.instance-id={self.paths.instance_id}",
+                "--label", f"io.animemo.compose-project={self.paths.compose_project}",
+                "--mount", f"type=bind,source={root},target=/animemo-instance-data",
+                "--entrypoint", "python", image, "-c", BUNDLE_RESTORE_STAGE_INIT,
+            ],
+            cwd=self.paths.app_root,
+            env={key: value for key, value in self._environment(manifest).items() if key in PROCESS_ENV_ALLOWLIST},
+            timeout=60,
+        )
+        try:
+            receipt = json.loads(result.stdout.strip())
+            if (
+                not isinstance(receipt, dict)
+                or set(receipt) != {"created", "uid", "gid", "mode"}
+                or type(receipt["created"]) is not bool
+                or receipt["uid"] != 10001
+                or receipt["gid"] != 10001
+                or receipt["mode"] != "0700"
+            ):
+                raise ValueError("Invalid fixed-directory receipt")
+            self._validate_bundle_restore_staging(stage)
+        except (OSError, ValueError) as error:
+            raise StateError("Bundle restore staging preparation could not be verified") from error
+
+    @staticmethod
+    def _validate_bundle_restore_staging(stage: Path) -> None:
+        value = stage.lstat()
+        if (
+            stage.is_symlink()
+            or getattr(value, "st_file_attributes", 0) & 0x400
+            or not stat.S_ISDIR(value.st_mode)
+            or (
+                os.name == "posix"
+                and (value.st_uid, value.st_gid, stat.S_IMODE(value.st_mode))
+                != (10001, 10001, 0o700)
+            )
+        ):
+            raise OSError("Unsafe bundle restore staging directory")
+
+    def invalidate_restored_bundle_sessions(self, manifest: dict[str, object]) -> None:
+        """Restore-only cleanup after confirming this exact API has its schema."""
+        result = self._compose(
+            manifest, "run", "--pull", "never", "--rm", "--no-deps",
+            "api", "python", "manage.py", "shell", "-c",
+            BUNDLE_RESTORE_CAPABILITY_PROBE, timeout=120,
+        )
+        try:
+            capability = json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError) as error:
+            raise StateError("Restore bundle capability inspection failed") from error
+        if (
+            not isinstance(capability, dict)
+            or set(capability) != {"command", "schema"}
+            or any(value is not True for value in capability.values())
+        ):
+            raise StateError("Restore bundle command or applied schema is unavailable")
+        self._compose(
+            manifest, "run", "--pull", "never", "--rm", "--no-deps",
+            "api", "python", "manage.py", "invalidate_restored_bundle_sessions",
+            timeout=120,
         )
 
     def verify_deployment_contract(self, manifest: dict[str, object]) -> None:

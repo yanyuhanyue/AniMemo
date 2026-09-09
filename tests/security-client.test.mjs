@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { LOCAL_IMPORT_BYTES } from "../src/lib/bundleRestore.js";
 
 const apiFacadeSource = readFileSync(new URL("../src/lib/api.js", import.meta.url), "utf8");
 const apiCoreSource = readFileSync(new URL("../src/lib/apiCore.js", import.meta.url), "utf8");
@@ -133,9 +134,11 @@ test("offers TOTP or recovery-code staff login without persisting the recovery c
   assert.match(adminLoginSource, /data\.admin_access/);
 });
 
-test("rejects oversized journal imports before uploading", () => {
-  assert.match(dashboardSource, /file\.size > 2 \* 1024 \* 1024/);
-  assert.match(dashboardSource, /文件不能超过 2 MB/);
+test("bounds synchronous CSV and demo imports while routing server JSON to durable recovery", () => {
+  assert.equal(LOCAL_IMPORT_BYTES, 2 * 1024 * 1024);
+  assert.match(dashboardSource, /\(isDemo \|\| !isJson\) && file\.size > LOCAL_IMPORT_BYTES/);
+  assert.match(dashboardSource, /CSV 文件不能超过 2 MiB/);
+  assert.match(dashboardSource, /if \(!isDemo && isJson\) \{[\s\S]*?client\.prepare\(file, \{ startNew \}\)[\s\S]*?return;/);
 });
 
 test("requires a staff second factor before self-account deletion", () => {

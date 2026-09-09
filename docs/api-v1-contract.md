@@ -3,6 +3,24 @@
 Baseline: `bbff1354f235a180a48c3f216b94c8b295f1cd96`
 Contract date: `2026-08-11`
 
+## Portable Bundle Restore Sessions
+
+The additive `/api/v1/bundle-restores/` family restores the unchanged Data Bundle v1 through bounded upload and one atomic business transaction. Every endpoint authenticates the current owner. The `/api/` aliases use the same views and contract. Existing synchronous `/import/` retains its 2 MiB budget.
+
+| Method / suffix | Request | Response |
+|---|---|---|
+| POST `bundle-restores/` | `idempotency_key` UUID, `expected_bytes` positive integer, lowercase `sha256`, `schema_version: 1`; no extra fields | Owner-bound session; same key and content returns the same session; conflicting content is 409 |
+| GET `bundle-restores/current/` | None | `{session: status-or-null}` for the current unfinished session |
+| GET `bundle-restores/<uuid>/` | None | Bounded status, preview and completed receipt |
+| PUT `bundle-restores/<uuid>/chunks/?offset=N&generation=N` | `application/octet-stream`, exactly 1 MiB except the final remainder | Updated acknowledged offset; identical retries succeed, conflicting/missing/out-of-order chunks fail |
+| POST `bundle-restores/<uuid>/validate/` | `{generation: N}` | Whole-file hash and domain validation; `ready` plus bounded preview |
+| POST `bundle-restores/<uuid>/commit/` | `{generation: N}` | `completed` and durable receipt; repeated completion does not write again |
+| POST `bundle-restores/<uuid>/cancel/` | `{generation: N}` | Terminal status; already completed business is preserved |
+
+Status contains `id`, `generation`, `state`, `schema_version`, `expected_bytes`, `received_bytes`, `sha256`, `chunk_bytes`, `preview`, `receipt`, `error_code`, `cleanup_pending`, and `expires_at`. States are receiving/validating/ready/committing/completed/cancelled/failed/expired. `preview.items` includes at most 50 titles and rows, with total/ready and `items_truncated`; successful compact JSON is at most 65,536 bytes. Receipt includes format/schema_version/created/total/skipped_duplicates/errors and is kept for seven days after terminal completion. Every personal success and error is private/no-store and varies on Authorization/Cookie.
+
+Create and operation JSON bodies are limited to 16 KiB. Errors retain exactly code/detail/correlation_id. Capacity returns `bundle_restore_capacity` (413), identity/offset/generation conflicts return stable 409 codes, and unavailable staging returns `bundle_restore_storage` (507). Tokens, UUIDs and hashes do not grant authority. A lost commit response must be reconciled through status before retrying. Operational capacity, private staging, cleanup and upgrade rules are specified in [Data Bundle v1](data-bundle-v1.md#分块恢复会话).
+
 ## Contract Status
 
 `/api/v1/` is the canonical AniMemo Core client contract. Existing `/api/` Core routes are compatibility aliases backed by the same Django URL patterns, Views, Serializers, permissions and domain implementation. They are not a second API and must not receive legacy-only endpoints.

@@ -279,6 +279,10 @@ export function DashboardPage() {
   const {
     closeImport,
     confirmImport,
+    cancelImport,
+    resumeImport,
+    openImport,
+    chooseImportFile,
     fileRef,
     importBusy,
     importData,
@@ -286,6 +290,8 @@ export function DashboardPage() {
     importFile,
     importOpen,
     importPreview,
+    importRestore,
+    importDemo,
   } = useDashboardImport({ isDemo, presetColors, records, setRecords, refreshEntries, flash });
 
   const saveRecord = async (record) => {
@@ -798,7 +804,7 @@ export function DashboardPage() {
             <nav className="dashboard-console-tools" aria-label="手账工具">
               <DashboardReturnHomeControl onConfirm={returnHome} />
               <button className="dashboard-arcade-button is-yellow" type="button" onClick={exportData}><Icon name="export" /><span className="dashboard-arcade-button__label">导出数据</span></button>
-              <button className="dashboard-arcade-button is-coral" type="button" onClick={() => fileRef.current?.click()}><Icon name="upload" /><span className="dashboard-arcade-button__label">导入备份</span></button>
+              <button className="dashboard-arcade-button is-coral" type="button" onClick={openImport}><Icon name="upload" /><span className="dashboard-arcade-button__label">导入备份</span></button>
               <button className="dashboard-arcade-button" type="button" onClick={() => navigate(`/shared/${settings.publicSlug || "local-preview"}?preview=1`, { state: { dashboardModeTransition: true } })}><Icon name="eye" /><span className="dashboard-arcade-button__label">预览模式</span></button>
               <DashboardShareControl publicStatus={settings.publicStatus} onChange={changePublicJournalStatus} />
               <button className="dashboard-arcade-button is-yellow" type="button" onClick={() => navigate("/plugins")}><Icon name="puzzle" /><span className="dashboard-arcade-button__label">插件中心</span></button>
@@ -858,7 +864,7 @@ export function DashboardPage() {
       {bangumiImportOpen && <BangumiImportDialog onClose={() => setBangumiImportOpen(false)} />}
       {dangerZoneOpen && <DangerZoneDialog settings={settings} isDemo={isDemo} onClose={() => { setDangerZoneOpen(false); window.requestAnimationFrame(() => profileAvatarButtonRef.current?.focus({ preventScroll: true })); }} onDeleteAccount={deleteAccount} />}
       {filterEditorOpen && <QuickFilterEditor filters={quickFilters} onClose={() => setFilterEditorOpen(false)} onSave={saveQuickFilter} onDelete={deleteQuickFilter} />}
-      {importOpen && <ImportJournalModal fileName={importFile?.name} preview={importPreview} busy={importBusy} error={importError} onClose={closeImport} onConfirm={confirmImport} />}
+      {importOpen && <ImportJournalModal fileName={importRestore?.fileName || importFile?.name} preview={importPreview} busy={importBusy} error={importError} restore={importRestore} demo={importDemo} onClose={closeImport} onConfirm={confirmImport} onResume={resumeImport} onCancel={cancelImport} onChooseFile={chooseImportFile} />}
     </main>
   );
 }

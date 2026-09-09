@@ -15,6 +15,8 @@ services:
 
   api:
     container_name: ${COMPOSE_PROJECT_NAME}-api
+    environment:
+      BUNDLE_RESTORE_ROOT: /app/runtime/bundle-restore-staging
     env_file: !override
       - ${STATEFUL_UPGRADE_ENV_FILE:?STATEFUL_UPGRADE_ENV_FILE is required}
     volumes: !override
@@ -23,6 +25,7 @@ services:
       - ${ANIMEMO_DATA_ROOT}/backups:/app/backups
       - ${ANIMEMO_DATA_ROOT}/media:/data/animemo/media
       - ${ANIMEMO_DATA_ROOT}/private:/app/runtime/private
+      - ${ANIMEMO_DATA_ROOT}/bundle-restore-staging:/app/runtime/bundle-restore-staging
       - ${STATEFUL_UPGRADE_HELPER_ROOT:?STATEFUL_UPGRADE_HELPER_ROOT is required}/scripts:/app/ci-scripts:ro
       - ${STATEFUL_UPGRADE_META_ROOT:?STATEFUL_UPGRADE_META_ROOT is required}:/app/ci-meta
     networks: !override
@@ -32,6 +35,8 @@ services:
     container_name: ${COMPOSE_PROJECT_NAME}-migration
     image: ${ANIMEMO_API_IMAGE:-animemo-upgrade-api:current}
     command: ["python", "manage.py", "migrate", "--noinput"]
+    environment:
+      BUNDLE_RESTORE_ROOT: /app/runtime/bundle-restore-staging
     env_file: !override
       - ${STATEFUL_UPGRADE_ENV_FILE:?STATEFUL_UPGRADE_ENV_FILE is required}
     volumes: !override
@@ -40,6 +45,7 @@ services:
       - ${ANIMEMO_DATA_ROOT}/backups:/app/backups
       - ${ANIMEMO_DATA_ROOT}/media:/data/animemo/media
       - ${ANIMEMO_DATA_ROOT}/private:/app/runtime/private
+      - ${ANIMEMO_DATA_ROOT}/bundle-restore-staging:/app/runtime/bundle-restore-staging
       - ${STATEFUL_UPGRADE_HELPER_ROOT:?STATEFUL_UPGRADE_HELPER_ROOT is required}/scripts:/app/ci-scripts:ro
       - ${STATEFUL_UPGRADE_META_ROOT:?STATEFUL_UPGRADE_META_ROOT is required}:/app/ci-meta
     networks: !override
@@ -48,6 +54,8 @@ services:
   bootstrap:
     container_name: ${COMPOSE_PROJECT_NAME}-bootstrap
     image: ${ANIMEMO_API_IMAGE:-animemo-upgrade-api:current}
+    environment:
+      BUNDLE_RESTORE_ROOT: /app/runtime/bundle-restore-staging
     env_file: !override
       - ${STATEFUL_UPGRADE_ENV_FILE:?STATEFUL_UPGRADE_ENV_FILE is required}
     volumes: !override
@@ -56,6 +64,7 @@ services:
       - ${ANIMEMO_DATA_ROOT}/backups:/app/backups
       - ${ANIMEMO_DATA_ROOT}/media:/data/animemo/media
       - ${ANIMEMO_DATA_ROOT}/private:/app/runtime/private
+      - ${ANIMEMO_DATA_ROOT}/bundle-restore-staging:/app/runtime/bundle-restore-staging
     networks: !override
       - upgrade-gate
 

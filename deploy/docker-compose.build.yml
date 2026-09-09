@@ -8,12 +8,14 @@ x-api-build-common: &api-build-common
     - ${ANIMEMO_TEST_MANAGED_ENV_PATH:-../.ci-runtime.env}
   environment:
     ANIMEMO_PUBLIC_ORIGIN: ${ANIMEMO_PUBLIC_ORIGIN:?ANIMEMO_PUBLIC_ORIGIN is required}
+    BUNDLE_RESTORE_ROOT: /app/runtime/bundle-restore-staging
   volumes:
     - ${ANIMEMO_TEST_DATA_ROOT:?ANIMEMO_TEST_DATA_ROOT is required}/plugins:/app/runtime/plugins
     - ${ANIMEMO_TEST_DATA_ROOT}/logs:/app/logs
     - ${ANIMEMO_TEST_DATA_ROOT}/backups:/app/backups
     - ${ANIMEMO_TEST_DATA_ROOT}/media:/data/animemo/media
     - ${ANIMEMO_TEST_DATA_ROOT}/private:/app/runtime/private
+    - ${ANIMEMO_TEST_DATA_ROOT}/bundle-restore-staging:/app/runtime/bundle-restore-staging
 
 services:
   postgres:
@@ -38,6 +40,7 @@ services:
       - ${ANIMEMO_TEST_DATA_ROOT}/backups:/app/backups
       - ${ANIMEMO_TEST_DATA_ROOT}/media:/data/animemo/media
       - ${ANIMEMO_TEST_DATA_ROOT}/private:/app/runtime/private
+      - ${ANIMEMO_TEST_DATA_ROOT}/bundle-restore-staging:/app/runtime/bundle-restore-staging
       - /run/animemo-updater:/run/animemo-updater:rw
 
   web:
