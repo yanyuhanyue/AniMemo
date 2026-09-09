@@ -77,6 +77,9 @@ categories:
 template: |
   本草稿由已合并的 Pull Request 自动汇总；发布前仍须通过 AniMemo 的 Release Gate。
 
+  当前部署参考目标为 v2.0.0，定位 PREPRODUCTION_ONLY；首个正式生产里程碑计划为 v2.2.0，仍须满足完整生产准入条件。
+  正式 Producer 独立解析版本；当前 Stable 基线 v1.0.0 对应显式 version_bump=major。
+
   $CHANGES
 
   > 此页面是变更草稿，不代表 RC、Stable、部署或发布授权。

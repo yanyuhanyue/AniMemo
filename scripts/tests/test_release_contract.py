@@ -149,6 +149,35 @@ def manifest(**overrides):
 
 
 class VersionResolutionTests(unittest.TestCase):
+    def test_v2_major_plan_preserves_minor_patch_and_reserved_sequences(self):
+        tags = ["v1.0.0", "v1.1.0-rc.19", "v2.0.0-rc.2"]
+        reservations = {"schemaVersion": 1, "reservations": [
+            publication_reservation(release_tag="v2.0.0-rc.4"),
+        ]}
+        for bump, target, sequence in (("major", "v2.0.0", 5),
+                                       ("minor", "v1.1.0", 20),
+                                       ("patch", "v1.0.1", 1)):
+            with self.subTest(bump=bump):
+                plan = resolve_prerelease(tags=tags, bump=bump, channel="rc",
+                                          publication_reservations=reservations)
+                self.assertEqual(plan, {"targetVersion": target,
+                    "releaseTag": f"{target}-rc.{sequence}", "sequence": sequence})
+        # Inputs are actual refs, not releases/latest or Drafter's future title.
+        plan = resolve_prerelease(tags=["v1.0.0", "v1.4.0"], bump="major", channel="rc")
+        self.assertEqual(plan["targetVersion"], "v2.0.0")
+        self.assertEqual(set(plan), {"targetVersion", "releaseTag", "sequence"})
+
+    def test_product_major_keeps_schema_profile_and_compatibility_identity(self):
+        before = manifest(version="v1.1.0-rc.19")
+        after = manifest(version="v2.0.0-rc.1")
+        for field in ("schemaVersion", "deployment", "compatibility", "minimumUpdaterVersion"):
+            self.assertEqual(before[field], after[field])
+        self.assertEqual(after["release"]["version"], "v2.0.0-rc.1")
+        self.assertEqual(DEPLOYMENT_CONTRACT["profile"], "v1.1-instance-scoped")
+        # No production qualification is inferred from a product version number.
+        self.assertNotIn("lifecycle", after)
+        self.assertNotIn("productionReady", after)
+
     def test_initial_release_line_requires_explicit_bootstrap_version(self):
         with self.assertRaisesRegex(ReleaseContractError, "target-version-override"):
             resolve_prerelease(tags=[], bump="patch", channel="rc")
