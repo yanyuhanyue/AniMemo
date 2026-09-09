@@ -1218,6 +1218,12 @@ class HostCommandRunner(Protocol):
     ) -> subprocess.CompletedProcess[bytes]: ...
 
 
+    def run_guest_exchange(
+        self, argv: Sequence[str], *, environment: Mapping[str, str],
+        cwd: Path, exchange: Callable[[subprocess.Popen[bytes]], None], timeout: int,
+    ) -> subprocess.CompletedProcess[bytes]: ...
+
+
 class SubprocessHostCommandRunner:
     def run(
         self,
@@ -1240,6 +1246,30 @@ class SubprocessHostCommandRunner:
             timeout=timeout,
             check=False,
         )
+
+
+    def run_guest_exchange(
+        self, argv: Sequence[str], *, environment: Mapping[str, str],
+        cwd: Path, exchange: Any, timeout: int,
+    ) -> subprocess.CompletedProcess[bytes]:
+        """One held SSH process; only its in-process exchange may write stdin."""
+        process = subprocess.Popen(
+            tuple(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=dict(environment), cwd=cwd,
+            shell=False, close_fds=True,
+            creationflags=0x08000000 if os.name == "nt" else 0,
+        )
+        try:
+            exchange(process)
+            code = process.wait(timeout=timeout)
+            return subprocess.CompletedProcess(tuple(argv), code, b"", b"")
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            for stream in (process.stdin, process.stdout):
+                if stream is not None:
+                    stream.close()
 
 
 class PublicReadonlyTransport(Protocol):
@@ -1829,11 +1859,19 @@ class CandidateProfileExecutionError(CandidateHarnessError):
         self.continuation_receipt = continuation_receipt
 
 
-@dataclass(frozen=True)
 class ProviderSessionLease:
-    path: Path
-    file_identity: tuple[int, int, int, int]
-    holder: ExitStack | None = None
+    """Process-local ownership of the provider lock, not a disk marker grant."""
+    __slots__ = ("path", "file_identity", "holder", "authority", "_closed")
+
+    def __init__(self):
+        raise TypeError("Provider leases are issued only by acquisition")
+
+    def __reduce__(self):
+        raise TypeError("Provider leases cannot be serialized")
+
+    def require_open(self) -> None:
+        if self._closed:
+            raise CandidateHarnessError("CANDIDATE_VM_PROVIDER_SESSION_CLOSED")
 
 
 def connection_challenge(connection_nonce: str, phase: str) -> str:
@@ -2540,11 +2578,13 @@ class ClosedVmwareProvider:
             if work_root is not None:
                 holder = ExitStack()
                 holder.enter_context(hold_windows_private_file(lock_path))
-            return ProviderSessionLease(
-                path=lock_path,
-                file_identity=_file_identity(metadata),
-                holder=holder,
-            )
+            lease = object.__new__(ProviderSessionLease)
+            lease.path = lock_path
+            lease.file_identity = _file_identity(metadata)
+            lease.holder = holder
+            lease.authority = authority
+            lease._closed = False
+            return lease
         except BaseException:
             if holder is not None:
                 holder.close()
@@ -2562,6 +2602,8 @@ class ClosedVmwareProvider:
         work_root: Path | None = None,
     ) -> None:
         boundary = VM_WORK_PARENT if work_root is None else Path(work_root)
+        lease.require_open()
+        lease._closed = True
         try:
             if lease.holder is not None:
                 lease.holder.close()
@@ -2592,6 +2634,7 @@ class ClosedVmwareProvider:
         timeout: int = 300,
         allowed: frozenset[int] = frozenset({0}),
         openssh: bool = False,
+        guest_exchange: Any | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         self._require_active_execution_authority()
         if not argv:
@@ -2604,6 +2647,8 @@ class ClosedVmwareProvider:
         }
         if openssh is not is_openssh_executable:
             raise CandidateHarnessError("WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE")
+        if guest_exchange is not None and (requested_path != SSH or not openssh or input_bytes is not None):
+            raise CandidateHarnessError("CANDIDATE_GUEST_EXCHANGE_INVALID")
         executable_path = self._tool_path(requested_path)
         resolved_argv = (str(executable_path), *tuple(argv)[1:])
         environment = self._execution_environment(openssh=openssh)
@@ -2643,13 +2688,22 @@ class ClosedVmwareProvider:
                 raise CandidateHarnessError(
                     "CANDIDATE_VM_EXECUTION_TOOL_IDENTITY_MISMATCH"
                 )
-            completed = self._runner.run(
-                resolved_argv,
-                environment=environment,
-                cwd=executable_path.parent,
-                input_bytes=input_bytes,
-                timeout=timeout,
-            )
+            if guest_exchange is None:
+                completed = self._runner.run(
+                    resolved_argv,
+                    environment=environment,
+                    cwd=executable_path.parent,
+                    input_bytes=input_bytes,
+                    timeout=timeout,
+                )
+            else:
+                completed = self._runner.run_guest_exchange(
+                    resolved_argv,
+                    environment=environment,
+                    cwd=executable_path.parent,
+                    exchange=guest_exchange,
+                    timeout=timeout,
+                )
         except (OSError, subprocess.SubprocessError) as error:
             raise CandidateHarnessError(code) from error
         if (
@@ -4250,7 +4304,7 @@ class ClosedVmwareProvider:
             bootstrap_identity=True,
         )
 
-    def _establish_clone_connection(
+    def _verify_bootstrap_connection(
         self,
         authority: ProfileConnectionAuthority,
         plan: CandidateProfilePlan | VmProviderProfilePlan,
@@ -4295,7 +4349,7 @@ class ClosedVmwareProvider:
             host_key_digest=bootstrap_host_key,
             bootstrap_identity=True,
         )
-        verify_bootstrap_clone_identity(
+        return verify_bootstrap_clone_identity(
             authority=authority,
             plan=plan,
             runtime=runtime,
@@ -4304,6 +4358,24 @@ class ClosedVmwareProvider:
             known_hosts_was_absent=known_hosts_was_absent,
             competing_vmx_paths=competitors,
         )
+
+    def _establish_clone_connection(
+        self,
+        authority: ProfileConnectionAuthority,
+        plan: CandidateProfilePlan | VmProviderProfilePlan,
+        *,
+        preboot_disk_graph_digest: str,
+        preboot_snapshot_identity: str,
+    ) -> VerifiedCloneConnection:
+        bootstrap_connection = self._verify_bootstrap_connection(
+            authority, plan,
+            preboot_disk_graph_digest=preboot_disk_graph_digest,
+            preboot_snapshot_identity=preboot_snapshot_identity,
+        )
+        runtime = bootstrap_connection.runtime
+        bootstrap = bootstrap_connection.guest
+        known_hosts_was_absent = True
+        competitors = frozenset()
         self._provision_session_key_and_rotate_host_key(authority)
         self._remove_known_hosts(authority)
         self._wait_for_ssh(authority, capture_new_host_key=True)
