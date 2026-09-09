@@ -6,7 +6,7 @@ from datetime import timezone as dt_timezone
 from decimal import Decimal
 from unittest import SkipTest
 from unittest.mock import patch
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -285,6 +285,23 @@ class PublicCatalogPaginationTests(CatalogDatabaseTestCase):
 
 
 class PublicCatalogAuthorityTests(CatalogDatabaseTestCase):
+    def test_field_routes_reject_unlisted_identifiers_before_business_reads(self):
+        entry = self.entry(review="retained public review")
+        fields = (
+            "poster_file", "Review", "description ", "review::text",
+            "review) FROM journal_journalentry; SELECT pg_sleep(1); --",
+            "tags->>'private'", 'review" OR TRUE --',
+        )
+        for base in (BASE, BASE.replace("/v1/", "/"), self.showcase, self.showcase.replace("/v1/", "/")):
+            for field in fields:
+                path = f"{base}entries/{entry.pk}/fields/{quote(field, safe='')}/"
+                with self.subTest(path=path), CaptureQueriesContext(connection) as queries:
+                    response = self.client.get(path, {"revision": "unused-for-rejected-field"})
+                self.assert_error(response, 404, "not_found")
+                self.assertFalse(any("journal_journalentry" in item["sql"].lower() for item in queries))
+        entry.refresh_from_db()
+        self.assertEqual(entry.review, "retained public review")
+
     def test_owner_preview_whitelist_homepage_authority_and_aliases(self):
         entries = [JournalEntry.objects.create(user=self.owner, title=visibility, visibility=visibility) for visibility in JournalEntry.Visibility.values]
         deleted = self.entry(deleted_at=timezone.now())
