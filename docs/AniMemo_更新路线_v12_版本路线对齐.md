@@ -54,7 +54,7 @@ AniMemo 要解决两个问题：让用户多年以后仍能找回自己与动画
 
 ## 路线权威、当前状态与版本解释（v12 修订）
 
-**文档状态：** MASTER ROADMAP v12 / ACTIVE ROADMAP  
+**文档状态：** MASTER ROADMAP v12 / ACTIVE ROADMAP
 **继承基础：** 已批准 Active v10 全文（SHA256 `6777591e0ea218b98d50cd087fc02699e4fe61564911138a657b4f691eca2824`）；保留 Memory、Durability、Quality、第一方扩展、UI、安装入口及生产准备范围。v11 候选未激活。
 **本次决定：** 2026-09-09 启动指令接受下表映射。版本号是里程碑计划属性，未来真实破坏已发布公共合同仍须选择 major。
 **当前源码：** A03 #229、A07 #231、CodeQL #232、R01 #233、gRPC #230 已合并；本次基线 main `780505b72ce15b2e55104de142888d46c8946713`。这些任务不重开。
