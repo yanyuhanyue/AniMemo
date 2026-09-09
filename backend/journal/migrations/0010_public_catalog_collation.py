@@ -23,5 +23,5 @@ def create_public_collation(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies: ClassVar[list] = [("journal", "0008_journalmediareference")]
+    dependencies: ClassVar[list] = [("journal", "0009_bundle_restore_sessions")]
     operations: ClassVar[list] = [migrations.RunPython(create_public_collation, migrations.RunPython.noop)]
