@@ -10,7 +10,6 @@ from journal.models import JournalEntry, UserSettings, WatchHistoryRecord
 from .contracts import (
     DEFAULT_PAGE_SIZE,
     DEFAULT_PART_SIZE,
-    FIELDS,
     MAX_PAGE_SIZE,
     MAX_PART_SIZE,
     SCHEMA,
@@ -44,6 +43,12 @@ from .query import (
 )
 
 QUERY_PARAMS = {"search", "tag", "tag_ref", "status", "year", "year_ref", "quick", "sort"}
+FIELD_EXPRESSIONS = {
+    "description": "to_json(e.description)::text",
+    "review": "to_json(e.review)::text",
+    "tags": "e.tags::text",
+    "tag_colors": "e.tag_colors::text",
+}
 
 
 def envelope(scope, **values):
@@ -232,9 +237,9 @@ def _read_fragment(scope, entry_id, field, expected_revision, expression, expres
 
 def read_field(scope, entry_id, field, params, render):
     check_params(params, {"revision", "cursor", "part_size"})
-    if field not in FIELDS:
+    expression = FIELD_EXPRESSIONS.get(field)
+    if expression is None:
         raise CatalogError("not_found", 404)
-    expression = f"e.{field}::text" if field in {"tags", "tag_colors"} else f"to_json(e.{field})::text"
     return _read_fragment(scope, entry_id, field, params.get("revision"), expression, [], params, render)
 
 
