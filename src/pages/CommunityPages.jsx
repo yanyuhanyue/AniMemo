@@ -8,10 +8,8 @@ import { useSiteSettings } from "../context/SiteSettingsContext.jsx";
 import { usePageColorTransition } from "../components/PageColorTransition.jsx";
 import { api, getStoredTokens } from "../lib/api.js";
 import { demoEnabled, demoUniverseOwners } from "@demo-data";
-
-async function loadDemoUniverseOwners() {
-  return demoEnabled ? demoUniverseOwners : [];
-}
+import { usePublicCatalog } from "./usePublicCatalog.js";
+import { PublicCatalogPager } from "../components/catalog/PublicCatalogControls.jsx";
 
 function apiEntryToPick(entry) {
   return {
@@ -90,40 +88,22 @@ export function UniversePage() {
   const { settings: siteSettings } = useSiteSettings();
   const rootRef = useRef(null);
   const { isTransitioning, navigateWithTransition } = usePageColorTransition();
-  const [owners, setOwners] = useState([]);
   const [query, setQuery] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
+  const [localPage, setLocalPage] = useState(0);
+  const localMode = demoEnabled && localStorage.getItem("animemo_demo") === "true";
+  const catalog = usePublicCatalog({ kind: "directory", filters: { search: query, page_size: 50 }, enabled: !localMode });
+  const owners = useMemo(() => localMode ? demoUniverseOwners : catalog.list.results.map(normalizeOwner), [localMode, catalog.list.results]);
+  const loading = !localMode && ["idle", "loading"].includes(catalog.list.status);
+  const loadError = localMode ? "" : catalog.list.error?.detail || "";
 
   useEffect(() => {
-    let cancelled = false;
-    let refreshTimer;
-    const refresh = async () => {
-      try {
-        const { data } = await api.get("showcases/");
-        if (cancelled) return;
-        const results = Array.isArray(data.results) ? data.results.map(normalizeOwner) : [];
-        if (results.length || !demoEnabled) setOwners(results);
-        else setOwners(await loadDemoUniverseOwners());
-        setLoadError("");
-      } catch {
-        if (!cancelled) {
-          setOwners(await loadDemoUniverseOwners());
-          setLoadError(demoEnabled ? "" : "公开手账信号加载失败，请检查服务器连接。");
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-    refresh();
-    refreshTimer = window.setInterval(refresh, 60000);
+    if (localMode) return undefined;
+    const refresh = () => catalog.autoRefresh();
+    const refreshTimer = window.setInterval(refresh, 60000);
     window.addEventListener("focus", refresh);
-    return () => {
-      cancelled = true;
-      window.clearInterval(refreshTimer);
-      window.removeEventListener("focus", refresh);
-    };
-  }, []);
+    return () => { window.clearInterval(refreshTimer); window.removeEventListener("focus", refresh); };
+  }, [localMode, catalog.autoRefresh]);
+  useEffect(() => { setLocalPage(0); }, [query]);
 
   useLayoutEffect(() => {
     const introElements = gsap.utils.toArray(".universe-header-reveal", rootRef.current);
@@ -231,11 +211,16 @@ export function UniversePage() {
     };
   }, []);
 
-  const visibleOwners = useMemo(() => {
+  const matchedOwners = useMemo(() => {
+    if (!localMode) return owners;
     const normalized = query.trim().toLocaleLowerCase("zh-CN");
     if (!normalized) return owners;
     return owners.filter((owner) => `${owner.nickname} ${owner.subtitle}`.toLocaleLowerCase("zh-CN").includes(normalized));
-  }, [owners, query]);
+  }, [owners, query, localMode]);
+  const visibleOwners = localMode ? matchedOwners.slice(localPage * 50, (localPage + 1) * 50) : owners;
+  const ownerCount = localMode ? matchedOwners.length : catalog.list.matched_count ?? "—";
+  const pagination = localMode ? { status: "ready", results: visibleOwners, pageIndex: localPage,
+    previousAvailable: localPage > 0, next_cursor: (localPage + 1) * 50 < matchedOwners.length ? "next" : null } : catalog.list;
 
   const openOwner = (owner) => {
     if (isTransitioning) return;
@@ -262,7 +247,7 @@ export function UniversePage() {
               <span><Icon className="universe-search__signal-icon" name="satellite-dish" /> 搜索昵称或账号</span>
               <div className="universe-search__field">
                 <span className="universe-search__icon" aria-hidden="true"><Icon name="search" /></span>
-                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索用户昵称，例如：兔子" />
+                <input value={query} maxLength={1000} onChange={(event) => setQuery(event.target.value)} placeholder="搜索用户昵称，例如：兔子" />
               </div>
             </label>
           </div>
@@ -273,12 +258,16 @@ export function UniversePage() {
       <section className="universe-signals" aria-labelledby="signals-title">
         <header className="universe-signals__header universe-signal-stage">
           <div><span className="micro-label">LIVE SIGNALS</span><h2 id="signals-title">公开手账信号</h2></div>
-          <span className="universe-owner-count"><Icon name="users-viewfinder" /> {visibleOwners.length} 位同好</span>
+          <span className="universe-owner-count"><Icon name="users-viewfinder" /> {ownerCount} 位同好</span>
         </header>
         <div className="journal-owner-grid" aria-live="polite">
           {visibleOwners.map((owner) => <UniverseOwnerCard owner={owner} onOpen={openOwner} key={owner.id} />)}
         </div>
-        {!visibleOwners.length && <div className="universe-empty"><Icon name={loadError ? "warning" : "search"} /><strong>{loadError || "没有捕捉到匹配信号"}</strong><span>{loadError ? "当前页面不会显示演示账号。" : "换一个昵称再试试。"}</span></div>}
+        <PublicCatalogPager list={pagination} label="公开手账目录翻页"
+          onPrevious={localMode ? () => setLocalPage((value) => Math.max(0, value - 1)) : catalog.previousPage}
+          onNext={localMode ? () => setLocalPage((value) => value + 1) : catalog.nextPage}
+          onRefresh={localMode ? () => setLocalPage(0) : catalog.refresh} />
+        {!visibleOwners.length && !loading && <div className="universe-empty"><Icon name={loadError ? "warning" : "search"} /><strong>{loadError || "没有捕捉到匹配信号"}</strong><span>{loadError ? "请刷新后重试。" : "换一个昵称再试试。"}</span></div>}
         {loading && <span className="universe-refreshing">正在同步公开手账信号...</span>}
       </section>
     </main>

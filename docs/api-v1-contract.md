@@ -50,6 +50,7 @@ The generated `/api/schema/` document is the exhaustive method-level inventory a
 | Import/export | `/api/v1/import/`, `/api/v1/export/` | POST, GET | Bearer + current user | Data Bundle v1 / file responses, `ApiError` | Web; Mobile deferred |
 | Columns | `/api/v1/columns/`, `/api/v1/columns/{id}/`, submit/removal actions | GET, POST, PUT, PATCH, DELETE | Bearer + author/workflow permission | column serializers, `ApiError` | Web; Mobile optional |
 | Public discovery | `/api/v1/homepage/`, `featured/`, `showcases/`, `showcase/{public_slug}/`, `shared/{share_slug}/`, `site-settings/`, `tag-presets/` | GET | Public or optional Bearer | public DTO serializers, `ApiError` | Web, future Mobile |
+| Bounded public catalogue | `/api/v1/public/homepage/...`, `/api/v1/public/showcase/{public_slug}/...`, `/api/v1/public/showcases/` | GET | Public or server-selected owner preview | explicit page/summary/facet/detail/field envelopes, `ApiError`; [contract](public-catalog-contract.md) | Web, future Mobile, frontend Plugin |
 | Public catalog | `/api/v1/catalog/public-search/` | GET | Bearer | paginated catalog DTO, query parameters, `ApiError` | Web, future Mobile |
 | External media | `/api/v1/external-media/providers/{provider}/...` | GET | Public or Bearer depending on operation | provider-neutral media DTOs, `ApiError` | Web, future Mobile |
 | External accounts | `/api/v1/external-accounts/...` | GET, POST, DELETE | Bearer except provider callback | provider capability/connection/import DTOs, `ApiError` | Web, future Mobile adapter |
@@ -66,6 +67,13 @@ All JSON errors use the canonical `{code, detail, correlation_id}` shape defined
 ## Pagination And Query Stability
 
 Page-number pagination remains `{count, next, previous, results}`. Entry queries retain `page`, `page_size`, `search`, `ordering`, `watch_status`, `tags`, `priority`, `activity` and Quick Filter semantics already covered by Dashboard regression tests. A future cursor contract requires a new documented version or an additive endpoint; it cannot silently replace v1 page semantics.
+
+The additive `public/...` catalogue uses its own documented live keyset contract:
+default 50/max 100 entries, actual success JSON at most 524288 bytes, and complete
+revision-bound field access. Its summary covers the full authorized scope.
+See [Bounded public catalogue](public-catalog-contract.md) for the migration of
+old homepage/showcase/directory operations to fixed 410 responses, including
+their `/api/` aliases. This leaves authenticated Entries pagination unchanged.
 
 ## Entry mutation order
 

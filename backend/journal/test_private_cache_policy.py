@@ -3,11 +3,12 @@
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import skipUnless
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
-from django.db import OperationalError
+from django.db import OperationalError, connection
 from django.middleware.common import CommonMiddleware
 from django.test import override_settings
 from django.urls import reverse
@@ -34,12 +35,12 @@ class PrivateApiCachePolicyTests(APITestCase):
         state.status = InstallationState.Status.INITIALIZED
         state.save(update_fields=["status"])
 
-    def assert_private(self, response, *, drf=True):
+    def assert_private(self, response, *, vary_accept=True):
         directives = {part.strip().lower() for part in response.get("Cache-Control", "").split(",")}
         self.assertTrue({"private", "no-store"}.issubset(directives), response.headers)
         self.assertNotIn("public", directives)
         vary = {part.strip().lower() for part in response.get("Vary", "").split(",")}
-        expected_vary = {"authorization", "cookie", "accept"} if drf else {"authorization", "cookie"}
+        expected_vary = {"authorization", "cookie", "accept"} if vary_accept else {"authorization", "cookie"}
         self.assertTrue(expected_vary.issubset(vary), response.headers)
 
     def test_success_policy_for_personal_route_families_and_both_aliases(self):
@@ -89,8 +90,9 @@ class PrivateApiCachePolicyTests(APITestCase):
         self.assertEqual(response.status_code, 401)
         self.assert_private(response)
 
+    @skipUnless(connection.vendor == "postgresql", "Bounded owner preview requires PostgreSQL")
     def test_owner_preview_is_private_and_public_variant_keeps_identity_vary(self):
-        path = reverse("showcase", args=[self.settings.public_slug])
+        path = reverse("public-showcase-entries", args=[self.settings.public_slug])
         anonymous = self.client.get(path)
         self.assertEqual(anonymous.status_code, 200)
         self.assertEqual(anonymous.data["results"], [])
@@ -100,16 +102,30 @@ class PrivateApiCachePolicyTests(APITestCase):
         owner = self.client.get(path)
         self.assertEqual(owner.status_code, 200)
         self.assertEqual(owner.data["results"][0]["review"], "owner-only note")
-        self.assert_private(owner)
+        self.assert_private(owner, vary_accept=False)
 
     def test_public_discovery_keeps_its_public_cache_policy(self):
         for user in (None, self.user):
             self.client.force_authenticate(user)
-            for name in ("homepage", "site-settings", "tag-presets", "showcase-list", "featured"):
+            for name in ("site-settings", "tag-presets", "featured"):
                 with self.subTest(name=name, authenticated=user is not None):
                     response = self.client.get(reverse(name))
                     self.assertEqual(response.status_code, 200)
                     self.assertNotIn("no-store", response.get("Cache-Control", ""))
+
+    @skipUnless(connection.vendor == "postgresql", "Bounded public variants require PostgreSQL")
+    def test_bounded_public_identity_variants_keep_private_authenticated_policy(self):
+        for user in (None, self.user):
+            self.client.force_authenticate(user)
+            for name in ("public-homepage-entries", "public-homepage-summary", "public-homepage-facets", "public-showcase-directory"):
+                with self.subTest(name=name, authenticated=user is not None):
+                    response = self.client.get(reverse(name))
+                    self.assertEqual(response.status_code, 200)
+                    if user is None:
+                        self.assertNotIn("no-store", response.get("Cache-Control", ""))
+                        self.assertTrue({"authorization", "cookie"}.issubset({part.strip().lower() for part in response.get("Vary", "").split(",")}))
+                    else:
+                        self.assert_private(response, vary_accept=False)
 
     def test_existing_vary_values_are_merged(self):
         from .entry_views import MeView
@@ -161,7 +177,7 @@ class PrivateApiCachePolicyTests(APITestCase):
         for prefix in ("/api/", "/api/v1/"):
             response = self.client.get(prefix + "auth/me/", HTTP_HOST="synthetic-invalid-host.example")
             self.assertEqual(response.status_code, 400)
-            self.assert_private(response, drf=False)
+            self.assert_private(response, vary_accept=False)
 
     @override_settings(DEBUG=False)
     def test_personal_middleware_errors_before_resolution_are_private(self):
@@ -170,7 +186,7 @@ class PrivateApiCachePolicyTests(APITestCase):
             for prefix in ("/api/", "/api/v1/"):
                 response = self.client.get(prefix + "auth/me/")
                 self.assertEqual(response.status_code, 500)
-                self.assert_private(response, drf=False)
+                self.assert_private(response, vary_accept=False)
 
     def test_setup_credential_validation_errors_are_private(self):
         for prefix in ("/api/", "/api/v1/"):

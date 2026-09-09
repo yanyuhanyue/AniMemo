@@ -3,6 +3,7 @@ import json
 import time
 import zipfile
 from base64 import b64decode
+from unittest import skipUnless
 from unittest.mock import Mock, patch
 
 import requests
@@ -11,12 +12,14 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 from site_config.models import InstallationState, SiteSettings, TagDefinition
 
 from .models import AdminAuditLog, Column, JournalEntry, UserSettings
+from .public_catalog_test_support import public_catalog_response
 from .security import _totp_at
 
 User = get_user_model()
@@ -115,6 +118,7 @@ class JournalApiTests(APITestCase):
         self.assertEqual(deleted.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(User.objects.filter(pk=self.user.pk).exists())
 
+    @skipUnless(connection.vendor == "postgresql", "Bounded public reads require PostgreSQL")
     def test_public_showcase_stats_are_calculated_from_current_records(self):
         settings_obj, _ = UserSettings.objects.get_or_create(user=self.user)
         settings_obj.public_status = UserSettings.PublicStatus.APPROVED
@@ -153,10 +157,7 @@ class JournalApiTests(APITestCase):
         JournalEntry.objects.create(user=self.user, title="私人记录", visibility="private", personal_score="10")
 
         self.client.force_authenticate(user=None)
-        response = self.client.get(
-            reverse("showcase", kwargs={"public_slug": settings_obj.public_slug}),
-            {"tag": "泡面番"},
-        )
+        response = public_catalog_response(self.client, public_slug=settings_obj.public_slug, params={"tag": "泡面番"})
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["results"]), 1)
@@ -171,6 +172,7 @@ class JournalApiTests(APITestCase):
             "pending_count": 1,
         })
 
+    @skipUnless(connection.vendor == "postgresql", "Bounded public reads require PostgreSQL")
     def test_public_showcase_list_uses_live_public_records(self):
         settings_obj, _ = UserSettings.objects.get_or_create(user=self.user)
         settings_obj.nickname = "收藏家"
@@ -196,10 +198,10 @@ class JournalApiTests(APITestCase):
         JournalEntry.objects.create(user=self.user, title="私人满分记录", visibility="private", personal_score="10")
 
         self.client.force_authenticate(user=None)
-        response = self.client.get(reverse("showcase-list"))
+        response = self.client.get(reverse("public-showcase-directory"))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["total"], 1)
         owner = response.data["results"][0]
         self.assertEqual(owner["nickname"], "收藏家")
         self.assertEqual(owner["stats"]["total"], 2)
@@ -208,12 +210,13 @@ class JournalApiTests(APITestCase):
         self.assertEqual(owner["stats"]["short_count"], 1)
         self.assertEqual([entry["title"] for entry in owner["top_picks"]], ["公开高分剧场版", "公开泡面番"])
 
+    @skipUnless(connection.vendor == "postgresql", "Bounded public reads require PostgreSQL")
     def test_owner_preview_includes_private_records_before_public_approval(self):
         settings_obj, _ = UserSettings.objects.get_or_create(user=self.user)
         JournalEntry.objects.create(user=self.user, title="公开记录", visibility="public")
         JournalEntry.objects.create(user=self.user, title="仅自己可见", visibility="private")
 
-        response = self.client.get(reverse("showcase", kwargs={"public_slug": settings_obj.public_slug}))
+        response = public_catalog_response(self.client, public_slug=settings_obj.public_slug)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual({item["title"] for item in response.data["results"]}, {"公开记录", "仅自己可见"})
@@ -414,6 +417,7 @@ class JournalApiTests(APITestCase):
         self.assertEqual(response.data["created"], 1)
         self.assertTrue(JournalEntry.objects.filter(user=self.user, title="《CSV 番剧》").exists())
 
+    @skipUnless(connection.vendor == "postgresql", "Bounded public reads require PostgreSQL")
     def test_public_homepage_uses_live_staff_entries_only(self):
         staff = User.objects.create_user(username="homepage-owner", password="StrongPass123!", is_staff=True)
         inactive_staff = User.objects.create_user(username="inactive-owner", password="StrongPass123!", is_staff=True, is_active=False)
@@ -433,7 +437,7 @@ class JournalApiTests(APITestCase):
         JournalEntry.objects.create(user=self.other, title="普通用户私人番剧")
 
         self.client.force_authenticate(user=None)
-        response = self.client.get(reverse("homepage"))
+        response = public_catalog_response(self.client)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual([item["title"] for item in response.data["results"]], ["首页真实番剧"])
