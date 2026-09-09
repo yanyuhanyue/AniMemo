@@ -28,4 +28,22 @@ Backend runtime 如需访问 Core 数据，必须在 `manifest.json` 声明：
 
 新增或改变包内代码必须递增插件 SemVer；已发布的 `slug + version` 内容不可覆盖。Core capability 字段是向后兼容的可选 Manifest 字段，旧插件不声明时对应 Host surface 保持拒绝，不会隐式获得 Core 数据能力。
 
-本批次没有数据库 schema 变化：`NEW MIGRATION: NOT APPLICABLE`。Integration Protocol v1 wire contract 保持冻结。
+SDK v2 Core capability 的引入没有新增数据库模型。公共目录迁移另有专用排序 collation migration，见下述目录合同。Integration Protocol v1 wire contract 保持冻结。
+
+## Frontend public catalogue reads
+
+Frontend `host.api` forwards Core paths through the current user transport. New
+public catalogue callers use `public/homepage/entries/`,
+`public/showcase/{public_slug}/entries/` and `public/showcases/`, with separate
+summary, facet, detail and field requests described in the
+[public catalogue contract](public-catalog-contract.md). Process one bounded
+page at a time and repeat the original query with `next_cursor`; check field
+completeness before treating a preview as its original value.
+
+The catalogue release migration retires `homepage/`, `showcase/{public_slug}/`
+and `showcases/` with a strict 410 error on both Core prefixes. External callers
+must migrate their paths and response handling. Expired cursors restart the
+read; changed field revisions require discarding earlier fragments. The SDK's
+generic transport remains the same, and does not imply that unknown external
+plugins have already migrated. These HTTP reads do not change backend Host
+capabilities or the frozen Integration v1 protocol.

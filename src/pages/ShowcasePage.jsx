@@ -13,19 +13,22 @@ import { AnimeCatalog } from "../components/catalog/AnimeCatalog.jsx";
 import { CatalogFilterLab } from "../components/catalog/CatalogFilterLab.jsx";
 import { CatalogMeta } from "../components/catalog/CatalogMeta.jsx";
 import { api, authApi, getStoredTokens } from "../lib/api.js";
-import { buildPresetColorMap, normalizeTagPresets, resolveTagColors } from "../lib/tagPresets.js";
+import { resolveTagColors } from "../lib/tagPresets.js";
 import { pressBeforeOpen } from "../lib/modalMotion.js";
 import { usePageColorTransition } from "../components/PageColorTransition.jsx";
 import { SharedShowcaseHeader } from "../components/SharedShowcaseHeader.jsx";
 import { useSiteSettings } from "../context/SiteSettingsContext.jsx";
 import { demoAnimeRecords, demoEnabled, getDemoUniverseOwner } from "@demo-data";
+import { usePublicCatalog } from "./usePublicCatalog.js";
+import { publicFacetFilters, utf8Bytes } from "../lib/publicCatalog.js";
 
 const RECORDS_STORAGE_KEY = "animemo_records_v1";
 const SETTINGS_STORAGE_KEY = "animemo_settings_v1";
 const RECORDS_UPDATED_EVENT = "animemo:records-updated";
+const DEMO_SOURCE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_FILTERS = { search: "", tag: "all", status: "all", year: "all", sort: "date-desc", quick: "all" };
 
-function apiToRecord(item, presetColors) {
+function apiToRecord(item, presetColors = item.preset_colors || {}) {
   return {
     id: item.id,
     title: item.title,
@@ -79,14 +82,17 @@ function normalizeLocalRecordColors(record, presetColors) {
 
 function readStoredRecords() {
   try {
-    const records = JSON.parse(localStorage.getItem(RECORDS_STORAGE_KEY) || "null");
+    const source = localStorage.getItem(RECORDS_STORAGE_KEY) || "null";
+    if (source.length > DEMO_SOURCE_BYTES || utf8Bytes(source) > DEMO_SOURCE_BYTES) throw new Error("演示记录超过 2 MiB，暂无法在公开预览中载入；原始数据仍保留。");
+    const records = JSON.parse(source);
     if (!Array.isArray(records)) return [];
     return records.map((record) => (
       record?.title === "《超时空辉夜姬！》" && record?.studio === "Studio Colorido"
         ? { ...record, studio: "Studio Colorido、STUDIO CHROMATO" }
         : record
     ));
-  } catch {
+  } catch (error) {
+    if (error?.message?.startsWith("演示记录超过")) throw error;
     return [];
   }
 }
@@ -186,7 +192,6 @@ function Stats({ stats, interactive = true }) {
 export function ShowcasePage({ sharedMode = false }) {
   const { settings: siteSettings } = useSiteSettings();
   const rootRef = useRef(null);
-  const initialDataSettledRef = useRef(false);
   const navigate = useNavigate();
   const location = useLocation();
   const { publicSlug: routePublicSlug = "" } = useParams();
@@ -197,18 +202,28 @@ export function ShowcasePage({ sharedMode = false }) {
     || searchParams.get("showcase")?.trim()
     || import.meta.env.VITE_PUBLIC_SHOWCASE_SLUG?.trim();
   const explicitDemo = isExplicitDemoMode();
-  const [records, setRecords] = useState(() => explicitDemo ? readStoredRecords() : []);
-  const [remoteStats, setRemoteStats] = useState(null);
-  const [profile, setProfile] = useState(null);
+  const demoOwner = useMemo(() => demoEnabled && publicSlug ? getDemoUniverseOwner(publicSlug) : null, [publicSlug]);
+  const localMode = demoEnabled && Boolean(demoOwner || explicitDemo || (ownerPreview && publicSlug === "local-preview"));
+  const [localRecords, setLocalRecords] = useState([]);
+  const [localProfile, setLocalProfile] = useState(null);
+  const [localError, setLocalError] = useState("");
   const [ownerPublicStatus, setOwnerPublicStatus] = useState(() => demoEnabled ? (readStoredPreviewSettings().publicStatus || "private") : "private");
-  const [dataError, setDataError] = useState("");
   const [view, setView] = useState("list");
   const [selected, setSelected] = useState(null);
   const [modalSourceElement, setModalSourceElement] = useState(null);
   const [showBackTop, setShowBackTop] = useState(false);
-  const [pageSize, setPageSize] = useState("all");
+  const [pageSize, setPageSize] = useState("50");
+  const [localPage, setLocalPage] = useState(0);
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
-  const [dataReady, setDataReady] = useState(false);
+  const catalog = usePublicCatalog({ kind: publicSlug ? "showcase" : "homepage", publicSlug: publicSlug || "",
+    filters: { ...filters, page_size: Number(pageSize) }, enabled: !localMode });
+  const records = useMemo(() => localMode ? localRecords : catalog.list.results.map((item) => apiToRecord(item)), [localMode, localRecords, catalog.list.results]);
+  const remoteStats = localMode ? demoOwner?.stats || null : catalog.summary.stats;
+  const profile = localMode ? localProfile : catalog.summary.profile ? {
+    ...catalog.summary.profile, avatar: catalog.summary.profile.avatar_url || "/assets/avatar.png",
+  } : null;
+  const dataError = localMode ? localError : catalog.list.error?.detail || "";
+  const dataReady = localMode || ["ready", "error"].includes(catalog.list.status);
   const [bootComplete, setBootComplete] = useState(sharedMode);
   const [loaderVisible, setLoaderVisible] = useState(!sharedMode);
   const changeCatalogView = useCallback((nextView) => {
@@ -251,168 +266,50 @@ export function ShowcasePage({ sharedMode = false }) {
     api.get("settings/me/").then(({ data }) => {
       if (cancelled) return;
       setOwnerPublicStatus(data.public_status || "private");
-      setProfile((current) => ({
-        ...current,
-        nickname: data.nickname || data.username || current?.nickname,
-        subtitle: data.showcase_subtitle || current?.subtitle,
-        avatar: Object.hasOwn(data, "avatar_url") ? data.avatar_url : current?.avatar,
-        public_slug: data.public_slug || current?.public_slug,
-      }));
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [ownerPreview]);
 
   useEffect(() => {
-    let cancelled = false;
-    let refreshTimer;
-    const markInitialDataReady = () => {
-      if (cancelled || initialDataSettledRef.current) return;
-      initialDataSettledRef.current = true;
-      setDataReady(true);
-    };
-
-    const loadDemoOwner = async () => {
-      if (!demoEnabled || !publicSlug) return null;
-      return getDemoUniverseOwner(publicSlug);
-    };
-
-    const applyLocalRecords = async (providedDemo = null) => {
-      if (cancelled) return;
-      const demo = providedDemo || await loadDemoOwner();
-      if (cancelled) return;
-      if (demo) {
-        setRecords(demo.records);
-        setRemoteStats(demo.stats);
-        setProfile({
-          nickname: demo.nickname,
-          subtitle: demo.subtitle,
-          avatar: demo.avatar,
-          public_slug: demo.public_slug,
-        });
-        return;
-      }
-      let localRecords = readStoredRecords();
-      if (!localRecords.length && demoEnabled) localRecords = demoAnimeRecords;
-      localRecords = localRecords.map((record) => normalizeLocalRecordColors(record));
-      if (cancelled) return;
-      if (ownerPreview) {
-        const settings = readStoredPreviewSettings();
-        setRecords(localRecords);
-        setRemoteStats(null);
-        setProfile({
-          nickname: settings.nickname || settings.email || "AniMemo",
-          subtitle: settings.subtitle || "把每一次与动画相遇认真收藏。",
-          avatar: settings.avatar || "/assets/avatar.png",
-          public_slug: publicSlug || "local-preview",
-        });
-        setOwnerPublicStatus(settings.publicStatus || "private");
-        return;
-      }
-      setRecords(localRecords);
-      setRemoteStats(null);
-      setProfile(sharedMode ? {
-        nickname: "公开同好",
-        subtitle: "这位同好正在公开分享自己的观看轨道。",
-        avatar: "/assets/avatar.png",
-        public_slug: publicSlug || "",
-      } : null);
-    };
-
-    const refresh = async () => {
-      if (!publicSlug) {
-        if (ownerPreview || isExplicitDemoMode()) {
-          await applyLocalRecords();
-          setDataError("");
-          markInitialDataReady();
-          return;
-        }
-        try {
-          const [{ data }, tagPresetsResponse] = await Promise.all([
-            api.get("homepage/"),
-            api.get("tag-presets/").catch(() => null),
-          ]);
-          if (cancelled) return;
-          const presetColors = buildPresetColorMap(normalizeTagPresets(tagPresetsResponse?.data, []));
-          setRecords(Array.isArray(data.results) ? data.results.map((item) => apiToRecord(item, presetColors)) : []);
-          setRemoteStats(data.stats || null);
-          setProfile(null);
-          setDataError("");
-        } catch {
-          if (demoEnabled) await applyLocalRecords();
-          else {
-            setRecords([]);
-            setRemoteStats(null);
-            setProfile(null);
-            setDataError("首页数据加载失败，请检查服务器连接。");
-          }
-        } finally {
-          markInitialDataReady();
-        }
-        return;
-      }
-      const demoOwner = await loadDemoOwner();
-      if (demoOwner) {
-        await applyLocalRecords(demoOwner);
-        setDataError("");
-        markInitialDataReady();
-        return;
-      }
+    if (!localMode) { setLocalRecords([]); setLocalProfile(null); setLocalError(""); return undefined; }
+    const applyLocalRecords = () => {
       try {
-        const [{ data }, tagPresetsResponse] = await Promise.all([
-          api.get(`showcase/${encodeURIComponent(publicSlug)}/`),
-          api.get("tag-presets/").catch(() => null),
-        ]);
-        if (cancelled) return;
-        const presetColors = buildPresetColorMap(normalizeTagPresets(tagPresetsResponse?.data, []));
-        setRecords(Array.isArray(data.results) ? data.results.map((item) => apiToRecord(item, presetColors)) : []);
-        setRemoteStats(data.stats || null);
-        setProfile(data.profile ? {
-          ...data.profile,
-          avatar: data.profile.avatar || data.profile.avatar_url || "/assets/avatar.png",
-          public_slug: data.profile.public_slug || publicSlug,
-        } : null);
-        setDataError("");
-      } catch {
-        if (demoEnabled) await applyLocalRecords();
-        else {
-          setRecords([]);
-          setRemoteStats(null);
-          setProfile(null);
-          setDataError("公开手账加载失败或不存在。");
-        }
-      } finally {
-        markInitialDataReady();
-      }
+        let source = demoOwner?.records || readStoredRecords();
+        if (!source.length) source = demoAnimeRecords;
+        if (utf8Bytes(JSON.stringify(source)) > DEMO_SOURCE_BYTES) throw new Error("演示记录超过 2 MiB，暂无法在公开预览中载入；原始数据仍保留。");
+        setLocalRecords(source.map((record) => normalizeLocalRecordColors(record)));
+        const settings = ownerPreview ? readStoredPreviewSettings() : {};
+        setLocalProfile(demoOwner ? { nickname: demoOwner.nickname, subtitle: demoOwner.subtitle, avatar: demoOwner.avatar, public_slug: demoOwner.public_slug }
+          : sharedMode ? { nickname: settings.nickname || settings.email || "公开同好", subtitle: settings.subtitle || "这位同好正在公开分享自己的观看轨道。",
+            avatar: settings.avatar || "/assets/avatar.png", public_slug: publicSlug || "local-preview" } : null);
+        if (ownerPreview) setOwnerPublicStatus(settings.publicStatus || "private");
+        setLocalError("");
+      } catch (error) { setLocalRecords([]); setLocalError(error.message || "演示记录暂时不可用。"); }
     };
+    applyLocalRecords();
+    const onStorage = (event) => { if (!event.key || event.key === RECORDS_STORAGE_KEY || event.key === SETTINGS_STORAGE_KEY) applyLocalRecords(); };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener(RECORDS_UPDATED_EVENT, applyLocalRecords);
+    return () => { window.removeEventListener("storage", onStorage); window.removeEventListener(RECORDS_UPDATED_EVENT, applyLocalRecords); };
+  }, [localMode, demoOwner, ownerPreview, publicSlug, sharedMode]);
 
-    const handleStorage = (event) => {
-      if (!publicSlug && isExplicitDemoMode() && (!event.key || event.key === RECORDS_STORAGE_KEY)) void applyLocalRecords();
-    };
-    const handleRecordsUpdated = (event) => {
-      if (publicSlug) return;
-      if (isExplicitDemoMode()) {
-        if (Array.isArray(event.detail)) setRecords(event.detail);
-        else void applyLocalRecords();
-        setRemoteStats(null);
-      } else {
-        void refresh();
-      }
-    };
-    const handleFocus = () => refresh();
-
-    refresh();
-    if (publicSlug) refreshTimer = window.setInterval(refresh, 60000);
-    window.addEventListener("focus", handleFocus);
-    window.addEventListener("storage", handleStorage);
-    window.addEventListener(RECORDS_UPDATED_EVENT, handleRecordsUpdated);
+  useEffect(() => {
+    if (localMode) return undefined;
+    const refresh = () => catalog.autoRefresh();
+    const interval = window.setInterval(refresh, 60000);
+    window.addEventListener("focus", refresh);
+    window.addEventListener(RECORDS_UPDATED_EVENT, refresh);
     return () => {
-      cancelled = true;
-      window.clearInterval(refreshTimer);
-      window.removeEventListener("focus", handleFocus);
-      window.removeEventListener("storage", handleStorage);
-      window.removeEventListener(RECORDS_UPDATED_EVENT, handleRecordsUpdated);
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener(RECORDS_UPDATED_EVENT, refresh);
     };
-  }, [ownerPreview, publicSlug, sharedMode]);
+  }, [localMode, catalog.autoRefresh]);
+
+  useEffect(() => {
+    if (!localMode && catalog.detail.status === "idle") setSelected(null);
+  }, [localMode, catalog.detail.status]);
+  useEffect(() => { setLocalPage(0); setSelected(null); }, [localMode, filters, pageSize, publicSlug]);
 
   const changeOwnerPublicStatus = useCallback(async (action) => {
     const { access } = getStoredTokens();
@@ -523,19 +420,26 @@ export function ShowcasePage({ sharedMode = false }) {
     };
   }, [modalSourceElement, selected]);
 
-  const availableTags = useMemo(() => [...new Set(records.flatMap((record) => record.tags || []))].sort(
+  const availableTags = useMemo(() => !localMode ? [] : [...new Set(records.flatMap((record) => record.tags || []))].sort(
     (a, b) => a.localeCompare(b, "zh-CN"),
-  ), [records]);
-  const availableYears = useMemo(() => [...new Set(records.map((record) => record.period?.split("-")[0]).filter(Boolean))].sort(
-    (a, b) => Number(b) - Number(a),
-  ), [records]);
-  const stats = useMemo(() => calculateShowcaseStats(records, remoteStats), [records, remoteStats]);
+  ), [localMode, records]);
+  const availableYears = useMemo(() => !localMode ? [] : [...new Set(records.map((record) => record.period?.split("-")[0]).filter(Boolean))].sort(
+    (a, b) => {
+      const numericA = /^\d+$/.test(a), numericB = /^\d+$/.test(b);
+      return numericA && numericB ? Number(b) - Number(a) || a.localeCompare(b, "zh-CN") : numericA ? -1 : numericB ? 1 : a.localeCompare(b, "zh-CN");
+    },
+  ), [localMode, records]);
+  const stats = useMemo(() => {
+    const values = calculateShowcaseStats(localMode ? records : [], remoteStats);
+    return !localMode && !remoteStats ? values.map((value) => ({ ...value, value: "—", note: catalog.summary.status === "error" ? "统计暂时不可用" : "正在读取完整统计" })) : values;
+  }, [records, remoteStats, localMode, catalog.summary.status]);
   const criticalImages = useMemo(() => [
     profile?.avatar || "/assets/avatar.png",
     ...records.slice(0, 4).map((record) => record.poster),
   ], [profile?.avatar, records]);
 
   const filtered = useMemo(() => {
+    if (!localMode) return records;
     const selectedQuick = quickFilters.find((quick) => quick.id === filters.quick);
     const query = filters.search.trim().toLocaleLowerCase("zh-CN");
     const result = records.filter((record) => {
@@ -552,16 +456,24 @@ export function ShowcasePage({ sharedMode = false }) {
       if (filters.sort === "score-asc") return (Number(a.score) || Number.MAX_SAFE_INTEGER) - (Number(b.score) || Number.MAX_SAFE_INTEGER);
       return periodSortValue(b.period) - periodSortValue(a.period) || a.title.localeCompare(b.title, "zh-CN");
     });
-  }, [filters, records]);
+  }, [filters, records, localMode]);
 
-  const visible = pageSize === "all" ? filtered : filtered.slice(0, Number(pageSize));
-  const unscoredCount = records.filter((record) => !Number.isFinite(Number(record.score)) || Number(record.score) <= 0).length;
+  const visible = localMode ? filtered.slice(localPage * Number(pageSize), (localPage + 1) * Number(pageSize)) : records;
+  const resultCount = localMode ? filtered.length : catalog.list.matched_count ?? "—";
+  const unscoredCount = localMode ? records.filter((record) => !Number.isFinite(Number(record.score)) || Number(record.score) <= 0).length : catalog.summary.unscored_count;
+  const pagination = localMode ? {
+    list: { status: "ready", results: visible, total: records.length, pageIndex: localPage, previousAvailable: localPage > 0, next_cursor: (localPage + 1) * Number(pageSize) < filtered.length ? "next" : null },
+    previousPage: () => setLocalPage((value) => Math.max(0, value - 1)), nextPage: () => setLocalPage((value) => value + 1), refresh: () => setLocalPage(0),
+  } : catalog;
 
   const changeSort = (sort) => setFilters((current) => ({ ...current, sort }));
   const openRecord = (record, source) => {
     pressBeforeOpen(source, () => {
       setModalSourceElement(source || null);
-      setSelected(recordToFeaturedColumn(record));
+      if (localMode) setSelected(recordToFeaturedColumn(record));
+      else void catalog.openDetail(record.id).then((entry) => {
+        if (entry) setSelected(recordToFeaturedColumn(apiToRecord(entry)));
+      });
     });
   };
 
@@ -571,8 +483,9 @@ export function ShowcasePage({ sharedMode = false }) {
       {sharedMode ? (
         <SharedShowcaseHeader
           profile={profile}
-          records={records}
-          ownerPreview={ownerPreview}
+          records={localMode ? records : undefined}
+          publicCatalog={localMode ? null : catalog}
+          ownerPreview={ownerPreview && (localMode || catalog.scope?.visibility === "owner")}
           modeTransition={modeTransition}
           publicStatus={ownerPublicStatus}
           onShareChange={changeOwnerPublicStatus}
@@ -591,12 +504,17 @@ export function ShowcasePage({ sharedMode = false }) {
           onReset={() => setFilters(DEFAULT_FILTERS)}
           viewMode={view}
           onViewChange={changeCatalogView}
-          resultCount={filtered.length}
+          resultCount={resultCount}
           tags={availableTags}
           years={availableYears}
           quickFilters={quickFilters}
+          publicCatalog={localMode ? null : catalog}
+          onFacetSelect={(name, item) => setFilters((current) => ({ ...current, ...publicFacetFilters(name, item) }))}
         />
-        <CatalogMeta resultCount={filtered.length} pageSize={pageSize} onPageSizeChange={setPageSize} unscoredCount={unscoredCount} />
+        <CatalogMeta resultCount={resultCount} pageSize={pageSize} onPageSizeChange={setPageSize} unscoredCount={unscoredCount} pageSizeOptions={["12", "24", "50", "100"]} publicCatalog={pagination} />
+        {!localMode && catalog.summary.error && <p role="alert">{catalog.summary.error.detail} <button type="button" onClick={catalog.refresh}>重新读取</button></p>}
+        {!localMode && catalog.detail.status === "loading" && <p role="status">正在读取番剧详情…</p>}
+        {!localMode && catalog.detail.error && !selected && <p role="alert">{catalog.detail.error.detail}</p>}
         <div className="hazard-line" aria-hidden="true" />
         <div className={`view-content view-content--${view}`} id="anime-results">
           {visible.length ? (
@@ -608,11 +526,11 @@ export function ShowcasePage({ sharedMode = false }) {
               onSortChange={changeSort}
               ready={bootComplete}
             />
-          ) : <div className="empty-state"><Icon name={dataError ? "warning" : "search"} /><h2>{dataError || "没有找到匹配的番剧"}</h2><p>{dataError ? "当前页面不会使用演示数据代替服务器结果。" : "换个关键词或恢复默认筛选试试。"}</p></div>}
+          ) : <div className="empty-state"><Icon name={dataError ? "warning" : "search"} /><h2>{dataError || (!localMode && catalog.list.status === "loading" ? "正在读取番剧…" : "没有找到匹配的番剧")}</h2><p>{dataError ? "请刷新后重试。" : "换个关键词或恢复默认筛选试试。"}</p></div>}
         </div>
       </div>
       <button className={`back-to-top${showBackTop ? " is-visible" : ""}`} onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} aria-label="返回页面顶部"><span className="back-to-top__visual"><Icon name="arrow-up" /></span></button>
-      {selected && <FeaturedAnimeModal column={selected} onClosed={() => setSelected(null)} />}
+      {selected && (localMode || ["ready", "error"].includes(catalog.detail.status)) && <FeaturedAnimeModal column={selected} publicRead={localMode ? null : catalog} onClosed={() => { setSelected(null); if (!localMode) catalog.closeDetail(); }} />}
     </main>
   );
 }

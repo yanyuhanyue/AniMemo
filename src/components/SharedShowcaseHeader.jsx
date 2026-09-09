@@ -1,6 +1,7 @@
 import { Icon } from "./Icon.jsx";
 import { usePageColorTransition } from "./PageColorTransition.jsx";
 import { DashboardPreviewActions } from "./dashboard/DashboardJournalControls.jsx";
+import { PublicExportStatus } from "./catalog/PublicCatalogControls.jsx";
 
 function safeFileName(value) {
   return String(value || "public-journal")
@@ -18,6 +19,7 @@ export function SharedShowcaseHeader({
   onShareChange,
   onEdit,
   onReturnHome,
+  publicCatalog = null,
 }) {
   const { isTransitioning, navigateWithTransition } = usePageColorTransition();
   const nickname = profile?.nickname || "公开同好";
@@ -25,6 +27,7 @@ export function SharedShowcaseHeader({
   const avatar = profile?.avatar || profile?.avatar_url || "/assets/avatar.png";
 
   const exportRecords = () => {
+    if (publicCatalog) return publicCatalog.exportAll(`${safeFileName(nickname)}-animemo-public.json`);
     const payload = {
       exported_at: new Date().toISOString(),
       profile: {
@@ -70,7 +73,7 @@ export function SharedShowcaseHeader({
           </div>
         ) : (
           <div className="shared-showcase-hero__actions shared-hero-piece">
-            <button className="shared-showcase-action shared-showcase-action--export" type="button" onClick={exportRecords}>
+            <button className="shared-showcase-action shared-showcase-action--export" type="button" disabled={publicCatalog && (["choosing", "writing", "finalizing"].includes(publicCatalog.exporting.status) || publicCatalog.list.status !== "ready")} onClick={exportRecords}>
               <span><Icon name="export" /> 导出数据</span>
             </button>
             <button
@@ -84,6 +87,7 @@ export function SharedShowcaseHeader({
           </div>
         )}
       </div>
+      {publicCatalog && <div className="showcase-hero__inner"><PublicExportStatus state={publicCatalog.exporting.kind === "field" ? null : publicCatalog.exporting} onCancel={publicCatalog.cancelExport} /></div>}
     </header>
   );
 }

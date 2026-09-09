@@ -2,6 +2,7 @@
 
 import json
 from datetime import date
+from unittest import skipUnless
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -18,8 +19,10 @@ from .models import (
     UserSettings,
     WatchHistoryRecord,
 )
+from .public_catalog_test_support import public_catalog_response
 
 
+@skipUnless(connection.vendor == "postgresql", "Bounded public visibility oracles require PostgreSQL")
 class PublicVisibilityTests(APITestCase):
     @classmethod
     def setUpTestData(cls):
@@ -66,7 +69,7 @@ class PublicVisibilityTests(APITestCase):
         for actor in (None, self.member, self.owner, self.staff):
             with self.subTest(actor=actor.pk if actor else "anonymous"):
                 self.client.force_authenticate(actor)
-                self._assert_only_public(self.client.get(reverse("homepage")))
+                self._assert_only_public(public_catalog_response(self.client))
 
     def test_homepage_never_falls_back_from_missing_or_invalid_owner(self):
         for owner, active, staff in ((None, True, True), (self.owner, False, True), (self.owner, True, False)):
@@ -74,7 +77,7 @@ class PublicVisibilityTests(APITestCase):
                 get_user_model().objects.filter(pk=self.owner.pk).update(is_active=active, is_staff=staff)
                 self.site.homepage_owner = owner
                 self.site.save()
-                response = self.client.get(reverse("homepage"))
+                response = public_catalog_response(self.client)
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(set(response.data), {"stats", "results"})
                 self.assertEqual(response.data["results"], [])
@@ -84,11 +87,11 @@ class PublicVisibilityTests(APITestCase):
         for state, allow in (("private", True), ("pending", True), ("approved", False)):
             with self.subTest(state=state, allow=allow):
                 UserSettings.objects.filter(pk=self.publication.pk).update(public_status=state, allow_sharing=allow)
-                response = self.client.get(reverse("homepage"))
+                response = public_catalog_response(self.client)
                 self.assertEqual(response.data["results"], [])
                 self.assertEqual(response.data["stats"]["total"], 0)
         self.publication.delete()
-        response = self.client.get(reverse("homepage"))
+        response = public_catalog_response(self.client)
         self.assertEqual(response.data["results"], [])
         self.assertFalse(UserSettings.objects.filter(user=self.owner).exists())
 
@@ -98,7 +101,7 @@ class PublicVisibilityTests(APITestCase):
             entry=entry, provider="bangumi", external_id="100", canonical_url="https://bgm.tv/subject/100",
             metadata={"title": "public-metadata-title", "private_note": "private-metadata-sentinel"},
         )
-        response = self.client.get(reverse("homepage"))
+        response = public_catalog_response(self.client)
         row = next(row for row in response.data["results"] if row["id"] == entry.pk)
         for field in ("poster_file", "custom_poster_url", "share_slug", "share_url", "external_identities", "user", "email"):
             self.assertNotIn(field, row)
@@ -120,22 +123,21 @@ class PublicVisibilityTests(APITestCase):
                 self.assertEqual(result.data["results"], [])
 
     def test_publication_revocation_is_immediate_across_public_reads(self):
-        self._assert_only_public(self.client.get(reverse("homepage")))
+        self._assert_only_public(public_catalog_response(self.client))
         self.publication.allow_sharing = False
         self.publication.save()
-        self.assertEqual(self.client.get(reverse("homepage")).data["results"], [])
-        self.assertEqual(self.client.get(reverse("showcase-list")).data["results"], [])
-        self.assertEqual(self.client.get(reverse("showcase", args=[self.publication.public_slug])).status_code, 404)
+        self.assertEqual(public_catalog_response(self.client).data["results"], [])
+        self.assertEqual(self.client.get(reverse("public-showcase-directory")).data["results"], [])
+        self.assertEqual(public_catalog_response(self.client, public_slug=self.publication.public_slug).status_code, 404)
         self.assertEqual(self.client.get(reverse("shared-entry", args=[self.entries["public"].share_slug])).status_code, 404)
         self.client.force_authenticate(self.member)
         self.assertEqual(self.client.get(reverse("public-catalog-search")).data["results"], [])
 
     def test_showcase_owner_preview_and_unlisted_share_keep_separate_visibility(self):
-        url = reverse("showcase", args=[self.publication.public_slug])
         for actor in (None, self.member, self.staff, self.owner):
             with self.subTest(actor=actor.pk if actor else "anonymous"):
                 self.client.force_authenticate(actor)
-                response = self.client.get(url)
+                response = public_catalog_response(self.client, public_slug=self.publication.public_slug)
                 self.assertEqual(response.status_code, 200)
                 expected = set(self.entries) if actor == self.owner else {"public"}
                 self.assertEqual({row["visibility"] for row in response.data["results"]}, expected)
@@ -146,14 +148,15 @@ class PublicVisibilityTests(APITestCase):
 
     def test_disabled_owner_has_no_public_surface(self):
         get_user_model().objects.filter(pk=self.owner.pk).update(is_active=False)
-        self.assertEqual(self.client.get(reverse("homepage")).data["results"], [])
-        self.assertEqual(self.client.get(reverse("showcase-list")).data["results"], [])
-        self.assertEqual(self.client.get(reverse("showcase", args=[self.publication.public_slug])).status_code, 404)
+        self.assertEqual(public_catalog_response(self.client).data["results"], [])
+        self.assertEqual(self.client.get(reverse("public-showcase-directory")).data["results"], [])
+        self.assertEqual(public_catalog_response(self.client, public_slug=self.publication.public_slug).status_code, 404)
         self.assertEqual(self.client.get(reverse("shared-entry", args=[self.entries["public"].share_slug])).status_code, 404)
         self.client.force_authenticate(self.member)
         self.assertEqual(self.client.get(reverse("public-catalog-search")).data["results"], [])
 
 
+@skipUnless(connection.vendor == "postgresql", "Bounded public SQL budgets require PostgreSQL")
 class PublicQueryBudgetTests(APITestCase):
     def setUp(self):
         cache.clear()
@@ -165,19 +168,28 @@ class PublicQueryBudgetTests(APITestCase):
         site.save()
 
     def test_homepage_query_count_does_not_grow_per_entry(self):
-        counts = []
+        counts, summary_counts = [], []
         for size in (1, 10, 50):
             for index in range(JournalEntry.objects.count(), size):
                 entry = JournalEntry.objects.create(user=self.owner, title=f"entry-{index}", visibility="public")
                 WatchHistoryRecord.objects.create(entry=entry, watched_on=date(2026, 8, 1),
                                                   watched_label="2026.8.1", brush_label="首刷", sequence=1)
             with CaptureQueriesContext(connection) as captured:
-                response = self.client.get(reverse("homepage"))
+                response = self.client.get(reverse("public-homepage-entries"))
+            with CaptureQueriesContext(connection) as summary_queries:
+                summary = self.client.get(reverse("public-homepage-summary"))
             self.assertEqual(response.status_code, 200)
             self.assertEqual(len(response.data["results"]), size)
-            self.assertEqual(response.data["stats"]["total"], size)
+            self.assertEqual(summary.status_code, 200)
+            self.assertEqual(summary.data["stats"]["total"], size)
+            self.assertEqual(response.data["total"], size)
             self.assertEqual({row["watch_history_count"] for row in response.data["results"]}, {1})
-            self.assertEqual([row["id"] for row in response.data["results"]], list(JournalEntry.objects.order_by("-updated_at", "-id").values_list("pk", flat=True)))
+            expected = sorted(JournalEntry.objects.values("pk", "title"), key=lambda row: row["title"])
+            self.assertEqual([row["id"] for row in response.data["results"]], [row["pk"] for row in expected])
             counts.append(len(captured))
+            summary_counts.append(len(summary_queries))
         self.assertLessEqual(max(counts), min(counts) + 1, counts)
         self.assertLessEqual(max(counts), 6, counts)
+        self.assertLessEqual(max(summary_counts), min(summary_counts) + 1, summary_counts)
+        # Collation + homepage owner + publication + aggregate + scalar score batch.
+        self.assertLessEqual(max(summary_counts), 5, summary_counts)

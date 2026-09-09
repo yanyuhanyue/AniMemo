@@ -19,6 +19,13 @@ PERSONAL_PUBLIC_VIEWS = frozenset({
 # Their anonymous result is public; their authenticated result can be personal.
 IDENTITY_VARIANTS = frozenset({
     ("journal.public_views", "PublicShowcaseView"),
+    ("journal.public_catalog_views", "PublicCatalogEntriesView"),
+    ("journal.public_catalog_views", "PublicCatalogSummaryView"),
+    ("journal.public_catalog_views", "PublicCatalogFacetsView"),
+    ("journal.public_catalog_views", "PublicCatalogDetailView"),
+    ("journal.public_catalog_views", "PublicCatalogFieldView"),
+    ("journal.public_catalog_views", "PublicCatalogDirectoryView"),
+    ("journal.public_catalog_views", "RetiredPublicCatalogView"),
     ("plugin_host.views", "EnabledPluginListView"),
     ("plugin_host.views", "MarketplaceView"),
     ("plugin_host.views", "MarketplaceDetailView"),
