@@ -16,6 +16,7 @@ from pathlib import Path
 from release.formal_windows_pretrust import (
     create_windows_private_named_directory,
 )
+from release.r2_plugin_origin import CloudflarePluginOrigin, R2PluginOriginError
 from scripts import candidate_vm_harness as h
 from scripts.guest_console_capture import ConsoleCaptureError, WindowsConsoleCapture
 from scripts.guest_sudo_session import ControllerFailure, SessionSupervisor, wipe
@@ -28,7 +29,7 @@ CAPTURE_LEDGER = Path("E:/") / hashlib.sha256(CAPTURE_AUTHORIZATION.encode("asci
 
 
 def _failure_code(error):
-    if isinstance(error, (ControllerFailure, ConsoleCaptureError, h.CandidateHarnessError, h.CandidateContractError)):
+    if isinstance(error, (ControllerFailure, ConsoleCaptureError, R2PluginOriginError, h.CandidateHarnessError, h.CandidateContractError)):
         return getattr(error, "code", str(error))
     return "GUEST_VALIDATION_INTERRUPTED_OR_UNCLASSIFIED"
 
@@ -60,7 +61,11 @@ def _check_checkout(source_sha: str, source_tree: str) -> None:
         raise ControllerFailure("GUEST_CONTROLLER_SOURCE_UNVERIFIED") from None
 
 
-def _origin(plan, role):
+def _origin(plan, role, *, plugin_origin=None):
+    if plugin_origin is not None:
+        if type(plugin_origin) is not CloudflarePluginOrigin:
+            raise ControllerFailure("R2_PLUGIN_CHANNEL_INVALID")
+        return plugin_origin.observe(plan, role)
     return h.validate_r2_origin_receipt(
         h.verify_candidate_r2_origin_from_environment(
             target_rc=plan.candidate_version, source_sha=plan.source_sha,
@@ -182,8 +187,12 @@ def _controller_clone(provider, plan, result):
                 raise ControllerFailure("GUEST_CLONE_CLEANUP_FAILED") from None
 
 
-def _validate(plan, provider, console, result):
-    result["r2_prestate"] = _origin(plan, "PRESTATE")
+def _validate(plan, provider, console, result, *, plugin_origin=None):
+    def observe(role):
+        if plugin_origin is None:
+            return _origin(plan, role)
+        return _origin(plan, role, plugin_origin=plugin_origin)
+    result["r2_prestate"] = observe("PRESTATE")
     result["external_prestate"] = h._read_expected_external_state(provider, plan.candidate_version)
     try:
         with _controller_clone(provider, plan, result) as (profile, lease, disk, snapshot):
@@ -227,7 +236,7 @@ def _validate(plan, provider, console, result):
         raise
     finally:
         try:
-            result["r2_poststate"] = _origin(plan, "POSTSTATE")
+            result["r2_poststate"] = observe("POSTSTATE")
             if result["r2_poststate"]["observation_id"] == result["r2_prestate"]["observation_id"]:
                 raise ControllerFailure("GUEST_R2_OBSERVATION_REUSED")
             result["external_poststate"] = h._read_expected_external_state(provider, plan.candidate_version)
@@ -243,6 +252,7 @@ def main(argv=None):
     parser.add_argument("--expected-source-sha", required=True)
     parser.add_argument("--expected-source-tree", required=True)
     parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument("--r2-origin-transport", choices=("s3", "cloudflare-plugin"), default="s3")
     args = parser.parse_args(argv)
     # Reserve the report before any external action; never overwrite evidence.
     report = args.result.open("x", encoding="utf-8", newline="\n")
@@ -251,7 +261,7 @@ def main(argv=None):
         "status": "ERROR", "capture_attempts": 0, "capture_completed": 0,
         "delivery_attempts": {"BOOTSTRAP_ROTATION": 0, "VERIFIED_SUDO": 0},
         "delivery_completed": {"BOOTSTRAP_ROTATION": 0, "VERIFIED_SUDO": 0},
-        "snapshot_started": False,
+        "snapshot_started": False, "r2_origin_transport": args.r2_origin_transport,
     }
     try:
         _check_checkout(args.expected_source_sha, args.expected_source_tree)
@@ -260,7 +270,12 @@ def main(argv=None):
         if CAPTURE_LEDGER.exists() or CAPTURE_LEDGER.is_symlink():
             raise ControllerFailure("GUEST_CAPTURE_ALREADY_ATTEMPTED")
         provider = h.ClosedVmwareProvider()
-        with provider.execution_authority(_retain_controller_data=True), ExitStack() as stack:
+        with ExitStack() as stack:
+            plugin_origin = None
+            if args.r2_origin_transport == "cloudflare-plugin":
+                plugin_origin = stack.enter_context(CloudflarePluginOrigin())
+                result["r2_plugin_channel"] = str(plugin_origin.root)
+            stack.enter_context(provider.execution_authority(_retain_controller_data=True))
             material = stack.enter_context(h.acquire_candidate_material_authority(
                 args.verified_candidate_digest, provider=provider,
             ))
@@ -273,7 +288,7 @@ def main(argv=None):
             )
             result["plan"] = plan.as_dict()
             with provider.bind_candidate_material_authority(material):
-                _validate(plan, provider, console, result)
+                _validate(plan, provider, console, result, plugin_origin=plugin_origin)
         if result["resource"]["power_state"] != "STOPPED":
             raise ControllerFailure("GUEST_CLONE_SUSPENDED_REQUIRES_RECONCILIATION")
         result["status"] = "DYNAMIC_VALIDATION_PASSED"

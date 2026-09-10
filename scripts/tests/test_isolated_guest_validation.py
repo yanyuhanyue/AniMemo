@@ -209,6 +209,24 @@ class IsolatedGuestValidationTests(unittest.TestCase):
         supervisor.bootstrap_rotation.assert_not_called()
         entry._controller_clone.assert_not_called()
 
+    def test_plugin_pre_and_post_use_same_explicit_channel_after_cleanup(self):
+        events, origin, _, console, _, _ = self.validation_fixture()
+        channel = mock.sentinel.plugin_channel
+        origin.side_effect = lambda _plan, role, **kwargs: (
+            self.assertIs(kwargs['plugin_origin'], channel), events.append(role),
+            {'observation_id': role})[-1]
+        entry._validate(self.plan, self.provider, console, self.result, plugin_origin=channel)
+        self.assertEqual(events, ["PRESTATE", "identity", "reserve", "capture", "rotation", "validation", "cleanup", "POSTSTATE"])
+
+    def test_plugin_poststate_failure_remains_terminal_after_guest_cleanup(self):
+        events, origin, _, console, supervisor, _ = self.validation_fixture()
+        origin.side_effect = [{'observation_id': 'synthetic-pre'}, entry.R2PluginOriginError('R2_PLUGIN_RESPONSE_TIMEOUT')]
+        with self.assertRaisesRegex(entry.R2PluginOriginError, 'TIMEOUT'):
+            entry._validate(self.plan, self.provider, console, self.result, plugin_origin=mock.sentinel.plugin)
+        supervisor.close.assert_called_once()
+        self.assertIn('cleanup', events)
+        self.assertEqual(self.result['poststate_failure_code'], 'R2_PLUGIN_RESPONSE_TIMEOUT')
+
     def test_constructor_failure_wipes_caller_owned_buffer_and_does_not_recapture(self):
         events, _, secret, console, supervisor, constructor = self.validation_fixture()
         constructor.side_effect = entry.ControllerFailure("HELD_GUEST_SCOPE_REQUIRED")

@@ -2,6 +2,10 @@
 
 状态：RC.14 Candidate Acceptance 的强制操作员边界。
 
+显式选择插件 REST 的单 Profile 控制器任务使用
+[Cloudflare 插件 Origin 观察合同](r2-plugin-origin-observation.md)。下文约束
+S3 凭据路径；正式 Candidate Acceptance 继续使用原有 S3 receipt。
+
 ## 权限与用途
 
 Candidate Acceptance 只接受 Cloudflare R2 S3-compatible API 的单 Bucket `Object Read only`
