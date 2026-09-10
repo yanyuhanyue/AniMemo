@@ -26,9 +26,9 @@ from typing import Protocol
 from jsonschema import Draft202012Validator, FormatChecker
 
 from .candidate import CandidateContractError, canonical_json_bytes, sha256_bytes
+from .contract import ReleaseContractError, rc_target_version
 
 REPOSITORY = "yanyuhanyue/AniMemo"
-TARGET_VERSION = "v1.1.0"
 TARGET_RC = "v1.1.0-rc.14"
 R2_RECEIPT_SCHEMA = "animemo.r2-origin-observation-receipt/v3"
 R2_AUTH_METHOD = "R2_S3_OBJECT_READ_ONLY"
@@ -66,7 +66,6 @@ _SENSITIVE_SDK_LOGGER_NAMESPACES = ("boto3", "botocore")
 
 _ACCOUNT_ID = re.compile(r"[0-9a-f]{32}\Z")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
-_TARGET_RC = re.compile(re.escape(TARGET_VERSION) + r"-rc\.[1-9][0-9]*\Z")
 _SENSITIVE_FIELD = re.compile(
     r"(?:authorization|cookie|set-cookie|x-amz-(?:credential|signature|security-token)|"
     r"awsaccesskeyid|access[_-]?key(?:[_-]?id)?|secret[_-]?access[_-]?key|"
@@ -488,7 +487,9 @@ def _validate_source_identity(source_sha: str, source_tree: str) -> None:
 
 
 def candidate_r2_prefix(target_rc: str) -> str:
-    if type(target_rc) is not str or _TARGET_RC.fullmatch(target_rc) is None:
+    try:
+        rc_target_version(target_rc)
+    except ReleaseContractError:
         _raise("R2_S3_RESPONSE_INVALID")
     return f"{REPOSITORY}/releases/download/{target_rc}/"
 
@@ -650,7 +651,7 @@ def verify_r2_origin_empty(
         "repository": REPOSITORY,
         "source_sha": source_sha,
         "source_tree": source_tree,
-        "target_version": TARGET_VERSION,
+        "target_version": rc_target_version(target_rc),
         "target_rc": target_rc,
         "account_id": account_id,
         "bucket": R2_BUCKET,
@@ -783,8 +784,7 @@ def validate_r2_origin_receipt(
         or observation_uuid.version != 4
         or str(observation_uuid) != receipt["observation_id"]
         or receipt["repository"] != REPOSITORY
-        or receipt["target_version"] != TARGET_VERSION
-        or not receipt["target_rc"].startswith(TARGET_VERSION + "-rc.")
+        or receipt["target_version"] != rc_target_version(receipt["target_rc"])
         or receipt["bucket"] != R2_BUCKET
         or receipt["prefix"] != expected_prefix
         or receipt["endpoint_host"] != expected_host

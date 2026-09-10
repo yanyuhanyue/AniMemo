@@ -12,6 +12,8 @@ Release Drafter 只生成变更草稿；它的 `tag_name` 和 `target_commitish=
 
 旧事务、旧报告、已发布 v1.0.0 与 v1.x RC 保留原身份。草稿 ID 373784357 是普通变更草稿，必须保持 draft=true、published_at=null、assets=[]；不得将它当作真实 Git tag 或已占用 RC 事务。
 
+Candidate VM harness 与 R2 Origin 收据使用同一 canonical RC parser，从 verified Candidate 的实际 RC 推导 base、隔离目录、prefix 和对象键。它们不再限定 v1.1.0；仍拒绝 Stable/Beta、非规范编号或 base/prefix 不匹配。历史 rc14 专用入口保留其历史身份，不用于此次新目标。
+
 ## 消费链与证明边界
 
 - Qualification 使用最终 exact source；Candidate 验证器绑定 candidate version/source/tree/制品 identity。

@@ -353,6 +353,23 @@ class PresentationGuardTests(unittest.TestCase):
                         state="draft",
                     )
 
+    def test_v2_draft_fields_do_not_supply_git_or_published_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository, commit = _repository(Path(directory))
+            tag = "v2.0.0-rc.1"
+            plan = _plan(tag=tag, commit=commit)
+            metadata = _metadata(tag)
+            # A draft's name/tag fields do not manufacture a real Git ref.
+            with self.assertRaises(PresentationError):
+                verify_release_presentation_metadata(
+                    plan, metadata=metadata, repository=repository, state="draft")
+            _tag(repository, tag, commit, tag)
+            # Even a matching local ref cannot turn an unpublished draft into
+            # immutable published-release authority.
+            with self.assertRaises(PresentationError):
+                verify_release_presentation_metadata(
+                    plan, metadata=metadata, repository=repository, state="published")
+
     def test_post_publish_guard_still_checks_title_and_tag_subject(self):
         with tempfile.TemporaryDirectory() as directory:
             repository, commit = _repository(Path(directory))
