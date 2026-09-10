@@ -153,6 +153,10 @@ class SessionSupervisor:
         self._bootstrap = None
         self._prior_keys = frozenset(provider._accepted_host_key_digests)
         self._grant = None
+        self._delivery_attempts = {"BOOTSTRAP_ROTATION": 0, "VERIFIED_SUDO": 0}
+        self._delivery_completed = dict(self._delivery_attempts)
+        # Completed stdin write/flush/close exchanges, not successful sudo
+        # operations. An attempted exchange may have delivered bytes on failure.
         self.injection_count = 0
         try:
             self._check_scope()
@@ -165,6 +169,18 @@ class SessionSupervisor:
         except BaseException:
             self.close(failed=True)
             raise ControllerFailure("HELD_GUEST_SCOPE_REQUIRED") from None
+
+    @property
+    def delivery_attempts(self) -> dict[str, int]:
+        """Snapshot of writes attempted by role, including uncertain delivery."""
+        with self._lock:
+            return dict(self._delivery_attempts)
+
+    @property
+    def delivery_completed(self) -> dict[str, int]:
+        """Snapshot of completed stdin exchanges; does not imply sudo success."""
+        with self._lock:
+            return dict(self._delivery_completed)
 
     def _check_scope(self) -> None:
         provider = self._provider
@@ -233,15 +249,19 @@ class SessionSupervisor:
 
     def _consume(self, grant: _Grant, process: Any, role: str) -> None:
         self._active()
-        if grant is not self._grant or grant.owner is not self or grant.execution is not self._execution or grant.process is not process or grant.role != role or grant.used or self._clock() >= grant.expires or process.poll() is not None:
+        if grant is not self._grant or grant.owner is not self or grant.execution is not self._execution or grant.process is not process or grant.role != role or grant.used or self._clock() >= grant.expires or process.poll() is not None or role not in self._delivery_attempts or self._delivery_attempts[role] != 0:
             raise ControllerFailure("GUEST_GRANT_REJECTED")
         grant.used = True
         value = bytearray(self._secret)
         value.append(10)
         try:
-            process.stdin.write(value)
+            self._delivery_attempts[role] += 1
+            written = process.stdin.write(value)
+            if type(written) is not int or written != len(value):
+                raise ControllerFailure("GUEST_STDIN_SHORT_WRITE")
             process.stdin.flush()
             process.stdin.close()
+            self._delivery_completed[role] += 1
             self.injection_count += 1
         finally:
             wipe(value)
