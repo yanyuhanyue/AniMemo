@@ -2036,7 +2036,7 @@ def verify_clone_connection_identity(
 
 
 class CandidateVmProvider(Protocol):
-    def execution_authority(self): ...
+    def execution_authority(self, *, _retain_controller_data: bool = False): ...
 
     def inspect_execution_authority(
         self,
@@ -2148,7 +2148,7 @@ class ClosedVmwareProvider:
             ) from error
 
     @contextmanager
-    def execution_authority(self):
+    def execution_authority(self, *, _retain_controller_data: bool = False):
         """Enter the one production authority spanning plan through cleanup."""
 
         if self._execution is not None or self._execution_stack is not None:
@@ -2156,6 +2156,7 @@ class ClosedVmwareProvider:
                 "CANDIDATE_VM_EXECUTION_AUTHORITY_ALREADY_ACTIVE"
             )
         root: Path | None = None
+        work_root: Path | None = None
         try:
             root = create_windows_private_directory(
                 PROVIDER_EXECUTION_PARENT,
@@ -2273,7 +2274,28 @@ class ClosedVmwareProvider:
             if root is not None:
                 try:
                     if root.exists() and not root.is_symlink():
-                        shutil.rmtree(root)
+                        if _retain_controller_data and work_root is not None:
+                            # The controller scope removes keys before releasing its
+                            # lease. Keep its VM bytes even if containment failed.
+                            release_errors = []
+                            children = sorted(root.iterdir(), key=lambda child: child != key_root)
+                            for child in children:
+                                if child != work_root:
+                                    try:
+                                        self._closed_path(child, root=root,
+                                            code="CANDIDATE_VM_CLEANUP_AUTHORITY_INVALID")
+                                        if child.is_dir():
+                                            shutil.rmtree(child)
+                                        else:
+                                            child.unlink()
+                                    except BaseException as error:
+                                        release_errors.append(error)
+                            if release_errors:
+                                raise CandidateHarnessError(
+                                    "CANDIDATE_VM_EXECUTION_AUTHORITY_RELEASE_FAILED"
+                                ) from None
+                        else:
+                            shutil.rmtree(root)
                 except OSError as error:
                     raise CandidateHarnessError(
                         "CANDIDATE_VM_EXECUTION_AUTHORITY_RELEASE_FAILED"
@@ -4762,10 +4784,10 @@ class ClosedVmwareProvider:
             time.sleep(2)
         raise CandidateHarnessError("CANDIDATE_VM_CLONE_SOFT_SHUTDOWN_FAILED")
 
-    def _contain_clone(self, clone_vmx: Path) -> None:
+    def _contain_clone(self, clone_vmx: Path) -> str:
         try:
             self._stop_clone(clone_vmx)
-            return
+            return "STOPPED"
         except CandidateHarnessError:
             pass
         for mode in ("soft", "hard"):
@@ -4781,7 +4803,7 @@ class ClosedVmwareProvider:
                 raise
             for _ in range(60):
                 if not self._is_running(clone_vmx):
-                    return
+                    return "SUSPENDED"
                 time.sleep(2)
         raise CandidateHarnessError("CANDIDATE_VM_CLONE_CONTAINMENT_FAILED")
 
@@ -4921,6 +4943,102 @@ class ClosedVmwareProvider:
             original_hashes=hashes,
         )
 
+    def _prepare_and_start_profile_clone(
+        self, *, authority, plan, harness_plan, before_hashes,
+        profile_authority_stack, clone_authority_stack,
+        checked_running_vmx_paths, reject_running_clone,
+    ):
+        """Shared byte-copy, held scope, snapshot and challenge launch sequence.
+
+        Callers own the lease and conservative failure containment, including
+        partial copies and failed start commands.
+        """
+        self._prepare_profile_authority(authority)
+        if self._execution is not None:
+            for directory in (
+                authority.session_root,
+                authority.profile_root,
+                authority.ssh_root,
+            ):
+                profile_authority_stack.enter_context(
+                    hold_windows_private_directory(
+                        directory, allow_child_writes=True
+                    )
+                )
+            profile_authority_stack.enter_context(
+                hold_windows_private_file(authority.identity_file)
+            )
+            profile_authority_stack.enter_context(
+                hold_windows_private_file(
+                    authority.identity_file.with_suffix(".pub")
+                )
+            )
+        clone_root, clone_vmx = self._clone_full(
+            plan,
+            authority,
+            expected_original_hashes=harness_plan.original_vm_hashes,
+            expected_source_disk_graph_identity=(
+                harness_plan.source_disk_graph_identity
+            ),
+        )
+        if self._execution is not None:
+            clone_authority_stack.enter_context(
+                hold_windows_private_directory(
+                    clone_root, allow_child_writes=True
+                )
+            )
+        if (
+            clone_root.resolve(strict=False)
+            != authority.clone_root.resolve(strict=False)
+            or clone_vmx.resolve(strict=False)
+            != authority.clone_vmx.resolve(strict=False)
+        ):
+            raise CandidateHarnessError(
+                "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH"
+            )
+        clone_identity = os.path.normcase(
+            str(clone_vmx.resolve(strict=False))
+        )
+        running_before_revert = checked_running_vmx_paths()
+        reject_running_clone(running_before_revert, clone_identity)
+        if self._hashes() != before_hashes:
+            raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
+        pre_revert_inventory = self._vm_inventory(clone_root)
+        self._revert_clone(clone_vmx, plan.snapshot_name)
+        running_after_revert = checked_running_vmx_paths()
+        reject_running_clone(running_after_revert, clone_identity)
+        if self._hashes() != before_hashes:
+            raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
+        self._validate_reverted_clone_disk_graph(
+            clone_root,
+            clone_vmx,
+            profile=plan.profile,
+            expected_original_hashes=harness_plan.original_vm_hashes,
+            pre_revert_inventory=pre_revert_inventory,
+        )
+        self._clone_snapshot_disk_graph_identity(
+            clone_root,
+            profile=plan.profile,
+            expected_snapshot_disk_graph_identity=(
+                plan.snapshot_disk_graph_identity
+            ),
+        )
+        preboot_snapshot_identity = self._clone_snapshot_identity(
+            clone_root,
+            profile=plan.profile,
+            expected_snapshot_identity=plan.snapshot_identity,
+        )
+        preboot_disk_graph_digest = self._disk_graph_content_digest(
+            clone_root, clone_vmx
+        )
+        running_after_readback = checked_running_vmx_paths()
+        reject_running_clone(running_after_readback, clone_identity)
+        self._inject_guestinfo_challenge(authority, plan)
+        running_after_write = checked_running_vmx_paths()
+        reject_running_clone(running_after_write, clone_identity)
+        self._start_clone(clone_vmx)
+        return preboot_disk_graph_digest, preboot_snapshot_identity
+
     def execute_profile(
         self,
         *,
@@ -5012,91 +5130,20 @@ class ClosedVmwareProvider:
         profile_authority_stack = ExitStack()
         clone_authority_stack = ExitStack()
         try:
-            self._prepare_profile_authority(authority)
-            if self._execution is not None:
-                for directory in (
-                    authority.session_root,
-                    authority.profile_root,
-                    authority.ssh_root,
-                ):
-                    profile_authority_stack.enter_context(
-                        hold_windows_private_directory(
-                            directory, allow_child_writes=True
-                        )
-                    )
-                profile_authority_stack.enter_context(
-                    hold_windows_private_file(authority.identity_file)
-                )
-                profile_authority_stack.enter_context(
-                    hold_windows_private_file(
-                        authority.identity_file.with_suffix(".pub")
-                    )
-                )
-            clone_root, clone_vmx = self._clone_full(
-                plan,
-                authority,
-                expected_original_hashes=harness_plan.original_vm_hashes,
-                expected_source_disk_graph_identity=(
-                    harness_plan.source_disk_graph_identity
-                ),
-            )
-            if self._execution is not None:
-                clone_authority_stack.enter_context(
-                    hold_windows_private_directory(
-                        clone_root, allow_child_writes=True
-                    )
-                )
-            if (
-                clone_root.resolve(strict=False)
-                != authority.clone_root.resolve(strict=False)
-                or clone_vmx.resolve(strict=False)
-                != authority.clone_vmx.resolve(strict=False)
-            ):
-                raise CandidateHarnessError(
-                    "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH"
-                )
+            # Paths are owned before copying; failures never lose containment
+            # authority merely because preparation did not return successfully.
+            clone_root, clone_vmx = authority.clone_root, authority.clone_vmx
             clone_power_state_untrusted = True
-            clone_identity = os.path.normcase(
-                str(clone_vmx.resolve(strict=False))
+            preboot_disk_graph_digest, preboot_snapshot_identity = (
+                self._prepare_and_start_profile_clone(
+                    authority=authority, plan=plan, harness_plan=harness_plan,
+                    before_hashes=before_hashes,
+                    profile_authority_stack=profile_authority_stack,
+                    clone_authority_stack=clone_authority_stack,
+                    checked_running_vmx_paths=checked_running_vmx_paths,
+                    reject_running_clone=reject_running_clone,
+                )
             )
-            running_before_revert = checked_running_vmx_paths()
-            reject_running_clone(running_before_revert, clone_identity)
-            if self._hashes() != before_hashes:
-                raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
-            pre_revert_inventory = self._vm_inventory(clone_root)
-            self._revert_clone(clone_vmx, plan.snapshot_name)
-            running_after_revert = checked_running_vmx_paths()
-            reject_running_clone(running_after_revert, clone_identity)
-            if self._hashes() != before_hashes:
-                raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
-            self._validate_reverted_clone_disk_graph(
-                clone_root,
-                clone_vmx,
-                profile=plan.profile,
-                expected_original_hashes=harness_plan.original_vm_hashes,
-                pre_revert_inventory=pre_revert_inventory,
-            )
-            self._clone_snapshot_disk_graph_identity(
-                clone_root,
-                profile=plan.profile,
-                expected_snapshot_disk_graph_identity=(
-                    plan.snapshot_disk_graph_identity
-                ),
-            )
-            preboot_snapshot_identity = self._clone_snapshot_identity(
-                clone_root,
-                profile=plan.profile,
-                expected_snapshot_identity=plan.snapshot_identity,
-            )
-            preboot_disk_graph_digest = self._disk_graph_content_digest(
-                clone_root, clone_vmx
-            )
-            running_after_readback = checked_running_vmx_paths()
-            reject_running_clone(running_after_readback, clone_identity)
-            self._inject_guestinfo_challenge(authority, plan)
-            running_after_write = checked_running_vmx_paths()
-            reject_running_clone(running_after_write, clone_identity)
-            self._start_clone(clone_vmx)
             verified_connection = self._establish_clone_connection(
                 authority,
                 plan,

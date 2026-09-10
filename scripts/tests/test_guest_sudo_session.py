@@ -93,6 +93,9 @@ class GuestSudoSessionTests(unittest.TestCase):
         self.runner.observation = self.verified
         self.session.validate_verified_guest()
         self.assertEqual(self.session.injection_count, 2)
+        expected_counts = {"BOOTSTRAP_ROTATION": 1, "VERIFIED_SUDO": 1}
+        self.assertEqual(self.session.delivery_attempts, expected_counts)
+        self.assertEqual(self.session.delivery_completed, expected_counts)
         self.assertEqual(self.secret, b"")
         for process in self.runner.processes:
             self.assertEqual(process.stdin.getvalue(), SENTINEL + b"\n")
@@ -102,12 +105,96 @@ class GuestSudoSessionTests(unittest.TestCase):
         with self.assertRaises(c.ControllerFailure):
             self.session.validate_verified_guest()
         self.assertEqual(self.session.injection_count, 2)
+        self.assertEqual(self.session.delivery_attempts, expected_counts)
+
+    def test_partial_or_failed_stdin_delivery_is_counted_once_and_never_replayed(self):
+        for role in ("BOOTSTRAP_ROTATION", "VERIFIED_SUDO"):
+            for failure in ("short_write", "write_error", "flush_error", "close_error"):
+                with self.subTest(role=role, failure=failure):
+                    secret = bytearray(SENTINEL)
+                    session = c.SessionSupervisor(secret, provider=self.provider, plan=self.plan, profile=self.profile,
+                        preboot_disk_graph_digest=self.runtime.disk_graph_digest,
+                        preboot_snapshot_identity=self.runtime.snapshot_identity)
+                    self.addCleanup(session.close)
+                    self.runner.before_exchange = None
+                    self.runner.observation = self.bootstrap
+                    self.key_read.return_value = self.bootstrap.host_key_digest
+                    if role == "VERIFIED_SUDO":
+                        session.bootstrap_rotation()
+                        self.runner.observation = self.verified
+                        self.key_read.return_value = self.verified.host_key_digest
+                    testcase = self
+
+                    class FailingSink(InputSink):
+                        write_calls = 0
+                        flush_calls = 0
+                        close_calls = 0
+
+                        def write(self, value):
+                            self.write_calls += 1
+                            testcase.assertEqual(session.delivery_attempts[role], 1)
+                            testcase.assertEqual(session.delivery_completed[role], 0)
+                            if failure in {"short_write", "write_error"}:
+                                written = super().write(value[:3])
+                                if failure == "write_error":
+                                    raise OSError("synthetic partial write")
+                                return written
+                            return super().write(value)
+
+                        def flush(self):
+                            self.flush_calls += 1
+                            if failure == "flush_error":
+                                raise OSError("synthetic flush failure")
+                            return super().flush()
+
+                        def close(self):
+                            self.close_calls += 1
+                            if failure == "close_error":
+                                raise OSError("synthetic close failure")
+                            return super().close()
+
+                    sink = FailingSink()
+                    self.runner.before_exchange = lambda process: setattr(process, "stdin", sink)
+                    operation = session.bootstrap_rotation if role == "BOOTSTRAP_ROTATION" else session.validate_verified_guest
+                    with self.assertRaises(c.ControllerFailure) as caught:
+                        operation()
+                    self.assertNotIn(SENTINEL.decode(), str(caught.exception))
+                    self.assertEqual(secret, b"")
+                    self.assertEqual(sink.write_calls, 1)
+                    if failure in {"short_write", "write_error"}:
+                        self.assertEqual(sink.getvalue(), SENTINEL[:3])
+                        self.assertEqual(sink.flush_calls, 0)
+                        self.assertEqual(sink.close_calls, 0)
+                    else:
+                        self.assertEqual(sink.getvalue(), SENTINEL + b"\n")
+                    expected_attempts = {"BOOTSTRAP_ROTATION": 1, "VERIFIED_SUDO": int(role == "VERIFIED_SUDO")}
+                    expected_completed = {"BOOTSTRAP_ROTATION": int(role == "VERIFIED_SUDO"), "VERIFIED_SUDO": 0}
+                    self.assertEqual(session.delivery_attempts, expected_attempts)
+                    self.assertEqual(session.delivery_completed, expected_completed)
+                    self.assertEqual(session.injection_count, int(role == "VERIFIED_SUDO"))
+                    process_count = len(self.runner.processes)
+                    for replay in (session.bootstrap_rotation, session.validate_verified_guest):
+                        with self.assertRaises(c.ControllerFailure):
+                            replay()
+                    self.assertEqual(len(self.runner.processes), process_count)
+                    self.assertEqual(sink.write_calls, 1)
+                    session.close()
+                    self.assertEqual(session.delivery_attempts, expected_attempts)
+                    self.assertEqual(session.delivery_completed, expected_completed)
+
+    def test_delivery_counter_snapshots_cannot_reset_session_accounting(self):
+        self.session.bootstrap_rotation()
+        self.session.delivery_attempts["BOOTSTRAP_ROTATION"] = 0
+        self.session.delivery_completed.clear()
+        self.assertEqual(self.session.delivery_attempts["BOOTSTRAP_ROTATION"], 1)
+        self.assertEqual(self.session.delivery_completed["BOOTSTRAP_ROTATION"], 1)
 
     def test_verified_role_cannot_use_bootstrap_grant(self):
         with self.assertRaises(c.ControllerFailure):
             self.session.validate_verified_guest()
         self.assertEqual(self.runner.processes, [])
         self.assertEqual(self.secret, b"")
+        self.assertEqual(self.session.delivery_attempts, {"BOOTSTRAP_ROTATION": 0, "VERIFIED_SUDO": 0})
 
     def test_wrong_initial_guest_fails_before_exchange(self):
         self.observe.return_value = replace(self.bootstrap, nonce="0" * 64)
@@ -225,6 +312,8 @@ class GuestSudoSessionTests(unittest.TestCase):
             self.session.bootstrap_rotation()
         self.assertNotIn(SENTINEL.decode(), str(caught.exception))
         self.assertEqual(self.secret, b"")
+        self.assertEqual(self.session.delivery_attempts, {"BOOTSTRAP_ROTATION": 1, "VERIFIED_SUDO": 0})
+        self.assertEqual(self.session.injection_count, 0)
         with self.assertRaises(c.ControllerFailure):
             self.session.bootstrap_rotation()
         self.assertEqual(len(self.runner.processes), 1)

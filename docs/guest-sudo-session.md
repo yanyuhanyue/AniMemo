@@ -18,6 +18,20 @@
 
 实际进程由原 provider `_run` 的工具身份、固定 cwd、净化环境、active execution 前后检查启动；新增交互方法不绕开既有 launcher。stdout 仅接收有界 public observation，sudo 输出被丢弃；进程异常时关闭管道并回收本次子进程。
 
+`delivery_attempts` 按两个固定 role 记录首次 stdin 写入前的尝试数；`delivery_completed` 与总计 `injection_count` 只计完整 write/flush/close。短写和部分写入异常都终止会话且不补写，不能因完成数为零而断言密码未送出。完整交付也不等于 sudo 操作成功，操作结果单独记录。
+
+## 单 Profile 动态入口
+
+`python -B -m scripts.isolated_guest_validation` 是 `ANIMEMO_V2_ISOLATED_DYNAMIC_VALIDATION_AND_QUALIFICATION_V1` 的最小编排入口。必填参数为 `--verified-candidate-digest`、`--expected-qualification-run-id`、`--expected-source-sha`、`--expected-source-tree`、`--result`；结果路径必须尚不存在。执行前须已获得该任务的动态授权，并在最终 main 的干净 checkout 中取得同源 Qualification 的 canonical Verified Candidate。
+
+入口在同一进程持有 provider execution、Candidate materials 与 profile lease，取得本次 R2 PRESTATE 后，只选择 FRESH_BASE，复用 harness 的全字节复制、Snapshot/磁盘图校验、challenge 和启动序列。密码捕获前先通过只读 canonical bootstrap 观察；捕获后由 Supervisor 重新验证目标并执行两个固定 role。入口不会生成 Candidate Profile/Aggregate Receipt。
+
+`WindowsConsoleCapture` 要求未录制、可见且仅当前 Python 进程附着的原生 Windows Console，校验 Win32 console handle/mode，关闭 echo，以可变 UTF-16 缓冲读取后直接转换为可变 UTF-8 buffer。每次读取返回后也复核同一 Console。重定向、共享 Console、不可见 pseudoconsole、取消、模式变化和读取失败均关闭该捕获路径，没有明文输入 fallback。生产启动须让专用 Console 直接运行 Python，不能从会在结束后继续接收输入的交互 shell 调用。若清空输入队列失败，保持隐藏模式并终止此 Python/专用 Console；不得恢复 echo 后继续使用窗口。不要把密码放入聊天、命令、环境或结果文件。
+
+捕获前在固定的 `E:/<SHA256(CAPTURE_AUTHORIZATION)>` 私有目录原子登记一次尝试。此记录只阻止再次捕获，不提供 Guest authority；与 run/session/source SHA 无关，重启进程或创建新计划不能重置次数。取消和失败也保留记录，下一次真实捕获需新的授权处理，不删除该记录重试。
+
+成功和失败都回收当前 SSH/secret/session key，并尝试软关机；provider 必要时使用既有 suspend containment。结果分别记录 STOPPED、SUSPENDED 或未完成 containment，suspend 不算正常关机。该入口保留本次 private-work 中的 Clone/测试数据，execution 退出优先清理复制的 bootstrap key，再清理工具/source 临时副本。独立清理步骤逐项执行，任何失败都会记录并阻止成功结论。随后取得新的 R2 POSTSTATE，并再次核对源码。报告只包含公开身份、操作类别、计数与收尾状态。
+
 ## 使用范围与后续任务
 
 本模块实现最小控制器的 rotation / sudo validation，不负责启动或复制 VM、不实现完整 Candidate/Formal workload 调度，也不为后续 privileged workload 提供 env fallback。本次没有启用历史环境变量式 sudo 入口。动态任务应在受控 profile 入口使用本模块；不得退回历史外置 `capture_and_serve` 或从旧 authority JSON 请求 secret。
