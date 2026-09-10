@@ -22,7 +22,7 @@ Linux Guest 的路径明确引用 `POSIX_VERIFIED_CANDIDATE_ROOT`，不继承 Wi
 修复不改变这些格式版本。旧 Qualification 只能证明原来源源码；不能因新 loader 能读取
 旧材料就把它用作新源码的动态资格。
 
-针对回归位于 `release/test_candidate_roots.py`、既有 Candidate verifier/loader identity
+针对回归位于 `scripts/tests/test_candidate_roots.py`（由现行 CI 测试发现入口执行）、既有 Candidate verifier/loader identity
 测试和 Guest 路径测试。真实 Windows 的 junction 拒绝、私有树双侧持有、ACL/owner 拒绝
 与关闭后失效应分别保留实际证据。宿主集成回归使用已验证材料核对默认 verifier 与 loader
 一致、同盘/跨盘当前目录无关、真实私有材料获取和清理；其开发 fixture 的原源码/Q 标签
