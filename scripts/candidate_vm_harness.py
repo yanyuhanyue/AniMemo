@@ -36,7 +36,7 @@ from typing import Any, Protocol, Self
 from uuid import uuid4
 
 from release.candidate import (
-    VERIFIED_CANDIDATE_ROOT,
+    POSIX_VERIFIED_CANDIDATE_ROOT,
     CandidateContractError,
     LoadedVerifiedCandidate,
     aggregate_receipt_digest,
@@ -133,7 +133,7 @@ SNAPSHOT_DISK_FILES = {
 PUBLIC_ORIGIN = "https://candidate.invalid"
 REPOSITORY = "yanyuhanyue/AniMemo"
 PUBLIC_MIRROR_ORIGIN = "https://download.animemo.cc"
-GUEST_CANDIDATE_ROOT = VERIFIED_CANDIDATE_ROOT.as_posix()
+GUEST_CANDIDATE_ROOT = POSIX_VERIFIED_CANDIDATE_ROOT.as_posix()
 GUEST_RECEIPT = (
     "/var/lib/animemo/candidate-acceptance/profile-receipt-draft.json"
 )

@@ -22,7 +22,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, BinaryIO
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -85,7 +85,18 @@ AGGREGATE_RECEIPT_SCHEMA = (
     "animemo.prepublication-candidate-acceptance-receipt/v3"
 )
 VERIFIER_CONTRACT_VERSION = "2"
-VERIFIED_CANDIDATE_ROOT = Path("/var/lib/animemo/prepublication-candidates/v2")
+POSIX_VERIFIED_CANDIDATE_ROOT = PurePosixPath(
+    "/var/lib/animemo/prepublication-candidates/v2"
+)
+# The supported Windows controller has a fixed E: layout. Never infer its
+# volume from cwd, an existing directory, or a caller's drive-less path.
+WINDOWS_VERIFIED_CANDIDATE_ROOT = (
+    PureWindowsPath("E:/") / POSIX_VERIFIED_CANDIDATE_ROOT.relative_to("/")
+)
+VERIFIED_CANDIDATE_ROOT = Path(
+    WINDOWS_VERIFIED_CANDIDATE_ROOT if os.name == "nt"
+    else POSIX_VERIFIED_CANDIDATE_ROOT
+)
 CANDIDATE_RUNTIME_ROOT = "candidate-runtime"
 OCI_ROLES = ("api", "postgres", "redis", "web")
 PROFILE_ROLES = ("FRESH_BASE", "DOCKER_BASE", "RUNTIME_BASE_OFFLINE")
@@ -124,6 +135,53 @@ class CandidateContractError(ValueError):
 
 def _reject(code: str) -> None:
     raise CandidateContractError(code)
+
+
+def _validate_candidate_state_root_path(path: PurePath) -> None:
+    """Reject ambiguous host inputs without resolving or promoting them."""
+
+    if not path.is_absolute() or ".." in path.parts:
+        _reject("VERIFIED_CANDIDATE_ROOT_INVALID")
+    if isinstance(path, PureWindowsPath):
+        if _WINDOWS_DRIVE.fullmatch(path.drive) is None:
+            _reject("VERIFIED_CANDIDATE_ROOT_INVALID")
+        for part in path.parts[1:]:
+            if (
+                part.endswith((".", " "))
+                or any(character in part for character in '<>:"|?*~')
+                or any(ord(character) < 32 for character in part)
+                or PureWindowsPath(part).is_reserved()
+            ):
+                _reject("VERIFIED_CANDIDATE_ROOT_INVALID")
+    elif path.anchor != "/" or "\x00" in str(path):
+        _reject("VERIFIED_CANDIDATE_ROOT_INVALID")
+
+
+def _candidate_state_root(state_root: Path | None) -> Path:
+    """Use one fully qualified root for verifier writes and loader reads.
+
+    This lexical/ancestry check does not replace the existing file identity,
+    private ACL or held-source checks. In particular, it never calls resolve()
+    and thereby erases evidence of a junction or symlink in a supplied path.
+    """
+
+    root = Path(VERIFIED_CANDIDATE_ROOT if state_root is None else state_root)
+    _validate_candidate_state_root_path(root)
+    for component in (*reversed(root.parents), root):
+        try:
+            metadata = component.lstat()
+        except FileNotFoundError:
+            break  # The verifier may create a missing tail beneath this root.
+        except OSError as error:
+            raise CandidateContractError("VERIFIED_CANDIDATE_ROOT_UNAVAILABLE") from error
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or getattr(metadata, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        ):
+            _reject("VERIFIED_CANDIDATE_ROOT_INVALID")
+    return root
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -1763,7 +1821,7 @@ def verify_prepublication_candidate(
         or selected.get("digest") != containing_artifact_api_digest
     ):
         _reject("CANDIDATE_CONTAINING_ARTIFACT_MISMATCH")
-    state_root = Path(_state_root or VERIFIED_CANDIDATE_ROOT)
+    state_root = _candidate_state_root(_state_root)
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     root_metadata = state_root.lstat()
     if (
@@ -1974,7 +2032,7 @@ def load_verified_candidate(
 ) -> LoadedVerifiedCandidate:
     if not _DIGEST.fullmatch(digest):
         _reject("VERIFIED_CANDIDATE_DIGEST_INVALID")
-    state_root = Path(_state_root or VERIFIED_CANDIDATE_ROOT)
+    state_root = _candidate_state_root(_state_root)
     root = _locate_verified_candidate_root(state_root, digest)
     verified, verified_bytes = _strict_json_file(
         root / "verified-candidate.json", code="VERIFIED_CANDIDATE_INVALID"
@@ -2242,6 +2300,7 @@ __all__ = [
     "PROFILE_RECEIPT_SCHEMA",
     "VERIFICATION_EXECUTION_RECEIPT_SCHEMA",
     "VERIFIED_CANDIDATE_ROOT",
+    "POSIX_VERIFIED_CANDIDATE_ROOT",
     "VERIFIED_CANDIDATE_SCHEMA",
     "CandidateContractError",
     "LoadedVerifiedCandidate",

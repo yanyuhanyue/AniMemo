@@ -20,7 +20,7 @@ from unittest import mock
 from durability.canonical import canonical_json_bytes as canonical_identity_bytes
 from release import candidate as candidate_contract
 from release.candidate import (
-    VERIFIED_CANDIDATE_ROOT,
+    POSIX_VERIFIED_CANDIDATE_ROOT,
     canonical_json_bytes,
     sha256_bytes,
 )
@@ -256,10 +256,10 @@ class FakeProvider:
 
 
 class CandidateGuestPathContractTests(unittest.TestCase):
-    def test_guest_staging_root_matches_verified_candidate_loader_root(self):
+    def test_guest_staging_root_matches_posix_candidate_loader_root(self):
         self.assertEqual(
-            Path(harness.GUEST_CANDIDATE_ROOT),
-            VERIFIED_CANDIDATE_ROOT,
+            harness.GUEST_CANDIDATE_ROOT,
+            POSIX_VERIFIED_CANDIDATE_ROOT.as_posix(),
         )
 
     def test_candidate_material_manifest_requires_closed_inventory_program(self):
