@@ -108,9 +108,9 @@ npm run dev -- --host 0.0.0.0
 npm run test:plugins
 ```
 
-## v1.1 Durable Deployment Contracts
+## v2.0 Durable Deployment Contracts
 
-v1.1 先冻结 provider-neutral 的部署边界，再实现安装与维护工具。canonical Contract 为：
+v2.0 承接原 v1.1 的部署参考范围，先冻结 provider-neutral 的部署边界，再实现安装与维护工具。canonical Contract 为：
 
 - [`Deployment Boundary v1`](docs/deployment-boundary-v1.md)
 - [`Standard Filesystem Layout v1`](docs/filesystem-layout-v1.md)
@@ -123,13 +123,13 @@ v1.1 先冻结 provider-neutral 的部署边界，再实现安装与维护工具
 - [`Migration Bundle v1`](docs/migration-bundle-v1.md)
 - [`Doctor Basic Contract v1`](docs/doctor-basic-contract-v1.md)
 
-版本路线为 `v1.0.0 Stable → v1.1 development → v1.1 RC → v1.1.0 Stable`。原计划的 v1.0.1 Stability/UI Patch 已取消，当前 main 上的品牌与小型修复累计进入 v1.1；生产继续保持 v1.0.0。本阶段不创建 tag、Release、OCI，不部署生产。
+当前完整路线见 [Master Roadmap v12](docs/AniMemo_更新路线_v12_版本路线对齐.md)，执行参数见 [v2.0 发行准备](docs/v2-release-preparation.md)。`v2.0.0` 承接原 `v1.1.0` 的部署参考 Stable，仍为 `PREPRODUCTION_ONLY`；Web 计划 `v2.1.0`，首个正式生产里程碑计划 `v2.2.0`。已发布 `v1.0.0` 与旧 RC 身份保留。产品改号不修改 API、SDK、schema 或 deployment profile。正式发行与生产部署另需授权。
 
-v1.1 新安装只使用 `/opt/animemo`、`/data/animemo`、`/opt/animemo-updater`、`/var/lib/animemo-updater` 与 `/run/animemo-updater`，默认监听 `127.0.0.1:8088`。Phase 3C 已实现 Fresh Install、Restore-to-New、canonical Updater adoption、托管配置与平台资格验证；Migration Runtime 仍独立拥有迁移包消费和激活授权。DNS、TLS、公网反向代理、firewall 与 hosting panel 由管理员负责，不是 AniMemo 安装成功条件。
+v2.0 新安装只使用 `/opt/animemo`、`/data/animemo`、`/opt/animemo-updater`、`/var/lib/animemo-updater` 与 `/run/animemo-updater`，默认监听 `127.0.0.1:8088`。Phase 3C 已实现 Fresh Install、Restore-to-New、canonical Updater adoption、托管配置与平台资格验证；Migration Runtime 仍独立拥有迁移包消费和激活授权。DNS、TLS、公网反向代理、firewall 与 hosting panel 由管理员负责，不是 AniMemo 安装成功条件。
 
 ## 生产部署
 
-v1.1 的部署 authority 是经过验证的 GitHub Release、Manifest/checksums/attestation 与不可变 OCI digest。Installer 只消费 Release 中逐字节绑定的材料；不同版本的现有实例必须交给 Updater，foreign、partial 或无有效 locator 的目标默认拒绝。
+v2.0 的部署 authority 是经过验证的 GitHub Release、Manifest/checksums/attestation 与不可变 OCI digest。Installer 只消费 Release 中逐字节绑定的材料；不同版本的现有实例必须交给 Updater，foreign、partial 或无有效 locator 的目标默认拒绝。
 
 实例配置的唯一 authority 是 `/data/animemo/config/animemo.json`。Updater 从它生成可重建的 `/run/animemo-updater/managed.env` 供 exact Compose 消费；该 env 文件不是配置 authority，也不得人工维护。查看或修改非秘密配置使用：
 

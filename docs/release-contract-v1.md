@@ -1,5 +1,7 @@
 # AniMemo Release Contract v1
 
+当前产品规划与显式 Producer 参数见 [v2.0 发行准备](v2-release-preparation.md)。原 v1.1 部署参考范围由 v2.0.0 承接，仍为 PREPRODUCTION_ONLY；历史示例和独立 schema/profile 保持原身份。下文曾按当时占号推导的下一 RC 仅为历史记录，执行时必须重新读取全集与预留。
+
 ## Authority and identity
 
 AniMemo 的权威发布身份由 Git tag 与 `release-manifest.json` 共同给出：
