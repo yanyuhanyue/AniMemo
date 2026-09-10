@@ -1180,6 +1180,25 @@ class CandidateVmHarnessTests(unittest.TestCase):
         )
         self.assertRegex(plan.plan_digest, r"^sha256:[0-9a-f]{64}$")
 
+    def test_major_candidate_uses_verified_version_in_all_profile_namespaces(self):
+        self.loaded.candidate_input["candidate_version"] = "v2.0.0-rc.1"
+        plan = self._plan()
+        self.assertEqual(plan.candidate_version, "v2.0.0-rc.1")
+        self.assertFalse(plan.identity_body()["releaseAuthorityGranted"])
+        self.assertFalse(plan.identity_body()["publishAuthorized"])
+        for profile in plan.profiles:
+            authority = harness.ClosedVmwareProvider._profile_authority(profile, plan)
+            self.assertIn("v2.0.0-rc.1", authority.session_root.parts)
+            self.assertEqual(profile.installer_profile, harness.INSTALLER_PROFILES[profile.profile])
+        self.assertEqual(self.provider.execute_calls, 0)
+
+    def test_candidate_still_rejects_stable_beta_and_noncanonical_product_versions(self):
+        for version in ("v2.0.0", "v2.0.0-beta.1", "v02.0.0-rc.1", "v2.0.0-rc.01", "v2.0.0-rc.1/../../x"):
+            with self.subTest(version=version):
+                self.loaded.candidate_input["candidate_version"] = version
+                with self.assertRaises(harness.CandidateHarnessError):
+                    self._plan()
+
     def test_plan_accepts_the_next_rc_from_the_verified_candidate_identity(self):
         self.loaded.candidate_input["candidate_version"] = "v1.1.0-rc.15"
 

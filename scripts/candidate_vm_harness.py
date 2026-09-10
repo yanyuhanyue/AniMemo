@@ -65,6 +65,7 @@ from release.formal_windows_pretrust import (
     inspect_windows_pe_imports,
 )
 from release.materials import reject_duplicate_json_keys
+from release.contract import ReleaseContractError, rc_target_version
 from release.r2_prestate import (
     R2_AUTH_METHOD_ARGUMENT,
     candidate_r2_expected_keys,
@@ -130,7 +131,6 @@ SNAPSHOT_DISK_FILES = {
     "RUNTIME_BASE_OFFLINE": "Ubuntu 64 位-000001.vmdk",
 }
 PUBLIC_ORIGIN = "https://candidate.invalid"
-TARGET_VERSION = "v1.1.0"
 REPOSITORY = "yanyuhanyue/AniMemo"
 PUBLIC_MIRROR_ORIGIN = "https://download.animemo.cc"
 GUEST_CANDIDATE_ROOT = VERIFIED_CANDIDATE_ROOT.as_posix()
@@ -242,9 +242,13 @@ OPENSSH_REQUIRED_OPTIONS = (
 )
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
-_CANDIDATE_VERSION = re.compile(
-    re.escape(TARGET_VERSION) + r"-rc\.[1-9][0-9]*\Z"
-)
+
+def _is_candidate_rc(value: str) -> bool:
+    try:
+        rc_target_version(value)
+    except ReleaseContractError:
+        return False
+    return True
 
 
 class CandidateHarnessError(RuntimeError):
@@ -2476,7 +2480,7 @@ class ClosedVmwareProvider:
             or re.fullmatch(r"animemo-[a-z0-9-]+", plan.ssh_host_key_alias) is None
             or not _DIGEST.fullmatch(authority_digest)
             or not _DIGEST.fullmatch(plan.clone_identity)
-            or _CANDIDATE_VERSION.fullmatch(target_version) is None
+            or not _is_candidate_rc(target_version)
         ):
             raise CandidateHarnessError("CANDIDATE_VM_PROFILE_NAMESPACE_INVALID")
         session_root = (
@@ -5333,7 +5337,7 @@ class ClosedVmwareProvider:
     def inspect_candidate_external_state(
         self, candidate_version: str
     ) -> Mapping[str, str]:
-        if _CANDIDATE_VERSION.fullmatch(candidate_version) is None:
+        if not _is_candidate_rc(candidate_version):
             raise CandidateHarnessError("CANDIDATE_HARNESS_AUTHORITY_MISMATCH")
         ghcr_states = {
             self._ghcr_manifest_state("api", candidate_version),
@@ -5426,7 +5430,7 @@ def build_harness_plan(
         or candidate["qualification_run_attempt"] != 1
         or candidate["source_sha"] != expected_source_sha
         or candidate["source_tree"] != expected_source_tree
-        or _CANDIDATE_VERSION.fullmatch(candidate["candidate_version"]) is None
+        or not _is_candidate_rc(candidate["candidate_version"])
     ):
         raise CandidateHarnessError("CANDIDATE_HARNESS_AUTHORITY_MISMATCH")
     readiness = provider.inspect_readiness()

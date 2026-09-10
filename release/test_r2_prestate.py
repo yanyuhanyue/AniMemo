@@ -180,6 +180,32 @@ class R2S3PrestateTests(unittest.TestCase):
             )
         )
 
+    def test_major_rc_binds_base_prefix_keys_and_still_denies_publication(self):
+        for target_rc in ("v2.0.0-rc.1", "v3.2.1-rc.7"):
+            with self.subTest(target_rc=target_rc):
+                client = RecordingS3Client()
+                receipt = self.verify(client, target_rc=target_rc)
+                self.assertEqual(receipt["target_version"], target_rc.split("-rc.")[0])
+                self.assertEqual(receipt["prefix"], candidate_r2_prefix(target_rc))
+                self.assertFalse(receipt["release_authority_granted"])
+                self.assertFalse(receipt["publish_authorized"])
+                self.assertEqual([request["key"] for name, request in client.operations if name == "HeadObject"],
+                    [candidate_r2_prefix(target_rc)+key for key in candidate_r2_expected_keys(target_rc)])
+                validate_r2_origin_receipt(receipt, expected_target_rc=target_rc)
+                receipt["target_version"] = "v9.0.0"
+                unsigned = {k:v for k,v in receipt.items() if k != "receipt_digest"}
+                receipt["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
+                with self.assertRaises(R2S3PrecheckError):
+                    validate_r2_origin_receipt(receipt, expected_target_rc=target_rc)
+
+    def test_non_rc_or_noncanonical_version_never_reaches_s3_transport(self):
+        for target_rc in ("v2.0.0", "v2.0.0-beta.1", "v02.0.0-rc.1", "v2.0.0-rc.01", "v2.0.0-rc.1/../../x"):
+            with self.subTest(target_rc=target_rc):
+                client = RecordingS3Client()
+                with self.assertRaises(R2S3PrecheckError):
+                    self.verify(client, target_rc=target_rc)
+                self.assertEqual(client.operations, [])
+
     def test_next_rc_uses_its_own_closed_prefix_and_portable_name(self):
         target_rc = "v1.1.0-rc.15"
         client = RecordingS3Client()

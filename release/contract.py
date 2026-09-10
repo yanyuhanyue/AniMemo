@@ -235,6 +235,14 @@ def _stable_tags(tags: list[str]) -> list[tuple[Version, str]]:
     return sorted(result)
 
 
+def rc_target_version(value: str) -> str:
+    """Return the product base of one canonical RC identity, without choosing it."""
+    match = PRERELEASE_TAG.fullmatch(value) if type(value) is str else None
+    if match is None or match.group("channel") != "rc":
+        raise ReleaseContractError("Candidate identity must be a canonical RC tag")
+    return "v" + match.group("base")
+
+
 def assert_tag_absent(tag: str, tags: list[str]) -> None:
     if tag in set(tags):
         raise ReleaseContractError(f"Release tag already exists: {tag}")
