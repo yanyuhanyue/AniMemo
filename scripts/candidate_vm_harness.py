@@ -56,6 +56,7 @@ from release.formal_windows_pretrust import (
     hold_windows_fixed_source_snapshot,
     hold_windows_private_descendant_path,
     hold_windows_private_directory,
+    hold_windows_private_working_directory,
     hold_windows_private_file,
     hold_windows_private_path_chain,
     hold_windows_private_source_snapshot,
@@ -276,6 +277,62 @@ class SessionKeyCommandError(CandidateHarnessError):
             "returncode": self.returncode, "timeout": self.kind == "TIMEOUT",
             "stdout_empty": self.stdout_empty, "stderr_empty": self.stderr_empty,
         }
+
+
+class VmHostCommandError(CandidateHarnessError):
+    """Closed, credential-free VMware lifecycle process observation."""
+
+    def __init__(self, code: str, diagnostic: Mapping[str, Any]) -> None:
+        super().__init__(code)
+        self._diagnostic = dict(diagnostic)
+
+    def public_diagnostic(self) -> dict[str, Any]:
+        return dict(self._diagnostic)
+
+
+def _vmware_error_excerpt(value: bytes | None, *, clone_vmx: str | None = None) -> Mapping[str, Any]:
+    # Only known generic tool messages may leave memory. Paths, arbitrary
+    # exception text and unknown output remain omitted, even on this no-secret
+    # command path. Trimming happens after communicate has drained both pipes.
+    if value is None:
+        return {"empty": None, "truncated": None, "excerpt": None,
+                "limitation": "NOT_OBSERVED"}
+    budget = 16 * 1024
+    known = (
+        "Unknown error", "The file is already in use", "The file is not found",
+        "A file was not found", "The system cannot find the file specified",
+        "The system cannot find the path specified", "Access is denied",
+        "Insufficient permissions", "Invalid argument", "Invalid parameter",
+        "The virtual machine is not powered on", "The virtual machine is powered on",
+        "The snapshot does not exist", "The virtual machine is busy",
+        "The file name is too long", "The path is too long",
+        "The file name is not valid", "The filename is too long",
+        "Invalid file name", "Invalid file names", "unknown file suffix",
+        "The virtual machine cannot be found",
+        "Could not get snapshot information: Insufficient permission to access the file",
+        "Module 'Snapshot' power on failed", "Failed to start the virtual machine",
+    )
+    for encoding in dict.fromkeys(("utf-8", locale.getpreferredencoding(False))):
+        try:
+            text = value[:budget].decode(encoding, errors="strict")
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = ""
+    excerpts = []
+    for line in text.splitlines():
+        if clone_vmx is not None:
+            line = line.replace(clone_vmx, "<CLONE_VMX>")
+        matched = re.fullmatch(
+            r"(?:Error: )?(?:Cannot open VM: <CLONE_VMX>, )?(" + "|".join(re.escape(item) for item in known)
+            + r")(?:[.])?(?: \((-?[0-9]{1,10})\))?", line.strip(), re.IGNORECASE,
+        )
+        if matched:
+            excerpts.append(matched.group(0))
+    return {"empty": not value, "truncated": len(value) > budget,
+            "excerpt": "\n".join(excerpts) or None,
+            "limitation": "UNRECOGNIZED_CONTENT_OMITTED" if value and not excerpts else None}
 
 
 @dataclass(frozen=True)
@@ -2561,16 +2618,18 @@ class ClosedVmwareProvider:
         if self._execution is None:
             return authority
         try:
-            relative = authority.session_root.relative_to(VM_WORK_PARENT)
+            authority.session_root.relative_to(VM_WORK_PARENT)
         except ValueError as error:
             raise CandidateHarnessError(
                 "CANDIDATE_VM_PROFILE_NAMESPACE_INVALID"
             ) from error
-        session_root = self._execution.work_root / relative
-        profile_root = session_root / "profiles" / plan.profile.lower()
-        clone_root = profile_root / "clone" / plan.clone_identity.removeprefix(
-            "sha256:"
-        )
+        # The private execution root is already unique and bound to this
+        # provider. Full Candidate/Clone identities remain in the plan, active
+        # authority and lease; repeating them in directories pushes VMware
+        # beyond its usable Windows path length before it opens the VMX.
+        session_root = self._execution.work_root / harness_plan.session_id
+        profile_root = session_root / plan.profile.lower()
+        clone_root = profile_root / "vm"
         ssh_root = profile_root / "ssh"
         return ProfileConnectionAuthority(
             session_root=session_root,
@@ -2720,6 +2779,27 @@ class ClosedVmwareProvider:
             ),
         }
         expected_identity = expected_identities.get(requested_path)
+        host_observation = None
+        if (requested_path == VMRUN and input_bytes is None and guest_exchange is None
+                and len(argv) == 6 and tuple(argv[1:3]) == ("-T", "ws")
+                and argv[3] in {"revertToSnapshot", "start", "stop", "suspend"}):
+            host_observation = {
+                "tool": "vmrun", "tool_sha256": EXPECTED_VMRUN_SHA256,
+                "operation": argv[3], "clone_vmx": argv[4],
+                "snapshot": argv[5] if argv[3] == "revertToSnapshot" else None,
+                "started_utc": datetime.now(timezone.utc).isoformat(),
+            }
+
+        def finish_host(kind, returncode=None, stdout=None, stderr=None):
+            if host_observation is None:
+                return None
+            diagnostic = dict(host_observation, kind=kind, returncode=returncode,
+                ended_utc=datetime.now(timezone.utc).isoformat(),
+                stdout=_vmware_error_excerpt(stdout, clone_vmx=host_observation["clone_vmx"]),
+                stderr=_vmware_error_excerpt(stderr, clone_vmx=host_observation["clone_vmx"]))
+            self.__dict__.setdefault("_host_lifecycle_observations", []).append(diagnostic)
+            return diagnostic
+
         try:
             if not PureWindowsPath(str(executable_path)).is_absolute():
                 raise CandidateHarnessError(
@@ -2753,6 +2833,15 @@ class ClosedVmwareProvider:
                     timeout=timeout,
                 )
         except (OSError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+            kind = ("TIMEOUT" if isinstance(error, subprocess.TimeoutExpired)
+                    else "CANCELLED" if isinstance(error, KeyboardInterrupt)
+                    else "PROCESS_START_OR_WAIT_FAILED")
+            diagnostic = finish_host(
+                kind, stdout=error.stdout if isinstance(error, subprocess.TimeoutExpired) else None,
+                stderr=error.stderr if isinstance(error, subprocess.TimeoutExpired) else None,
+            )
+            if diagnostic is not None:
+                raise VmHostCommandError(code, diagnostic) from error
             if requested_path == SSH_KEYGEN:
                 raise SessionKeyCommandError(
                     code,
@@ -2763,6 +2852,10 @@ class ClosedVmwareProvider:
             if isinstance(error, KeyboardInterrupt):
                 raise
             raise CandidateHarnessError(code) from error
+        diagnostic = finish_host(
+            "SUCCESS" if completed.returncode in allowed else "NONZERO_EXIT",
+            completed.returncode, completed.stdout, completed.stderr,
+        )
         if (
             self._execution is not None
             and self._windows_platform.inspect_binary(executable_path)
@@ -2772,6 +2865,8 @@ class ClosedVmwareProvider:
                 "CANDIDATE_VM_EXECUTION_TOOL_IDENTITY_MISMATCH"
             )
         if completed.returncode not in allowed:
+            if diagnostic is not None:
+                raise VmHostCommandError(code, diagnostic)
             if requested_path == SSH_KEYGEN:
                 raise SessionKeyCommandError(
                     code, kind="NONZERO_EXIT", returncode=completed.returncode,
@@ -3808,6 +3903,10 @@ class ClosedVmwareProvider:
                 raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
             source_root = self._source_root
             source_inventory = self._vm_inventory(source_root)
+            # Leave room below Win32 MAX_PATH for VMware's temporary suffixes.
+            # Check the complete copied inventory before creating a partial VM.
+            for name in source_inventory:
+                self._assert_vmware_path_budget(clone_root / name)
             clone_root.parent.mkdir(parents=True, exist_ok=True)
             completed = self._run(
                 (
@@ -3860,7 +3959,13 @@ class ClosedVmwareProvider:
             self._quarantine_clone(authority)
             raise
 
+    @staticmethod
+    def _assert_vmware_path_budget(path: Path) -> None:
+        if len(str(path).encode("utf-16-le")) // 2 > 240:
+            raise CandidateHarnessError("CANDIDATE_VM_PRIVATE_PATH_TOO_LONG")
+
     def _revert_clone(self, clone_vmx: Path, snapshot_name: str) -> None:
+        self._assert_vmware_path_budget(clone_vmx)
         self._run(
             (
                 str(VMRUN),
@@ -3875,6 +3980,7 @@ class ClosedVmwareProvider:
         )
 
     def _start_clone(self, clone_vmx: Path) -> None:
+        self._assert_vmware_path_budget(clone_vmx)
         self._run(
             (str(VMRUN), "-T", "ws", "start", str(clone_vmx), "nogui"),
             code="CANDIDATE_VM_CLONE_START_FAILED",
@@ -5022,9 +5128,7 @@ class ClosedVmwareProvider:
                 authority.ssh_root,
             ):
                 profile_authority_stack.enter_context(
-                    hold_windows_private_directory(
-                        directory, allow_child_writes=True
-                    )
+                    hold_windows_private_working_directory(directory)
                 )
             profile_authority_stack.enter_context(
                 hold_windows_private_file(authority.identity_file)
@@ -5044,9 +5148,7 @@ class ClosedVmwareProvider:
         )
         if self._execution is not None:
             clone_authority_stack.enter_context(
-                hold_windows_private_directory(
-                    clone_root, allow_child_writes=True
-                )
+                hold_windows_private_working_directory(clone_root)
             )
         if (
             clone_root.resolve(strict=False)

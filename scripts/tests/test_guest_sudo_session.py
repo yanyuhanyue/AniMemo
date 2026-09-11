@@ -359,7 +359,7 @@ class GuestSudoSessionTests(unittest.TestCase):
         self.assertTrue(observed[0].stdin.closed)
         self.assertTrue(observed[0].stdout.closed)
 
-    def _production_scope(self):
+    def _production_scope(self, *, outer_directory_holds=False):
         from pathlib import Path
         from types import SimpleNamespace
         import tempfile
@@ -403,6 +403,11 @@ class GuestSudoSessionTests(unittest.TestCase):
             authority.known_hosts_file.write_bytes(b"synthetic public host key")
         self.provider._wait_for_ssh.side_effect = wait_ssh
         self.provider._remove_known_hosts.side_effect = lambda a: a.known_hosts_file.unlink(missing_ok=True)
+        if outer_directory_holds:
+            outer = ExitStack()
+            self.addCleanup(outer.close)
+            for directory in (authority.session_root, authority.profile_root, authority.ssh_root, authority.clone_root):
+                outer.enter_context(h.hold_windows_private_working_directory(directory))
         secret = bytearray(SENTINEL)
         session = c.SessionSupervisor(secret, provider=self.provider, plan=self.plan, profile=self.profile,
             preboot_disk_graph_digest=self.runtime.disk_graph_digest, preboot_snapshot_identity=self.runtime.snapshot_identity,
@@ -419,6 +424,22 @@ class GuestSudoSessionTests(unittest.TestCase):
         session.validate_verified_guest()
         self.assertEqual(session.injection_count, 2)
         self.assertIn(self.verified.host_key_digest, self.provider._accepted_host_key_digests)
+
+    @unittest.skipUnless(os.name == "nt", "real nested Windows controller authority")
+    def test_outer_host_holds_remain_held_across_supervisor_two_role_exchange(self):
+        session, _, _, _ = self._production_scope(outer_directory_holds=True)
+        session.bootstrap_rotation()
+        self.key_read.return_value = self.verified.host_key_digest
+        self.runner.observation = self.verified
+        session.validate_verified_guest()
+        self.assertEqual(session.injection_count, 2)
+        self.assertEqual(session.delivery_attempts, {'BOOTSTRAP_ROTATION': 1, 'VERIFIED_SUDO': 1})
+        authority = session._authority
+        session.close()
+        # Closing the inner consumer cannot release the owner's directory hold.
+        with self.assertRaises(OSError) as caught:
+            authority.clone_root.rename(authority.clone_root.with_name('replaced'))
+        self.assertEqual(caught.exception.winerror, 32)
 
     @unittest.skipUnless(os.name == "nt", "real Windows private-file authority")
     def test_production_closed_material_rejects_at_stdin_boundary(self):

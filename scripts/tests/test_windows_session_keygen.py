@@ -85,7 +85,9 @@ class WindowsSessionKeyPreparationTests(unittest.TestCase):
             for _ in range(2):
                 plan = self.plan()
                 authority = provider._active_profile_authority(plan.profiles[0], plan)
-                self.assertEqual(len(str(authority.identity_file)), 253)
+                self.assertLessEqual(len(str(authority.identity_file)), 240)
+                self.assertEqual(authority.session_root.name, plan.session_id)
+                self.assertEqual(authority.clone_identity, plan.profiles[0].clone_identity)
                 work_root = provider._execution.work_root
                 lease = provider._acquire_provider_lease(authority, work_root=work_root)
                 try:
