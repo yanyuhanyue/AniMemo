@@ -20,6 +20,16 @@
 
 `delivery_attempts` 按两个固定 role 记录首次 stdin 写入前的尝试数；`delivery_completed` 与总计 `injection_count` 只计完整 write/flush/close。短写和部分写入异常都终止会话且不补写，不能因完成数为零而断言密码未送出。完整交付也不等于 sudo 操作成功，操作结果单独记录。
 
+## 宿主会话密钥准备
+
+`_prepare_profile_authority` 在 Clone 复制前，为当前私有 profile 生成新的 Ed25519 密钥对。固定的 `ssh-keygen` 与 `ssh`、`scp` 一样使用 OpenSSH 专用环境；`PROGRAMDATA` 来自已核验的 Windows Known Folder API，不能被父环境重定向。通用 VMware/复制命令仍使用独立环境。缺失该字段会让 Windows OpenSSH 在标准流初始化前退出，可能只留下 255 和空输出。
+
+生成和公钥派生均走现有私有工具、身份检查及受控 launcher，显式传递空 passphrase。准备期间持有私有目录，生成后检查文件类型、大小、独占链接、属主/权限，并持有文件验证公私钥配对；验证成功后才允许进入 Clone 复制。公钥允许读取，但不能被不受信主体修改。失败、超时、取消或校验失败会清理本次新槽位中的两份密钥文件；一个删除失败也会继续尝试另一个，并阻止成功结论。既有 profile 冲突在生成前拒绝，不删除既有密钥。
+
+会话密钥命令失败保留既有错误码，另输出固定工具名、失败类别、真实退出码、超时状态及 stdout/stderr 是否为空；启动/超时未取得的字段为 null。不输出命令、完整环境、标准流正文或私钥。此诊断不是 Guest 观察，也不消费或新增 sudo 捕获额度。
+
+真实 Windows 准备回归入口为 `python -m unittest scripts.tests.test_windows_session_keygen`。它使用专用可丢弃的计划、模板和 bootstrap 测试数据，真实执行生产工具与准备逻辑，停止在 Clone 复制之前；不支持 Windows 时明确跳过。
+
 ## 单 Profile 动态入口
 
 `python -B -m scripts.isolated_guest_validation` 是 `ANIMEMO_V2_ISOLATED_DYNAMIC_VALIDATION_AND_QUALIFICATION_V1` 的最小编排入口。必填参数为 `--verified-candidate-digest`、`--expected-qualification-run-id`、`--expected-source-sha`、`--expected-source-tree`、`--result`；结果路径必须尚不存在。执行前须已获得该任务的动态授权，并在最终 main 的干净 checkout 中取得同源 Qualification 的 canonical Verified Candidate。
