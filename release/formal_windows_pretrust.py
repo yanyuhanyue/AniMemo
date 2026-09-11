@@ -1155,6 +1155,7 @@ def _hold_windows_directory_component(
     allow_child_writes: bool,
     request_delete: bool,
     share_delete: bool = False,
+    request_list: bool = False,
 ) -> Iterator[Path]:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.argtypes = (
@@ -1173,8 +1174,8 @@ def _hold_windows_directory_component(
     before_identity = _windows_path_identity(path)
     handle = kernel32.CreateFileW(
         str(path),
-        0x00000080 | (0x00010000 if request_delete else 0),
-        # FILE_READ_ATTRIBUTES [+ DELETE for rename lock]
+        0x00000080 | (0x00010000 if request_delete else 0) | (0x1 if request_list else 0),
+        # FILE_READ_ATTRIBUTES [+ DELETE or FILE_LIST_DIRECTORY for rename lock]
         0x00000001
         | (0x00000002 if allow_child_writes else 0)
         | (0x00000004 if share_delete else 0),
@@ -1236,6 +1237,28 @@ def hold_windows_private_directory(
         return
     with _hold_windows_directory_component(
         root, allow_child_writes=allow_child_writes, request_delete=True
+    ):
+        assert_windows_private_acl(root)
+        yield root
+        assert_windows_private_acl(root)
+
+
+@contextmanager
+def hold_windows_private_working_directory(root: Path) -> Iterator[Path]:
+    """Deny replacement while permitting a child to use this directory as cwd.
+
+    A DELETE-access hold conflicts with SetCurrentDirectory's sharing mode.
+    FILE_LIST_DIRECTORY participates in share checks (attributes alone do not),
+    so omitting FILE_SHARE_DELETE still prevents rename/delete, including an
+    already open DELETE handle. Child file writes remain permitted.
+    """
+    root = Path(root)
+    assert_windows_private_acl(root)
+    if os.name != "nt":
+        yield root
+        return
+    with _hold_windows_directory_component(
+        root, allow_child_writes=True, request_delete=False, request_list=True,
     ):
         assert_windows_private_acl(root)
         yield root

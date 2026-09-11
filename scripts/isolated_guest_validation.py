@@ -34,6 +34,13 @@ def _failure_code(error):
     return "GUEST_VALIDATION_INTERRUPTED_OR_UNCLASSIFIED"
 
 
+def _record_operation_failure(result, error):
+    if "operation_failure_code" not in result:
+        result["operation_failure_code"] = _failure_code(error)
+        if type(error) in (h.SessionKeyCommandError, h.VmHostCommandError):
+            result["operation_failure_diagnostic"] = error.public_diagnostic()
+
+
 def _reserve_capture() -> None:
     if CAPTURE_LEDGER.exists() or CAPTURE_LEDGER.is_symlink():
         raise ControllerFailure("GUEST_CAPTURE_ALREADY_ATTEMPTED")
@@ -120,12 +127,18 @@ def _controller_clone(provider, plan, result):
         if identity in paths:
             power_uncertain = True
             raise ControllerFailure("CANDIDATE_VM_CLONE_POWER_STATE_INVALID")
+    primary_error = None
     try:
         disk, snapshot = provider._prepare_and_start_profile_clone(
             authority=authority, plan=profile, harness_plan=plan, before_hashes=before,
             profile_authority_stack=profile_holds, clone_authority_stack=clone_holds,
             checked_running_vmx_paths=checked_running, reject_running_clone=reject_running,
         )
+        owned = os.path.normcase(str(authority.clone_vmx.resolve(strict=False)))
+        if checked_running() != frozenset({owned}):
+            power_uncertain = True
+            raise ControllerFailure("CANDIDATE_VM_CLONE_POWER_STATE_INVALID")
+        result["resource"]["running_observed"] = True
         result["resource"]["power_state"] = "RUNNING"
         result["snapshot_started"] = True
         # No password is present here. The Supervisor repeats these canonical
@@ -142,7 +155,15 @@ def _controller_clone(provider, plan, result):
         }
         provider._remove_known_hosts(authority)
         yield profile, lease, disk, snapshot
+    except BaseException as error:
+        primary_error = error
+        if (type(error) is h.VmHostCommandError and error.public_diagnostic()["kind"]
+                in {"TIMEOUT", "CANCELLED", "PROCESS_START_OR_WAIT_FAILED"}):
+            power_uncertain = True
+        _record_operation_failure(result, error)
+        raise
     finally:
+        cleanup_errors = []
         try:
             if authority.clone_vmx.exists():
                 try:
@@ -155,9 +176,12 @@ def _controller_clone(provider, plan, result):
                     result["resource"]["power_state"] = "CONTAINMENT_PENDING"
                     result["resource"]["power_state"] = provider._contain_clone(authority.clone_vmx)
                 else:
-                    result["resource"]["power_state"] = "STOPPED"
+                    result["resource"]["power_state"] = (
+                        "STOPPED" if result.get("snapshot_started") else "NOT_RUNNING_OBSERVED"
+                    )
+        except BaseException as error:
+            cleanup_errors.append({"step": "containment", "code": _failure_code(error)})
         finally:
-            cleanup_errors = []
             # Every independent cleanup is attempted even if an earlier handle
             # close fails. Retained VM data must not silently retain usable keys.
             for step, cleanup in (
@@ -182,9 +206,13 @@ def _controller_clone(provider, plan, result):
                     raise ControllerFailure("CANDIDATE_ORIGINAL_VM_MUTATED")
             except BaseException as error:
                 cleanup_errors.append({"step": "original_vm", "code": _failure_code(error)})
+            result["resource"]["host_lifecycle"] = list(
+                getattr(provider, "_host_lifecycle_observations", ())
+            )
             if cleanup_errors:
                 result["resource"]["cleanup_errors"] = cleanup_errors
-                raise ControllerFailure("GUEST_CLONE_CLEANUP_FAILED") from None
+                if primary_error is None:
+                    raise ControllerFailure("GUEST_CLONE_CLEANUP_FAILED") from None
 
 
 def _validate(plan, provider, console, result, *, plugin_origin=None):
@@ -194,6 +222,7 @@ def _validate(plan, provider, console, result, *, plugin_origin=None):
         return _origin(plan, role, plugin_origin=plugin_origin)
     result["r2_prestate"] = observe("PRESTATE")
     result["external_prestate"] = h._read_expected_external_state(provider, plan.candidate_version)
+    primary_error = None
     try:
         with _controller_clone(provider, plan, result) as (profile, lease, disk, snapshot):
             _check_checkout(plan.source_sha, plan.source_tree)
@@ -232,9 +261,8 @@ def _validate(plan, provider, console, result, *, plugin_origin=None):
                     result["secret_cleanup"] = "BEST_EFFORT_COMPLETED"
         _check_checkout(plan.source_sha, plan.source_tree)
     except BaseException as error:
-        result["operation_failure_code"] = _failure_code(error)
-        if type(error) is h.SessionKeyCommandError:
-            result["operation_failure_diagnostic"] = error.public_diagnostic()
+        primary_error = error
+        _record_operation_failure(result, error)
         raise
     finally:
         try:
@@ -244,7 +272,8 @@ def _validate(plan, provider, console, result, *, plugin_origin=None):
             result["external_poststate"] = h._read_expected_external_state(provider, plan.candidate_version)
         except BaseException as error:
             result["poststate_failure_code"] = _failure_code(error)
-            raise
+            if primary_error is None:
+                raise
 
 
 def main(argv=None):
@@ -298,8 +327,12 @@ def main(argv=None):
     except BaseException as error:
         # Unknown exception text and subprocess output can contain sensitive
         # data. Only errors from the closed contract may contribute a code.
-        result["failure_code"] = _failure_code(error)
-        if type(error) is h.SessionKeyCommandError:
+        result["failure_code"] = result.get("operation_failure_code", _failure_code(error))
+        if result["failure_code"] != _failure_code(error):
+            result["outer_failure_code"] = _failure_code(error)
+        if "operation_failure_diagnostic" in result:
+            result["failure_diagnostic"] = result["operation_failure_diagnostic"]
+        elif type(error) in (h.SessionKeyCommandError, h.VmHostCommandError):
             result["failure_diagnostic"] = error.public_diagnostic()
         return 2
     finally:

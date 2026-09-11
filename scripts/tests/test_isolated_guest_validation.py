@@ -122,7 +122,7 @@ class IsolatedGuestValidationTests(unittest.TestCase):
     def test_failed_containment_still_destroys_keys_releases_lease_and_keeps_vm(self):
         _, contain, release = self.clone_fixture()
         contain.side_effect = h.CandidateHarnessError("CANDIDATE_VM_CLONE_CONTAINMENT_FAILED")
-        with self.assertRaisesRegex(h.CandidateHarnessError, "CONTAINMENT_FAILED"):
+        with self.assertRaisesRegex(entry.ControllerFailure, "GUEST_CLONE_CLEANUP_FAILED"):
             with entry._controller_clone(self.provider, self.plan, self.result):
                 pass
         release.assert_called_once()
@@ -294,11 +294,56 @@ class IsolatedGuestValidationTests(unittest.TestCase):
         _, origin, secret, console, supervisor, _ = self.validation_fixture()
         origin.side_effect = [{"observation_id": "PRESTATE"}, h.CandidateContractError("SYNTHETIC_POSTSTATE_FAILURE")]
         supervisor.bootstrap_rotation.side_effect = entry.ControllerFailure("BOOTSTRAP_ROTATION_FAILED")
-        with self.assertRaisesRegex(h.CandidateContractError, "SYNTHETIC_POSTSTATE_FAILURE"):
+        with self.assertRaisesRegex(entry.ControllerFailure, "BOOTSTRAP_ROTATION_FAILED"):
             entry._validate(self.plan, self.provider, console, self.result)
         self.assertEqual(secret, b"")
         self.assertEqual(self.result["operation_failure_code"], "BOOTSTRAP_ROTATION_FAILED")
         self.assertEqual(self.result["poststate_failure_code"], "SYNTHETIC_POSTSTATE_FAILURE")
+
+    def test_revert_diagnostic_survives_containment_cleanup_and_poststate_failure(self):
+        diagnostic = {"operation": "revertToSnapshot", "kind": "NONZERO_EXIT", "returncode": 57}
+        original = h.VmHostCommandError("CANDIDATE_VM_CLONE_REVERT_FAILED", diagnostic)
+        _, contain, release = self.clone_fixture(prepare_error=original)
+        contain.side_effect = h.CandidateHarnessError("CANDIDATE_VM_CLONE_CONTAINMENT_FAILED")
+        self.patch(self.provider, "_destroy_known_hosts", side_effect=OSError("untrusted text"))
+        self.patch(entry, "_origin", side_effect=[{"observation_id": "pre"},
+            entry.R2PluginOriginError("R2_PLUGIN_RESPONSE_TIMEOUT")])
+        self.patch(h, "_read_expected_external_state", return_value={})
+        console = mock.Mock()
+        with self.assertRaises(h.VmHostCommandError) as caught:
+            entry._validate(self.plan, self.provider, console, self.result)
+        self.assertIs(caught.exception, original)
+        self.assertEqual(self.result["operation_failure_diagnostic"], diagnostic)
+        self.assertEqual(self.result["operation_failure_code"], original.code)
+        self.assertEqual(self.result["poststate_failure_code"], "R2_PLUGIN_RESPONSE_TIMEOUT")
+        self.assertEqual([item["step"] for item in self.result["resource"]["cleanup_errors"]],
+                         ["containment", "known_hosts"])
+        self.assertNotIn("untrusted text", str(self.result))
+        release.assert_called_once()
+        console.capture.assert_not_called()
+
+    def test_timed_out_host_operation_requires_containment_despite_empty_inventory(self):
+        error = h.VmHostCommandError('CANDIDATE_VM_CLONE_REVERT_FAILED', {
+            'operation': 'revertToSnapshot', 'kind': 'TIMEOUT', 'returncode': None})
+        _, contain, release = self.clone_fixture(prepare_error=error)
+        self.provider._running_vmx_paths.return_value = frozenset()
+        with self.assertRaises(h.VmHostCommandError) as caught:
+            with entry._controller_clone(self.provider, self.plan, self.result):
+                self.fail('No credential scope after timeout')
+        self.assertIs(caught.exception, error)
+        contain.assert_called_once_with(self.authority.clone_vmx)
+        release.assert_called_once()
+
+    def test_zero_start_exit_without_running_observation_never_yields_guest_scope(self):
+        observe, contain, release = self.clone_fixture()
+        self.provider._running_vmx_paths.return_value = frozenset()
+        with self.assertRaisesRegex(entry.ControllerFailure, 'CANDIDATE_VM_CLONE_POWER_STATE_INVALID'):
+            with entry._controller_clone(self.provider, self.plan, self.result):
+                self.fail('Start return alone does not prove running')
+        observe.assert_not_called()
+        contain.assert_called_once()
+        release.assert_called_once()
+        self.assertNotIn('running_observed', self.result['resource'])
 
     def test_one_shot_reservation_survives_a_second_call_without_task_id_input(self):
         with tempfile.TemporaryDirectory() as temporary:
