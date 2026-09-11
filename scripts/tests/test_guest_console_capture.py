@@ -35,6 +35,9 @@ class ConsoleFixture:
         self.set_modes = []
         self.read_modes = []
         self.outputs = []
+        self.width, self.height = 80, 25
+        self.cursor_x, self.cursor_y = 0, 3
+        self.erased = []
         self.flushes = 0
         self.read_failure = None
         self.fail_restore = False
@@ -50,6 +53,9 @@ class ConsoleFixture:
             FlushConsoleInputBuffer=Function(self.flush),
             ReadConsoleW=Function(self.read),
             WriteConsoleW=Function(self.write),
+            GetConsoleScreenBufferInfo=Function(self.screen_info),
+            FillConsoleOutputCharacterW=Function(self.fill),
+            SetConsoleCursorPosition=Function(self.set_cursor),
             WideCharToMultiByte=Function(self.encode),
         )
         self.user32 = types.SimpleNamespace(IsWindowVisible=Function(lambda window: self.visible))
@@ -90,8 +96,33 @@ class ConsoleFixture:
         return 1
 
     def write(self, handle, value, size, count, reserved):
-        self.outputs.append(ctypes.string_at(value, size * 2).decode("utf-16-le"))
+        text = ctypes.string_at(value, size * 2).decode("utf-16-le")
+        self.outputs.append(text)
+        for char in text:
+            if char == "\r":
+                self.cursor_x = 0
+            elif char == "\n":
+                self.cursor_y = min(self.cursor_y + 1, self.height - 1)
+            else:
+                self.cursor_x += 1
+                if self.cursor_x == self.width:
+                    self.cursor_x = 0
+                    self.cursor_y = min(self.cursor_y + 1, self.height - 1)
         count._obj.value = size
+        return 1
+
+    def screen_info(self, handle, output):
+        output._obj.dwSize = c.COORD(self.width, self.height)
+        output._obj.dwCursorPosition = c.COORD(self.cursor_x, self.cursor_y)
+        return 1
+
+    def fill(self, handle, char, count, position, written):
+        self.erased.append((position.X, position.Y, char, count))
+        written._obj.value = count
+        return 1
+
+    def set_cursor(self, handle, position):
+        self.cursor_x, self.cursor_y = position.X, position.Y
         return 1
 
     def encode(self, codepage, flags, value, length, output, size, default, used_default):
@@ -165,7 +196,7 @@ class ConsoleCaptureTests(unittest.TestCase):
         self.assertEqual(api.set_modes, [hidden, api.original_mode])
         self.assertTrue(api.read_modes)
         self.assertTrue(all(mode == hidden for mode in api.read_modes))
-        self.assertEqual(api.outputs, [c._PROMPT, "\r\n"])
+        self.assertEqual(api.outputs, [c._PROMPT] + ["*"] * len("synthetic-密钥-😀") + ["\r\n"])
         self.assertEqual(api.flushes, 2)
         self.assertEqual(api.mode, api.original_mode)
         with self.assertRaisesRegex(c.ConsoleCaptureError, "CREDENTIAL_CAPTURE_ALREADY_ATTEMPTED"):
@@ -192,6 +223,58 @@ class ConsoleCaptureTests(unittest.TestCase):
     def test_backspace_clears_complete_surrogate_pair(self):
         api = ConsoleFixture("synthetic😀\b!\r")
         self.assertEqual(c.WindowsConsoleCapture(_api=api).capture(), b"synthetic!")
+        self.assertEqual(api.outputs, [c._PROMPT] + ["*"] * 11 + ["\r\n"])
+        self.assertEqual(len(api.erased), 1)
+
+    def test_empty_backspace_does_not_erase_prompt(self):
+        api = ConsoleFixture("\b\bA\b\bB\r")
+        self.assertEqual(c.WindowsConsoleCapture(_api=api).capture(), b"B")
+        self.assertEqual(len(api.erased), 1)
+        self.assertEqual(api.outputs, [c._PROMPT, "*", "*", "\r\n"])
+
+    def test_mask_erasure_crosses_wrap_and_bottom_scroll(self):
+        for row in (2, 24):
+            with self.subTest(row=row):
+                api = ConsoleFixture()
+                api.cursor_x, api.cursor_y = 0, row
+                c.WindowsConsoleCapture(_api=api)._erase_mask(api.handles[c.STD_OUTPUT_HANDLE])
+                self.assertEqual(api.erased, [(79, row - 1, " ", 1)])
+                self.assertEqual((api.cursor_x, api.cursor_y), (79, row - 1))
+
+    def test_mask_output_failures_discard_input_and_restore_mode(self):
+        for failure in ("append", "info", "fill", "partial_fill", "cursor"):
+            with self.subTest(failure=failure):
+                api = ConsoleFixture("A\bB\r")
+                if failure == "append":
+                    original = api.kernel32.WriteConsoleW.implementation
+                    api.kernel32.WriteConsoleW.implementation = lambda handle, value, size, count, reserved, original=original: (
+                        0 if size == 1 else original(handle, value, size, count, reserved))
+                elif failure == "info":
+                    api.kernel32.GetConsoleScreenBufferInfo.implementation = lambda *args: 0
+                elif failure == "fill":
+                    api.kernel32.FillConsoleOutputCharacterW.implementation = lambda *args: 0
+                elif failure == "partial_fill":
+                    api.kernel32.FillConsoleOutputCharacterW.implementation = lambda *args: 1
+                else:
+                    api.kernel32.SetConsoleCursorPosition.implementation = lambda *args: 0
+                self.assert_mutable_buffers_wiped(c.WindowsConsoleCapture(_api=api), "CREDENTIAL_CONSOLE_OUTPUT_FAILED")
+                self.assertEqual(api.mode, api.original_mode)
+
+    def test_backspace_can_remove_masks_that_scrolled_out_of_buffer(self):
+        api = ConsoleFixture("x" * c.MAX_SECRET_BYTES + "\b" * c.MAX_SECRET_BYTES + "A\r")
+        self.assertEqual(c.WindowsConsoleCapture(_api=api).capture(), b"A")
+        self.assertEqual(api.outputs.count("*"), c.MAX_SECRET_BYTES + 1)
+        self.assertLess(len(api.erased), c.MAX_SECRET_BYTES)
+        self.assertEqual((api.cursor_x, api.cursor_y), (0, 1))
+
+    def test_nonwrapping_or_delayed_wrapping_output_rejects_before_input(self):
+        for mode in (0, 1, 2, 3 | c.DISABLE_NEWLINE_AUTO_RETURN):
+            api = ConsoleFixture()
+            api.output_mode = mode
+            with self.assertRaisesRegex(c.ConsoleCaptureError, "CREDENTIAL_CHANNEL_UNAVAILABLE"):
+                c.WindowsConsoleCapture(_api=api).preflight()
+            self.assert_mutable_buffers_wiped(c.WindowsConsoleCapture(_api=api), "CREDENTIAL_CHANNEL_UNAVAILABLE")
+            self.assertEqual((api.outputs, api.read_modes, api.set_modes), ([], [], []))
 
     def test_exact_byte_limit_is_accepted(self):
         api = ConsoleFixture("x" * c.MAX_SECRET_BYTES + "\r")
@@ -313,7 +396,7 @@ class ConsoleCaptureTests(unittest.TestCase):
         with mock.patch.object(channel, "_encode", wraps=channel._encode) as encode:
             self.assert_mutable_buffers_wiped(channel, "CREDENTIAL_CONSOLE_CHANGED")
         encode.assert_not_called()
-        self.assertEqual(api.outputs, [c._PROMPT])
+        self.assertEqual(api.outputs, [c._PROMPT] + ["*"] * len("synthetic-sentinel"))
         self.assertEqual(api.mode, api.original_mode)
 
     def test_uncertain_final_flush_keeps_hidden_mode_and_discards_secret(self):
@@ -355,6 +438,10 @@ class ConsoleCaptureTests(unittest.TestCase):
         self.assertEqual(api.kernel32.GetCurrentProcessId.argtypes, [])
         self.assertEqual(api.kernel32.GetCurrentProcessId.restype, c.DWORD)
         self.assertEqual(api.kernel32.GetConsoleMode.argtypes, [c.HANDLE, c.LPDWORD])
+        self.assertEqual(ctypes.sizeof(c.COORD), 4)
+        self.assertEqual(ctypes.sizeof(c.CONSOLE_SCREEN_BUFFER_INFO), 22)
+        self.assertEqual(api.kernel32.SetConsoleCursorPosition.argtypes, [c.HANDLE, c.COORD])
+        self.assertEqual(api.kernel32.FillConsoleOutputCharacterW.argtypes, [c.HANDLE, ctypes.c_wchar, c.DWORD, c.COORD, c.LPDWORD])
         self.assertEqual(api.kernel32.ReadConsoleW.argtypes, [c.HANDLE, c.LPWCHAR, c.DWORD, c.LPDWORD, ctypes.c_void_p])
         self.assertEqual(api.kernel32.WideCharToMultiByte.argtypes[2:6], [c.LPWCHAR, ctypes.c_int32, c.LPBYTE, ctypes.c_int32])
         c.WindowsConsoleCapture(_api=api).preflight()

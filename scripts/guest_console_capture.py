@@ -19,17 +19,36 @@ WCHAR = ctypes.c_uint16
 LPDWORD = ctypes.POINTER(DWORD)
 LPWCHAR = ctypes.POINTER(WCHAR)
 LPBYTE = ctypes.POINTER(ctypes.c_ubyte)
+
+
+class COORD(ctypes.Structure):
+    _fields_ = [("X", ctypes.c_int16), ("Y", ctypes.c_int16)]
+
+
+class SMALL_RECT(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_int16) for name in ("Left", "Top", "Right", "Bottom")]
+
+
+class CONSOLE_SCREEN_BUFFER_INFO(ctypes.Structure):
+    _fields_ = [("dwSize", COORD), ("dwCursorPosition", COORD),
+                ("wAttributes", ctypes.c_uint16), ("srWindow", SMALL_RECT),
+                ("dwMaximumWindowSize", COORD)]
+
+
 STD_INPUT_HANDLE = DWORD(-10).value
 STD_OUTPUT_HANDLE = DWORD(-11).value
 INVALID_HANDLE_VALUE = HANDLE(-1).value
 ENABLE_PROCESSED_INPUT = 0x0001
 ENABLE_LINE_INPUT = 0x0002
 ENABLE_ECHO_INPUT = 0x0004
+ENABLE_PROCESSED_OUTPUT = 0x0001
+ENABLE_WRAP_AT_EOL_OUTPUT = 0x0002
+DISABLE_NEWLINE_AUTO_RETURN = 0x0008
 FILE_TYPE_CHAR = 0x0002
 CP_UTF8 = 65001
 WC_ERR_INVALID_CHARS = 0x0080
 MAX_SECRET_BYTES = 4096
-_PROMPT = "Guest sudo password (hidden; Enter confirms, Esc cancels): "
+_PROMPT = "Guest sudo password (* masked; Enter confirms, Esc cancels): "
 
 
 class ConsoleCaptureError(RuntimeError):
@@ -61,6 +80,9 @@ class _ConsoleAPI:
                 (self.kernel32.FlushConsoleInputBuffer, [HANDLE], BOOL),
                 (self.kernel32.ReadConsoleW, [HANDLE, LPWCHAR, DWORD, LPDWORD, ctypes.c_void_p], BOOL),
                 (self.kernel32.WriteConsoleW, [HANDLE, LPWCHAR, DWORD, LPDWORD, ctypes.c_void_p], BOOL),
+                (self.kernel32.GetConsoleScreenBufferInfo, [HANDLE, ctypes.POINTER(CONSOLE_SCREEN_BUFFER_INFO)], BOOL),
+                (self.kernel32.FillConsoleOutputCharacterW, [HANDLE, ctypes.c_wchar, DWORD, COORD, LPDWORD], BOOL),
+                (self.kernel32.SetConsoleCursorPosition, [HANDLE, COORD], BOOL),
                 (self.kernel32.WideCharToMultiByte,
                  [DWORD, DWORD, LPWCHAR, ctypes.c_int32, LPBYTE, ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p],
                  ctypes.c_int32),
@@ -106,6 +128,11 @@ class WindowsConsoleCapture:
             if handle in (None, 0, INVALID_HANDLE_VALUE) or kernel.GetFileType(handle) != FILE_TYPE_CHAR or not kernel.GetConsoleMode(handle, ctypes.byref(mode)):
                 raise ConsoleCaptureError("CREDENTIAL_CHANNEL_UNAVAILABLE")
             modes.append(mode.value)
+        # Check this during preflight, before the caller reserves its allowance.
+        # Immediate wrapping makes one mask occupy one preceding buffer cell.
+        if (modes[1] & (ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT) != 3
+                or modes[1] & DISABLE_NEWLINE_AUTO_RETURN):
+            raise ConsoleCaptureError("CREDENTIAL_CHANNEL_UNAVAILABLE")
         return stdin, stdout, window, modes[0], modes[1]
 
     def preflight(self) -> None:
@@ -143,6 +170,27 @@ class WindowsConsoleCapture:
             raise
         finally:
             del view
+
+    def _erase_mask(self, stdout) -> None:
+        # A Win32 backspace does not cross the left edge of a wrapped line.
+        # Erase the preceding screen cell explicitly, including after scrolling.
+        info = CONSOLE_SCREEN_BUFFER_INFO()
+        kernel = self._api.kernel32
+        if not kernel.GetConsoleScreenBufferInfo(stdout, ctypes.byref(info)):
+            raise ConsoleCaptureError("CREDENTIAL_CONSOLE_OUTPUT_FAILED")
+        width, height = info.dwSize.X, info.dwSize.Y
+        x, y = info.dwCursorPosition.X, info.dwCursorPosition.Y
+        if width < 1 or height < 1 or not (0 <= x < width and 0 <= y < height):
+            raise ConsoleCaptureError("CREDENTIAL_CONSOLE_OUTPUT_FAILED")
+        if x == 0 and y == 0:
+            # Earlier masks can have scrolled out of the finite screen buffer.
+            # Deleting that input needs no further visible cell to erase.
+            return
+        position = COORD(x - 1, y) if x else COORD(width - 1, y - 1)
+        written = DWORD()
+        if (not kernel.FillConsoleOutputCharacterW(stdout, " ", 1, position, ctypes.byref(written))
+                or written.value != 1 or not kernel.SetConsoleCursorPosition(stdout, position)):
+            raise ConsoleCaptureError("CREDENTIAL_CONSOLE_OUTPUT_FAILED")
 
     def capture(self) -> bytearray:
         """Read once into mutable storage; no argv/env/file/stdin-stream input."""
@@ -193,6 +241,7 @@ class WindowsConsoleCapture:
                         if low_surrogate and length and 0xD800 <= value[length - 1] <= 0xDBFF:
                             length -= 1
                             value[length] = 0
+                        self._erase_mask(stdout)
                     continue
                 if codepoint < 32 or codepoint == 127:
                     raise ConsoleCaptureError("CREDENTIAL_INPUT_INVALID")
@@ -200,6 +249,10 @@ class WindowsConsoleCapture:
                     raise ConsoleCaptureError("CREDENTIAL_INPUT_TOO_LONG")
                 value[length] = codepoint
                 length += 1
+                paired_low = (0xDC00 <= codepoint <= 0xDFFF and length > 1
+                              and 0xD800 <= value[length - 2] <= 0xDBFF)
+                if not paired_low:
+                    self._write_public(stdout, "*")
         except ConsoleCaptureError as failure:
             error = failure.code
         except (KeyboardInterrupt, SystemExit):
