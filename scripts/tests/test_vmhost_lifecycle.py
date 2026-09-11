@@ -5,6 +5,7 @@ import ctypes
 from ctypes import wintypes
 import os
 import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -79,7 +80,9 @@ class VmHostDiagnosticsTests(unittest.TestCase):
 @unittest.skipUnless(os.name == 'nt', 'Actual Windows cwd and anti-replacement sharing')
 class WindowsWorkingDirectoryHoldTests(unittest.TestCase):
     def setUp(self):
-        self.root = win.create_windows_private_directory(Path(os.environ['TEMP']), prefix='animemo-cwd-hold-test')
+        self.temporary = tempfile.TemporaryDirectory(prefix='animemo-cwd-fixture-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = win.create_windows_private_directory(Path(self.temporary.name), prefix='animemo-cwd-hold-test')
         self.directory = self.root / 'vm'
         self.directory.mkdir()
         self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -90,7 +93,7 @@ class WindowsWorkingDirectoryHoldTests(unittest.TestCase):
         self.kernel.CloseHandle.restype = wintypes.BOOL
 
     def tearDown(self):
-        self.assertEqual(self.root.resolve().parent, Path(os.environ['TEMP']).resolve())
+        self.assertEqual(self.root.resolve().parent, Path(self.temporary.name).resolve())
         self.assertTrue(self.root.name.startswith('animemo-cwd-hold-test-'))
         shutil.rmtree(self.root)
 
