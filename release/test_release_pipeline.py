@@ -84,6 +84,7 @@ def frozen_prepublication_fixture(directory: Path):
         "updater/docker-compose.runtime.yml",
         "scripts/candidate_profile_runner.py",
         "scripts/closed_runtime_inventory.py",
+        "scripts/candidate_workload_root.py",
         "scripts/formal_profile_runner.py",
         "scripts/release_qualification.py",
     ):

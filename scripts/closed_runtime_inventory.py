@@ -34,6 +34,10 @@ def closed_runtime_inventory_digest(root: Path) -> str:
         items = _descriptor_inventory(boundary)
     else:
         items = _fallback_inventory(boundary)
+    # Match the Host's full-path order, including a directory beside a file
+    # such as a/ and a.txt. Descriptor traversal is depth-first, which alone
+    # would place a/file before a.txt and change an otherwise identical tree.
+    items.sort(key=lambda item: item["path"].removesuffix("/"))
     encoded = (
         json.dumps(
             items,

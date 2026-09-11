@@ -1,0 +1,395 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://animemo.cc/schemas/prepublication-candidate-acceptance-receipt-v4.json",
+  "title": "AniMemo prepublication candidate acceptance receipt v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "candidate_input_digest",
+    "verified_candidate_digest",
+    "qualification_run_id",
+    "qualification_run_attempt",
+    "source_sha",
+    "source_tree",
+    "candidate_version",
+    "r2_origin_prestate_receipt_digest",
+    "r2_origin_poststate_receipt_digest",
+    "r2_origin_prestate_observation_id",
+    "r2_origin_poststate_observation_id",
+    "base_vm_identity",
+    "source_vm_inventory_identity",
+    "source_disk_graph_identity",
+    "original_vm_hashes",
+    "snapshot_identities",
+    "snapshot_disk_graph_identities",
+    "profile_results",
+    "all_profiles_pass",
+    "candidate_prestate",
+    "candidate_poststate",
+    "repository_mutation_count",
+    "publication_mutation_count",
+    "shared_host_connection_count",
+    "secret_sweep",
+    "placeholder_sweep",
+    "release_authority_granted",
+    "publish_authorized",
+    "completed_at",
+    "result",
+    "receipt_digest",
+    "plan_digest",
+    "session_id",
+    "r2_origin_prestate_receipt",
+    "r2_origin_poststate_receipt",
+    "profile_receipts"
+  ],
+  "properties": {
+    "schema": {
+      "const": "animemo.prepublication-candidate-acceptance-receipt/v4"
+    },
+    "version": {
+      "const": 4
+    },
+    "candidate_input_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "verified_candidate_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "qualification_run_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "qualification_run_attempt": {
+      "const": 1
+    },
+    "source_sha": {
+      "$ref": "#/$defs/gitSha"
+    },
+    "source_tree": {
+      "$ref": "#/$defs/gitSha"
+    },
+    "candidate_version": {
+      "type": "string",
+      "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-rc\\.[1-9][0-9]*$"
+    },
+    "r2_origin_prestate_receipt_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "r2_origin_poststate_receipt_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "r2_origin_prestate_observation_id": {
+      "$ref": "#/$defs/observationId"
+    },
+    "r2_origin_poststate_observation_id": {
+      "$ref": "#/$defs/observationId"
+    },
+    "base_vm_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "source_vm_inventory_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "source_disk_graph_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "original_vm_hashes": {
+      "$ref": "#/$defs/fileDigests"
+    },
+    "snapshot_identities": {
+      "$ref": "#/$defs/profileDigests"
+    },
+    "snapshot_disk_graph_identities": {
+      "$ref": "#/$defs/profileDigests"
+    },
+    "profile_results": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fresh_base",
+        "docker_base",
+        "runtime_base_offline"
+      ],
+      "properties": {
+        "fresh_base": {
+          "$ref": "#/$defs/profileResult"
+        },
+        "docker_base": {
+          "$ref": "#/$defs/profileResult"
+        },
+        "runtime_base_offline": {
+          "$ref": "#/$defs/profileResult"
+        }
+      }
+    },
+    "all_profiles_pass": {
+      "type": "boolean"
+    },
+    "candidate_prestate": {
+      "$ref": "#/$defs/prestate"
+    },
+    "candidate_poststate": {
+      "$ref": "#/$defs/prestate"
+    },
+    "repository_mutation_count": {
+      "const": 0
+    },
+    "publication_mutation_count": {
+      "const": 0
+    },
+    "shared_host_connection_count": {
+      "const": 0
+    },
+    "secret_sweep": {
+      "const": 0
+    },
+    "placeholder_sweep": {
+      "const": 0
+    },
+    "release_authority_granted": {
+      "const": false
+    },
+    "publish_authorized": {
+      "const": false
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "result": {
+      "enum": [
+        "PASS",
+        "FAIL"
+      ]
+    },
+    "receipt_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "plan_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "r2_origin_prestate_receipt": {
+      "type": "object"
+    },
+    "r2_origin_poststate_receipt": {
+      "type": "object"
+    },
+    "profile_receipts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "FRESH_BASE": {
+          "type": "object"
+        },
+        "DOCKER_BASE": {
+          "type": "object"
+        },
+        "RUNTIME_BASE_OFFLINE": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "fileDigests": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 256,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 255
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/digest"
+      }
+    },
+    "profileDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "FRESH_BASE",
+        "DOCKER_BASE",
+        "RUNTIME_BASE_OFFLINE"
+      ],
+      "properties": {
+        "FRESH_BASE": {
+          "$ref": "#/$defs/digest"
+        },
+        "DOCKER_BASE": {
+          "$ref": "#/$defs/digest"
+        },
+        "RUNTIME_BASE_OFFLINE": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "observationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "failureCode": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{2,127}$"
+    },
+    "profileResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "failure_code",
+        "receipt_digest"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "ERROR",
+            "NOT_RUN_SHARED_BLOCKER"
+          ]
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/failureCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "PASS"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "failure_code": {
+                "type": "null"
+              },
+              "receipt_digest": {
+                "$ref": "#/$defs/digest"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "FAIL"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "failure_code": {
+                "$ref": "#/$defs/failureCode"
+              },
+              "receipt_digest": {
+                "$ref": "#/$defs/digest"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ERROR"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "failure_code": {
+                "$ref": "#/$defs/failureCode"
+              },
+              "receipt_digest": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "NOT_RUN_SHARED_BLOCKER"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "failure_code": {
+                "$ref": "#/$defs/failureCode"
+              },
+              "receipt_digest": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "prestate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tag",
+        "github_release",
+        "ghcr",
+        "public_r2",
+        "r2_origin"
+      ],
+      "properties": {
+        "tag": {
+          "const": "ABSENT"
+        },
+        "github_release": {
+          "const": "ABSENT"
+        },
+        "ghcr": {
+          "const": "ABSENT"
+        },
+        "public_r2": {
+          "const": "ABSENT_BY_PUBLIC_READBACK_NON_AUTHORITATIVE"
+        },
+        "r2_origin": {
+          "const": "PROVEN_EMPTY"
+        }
+      }
+    }
+  }
+}

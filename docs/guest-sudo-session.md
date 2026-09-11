@@ -1,6 +1,6 @@
 # Guest sudo 会话控制器
 
-当前实现为 `scripts/guest_sudo_session.py` 的 `SessionSupervisor`，替代历史仓库外 RC19 controller 的 worker secret 分发边界。接口是进程内能力；没有从 JSON、ready marker、PID 或命令文件取得凭据的入口。
+`scripts/guest_sudo_session.py` 的 `SessionSupervisor` 负责固定 rotation / sudo validation；`scripts/candidate_guest_session.py` 将其接入完整 Candidate Provider，并提供独立的一次性 workload 交付。接口是进程内能力；没有从 JSON、ready marker、PID 或命令文件取得凭据的入口。
 
 ## 受控调用边界
 
@@ -50,8 +50,24 @@ Windows execution 的私有工作根使用紧凑的 `session/profile/vm` 路径�
 
 ## 使用范围与后续任务
 
-本模块实现最小控制器的 rotation / sudo validation，不负责启动或复制 VM、不实现完整 Candidate/Formal workload 调度，也不为后续 privileged workload 提供 env fallback。本次没有启用历史环境变量式 sudo 入口。动态任务应在受控 profile 入口使用本模块；不得退回历史外置 `capture_and_serve` 或从旧 authority JSON 请求 secret。
+`SessionSupervisor` 成功后立即清理秘密。完整 Candidate 由 canonical `ClosedVmwareProvider.execute_profile` 调用 `bootstrap_candidate` 和 `execute_candidate_workload`；其 staging 与 runner 不再读取环境密码。Formal 保留独立的既有路径，不继承 Candidate 凭据额度。
+
+### 完整 Candidate 的两用途额度
+
+固定授权 `ANIMEMO_V2_EXACT_CANDIDATE_ACCEPTANCE_V1` 的计数根为 `E:/6d30583b353270ffd7b42163054ca7a470b74d5c9f6c19c920718364661ea82a`。每个固定 Profile 各有 `SESSION_BOOTSTRAP`、`CANDIDATE_WORKLOAD` 两个用途；根下两级目录分别为 Profile 和用途 ASCII 字节的 SHA-256，复用私有目录的 exclusive 创建与目录持有交接。每用途最多一次人工捕获，目录存在即已尝试。取消、无效输入、崩溃或部分交付不恢复额度；源码、session、Q 和新 Clone 不改变槽位。旧授权目录保持原样。
+
+Bootstrap 在新的无密码 Guest 观察和 Console preflight 后占用槽位，复用两个既有角色，成功后由 Provider 登记绑定当前 execution、plan、Profile 和 lease 的进程内连接。workload 不接收外部 connection ticket；它对新观察重新比较 runtime、machine/boot ID、MAC、challenge 与已认证 host key。正常续接允许使用本 Profile 已登记的 key，跨 Profile/session 的 freshness 检查和已使用 key 集合保持有效。
+
+材料先通过无秘密 SCP 传到当前 session/Profile 独占 staging。Host 验证受持有材料和受审 root 程序字节，重新观察 Guest 后才预检并占用 workload 槽位。最终观察来自随后接收秘密的同一 SSH 子进程。一个固定 sudo 子进程执行 `candidate_workload_root.py`：逐级 no-follow directory fd 复制，拒绝 symlink、hardlink、特殊文件、目录替换、文件增长和目标预占；新目标从创建时即 root-owned，复制后失去写权限。其完整库存与宿主持有摘要相等后，才从已验证目标加载 wheel runtime 和 canonical Profile Runner，并安全读取固定 Profile Draft。
+
+宿主和远端转发器在一次 write/flush/close 后立即清理可变密码，不等待安装完成。短写不补写；grant 的五秒窗口与固定工作负载最长五小时（含材料完结）的进程预算分开。stdout 只包含有界身份观察与回执，由宿主持续读取，Runner 普通输出不进入该通道。SSH 超时或断线进入 Clone containment，不认为远端 root 已退出，不重新交付密码。Provider 退出 Profile 时撤销连接登记。
+
+公开记录按 Profile、用途与角色分别保存 capture/delivery attempts、completed 和操作结果，并绑定 plan/session/source/tree/Q/Candidate。完成交付不等于安装 PASS；只有 canonical Guest Draft、Host 模板前后观察及最终收据验证均通过，才支持对应结论。
+
+已获得本固定任务授权时，专用原生 Console 可直接运行 `python -B -m scripts.candidate_vm_harness --execute --authorization-id ANIMEMO_V2_EXACT_CANDIDATE_ACCEPTANCE_V1 --r2-origin-transport cloudflare-plugin`，同时提供准确的四项 Candidate/Q/source 参数与尚不存在的 `--result` 路径。该授权接受本进程产生并保存的完整 plan；不是后续任务或发布权限。
 
 离线检查运行 `python -m unittest scripts.tests.test_guest_sudo_session`，全部输入为 synthetic sentinel 和 mock Guest transport；Windows 用真实私有文件/目录 holds 检查生产 scope。Linux 跳过仅 Windows ACL 的测试；原 harness 回归另行保留。结果最多支持 `OFFLINE_SECURITY_REVIEW_PASSED_DYNAMIC_PENDING`，不能写成 Candidate PASS、真实 Guest 安全或 Snapshot 已修复。
 
-下一次 VM/Guest/sudo/Qualification 执行需新的明确授权，先比对最终 main 和本模块/launcher 摘要，再核对精确模板、profile、Snapshot 单变量方案与任务自有资源。不得把旧 run33627874404 或历史 RC19 变成新源码资格。
+新增权限的定点测试为 `scripts.tests.test_candidate_guest_session`、`scripts.tests.test_candidate_workload_root` 和 `scripts.tests.test_candidate_plugin_acceptance`。前者在 Windows 使用真实 holds 与本机子进程；POSIX fd 对抗测试在 Linux 执行。`scripts/tests/native_candidate_console_probe.py` 必须在独占可见 conhost 中显式启动，只自动输入公开测试文本并验证退格、取消及两用途的原生通道；它不访问真实额度，不执行 VM 或 sudo。所有这些都是开发证据，不能替代真实三 Profile 验收。
+
+每次实际执行仍须有适用的明确授权，先比对最终 main、控制器源码与 Qualification，再核对模板、Profile、Snapshot 和任务资源；成功 Q 只绑定其准确源码，历史结果不能授权新源码。

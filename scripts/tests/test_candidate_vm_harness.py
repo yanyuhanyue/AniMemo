@@ -36,6 +36,7 @@ from release.r2_prestate import (
     verify_rc14_r2_origin_from_environment,
 )
 from scripts import candidate_vm_harness as harness
+from scripts import candidate_guest_session as candidate_session
 
 DIGEST = "sha256:" + "a" * 64
 SHA = "b" * 40
@@ -357,7 +358,6 @@ class CandidateGuestPathContractTests(unittest.TestCase):
     def test_root_only_guest_inventory_calls_use_hidden_sudo_stdin(self):
         production_tree = ast.parse(Path(harness.__file__).read_text(encoding="utf-8"))
         for method_name, error_code in (
-            ("_stage_candidate", "CANDIDATE_VM_GUEST_MATERIAL_INVENTORY_UNAVAILABLE"),
             ("_stage_formal_workload", "FORMAL_VM_GUEST_RUNTIME_INVENTORY_UNAVAILABLE"),
         ):
             method = next(
@@ -392,47 +392,6 @@ class CandidateGuestPathContractTests(unittest.TestCase):
             self.assertIsInstance(sudo_password, ast.Name)
             self.assertEqual(sudo_password.id, "password")
 
-    def test_profile_runner_uses_python_safe_path(self):
-        provider = harness.ClosedVmwareProvider(
-            runner=RecordingRunner(),
-            windows_platform=FakeWindowsPlatform(),
-            environment={harness.GUEST_SUDO_PASSWORD_ENV: "test-only-password"},
-        )
-        profile = SimpleNamespace(
-            profile="FRESH_BASE",
-            clone_identity=DIGEST,
-            snapshot_identity=DIGEST,
-            snapshot_disk_graph_identity=DIGEST,
-        )
-        plan = SimpleNamespace(
-            source_vm_digest=DIGEST,
-            source_vm_inventory_identity=DIGEST,
-            source_disk_graph_identity=DIGEST,
-            original_vm_hashes={"base.vmx": DIGEST},
-            candidate_input_digest=DIGEST,
-            verified_candidate_digest=DIGEST,
-        )
-        completed = SimpleNamespace(stdout=b"{}")
-        with mock.patch.object(
-            provider,
-            "_ssh_checked",
-            side_effect=[SimpleNamespace(stdout=b""), completed],
-        ) as ssh_checked:
-            provider._run_profile_guest(
-                authority=mock.sentinel.profile_authority,
-                plan=profile,
-                harness_plan=plan,
-                guest_root="/var/lib/animemo/prepublication-candidates/v2/candidate",
-                initial_platform_state={
-                    "docker_present": False,
-                    "network_allowed": True,
-                    "runtime_dependencies_present": False,
-                },
-            )
-
-        command = ssh_checked.call_args_list[0].args[1]
-        self.assertIn("/usr/bin/python3 -P -B ", command)
-        self.assertIn("PYTHONSAFEPATH=1", command)
 
 
 class PublicTransport:
@@ -828,7 +787,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
         return selected_extent
 
     def test_execute_cli_returns_controlled_nonzero_for_valid_fail_aggregate(self):
-        plan = SimpleNamespace(plan_digest=DIGEST)
+        plan = SimpleNamespace(plan_digest=DIGEST, as_dict=lambda: {"planDigest": DIGEST})
         result = {"status": "FAIL", "aggregateReceipt": {"result": "FAIL"}}
         output = io.StringIO()
         with mock.patch(
@@ -844,6 +803,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
         ), mock.patch(
             "scripts.candidate_vm_harness.acquire_candidate_material_authority",
             return_value=nullcontext(SimpleNamespace()),
+        ), mock.patch("scripts.isolated_guest_validation._check_checkout"), mock.patch(
+            "scripts.guest_console_capture.WindowsConsoleCapture.preflight"
         ), redirect_stdout(output):
             code = harness.main(
                 [
@@ -856,13 +817,16 @@ class CandidateVmHarnessTests(unittest.TestCase):
                     "--expected-source-tree",
                     TREE,
                     "--execute",
+                    "--r2-origin-transport", "s3",
                     "--accept-plan-digest",
                     DIGEST,
                 ]
             )
 
         self.assertEqual(code, 2)
-        self.assertEqual(json.loads(output.getvalue()), result)
+        observed = json.loads(output.getvalue())
+        self.assertEqual(observed["status"], result["status"])
+        self.assertEqual(observed["aggregateReceipt"], result["aggregateReceipt"])
 
     @unittest.skipUnless(os.name == "nt", "Windows Candidate material authority")
     def test_candidate_material_authority_closes_over_producer_receipt(self):
@@ -1410,7 +1374,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
         ), mock.patch.object(
             provider, "_provision_session_key_and_rotate_host_key"
         ) as provision, mock.patch.object(
-            provider, "_stage_candidate"
+            candidate_session, "_stage_candidate"
         ) as stage, self.assertRaisesRegex(
             harness.CandidateHarnessError,
             "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH",
@@ -1456,7 +1420,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
         ), mock.patch.object(
             provider, "_provision_session_key_and_rotate_host_key"
         ) as provision, mock.patch.object(
-            provider, "_stage_candidate"
+            candidate_session, "_stage_candidate"
         ) as stage, self.assertRaisesRegex(
             harness.CandidateHarnessError,
             "CANDIDATE_VM_CONNECTION_IDENTITY_MISMATCH",
@@ -2508,27 +2472,12 @@ class CandidateVmHarnessTests(unittest.TestCase):
                     side_effect=lambda _value: events.append("start"),
                 )
             )
-            stack.enter_context(
-                mock.patch.object(
-                    provider,
-                    "_establish_clone_connection",
-                    side_effect=lambda profile_authority, item, **_kwargs: (
-                        events.append("identity") or verified
-                    ),
-                )
-            )
-            stack.enter_context(
-                mock.patch.object(
-                    provider,
-                    "_stage_candidate",
-                    side_effect=lambda profile_authority, candidate_root, digest: (
-                        events.append("stage") or "/fixed/candidate"
-                    ),
-                )
-            )
-            stack.enter_context(
-                mock.patch.object(provider, "_run_profile_guest", return_value=receipt)
-            )
+            stack.enter_context(mock.patch.object(candidate_session, "bootstrap_candidate",
+                side_effect=lambda *_args: events.append("identity") or verified))
+            stack.enter_context(mock.patch.object(candidate_session, "execute_candidate_workload",
+                side_effect=lambda *_args: events.append("stage") or receipt))
+            environment_password = stack.enter_context(mock.patch.object(provider, "_sudo_password",
+                side_effect=AssertionError("Candidate must not read an environment credential")))
             stop = stack.enter_context(mock.patch.object(provider, "_stop_clone"))
             remove = stack.enter_context(mock.patch.object(provider, "_remove_clone"))
             quarantine = stack.enter_context(
@@ -2563,6 +2512,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
         stop.assert_called_once_with(authority.clone_vmx)
         remove.assert_called_once_with(verified)
         quarantine.assert_not_called()
+        environment_password.assert_not_called()
         release_lease.assert_called_once_with(
             mock.sentinel.lease, work_root=harness.VM_WORK_PARENT
         )

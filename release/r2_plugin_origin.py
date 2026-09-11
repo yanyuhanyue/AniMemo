@@ -30,7 +30,7 @@ from release.r2_prestate import (
 ACCOUNT_ID = 'd6a6e23b63921b1ed386645022fa92a7'
 REQUEST_SCHEMA = 'animemo.cloudflare-plugin-origin-request/v1'
 RESPONSE_SCHEMA = 'animemo.cloudflare-plugin-origin-response/v1'
-RECEIPT_SCHEMA = 'animemo.cloudflare-plugin-origin-receipt/v1'
+RECEIPT_SCHEMA = 'animemo.cloudflare-plugin-origin-receipt/v2'
 PRODUCER = 'CODEX_CLOUDFLARE_PLUGIN'
 WAIT_SECONDS = 300
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -123,15 +123,47 @@ def make_request(plan, role):
     return request
 
 
-def validate_plugin_response(value, request):
+def validate_plugin_request(request):
+    _keys(request, ('schema', 'request_id', 'role', 'repository', 'source_sha', 'source_tree',
+                    'candidate_version', 'verified_candidate_digest', 'qualification_run_id',
+                    'plan_digest', 'session_id', 'account_id', 'bucket', 'jurisdiction',
+                    'prefix', 'expected_keys', 'created_at', 'expires_at', 'collector_sha256',
+                    'request_digest'))
+    _require(request['schema'] == REQUEST_SCHEMA and request['role'] in {'PRESTATE', 'POSTSTATE'})
+    try:
+        nonce = UUID(request['request_id'])
+        _require(nonce.version == 4 and str(nonce) == request['request_id'])
+        for key in ('source_sha', 'source_tree'):
+            _require(type(request[key]) is str and _SHA.fullmatch(request[key]))
+        for key in ('verified_candidate_digest', 'plan_digest', 'collector_sha256'):
+            _require(type(request[key]) is str and _DIGEST.fullmatch(request[key]))
+        rc_target_version(request['candidate_version'])
+    except (ValueError, TypeError, AttributeError):
+        raise R2PluginOriginError('R2_PLUGIN_SCOPE_INVALID') from None
+    _require(type(request['qualification_run_id']) is int and request['qualification_run_id'] > 0)
+    _require(type(request['session_id']) is str and re.fullmatch(r'[0-9a-f]{32}', request['session_id']))
+    _require(request['repository'] == REPOSITORY and request['account_id'] == ACCOUNT_ID
+             and request['bucket'] == R2_BUCKET and request['jurisdiction'] == 'default')
+    prefix = candidate_r2_prefix(request['candidate_version'])
+    _require(request['prefix'] == prefix and request['expected_keys'] ==
+             [prefix + key for key in candidate_r2_expected_keys(request['candidate_version'])])
+    _require(_time(request['expires_at']) - _time(request['created_at']) == timedelta(seconds=300))
+    unsigned = dict(request)
+    unsigned.pop('request_digest')
+    _require(request['request_digest'] == sha256_bytes(canonical_json_bytes(unsigned)), 'R2_PLUGIN_REQUEST_MISMATCH')
+    return request
+
+
+def validate_plugin_response(value, request, *, observed_at=None):
     """Validate a complete, fresh REST observation; never coerce it into S3."""
+    validate_plugin_request(request)
     _keys(value, ('schema', 'producer', 'request_id', 'request_digest', 'collector_sha256',
                   'started_at', 'completed_at', 'bucket_read', 'list_reads', 'object_reads', 'failure'))
     _require(value['schema'] == RESPONSE_SCHEMA and value['producer'] == PRODUCER)
     _require(all(value[name] == request[name] for name in ('request_id', 'request_digest', 'collector_sha256')),
              'R2_PLUGIN_REQUEST_MISMATCH')
     _require(str(UUID(value['request_id'])) == request['request_id'])
-    start, end, now = _time(value['started_at']), _time(value['completed_at']), _now()
+    start, end, now = _time(value['started_at']), _time(value['completed_at']), observed_at or _now()
     _require(_time(request['created_at']) - timedelta(seconds=5) <= start <= end
              <= now + timedelta(seconds=5) and end <= _time(request['expires_at'])
              and now <= _time(request['expires_at']) and now - end <= timedelta(seconds=120),
@@ -200,6 +232,7 @@ def validate_plugin_response(value, request):
         'schema': RECEIPT_SCHEMA, 'observation_id': request['request_id'], 'observation_role': request['role'],
         'source_sha': request['source_sha'], 'source_tree': request['source_tree'],
         'candidate_version': request['candidate_version'], 'plan_digest': request['plan_digest'],
+        'qualification_run_id': request['qualification_run_id'], 'session_id': request['session_id'],
         'verified_candidate_digest': request['verified_candidate_digest'], 'request_digest': request['request_digest'],
         'response_digest': sha256_bytes(canonical_json_bytes(value)), 'account_id': request['account_id'],
         'bucket': request['bucket'], 'prefix': request['prefix'], 'jurisdiction': request['jurisdiction'],
@@ -208,8 +241,28 @@ def validate_plugin_response(value, request):
         'object_get_count': len(objects), 'write_request_count': 0, 'pagination_metadata_omitted': pagination_omitted,
         'started_at': value['started_at'], 'completed_at': value['completed_at'], 'result': 'PROVEN_EMPTY',
         'release_authority_granted': False, 'publish_authorized': False,
+        'request': request, 'response': value,
     }
     receipt['receipt_digest'] = sha256_bytes(canonical_json_bytes(receipt))
+    return receipt
+
+
+def validate_plugin_receipt(receipt, *, expected_scope, role):
+    """Recheck retained evidence at observation time, without renewing its TTL.
+
+    Integrity digests are not signatures. Authenticity comes from the held
+    plugin exchange and the canonical Host receipt producer.
+    """
+    _require(type(receipt) is dict and type(receipt.get('response')) is dict)
+    expected = validate_plugin_response(receipt['response'], receipt.get('request'),
+        observed_at=_time(receipt['response'].get('completed_at')))
+    # Python object equality equates True with 1 and False with 0. Compare
+    # canonical bytes so typed fields and the receipt's own digest both bind.
+    _require(canonical_json_bytes(receipt) == canonical_json_bytes(expected), 'R2_PLUGIN_RECEIPT_MISMATCH')
+    _require(receipt['observation_role'] == role and all(
+        receipt[key] == expected_scope[key] for key in
+        ('source_sha', 'source_tree', 'candidate_version', 'verified_candidate_digest',
+         'qualification_run_id', 'plan_digest', 'session_id')), 'R2_PLUGIN_REQUEST_MISMATCH')
     return receipt
 
 
@@ -243,7 +296,7 @@ class CloudflarePluginOrigin:
         if role == 'POSTSTATE':
             _require(_time(request['created_at']) >= _time(self._prestate['completed_at']), 'R2_PLUGIN_OBSERVATION_REPLAY')
             _require(all(request[key] == self._prestate[key] for key in
-                         ('plan_digest', 'source_sha', 'source_tree', 'candidate_version', 'verified_candidate_digest')),
+                         ('plan_digest', 'session_id', 'qualification_run_id', 'source_sha', 'source_tree', 'candidate_version', 'verified_candidate_digest')),
                      'R2_PLUGIN_REQUEST_MISMATCH')
         request_path = self.root / (role + '.request.json')
         response_path = self.root / (role + '.response.json')

@@ -1,6 +1,6 @@
 # AniMemo 发布前 Candidate Acceptance 合同 v1
 
-状态：v1.1 RC 发布前强制合同。
+状态：Candidate RC 发布前强制合同；当前完整插件验收使用 Profile v2 / Aggregate v4。
 
 本合同把“Qualification 产物可验证”与“GitHub Release 已发布”严格分开。Candidate
 Acceptance 只证明同一次 Qualification 的完整字节在三种一次性 VM Profile 中通过；它
@@ -34,14 +34,17 @@ Acceptance。每个可接受 OCI layout 必须包含 index、authoritative manif
 
 ## 2. Candidate Input 与 canonical verifier
 
-六个 closed JSON Schema 为：
+当前身份与收据协议为：
 
 - `animemo.prepublication-candidate-input/v1`
 - `animemo.verified-prepublication-candidate/v2`
 - `animemo.prepublication-candidate-verification-execution-receipt/v1`
-- `animemo.prepublication-candidate-profile-receipt/v1`
-- `animemo.prepublication-candidate-acceptance-receipt/v3`
-- `animemo.r2-origin-observation-receipt/v3`
+- `animemo.prepublication-candidate-profile-receipt/v2`
+- `animemo.prepublication-candidate-acceptance-receipt/v4`
+- `animemo.cloudflare-plugin-origin-receipt/v2`
+
+历史 Profile v1、Aggregate v3 和 S3 Origin v3 的协议身份与原始证据保持不变；
+Guest 仍只生成 v1 Draft，由 Host 添加独立观察和本轮 plan/session 绑定。
 
 唯一验证入口为：
 
@@ -122,42 +125,42 @@ python scripts/candidate_vm_harness.py
 
 Harness 默认 `PLAN_ONLY`。只允许固定 `FRESH_BASE`、`DOCKER_BASE`、
 `RUNTIME_BASE_OFFLINE` 及其固定 VMware snapshot 名；不接受 VM path、snapshot path、
-shell、package list 或安全策略覆盖。`--execute` 还必须给出完全相同的 aggregate plan
-digest，并在任何 clone 前通过关闭 Account、Bucket、Candidate Prefix 和 expected keys 的
-S3 只读 empty PRESTATE 证明。Account、Bucket、Prefix 与 expected keys 必须由本次
-Candidate version 的关闭计划派生，不能由旧 RC 编号恢复。
+shell、package list 或安全策略覆盖。`--execute` 必须接受本进程的完整 plan digest；
+已明确批准 `ANIMEMO_V2_EXACT_CANDIDATE_ACCEPTANCE_V1` 时，可使用对应的
+`--authorization-id` 和 exclusive `--result`，接受本次生成并保存的完整计划。
+在任何 Clone 前，必须通过固定 Account、Bucket、Candidate Prefix 和 expected keys 的
+Origin empty PRESTATE 证明；前缀和键只从本次 Candidate version 派生。
 
-其中 R2 Origin 的 canonical acceptance 入口只允许显式的 S3 Object Read only 模式：
+完整入口默认 `--r2-origin-transport cloudflare-plugin`，同一个受持有的
+`CloudflarePluginOrigin` 在 Clone 前与三个 Profile 结束后分别请求 PRESTATE、POSTSTATE。
+插件实际 GET 固定账户的 `animemo-release-mirror` Bucket、完整 Prefix 分页和准确 expected
+keys。请求绑定 source/tree/Q/Candidate/plan/session/role、新 UUIDv4 nonce、collector 摘要
+和五分钟有效期；本地私有通道只运输和校验公开观察，不取得 API Token 或 Guest secret。
 
-Harness 对同一关闭计划调用 `verify_candidate_r2_origin_from_environment`：clone 前使用
-`observation_role=PRESTATE`，三个 Profile 均结束后必须再次发起新的 List/Head 调用并使用
-`observation_role=POSTSTATE`。两个 Observation 使用不同的 UUIDv4 `observation_id`，各自绑定
-完整 object inventory 及其摘要；POSTSTATE 不得复用 PRESTATE receipt、对象列表或读取结果。
+插件 Receipt v2 保留完整 request/response、自摘要与派生计数，保留真实 `10007`、未知
+HTTP status 为 null 和缺失分页字段的语义；不把 GET 数固定为某个成功常数，不转换成
+S3 Receipt。POSTSTATE 必须使用新的 request/nonce/response，并在 PRESTATE 完成后发起。
+独立消费者在原观察完成时刻重验请求有效期、scope、分页和对象结果；三 Profile 的长运行
+不会刷新或破坏已完成观察的证据。摘要是完整性绑定，不是 Cloudflare 签名；来源权威是受信
+插件观察通道和 canonical Host 生产器。
 
-它使用 `ListObjectsV2` 枚举固定 Prefix，并对六个 expected keys 执行 `HeadObject`；客户端
-接口只暴露 `ListObjectsV2`、`HeadObject`、`GetObject` 三个读取方法。Account、Bucket、
-jurisdiction、endpoint host、Prefix 和 source SHA/tree 全部进入 closed Receipt。REST Bearer
-Token、公共 CDN、GitHub Release 和其他 transport 均不是 fallback，也不能产生 Candidate
-Acceptance 所需的 R2 Receipt。
-
-公共 CDN 404 不是 R2 Origin 权威。缺少专用 S3 只读凭据、Receipt schema/auth method 不符、
-Receipt 被篡改或 source SHA/tree 不匹配时，必须在读取 Candidate、公共回查和 clone 前失败。
-专用凭据只从当前进程的 `ANIMEMO_R2_S3_ACCESS_KEY_ID`、
-`ANIMEMO_R2_S3_SECRET_ACCESS_KEY` 与可选的 `ANIMEMO_R2_S3_SESSION_TOKEN` 读取；不使用
-AWS profile、metadata 或通用 `AWS_*` ambient chain。Harness 实现不暴露 R2 写、删、复制、
-multipart、Bucket、DNS、Cache、Worker 或 Route 方法，也不记录 Access Key、Secret、Session
-Token、Authorization header、签名或 signed URL。操作员边界见
-[`R2 S3 只读凭据处理合同`](r2-s3-readonly-credential-handling.md)。
+公共 CDN 404 不构成 Origin 权威。缺连接、scope/role/nonce 不符、过期响应或未知 API
+错误均失败关闭，无其他 transport 自动 fallback。显式 S3 模式保留既有独立协议及
+[`S3 只读凭据处理合同`](r2-s3-readonly-credential-handling.md)，不用于本次插件验收。
+所有 Origin 路径仅有只读操作，不记录 Token、Authorization header 或签名。
 
 每个 Profile Receipt 必须回绑 Candidate/Run/SHA/tree/version、base/snapshot/clone、平台
 与 Installer plan/receipt、四个 OCI digest、实际 Doctor、三项 canonical tests、completed
 steps、实际命令边界/network policy、external-pull inventory 和原始 VM 前后 hashes。Guest
 只能输出不含任何宿主 VM hash 字段的 Profile Receipt Draft；Host Harness 拒绝 Guest 注入的
 前后 hash 字段，并用计划冻结的 pre hashes 与独立重读的 post hashes 生成和校验最终 Receipt。
+插件路径的 Profile v2 另由 Host 绑定 plan digest 与 session ID。
 Aggregate Receipt
 分别绑定已验证的 `candidate_prestate` 与 `candidate_poststate` Observation Receipt 摘要，并
 要求二者 `observation_id` 不同、执行前后 Origin 均为空、repository/publication/shared-host
-mutation 为零。v3 的 `profile_results` 对三个固定 Profile 分别表达 `PASS`、`FAIL`、`ERROR`
+mutation 为零。v4 内嵌两份可独立验证的 Origin Receipt 与实际生成的完整 Profile Receipts，
+重验 scope、时间顺序、Profile 摘要和 source/Q/Candidate/plan/session 绑定。
+`profile_results` 对三个固定 Profile 分别表达 `PASS`、`FAIL`、`ERROR`
 或 `NOT_RUN_SHARED_BLOCKER`；只有三项全为 `PASS` 时 overall 才为 `PASS`，Freshness 与
 Publication 必须拒绝语法有效的 FAIL Aggregate，并始终固定
 `release_authority_granted=false`、`publish_authorized=false`。
@@ -169,8 +172,12 @@ multi-writer 和 shared bus。Plan 必须冻结当前 active graph 与三个固�
 各 Profile Snapshot graph 聚合摘要。Clone copy 后必须按完整文件集合和字节摘要精确对账；
 revert 后 active VMDK 只能来自该冻结集合，所选 Snapshot graph 还必须再次与 Profile plan
 精确匹配，同尺寸 extent 漂移同样失败关闭。动态 VMX/redo 只作为运行观察，不得成为计划
-Authority。宿主命令使用固定 argv 与最小环境，guest sudo secret 只经 stdin
-传递。成功路径只允许软关机后删除；失败路径必须先软关机，软关机失败时仅允许 soft
+Authority。完整 Candidate 使用两个固定用途的原生 Console 捕获；材料 SCP 和无秘密准备
+结束后，才允许一次 workload 输入，并只交付到产生最终身份观察的同一受控 SSH 进程。
+root 首先运行 Host 内嵌的固定程序，安全复制并验证库存后才执行材料中的 Runner；
+一次特权进程包含材料完结、执行与回执输出，密码在启动后立即清理，不再通过环境读取。
+额度、交付与清理边界见 [Guest sudo 会话控制器](guest-sudo-session.md)。
+成功路径只允许软关机后删除；失败路径必须先软关机，软关机失败时仅允许 soft
 suspend、继而 hard suspend 作为紧急 containment（禁止 hard power-off）；只有确认副本
 不再运行后才隔离，仍然返回失败且不生成 Acceptance PASS。
 
@@ -195,8 +202,9 @@ known-hosts authority（`GlobalKnownHostsFile=none`）。连接目标固定为 `
 别名由 Candidate version、Candidate digest、随机 session ID、Profile 与 clone identity 派生；不得从用户或系统 ssh_config 恢复别名、用户、身份、代理、
 跳板、LocalCommand 或转发语义。
 
-Provider session root 必须由 Candidate version、Candidate digest 和随机 session ID 动态
-派生，每个 Profile 使用独立 clone root、session key 与 known_hosts。身份文件与 known_hosts
+Provider 的 plan/lease 绑定 Candidate version、Candidate digest 与随机 session ID；Windows
+磁盘路径使用受持有私有 work root 下的紧凑 session/profile/vm 布局，每个 Profile 使用
+独立 clone root、session key 与 known_hosts。身份文件与 known_hosts
 均须为各自 authority root 内的普通文件、路径链无 reparse point、由当前 Harness 用户所有，且不得向
 Everyone、Authenticated Users 或 Builtin Users 提供有效 NTFS 权限。身份文件必须显式
 绑定，默认 `~/.ssh/id_rsa`、`~/.ssh/id_ed25519` 和 ssh-agent 都不是 Authority。Harness
@@ -233,7 +241,7 @@ fail closed。
 
 Source VM Authority 还必须枚举当前 VMX 与三个受控 Snapshot descriptor 可达的闭合
 VMDK parent/extent 图，并把每个 descriptor 与 extent 的实际字节 SHA256 纳入
-`originalVmHashes`（当前 56 个图文件、与静态 VMX/VMSD/VMSN 合并后 61 个键）。完整图摘要
+`originalVmHashes`，文件数由实际闭合图及 VMX/VMSD/VMSN 清单取得。完整图摘要
 进入 Harness plan，每个 Snapshot 的祖先图摘要同时进入对应 Profile plan。全量复制后必须对
 所有 source-bound 文件逐字节重验；revert 后 active VMDK 节点只能来自这份 source-bound
 inventory，并且 selected Snapshot descriptor 的闭合祖先链必须与 Profile plan 摘要完全一致。
@@ -244,14 +252,20 @@ fail closed。
 该合同修复不在 Repair 阶段执行真实 VM，也不改变 Candidate Identity v2、Qualification 或
 R2 Authority。修复合并改变 exact main 后，旧
 Qualification、Identity、Execution Receipt、live R2 prestate 与隔离 Clone 全部仅可取证；
-下一轮必须从新 exact-main Qualification 开始，使用未暴露的最小只读 R2 凭据并创建三套
+本轮从新 exact-main Qualification 开始，使用已连接插件的真实只读 Origin 观察并创建三套
 全新 Profile Clone。
 
 ## 5. Freshness 与 Publish
 
-Freshness workflow 必须接收非可选 `candidate_acceptance_receipt_b64url`：它是 bounded、
-canonical UTF-8 Aggregate Receipt 的 unpadded base64url。Freshness Artifact 为十文件闭合
-集合，包含原始 `candidate-acceptance-receipt.json`，并绑定其 SHA256、Qualification Run、
+Freshness workflow 必须接收非可选 `candidate_acceptance_receipt_b64url`。完整 v4 收据由
+`encode_aggregate_receipt_b64url` 生成 `animemo.candidate-acceptance-wire/v1`：canonical JSON
+envelope 包含 zlib payload、原始回执字节数与 SHA-256，外层使用 unpadded base64url，
+最多 48 KiB，为 [GitHub 全部 workflow_dispatch inputs 的 65,535 字符上限](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs)
+留出其他绑定字段的空间。解码最多输出 384 KiB，拒绝截断、拼接或尾随流、超限解压、
+错误长度/摘要、额外字段与非 canonical JSON；历史直接 base64url 格式保留原有验证。
+Harness 的 `candidateAcceptanceReceiptB64url` 即为下一阶段输入，生成它不派发工作流。
+解码后的原始完整 Aggregate 字节保持不变；Freshness Artifact 为十文件闭合集合，
+包含原始 `candidate-acceptance-receipt.json`，并绑定其 SHA256、Qualification Run、
 intended main SHA/tree 与 candidate version，同时保留双快照、至少 60 秒间隔和 15 分钟
 TTL。
 

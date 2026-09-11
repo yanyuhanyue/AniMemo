@@ -18,6 +18,7 @@ import tarfile
 import tempfile
 import unicodedata
 import zipfile
+import zlib
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -82,7 +83,7 @@ VERIFICATION_EXECUTION_RECEIPT_SCHEMA = (
 )
 PROFILE_RECEIPT_SCHEMA = "animemo.prepublication-candidate-profile-receipt/v1"
 AGGREGATE_RECEIPT_SCHEMA = (
-    "animemo.prepublication-candidate-acceptance-receipt/v3"
+    "animemo.prepublication-candidate-acceptance-receipt/v4"
 )
 VERIFIER_CONTRACT_VERSION = "2"
 POSIX_VERIFIED_CANDIDATE_ROOT = PurePosixPath(
@@ -112,6 +113,9 @@ MAX_ARCHIVE_FILE_COUNT = 1100
 MAX_RUNTIME_BYTES = 16 * 1024 * 1024 * 1024
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_RECEIPT_B64URL_BYTES = 512 * 1024
+MAX_RECEIPT_WIRE_B64URL_BYTES = 48 * 1024
+MAX_RECEIPT_JSON_BYTES = MAX_RECEIPT_B64URL_BYTES * 3 // 4
+RECEIPT_WIRE_SCHEMA = "animemo.candidate-acceptance-wire/v1"
 MAX_CONTROLLER_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_CONTROLLER_EXPANDED_BYTES = 6 * 1024 * 1024 * 1024
 MIN_CONTROLLER_DISK_RESERVE_BYTES = 2 * 1024 * 1024 * 1024
@@ -2108,7 +2112,9 @@ def load_verified_candidate(
 def validate_profile_receipt(value: object) -> dict[str, Any]:
     receipt = _validate_schema(
         value,
-        "prepublication-candidate-profile-receipt.schema.json",
+        ("prepublication-candidate-profile-receipt-v2.schema.json"
+         if type(value) is dict and value.get("schema") == "animemo.prepublication-candidate-profile-receipt/v2"
+         else "prepublication-candidate-profile-receipt.schema.json"),
         code="CANDIDATE_PROFILE_RECEIPT_INVALID",
     )
     started = _parse_time(receipt["started_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")
@@ -2220,7 +2226,9 @@ def validate_profile_receipt(value: object) -> dict[str, Any]:
 def validate_aggregate_receipt(value: object) -> dict[str, Any]:
     receipt = _validate_schema(
         value,
-        "prepublication-candidate-acceptance-receipt.schema.json",
+        ("prepublication-candidate-acceptance-receipt-v4.schema.json"
+         if type(value) is dict and value.get("schema") == AGGREGATE_RECEIPT_SCHEMA
+         else "prepublication-candidate-acceptance-receipt.schema.json"),
         code="CANDIDATE_ACCEPTANCE_RECEIPT_INVALID",
     )
     _parse_time(receipt["completed_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")
@@ -2233,6 +2241,50 @@ def validate_aggregate_receipt(value: object) -> dict[str, Any]:
         == receipt["r2_origin_poststate_observation_id"]
     ):
         _reject("CANDIDATE_R2_OBSERVATION_REUSED")
+    if receipt["schema"] == AGGREGATE_RECEIPT_SCHEMA:
+        from release.r2_plugin_origin import validate_plugin_receipt, R2PluginOriginError
+        try:
+            for role in ("PRESTATE", "POSTSTATE"):
+                prefix = "r2_origin_" + role.lower()
+                origin = validate_plugin_receipt(receipt[prefix + "_receipt"],
+                    expected_scope=receipt, role=role)
+                if (receipt[prefix + "_receipt_digest"] != sha256_bytes(canonical_json_bytes(origin))
+                        or receipt[prefix + "_observation_id"] != origin["observation_id"]):
+                    _reject("CANDIDATE_R2_RECEIPT_MISMATCH")
+            pre, post = receipt["r2_origin_prestate_receipt"], receipt["r2_origin_poststate_receipt"]
+            if not (_parse_time(pre["completed_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")
+                    <= _parse_time(post["request"]["created_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")
+                    <= _parse_time(post["completed_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")
+                    <= _parse_time(receipt["completed_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")):
+                _reject("CANDIDATE_R2_OBSERVATION_ORDER_INVALID")
+        except (R2PluginOriginError, KeyError, TypeError, ValueError) as error:
+            raise CandidateContractError("CANDIDATE_R2_RECEIPT_INVALID") from error
+        for profile, result in receipt["profile_results"].items():
+            name = profile.upper()
+            detail = receipt["profile_receipts"].get(name)
+            if result["receipt_digest"] is None:
+                if detail is not None:
+                    _reject("CANDIDATE_PROFILE_RECEIPT_BINDING_MISMATCH")
+                continue
+            detail = validate_profile_receipt(detail)
+            if (detail["schema"] != "animemo.prepublication-candidate-profile-receipt/v2"
+                    or detail["profile"] != name or detail["result"] != result["status"]
+                    or sha256_bytes(canonical_json_bytes(detail)) != result["receipt_digest"]
+                    or any(detail[key] != receipt[key] for key in (
+                        "plan_digest", "session_id", "source_sha", "source_tree", "candidate_version",
+                        "candidate_input_digest", "verified_candidate_digest", "qualification_run_id",
+                        "qualification_run_attempt", "base_vm_identity", "source_vm_inventory_identity",
+                        "source_disk_graph_identity"))
+                    or detail["snapshot_identity"] != receipt["snapshot_identities"][name]
+                    or detail["snapshot_disk_graph_identity"] != receipt["snapshot_disk_graph_identities"][name]
+                    or detail["original_vm_pre_hashes"] != receipt["original_vm_hashes"]
+                    or detail["original_vm_post_hashes"] != receipt["original_vm_hashes"]):
+                _reject("CANDIDATE_PROFILE_RECEIPT_BINDING_MISMATCH")
+            if not (_parse_time(pre["completed_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")
+                    <= _parse_time(detail["started_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")
+                    <= _parse_time(detail["completed_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")
+                    <= _parse_time(post["request"]["created_at"], code="CANDIDATE_RECEIPT_TIME_INVALID")):
+                _reject("CANDIDATE_PROFILE_OBSERVATION_ORDER_INVALID")
     profile_results = receipt["profile_results"]
     original_vm_hashes = receipt["original_vm_hashes"]
     if receipt["base_vm_identity"] != sha256_bytes(
@@ -2265,11 +2317,11 @@ def aggregate_receipt_digest(value: object) -> str:
     return sha256_bytes(canonical_json_bytes(validate_aggregate_receipt(value)))
 
 
-def decode_aggregate_receipt_b64url(value: str) -> tuple[dict[str, Any], bytes]:
+def _decode_receipt_base64(value: str, maximum: int) -> bytes:
     if (
         type(value) is not str
         or not value
-        or len(value) > MAX_RECEIPT_B64URL_BYTES
+        or len(value) > maximum
         or "=" in value
         or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None
     ):
@@ -2279,11 +2331,49 @@ def decode_aggregate_receipt_b64url(value: str) -> tuple[dict[str, Any], bytes]:
         decoded = base64.urlsafe_b64decode((value + padding).encode("ascii"))
     except (ValueError, UnicodeEncodeError) as error:
         raise CandidateContractError("CANDIDATE_RECEIPT_B64URL_INVALID") from error
-    if len(decoded) > MAX_JSON_BYTES:
-        _reject("CANDIDATE_RECEIPT_SIZE_LIMIT")
     canonical = base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=")
     if canonical != value:
         _reject("CANDIDATE_RECEIPT_B64URL_NON_CANONICAL")
+    return decoded
+
+
+def encode_aggregate_receipt_b64url(value: object) -> str:
+    """A bounded dispatch envelope; receipt identity is its original bytes."""
+    encoded = canonical_json_bytes(validate_aggregate_receipt(value))
+    if len(encoded) > MAX_RECEIPT_JSON_BYTES:
+        _reject("CANDIDATE_RECEIPT_SIZE_LIMIT")
+    envelope = {
+        "schema": RECEIPT_WIRE_SCHEMA, "encoding": "zlib",
+        "receipt_sha256": sha256_bytes(encoded), "receipt_bytes": len(encoded),
+        "payload": base64.urlsafe_b64encode(zlib.compress(encoded, level=9)).decode("ascii").rstrip("="),
+    }
+    wire = base64.urlsafe_b64encode(canonical_json_bytes(envelope)).decode("ascii").rstrip("=")
+    if len(wire) > MAX_RECEIPT_WIRE_B64URL_BYTES:
+        _reject("CANDIDATE_RECEIPT_WIRE_SIZE_LIMIT")
+    return wire
+
+
+def decode_aggregate_receipt_b64url(value: str) -> tuple[dict[str, Any], bytes]:
+    decoded = _decode_receipt_base64(value, MAX_RECEIPT_B64URL_BYTES)
+    body = _strict_json_bytes(decoded, code="CANDIDATE_ACCEPTANCE_RECEIPT_INVALID")
+    if type(body) is dict and body.get("schema") == RECEIPT_WIRE_SCHEMA:
+        if (len(value) > MAX_RECEIPT_WIRE_B64URL_BYTES
+                or set(body) != {"schema", "encoding", "receipt_sha256", "receipt_bytes", "payload"}
+                or body["encoding"] != "zlib"
+                or type(body["receipt_bytes"]) is not int
+                or not 0 < body["receipt_bytes"] <= MAX_RECEIPT_JSON_BYTES
+                or canonical_json_bytes(body) != decoded):
+            _reject("CANDIDATE_RECEIPT_WIRE_INVALID")
+        compressed = _decode_receipt_base64(body["payload"], MAX_RECEIPT_WIRE_B64URL_BYTES)
+        try:
+            inflater = zlib.decompressobj()
+            decoded = inflater.decompress(compressed, body["receipt_bytes"] + 1)
+        except zlib.error as error:
+            raise CandidateContractError("CANDIDATE_RECEIPT_WIRE_INVALID") from error
+        if (len(decoded) != body["receipt_bytes"] or not inflater.eof
+                or inflater.unused_data or inflater.unconsumed_tail
+                or sha256_bytes(decoded) != body["receipt_sha256"]):
+            _reject("CANDIDATE_RECEIPT_WIRE_INVALID")
     receipt = validate_aggregate_receipt(
         _strict_json_bytes(decoded, code="CANDIDATE_ACCEPTANCE_RECEIPT_INVALID")
     )
@@ -2308,6 +2398,7 @@ __all__ = [
     "build_candidate_input",
     "canonical_json_bytes",
     "decode_aggregate_receipt_b64url",
+    "encode_aggregate_receipt_b64url",
     "extract_candidate_oci_archive",
     "load_verified_candidate",
     "normalize_candidate_oci_layout",
