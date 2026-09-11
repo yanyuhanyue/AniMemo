@@ -28,6 +28,8 @@
 
 `WindowsConsoleCapture` 要求未录制、可见且仅当前 Python 进程附着的原生 Windows Console，校验 Win32 console handle/mode，关闭 echo，以可变 UTF-16 缓冲读取后直接转换为可变 UTF-8 buffer。每次读取返回后也复核同一 Console。重定向、共享 Console、不可见 pseudoconsole、取消、模式变化和读取失败均关闭该捕获路径，没有明文输入 fallback。生产启动须让专用 Console 直接运行 Python，不能从会在结束后继续接收输入的交互 shell 调用。若清空输入队列失败，保持隐藏模式并终止此 Python/专用 Console；不得恢复 echo 后继续使用窗口。不要把密码放入聊天、命令、环境或结果文件。
 
+输入反馈使用一个 Unicode 码点对应一个 `*`，UTF-16 代理对只显示一个掩码；退格同步移除最后一个掩码，包括缓冲区换行处。只将固定掩码和光标操作送往 Console，不回显密码原文。输入长度会通过掩码可见。预检要求原生输出启用 processed output 和立即换行，以保持掩码及光标一致；不支持的输出模式在捕获额度登记前拒绝。掩码写入或擦除失败同样终止本次捕获并清理缓冲区。
+
 捕获前在固定的 `E:/<SHA256(CAPTURE_AUTHORIZATION)>` 私有目录原子登记一次尝试。此记录只阻止再次捕获，不提供 Guest authority；与 run/session/source SHA 无关，重启进程或创建新计划不能重置次数。取消和失败也保留记录，下一次真实捕获需新的授权处理，不删除该记录重试。
 
 成功和失败都回收当前 SSH/secret/session key，并尝试软关机；provider 必要时使用既有 suspend containment。结果分别记录 STOPPED、SUSPENDED 或未完成 containment，suspend 不算正常关机。该入口保留本次 private-work 中的 Clone/测试数据，execution 退出优先清理复制的 bootstrap key，再清理工具/source 临时副本。独立清理步骤逐项执行，任何失败都会记录并阻止成功结论。随后取得新的 R2 POSTSTATE，并再次核对源码。报告只包含公开身份、操作类别、计数与收尾状态。
