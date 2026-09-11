@@ -216,7 +216,7 @@ def _remote_workload_command(root_program):
     # password is wiped immediately after one forwarding write, before wait.
     from scripts.guest_sudo_session import _REMOTE_OBSERVE
     observe = _REMOTE_OBSERVE[:_REMOTE_OBSERVE.index('password=')]
-    argv = ['sudo', '-S', '-k', '-p', '', '--', '/usr/bin/python3', '-I', '-B', '-c', root_program]
+    argv = ['/usr/bin/sudo', '-S', '-k', '-p', '', '--', '/usr/bin/python3', '-I', '-B', '-c', root_program]
     program = observe + '\n' + '''password=bytearray()
 child=None
 try:

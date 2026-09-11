@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import ast
 import json
 import os
 from pathlib import Path
@@ -210,6 +211,20 @@ class WorkloadTransportTests(unittest.TestCase):
         self.assertLess(program.index('password.clear()'), program.index('child.wait()'))
         self.assertIn('bufsize=0', program)
         self.assertNotIn(SENTINEL.decode(), program)
+
+    def test_all_candidate_sudo_executables_are_absolute_and_ignore_guest_path(self):
+        from scripts import guest_sudo_session as bootstrap
+        programs = [c._remote_workload_command('pass')]
+        programs += [bootstrap._remote_command(role, 'ssh-ed25519 YWJj alias')
+                     for role in ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO')]
+        for command in programs:
+            tree = ast.parse(shlex.split(command)[-1])
+            sudo_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute) and node.func.attr in {'run', 'Popen'}
+                and node.args and isinstance(node.args[0], ast.List)
+                and any(isinstance(item, ast.Constant) and item.value == '-S' for item in node.args[0].elts)]
+            self.assertEqual(len(sudo_calls), 1)
+            self.assertEqual(sudo_calls[0].args[0].elts[0].value, '/usr/bin/sudo')
 
 
 if __name__ == '__main__':
