@@ -85,6 +85,7 @@ class ProfileCleanupTests(unittest.TestCase):
         self.assert_no_keys()
         operation = self.provider._profile_operation_results[self.profile.profile]
         self.assertEqual(operation['cleanup_errors'][0]['step'], 'containment')
+        self.assertEqual(operation['power_state'], 'CONTAINMENT_PENDING')
         self.assertEqual(operation['clone_disposition'], 'RETAINED_CLEANUP_BLOCKED')
         self.assertTrue(operation['lease_released'])
 

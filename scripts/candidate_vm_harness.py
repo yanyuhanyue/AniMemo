@@ -5252,6 +5252,7 @@ class ClosedVmwareProvider:
                             running = True
                     if running:
                         def contain():
+                            operation["power_state"] = "CONTAINMENT_PENDING"
                             operation["power_state"] = self._contain_clone(clone_vmx)
                         contained = cleanup("containment", contain)
                     else:
