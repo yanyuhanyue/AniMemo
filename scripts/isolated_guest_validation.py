@@ -233,6 +233,8 @@ def _validate(plan, provider, console, result, *, plugin_origin=None):
         _check_checkout(plan.source_sha, plan.source_tree)
     except BaseException as error:
         result["operation_failure_code"] = _failure_code(error)
+        if type(error) is h.SessionKeyCommandError:
+            result["operation_failure_diagnostic"] = error.public_diagnostic()
         raise
     finally:
         try:
@@ -297,6 +299,8 @@ def main(argv=None):
         # Unknown exception text and subprocess output can contain sensitive
         # data. Only errors from the closed contract may contribute a code.
         result["failure_code"] = _failure_code(error)
+        if type(error) is h.SessionKeyCommandError:
+            result["failure_diagnostic"] = error.public_diagnostic()
         return 2
     finally:
         with report:

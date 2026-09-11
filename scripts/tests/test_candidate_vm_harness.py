@@ -565,6 +565,8 @@ class FakeWindowsPlatform:
         self.last_controlled_file_check = (path, root, private)
         if path.name == "id_ed25519":
             status = self.identity_status
+        elif path.name == "id_ed25519.pub" and not private:
+            status = "PASS"
         elif path.name == "known_hosts":
             status = self.known_hosts_status
         else:
@@ -1536,6 +1538,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
 
         def generate(argv, **_kwargs):
             generated_argv.append(tuple(argv))
+            if "-y" in argv:
+                return SimpleNamespace(returncode=0, stdout=b"ssh-ed25519 QUJD\n", stderr=b"")
             authority.identity_file.write_bytes(b"ephemeral-fixture")
             authority.identity_file.with_suffix(".pub").write_text(
                 f"ssh-ed25519 QUJD {authority.host_key_alias}\n",
@@ -2671,6 +2675,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
         )
         provider._run((str(harness.VMRUN), "-T", "ws", "list"), code="TEST")
         provider._run((str(harness.ROBOCOPY), "source", "target"), code="TEST")
+        provider._run((str(harness.SSH_KEYGEN), "-?"), code="TEST", openssh=True)
         provider._ssh_checked(authority, "/usr/bin/true", code="TEST")
         provider._run(
             provider._scp_argv(
@@ -2682,12 +2687,12 @@ class CandidateVmHarnessTests(unittest.TestCase):
             code="TEST",
             openssh=True,
         )
-        vmrun_environment, robocopy_environment, ssh_environment, scp_environment = (
+        vmrun_environment, robocopy_environment, keygen_environment, ssh_environment, scp_environment = (
             call["environment"] for call in runner.calls
         )
         self.assertNotIn("PROGRAMDATA", vmrun_environment)
         self.assertNotIn("PROGRAMDATA", robocopy_environment)
-        for environment in (ssh_environment, scp_environment):
+        for environment in (keygen_environment, ssh_environment, scp_environment):
             self.assertEqual(environment["PROGRAMDATA"], r"C:\ProgramData")
             self.assertNotIn("HOME", environment)
             self.assertNotIn("USERPROFILE", environment)
@@ -2704,6 +2709,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
             ((str(harness.ROBOCOPY), "source", "target"), True),
             ((str(harness.SSH), "-V"), False),
             ((str(harness.SCP), "-V"), False),
+            ((str(harness.SSH_KEYGEN), "-?"), False),
         )
         for argv, openssh in cases:
             with self.subTest(argv=argv), self.assertRaisesRegex(

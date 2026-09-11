@@ -209,6 +209,37 @@ class IsolatedGuestValidationTests(unittest.TestCase):
         supervisor.bootstrap_rotation.assert_not_called()
         entry._controller_clone.assert_not_called()
 
+    def test_keygen_diagnostic_preserves_only_process_facts_before_capture(self):
+        events, _, _, console, supervisor, _ = self.validation_fixture()
+        error = h.SessionKeyCommandError(
+            "CANDIDATE_VM_SESSION_KEY_GENERATION_FAILED", kind="NONZERO_EXIT",
+            returncode=255, stdout_empty=False, stderr_empty=True,
+        )
+        error.stdout = b"synthetic-sensitive-output"
+        entry._controller_clone.side_effect = error
+        with self.assertRaises(h.SessionKeyCommandError):
+            entry._validate(self.plan, self.provider, console, self.result)
+        self.assertEqual(self.result["operation_failure_diagnostic"], {
+            "tool": "ssh-keygen", "kind": "NONZERO_EXIT", "returncode": 255,
+            "timeout": False, "stdout_empty": False, "stderr_empty": True,
+        })
+        self.assertNotIn("synthetic-sensitive-output", str(self.result))
+        self.assertEqual(events, ["PRESTATE", "POSTSTATE"])
+        console.capture.assert_not_called()
+        supervisor.bootstrap_rotation.assert_not_called()
+
+    def test_unknown_error_cannot_add_untrusted_diagnostic_output(self):
+        _, _, _, console, _, _ = self.validation_fixture()
+        error = RuntimeError("synthetic-sensitive-output")
+        error.public_diagnostic = lambda: {"secret": "synthetic-sensitive-output"}
+        entry._controller_clone.side_effect = error
+        with self.assertRaises(RuntimeError):
+            entry._validate(self.plan, self.provider, console, self.result)
+        self.assertEqual(self.result["operation_failure_code"], "GUEST_VALIDATION_INTERRUPTED_OR_UNCLASSIFIED")
+        self.assertNotIn("operation_failure_diagnostic", self.result)
+        self.assertNotIn("synthetic-sensitive-output", str(self.result))
+        console.capture.assert_not_called()
+
     def test_plugin_pre_and_post_use_same_explicit_channel_after_cleanup(self):
         events, origin, _, console, _, _ = self.validation_fixture()
         channel = mock.sentinel.plugin_channel

@@ -257,6 +257,27 @@ class CandidateHarnessError(RuntimeError):
         super().__init__(code)
 
 
+class SessionKeyCommandError(CandidateHarnessError):
+    """Bounded process facts, never argv, environment or captured output."""
+
+    def __init__(
+        self, code: str, *, kind: str, returncode: int | None = None,
+        stdout_empty: bool | None = None, stderr_empty: bool | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.kind = kind
+        self.returncode = returncode
+        self.stdout_empty = stdout_empty
+        self.stderr_empty = stderr_empty
+
+    def public_diagnostic(self) -> dict[str, str | int | bool | None]:
+        return {
+            "tool": "ssh-keygen", "kind": self.kind,
+            "returncode": self.returncode, "timeout": self.kind == "TIMEOUT",
+            "stdout_empty": self.stdout_empty, "stderr_empty": self.stderr_empty,
+        }
+
+
 @dataclass(frozen=True)
 class WindowsControlledFileInspection:
     """Secret-free classification of one controlled Windows file."""
@@ -2670,6 +2691,7 @@ class ClosedVmwareProvider:
         is_openssh_executable = requested in {
             _canonical_windows_path(str(SSH)),
             _canonical_windows_path(str(SCP)),
+            _canonical_windows_path(str(SSH_KEYGEN)),
         }
         if openssh is not is_openssh_executable:
             raise CandidateHarnessError("WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE")
@@ -2730,7 +2752,16 @@ class ClosedVmwareProvider:
                     exchange=guest_exchange,
                     timeout=timeout,
                 )
-        except (OSError, subprocess.SubprocessError) as error:
+        except (OSError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+            if requested_path == SSH_KEYGEN:
+                raise SessionKeyCommandError(
+                    code,
+                    kind=("TIMEOUT" if isinstance(error, subprocess.TimeoutExpired)
+                          else "CANCELLED" if isinstance(error, KeyboardInterrupt)
+                          else "PROCESS_START_OR_WAIT_FAILED"),
+                ) from error
+            if isinstance(error, KeyboardInterrupt):
+                raise
             raise CandidateHarnessError(code) from error
         if (
             self._execution is not None
@@ -2741,6 +2772,11 @@ class ClosedVmwareProvider:
                 "CANDIDATE_VM_EXECUTION_TOOL_IDENTITY_MISMATCH"
             )
         if completed.returncode not in allowed:
+            if requested_path == SSH_KEYGEN:
+                raise SessionKeyCommandError(
+                    code, kind="NONZERO_EXIT", returncode=completed.returncode,
+                    stdout_empty=not completed.stdout, stderr_empty=not completed.stderr,
+                )
             raise CandidateHarnessError(code)
         return completed
 
@@ -4022,61 +4058,83 @@ class ClosedVmwareProvider:
         )
         if authority.profile_root.exists() or authority.profile_root.is_symlink():
             raise CandidateHarnessError("CANDIDATE_VM_PROFILE_NAMESPACE_EXISTS")
+        if (
+            authority.ssh_root != authority.profile_root / "ssh"
+            or authority.identity_file != authority.ssh_root / "id_ed25519"
+            or authority.known_hosts_file != authority.ssh_root / "known_hosts"
+        ):
+            raise CandidateHarnessError("CANDIDATE_VM_PROFILE_NAMESPACE_INVALID")
+        created = False
+        prepared = False
         try:
             authority.ssh_root.mkdir(parents=True, exist_ok=False)
-            if self._execution is not None:
-                for private_directory in (
-                    authority.session_root,
-                    authority.profile_root,
-                    authority.ssh_root,
+            created = True
+            with ExitStack() as held:
+                if self._execution is not None:
+                    for directory in (
+                        authority.session_root, authority.profile_root, authority.ssh_root,
+                    ):
+                        held.enter_context(hold_windows_private_directory(
+                            directory, allow_child_writes=True,
+                        ))
+                if (
+                    authority.known_hosts_file.exists()
+                    or authority.known_hosts_file.is_symlink()
                 ):
-                    assert_windows_private_acl(private_directory)
-            if (
-                authority.known_hosts_file.exists()
-                or authority.known_hosts_file.is_symlink()
-            ):
-                raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_RESIDUAL")
-            self._run(
-                (
-                    str(SSH_KEYGEN),
-                    "-q",
-                    "-t",
-                    "ed25519",
-                    "-N",
-                    "",
-                    "-C",
-                    authority.host_key_alias,
-                    "-f",
-                    str(authority.identity_file),
-                ),
-                code="CANDIDATE_VM_SESSION_KEY_GENERATION_FAILED",
-                timeout=30,
-            )
-            authority.identity_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
-            authority.identity_file.with_suffix(".pub").chmod(
-                stat.S_IRUSR | stat.S_IWUSR
-            )
-            if self._execution is not None:
-                assert_windows_private_acl(authority.identity_file)
-                assert_windows_private_acl(
-                    authority.identity_file.with_suffix(".pub")
-                )
-            inspection = self._windows_platform.inspect_controlled_file(
-                authority.identity_file,
-                root=authority.ssh_root,
-                private=True,
-            )
-        except CandidateHarnessError:
-            raise
+                    raise CandidateHarnessError("CANDIDATE_VM_KNOWN_HOSTS_RESIDUAL")
+                self._generate_session_key_pair(authority, held)
+            prepared = True
         except OSError as error:
             raise CandidateHarnessError(
                 "CANDIDATE_VM_PROFILE_NAMESPACE_UNAVAILABLE"
             ) from error
-        if inspection.status != _CONTROLLED_FILE_PASS:
-            code = _CONTROLLED_FILE_ERROR_CODES.get(
-                inspection.status, "WINDOWS_WIN32_ABI_UNSUPPORTED"
+        finally:
+            # Generation, verification and cancellation can leave either file.
+            # Only the namespace created by this call may be cleaned here.
+            if created and not prepared:
+                self._destroy_session_key(authority)
+
+    def _generate_session_key_pair(
+        self, authority: ProfileConnectionAuthority, held: ExitStack,
+    ) -> None:
+        self._run(
+            (str(SSH_KEYGEN), "-q", "-t", "ed25519", "-N", "",
+             "-C", authority.host_key_alias, "-f", str(authority.identity_file)),
+            code="CANDIDATE_VM_SESSION_KEY_GENERATION_FAILED",
+            timeout=30, openssh=True,
+        )
+        for path in (authority.identity_file, authority.identity_file.with_suffix(".pub")):
+            metadata = path.lstat()
+            if (
+                not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or not 1 <= metadata.st_size <= 64 * 1024
+            ):
+                raise CandidateHarnessError("CANDIDATE_VM_SESSION_KEY_INVALID")
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            if self._execution is not None:
+                held.enter_context(hold_windows_private_file(path))
+            inspection = self._windows_platform.inspect_controlled_file(
+                # Public keys may be readable; the private hold still rejects
+                # untrusted mutation and unsafe ownership of either file.
+                path, root=authority.ssh_root, private=path == authority.identity_file,
             )
-            raise CandidateHarnessError(code)
+            if inspection.status != _CONTROLLED_FILE_PASS:
+                raise CandidateHarnessError(_CONTROLLED_FILE_ERROR_CODES.get(
+                    inspection.status, "WINDOWS_WIN32_ABI_UNSUPPORTED",
+                ))
+        expected = self._session_public_key(authority).split()[:2]
+        derived = self._run(
+            (str(SSH_KEYGEN), "-y", "-P", "", "-f", str(authority.identity_file)),
+            code="CANDIDATE_VM_SESSION_KEY_INVALID", timeout=15, openssh=True,
+        )
+        try:
+            if len(derived.stdout) > 64 * 1024:
+                raise ValueError
+            fields = derived.stdout.decode("ascii", errors="strict").split()
+            if len(fields) not in (2, 3) or fields[:2] != expected:
+                raise ValueError
+        except (UnicodeError, ValueError) as error:
+            raise CandidateHarnessError("CANDIDATE_VM_SESSION_KEY_INVALID") from error
 
     @staticmethod
     def _read_known_host_key(
@@ -4809,6 +4867,7 @@ class ClosedVmwareProvider:
 
     @staticmethod
     def _destroy_session_key(authority: ProfileConnectionAuthority) -> None:
+        failure: CandidateHarnessError | None = None
         for path in (
             authority.identity_file,
             authority.identity_file.with_suffix(".pub"),
@@ -4821,12 +4880,14 @@ class ClosedVmwareProvider:
                 )
                 if target.exists() or target.is_symlink():
                     target.unlink()
-            except CandidateHarnessError:
-                raise
-            except OSError as error:
-                raise CandidateHarnessError(
+            except CandidateHarnessError as error:
+                failure = failure or error
+            except OSError:
+                failure = failure or CandidateHarnessError(
                     "CANDIDATE_VM_SESSION_KEY_DELETION_FAILED"
-                ) from error
+                )
+        if failure is not None:
+            raise failure
 
     @staticmethod
     def _destroy_known_hosts(authority: ProfileConnectionAuthority) -> None:
