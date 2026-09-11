@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from release.formal_windows_pretrust import (
-    hold_windows_private_file, hold_windows_private_directory,
+    hold_windows_private_file, hold_windows_private_working_directory,
 )
 from scripts import candidate_vm_harness as h
 
@@ -163,7 +163,7 @@ class SessionSupervisor:
             if provider._require_execution_context:
                 for directory in (self._authority.session_root, self._authority.profile_root,
                                   self._authority.ssh_root, self._authority.clone_root):
-                    self._holds.enter_context(hold_windows_private_directory(directory, allow_child_writes=True))
+                    self._holds.enter_context(hold_windows_private_working_directory(directory))
                 for path in (lease.path, self._authority.identity_file, self._authority.identity_file.with_suffix(".pub")):
                     self._holds.enter_context(hold_windows_private_file(path))
         except BaseException:

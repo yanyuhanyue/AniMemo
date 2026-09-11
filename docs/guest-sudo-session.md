@@ -32,7 +32,7 @@
 
 ## 单 Profile 动态入口
 
-Windows execution 的私有工作根使用紧凑的 `session/profile/vm` 路径；Candidate、源码和完整 Clone digest 仍由 plan、active authority、lease 和材料绑定校验，不在目录中重复展开。VMware 可在文件实际存在时因过长 VMX 路径报“找不到虚拟机”。复制前检查所有目标文件路径的 UTF-16 长度，保留临时文件后缀余量；超预算在调用 VMware 前拒绝。Clone 根使用 FILE_LIST_DIRECTORY 持有且不共享 DELETE，既拒绝替换，又允许 VMware 设置工作目录；仅 FILE_READ_ATTRIBUTES 不提供同样的替换保护。源、材料、工具、会话目录的 ACL/holds 保持不变。
+Windows execution 的私有工作根使用紧凑的 `session/profile/vm` 路径；Candidate、源码和完整 Clone digest 仍由 plan、active authority、lease 和材料绑定校验，不在目录中重复展开。VMware 可在文件实际存在时因过长 VMX 路径报“找不到虚拟机”。复制前检查所有目标文件路径的 UTF-16 长度，保留临时文件后缀余量；超预算在调用 VMware 前拒绝。宿主与 Supervisor 对 session/profile/ssh/Clone 目录统一使用 FILE_LIST_DIRECTORY 持有且不共享 DELETE，既拒绝替换，又允许 VMware 设置工作目录和内外两层同时持有。内层关闭不释放外层保护；仅 FILE_READ_ATTRIBUTES 不提供同样的替换保护。源、材料、工具的 holds 与所有私有 ACL 保持不变。
 
 无凭据的 vmrun 恢复、启动和停止命令保留操作、Clone 路径、受信工具 digest、起止时间、真实返回码或 timeout/cancel/launch 分类。标准流每流最多匹配 16 KiB 中已知的通用错误摘录，精确 Clone 路径以占位符替换，未知内容不持久化；不扩展到 SSH/sudo 标准流。初始故障与 containment、清理、POSTSTATE 故障分别记录，后者不覆盖初始故障。未到成功启动阶段时，一次空运行清单只记 `NOT_RUNNING_OBSERVED`，不宣称启动后已软关机。
 

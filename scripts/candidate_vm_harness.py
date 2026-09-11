@@ -5128,9 +5128,7 @@ class ClosedVmwareProvider:
                 authority.ssh_root,
             ):
                 profile_authority_stack.enter_context(
-                    hold_windows_private_directory(
-                        directory, allow_child_writes=True
-                    )
+                    hold_windows_private_working_directory(directory)
                 )
             profile_authority_stack.enter_context(
                 hold_windows_private_file(authority.identity_file)
