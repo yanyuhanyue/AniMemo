@@ -19,6 +19,18 @@ from scripts.tests import test_guest_sudo_session as session_fixtures
 from scripts.tests.test_guest_sudo_session import SENTINEL, InputSink
 
 
+class FixedAuthorizationTests(unittest.TestCase):
+    def test_pr247_scope_uses_only_its_fixed_ascii_digest_path_without_reserving(self):
+        # Only resolve the production path. Every actual reserve uses the
+        # isolated mappings in BatchSessionTests; this never touches a ledger.
+        self.assertEqual(b.capture_ledger(b.PR247_REVALIDATION_AUTHORIZATION),
+            Path('E:/1e0c088ec6cb93149000f3d00a88111230dc38a8ebcf8233340e1fcfa5df086f'))
+        for unknown in (None, '', b.PR247_REVALIDATION_AUTHORIZATION + '_NEXT',
+                        'ANIMEMO_V2_CANDIDATE_PR247_REVALIDATION_SINGLE_CAPTURE_V2'):
+            with self.assertRaisesRegex(guest.ControllerFailure, 'AUTHORIZATION_INVALID'):
+                b.capture_ledger(unknown)
+
+
 class BatchSessionTests(unittest.TestCase):
     def setUp(self):
         fixture = session_fixtures.GuestSudoSessionTests()
@@ -31,11 +43,14 @@ class BatchSessionTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.ledger = Path(temporary.name) / ('a' * 64)
         self.new_ledger = Path(temporary.name) / ('b' * 64)
+        self.legacy_ledger = Path(temporary.name) / ('c' * 64)
         patcher = mock.patch.object(b, 'CAPTURE_LEDGERS', {
-            b.AUTHORIZATION: self.ledger, b.GATEWAY_REPAIR_AUTHORIZATION: self.new_ledger})
+            b.AUTHORIZATION: self.legacy_ledger, b.GATEWAY_REPAIR_AUTHORIZATION: self.new_ledger,
+            b.PR247_REVALIDATION_AUTHORIZATION: self.ledger})
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.batch = b.CandidateBatch(self.provider, self.plan, clock=lambda: self.time)
+        self.batch = b.CandidateBatch(self.provider, self.plan,
+            authorization_id=b.PR247_REVALIDATION_AUTHORIZATION, clock=lambda: self.time)
         self.provider._candidate_batch = self.batch
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(b, '_check_checkout').start()
@@ -141,7 +156,7 @@ class BatchSessionTests(unittest.TestCase):
     def test_two_launchers_race_for_the_same_irreversible_capture(self):
         def reserve():
             try:
-                b.reserve_capture()
+                b.reserve_capture(b.PR247_REVALIDATION_AUTHORIZATION)
                 return 'RESERVED'
             except guest.ControllerFailure:
                 return 'REJECTED'
@@ -150,23 +165,30 @@ class BatchSessionTests(unittest.TestCase):
         self.assertCountEqual(values, ['RESERVED', 'REJECTED'])
 
     def test_new_fixed_scope_preserves_consumed_old_scope_and_requires_explicit_selection(self):
-        b.reserve_capture()
-        (self.ledger / 'preserved.json').write_bytes(b'{"consumed":true}\n')
-        original = (self.ledger / 'preserved.json').read_bytes()
+        originals = {}
+        for authorization, ledger in ((b.AUTHORIZATION, self.legacy_ledger),
+                                      (b.GATEWAY_REPAIR_AUTHORIZATION, self.new_ledger)):
+            b.reserve_capture(authorization)
+            (ledger / 'preserved.json').write_bytes(b'{"consumed":true}\n')
+            originals[ledger] = (ledger / 'preserved.json').read_bytes()
+            with self.assertRaisesRegex(guest.ControllerFailure, 'ALREADY_ATTEMPTED'):
+                b.reserve_capture(authorization)
         for unknown in (None, '', 'arbitrary-new-scope', str(self.new_ledger)):
             with self.assertRaisesRegex(guest.ControllerFailure, 'AUTHORIZATION_INVALID'):
                 b.CandidateBatch(self.provider, self.plan, authorization_id=unknown)
-        with self.assertRaisesRegex(guest.ControllerFailure, 'ALREADY_ATTEMPTED'):
-            self.capture()
+        with self.assertRaisesRegex(guest.ControllerFailure, 'AUTHORIZATION_INVALID'):
+            b.CandidateBatch(self.provider, self.plan)
+        with self.assertRaisesRegex(guest.ControllerFailure, 'AUTHORIZATION_INVALID'):
+            b.reserve_capture()
         self.console.capture.assert_not_called()
-        self.assertFalse(self.new_ledger.exists())
-        batch = b.CandidateBatch(self.provider, self.plan, authorization_id=b.GATEWAY_REPAIR_AUTHORIZATION)
+        self.assertFalse(self.ledger.exists())
+        batch = b.CandidateBatch(self.provider, self.plan, authorization_id=b.PR247_REVALIDATION_AUTHORIZATION)
         self.addCleanup(batch.close)
-        self.assertFalse(self.new_ledger.exists())
-        self.assertEqual(batch.record['authorization_id'], b.GATEWAY_REPAIR_AUTHORIZATION)
+        self.assertFalse(self.ledger.exists())
+        self.assertEqual(batch.record['authorization_id'], b.PR247_REVALIDATION_AUTHORIZATION)
         def reserve():
             try:
-                b.reserve_capture(b.GATEWAY_REPAIR_AUTHORIZATION)
+                b.reserve_capture(b.PR247_REVALIDATION_AUTHORIZATION)
                 return 'RESERVED'
             except guest.ControllerFailure:
                 return 'REJECTED'
@@ -176,28 +198,29 @@ class BatchSessionTests(unittest.TestCase):
             with self.assertRaisesRegex(guest.ControllerFailure, 'ALREADY_ATTEMPTED'):
                 batch.capture_after_bootstrap_observation(self.plan.profiles[0])
         self.console.capture.assert_not_called()
-        self.assertEqual((self.ledger / 'preserved.json').read_bytes(), original)
+        for ledger, original in originals.items():
+            self.assertEqual((ledger / 'preserved.json').read_bytes(), original)
 
     def test_new_scope_capture_record_and_restart_after_source_change_share_one_budget(self):
-        batch = b.CandidateBatch(self.provider, self.plan, authorization_id=b.GATEWAY_REPAIR_AUTHORIZATION)
+        batch = b.CandidateBatch(self.provider, self.plan, authorization_id=b.PR247_REVALIDATION_AUTHORIZATION)
         self.addCleanup(batch.close)
         with batch.operation('BOOTSTRAP', self.plan.profiles[0]), redirect_stdout(io.StringIO()):
             batch.capture_after_bootstrap_observation(self.plan.profiles[0])
         batch.close()
-        original = (self.new_ledger / 'result.json').read_bytes()
+        original = (self.ledger / 'result.json').read_bytes()
         record = json.loads(original)
-        self.assertEqual(record['authorization_id'], b.GATEWAY_REPAIR_AUTHORIZATION)
+        self.assertEqual(record['authorization_id'], b.PR247_REVALIDATION_AUTHORIZATION)
         self.assertEqual(record['session_capture_attempts'], 1)
-        self.assertFalse(self.ledger.exists())
+        self.assertFalse(self.new_ledger.exists())
         changed = replace(self.plan, source_sha='f'*40, qualification_run_id=self.plan.qualification_run_id+1)
         changed = replace(changed, plan_digest=c.h.sha256_bytes(c.h.canonical_json_bytes(changed.identity_body())))
-        restarted = b.CandidateBatch(self.provider, changed, authorization_id=b.GATEWAY_REPAIR_AUTHORIZATION)
+        restarted = b.CandidateBatch(self.provider, changed, authorization_id=b.PR247_REVALIDATION_AUTHORIZATION)
         self.addCleanup(restarted.close)
         with restarted.operation('BOOTSTRAP', changed.profiles[0]):
             with self.assertRaisesRegex(guest.ControllerFailure, 'ALREADY_ATTEMPTED'):
                 restarted.capture_after_bootstrap_observation(changed.profiles[0])
         self.console.capture.assert_called_once()
-        self.assertEqual((self.new_ledger / 'result.json').read_bytes(), original)
+        self.assertEqual((self.ledger / 'result.json').read_bytes(), original)
 
     def test_idle_and_hard_deadlines_use_monotonic_time_and_close_owner(self):
         self.capture()

@@ -54,10 +54,10 @@ Windows execution 的私有工作根使用紧凑的 `session/profile/vm` 路径�
 
 网关根因修复后的新会话另识别固定范围
 `ANIMEMO_V2_CANDIDATE_GATEWAY_REPAIR_SINGLE_CAPTURE_V1`，账本同样由该 ID 的
-ASCII SHA-256 派生到 `E:/`。入口只接受这两个固定 ID，显式传给 batch；默认仍选择
-原范围。代码识别新 ID 不代表已取得新输入授权，必须先完成修复合并、同源新 Q 并获得
+ASCII SHA-256 派生到 `E:/`。入口只接受代码中列明的三个固定 ID，显式传给 batch；
+缺失 ID 直接拒绝。代码识别新 ID 不代表已取得新输入授权，必须先完成修复合并、同源新 Q 并获得
 操作员对下一次新会话的一次输入短授权。准备或 plan-only 不创建新账本，首次合法
-bootstrap 观察后才原子登记。两个范围各自最多一次尝试，均不能因换源码、Q、计划、
+bootstrap 观察后才原子登记。每个范围各自最多一次尝试，均不能因换源码、Q、计划、
 控制器或重启恢复额度；不接受任意 ID、路径或序号。旧记录保持原状。
 
 一个控制器进程中的 `CandidateBatch` 绑定冻结 M/T/Q/Candidate 与 canonical plan，只允许 FRESH_BASE、DOCKER_BASE、RUNTIME_BASE_OFFLINE 串行执行。第一次无密码 bootstrap 核验、源码检查及 Console preflight 通过后捕获一次。每 Profile 的 BOOTSTRAP_ROTATION、VERIFIED_SUDO、CANDIDATE_WORKLOAD 各最多一次交付尝试，整场上界九次。前置角色未成功或前一 Profile 未结束时不得申请后续用途。
@@ -86,7 +86,14 @@ Installer 失败同时记录通用失败和受限的真实 Adapter 错误码，�
 
 诊断不提供成功 authority。仍须 canonical Draft、Host 模板前后态及 Profile Receipt 验证通过；Aggregate v4 / Profile v2 的现行消费者继续拒绝 FAIL、不完整或身份不符。`credential_session` 记录一次 capture attempts/completed、终态和冻结绑定；其 `profiles` 与 `credential_results` 记录每角色 delivery attempts/completed、target/lease 核验及操作结果。capture 不按 Profile 重复计数。初始失败、诊断失败、cleanup 和 POSTSTATE 分别保留。
 
-已获得本固定任务授权时，专用原生 Console 直接运行 `python -B -m scripts.candidate_vm_harness --execute --authorization-id ANIMEMO_V2_CANDIDATE_WORKLOAD_DIAGNOSTICS_SINGLE_CAPTURE_V1 --r2-origin-transport cloudflare-plugin`，同时提供准确 Candidate/Q/source 参数及尚不存在的 `--result`。入口接受本进程生成并保存的完整 plan，不授予后续任务或发布权限。Formal 保持其独立调用边界。
+已获得本固定任务授权时，专用原生 Console 直接运行 `python -B -m scripts.candidate_vm_harness --execute --authorization-id ANIMEMO_V2_CANDIDATE_PR247_REVALIDATION_SINGLE_CAPTURE_V1 --r2-origin-transport cloudflare-plugin`，同时提供准确 Candidate/Q/source 参数及尚不存在的 `--result`。入口接受本进程生成并保存的完整 plan，不授予后续任务或发布权限。Formal 保持其独立调用边界。
+
+#247 后复验的独立固定范围为 `ANIMEMO_V2_CANDIDATE_PR247_REVALIDATION_SINGLE_CAPTURE_V1`，
+派生账本是 `E:/1e0c088ec6cb93149000f3d00a88111230dc38a8ebcf8233340e1fcfa5df086f`。
+它只提供一次 capture attempt、三个 Profile 各三个固定角色最多九次交付；仍需操作员
+明确授权。owner 和 reserve 均要求明确 ID，缺省即拒绝，不回落到旧范围。旧账本保持
+原样，改变源码、Q 或 session 不产生新额度。最终源码及未来 Q 在运行时校验并冻结，
+不把未来 commit/run ID 写回源码，也不预建账本。未知 ID、通配前缀和后续备用 ID 均拒绝。
 
 开发回归按风险分为 batch 生命周期与额度、Guest authority/真实 Windows holds、受限协议/本机子进程、POSIX root/runtime/receipt、现行 canonical 消费者。测试输入仅 synthetic sentinel；`scripts/tests/native_candidate_console_probe.py` 在独占可见 conhost 自动输入公开文本，验证捕获、退格和取消，不接触真实账本或 Guest。真实发行材料的隔离开发探针须记录源码/材料差异，并明确没有 Candidate authority。
 
