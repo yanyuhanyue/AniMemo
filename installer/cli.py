@@ -227,7 +227,7 @@ def _write(value: object, *, json_output: bool) -> None:
 
 def _run_candidate(args: argparse.Namespace) -> int:
     from .production import build_candidate_composition
-    from scripts.candidate_diagnostics import inherited_writer
+    from scripts.candidate_diagnostics import INSTALLER_FAILURE_CODES, inherited_writer
 
     diagnostic = inherited_writer()
     request = _candidate_request(args)
@@ -297,9 +297,11 @@ def _run_candidate(args: argparse.Namespace) -> int:
             plan,
             accepted_plan_digest=plan.plan_digest,
         )
-    except BaseException:
+    except BaseException as error:
         if diagnostic is not None:
             diagnostic.error('INSTALLER_EXECUTION_FAILED')
+            if isinstance(error, InstallerError) and error.code in INSTALLER_FAILURE_CODES:
+                diagnostic.error(error.code)
         raise
     if diagnostic is not None:
         diagnostic.stage('INSTALLER_COMPLETED')

@@ -110,10 +110,21 @@ Ubuntu APT argv。`expected_network_command_digests` 必须保留计划顺序且
 Docker run/Compose run/up 都必须显式 `--pull never`，
 镜像只从 verifier 已闭合的本地 OCI bytes 导入。Candidate composition 还必须加载固定字节的
 Compose override，把 Profile 实例的 `animemo` network 设置为 `internal: true`；Candidate
-Updater service 必须通过独立 systemd drop-in 固定为
-`RestrictAddressFamilies=AF_UNIX AF_NETLINK`。Profile Receipt 只能在 Docker network 与
+Updater service 必须通过独立 systemd drop-in 先以空 `RestrictAddressFamilies=` 重置
+基础服务的列表，再固定为 `RestrictAddressFamilies=AF_UNIX AF_NETLINK`。读取实际属性时
+要求准确的两个地址族且无重复，不依赖 systemd 输出顺序；Receipt 使用固定规范顺序。
+Profile Receipt 只能在 Docker network 与
 systemd property 的真实 readback 均精确匹配后记录 OS egress isolation receipt；这不会修改
 公共 DNS、Cloudflare、主机防火墙或共享生产服务。
+
+内部 bridge 没有容器默认路由。Candidate Installer 在 datastore 建网后，从已核验
+实例归属的容器查得唯一 network ID，再确认该 bridge 的 Compose labels、internal 属性、
+唯一 IPv4 IPAM subnet 和成员 endpoint，取得准确 gateway。它把单个规范 IPv4 原子写入
+`/run/animemo-candidate/<instance>/edge-proxy-ipv4`：父目录由 root 控制，文件
+`root:root / 0444`，独立于 API 可写的数据目录。Web 只读绑定此文件且禁止自动创建缺失源；
+启动及 API 重建后重新核验网络 ID。Nginx 仅信任 gateway `/32`，Django 的
+`TRUSTED_PROXY_IPS` 仍由实际 Web 容器地址 `/32` 独立绑定。文件存在但无效即退出；
+未挂载该文件的普通部署继续使用默认路由解析。Candidate 保持 `internal: true`。
 
 ## 4. VM Harness 与原始 VM 保护
 
@@ -126,8 +137,9 @@ python scripts/candidate_vm_harness.py
 Harness 默认 `PLAN_ONLY`。只允许固定 `FRESH_BASE`、`DOCKER_BASE`、
 `RUNTIME_BASE_OFFLINE` 及其固定 VMware snapshot 名；不接受 VM path、snapshot path、
 shell、package list 或安全策略覆盖。`--execute` 必须接受本进程的完整 plan digest；
-已明确批准 `ANIMEMO_V2_EXACT_CANDIDATE_ACCEPTANCE_V1` 时，可使用对应的
-`--authorization-id` 和 exclusive `--result`，接受本次生成并保存的完整计划。
+已明确批准当前封闭单次捕获范围时，使用对应的 `--authorization-id` 和 exclusive
+`--result`，接受本次生成并保存的完整计划；范围与独立固定账本见
+[Guest sudo 会话控制器](guest-sudo-session.md)。
 在任何 Clone 前，必须通过固定 Account、Bucket、Candidate Prefix 和 expected keys 的
 Origin empty PRESTATE 证明；前缀和键只从本次 Candidate version 派生。
 

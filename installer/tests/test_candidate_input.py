@@ -112,6 +112,33 @@ class _CandidateGate:
 
 
 class CandidateInstallerCliTests(unittest.TestCase):
+    def test_actual_installer_failure_code_crosses_only_the_diagnostic_allowlist(self):
+        from scripts import candidate_diagnostics as diagnostics
+        for failure_code in ('INSTALL_RUNTIME_START_FAILED', 'SYNTHETIC_PRIVATE_ERROR_SENTINEL'):
+            with self.subTest(failure_code=failure_code), tempfile.TemporaryFile() as stream:
+                composition = _ExecutingComposition()
+                composition.runtime.execute.side_effect = InstallerError(
+                    failure_code, outcome=InstallOutcome.RECOVERY_REQUIRED)
+                operation = 'sha256:' + 'd' * 64
+                writer = diagnostics.DiagnosticWriter(stream.fileno(), operation)
+                with (mock.patch('installer.production.build_candidate_composition', return_value=composition),
+                        mock.patch.object(diagnostics, 'inherited_writer', return_value=writer)):
+                    args = cli._parser().parse_args(['candidate', '--verified-candidate-digest', DIGEST,
+                        '--profile', 'ONLINE_FRESH', '--public-origin', 'https://candidate.invalid',
+                        '--execute', '--accept', '--json'])
+                    with self.assertRaises(InstallerError):
+                        cli._run_candidate(args)
+                stream.seek(0)
+                reader = diagnostics.DiagnosticReader(operation)
+                while item := diagnostics.read_frame(stream):
+                    reader.accept(*item)
+                observed = reader.public()
+                self.assertEqual(observed['last_stage'], 'INSTALLER_RUNNING')
+                self.assertIn('INSTALLER_EXECUTION_FAILED', observed['errors'])
+                self.assertEqual('INSTALL_RUNTIME_START_FAILED' in observed['errors'],
+                                 failure_code == 'INSTALL_RUNTIME_START_FAILED')
+                self.assertNotIn('SYNTHETIC_PRIVATE_ERROR_SENTINEL', json.dumps(observed))
+
     def test_platform_planning_failure_has_bounded_diagnostic_before_execution(self):
         from installer.platform_bootstrap import PlatformBootstrapError
         from scripts import candidate_diagnostics as diagnostics
@@ -390,7 +417,7 @@ class CandidateInstallerCliTests(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="true"),
             SimpleNamespace(
                 returncode=0,
-                stdout="AF_UNIX AF_NETLINK\n",
+                stdout="AF_NETLINK AF_UNIX\n",
             ),
         ]
         command_delegate.run.side_effect = [
@@ -447,6 +474,8 @@ class CandidateInstallerCliTests(unittest.TestCase):
                 "containerNetworkInternal"
             ]
         )
+        self.assertEqual(observation["networkObservation"]["egressIsolation"]["serviceAddressFamilies"],
+                         ["AF_UNIX", "AF_NETLINK"])
         self.assertEqual(
             observation["imageRuntimeReadbackReceipt"]["result"], "PASS"
         )
@@ -471,6 +500,16 @@ class CandidateInstallerCliTests(unittest.TestCase):
                     SimpleNamespace(returncode=0, stdout="true"),
                     SimpleNamespace(returncode=0, stdout="AF_UNIX AF_INET\n"),
                 ],
+            ),
+            (
+                "base-service-families-merged",
+                [SimpleNamespace(returncode=0, stdout="true"),
+                 SimpleNamespace(returncode=0, stdout="AF_INET AF_INET6 AF_NETLINK AF_UNIX\n")],
+            ),
+            (
+                "duplicate-families",
+                [SimpleNamespace(returncode=0, stdout="true"),
+                 SimpleNamespace(returncode=0, stdout="AF_NETLINK AF_UNIX AF_UNIX\n")],
             ),
         ):
             command_delegate.run.side_effect = readbacks

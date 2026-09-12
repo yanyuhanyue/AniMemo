@@ -101,7 +101,7 @@ from installer.operations import (
 from release.contract import validate_manifest
 from updater import __version__ as updater_version
 from updater.commands import CommandRunner
-from updater.deployment import HostPaths, ImmutableComposeDeployment
+from updater.deployment import CANDIDATE_NETWORK_OVERRIDE_TEXT, HostPaths, ImmutableComposeDeployment
 from updater.errors import StateError
 from updater.local_bundle import (
     LocalBundleReleaseSource,
@@ -154,11 +154,10 @@ _PLATFORM_PROBE_ENVIRONMENT = {
     "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
 }
 _LOCAL_DOCKER_HOST = "unix:///var/run/docker.sock"
-_CANDIDATE_NETWORK_OVERRIDE_BYTES = (
-    b"networks:\n  animemo:\n    internal: true\n"
-)
+_CANDIDATE_NETWORK_OVERRIDE_BYTES = CANDIDATE_NETWORK_OVERRIDE_TEXT.encode("ascii")
+_CANDIDATE_EDGE_CONTROL_BASE = Path("/run/animemo-candidate")
 _CANDIDATE_SYSTEMD_NETWORK_ISOLATION_BYTES = (
-    b"[Service]\nRestrictAddressFamilies=AF_UNIX AF_NETLINK\n"
+    b"[Service]\nRestrictAddressFamilies=\nRestrictAddressFamilies=AF_UNIX AF_NETLINK\n"
 )
 _CANDIDATE_PLATFORM_LOCAL_EXECUTABLES = frozenset(
     {
@@ -2461,6 +2460,7 @@ class ProductionFreshInstallPort:
         self._deployment: ImmutableComposeDeployment | None = None
         self._created: set[Path] = set()
         self._ownership: dict[str, OwnershipReceipt] = {}
+        self._candidate_edge_binding: dict[str, str] | None = None
 
     def _manifest(self, plan: InstallPlan) -> dict[str, object]:
         return self.releases.materials_for(plan.release).manifest
@@ -2741,6 +2741,8 @@ class ProductionFreshInstallPort:
                 os.chown(path, 10001, 10001)
                 os.chmod(path, mode)
             deployment.start_datastores(manifest)
+            if self.candidate_network_isolation:
+                self._publish_candidate_edge_proxy(deployment, manifest)
         except Exception:  # noqa: BLE001 - fixed host Adapter boundary
             _safe_adapter_error(
                 "INSTALL_SERVICE_PREPARATION_FAILED", mutation=True, recovery=False
@@ -2754,6 +2756,61 @@ class ProductionFreshInstallPort:
                 "INSTALL_DATABASE_MIGRATION_FAILED", mutation=True, recovery=True
             )
 
+    def _candidate_edge_path(self) -> Path:
+        return _CANDIDATE_EDGE_CONTROL_BASE / str(self.namespace.name) / "edge-proxy-ipv4"
+
+    @staticmethod
+    def _require_candidate_control_directory(path: Path) -> None:
+        for item in (path, *path.parents):
+            metadata = item.lstat()
+            if (item.is_symlink() or not stat.S_ISDIR(metadata.st_mode)
+                    or metadata.st_uid != 0 or metadata.st_mode & 0o022):
+                raise OSError("Candidate edge proxy control directory is unsafe")
+
+    def _publish_candidate_edge_proxy(self, deployment, manifest) -> None:
+        if os.name != "posix" or not self.candidate_network_isolation or self._candidate_edge_binding is not None:
+            raise OSError("Candidate edge proxy publication is invalid")
+        binding = deployment.candidate_internal_gateway(manifest, "postgres")
+        path = self._candidate_edge_path()
+        for directory in (_CANDIDATE_EDGE_CONTROL_BASE, path.parent):
+            self._require_candidate_control_directory(directory.parent)
+            if not directory.exists() and not directory.is_symlink():
+                directory.mkdir(mode=0o755)
+                self._created.add(directory)
+            self._require_candidate_control_directory(directory)
+        if path.exists() or path.is_symlink():
+            raise OSError("Candidate edge proxy authority already exists")
+        temporary = path.with_name(".edge-proxy-ipv4.tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        self._created.add(temporary)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write((binding["gateway"] + "\n").encode("ascii"))
+            output.flush()
+            os.fchown(output.fileno(), 0, 0)
+            os.fchmod(output.fileno(), 0o444)
+            os.fsync(output.fileno())
+        os.rename(temporary, path)
+        self._created.discard(temporary)
+        self._created.add(path)
+        self._candidate_edge_binding = binding
+        self._validate_candidate_edge_proxy(deployment, manifest, "postgres")
+
+    def _validate_candidate_edge_proxy(self, deployment, manifest, service: str) -> None:
+        if self._candidate_edge_binding is None:
+            raise OSError("Candidate edge proxy authority is missing")
+        path = self._candidate_edge_path()
+        self._require_candidate_control_directory(path.parent)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as source:
+            metadata = os.fstat(source.fileno())
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or metadata.st_uid != 0 or metadata.st_gid != 0
+                    or stat.S_IMODE(metadata.st_mode) != 0o444 or not 8 <= metadata.st_size <= 16
+                    or source.read(17) != (self._candidate_edge_binding["gateway"] + "\n").encode("ascii")):
+                raise OSError("Candidate edge proxy authority changed")
+        if deployment.candidate_internal_gateway(manifest, service) != self._candidate_edge_binding:
+            raise OSError("Candidate edge proxy network changed")
+
     def bootstrap(self, plan: InstallPlan) -> None:
         try:
             self._compose(plan).bootstrap(self._manifest(plan))
@@ -2766,7 +2823,11 @@ class ProductionFreshInstallPort:
         try:
             deployment = self._compose(plan)
             manifest = self._manifest(plan)
+            if self.candidate_network_isolation:
+                self._validate_candidate_edge_proxy(deployment, manifest, "postgres")
             deployment.start_application(manifest)
+            if self.candidate_network_isolation:
+                self._validate_candidate_edge_proxy(deployment, manifest, "web")
             self.configuration.bind_exact_web_proxy(
                 plan.configuration,
                 deployment.exact_web_proxy(manifest),
@@ -2789,6 +2850,8 @@ class ProductionFreshInstallPort:
                 ),
             )
             deployment.reconcile_api(manifest)
+            if self.candidate_network_isolation:
+                self._validate_candidate_edge_proxy(deployment, manifest, "web")
         except Exception:  # noqa: BLE001 - fixed Compose Adapter boundary
             _safe_adapter_error(
                 "INSTALL_RUNTIME_START_FAILED", mutation=True, recovery=True
@@ -3081,9 +3144,9 @@ class ProductionInstallerComposition:
                 "INSTALL_CANDIDATE_EGRESS_ISOLATION_UNVERIFIED",
                 outcome=InstallOutcome.VALIDATION_FAILED,
             ) from None
-        if network_internal is not True or service_families != [
-            "AF_UNIX",
+        if network_internal is not True or sorted(service_families) != [
             "AF_NETLINK",
+            "AF_UNIX",
         ]:
             raise InstallerError(
                 "INSTALL_CANDIDATE_EGRESS_ISOLATION_UNVERIFIED",
@@ -3094,7 +3157,8 @@ class ProductionInstallerComposition:
             "containerNetwork": network_name,
             "containerNetworkInternal": True,
             "service": self.candidate_doctor.namespace.updater_service,
-            "serviceAddressFamilies": service_families,
+            # systemd exposes a set; preserve the receipt's canonical order.
+            "serviceAddressFamilies": ["AF_UNIX", "AF_NETLINK"],
         }
         egress_isolation = {
             **egress_isolation_body,

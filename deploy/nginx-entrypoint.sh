@@ -9,18 +9,35 @@ template=/etc/nginx/animemo/default.conf.template
 target=/etc/nginx/conf.d/default.conf
 temporary="${target}.tmp"
 placeholder=__ANIMEMO_TRUSTED_EDGE_PROXY_CIDR__
+candidate_edge=/etc/nginx/animemo/candidate-edge-proxy-ipv4
 
-gateway="$(/usr/bin/awk -f /usr/local/libexec/animemo/resolve-edge-gateway.awk \
-  /proc/net/route)" || {
-  echo "AniMemo Web could not determine one exact IPv4 edge proxy." >&2
-  exit 1
-}
+if [ -e "$candidate_edge" ] || [ -L "$candidate_edge" ]; then
+  if [ ! -f "$candidate_edge" ] || [ -L "$candidate_edge" ] || \
+      [ "$(stat -c '%u:%g:%a:%h' "$candidate_edge")" != '0:0:444:1' ] || \
+      [ "$(stat -c '%s' "$candidate_edge")" -lt 8 ] || \
+      [ "$(stat -c '%s' "$candidate_edge")" -gt 16 ]; then
+    echo "AniMemo Web candidate edge proxy authority is invalid." >&2
+    exit 1
+  fi
+  gateway="$(/bin/cat "$candidate_edge")"
+  if ! printf '%s\n' "$gateway" | cmp -s - "$candidate_edge"; then
+    echo "AniMemo Web candidate edge proxy authority is invalid." >&2
+    exit 1
+  fi
+else
+  gateway="$(/usr/bin/awk -f /usr/local/libexec/animemo/resolve-edge-gateway.awk \
+    /proc/net/route)" || {
+    echo "AniMemo Web could not determine one exact IPv4 edge proxy." >&2
+    exit 1
+  }
+fi
 
 if ! printf '%s\n' "$gateway" | /usr/bin/awk -F. '
-  NF != 4 { exit 1 }
+  NR != 1 || NF != 4 { exit 1 }
   {
     for (octet = 1; octet <= 4; octet += 1) {
-      if ($octet !~ /^[0-9]+$/ || $octet < 0 || $octet > 255) {
+      if ($octet !~ /^[0-9]+$/ || $octet < 0 || $octet > 255 || \
+          (length($octet) > 1 && substr($octet, 1, 1) == "0")) {
         exit 1
       }
     }
@@ -28,6 +45,7 @@ if ! printf '%s\n' "$gateway" | /usr/bin/awk -F. '
       exit 1
     }
   }
+  END { if (NR != 1) exit 1 }
 '; then
   echo "AniMemo Web edge proxy identity is invalid." >&2
   exit 1

@@ -807,7 +807,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
             "scripts.guest_console_capture.WindowsConsoleCapture.preflight"
         ), mock.patch('scripts.candidate_batch_session.CandidateBatch',
             return_value=mock.Mock(record={'profiles': {}})
-        ), redirect_stdout(output):
+        ) as batch_factory, redirect_stdout(output):
             code = harness.main(
                 [
                     "--verified-candidate-digest",
@@ -819,7 +819,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
                     "--expected-source-tree",
                     TREE,
                     "--execute",
-                    "--authorization-id", 'ANIMEMO_V2_CANDIDATE_WORKLOAD_DIAGNOSTICS_SINGLE_CAPTURE_V1',
+                    "--authorization-id", 'ANIMEMO_V2_CANDIDATE_GATEWAY_REPAIR_SINGLE_CAPTURE_V1',
                     "--result", str(self.root / 'controlled-fail-result.json'),
                     "--r2-origin-transport", "s3",
                     "--accept-plan-digest",
@@ -828,6 +828,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
             )
 
         self.assertEqual(code, 2)
+        self.assertEqual(batch_factory.call_args.kwargs['authorization_id'],
+                         'ANIMEMO_V2_CANDIDATE_GATEWAY_REPAIR_SINGLE_CAPTURE_V1')
         observed = json.loads(output.getvalue())
         self.assertEqual(observed["status"], result["status"])
         self.assertEqual(observed["aggregateReceipt"], result["aggregateReceipt"])

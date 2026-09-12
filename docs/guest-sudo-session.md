@@ -52,6 +52,14 @@ Windows execution 的私有工作根使用紧凑的 `session/profile/vm` 路径�
 
 固定授权为 `ANIMEMO_V2_CANDIDATE_WORKLOAD_DIAGNOSTICS_SINGLE_CAPTURE_V1`，账本根为 `E:/78b1ae1ff8f196aa4cb31141423e33365e9334e34ee83735377a051053919901`，即授权 ID ASCII 字节的 SHA-256。目录 exclusive 创建消费一次人工捕获尝试；取消、无效输入、崩溃和部分交付均不恢复额度。账本独立于 run、session、Profile、Q 和源码。旧授权目录及其已消费记录保留。
 
+网关根因修复后的新会话另识别固定范围
+`ANIMEMO_V2_CANDIDATE_GATEWAY_REPAIR_SINGLE_CAPTURE_V1`，账本同样由该 ID 的
+ASCII SHA-256 派生到 `E:/`。入口只接受这两个固定 ID，显式传给 batch；默认仍选择
+原范围。代码识别新 ID 不代表已取得新输入授权，必须先完成修复合并、同源新 Q 并获得
+操作员对下一次新会话的一次输入短授权。准备或 plan-only 不创建新账本，首次合法
+bootstrap 观察后才原子登记。两个范围各自最多一次尝试，均不能因换源码、Q、计划、
+控制器或重启恢复额度；不接受任意 ID、路径或序号。旧记录保持原状。
+
 一个控制器进程中的 `CandidateBatch` 绑定冻结 M/T/Q/Candidate 与 canonical plan，只允许 FRESH_BASE、DOCKER_BASE、RUNTIME_BASE_OFFLINE 串行执行。第一次无密码 bootstrap 核验、源码检查及 Console preflight 通过后捕获一次。每 Profile 的 BOOTSTRAP_ROTATION、VERIFIED_SUDO、CANDIDATE_WORKLOAD 各最多一次交付尝试，整场上界九次。前置角色未成功或前一 Profile 未结束时不得申请后续用途。
 
 每次 Supervisor 仍执行完整目标、VMX、Snapshot/磁盘图、Guest challenge、host key、lease、源码和材料检查，并在同一 SSH 进程内完成观察与交付。跨 Profile 使用独立 key、known_hosts、Clone 身份；同 Profile 续接使用已登记的当前 key，不清空跨 Profile 的已使用 key 集合。`BatchUse` 没有 get_secret、任意命令或序列化接口；workload 的 `execute()` 不接受命令参数。
@@ -69,6 +77,10 @@ SCP/SSH/keygen/复制命令的后代也属于取消范围。Windows 在子进程
 Guest observation 之后的流按 D（诊断）和 R（Draft）分别 framing。诊断 schema 为 `animemo.candidate-operation-diagnostic/v1`，绑定 plan/source/tree/Q/verified digest/Profile/session 的 operation digest，每操作最多 16 KiB、40 个事件；Draft 上限 8 MiB。重复、倒序、未知字段/枚举、绑定错误、畸形、截断和超限均拒绝。普通 stdout/stderr 不转为诊断正文。
 
 固定阶段覆盖 SSH 观察、sudo 启动、root 进入、材料完结、runtime 初始化、Runner 启动、平台准备、Installer 执行、Draft 写入/回传；Host 独立记录解析和身份绑定结果。退出码只来自实际子进程，未取得为 null；缺少可信 root 标记时为 UNKNOWN_BEFORE_ROOT_START。标准库启动保护在复杂导入之前发出阶段。内部 Installer 输出有界 drain，stderr 丢弃，超时取消进程组；异常正文、原始流、环境和秘密不进入诊断。
+
+Installer 失败同时记录通用失败和受限的真实 Adapter 错误码，例如
+`INSTALL_RUNTIME_START_FAILED`。仅接受 `INSTALLER_FAILURE_CODES` 固定集合；未知异常
+或携带任意文本的 code 不能进入诊断。该字段用于区分失败步骤，不推导任何已完成步骤。
 
 普通 Installer/业务失败只有在各层真实退出码及可信阶段足够、canonical continuation 和清理证明安全时，才可继续下一 Profile。共同启动/回执缺陷或交付不确定撤销总会话，其余 Profile 为 NOT_RUN_SHARED_BLOCKER；认证失败、SSH 中断、短写、Guest/源码/材料/lease 漂移不得补发。
 

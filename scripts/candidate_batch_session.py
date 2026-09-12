@@ -6,6 +6,7 @@ import hashlib
 import threading
 import time
 from pathlib import Path
+from types import MappingProxyType
 
 from release.formal_windows_pretrust import create_windows_private_named_directory, hold_windows_private_path_chain
 from scripts import candidate_vm_harness as h
@@ -15,6 +16,13 @@ from scripts.isolated_guest_validation import _check_checkout
 
 AUTHORIZATION = 'ANIMEMO_V2_CANDIDATE_WORKLOAD_DIAGNOSTICS_SINGLE_CAPTURE_V1'
 LEDGER = Path('E:/') / hashlib.sha256(AUTHORIZATION.encode('ascii')).hexdigest()
+GATEWAY_REPAIR_AUTHORIZATION = 'ANIMEMO_V2_CANDIDATE_GATEWAY_REPAIR_SINGLE_CAPTURE_V1'
+# These are separately authorized, globally single-use scopes. Recognizing a
+# scope does not grant it; the operator must obtain its explicit authorization.
+CAPTURE_LEDGERS = MappingProxyType({
+    AUTHORIZATION: LEDGER,
+    GATEWAY_REPAIR_AUTHORIZATION: Path('E:/') / hashlib.sha256(GATEWAY_REPAIR_AUTHORIZATION.encode('ascii')).hexdigest(),
+})
 ROLES = ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO', 'CANDIDATE_WORKLOAD')
 HARD_SECONDS = 12 * 60 * 60
 IDLE_SECONDS = 30 * 60
@@ -30,9 +38,16 @@ REVOCATIONS = frozenset(('CANDIDATE_SECRET_USE_SCOPE_CHANGED', 'CANDIDATE_SECRET
     'CANDIDATE_BATCH_USE_ORDER_INVALID'))
 
 
-def reserve_capture():
+def capture_ledger(authorization_id):
+    if type(authorization_id) is not str or authorization_id not in CAPTURE_LEDGERS:
+        raise ControllerFailure('CANDIDATE_CAPTURE_AUTHORIZATION_INVALID')
+    return CAPTURE_LEDGERS[authorization_id]
+
+
+def reserve_capture(authorization_id=AUTHORIZATION):
+    ledger = capture_ledger(authorization_id)
     try:
-        return create_windows_private_named_directory(LEDGER.parent, name=LEDGER.name)
+        return create_windows_private_named_directory(ledger.parent, name=ledger.name)
     except Exception:
         raise ControllerFailure('CANDIDATE_CAPTURE_ALREADY_ATTEMPTED') from None
 
@@ -80,7 +95,9 @@ class BatchUse:
 
 
 class CandidateBatch:
-    def __init__(self, provider, plan, *, clock=time.monotonic):
+    def __init__(self, provider, plan, *, authorization_id=AUTHORIZATION, clock=time.monotonic):
+        self._authorization_id = authorization_id
+        self._ledger = capture_ledger(authorization_id)
         if (type(provider) is not h.ClosedVmwareProvider or type(plan) is not h.CandidateHarnessPlan
                 or h.sha256_bytes(h.canonical_json_bytes(plan.identity_body())) != plan.plan_digest):
             raise ControllerFailure('CANDIDATE_BATCH_SCOPE_INVALID')
@@ -99,7 +116,7 @@ class CandidateBatch:
         self._closed = False
         self._monitor_done = threading.Event()
         self.cancelled = threading.Event()
-        self._record = dict(authorization_id=AUTHORIZATION, session_capture_attempts=0,
+        self._record = dict(authorization_id=authorization_id, session_capture_attempts=0,
             session_capture_completed=0, secret_state='NOT_CAPTURED', secret_cleanup='NOT_REQUIRED',
             revocation_code=None, hard_limit_seconds=HARD_SECONDS, idle_limit_seconds=IDLE_SECONDS,
             binding={key: getattr(plan, key) for key in ('plan_digest', 'session_id', 'source_sha',
@@ -194,7 +211,9 @@ class CandidateBatch:
             _check_checkout(self.plan.source_sha, self.plan.source_tree)
             console = WindowsConsoleCapture()
             console.preflight()
-            self._slot = reserve_capture()
+            if capture_ledger(self._authorization_id) != self._ledger:
+                raise ControllerFailure('CANDIDATE_CAPTURE_AUTHORIZATION_INVALID')
+            self._slot = reserve_capture(self._authorization_id)
             self._record['session_capture_attempts'] = 1
             self._record['secret_state'] = 'CAPTURING'
             try:
