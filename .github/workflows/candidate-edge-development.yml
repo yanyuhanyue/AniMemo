@@ -21,6 +21,20 @@ jobs:
       - uses: ./.github/actions/setup-pinned-gh-cli
       - run: python -m pip install --require-hashes -r release/requirements.lock
       - run: python -m pip install --require-hashes -r durability/requirements.lock
+      - name: Enable OCI image storage on the disposable hosted runner
+        run: |
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          test -z "$(docker ps -aq)"
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('/etc/docker/daemon.json')
+          value = json.loads(path.read_bytes()) if path.exists() else {}
+          value.setdefault('features', {})['containerd-snapshotter'] = True
+          path.write_text(json.dumps(value))
+          PY
+          sudo systemctl restart docker
+          docker info -f '{{json .DriverStatus}}'
       - name: Acquire the actual completed Q as read-only development input
         env:
           GH_TOKEN: ${{ github.token }}
