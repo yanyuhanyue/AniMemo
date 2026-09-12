@@ -75,6 +75,12 @@ Doctor、严格 canonical CRUD / API / Web、内部 Docker network、systemd 地
 Guest root 在导入开发代码前先通过固定的 no-follow fd 复制与完整库存检查，封闭
 材料树和开发源码树；原 Q 的 Manifest、Verified Identity 和材料目录保持。
 
+开发安装树由本轮 Git 提交中的代码，以及原 Q 中未受 Git 跟踪的 wheels、pretrust
+和平台材料共同生成。已删除的旧源码不会回填；当前源码覆盖不可变材料会被拒绝。
+Guest 完整安装本轮 `durability`、`installer`、`release`、`updater`，随后读取实际安装
+目录和五项启动器 / systemd 资产的库存。Guest 和 Host 都对照本轮封存源码核验，
+缺失观察或安装了旧代码都不能通过。
+
 当前入口允许复用材料进行 Installer / Runner 及宿主控制器 Python 修订。涉及 OCI、
 依赖锁或静态发行材料的更改会在捕获前要求本地材料重建，不能拿旧材料给未执行的
 新字节记 PASS。开发报告不替代正式 Q、三 Profile Candidate、Origin 前后态或

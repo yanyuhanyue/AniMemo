@@ -1,12 +1,12 @@
 """Hold a clean local execution source tree independently of qualified OCI bytes."""
 from __future__ import annotations
 
-from contextlib import ExitStack, contextmanager
 import hashlib
 import os
-from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
+from contextlib import ExitStack, contextmanager
+from pathlib import Path, PurePosixPath
 
 from release.formal_windows_pretrust import (
     create_windows_private_directory,
@@ -21,6 +21,7 @@ from scripts.isolated_guest_validation import _check_checkout
 
 ROOT = Path(__file__).resolve().parents[1]
 DEVELOPMENT_RUNTIME_FILES = (
+    'scripts/development_installer_entry.py',
     'scripts/development_profile_runner.py',
     'scripts/development_runtime_entry.py',
     'scripts/development_workload_root.py',
@@ -46,11 +47,19 @@ def require_material_compatibility(material_source_sha, execution_source_sha):
 
 def execution_file_identities(source_sha, source_tree):
     _check_checkout(source_sha, source_tree)
-    raw = subprocess.check_output(['git', '-C', str(ROOT), 'ls-tree', '-rz', '--name-only',
+    raw = subprocess.check_output(['git', '-C', str(ROOT), 'ls-tree', '-rz',
         'HEAD', '--', 'durability', 'release', 'updater', 'installer',
         *_FIXED_DEPLOYMENT_FILES, *DEVELOPMENT_RUNTIME_FILES], timeout=30)
-    names = [name for name in raw.decode('utf-8').split('\0')
-             if name and not {'tests', '__pycache__'}.intersection(PurePosixPath(name).parts)]
+    blobs = {}
+    for record in filter(None, raw.decode('utf-8').split('\0')):
+        header, name = record.split('\t', 1)
+        mode, kind, digest = header.split(' ')
+        if {'tests', '__pycache__'}.intersection(PurePosixPath(name).parts):
+            continue
+        if mode not in {'100644', '100755'} or kind != 'blob':
+            raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_FILE_INVALID')
+        blobs[name] = digest
+    names = list(blobs)
     required = {*_FIXED_DEPLOYMENT_FILES, *DEVELOPMENT_RUNTIME_FILES}
     if not required <= set(names) or not names or len(names) > 1024 or len(names) != len(set(names)):
         raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_INVENTORY_INVALID')
@@ -66,10 +75,46 @@ def execution_file_identities(source_sha, source_tree):
         total += size
         if size > 64 * 1024 * 1024 or total > 256 * 1024 * 1024:
             raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_SIZE_INVALID')
-        with path.open('rb') as source:
-            identities[name] = 'sha256:' + hashlib.file_digest(source, 'sha256').hexdigest()
+        data = path.read_bytes()
+        if hashlib.sha1(b'blob ' + str(len(data)).encode('ascii') + b'\0' + data).hexdigest() != blobs[name]:
+            raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_GIT_BYTES_MISMATCH')
+        identities[name] = 'sha256:' + hashlib.sha256(data).hexdigest()
     _check_checkout(source_sha, source_tree)
     return identities
+
+
+def project_execution_tree(*, code_root, code_identities, material_root, material_identities,
+                           baseline_tracked_paths, destination):
+    """Create a new development tree; original Q files are only read.
+
+    Tracked source comes from the current commit, including removals. Producer
+    extras (wheels, pretrust and platform records) retain their qualified bytes.
+    """
+    files = {name: (material_root / name, digest) for name, digest in material_identities.items()
+             if name not in baseline_tracked_paths}
+    if set(files) & set(code_identities):
+        raise h.CandidateHarnessError('DEVELOPMENT_IMMUTABLE_MATERIAL_OVERRIDE')
+    files.update({name: (code_root / name, digest) for name, digest in code_identities.items()})
+    if not files or len(files) > 4096:
+        raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_INVENTORY_INVALID')
+    total = 0
+    for name, (source, expected) in files.items():
+        path = PurePosixPath(name)
+        if path.is_absolute() or '..' in path.parts or '\\' in name:
+            raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_FILE_INVALID')
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with source.open('rb') as read, target.open('xb') as write:
+            size = 0
+            while chunk := read.read(1024 * 1024):
+                size += len(chunk)
+                total += len(chunk)
+                if size > 64 * 1024 * 1024 or total > 512 * 1024 * 1024:
+                    raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_SIZE_INVALID')
+                write.write(chunk)
+        if h._hash_regular_file(target) != expected:
+            raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_COPY_CHANGED')
+    return {name: digest for name, (_, digest) in files.items()}
 
 
 class HeldDevelopmentSource:
@@ -111,6 +156,15 @@ def acquire_development_source(provider, *, source_sha, source_tree):
     if provider._execution is None or getattr(provider, '_development_source_authority', None) is not None:
         raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_PROVIDER_INVALID')
     identities = execution_file_identities(source_sha, source_tree)
+    material = provider._candidate_material_authority
+    if type(material) is not h.HeldCandidateMaterialAuthority:
+        raise h.CandidateHarnessError('DEVELOPMENT_MATERIAL_AUTHORITY_REQUIRED')
+    loaded = material.loaded
+    all_material_ids = h._candidate_authoritative_file_identities(loaded)
+    material_ids = {name.removeprefix('installer-root/'): digest
+                    for name, digest in all_material_ids.items() if name.startswith('installer-root/')}
+    tracked = set(subprocess.check_output(['git', '-C', str(ROOT), 'ls-tree', '-rz', '--name-only',
+        loaded.candidate_input['source_sha']], timeout=30).decode('utf-8').split('\0'))
     root = create_windows_private_directory(Path('E:/'), prefix='animemo-development-source')
     value = object.__new__(HeldDevelopmentSource)
     value._root, value._closed, value._execution = root, False, provider._execution
@@ -118,12 +172,25 @@ def acquire_development_source(provider, *, source_sha, source_tree):
     value._holds = ExitStack()
     try:
         value._holds.enter_context(hold_windows_private_path_chain(root, allow_leaf_child_writes=True))
-        value._source_root = create_windows_private_named_directory(root,
-            name=hashlib.sha256(h.canonical_json_bytes(identities)).hexdigest())
+        code_root = create_windows_private_named_directory(root,
+            name=hashlib.sha256(b'code\n' + h.canonical_json_bytes(identities)).hexdigest())
         value._holds.enter_context(hold_windows_private_tree_snapshot(ROOT,
-            expected_file_identities=identities, private_root=value._source_root,
+            expected_file_identities=identities, private_root=code_root,
             maximum_files=1024, maximum_file_bytes=64 * 1024 * 1024,
             maximum_total_bytes=256 * 1024 * 1024))
+        draft = create_windows_private_named_directory(root, name=hashlib.sha256(b'development-source-draft').hexdigest())
+        identities = project_execution_tree(code_root=code_root, code_identities=identities,
+            material_root=loaded.root / 'installer-root', material_identities=material_ids,
+            baseline_tracked_paths=tracked, destination=draft)
+        value._source_root = create_windows_private_named_directory(root,
+            name=hashlib.sha256(h.canonical_json_bytes(identities)).hexdigest())
+        value._holds.enter_context(hold_windows_private_tree_snapshot(draft,
+            expected_file_identities=identities, private_root=value._source_root,
+            maximum_files=4096, maximum_file_bytes=64 * 1024 * 1024,
+            maximum_total_bytes=512 * 1024 * 1024))
+        if draft.parent != root or draft.resolve(strict=True) != draft or draft.is_symlink() or draft.is_junction():
+            raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_CLEANUP_SCOPE_INVALID')
+        shutil.rmtree(draft)
         value.inventory_digest = h._closed_runtime_inventory_digest(value._source_root)
         _check_checkout(source_sha, source_tree)
         provider._development_source_authority = value
@@ -134,6 +201,11 @@ def acquire_development_source(provider, *, source_sha, source_tree):
 
 
 def require_development_source(provider, plan):
+    """Check held identity only; this may run while the secret owner is locked.
+
+    Checkout subprocesses belong to CandidateBatch.check_source(), outside the
+    owner's delivery lock, so its watchdog can always wipe an expired secret.
+    """
     authority = getattr(provider, '_development_source_authority', None)
     if (not is_development_plan(plan) or type(authority) is not HeldDevelopmentSource
             or authority._execution is not provider._execution
@@ -142,5 +214,4 @@ def require_development_source(provider, plan):
             or authority.inventory_digest != plan.execution_inventory_digest):
         raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_AUTHORITY_INVALID')
     authority.require_open()
-    _check_checkout(plan.execution_source_sha, plan.execution_source_tree)
     return authority

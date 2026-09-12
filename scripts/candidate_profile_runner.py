@@ -896,6 +896,7 @@ def _execute_profile_workload(
     context_b64url: str,
     runner: CommandRunner | None = None,
     execution_root: Path | None = None,
+    development_binding: dict | None = None,
 ):
     diagnostic = inherited_writer()
     try:
@@ -927,14 +928,20 @@ def _execute_profile_workload(
         if diagnostic is not None:
             environment.update({FD_ENV: str(diagnostic.fd), OP_ENV: diagnostic.operation})
             diagnostic.stage('INSTALLER_STARTING')
-        return_code, stdout, _ = (runner or SubprocessCommandRunner()).run(
-            installer_argv(
+        command = installer_argv(
                 verified_candidate_digest=verified_candidate_digest,
                 profile=profile,
                 public_origin=public_origin,
-            ),
-            environment,
-        )
+            )
+        if development_binding is not None:
+            from scripts.development_profile_runner import validate_binding
+            validate_binding(development_binding)
+            if execution_root is None or development_binding['verified_candidate_digest'] != verified_candidate_digest:
+                raise ProfileRunnerError('DEVELOPMENT_PROFILE_BINDING_INVALID')
+            command = (sys.executable, '-P', '-B', '-m', 'scripts.development_installer_entry',
+                '--profile', INSTALLER_PROFILES[profile], '--public-origin', public_origin,
+                '--binding', json.dumps(development_binding, sort_keys=True, separators=(',', ':')))
+        return_code, stdout, _ = (runner or SubprocessCommandRunner()).run(command, environment)
     if diagnostic is not None:
         diagnostic.exited('INSTALLER', return_code)
     try:

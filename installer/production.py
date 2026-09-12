@@ -2455,6 +2455,7 @@ class ProductionFreshInstallPort:
         | None = None,
         namespace: InstanceNamespace | None = None,
         candidate_network_isolation: bool = False,
+        _development_service_source=None,
     ) -> None:
         self.releases = releases
         self.configuration = configuration
@@ -2462,6 +2463,12 @@ class ProductionFreshInstallPort:
         self.doctor_acceptor = doctor_acceptor
         self.namespace = namespace or instance_namespace()
         self.candidate_network_isolation = candidate_network_isolation
+        if _development_service_source is not None:
+            from .development import DevelopmentServiceSource
+            if type(_development_service_source) is not DevelopmentServiceSource or not candidate_network_isolation:
+                raise ValueError('DEVELOPMENT_SERVICE_SOURCE_INVALID')
+            _development_service_source.verify_source()
+        self._development_service_source = _development_service_source
         self._deployment: ImmutableComposeDeployment | None = None
         self._candidate_listener = None
         self._created: set[Path] = set()
@@ -2667,9 +2674,14 @@ class ProductionFreshInstallPort:
 
     def prepare_services(self, plan: InstallPlan) -> None:
         try:
+            service_root = self.namespace.app_root
+            development_source = getattr(self, '_development_service_source', None)
+            if development_source is not None:
+                development_source.verify_source()
+                service_root = development_source.root
             self.runner.run(
                 [
-                    str(self.namespace.app_root / "deploy" / "install-updater.sh"),
+                    str(service_root / "deploy" / "install-updater.sh"),
                     "--instance",
                     str(self.namespace.name),
                 ],
@@ -3762,6 +3774,7 @@ def build_candidate_composition(
     *,
     profile: str,
     instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+    _development_service_source=None,
 ) -> ProductionInstallerComposition:
     """Compose the Installer around one local Candidate capability only."""
 
@@ -3783,6 +3796,11 @@ def build_candidate_composition(
             "INSTALL_VERIFIED_CANDIDATE_REQUIRED",
             outcome=InstallOutcome.VALIDATION_FAILED,
         ) from None
+    if _development_service_source is not None:
+        from .development import DevelopmentServiceSource
+        if (type(_development_service_source) is not DevelopmentServiceSource
+                or _development_service_source.verified_candidate_digest != loaded.verified_digest):
+            raise ValueError('DEVELOPMENT_SERVICE_MATERIAL_MISMATCH')
     from .platform_bootstrap import SubprocessPlatformCommandRunner
 
     namespace = instance_namespace(instance_name)
@@ -3821,6 +3839,7 @@ def build_candidate_composition(
         runner=runner,
         namespace=namespace,
         candidate_network_isolation=True,
+        _development_service_source=_development_service_source,
     )
     gate = CandidateBootstrapPrivilegeGate(
         verified_prepublication_candidate_capability(verified_candidate_digest)

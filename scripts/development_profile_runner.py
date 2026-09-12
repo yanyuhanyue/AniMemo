@@ -4,10 +4,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import re
+from pathlib import Path
 
-from release.candidate import canonical_json_bytes, load_verified_candidate, sha256_bytes
+from installer.development import expected_service_observation
+from release.candidate import (
+    canonical_json_bytes,
+    load_verified_candidate,
+    sha256_bytes,
+)
 from scripts import candidate_profile_runner as runner
 from scripts.candidate_diagnostics import inherited_writer
 
@@ -18,7 +23,7 @@ _SHA = re.compile(r'[0-9a-f]{40}\Z')
 _DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 
 
-def validate_development_report(value, *, loaded, expected_binding, expected_context):
+def validate_development_report(value, *, loaded, expected_binding, expected_context, expected_service_source):
     fields = {'schema', 'purpose', 'result', 'binding', 'context', 'installer_output',
               'started_at', 'completed_at', 'candidate_acceptance_authority_granted',
               'publish_authorized', 'report_digest'}
@@ -31,6 +36,11 @@ def validate_development_report(value, *, loaded, expected_binding, expected_con
     body = {key: item for key, item in value.items() if key != 'report_digest'}
     if value['report_digest'] != sha256_bytes(canonical_json_bytes(body)):
         raise runner.ProfileRunnerError('DEVELOPMENT_PROFILE_REPORT_DIGEST_INVALID')
+    if (type(expected_service_source) is not dict
+            or expected_service_source.get('execution_inventory_digest') != expected_binding['execution_inventory_digest']
+            or type(value['installer_output']) is not dict
+            or value['installer_output'].get('developmentServiceSourceObservation') != expected_service_source):
+        raise runner.ProfileRunnerError('DEVELOPMENT_SERVICE_SOURCE_MISMATCH')
     # Reuse every production observation check. Its temporary Draft is never
     # emitted as development authority or exposed as a Candidate receipt.
     runner.build_profile_receipt(loaded=loaded, profile=expected_context['profile'],
@@ -39,7 +49,7 @@ def validate_development_report(value, *, loaded, expected_binding, expected_con
     return value
 
 
-def execute_development_profile(*, binding, profile, context_b64url, command_runner=None):
+def validate_binding(binding):
     if (type(binding) is not dict or set(binding) != {'plan_digest', 'session_id',
             'execution_source_sha', 'execution_source_tree', 'execution_inventory_digest',
             'verified_candidate_digest', 'material_source_sha', 'material_source_tree',
@@ -51,6 +61,11 @@ def execute_development_profile(*, binding, profile, context_b64url, command_run
             or type(binding['session_id']) is not str or re.fullmatch('[0-9a-f]{32}', binding['session_id']) is None
             or type(binding['qualification_run_id']) is not int or binding['qualification_run_id'] <= 0):
         raise runner.ProfileRunnerError('DEVELOPMENT_PROFILE_BINDING_INVALID')
+    return binding
+
+
+def execute_development_profile(*, binding, profile, context_b64url, command_runner=None):
+    validate_binding(binding)
     before = load_verified_candidate(binding['verified_candidate_digest']).candidate_input
     if (before['source_sha'] != binding['material_source_sha']
             or before['source_tree'] != binding['material_source_tree']
@@ -59,7 +74,7 @@ def execute_development_profile(*, binding, profile, context_b64url, command_run
     loaded, context, output, started, completed = runner._execute_profile_workload(
         verified_candidate_digest=binding['verified_candidate_digest'], profile=profile,
         public_origin='https://candidate.invalid', context_b64url=context_b64url,
-        runner=command_runner, execution_root=Path(__file__).resolve().parents[1])
+        runner=command_runner, execution_root=Path(__file__).resolve().parents[1], development_binding=binding)
     material = loaded.candidate_input
     if (material['source_sha'] != binding['material_source_sha']
             or material['source_tree'] != binding['material_source_tree']
@@ -71,7 +86,8 @@ def execute_development_profile(*, binding, profile, context_b64url, command_run
              'candidate_acceptance_authority_granted': False, 'publish_authorized': False}
     value['report_digest'] = sha256_bytes(canonical_json_bytes(value))
     return validate_development_report(value, loaded=loaded,
-        expected_binding=binding, expected_context=context)
+        expected_binding=binding, expected_context=context,
+        expected_service_source=expected_service_observation(Path(__file__).resolve().parents[1], binding['execution_inventory_digest']))
 
 
 def main(argv=None):

@@ -1,10 +1,12 @@
 """Use the fixed Guest grants to execute one independently bound development tree."""
 import base64
-from pathlib import Path
 import zlib
+from pathlib import Path
 
+from installer.development import expected_service_observation
 from release.formal_windows_pretrust import hold_windows_private_file
-from scripts import candidate_guest_session as c, candidate_vm_harness as h
+from scripts import candidate_guest_session as c
+from scripts import candidate_vm_harness as h
 from scripts.development_profile_runner import validate_development_report
 from scripts.development_source import require_development_source
 from scripts.guest_sudo_session import ControllerFailure
@@ -80,7 +82,8 @@ def execute_development_workload(provider, plan, profile, lease, disk, snapshot,
                 value = supervisor.execute()
                 validate_development_report(value, loaded=provider._candidate_material_authority.loaded,
                     expected_binding=development_binding(plan),
-                    expected_context=c._profile_context(plan, profile, initial_platform_state))
+                    expected_context=c._profile_context(plan, profile, initial_platform_state),
+                    expected_service_source=expected_service_observation(source.root, source.inventory_digest))
                 provider._candidate_diagnostics[profile.profile]['host_receipt_parse'] = 'VALIDATED'
                 batch.role_result(profile, 'CANDIDATE_WORKLOAD', 'PASS')
                 return value
