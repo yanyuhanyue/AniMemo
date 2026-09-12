@@ -12,7 +12,6 @@ import base64
 import json
 import os
 import re
-import subprocess
 import sys
 import tempfile
 import urllib.parse
@@ -947,14 +946,19 @@ def execute_profile(
             diagnostic.error('INSTALLER_EXECUTION_FAILED')
         raise ProfileRunnerError("CANDIDATE_INSTALLER_EXECUTION_FAILED")
     completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    return build_profile_receipt(
-        loaded=loaded,
-        profile=profile,
-        context=context,
-        installer_output=output,
-        started_at=started,
-        completed_at=completed,
-    )
+    try:
+        return build_profile_receipt(
+            loaded=loaded,
+            profile=profile,
+            context=context,
+            installer_output=output,
+            started_at=started,
+            completed_at=completed,
+        )
+    except ProfileRunnerError:
+        if diagnostic is not None:
+            diagnostic.error('PROFILE_RECEIPT_INVALID')
+        raise
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1001,14 +1005,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         if diagnostic is not None:
             diagnostic.stage('DRAFT_WRITING')
-        if RECEIPT_OUTPUT.exists() or RECEIPT_OUTPUT.is_symlink():
-            raise ProfileRunnerError("CANDIDATE_PROFILE_RECEIPT_OUTPUT_EXISTS")
-        RECEIPT_OUTPUT.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with RECEIPT_OUTPUT.open("xb") as output:
-            output.write(canonical_json_bytes(receipt))
-            output.flush()
-            os.fsync(output.fileno())
-        os.chmod(RECEIPT_OUTPUT, 0o600)
+        try:
+            if RECEIPT_OUTPUT.exists() or RECEIPT_OUTPUT.is_symlink():
+                raise ProfileRunnerError("CANDIDATE_PROFILE_RECEIPT_OUTPUT_EXISTS")
+            RECEIPT_OUTPUT.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with RECEIPT_OUTPUT.open("xb") as output:
+                output.write(canonical_json_bytes(receipt))
+                output.flush()
+                os.fsync(output.fileno())
+            os.chmod(RECEIPT_OUTPUT, 0o600)
+        except (OSError, ProfileRunnerError):
+            if diagnostic is not None:
+                diagnostic.error('DRAFT_WRITE_FAILED')
+            raise ProfileRunnerError('CANDIDATE_PROFILE_RECEIPT_WRITE_FAILED') from None
         if diagnostic is not None:
             diagnostic.stage('DRAFT_WRITTEN')
         print(

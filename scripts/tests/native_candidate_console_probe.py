@@ -95,8 +95,7 @@ def main():
         result = {'status': 'ERROR', 'cases': []}
         try:
             for label, text, cancel in (
-                ('SESSION_BOOTSTRAP_CHANNEL', 'ANIMEMO_TEX\bST\r', False),
-                ('CANDIDATE_WORKLOAD_CHANNEL', 'ANIMEMO_TEX\bST\r', False),
+                ('SINGLE_CAPTURE_CHANNEL', 'ANIMEMO_TEX\bST\r', False),
                 ('CANCEL_CHANNEL', 'ANIMEMO_TEST\x1b', True),
             ):
                 result['cases'].append({'case': label, **run_case(text, cancel)})

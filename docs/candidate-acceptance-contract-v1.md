@@ -172,10 +172,11 @@ multi-writer 和 shared bus。Plan 必须冻结当前 active graph 与三个固�
 各 Profile Snapshot graph 聚合摘要。Clone copy 后必须按完整文件集合和字节摘要精确对账；
 revert 后 active VMDK 只能来自该冻结集合，所选 Snapshot graph 还必须再次与 Profile plan
 精确匹配，同尺寸 extent 漂移同样失败关闭。动态 VMX/redo 只作为运行观察，不得成为计划
-Authority。完整 Candidate 使用两个固定用途的原生 Console 捕获；材料 SCP 和无秘密准备
-结束后，才允许一次 workload 输入，并只交付到产生最终身份观察的同一受控 SSH 进程。
+Authority。完整 Candidate 使用一次原生 Console 捕获，内存 owner 绑定整场冻结 plan；
+三个 Profile 各自取得三个固定角色的单次 grant，只向产生最终身份观察的同一 SSH 进程交付。
 root 首先运行 Host 内嵌的固定程序，安全复制并验证库存后才执行材料中的 Runner；
-一次特权进程包含材料完结、执行与回执输出，密码在启动后立即清理，不再通过环境读取。
+一次特权进程包含材料完结、执行与回执输出，交付临时副本在发送后立即清理；owner 在
+最后一次交付、撤销或结束时清理。阶段诊断与 Draft 独立 framing，诊断不授予 Receipt authority。
 额度、交付与清理边界见 [Guest sudo 会话控制器](guest-sudo-session.md)。
 成功路径只允许软关机后删除；失败路径必须先软关机，软关机失败时仅允许 soft
 suspend、继而 hard suspend 作为紧急 containment（禁止 hard power-off）；只有确认副本

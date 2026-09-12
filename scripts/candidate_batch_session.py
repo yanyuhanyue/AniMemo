@@ -319,6 +319,7 @@ class CandidateBatch:
 
     def close(self):
         with self._lock:
+            self.cancelled.set()
             if not self._closed:
                 self._finish('CLOSED')
             if self._slot is not None:

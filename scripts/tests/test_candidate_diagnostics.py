@@ -10,6 +10,7 @@ import sys
 import threading
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 from scripts import candidate_diagnostics as d, candidate_guest_session as c, candidate_vm_harness as h
 
@@ -79,6 +80,7 @@ class DiagnosticTests(unittest.TestCase):
             frame(b'D', dict(schema=d.SCHEMA, operation=OPERATION, kind='ERROR', code=SENTINEL)),
             event('sha256:' + 'b' * 64, 'STAGE', stage='ROOT_STARTED'),
             event(OPERATION, 'STAGE', stage='ROOT_STARTED') * 2,
+            event(OPERATION, 'STAGE', stage='HOST_PARSED'),
             event(OPERATION, 'STAGE', stage='RUNTIME_READY') + event(OPERATION, 'STAGE', stage='ROOT_STARTED')]
         for body in hostile:
             with self.subTest(size=len(body)), self.assertRaises(c.WorkloadFailure) as caught:
@@ -101,6 +103,25 @@ class DiagnosticTests(unittest.TestCase):
             environment={'SYSTEMROOT': os.environ.get('SYSTEMROOT', 'C:/Windows')}, cwd=Path.cwd(), exchange=exchange, timeout=15)
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(len(observed['receipt']['padding']), 100000)
+
+    def test_bounded_installer_output_keeps_exit_and_never_returns_stderr(self):
+        code, stdout, stderr = d.bounded_process_output([sys.executable, '-I', '-B', '-c',
+            "import sys;sys.stdout.write('{}');sys.stderr.write('synthetic-diagnostic-secret-never-log');sys.exit(17)"],
+            environment={'SYSTEMROOT': os.environ.get('SYSTEMROOT', 'C:/Windows')}, timeout=5)
+        self.assertEqual((code, stdout, stderr), (17, b'{}', b''))
+
+    def test_bounded_installer_output_rejects_limit_and_timeout(self):
+        for program, code in (("import sys;sys.stdout.buffer.write(b'x'*10000)", 'TRANSPORT_LIMIT_EXCEEDED'),
+                              ('import time;time.sleep(60)', 'WORKLOAD_TIMEOUT')):
+            with mock.patch.object(d, 'MAX_RECEIPT_BYTES', 1000), self.assertRaisesRegex(d.DiagnosticError, code):
+                d.bounded_process_output([sys.executable, '-I', '-B', '-c', program],
+                    environment={'SYSTEMROOT': os.environ.get('SYSTEMROOT', 'C:/Windows')}, timeout=0.25)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX owned process group')
+    def test_timeout_cancels_descendant_holding_stdout_after_parent_exit(self):
+        program = "import subprocess,sys;subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])"
+        with self.assertRaisesRegex(d.DiagnosticError, 'WORKLOAD_TIMEOUT'):
+            d.bounded_process_output([sys.executable, '-I', '-B', '-c', program], environment={}, timeout=0.25)
 
     def test_revocation_interrupts_a_real_inflight_child(self):
         cancelled = threading.Event()

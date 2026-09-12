@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import struct
 import subprocess
 import threading
@@ -33,6 +34,7 @@ ERRORS = (
     'ROOT_EXECUTION_FAILED', 'ROOT_PROCESS_FAILED',
     'PRODUCER_TOOLCHAIN_INVALID', 'VERIFIED_CANDIDATE_INVALID',
     'RUNNER_CONTEXT_INVALID', 'PROFILE_RECEIPT_INVALID',
+    'PLATFORM_PACKAGE_POLICY_INVALID',
 )
 FD_ENV = 'ANIMEMO_CANDIDATE_DIAGNOSTIC_FD'
 OP_ENV = 'ANIMEMO_CANDIDATE_DIAGNOSTIC_OPERATION'
@@ -146,7 +148,7 @@ class DiagnosticReader:
             event = validate_event(_json(body), self.operation)
             if event['kind'] == 'STAGE':
                 index = STAGES.index(event['stage'])
-                if event['stage'] in self._stages or index <= self._stage_index:
+                if event['stage'] == 'HOST_PARSED' or event['stage'] in self._stages or index <= self._stage_index:
                     raise DiagnosticError()
                 self._stages.add(event['stage'])
                 self._stage_index = index
@@ -205,15 +207,20 @@ def read_frame(stream):
 def bounded_process_output(argv, *, environment, timeout, pass_fds=()):
     """Drain only bounded structured stdout; child stderr never enters memory."""
     process = subprocess.Popen(argv, env=environment, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=pass_fds)
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, pass_fds=pass_fds,
+        start_new_session=os.name == 'posix')
     expired = threading.Event()
+    def kill_group():
+        try:
+            if os.name == 'posix':
+                os.killpg(process.pid, signal.SIGKILL)
+            elif process.poll() is None:
+                process.kill()
+        except ProcessLookupError:
+            pass
     def terminate():
         expired.set()
-        if process.poll() is None:
-            try:
-                process.kill()
-            except OSError:
-                pass
+        kill_group()
     timer = threading.Timer(timeout, terminate)
     timer.daemon = True
     timer.start()
@@ -233,7 +240,7 @@ def bounded_process_output(argv, *, environment, timeout, pass_fds=()):
     finally:
         timer.cancel()
         if process.poll() is None:
-            process.kill()
+            kill_group()
         process.wait(timeout=5)
         process.stdout.close()
         output[:] = b'\0' * len(output)

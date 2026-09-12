@@ -200,6 +200,55 @@ class BatchSessionTests(unittest.TestCase):
             self.batch.require_live()
         self.assertEqual(self.secret, b'')
 
+    def test_workload_cannot_skip_bootstrap_or_use_a_raw_buffer(self):
+        self.capture()
+        with self.assertRaisesRegex(guest.ControllerFailure, 'USE_ORDER_INVALID'):
+            with self.batch.operation('WORKLOAD', self.plan.profiles[0]):
+                self.batch.issue(self.plan.profiles[0], self.lease, b.ROLES[2:])
+        self.assertTrue(self.batch.cancelled.is_set())
+        with self.assertRaisesRegex(guest.ControllerFailure, 'BATCH_USE_REQUIRED'):
+            c._WorkloadSupervisor(bytearray(SENTINEL))
+
+    def test_next_profile_cannot_inherit_an_unfinished_profile(self):
+        self.bootstrap(0)
+        with self.assertRaisesRegex(guest.ControllerFailure, 'USE_ORDER_INVALID'):
+            self.bootstrap(1)
+        self.assertEqual(len(self.fixture.runner.processes), 2)
+        self.assertEqual(self.secret, b'')
+
+    def test_operation_deadline_revokes_without_a_new_grant(self):
+        self.capture()
+        with self.assertRaisesRegex(guest.ControllerFailure, 'OPERATION_EXPIRED'):
+            with self.batch.operation('TRANSFER', self.plan.profiles[0]):
+                self.time += b.OPERATION_SECONDS['TRANSFER']
+                self.assertTrue(self.batch.cancelled.wait(2))
+        self.assertEqual(self.secret, b'')
+        self.assertEqual(self.batch.record['revocation_code'], 'CANDIDATE_BATCH_OPERATION_EXPIRED')
+
+    def test_human_capture_time_is_not_counted_as_credential_lifetime(self):
+        def capture():
+            self.time += 20 * 60
+            return self.secret
+        self.console.capture.side_effect = capture
+        self.capture()
+        self.batch.require_live()
+        self.assertEqual(self.batch._captured_at, self.time)
+
+    def test_source_change_at_delivery_revokes_without_exposing_exception(self):
+        self.capture()
+        with mock.patch.object(b, '_check_checkout', side_effect=RuntimeError(SENTINEL.decode())):
+            with self.assertRaises(guest.ControllerFailure) as caught:
+                self.bootstrap(0)
+        self.assertNotIn(SENTINEL.decode(), str(caught.exception))
+        self.assertEqual(self.secret, b'')
+        self.assertEqual(self.batch.record['profiles']['FRESH_BASE']['BOOTSTRAP_ROTATION']['delivery_attempts'], 0)
+
+    def test_unknown_cancellation_text_is_never_written_to_ledger(self):
+        self.capture()
+        self.batch.revoke(SENTINEL.decode())
+        self.batch.close()
+        self.assertNotIn(SENTINEL, (self.ledger / 'result.json').read_bytes())
+
 
 if __name__ == '__main__':
     unittest.main()

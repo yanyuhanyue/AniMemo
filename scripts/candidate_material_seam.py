@@ -162,6 +162,10 @@ def exercise_fixed_root(destination, loaded, namespace, inventory, baseline):
     os.chmod(deployment, 0o500)
     observations.update(development_staged_file_addition='installer-root/deploy/release-producer.Dockerfile',
         producer_reference_sha256=producer_digest, original_verified_material_unchanged=True)
+    from installer.platform_bootstrap import _apt_sources_evidence
+    trusted, identity = _apt_sources_evidence()
+    observations['ci_apt_sources_trusted'] = trusted
+    observations['ci_apt_sources_identity_present'] = identity is not None
     allowed_codes = set()
     paths = [loaded.root / 'installer-root' / name for name in
         ('scripts/candidate_profile_runner.py', 'scripts/candidate_workload_root.py', 'release/candidate.py')]

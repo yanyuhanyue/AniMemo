@@ -6,14 +6,14 @@
 
 调用方须先在 canonical `ClosedVmwareProvider.execution_authority()` 内取得真实源码 VM snapshot、readiness、HeldCandidateMaterialAuthority 与当前 CandidateHarnessPlan，并持有当前 profile 的 ProviderSessionLease。plan 不授予凭据使用权。控制器还验证 profile/clone/nonce、session、source SHA/tree、candidate version/input/verified digest、Qualification run、source snapshot、lease 生命周期及执行实例。
 
-控制器接收一次捕获的可变内存 buffer（构造成功后归控制器所有）；调用方使用 context manager 收尾。构造失败时，调用方仍负责清理输入 buffer。不从 argv/environment/文件读取 sudo 值，不提供 worker IPC，也不替代操作员的动态授权。Python 内存清理是 best effort，不承诺消除解释器或 OS 的所有副本。
+完整 Candidate 的 `CandidateBatch` 持有一次捕获的可变内存 buffer；每个 Supervisor 只接收绑定当前执行实例、plan、Profile、lease 和固定角色的 `BatchUse`。单 Profile 动态验证入口独立持有并清理其 buffer，不提供完整 Candidate 的替代入口。不从 argv/environment/文件读取 sudo 值，不提供 worker IPC，也不替代操作员的动态授权。Python 内存清理是 best effort，不承诺消除解释器或 OS 的所有副本。
 
 它在现有 profile 的受保护目录和 session key/lease 文件上持有 Windows authority；known-hosts 持有仅跨本次 SSH 连接，避免跨 host-key rotation 保留过时文件。
 
 操作顺序：
 
 1. `bootstrap_rotation()` 复用 provider 的只读 bootstrap gate，继而在同一 SSH 子进程中再次取得 Guest observation；真实 canonical bootstrap verifier 通过后，仅本次 BOOTSTRAP_ROTATION grant 可发送一次 secret，执行固定 session-key/host-key rotation。
-2. `validate_verified_guest()` 取得旋转后的 key，通过完整 canonical verifier（含当前已使用 key 集合）后，才向产生该 observation 的同一进程 stdin 执行固定 sudo validation；成功后登记 key、清空 secret。
+2. `validate_verified_guest()` 取得旋转后的 key，通过完整 canonical verifier（含当前已使用 key 集合）后，才向产生该 observation 的同一进程 stdin 执行固定 sudo validation；成功后登记 key、关闭该用途的 grant；Candidate 总缓冲由 batch owner 管理。
 3. 失败、超时、取消、租约/源码/材料失效、运行 VMX 竞争、Guest 或进程身份变化均撤销会话；不会回到再次捕获或再次验证旁路。grant 不可序列化和重用。
 
 实际进程由原 provider `_run` 的工具身份、固定 cwd、净化环境、active execution 前后检查启动；新增交互方法不绕开既有 launcher。stdout 仅接收有界 public observation，sudo 输出被丢弃；进程异常时关闭管道并回收本次子进程。
@@ -48,26 +48,32 @@ Windows execution 的私有工作根使用紧凑的 `session/profile/vm` 路径�
 
 成功和失败都回收当前 SSH/secret/session key，并尝试软关机；provider 必要时使用既有 suspend containment。结果分别记录 STOPPED、SUSPENDED 或未完成 containment，suspend 不算正常关机。该入口保留本次 private-work 中的 Clone/测试数据，execution 退出优先清理复制的 bootstrap key，再清理工具/source 临时副本。独立清理步骤逐项执行，任何失败都会记录并阻止成功结论。随后取得新的 R2 POSTSTATE，并再次核对源码。报告只包含公开身份、操作类别、计数与收尾状态。
 
-## 使用范围与后续任务
+## 完整 Candidate 的单次输入
 
-`SessionSupervisor` 成功后立即清理秘密。完整 Candidate 由 canonical `ClosedVmwareProvider.execute_profile` 调用 `bootstrap_candidate` 和 `execute_candidate_workload`；其 staging 与 runner 不再读取环境密码。Formal 保留独立的既有路径，不继承 Candidate 凭据额度。
+固定授权为 `ANIMEMO_V2_CANDIDATE_WORKLOAD_DIAGNOSTICS_SINGLE_CAPTURE_V1`，账本根为 `E:/78b1ae1ff8f196aa4cb31141423e33365e9334e34ee83735377a051053919901`，即授权 ID ASCII 字节的 SHA-256。目录 exclusive 创建消费一次人工捕获尝试；取消、无效输入、崩溃和部分交付均不恢复额度。账本独立于 run、session、Profile、Q 和源码。旧授权目录及其已消费记录保留。
 
-### 完整 Candidate 的两用途额度
+一个控制器进程中的 `CandidateBatch` 绑定冻结 M/T/Q/Candidate 与 canonical plan，只允许 FRESH_BASE、DOCKER_BASE、RUNTIME_BASE_OFFLINE 串行执行。第一次无密码 bootstrap 核验、源码检查及 Console preflight 通过后捕获一次。每 Profile 的 BOOTSTRAP_ROTATION、VERIFIED_SUDO、CANDIDATE_WORKLOAD 各最多一次交付尝试，整场上界九次。前置角色未成功或前一 Profile 未结束时不得申请后续用途。
 
-固定授权 `ANIMEMO_V2_EXACT_CANDIDATE_ACCEPTANCE_V1` 的计数根为 `E:/6d30583b353270ffd7b42163054ca7a470b74d5c9f6c19c920718364661ea82a`。每个固定 Profile 各有 `SESSION_BOOTSTRAP`、`CANDIDATE_WORKLOAD` 两个用途；根下两级目录分别为 Profile 和用途 ASCII 字节的 SHA-256，复用私有目录的 exclusive 创建与目录持有交接。每用途最多一次人工捕获，目录存在即已尝试。取消、无效输入、崩溃或部分交付不恢复额度；源码、session、Q 和新 Clone 不改变槽位。旧授权目录保持原样。
+每次 Supervisor 仍执行完整目标、VMX、Snapshot/磁盘图、Guest challenge、host key、lease、源码和材料检查，并在同一 SSH 进程内完成观察与交付。跨 Profile 使用独立 key、known_hosts、Clone 身份；同 Profile 续接使用已登记的当前 key，不清空跨 Profile 的已使用 key 集合。`BatchUse` 没有 get_secret、任意命令或序列化接口；workload 的 `execute()` 不接受命令参数。
 
-Bootstrap 在新的无密码 Guest 观察和 Console preflight 后占用槽位，复用两个既有角色，成功后由 Provider 登记绑定当前 execution、plan、Profile 和 lease 的进程内连接。workload 不接收外部 connection ticket；它对新观察重新比较 runtime、machine/boot ID、MAC、challenge 与已认证 host key。正常续接允许使用本 Profile 已登记的 key，跨 Profile/session 的 freshness 检查和已使用 key 集合保持有效。
+每次交付从 owner 借出临时可变 buffer，一次 write/flush/close 后立即清理。远端 forwarding buffer 同样在等待子进程前清理。正常 role/Profile close 仅关闭用途能力；第九次交付完成即提前清理 owner，其他结束路径在进入 POSTSTATE 和报告前清理。完整 write 不证明 sudo 或 Installer 成功。
 
-材料先通过无秘密 SCP 传到当前 session/Profile 独占 staging。Host 验证受持有材料和受审 root 程序字节，重新观察 Guest 后才预检并占用 workload 槽位。最终观察来自随后接收秘密的同一 SSH 子进程。一个固定 sudo 子进程执行 `candidate_workload_root.py`：逐级 no-follow directory fd 复制，拒绝 symlink、hardlink、特殊文件、目录替换、文件增长和目标预占；新目标从创建时即 root-owned，复制后失去写权限。其完整库存与宿主持有摘要相等后，才从已验证目标加载 wheel runtime 和 canonical Profile Runner，并安全读取固定 Profile Draft。
+捕获完成起使用单调时钟，硬上限 12 小时；没有登记操作时空闲上限 30 分钟。准备、bootstrap、传输、workload、清理均有固定超时，真实在途操作暂停空闲计时但不延长硬上限。到期、取消或控制器退出撤销全 batch、终止本任务子进程并执行 canonical Clone containment。会话不可续期、保存、重启恢复或自动重捕获；不得持有真实秘密编辑源码或等待 CI。
 
-宿主和远端转发器在一次 write/flush/close 后立即清理可变密码，不等待安装完成。短写不补写；grant 的五秒窗口与固定工作负载最长五小时（含材料完结）的进程预算分开。stdout 只包含有界身份观察与回执，由宿主持续读取，Runner 普通输出不进入该通道。SSH 超时或断线进入 Clone containment，不认为远端 root 已退出，不重新交付密码。Provider 退出 Profile 时撤销连接登记。
+材料经无秘密 SCP 进入 session/Profile 独占 staging。Host 比对受持有材料和受审 root 程序，固定 sudo/root 程序通过 no-follow directory fd 复制，拒绝链接、特殊文件、目录替换、增长和目标预占；新 root-owned 目标封闭后校验完整库存，才从其字节安装发行 wheels、加载 Runner 和执行 Installer。离线包包含 producer lock 及校验所需的 `deploy/release-producer.Dockerfile`。
 
-公开记录按 Profile、用途与角色分别保存 capture/delivery attempts、completed 和操作结果，并绑定 plan/session/source/tree/Q/Candidate。完成交付不等于安装 PASS；只有 canonical Guest Draft、Host 模板前后观察及最终收据验证均通过，才支持对应结论。
+## 受限 workload 诊断
 
-已获得本固定任务授权时，专用原生 Console 可直接运行 `python -B -m scripts.candidate_vm_harness --execute --authorization-id ANIMEMO_V2_EXACT_CANDIDATE_ACCEPTANCE_V1 --r2-origin-transport cloudflare-plugin`，同时提供准确的四项 Candidate/Q/source 参数与尚不存在的 `--result` 路径。该授权接受本进程产生并保存的完整 plan；不是后续任务或发布权限。
+Guest observation 之后的流按 D（诊断）和 R（Draft）分别 framing。诊断 schema 为 `animemo.candidate-operation-diagnostic/v1`，绑定 plan/source/tree/Q/verified digest/Profile/session 的 operation digest，每操作最多 16 KiB、40 个事件；Draft 上限 8 MiB。重复、倒序、未知字段/枚举、绑定错误、畸形、截断和超限均拒绝。普通 stdout/stderr 不转为诊断正文。
 
-离线检查运行 `python -m unittest scripts.tests.test_guest_sudo_session`，全部输入为 synthetic sentinel 和 mock Guest transport；Windows 用真实私有文件/目录 holds 检查生产 scope。Linux 跳过仅 Windows ACL 的测试；原 harness 回归另行保留。结果最多支持 `OFFLINE_SECURITY_REVIEW_PASSED_DYNAMIC_PENDING`，不能写成 Candidate PASS、真实 Guest 安全或 Snapshot 已修复。
+固定阶段覆盖 SSH 观察、sudo 启动、root 进入、材料完结、runtime 初始化、Runner 启动、平台准备、Installer 执行、Draft 写入/回传；Host 独立记录解析和身份绑定结果。退出码只来自实际子进程，未取得为 null；缺少可信 root 标记时为 UNKNOWN_BEFORE_ROOT_START。标准库启动保护在复杂导入之前发出阶段。内部 Installer 输出有界 drain，stderr 丢弃，超时取消进程组；异常正文、原始流、环境和秘密不进入诊断。
 
-新增权限的定点测试为 `scripts.tests.test_candidate_guest_session`、`scripts.tests.test_candidate_workload_root` 和 `scripts.tests.test_candidate_plugin_acceptance`。前者在 Windows 使用真实 holds 与本机子进程；POSIX fd 对抗测试在 Linux 执行。`scripts/tests/native_candidate_console_probe.py` 必须在独占可见 conhost 中显式启动，只自动输入公开测试文本并验证退格、取消及两用途的原生通道；它不访问真实额度，不执行 VM 或 sudo。所有这些都是开发证据，不能替代真实三 Profile 验收。
+普通 Installer/业务失败只有在各层真实退出码及可信阶段足够、canonical continuation 和清理证明安全时，才可继续下一 Profile。共同启动/回执缺陷或交付不确定撤销总会话，其余 Profile 为 NOT_RUN_SHARED_BLOCKER；认证失败、SSH 中断、短写、Guest/源码/材料/lease 漂移不得补发。
 
-每次实际执行仍须有适用的明确授权，先比对最终 main、控制器源码与 Qualification，再核对模板、Profile、Snapshot 和任务资源；成功 Q 只绑定其准确源码，历史结果不能授权新源码。
+诊断不提供成功 authority。仍须 canonical Draft、Host 模板前后态及 Profile Receipt 验证通过；Aggregate v4 / Profile v2 的现行消费者继续拒绝 FAIL、不完整或身份不符。`credential_session` 记录一次 capture attempts/completed、终态和冻结绑定；其 `profiles` 与 `credential_results` 记录每角色 delivery attempts/completed、target/lease 核验及操作结果。capture 不按 Profile 重复计数。初始失败、诊断失败、cleanup 和 POSTSTATE 分别保留。
+
+已获得本固定任务授权时，专用原生 Console 直接运行 `python -B -m scripts.candidate_vm_harness --execute --authorization-id ANIMEMO_V2_CANDIDATE_WORKLOAD_DIAGNOSTICS_SINGLE_CAPTURE_V1 --r2-origin-transport cloudflare-plugin`，同时提供准确 Candidate/Q/source 参数及尚不存在的 `--result`。入口接受本进程生成并保存的完整 plan，不授予后续任务或发布权限。Formal 保持其独立调用边界。
+
+开发回归按风险分为 batch 生命周期与额度、Guest authority/真实 Windows holds、受限协议/本机子进程、POSIX root/runtime/receipt、现行 canonical 消费者。测试输入仅 synthetic sentinel；`scripts/tests/native_candidate_console_probe.py` 在独占可见 conhost 自动输入公开文本，验证捕获、退格和取消，不接触真实账本或 Guest。真实发行材料的隔离开发探针须记录源码/材料差异，并明确没有 Candidate authority。
+
+最终三 Profile 验收只使用审查合并后的 exact main、同源 Q 和新 Clone。成功 Q、开发测试或单 Profile PASS 均不能替代三 Profile、Aggregate、Origin 前后态和资源收尾的实际结果。
