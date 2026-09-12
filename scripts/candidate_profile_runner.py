@@ -898,12 +898,20 @@ def execute_profile(
     runner: CommandRunner | None = None,
 ) -> dict[str, Any]:
     diagnostic = inherited_writer()
-    context = _decode_context(context_b64url)
+    try:
+        context = _decode_context(context_b64url)
+    except ProfileRunnerError:
+        if diagnostic is not None:
+            diagnostic.error('RUNNER_CONTEXT_INVALID')
+        raise
     if context["profile"] != profile:
         raise ProfileRunnerError("CANDIDATE_PROFILE_CONTEXT_MISMATCH")
     try:
         loaded = load_verified_candidate(verified_candidate_digest)
     except CandidateContractError as error:
+        if diagnostic is not None:
+            diagnostic.error('PRODUCER_TOOLCHAIN_INVALID' if error.code == 'CANDIDATE_PRODUCER_TOOLCHAIN_INVALID'
+                else 'VERIFIED_CANDIDATE_INVALID')
         raise ProfileRunnerError(error.code) from error
     started = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     installer_root = loaded.root / "installer-root"

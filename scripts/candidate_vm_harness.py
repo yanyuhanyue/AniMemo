@@ -5201,6 +5201,7 @@ class ClosedVmwareProvider:
                      "cleanup_errors": [], "lease_released": False, "result": "ERROR"}
         self._profile_operation_results[plan.profile] = operation
         primary_error = None
+        continue_batch_failure = False
         def cleanup(step, action):
             try:
                 action()
@@ -5238,7 +5239,7 @@ class ClosedVmwareProvider:
             try:
                 if _formal_workload is None:
                     from scripts.candidate_guest_session import (
-                        bootstrap_candidate, execute_candidate_workload,
+                        bootstrap_candidate, execute_candidate_workload, WorkloadFailure,
                     )
                     from scripts.guest_sudo_session import ControllerFailure
                     from scripts.guest_console_capture import ConsoleCaptureError
@@ -5251,6 +5252,9 @@ class ClosedVmwareProvider:
                             self, harness_plan, plan, lease,
                             preboot_disk_graph_digest, preboot_snapshot_identity,
                             candidate_root, initial_platform_state)
+                    except WorkloadFailure as error:
+                        continue_batch_failure = not error.revoke_batch
+                        raise CandidateHarnessError(error.code) from error
                     except (ControllerFailure, ConsoleCaptureError) as error:
                         raise CandidateHarnessError(getattr(error, "code", str(error))) from error
                 else:
@@ -5291,6 +5295,8 @@ class ClosedVmwareProvider:
         except BaseException as error:
             primary_error = error
             if self._candidate_batch is not None:
+                if not continue_batch_failure:
+                    self._candidate_batch.revoke('CANDIDATE_BATCH_PROFILE_FAILURE')
                 self._candidate_batch.cleanup_started(plan)
             operation["operation_failure_code"] = (error.code if isinstance(error, CandidateHarnessError)
                 else "CANDIDATE_PROFILE_UNCLASSIFIED_ERROR")
@@ -5952,6 +5958,9 @@ def _execute_harness_plan(
                 observed_original_hashes=observed_original_hashes,
             )
         except CandidateHarnessError as error:
+            if batch is not None:
+                batch.revoke('CANDIDATE_BATCH_RECEIPT_AUTHORITY_INVALID')
+                provider._candidate_diagnostics.get(item.profile, {})['host_receipt_parse'] = 'REJECTED'
             profile_results[result_key] = _profile_result(
                 "ERROR",
                 failure_code=error.code,
@@ -5982,6 +5991,9 @@ def _execute_harness_plan(
             or receipt["original_vm_post_hashes"]
             != observed_original_hashes
         ):
+            if batch is not None:
+                batch.revoke('CANDIDATE_BATCH_RECEIPT_AUTHORITY_INVALID')
+                provider._candidate_diagnostics.get(item.profile, {})['host_receipt_parse'] = 'REJECTED'
             profile_results[result_key] = _profile_result(
                 "ERROR",
                 failure_code="CANDIDATE_PROFILE_RECEIPT_BINDING_MISMATCH",
@@ -5992,6 +6004,8 @@ def _execute_harness_plan(
                            plan_digest=plan.plan_digest, session_id=plan.session_id)
             validate_profile_receipt(receipt)
         receipts[item.profile] = receipt
+        if batch is not None:
+            provider._candidate_diagnostics.get(item.profile, {})['host_receipt_parse'] = 'VALIDATED'
         digest = _profile_digest(receipt)
         if receipt["result"] == "PASS":
             profile_results[result_key] = _profile_result(

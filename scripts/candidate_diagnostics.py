@@ -31,6 +31,8 @@ ERRORS = (
     'TRANSPORT_PROTOCOL_INVALID', 'TRANSPORT_TRUNCATED',
     'TRANSPORT_LIMIT_EXCEEDED', 'TRANSPORT_INTERRUPTED', 'WORKLOAD_TIMEOUT',
     'ROOT_EXECUTION_FAILED', 'ROOT_PROCESS_FAILED',
+    'PRODUCER_TOOLCHAIN_INVALID', 'VERIFIED_CANDIDATE_INVALID',
+    'RUNNER_CONTEXT_INVALID', 'PROFILE_RECEIPT_INVALID',
 )
 FD_ENV = 'ANIMEMO_CANDIDATE_DIAGNOSTIC_FD'
 OP_ENV = 'ANIMEMO_CANDIDATE_DIAGNOSTIC_OPERATION'
@@ -171,7 +173,7 @@ class DiagnosticReader:
             root_started='ROOT_STARTED' in stages,
             exit_codes={component: exits.get(component) for component in COMPONENTS},
             transport_error=self.error_code, errors=errors,
-            profile_draft_received=self.receipt is not None)
+            profile_draft_received=self.receipt is not None, host_receipt_parse='NOT_REACHED')
 
 
 def read_frame(stream):

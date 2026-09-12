@@ -29,8 +29,11 @@ def main(runtime_directory=None):
         runpy.run_path(str(root / 'scripts/candidate_profile_runner.py'), run_name='__main__')
     except SystemExit as error:
         return error.code if type(error.code) is int and 0 <= error.code <= 255 else (0 if error.code is None else 2)
-    except BaseException:
+    except ImportError:
         diagnostic.error('RUNNER_INITIALIZATION_FAILED')
+        return 2
+    except BaseException:
+        diagnostic.error('RUNNER_EXECUTION_FAILED')
         return 2
     return 0
 

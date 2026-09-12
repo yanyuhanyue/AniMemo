@@ -116,19 +116,21 @@ raise SystemExit(0 if result['runner_module_loaded'] else 2)
         actual_root_fd_copy=True, full_inventory_match=True, child_exit_code=completed.returncode,
         import_probe=observation)
     if completed.returncode == 0:
-        result['fixed_root_execution'] = exercise_fixed_root(destination, loaded, namespace, inventory)
+        result['fixed_root_execution'] = exercise_fixed_root(destination, loaded, namespace, inventory, baseline)
     (destination / 'material-seam-result.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
     os.chmod(destination / 'material-seam-result.json', 0o644)
     print(json.dumps(result, sort_keys=True))
     return completed.returncode
 
 
-def exercise_fixed_root(destination, loaded, namespace, inventory):
+def exercise_fixed_root(destination, loaded, namespace, inventory, baseline):
     """Actual M6 root and actual Runner/Installer, in this disposable CI VM.
 
-    Only the root's process adapter is observed. Commands, program, runtime,
-    Runner, and Installer bytes are unchanged. The VM identity context is an
-    explicit development fixture and cannot issue a Host acceptance receipt.
+    The observed M6 failure is reproduced separately in the previous run.
+    This development variant supplies the missing, digest-verified producer
+    definition through a local reference projection. Runtime/Runner/Installer
+    modules and original verified material bytes stay unchanged. The synthetic
+    VM context and projection cannot issue a Host acceptance receipt.
     """
     session = '6d6e81b4f0ac4f3c9ced1a5648fc980f'
     profile = 'DOCKER_BASE'
@@ -146,6 +148,11 @@ def exercise_fixed_root(destination, loaded, namespace, inventory):
         runtime_runner_error_category=None, root_returned=False, root_error_code=None,
         root_error_category=None, draft_returned=False, host_receipt_issued=False,
         child_timeout=False, child_stderr_limit_exceeded=False)
+    producer_reference = baseline / 'deploy/release-producer.Dockerfile'
+    producer_receipt = json.loads((loaded.root / 'release-producer-toolchain-receipt.json').read_bytes())
+    producer_digest = 'sha256:' + hashlib.sha256(producer_reference.read_bytes()).hexdigest()
+    assert producer_digest == producer_receipt['byteAuthority']['releaseProducer']['dockerfileSha256']
+    observations.update(development_producer_reference_projection=True, producer_reference_sha256=producer_digest)
     allowed_codes = set()
     for name in ('scripts/candidate_profile_runner.py', 'scripts/candidate_workload_root.py', 'release/candidate.py'):
         for node in ast.walk(ast.parse((loaded.root / 'installer-root' / name).read_bytes())):
@@ -157,6 +164,12 @@ def exercise_fixed_root(destination, loaded, namespace, inventory):
         observations['root_copy_completed'] = True
     def observed_run(argv, **options):
         assert argv[0] == '/usr/bin/python3' and argv[1:4] == ['-I', '-B', '-c']
+        argv = list(argv)
+        marker = 'sys.path.insert(0,str(runtime));runpy.run_path('
+        assert argv[4].count(marker) == 1
+        projected = ('sys.path.insert(0,str(runtime));from release import producer_toolchain as _producer;'
+            + '_producer.DOCKERFILE_PATH=Path(' + repr(str(producer_reference)) + ');runpy.run_path(')
+        argv[4] = argv[4].replace(marker, projected)
         process = subprocess.Popen(argv, env=options['env'], stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
         observations['runtime_runner_started'] = True

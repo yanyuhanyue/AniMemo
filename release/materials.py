@@ -108,6 +108,7 @@ INITIAL_TRUST_KIT_FILES = frozenset(
 
 _FIXED_DEPLOYMENT_FILES = (
     "deploy/docker-compose.yml",
+    "deploy/release-producer.Dockerfile",
     "deploy/install-updater.sh",
     "deploy/updater/animemo",
     "deploy/updater/animemo-updater",
