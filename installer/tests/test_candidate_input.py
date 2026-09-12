@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from types import SimpleNamespace
@@ -111,6 +112,29 @@ class _CandidateGate:
 
 
 class CandidateInstallerCliTests(unittest.TestCase):
+    def test_platform_planning_failure_has_bounded_diagnostic_before_execution(self):
+        from installer.platform_bootstrap import PlatformBootstrapError
+        from scripts import candidate_diagnostics as diagnostics
+        composition = _ExecutingComposition()
+        composition.plan_platform = mock.Mock(side_effect=PlatformBootstrapError('PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID'))
+        operation = 'sha256:' + 'd' * 64
+        with tempfile.TemporaryFile() as stream:
+            writer = diagnostics.DiagnosticWriter(stream.fileno(), operation)
+            with (mock.patch('installer.production.build_candidate_composition', return_value=composition),
+                    mock.patch.object(diagnostics, 'inherited_writer', return_value=writer),
+                    redirect_stdout(io.StringIO())):
+                code = cli.main(['candidate', '--verified-candidate-digest', DIGEST, '--profile', 'ONLINE_FRESH',
+                    '--public-origin', 'https://candidate.invalid', '--execute', '--accept', '--json'])
+            stream.seek(0)
+            reader = diagnostics.DiagnosticReader(operation)
+            while item := diagnostics.read_frame(stream):
+                reader.accept(*item)
+        self.assertNotEqual(code, 0)
+        observed = reader.public()
+        self.assertEqual(observed['last_stage'], 'PLATFORM_PREPARING')
+        self.assertIn('PLATFORM_PACKAGE_POLICY_INVALID', observed['errors'])
+        composition.runtime.execute.assert_not_called()
+
     @mock.patch(
         "installer.production.verified_prepublication_candidate_capability",
         return_value=object(),

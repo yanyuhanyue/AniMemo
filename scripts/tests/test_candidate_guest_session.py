@@ -3,80 +3,20 @@ from __future__ import annotations
 
 import io
 import ast
-import json
 import os
 from pathlib import Path
 import shlex
-import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from dataclasses import replace
-from types import SimpleNamespace
 from unittest import mock
 
-from scripts import candidate_guest_session as c
+from scripts import candidate_batch_session as b, candidate_guest_session as c
 from scripts import candidate_vm_harness as h
 from scripts.tests import test_guest_sudo_session as session_fixtures
 from scripts.tests.test_guest_sudo_session import InputSink, SENTINEL
-
-
-class CaptureSlotsTests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory(dir='E:/' if os.name == 'nt' else None)
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name) / ('a' * 64)
-        self.patch = mock.patch.object(c, 'CAPTURE_LEDGER', self.root)
-        self.patch.start()
-        self.addCleanup(self.patch.stop)
-
-    def test_six_fixed_slots_are_independent_and_cannot_be_replayed(self):
-        paths = set()
-        for profile in h.PROFILES:
-            for purpose in c.PURPOSES:
-                slot = c._reserve_capture(profile, purpose)
-                paths.add(slot)
-                with self.assertRaisesRegex(c.ControllerFailure, 'ALREADY_ATTEMPTED'):
-                    c._reserve_capture(profile, purpose)
-        self.assertEqual(len(paths), 6)
-        for wrong in ('NEW_SESSION', '../FRESH_BASE', 'fresh_base'):
-            with self.assertRaisesRegex(c.ControllerFailure, 'SCOPE_INVALID'):
-                c._reserve_capture(wrong, 'SESSION_BOOTSTRAP')
-        self.assertTrue(all(path.is_dir() for path in paths))
-
-    def test_preflight_failure_does_not_consume_but_cancel_does(self):
-        provider = SimpleNamespace(_candidate_credential_results={})
-        plan = SimpleNamespace(source_sha='a' * 40, source_tree='b' * 40, plan_digest='sha256:'+'c'*64, session_id='d'*32, qualification_run_id=42, candidate_input_digest='sha256:'+'e'*64, verified_candidate_digest='sha256:'+'f'*64)
-        profile = SimpleNamespace(profile='FRESH_BASE')
-        with mock.patch.object(c, '_check_checkout'), mock.patch.object(c, 'WindowsConsoleCapture') as constructor:
-            console = constructor.return_value
-            console.preflight.side_effect = c.ConsoleCaptureError('CREDENTIAL_CHANNEL_UNAVAILABLE')
-            with self.assertRaises(c.ConsoleCaptureError), c._capture(provider, plan, profile, 'SESSION_BOOTSTRAP'):
-                self.fail('channel must not open')
-            self.assertFalse(self.root.exists())
-            console.preflight.side_effect = None
-            console.capture.side_effect = c.ConsoleCaptureError('CREDENTIAL_CAPTURE_CANCELLED')
-            with redirect_stdout(io.StringIO()), self.assertRaises(c.ConsoleCaptureError), c._capture(provider, plan, profile, 'SESSION_BOOTSTRAP'):
-                self.fail('cancelled capture must not yield')
-            with self.assertRaisesRegex(c.ControllerFailure, 'ALREADY_ATTEMPTED'):
-                c._reserve_capture('FRESH_BASE', 'SESSION_BOOTSTRAP')
-        record = provider._candidate_credential_results['FRESH_BASE']['SESSION_BOOTSTRAP']
-        self.assertEqual((record['capture_attempts'], record['capture_completed']), (1, 0))
-        self.assertEqual(record['delivery_attempts'], {'BOOTSTRAP_ROTATION': 0, 'VERIFIED_SUDO': 0})
-        self.assertEqual(record['secret_cleanup'], 'BEST_EFFORT_COMPLETED')
-
-    def test_secret_is_wiped_and_public_count_record_has_no_secret(self):
-        secret = bytearray(SENTINEL)
-        provider = SimpleNamespace(_candidate_credential_results={})
-        plan = SimpleNamespace(source_sha='a' * 40, source_tree='b' * 40, plan_digest='sha256:'+'c'*64, session_id='d'*32, qualification_run_id=42, candidate_input_digest='sha256:'+'e'*64, verified_candidate_digest='sha256:'+'f'*64)
-        profile = SimpleNamespace(profile='DOCKER_BASE')
-        with mock.patch.object(c, '_check_checkout'), mock.patch.object(c, 'WindowsConsoleCapture') as constructor, redirect_stdout(io.StringIO()):
-            constructor.return_value.capture.return_value = secret
-            with c._capture(provider, plan, profile, 'CANDIDATE_WORKLOAD') as (captured, _):
-                self.assertIs(captured, secret)
-        self.assertEqual(secret, b'')
-        for path in self.root.rglob('result.json'):
-            self.assertNotIn(SENTINEL, path.read_bytes())
+from scripts.tests.test_candidate_diagnostics import successful_frames, OPERATION
 
 
 @unittest.skipUnless(os.name == 'nt', 'actual Windows held authority')
@@ -87,43 +27,78 @@ class WorkloadAuthorityTests(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         self.fixture = fixture
         bootstrap, material, execution, lease = fixture._production_scope(outer_directory_holds=True)
-        bootstrap.bootstrap_rotation()
-        fixture.key_read.return_value = fixture.verified.host_key_digest
-        fixture.runner.observation = fixture.verified
-        bootstrap.validate_verified_guest()
-        self.verified = bootstrap._verified
         bootstrap.close()
         self.provider, self.plan, self.profile = fixture.provider, fixture.plan, fixture.profile
         self.lease, self.material = lease, material
+        temporary = tempfile.TemporaryDirectory(dir='E:/')
+        self.addCleanup(temporary.cleanup)
+        for patcher in (mock.patch.object(b, 'LEDGER', Path(temporary.name) / ('d' * 64)),
+                        mock.patch.object(b, '_check_checkout'), mock.patch.object(c, '_check_checkout'),
+                        mock.patch.object(c, '_root_program', return_value='pass')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.batch = b.CandidateBatch(self.provider, self.plan)
+        self.provider._candidate_batch = self.batch
+        self.addCleanup(self.batch.close)
+        self.secret = bytearray(SENTINEL)
+        with self.batch.operation('BOOTSTRAP', self.profile), redirect_stdout(io.StringIO()):
+            with mock.patch.object(b, 'WindowsConsoleCapture') as constructor:
+                constructor.return_value.capture.return_value = self.secret
+                self.batch.capture_after_bootstrap_observation(self.profile)
+            use = self.batch.issue(self.profile, lease, b.ROLES[:2])
+            bootstrap = c.SessionSupervisor(use, provider=self.provider, plan=self.plan,
+                profile=self.profile, lease=lease, preboot_disk_graph_digest=fixture.runtime.disk_graph_digest,
+                preboot_snapshot_identity=fixture.runtime.snapshot_identity)
+            try:
+                bootstrap.bootstrap_rotation()
+                self.batch.role_result(self.profile, 'BOOTSTRAP_ROTATION', 'PASS')
+                fixture.key_read.return_value = fixture.verified.host_key_digest
+                fixture.runner.observation = fixture.verified
+                bootstrap.validate_verified_guest()
+                self.batch.role_result(self.profile, 'VERIFIED_SUDO', 'PASS')
+                self.verified = bootstrap._verified
+            finally:
+                bootstrap.close()
         self.provider._candidate_connections[self.profile.profile] = c._IssuedConnection(
             execution, self.plan.plan_digest, lease, self.verified)
-        self.secret = bytearray(SENTINEL)
-        self.session = c._WorkloadSupervisor(self.secret, provider=self.provider, plan=self.plan,
+        self.operation = self.batch.operation('WORKLOAD', self.profile)
+        self.operation.__enter__()
+        # An expired/revoked fixture must still release its registered operation.
+        self.addCleanup(self.operation.__exit__, RuntimeError, RuntimeError(), None)
+        self.use = self.batch.issue(self.profile, lease, b.ROLES[2:])
+        self.session = c._WorkloadSupervisor(self.use, provider=self.provider, plan=self.plan,
             profile=self.profile, lease=lease, preboot_disk_graph_digest=fixture.runtime.disk_graph_digest,
             preboot_snapshot_identity=fixture.runtime.snapshot_identity)
         self.addCleanup(self.session.close)
-        self.check = mock.patch.object(c, '_check_checkout')
-        self.check.start()
-        self.addCleanup(self.check.stop)
+        self.frames = successful_frames(c._diagnostic_operation(self.plan, self.profile))
         self.fixture.runner.before_exchange = lambda process: setattr(process, 'stdout',
-            io.BytesIO(process.stdout.getvalue() + b'{"result":"PASS"}\n'))
+            io.BytesIO(process.stdout.getvalue() + self.frames))
 
     def run_workload(self):
-        return self.session.execute(c._remote_workload_command('pass'))
+        return self.session.execute()
 
     def test_same_profile_continuation_and_single_delivery_keep_actual_holds(self):
         def before(process):
-            process.stdout = io.BytesIO(process.stdout.getvalue() + b'{"result":"PASS"}\n')
+            process.stdout = io.BytesIO(process.stdout.getvalue() + self.frames)
             with self.assertRaises(OSError):
                 self.verified.authority.clone_root.rename(self.verified.authority.clone_root.with_name('replaced'))
-        self.fixture.runner.before_exchange = before
+        class TracedSink(InputSink):
+            def write(self, value):
+                self.borrowed = value
+                return super().write(value)
+        sink = TracedSink()
+        def traced(process):
+            before(process)
+            process.stdin = sink
+        self.fixture.runner.before_exchange = traced
         original = c._read_receipt
         def receipt(process, **kwargs):
-            self.assertEqual(self.secret, b'', 'secret must be gone before the long receipt wait')
+            self.assertEqual(self.secret, SENTINEL, 'later Profiles still need the batch owner')
+            self.assertEqual(sink.borrowed, b'', 'the delivery buffer must be wiped before waiting')
             self.session._expires = 0  # Grant expiry must not invalidate an already delivered fixed job.
             return original(process, **kwargs)
         with mock.patch.object(c, '_read_receipt', side_effect=receipt):
-            self.assertEqual(self.run_workload(), {'result': 'PASS'})
+            self.assertEqual(self.run_workload(), {'result': 'PASS', 'synthetic_transport_only': True})
         self.assertEqual(self.session.delivery_attempts, {'CANDIDATE_WORKLOAD': 1})
         self.assertEqual(self.session.delivery_completed, {'CANDIDATE_WORKLOAD': 1})
         self.assertIn(self.verified.guest.host_key_digest, self.provider._accepted_host_key_digests)
@@ -182,30 +157,8 @@ class WorkloadAuthorityTests(unittest.TestCase):
 
 
 class WorkloadTransportTests(unittest.TestCase):
-    def test_real_child_receipt_larger_than_pipe_is_drained_without_deadlock(self):
-        program = "import sys,json;sys.stdin.buffer.readline();print(json.dumps({'payload':'x'*300000}))"
-        result = []
-        secret = bytearray(SENTINEL)
-        def exchange(process):
-            process.stdin.write(secret + b'\n')
-            process.stdin.flush()
-            process.stdin.close()
-            c.wipe(secret)
-            result.append(c._read_receipt(process))
-        completed = h.SubprocessHostCommandRunner().run_guest_exchange(
-            (sys.executable, '-I', '-B', '-c', program), environment={}, cwd=Path(sys.executable).parent,
-            exchange=exchange, timeout=10)
-        self.assertEqual(completed.returncode, 0)
-        self.assertEqual(secret, b'')
-        self.assertEqual(len(result[0]['payload']), 300000)
-
-    def test_oversized_or_truncated_receipt_is_rejected(self):
-        for body in (b'', b'{', b'{"a":1,"a":2}', b'x' * (c.MAX_RECEIPT_BYTES + 1)):
-            with self.subTest(size=len(body)), self.assertRaises(c.ControllerFailure):
-                c._read_receipt(SimpleNamespace(stdout=io.BytesIO(body)))
-
     def test_remote_program_is_parseable_and_has_one_fixed_sudo_process(self):
-        program = shlex.split(c._remote_workload_command('pass'))[-1]
+        program = shlex.split(c._remote_workload_command('pass', OPERATION))[-1]
         compile(program, '<synthetic-remote>', 'exec')
         self.assertEqual(program.count('subprocess.Popen('), 1)
         self.assertLess(program.index('password.clear()'), program.index('child.wait()'))
@@ -214,7 +167,7 @@ class WorkloadTransportTests(unittest.TestCase):
 
     def test_all_candidate_sudo_executables_are_absolute_and_ignore_guest_path(self):
         from scripts import guest_sudo_session as bootstrap
-        programs = [c._remote_workload_command('pass')]
+        programs = [c._remote_workload_command('pass', OPERATION)]
         programs += [bootstrap._remote_command(role, 'ssh-ed25519 YWJj alias')
                      for role in ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO')]
         for command in programs:

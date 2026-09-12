@@ -57,9 +57,31 @@ _REMOTE_OBSERVE = (
     '"boot_id":open("/proc/sys/kernel/random/boot_id").read().strip(),'
     '"mac_addresses":sorted(open(p).read().strip() for p in '
     'glob.glob("/sys/class/net/*/address")),"nonce":challenge}),flush=True);'
-    'password=sys.stdin.buffer.readline(4098);'
-    'assert 1<len(password)<=4097 and password.endswith(b"\\n");'
 )
+
+_REMOTE_INPUT = '''
+password=bytearray()
+try:
+    while len(password)<4098:
+        one=bytearray(1)
+        try:
+            count=sys.stdin.buffer.raw.readinto(one)
+            if count!=1: raise ValueError('GUEST_SECRET_INPUT_INVALID')
+            password.extend(one)
+            if one[0]==10: break
+        finally:
+            one[:]=b'\\0'*len(one)
+    if not 1<len(password)<=4097 or password[-1]!=10: raise ValueError('GUEST_SECRET_INPUT_INVALID')
+    child=subprocess.Popen(ARGV,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,bufsize=0)
+    written=child.stdin.write(password)
+    if written!=len(password): raise ValueError('GUEST_SECRET_SHORT_WRITE')
+    child.stdin.flush()
+    child.stdin.close()
+finally:
+    password[:]=b'\\0'*len(password)
+    password.clear()
+sys.exit(child.wait())
+'''
 
 
 def _remote_command(role: str, public_key: str = "") -> str:
@@ -81,7 +103,7 @@ def _remote_command(role: str, public_key: str = "") -> str:
         argv = ["/usr/bin/sudo", "-S", "-k", "-p", "", "-v"]
     else:
         raise ControllerFailure("GUEST_ROLE_REJECTED")
-    program = _REMOTE_OBSERVE + 'sys.exit(subprocess.run(' + repr(argv) + ',input=password,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode)'
+    program = _REMOTE_OBSERVE + _REMOTE_INPUT.replace('ARGV', repr(argv))
     return "/usr/bin/python3 -I -B -c " + shlex.quote(program)
 
 
@@ -124,7 +146,9 @@ class SessionSupervisor:
                  preboot_disk_graph_digest: str, preboot_snapshot_identity: str,
                  lease: h.ProviderSessionLease | None = None,
                  clock=time.monotonic, lifetime: float = 300):
-        if type(secret) is not bytearray or not 1 <= len(secret) <= 4096 or any(x < 32 or x == 127 for x in secret):
+        from scripts.candidate_batch_session import BatchUse
+        self._batch_use = secret if type(secret) is BatchUse else None
+        if self._batch_use is None and (type(secret) is not bytearray or not 1 <= len(secret) <= 4096 or any(x < 32 or x == 127 for x in secret)):
             raise ControllerFailure("SUDO_VALUE_INVALID")
         if type(provider) is not h.ClosedVmwareProvider or type(plan) is not h.CandidateHarnessPlan or profile not in plan.profiles or profile.session_id != plan.session_id:
             raise ControllerFailure("SESSION_PLAN_INVALID")
@@ -138,7 +162,7 @@ class SessionSupervisor:
         self._preboot_disk = preboot_disk_graph_digest
         self._preboot_snapshot = preboot_snapshot_identity
         self._cancelled = threading.Event()
-        self._secret = secret
+        self._secret = secret if self._batch_use is None else None
         self._provider = provider
         self._plan = plan
         self._profile = profile
@@ -159,6 +183,8 @@ class SessionSupervisor:
         # operations. An attempted exchange may have delivered bytes on failure.
         self.injection_count = 0
         try:
+            if self._batch_use is not None:
+                self._batch_use.bind(self)
             self._check_scope()
             if provider._require_execution_context:
                 for directory in (self._authority.session_root, self._authority.profile_root,
@@ -216,6 +242,8 @@ class SessionSupervisor:
             raise ControllerFailure("CANDIDATE_AUTHORITY_CHANGED")
 
     def _active(self) -> None:
+        if self._batch_use is not None:
+            self._batch_use.check(self)
         if self._cancelled.is_set() or self._state in {"FAILED", "CLOSED", "VERIFIED"} or self._clock() >= self._expires or self._provider._execution is not self._execution:
             raise ControllerFailure("SESSION_AUTHORITY_EXPIRED")
         self._provider._require_active_execution_authority()
@@ -252,6 +280,12 @@ class SessionSupervisor:
         if grant is not self._grant or grant.owner is not self or grant.execution is not self._execution or grant.process is not process or grant.role != role or grant.used or self._clock() >= grant.expires or process.poll() is not None or role not in self._delivery_attempts or self._delivery_attempts[role] != 0:
             raise ControllerFailure("GUEST_GRANT_REJECTED")
         grant.used = True
+        if self._batch_use is not None:
+            self._delivery_attempts[role] += 1
+            self._batch_use.deliver(self, grant, process, role)
+            self._delivery_completed[role] += 1
+            self.injection_count += 1
+            return
         value = bytearray(self._secret)
         value.append(10)
         try:
@@ -330,7 +364,7 @@ class SessionSupervisor:
                 self._run("VERIFIED_SUDO")
                 self._provider._accepted_host_key_digests.add(self._verified.guest.host_key_digest)
                 self._state = "VERIFIED"
-                wipe(self._secret)
+                self._clear_secret()
             except BaseException:
                 self.close(failed=True)
                 raise ControllerFailure("VERIFIED_GUEST_FAILED") from None
@@ -340,8 +374,14 @@ class SessionSupervisor:
         with self._lock:
             self._state = "FAILED" if failed else "CLOSED"
             self._grant = None
-            wipe(self._secret)
+            self._clear_secret()
+            if self._batch_use is not None:
+                self._batch_use.close(failed=failed)
             self._holds.close()
+
+    def _clear_secret(self):
+        if self._secret is not None:
+            wipe(self._secret)
 
     def __enter__(self):
         return self

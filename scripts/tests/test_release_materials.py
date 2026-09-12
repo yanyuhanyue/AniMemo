@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import io
 import tarfile
 import tempfile
@@ -37,6 +38,31 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class InstallerMaterialsTests(unittest.TestCase):
+    def test_extracted_runtime_validates_producer_receipt_without_source_checkout(self):
+        from release.test_candidate import producer_toolchain_receipt_bytes, SHA
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            wheels = temporary / 'wheels'
+            wheels.mkdir()
+            (wheels / 'fixture-1-py3-none-any.whl').write_bytes(b'material packaging fixture')
+            trust = create_test_initial_trust_kit(temporary)
+            windows = create_test_formal_windows_pretrust_kit(temporary, source_initial_trust_kit=trust)
+            archive = temporary / 'installer.tar'
+            identity = build_installer_materials(ROOT, wheelhouse=wheels, output=archive,
+                initial_trust_kit=trust, formal_windows_pretrust_kit=windows)
+            extracted = temporary / 'extracted'
+            extract_installer_materials(archive, self.contract(identity), extracted)
+            spec = importlib.util.spec_from_file_location('extracted_producer_verifier', extracted / 'release/producer_toolchain.py')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.assertEqual(module.ROOT, extracted)
+            receipt = temporary / 'producer-receipt.json'
+            receipt.write_bytes(producer_toolchain_receipt_bytes())
+            self.assertEqual(module.validate_producer_toolchain_receipt(receipt, expected_candidate_sha=SHA)['candidateSha'], SHA)
+            module.DOCKERFILE_PATH.write_bytes(b'changed producer definition')
+            with self.assertRaises(module.ProducerToolchainError):
+                module.validate_producer_toolchain_receipt(receipt, expected_candidate_sha=SHA)
+
     def test_bound_directory_io_requires_nofollow_without_global_listdir_downgrade(
         self,
     ) -> None:
@@ -241,6 +267,7 @@ class InstallerMaterialsTests(unittest.TestCase):
             source_root = temporary / "source"
             fixed = (
                 "deploy/docker-compose.yml",
+                "deploy/release-producer.Dockerfile",
                 "deploy/install-updater.sh",
                 "deploy/updater/animemo",
                 "deploy/updater/animemo-updater",
@@ -250,6 +277,8 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "scripts/candidate_profile_runner.py",
                 "scripts/closed_runtime_inventory.py",
                 "scripts/candidate_workload_root.py",
+                "scripts/candidate_diagnostics.py",
+                "scripts/candidate_runtime_entry.py",
                 "scripts/formal_profile_runner.py",
                 "scripts/release_qualification.py",
             )
@@ -301,6 +330,7 @@ class InstallerMaterialsTests(unittest.TestCase):
             source_root = temporary / "source"
             fixed = (
                 "deploy/docker-compose.yml",
+                "deploy/release-producer.Dockerfile",
                 "deploy/install-updater.sh",
                 "deploy/updater/animemo",
                 "deploy/updater/animemo-updater",
@@ -310,6 +340,8 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "scripts/candidate_profile_runner.py",
                 "scripts/closed_runtime_inventory.py",
                 "scripts/candidate_workload_root.py",
+                "scripts/candidate_diagnostics.py",
+                "scripts/candidate_runtime_entry.py",
                 "scripts/formal_profile_runner.py",
                 "scripts/release_qualification.py",
             )

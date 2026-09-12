@@ -103,6 +103,35 @@ class PluginAcceptanceTests(unittest.TestCase):
             with self.assertRaises(PublicationInputError):
                 build_publish_candidate_plan(self.loaded, receipt)
 
+    def test_current_v4_fail_and_incomplete_receipts_decode_but_cannot_publish(self):
+        for only_one_pass in (False, True):
+            receipt = copy.deepcopy(self.receipt)
+            for profile in h.PROFILES:
+                if only_one_pass and profile == 'FRESH_BASE':
+                    continue
+                receipt['profile_receipts'].pop(profile)
+                receipt['profile_results'][profile.lower()] = {
+                    'status': 'ERROR' if profile == 'FRESH_BASE' else 'NOT_RUN_SHARED_BLOCKER',
+                    'failure_code': 'CANDIDATE_SHARED_WORKLOAD_STARTUP_OR_RECEIPT_FAILURE',
+                    'receipt_digest': None}
+            receipt.update(all_profiles_pass=False, result='FAIL')
+            seal(receipt)
+            self.assertEqual(contract.validate_aggregate_receipt(receipt)['version'], 4)
+            wire = contract.encode_aggregate_receipt_b64url(receipt)
+            self.assertEqual(contract.decode_aggregate_receipt_b64url(wire)[0], receipt)
+            output = self.root / ('failed-' + str(only_one_pass) + '.json')
+            cli._decode_candidate_acceptance_receipt(SimpleNamespace(value=wire, output=output))
+            self.assertEqual(json.loads(output.read_bytes())['result'], 'FAIL')
+            identity = SimpleNamespace(qualification_run_id=receipt['qualification_run_id'],
+                candidate_sha=receipt['source_sha'], candidate_tree=receipt['source_tree'],
+                candidate_version=receipt['candidate_version'],
+                candidate_acceptance_receipt_sha256=h.sha256_bytes(h.canonical_json_bytes(receipt)))
+            with self.assertRaises(freshness.MetadataFreshnessError):
+                freshness._load_candidate_acceptance_receipt(output, identity=identity,
+                    current_time=datetime(2030, 1, 1, tzinfo=timezone.utc))
+            with self.assertRaises(PublicationInputError):
+                build_publish_candidate_plan(self.loaded, receipt)
+
     def test_observation_swap_reuse_and_tampered_response_are_rejected(self):
         for mutation in ('swap', 'reuse', 'response', 'digest'):
             receipt = copy.deepcopy(self.receipt)

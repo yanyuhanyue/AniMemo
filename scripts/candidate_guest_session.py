@@ -1,11 +1,10 @@
-"""Candidate's fixed two-purpose native credential and workload chain.
+"""Candidate's fixed batch capability and workload chain.
 
 Only the canonical Provider calls this module inside its held execution and
 Profile lease. Neither commands nor secrets are accepted from a CLI or file.
 """
 from __future__ import annotations
 
-import hashlib
 import base64
 import json
 import os
@@ -15,23 +14,18 @@ import shlex
 import threading
 import time
 import zlib
-from contextlib import contextmanager
 from dataclasses import dataclass
 
 from release.formal_windows_pretrust import (
-    create_windows_private_named_directory, hold_windows_private_file,
-    hold_windows_private_path_chain, hold_windows_private_path_authority,
-    hold_windows_private_descendant_path,
+    hold_windows_private_file,
 )
 from scripts import candidate_vm_harness as h
-from scripts.guest_console_capture import WindowsConsoleCapture, ConsoleCaptureError
-from scripts.guest_sudo_session import SessionSupervisor, ControllerFailure, _Grant, _read_observation, wipe
+from scripts.guest_sudo_session import SessionSupervisor, ControllerFailure, _Grant, _read_observation
 from scripts.isolated_guest_validation import _check_checkout
+from scripts import candidate_diagnostics as diagnostics
 
 
-CAPTURE_AUTHORIZATION = 'ANIMEMO_V2_EXACT_CANDIDATE_ACCEPTANCE_V1'
-CAPTURE_LEDGER = Path('E:/') / hashlib.sha256(CAPTURE_AUTHORIZATION.encode('ascii')).hexdigest()
-PURPOSES = ('SESSION_BOOTSTRAP', 'CANDIDATE_WORKLOAD')
+from scripts.candidate_batch_session import BatchUse, CandidateBatch, AUTHORIZATION as CAPTURE_AUTHORIZATION
 MAX_RECEIPT_BYTES = 8 * 1024 * 1024
 WORKLOAD_SECONDS = 4 * 60 * 60 + 60 * 60
 
@@ -47,98 +41,41 @@ class _IssuedConnection:
         raise TypeError('Candidate connection authority cannot be serialized')
 
 
-def _reserve_capture(profile, purpose):
-    if profile not in h.PROFILES or purpose not in PURPOSES:
-        raise ControllerFailure('CANDIDATE_CAPTURE_SCOPE_INVALID')
-    # Parent creation may race; the final fixed purpose directory must be new.
-    # A directory alone means attempted, including crashes before any result.
-    if not CAPTURE_LEDGER.exists() and not CAPTURE_LEDGER.is_symlink():
-        create_windows_private_named_directory(CAPTURE_LEDGER.parent, name=CAPTURE_LEDGER.name)
-    with hold_windows_private_path_authority(CAPTURE_LEDGER) as root_authority:
-        profile_name = hashlib.sha256(profile.encode('ascii')).hexdigest()
-        parent = CAPTURE_LEDGER / profile_name
-        if not parent.exists() and not parent.is_symlink():
-            create_windows_private_named_directory(CAPTURE_LEDGER, name=profile_name)
-        with hold_windows_private_descendant_path(root_authority, parent):
-            try:
-                return create_windows_private_named_directory(parent,
-                    name=hashlib.sha256(purpose.encode('ascii')).hexdigest())
-            except Exception:
-                raise ControllerFailure('CANDIDATE_CAPTURE_ALREADY_ATTEMPTED') from None
-
-
-@contextmanager
-def _capture(provider, plan, profile, purpose):
-    console = WindowsConsoleCapture()
-    _check_checkout(plan.source_sha, plan.source_tree)
-    console.preflight()
-    slot = _reserve_capture(profile.profile, purpose)
-    record = dict(capture_attempts=1, capture_completed=0, delivery_attempts={},
-                  delivery_completed={}, operation_result='ERROR', secret_cleanup='PENDING')
-    record.update(authorization_id=CAPTURE_AUTHORIZATION, profile=profile.profile, purpose=purpose)
-    record['binding'] = {key: getattr(plan, key) for key in (
-        'plan_digest', 'session_id', 'source_sha', 'source_tree', 'qualification_run_id',
-        'candidate_input_digest', 'verified_candidate_digest')}
-    roles = ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO') if purpose == 'SESSION_BOOTSTRAP' else ('CANDIDATE_WORKLOAD',)
-    record.update(delivery_attempts={role: 0 for role in roles},
-                  delivery_completed={role: 0 for role in roles},
-                  operation_results={role: 'NOT_RUN' for role in roles})
-    provider._candidate_credential_results.setdefault(profile.profile, {})[purpose] = record
-    secret = None
-    primary_error = None
-    try:
-        print(profile.profile + ' / ' + purpose, flush=True)
-        secret = console.capture()
-        record['capture_completed'] = 1
-        _check_checkout(plan.source_sha, plan.source_tree)
-        yield secret, record
-        outcomes = set(record['operation_results'].values())
-        record['operation_result'] = 'PASS' if outcomes == {'PASS'} else ('NOT_RUN' if outcomes == {'NOT_RUN'} else 'FAIL')
-    except BaseException as error:
-        primary_error = error
-        record['failure_code'] = (getattr(error, 'code', str(error))
-            if isinstance(error, (ControllerFailure, ConsoleCaptureError, h.CandidateHarnessError))
-            else 'CANDIDATE_CAPTURE_INTERRUPTED_OR_UNCLASSIFIED')
-        raise
-    finally:
-        if secret is not None:
-            wipe(secret)
-        record['secret_cleanup'] = 'BEST_EFFORT_COMPLETED'
-        try:
-            with hold_windows_private_path_chain(slot, allow_leaf_child_writes=True):
-                with (slot / 'result.json').open('xb') as output:
-                    output.write(h.canonical_json_bytes(record))
-        except BaseException:
-            record['record_persistence_failure'] = 'CANDIDATE_CAPTURE_RECORD_WRITE_FAILED'
-            if primary_error is None:
-                raise ControllerFailure('CANDIDATE_CAPTURE_RECORD_WRITE_FAILED') from None
+def _batch(provider, plan):
+    batch = provider._candidate_batch
+    if type(batch) is not CandidateBatch or batch.provider is not provider or batch.plan is not plan:
+        raise ControllerFailure('CANDIDATE_BATCH_REQUIRED')
+    return batch
 
 
 def bootstrap_candidate(provider, plan, profile, lease, disk, snapshot):
+    batch = _batch(provider, plan)
     authority = provider._active_profile_authority(profile, plan)
-    # This gate occurs before opening/reserving the input channel. The actual
-    # same-process grant repeats it after capture, inside SessionSupervisor.
-    provider._verify_bootstrap_connection(authority, profile,
-        preboot_disk_graph_digest=disk, preboot_snapshot_identity=snapshot)
-    provider._remove_known_hosts(authority)
-    with _capture(provider, plan, profile, 'SESSION_BOOTSTRAP') as (secret, record):
+    with batch.operation('BOOTSTRAP', profile):
+        provider._verify_bootstrap_connection(authority, profile,
+            preboot_disk_graph_digest=disk, preboot_snapshot_identity=snapshot)
+        provider._remove_known_hosts(authority)
+        batch.capture_after_bootstrap_observation(profile)
+        use = batch.issue(profile, lease, ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO'))
         supervisor = None
+        role = 'BOOTSTRAP_ROTATION'
         try:
-            supervisor = SessionSupervisor(secret, provider=provider, plan=plan, profile=profile,
+            supervisor = SessionSupervisor(use, provider=provider, plan=plan, profile=profile,
                 lease=lease, preboot_disk_graph_digest=disk, preboot_snapshot_identity=snapshot)
-            record['operation_results']['BOOTSTRAP_ROTATION'] = 'ERROR'
             supervisor.bootstrap_rotation()
-            record['operation_results']['BOOTSTRAP_ROTATION'] = 'PASS'
-            record['operation_results']['VERIFIED_SUDO'] = 'ERROR'
+            batch.role_result(profile, role, 'PASS')
+            role = 'VERIFIED_SUDO'
             supervisor.validate_verified_guest()
-            record['operation_results']['VERIFIED_SUDO'] = 'PASS'
+            batch.role_result(profile, role, 'PASS')
             issued = _IssuedConnection(provider._execution, plan.plan_digest, lease, supervisor._verified)
             provider._candidate_connections[profile.profile] = issued
             return issued.verified
+        except BaseException:
+            batch.role_result(profile, role, 'ERROR')
+            batch.revoke('CANDIDATE_BOOTSTRAP_OR_AUTHENTICATION_UNCERTAIN')
+            raise
         finally:
             if supervisor is not None:
-                record['delivery_attempts'] = supervisor.delivery_attempts
-                record['delivery_completed'] = supervisor.delivery_completed
                 supervisor.close()
 
 
@@ -188,7 +125,7 @@ def _root_program(provider, plan, profile, initial_platform_state):
     loaded = material.loaded
     source = Path(__file__).resolve().parent
     programs = []
-    for name in ('closed_runtime_inventory.py', 'candidate_workload_root.py'):
+    for name in ('candidate_diagnostics.py', 'closed_runtime_inventory.py', 'candidate_workload_root.py'):
         reviewed = (source / name).read_bytes().replace(b'\r\n', b'\n')
         trusted = (loaded.root / 'installer-root' / 'scripts' / name).read_bytes()
         if trusted != reviewed:
@@ -202,22 +139,44 @@ def _root_program(provider, plan, profile, initial_platform_state):
     args = dict(session_id=plan.session_id, profile=profile.profile, input_digest=plan.candidate_input_digest,
         verified_digest=plan.verified_candidate_digest, inventory_digest=material.tree_inventory_identity,
         context=context)
-    program = ("scope={'__name__':'_animemo_fixed_root'};" +
-            ''.join('exec(compile(' + repr(program) + ",'<fixed-candidate-root>','exec'),scope);" for program in programs) +
-            "scope['run_fixed_candidate'](**" + repr(args) + ')')
+    operation = _diagnostic_operation(plan, profile)
+    program = ("scope={'__name__':'_animemo_fixed_root'}\n"
+        + 'exec(compile(' + repr(programs[0]) + ",'<fixed-diagnostic>','exec'),scope)\n"
+        + "diagnostic=scope['DiagnosticWriter'](1," + repr(operation) + ")\n"
+        + "import os\nif os.geteuid()!=0:\n diagnostic.error('ROOT_INITIALIZATION_FAILED')\n raise SystemExit(2)\n"
+        + "diagnostic.stage('ROOT_STARTED')\ntry:\n"
+        + ''.join(' exec(compile(' + repr(item) + ",'<fixed-candidate-root>','exec'),scope)\n" for item in programs[1:])
+        + " scope['run_fixed_candidate'](**" + repr(args) + ',diagnostic=diagnostic)\n'
+        + "except BaseException:\n diagnostic.error('ROOT_EXECUTION_FAILED')\n diagnostic.exited('ROOT',2)\n raise SystemExit(2)\n"
+        + "diagnostic.exited('ROOT',0)\n")
     encoded = base64.b64encode(zlib.compress(program.encode('utf-8'), level=9)).decode('ascii')
     if len(encoded) > 20000:
         raise ControllerFailure('CANDIDATE_ROOT_PROGRAM_SIZE_INVALID')
     return 'import base64,zlib;exec(compile(zlib.decompress(base64.b64decode(' + repr(encoded) + ")), '<fixed-candidate-root>', 'exec'))"
 
 
-def _remote_workload_command(root_program):
+def _diagnostic_operation(plan, profile):
+    return h.sha256_bytes(h.canonical_json_bytes(dict(plan_digest=plan.plan_digest,
+        source_sha=plan.source_sha, source_tree=plan.source_tree,
+        qualification_run_id=plan.qualification_run_id, verified_candidate_digest=plan.verified_candidate_digest,
+        profile=profile.profile, session_id=plan.session_id)))
+
+
+def _remote_workload_command(root_program, operation):
     # Only public identity and a bounded receipt reach stdout. The mutable
     # password is wiped immediately after one forwarding write, before wait.
     from scripts.guest_sudo_session import _REMOTE_OBSERVE
-    observe = _REMOTE_OBSERVE[:_REMOTE_OBSERVE.index('password=')]
+    observe = _REMOTE_OBSERVE
     argv = ['/usr/bin/sudo', '-S', '-k', '-p', '', '--', '/usr/bin/python3', '-I', '-B', '-c', root_program]
-    program = observe + '\n' + '''password=bytearray()
+    diagnostic_source = Path(diagnostics.__file__).read_text(encoding='utf-8')
+    encoded = base64.b64encode(zlib.compress(diagnostic_source.encode(), 9)).decode('ascii')
+    setup = ("\nimport base64,zlib\nscope={'__name__':'_animemo_diagnostic'}\n"
+        + 'exec(compile(zlib.decompress(base64.b64decode(' + repr(encoded)
+        + ")), '<fixed-diagnostic>', 'exec'),scope)\n"
+        + "diagnostic=scope['DiagnosticWriter'](1," + repr(operation) + ')\n'
+        + "reader=scope['DiagnosticReader'](" + repr(operation) + ")\n"
+        + "diagnostic.stage('SSH_OBSERVED')\n")
+    program = observe + setup + '''password=bytearray()
 child=None
 try:
     while len(password)<4098:
@@ -230,7 +189,8 @@ try:
         finally:
             one[:]=b'\\0'*len(one)
     if not 1<len(password)<=4097 or password[-1]!=10: raise ValueError('CANDIDATE_SECRET_INPUT_INVALID')
-    child=subprocess.Popen(''' + repr(argv) + ''',stdin=subprocess.PIPE,stdout=sys.stdout.buffer,stderr=subprocess.DEVNULL,bufsize=0)
+    child=subprocess.Popen(''' + repr(argv) + ''',stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,bufsize=0)
+    diagnostic.stage('SUDO_STARTED')
     written=child.stdin.write(password)
     if written!=len(password): raise ValueError('CANDIDATE_SECRET_SHORT_WRITE')
     child.stdin.flush()
@@ -238,38 +198,93 @@ try:
 finally:
     password[:]=b'\\0'*len(password)
     password.clear()
-sys.exit(child.wait())
+try:
+    while True:
+        frame=scope['read_frame'](child.stdout)
+        if frame is None: break
+        kind,body=frame
+        reader.accept(kind,body)
+        diagnostic.frame(kind,body)
+except BaseException:
+    diagnostic.error('TRANSPORT_PROTOCOL_INVALID')
+    if child.poll() is None: child.kill()
+    child.wait()
+    raise SystemExit(2)
+code=child.wait()
+if not reader.public()['root_started']:
+    diagnostic.error('UNKNOWN_BEFORE_ROOT_START')
+diagnostic.exited('SUDO',code)
+sys.exit(code)
 '''
     return '/usr/bin/python3 -I -B -c ' + shlex.quote(program)
 
 
-def _read_receipt(process, *, timeout=WORKLOAD_SECONDS):
+class WorkloadFailure(ControllerFailure):
+    def __init__(self, code, *, revoke_batch=True):
+        self.code, self.revoke_batch = code, revoke_batch
+        super().__init__(code)
+
+
+def _read_receipt(process, *, operation, provider, profile, batch=None, timeout=WORKLOAD_SECONDS):
+    reader = diagnostics.DiagnosticReader(operation)
     results = queue.Queue(maxsize=1)
     def read():
         try:
-            value = process.stdout.read(MAX_RECEIPT_BYTES + 1)
-            results.put(value)
-        except BaseException:
+            while True:
+                frame = diagnostics.read_frame(process.stdout)
+                if frame is None:
+                    break
+                reader.accept(*frame)
             results.put(None)
+        except diagnostics.DiagnosticError as error:
+            results.put(error.code)
+        except BaseException:
+            results.put('TRANSPORT_INTERRUPTED')
     threading.Thread(target=read, daemon=True).start()
-    try:
-        body = results.get(timeout=max(0, timeout))
-    except queue.Empty:
-        raise ControllerFailure('CANDIDATE_WORKLOAD_TIMEOUT') from None
-    if type(body) is not bytes or not 0 < len(body) <= MAX_RECEIPT_BYTES:
-        raise ControllerFailure('CANDIDATE_VM_PROFILE_RECEIPT_INVALID')
-    try:
-        value = json.loads(body, object_pairs_hook=h.reject_duplicate_json_keys)
-    except (ValueError, UnicodeError):
-        raise ControllerFailure('CANDIDATE_VM_PROFILE_RECEIPT_INVALID') from None
-    if type(value) is not dict:
-        raise ControllerFailure('CANDIDATE_VM_PROFILE_RECEIPT_INVALID')
-    return value
+    deadline = time.monotonic() + timeout
+    error = None
+    while True:
+        if batch is not None and batch.cancelled.is_set():
+            error = 'TRANSPORT_INTERRUPTED'
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            error = 'WORKLOAD_TIMEOUT'
+            break
+        try:
+            error = results.get(timeout=min(0.25, remaining))
+            break
+        except queue.Empty:
+            continue
+    reader.error_code = error
+    observed = reader.public()
+    provider._candidate_diagnostics[profile.profile] = observed
+    if error:
+        raise WorkloadFailure('CANDIDATE_' + error)
+    exits = observed['exit_codes']
+    stages = {event['stage'] for event in observed['events'] if event['kind'] == 'STAGE'}
+    if not observed['root_started']:
+        raise WorkloadFailure('CANDIDATE_UNKNOWN_BEFORE_ROOT_START')
+    if reader.receipt is None:
+        known_business_failure = (exits['SUDO'] not in (None, 0)
+            and exits['ROOT'] not in (None, 0) and exits['RUNTIME_RUNNER'] not in (None, 0)
+            and exits['INSTALLER'] not in (None, 0)
+            and 'PLATFORM_PREPARING' in stages
+            and bool(set(observed['errors']) & {'PLATFORM_PREPARATION_FAILED', 'INSTALLER_EXECUTION_FAILED'}))
+        if known_business_failure:
+            raise WorkloadFailure('CANDIDATE_INSTALLER_REPORTED_FAILURE', revoke_batch=False)
+        raise WorkloadFailure('CANDIDATE_SHARED_WORKLOAD_STARTUP_OR_RECEIPT_FAILURE')
+    if (observed['errors'] or any(exits[component] != 0 for component in diagnostics.COMPONENTS)
+            or not {'DRAFT_WRITTEN', 'DRAFT_RETURNED', 'RUNNER_STARTED', 'RUNTIME_READY'}.issubset(stages)):
+        raise WorkloadFailure('CANDIDATE_WORKLOAD_RECEIPT_DIAGNOSTIC_CONFLICT')
+    return reader.receipt
 
 
 class _WorkloadSupervisor(SessionSupervisor):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, use, **kwargs):
+        if type(use) is not BatchUse:
+            raise ControllerFailure('CANDIDATE_BATCH_USE_REQUIRED')
+        super().__init__(use, **kwargs)
         self._delivery_attempts = {'CANDIDATE_WORKLOAD': 0}
         self._delivery_completed = {'CANDIDATE_WORKLOAD': 0}
         self._state = 'CANDIDATE_WORKLOAD'
@@ -292,11 +307,16 @@ class _WorkloadSupervisor(SessionSupervisor):
                 self._consume(self._grant, process, 'CANDIDATE_WORKLOAD')
                 self._state = 'DELIVERED'
         finally:
-            wipe(self._secret)
+            self._clear_secret()
         # No secret or reusable grant is needed while the fixed process runs.
-        self.receipt = _read_receipt(process, timeout=self._workload_deadline - time.monotonic())
+        self.receipt = _read_receipt(process, operation=_diagnostic_operation(self._plan, self._profile),
+            provider=self._provider, profile=self._profile,
+            batch=self._batch_use._batch,
+            timeout=self._workload_deadline - time.monotonic())
 
-    def execute(self, command):
+    def execute(self):
+        command = _remote_workload_command(_root_program(self._provider, self._plan, self._profile,
+            h._initial_platform_state(self._profile.profile)), _diagnostic_operation(self._plan, self._profile))
         try:
             self._workload_deadline = time.monotonic() + WORKLOAD_SECONDS
             with hold_windows_private_file(self._authority.known_hosts_file):
@@ -306,6 +326,9 @@ class _WorkloadSupervisor(SessionSupervisor):
             if self._delivery_completed['CANDIDATE_WORKLOAD'] != 1:
                 raise ControllerFailure('CANDIDATE_WORKLOAD_NOT_DELIVERED')
             return self.receipt
+        except WorkloadFailure as error:
+            self.close(failed=error.revoke_batch)
+            raise
         except BaseException:
             self.close(failed=True)
             raise
@@ -313,24 +336,29 @@ class _WorkloadSupervisor(SessionSupervisor):
 
 def execute_candidate_workload(provider, plan, profile, lease, disk, snapshot,
                                candidate_root, initial_platform_state):
+    batch = _batch(provider, plan)
     authority = provider._active_profile_authority(profile, plan)
     with hold_windows_private_file(authority.known_hosts_file):
-        _continuing_connection(provider, plan, profile, lease, disk, snapshot)
-        _stage_candidate(provider, authority, plan, profile, candidate_root)
-        command = _remote_workload_command(_root_program(provider, plan, profile, initial_platform_state))
-        # Long SCP/preparation has finished before the second capture exists.
-        _continuing_connection(provider, plan, profile, lease, disk, snapshot)
-        with _capture(provider, plan, profile, 'CANDIDATE_WORKLOAD') as (secret, record):
+        with batch.operation('TRANSFER', profile):
+            _continuing_connection(provider, plan, profile, lease, disk, snapshot)
+            _stage_candidate(provider, authority, plan, profile, candidate_root)
+            _continuing_connection(provider, plan, profile, lease, disk, snapshot)
+        with batch.operation('WORKLOAD', profile):
+            use = batch.issue(profile, lease, ('CANDIDATE_WORKLOAD',))
             supervisor = None
             try:
-                supervisor = _WorkloadSupervisor(secret, provider=provider, plan=plan, profile=profile,
+                supervisor = _WorkloadSupervisor(use, provider=provider, plan=plan, profile=profile,
                     lease=lease, preboot_disk_graph_digest=disk, preboot_snapshot_identity=snapshot)
-                record['operation_results']['CANDIDATE_WORKLOAD'] = 'ERROR'
-                receipt = supervisor.execute(command)
-                record['operation_results']['CANDIDATE_WORKLOAD'] = receipt.get('result', 'ERROR')
+                receipt = supervisor.execute()
+                batch.role_result(profile, 'CANDIDATE_WORKLOAD', receipt.get('result', 'ERROR'))
                 return receipt
+            except WorkloadFailure as error:
+                batch.role_result(profile, 'CANDIDATE_WORKLOAD', 'FAIL' if not error.revoke_batch else 'ERROR')
+                raise
+            except BaseException:
+                batch.role_result(profile, 'CANDIDATE_WORKLOAD', 'ERROR')
+                batch.revoke('CANDIDATE_WORKLOAD_AUTHORITY_OR_DELIVERY_UNCERTAIN')
+                raise
             finally:
                 if supervisor is not None:
-                    record['delivery_attempts'] = supervisor.delivery_attempts
-                    record['delivery_completed'] = supervisor.delivery_completed
                     supervisor.close()

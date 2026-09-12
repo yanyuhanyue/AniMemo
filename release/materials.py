@@ -108,6 +108,7 @@ INITIAL_TRUST_KIT_FILES = frozenset(
 
 _FIXED_DEPLOYMENT_FILES = (
     "deploy/docker-compose.yml",
+    "deploy/release-producer.Dockerfile",
     "deploy/install-updater.sh",
     "deploy/updater/animemo",
     "deploy/updater/animemo-updater",
@@ -116,7 +117,9 @@ _FIXED_DEPLOYMENT_FILES = (
     "deploy/updater/animemo-updater.tmpfiles.conf",
     "scripts/candidate_profile_runner.py",
     "scripts/closed_runtime_inventory.py",
-        "scripts/candidate_workload_root.py",
+    "scripts/candidate_workload_root.py",
+    "scripts/candidate_diagnostics.py",
+    "scripts/candidate_runtime_entry.py",
     "scripts/formal_profile_runner.py",
     "scripts/release_qualification.py",
 )

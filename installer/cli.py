@@ -227,17 +227,28 @@ def _write(value: object, *, json_output: bool) -> None:
 
 def _run_candidate(args: argparse.Namespace) -> int:
     from .production import build_candidate_composition
+    from scripts.candidate_diagnostics import inherited_writer
 
+    diagnostic = inherited_writer()
     request = _candidate_request(args)
     composition = build_candidate_composition(
         args.verified_candidate_digest,
         profile=args.profile,
         instance_name=request.instance_name,
     )
-    session = composition.plan_platform(
-        request,
-        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    )
+    if diagnostic is not None:
+        diagnostic.stage('PLATFORM_PREPARING')
+    try:
+        session = composition.plan_platform(
+            request,
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    except BaseException as error:
+        if diagnostic is not None:
+            diagnostic.error('PLATFORM_PREPARATION_FAILED')
+            if getattr(error, 'code', None) == 'PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID':
+                diagnostic.error('PLATFORM_PACKAGE_POLICY_INVALID')
+        raise
     if session.plan.mode.value != args.profile:
         raise InstallerError(
             "INSTALL_CANDIDATE_PLATFORM_PROFILE_MISMATCH",
@@ -268,15 +279,30 @@ def _run_candidate(args: argparse.Namespace) -> int:
             json_output=args.json_output,
         )
         return EXIT_VALIDATION
-    platform_receipt = composition.execute_platform(
-        session,
-        session.plan.plan_digest,
-    )
-    plan = composition.runtime.plan(request)
-    result = composition.runtime.execute(
-        plan,
-        accepted_plan_digest=plan.plan_digest,
-    )
+    try:
+        platform_receipt = composition.execute_platform(session, session.plan.plan_digest)
+    except BaseException as error:
+        if diagnostic is not None:
+            diagnostic.error('PLATFORM_PREPARATION_FAILED')
+            if getattr(error, 'code', None) == 'PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID':
+                diagnostic.error('PLATFORM_PACKAGE_POLICY_INVALID')
+        raise
+    if diagnostic is not None:
+        diagnostic.stage('PLATFORM_READY')
+    try:
+        plan = composition.runtime.plan(request)
+        if diagnostic is not None:
+            diagnostic.stage('INSTALLER_RUNNING')
+        result = composition.runtime.execute(
+            plan,
+            accepted_plan_digest=plan.plan_digest,
+        )
+    except BaseException:
+        if diagnostic is not None:
+            diagnostic.error('INSTALLER_EXECUTION_FAILED')
+        raise
+    if diagnostic is not None:
+        diagnostic.stage('INSTALLER_COMPLETED')
     production_observation = composition.candidate_profile_execution_observation(
         platform_plan=session.plan,
         platform_receipt=platform_receipt,
