@@ -552,6 +552,7 @@ class ProductionInstallerCompositionTests(unittest.TestCase):
             )
             fresh = object.__new__(ProductionFreshInstallPort)
             fresh.namespace = SimpleNamespace(app_root=app_root)
+            fresh._candidate_listener = None
             fresh._created = {app_root}
 
             fresh.cleanup_owned_staging(None)  # type: ignore[arg-type]

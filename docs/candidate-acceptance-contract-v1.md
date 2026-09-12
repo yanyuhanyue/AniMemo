@@ -126,6 +126,15 @@ systemd property 的真实 readback 均精确匹配后记录 OS egress isolation
 `TRUSTED_PROXY_IPS` 仍由实际 Web 容器地址 `/32` 独立绑定。文件存在但无效即退出；
 未挂载该文件的普通部署继续使用默认路由解析。Candidate 保持 `internal: true`。
 
+Docker 不为仅连接内部网络的容器实现宿主端口映射。Candidate Installer 在验证准确
+Web/network/gateway 绑定后，于配置的 loopback listen endpoint 持有临时 TCP ingress，
+目的地址固定为该 Web IPv4 的 80 端口。它不改 Host、forwarded scheme 或响应字节，
+不连接外部网络，不改变 Docker/宿主防火墙，也不让调用者选择目的地址。端口被占用
+即失败；禁止替换 listen endpoint 或用直接容器探测冒充 Doctor 的 loopback 检查。
+连接、缓冲和存活时间有界，不记录流量；在运行校验及 Doctor 完成后重验准确绑定。
+Candidate CLI 的成功、失败、取消和 plan-only 出口均关闭进程内 ingress，确认线程及
+listener 释放后结束。不安装长期代理服务，不将此开发/验收设施用于普通部署。
+
 ## 4. VM Harness 与原始 VM 保护
 
 唯一入口为：

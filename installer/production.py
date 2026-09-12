@@ -101,7 +101,11 @@ from installer.operations import (
 from release.contract import validate_manifest
 from updater import __version__ as updater_version
 from updater.commands import CommandRunner
-from updater.deployment import CANDIDATE_NETWORK_OVERRIDE_TEXT, HostPaths, ImmutableComposeDeployment
+from updater.deployment import (
+    CANDIDATE_NETWORK_OVERRIDE_TEXT,
+    HostPaths,
+    ImmutableComposeDeployment,
+)
 from updater.errors import StateError
 from updater.local_bundle import (
     LocalBundleReleaseSource,
@@ -2026,17 +2030,18 @@ class ProductionDoctorAcceptance:
         deployment: ImmutableComposeDeployment,
         manifest: dict[str, object],
     ) -> tuple[dict[str, object], ...]:
-        command = [
-            "/usr/bin/docker",
-            "exec",
-            f"{self.namespace.compose_project}-api",
-            "python",
-            "manage.py",
-            "shell",
-            "-c",
-            _CANONICAL_ACCEPTANCE_SCRIPT,
-        ]
         try:
+            command = [
+                "/usr/bin/docker",
+                "exec",
+                deployment._container_id(manifest, "api"),
+                "python",
+                "manage.py",
+                "shell",
+                "--no-imports",
+                "-c",
+                _CANONICAL_ACCEPTANCE_SCRIPT,
+            ]
             completed = self.runner.run(command, timeout=120)
             crud = json.loads(completed.stdout)
             if crud != {
@@ -2458,6 +2463,7 @@ class ProductionFreshInstallPort:
         self.namespace = namespace or instance_namespace()
         self.candidate_network_isolation = candidate_network_isolation
         self._deployment: ImmutableComposeDeployment | None = None
+        self._candidate_listener = None
         self._created: set[Path] = set()
         self._ownership: dict[str, OwnershipReceipt] = {}
         self._candidate_edge_binding: dict[str, str] | None = None
@@ -2819,6 +2825,32 @@ class ProductionFreshInstallPort:
                 "INSTALL_BOOTSTRAP_FAILED", mutation=True, recovery=True
             )
 
+    def _start_candidate_listener(self, deployment, manifest) -> None:
+        from .candidate_listener import CandidateLoopbackListener
+
+        if not self.candidate_network_isolation or self._candidate_listener is not None:
+            raise OSError("Candidate ingress scope is invalid")
+        self._validate_candidate_edge_proxy(deployment, manifest, "web")
+        address = deployment.exact_web_proxy(manifest).removesuffix("/32")
+        self._candidate_listener = CandidateLoopbackListener(
+            (deployment.paths.listen_host, deployment.paths.listen_port), (address, 80),
+        )
+        self._validate_candidate_listener(deployment, manifest)
+
+    def _validate_candidate_listener(self, deployment, manifest) -> None:
+        self._validate_candidate_edge_proxy(deployment, manifest, "web")
+        listener = self._candidate_listener
+        if (listener is None
+                or listener.target != (deployment.exact_web_proxy(manifest).removesuffix("/32"), 80)
+                or listener.endpoint != (deployment.paths.listen_host, deployment.paths.listen_port)):
+            raise OSError("Candidate ingress binding changed")
+        listener.require_active()
+
+    def close_candidate_listener(self) -> None:
+        if self._candidate_listener is not None:
+            self._candidate_listener.close()
+            self._candidate_listener = None
+
     def start_runtime(self, plan: InstallPlan) -> None:
         try:
             deployment = self._compose(plan)
@@ -2852,6 +2884,7 @@ class ProductionFreshInstallPort:
             deployment.reconcile_api(manifest)
             if self.candidate_network_isolation:
                 self._validate_candidate_edge_proxy(deployment, manifest, "web")
+                self._start_candidate_listener(deployment, manifest)
         except Exception:  # noqa: BLE001 - fixed Compose Adapter boundary
             _safe_adapter_error(
                 "INSTALL_RUNTIME_START_FAILED", mutation=True, recovery=True
@@ -2859,6 +2892,8 @@ class ProductionFreshInstallPort:
 
     def validate_running_release(self, plan: InstallPlan) -> None:
         try:
+            if self.candidate_network_isolation:
+                self._validate_candidate_listener(self._compose(plan), self._manifest(plan))
             self._compose(plan).verify_health(self._manifest(plan))
         except Exception:  # noqa: BLE001 - fixed health Adapter boundary
             _safe_adapter_error(
@@ -2969,6 +3004,8 @@ class ProductionFreshInstallPort:
             )
         try:
             self.doctor_acceptor(plan, self._compose(plan))
+            if self.candidate_network_isolation:
+                self._validate_candidate_listener(self._compose(plan), self._manifest(plan))
         except InstallerAdapterError:
             raise
         except Exception:  # noqa: BLE001 - complete Doctor Adapter boundary
@@ -2976,6 +3013,7 @@ class ProductionFreshInstallPort:
 
     def cleanup_owned_staging(self, plan: InstallPlan) -> None:
         del plan
+        self.close_candidate_listener()
         application_root = Path(str(self.namespace.app_root))
         for path in sorted(
             self._created, key=lambda item: len(item.parts), reverse=True
@@ -3027,12 +3065,17 @@ class ProductionInstallerComposition:
     candidate_doctor: ProductionDoctorAcceptance | None = None
     candidate_platform_observer: CandidatePlatformCommandObserver | None = None
     candidate_command_runner: LocalDockerCommandRunner | None = None
+    candidate_fresh: ProductionFreshInstallPort | None = None
     formal_trust_temporary: tempfile.TemporaryDirectory[str] | None = None
 
     def close_formal_authority(self) -> None:
         temporary = self.formal_trust_temporary
         if temporary is not None:
             temporary.cleanup()
+
+    def close_candidate_runtime(self) -> None:
+        if self.candidate_fresh is not None:
+            self.candidate_fresh.close_candidate_listener()
 
     def candidate_profile_execution_observation(
         self,
@@ -3812,6 +3855,7 @@ def build_candidate_composition(
         candidate_doctor=doctor,
         candidate_platform_observer=platform_observer,
         candidate_command_runner=runner,
+        candidate_fresh=fresh,
     )
 
 
