@@ -3842,7 +3842,8 @@ def build_candidate_composition(
         _development_service_source=_development_service_source,
     )
     gate = CandidateBootstrapPrivilegeGate(
-        verified_prepublication_candidate_capability(verified_candidate_digest)
+        verified_prepublication_candidate_capability(verified_candidate_digest),
+        _development_source=_development_service_source,
     )
     runtime = Installer(
         releases=releases,

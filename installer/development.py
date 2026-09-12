@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import os
 import re
 import stat
@@ -73,6 +74,16 @@ class DevelopmentServiceSource:
         if observed != self._expected:
             raise DevelopmentServiceError()
         return observed
+
+    def verify_runtime_modules(self, module_names):
+        self.verify_source()
+        for name in sorted(module_names):
+            module = importlib.import_module(name)
+            source = getattr(module, '__file__', None)
+            if (type(source) is not str
+                    or Path(source).resolve(strict=True) != self.root / (name.replace('.', '/') + '.py')):
+                raise DevelopmentServiceError()
+        self.verify_source()
 
 
 def acquire_development_service_source(binding):

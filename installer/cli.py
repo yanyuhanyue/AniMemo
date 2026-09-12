@@ -243,6 +243,18 @@ def _run_candidate(args: argparse.Namespace) -> int:
         composition.close_candidate_runtime()
 
 
+def _diagnose_candidate_platform_failure(diagnostic, error):
+    from scripts.candidate_diagnostics import BOOTSTRAP_FAILURE_CODES, PLATFORM_FAILURE_CODES
+
+    if diagnostic is not None:
+        diagnostic.error('PLATFORM_PREPARATION_FAILED')
+        code = getattr(error, 'code', None)
+        if type(code) is str and code in (*BOOTSTRAP_FAILURE_CODES, *PLATFORM_FAILURE_CODES):
+            diagnostic.error(code)
+        if code == 'PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID':
+            diagnostic.error('PLATFORM_PACKAGE_POLICY_INVALID')
+
+
 def _run_candidate_composition(args, request, composition, diagnostic) -> int:
     from scripts.candidate_diagnostics import INSTALLER_FAILURE_CODES
 
@@ -254,10 +266,7 @@ def _run_candidate_composition(args, request, composition, diagnostic) -> int:
             datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
     except BaseException as error:
-        if diagnostic is not None:
-            diagnostic.error('PLATFORM_PREPARATION_FAILED')
-            if getattr(error, 'code', None) == 'PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID':
-                diagnostic.error('PLATFORM_PACKAGE_POLICY_INVALID')
+        _diagnose_candidate_platform_failure(diagnostic, error)
         raise
     if session.plan.mode.value != args.profile:
         raise InstallerError(
@@ -289,13 +298,12 @@ def _run_candidate_composition(args, request, composition, diagnostic) -> int:
             json_output=args.json_output,
         )
         return EXIT_VALIDATION
+    if diagnostic is not None:
+        diagnostic.stage('PLATFORM_PLANNED')
     try:
         platform_receipt = composition.execute_platform(session, session.plan.plan_digest)
     except BaseException as error:
-        if diagnostic is not None:
-            diagnostic.error('PLATFORM_PREPARATION_FAILED')
-            if getattr(error, 'code', None) == 'PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID':
-                diagnostic.error('PLATFORM_PACKAGE_POLICY_INVALID')
+        _diagnose_candidate_platform_failure(diagnostic, error)
         raise
     if diagnostic is not None:
         diagnostic.stage('PLATFORM_READY')

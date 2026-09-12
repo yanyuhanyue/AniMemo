@@ -702,10 +702,17 @@ def verified_prepublication_candidate_capability(
 class CandidateBootstrapPrivilegeGate:
     """Candidate-only Stage0 gate; cannot create production Release authority."""
 
-    def __init__(self, capability: VerifiedPrepublicationCandidateCapability) -> None:
+    def __init__(self, capability: VerifiedPrepublicationCandidateCapability, *, _development_source=None) -> None:
         if type(capability) is not VerifiedPrepublicationCandidateCapability:
             _reject("CANDIDATE_BOOTSTRAP_CAPABILITY_INVALID")
         self._capability = capability
+        if _development_source is not None:
+            from .development import DevelopmentServiceSource
+            if (type(_development_source) is not DevelopmentServiceSource
+                    or _development_source.verified_candidate_digest != capability.verified_candidate_digest):
+                _reject("CANDIDATE_BOOTSTRAP_DEVELOPMENT_SOURCE_INVALID")
+            _development_source.verify_source()
+        self._development_source = _development_source
 
     def verify_runtime_source(
         self,
@@ -725,7 +732,12 @@ class CandidateBootstrapPrivilegeGate:
         identities = _archive_python_identities(
             capability.installer_materials_path
         )
-        for module_name in sorted(_REQUIRED_RUNTIME_MODULES):
+        if self._development_source is not None:
+            # Qualified material still supplies the independently verified
+            # archive and trust bytes. This local-only capability supplies the
+            # exact currently loaded code; it cannot be selected by the CLI.
+            self._development_source.verify_runtime_modules(_REQUIRED_RUNTIME_MODULES)
+        for module_name in sorted(_REQUIRED_RUNTIME_MODULES) if self._development_source is None else ():
             module = importlib.import_module(module_name)
             source = getattr(module, "__file__", None)
             expected = module_name.replace(".", "/") + ".py"
@@ -737,15 +749,15 @@ class CandidateBootstrapPrivilegeGate:
                 _reject("CANDIDATE_BOOTSTRAP_RUNTIME_MODULE_INVALID")
             if observed != identities[expected]:
                 _reject("CANDIDATE_BOOTSTRAP_RUNTIME_MODULE_IDENTITY_MISMATCH")
-        identity = _sha256_identity(
-            _canonical_json_bytes(
-                {
-                    "candidateInputDigest": capability.candidate_input_digest,
-                    "purpose": "PREPUBLICATION_CANDIDATE_BOOTSTRAP_ONLY",
-                    "verifiedCandidateDigest": capability.verified_candidate_digest,
-                }
-            )
-        )
+        binding = {
+            "candidateInputDigest": capability.candidate_input_digest,
+            "purpose": "PREPUBLICATION_CANDIDATE_BOOTSTRAP_ONLY",
+            "verifiedCandidateDigest": capability.verified_candidate_digest,
+        }
+        if self._development_source is not None:
+            binding.update(purpose="LOCAL_INSTALLER_DEVELOPMENT_BOOTSTRAP_ONLY",
+                executionInventoryDigest=self._development_source.inventory_digest)
+        identity = _sha256_identity(_canonical_json_bytes(binding))
         return AuthorizedBootstrap(
             _CAPABILITY_TOKEN,
             authorization_identity=identity,

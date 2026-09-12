@@ -114,6 +114,27 @@ class _CandidateGate:
 
 
 class CandidateInstallerCliTests(unittest.TestCase):
+    def test_platform_diagnostics_preserve_fixed_causes_and_exclude_unknown_text(self):
+        from scripts import candidate_diagnostics as diagnostics
+        from installer.platform_bootstrap import PLATFORM_BOOTSTRAP_ERROR_CODES
+
+        self.assertEqual(set(diagnostics.PLATFORM_FAILURE_CODES), PLATFORM_BOOTSTRAP_ERROR_CODES)
+        for code in ('CANDIDATE_BOOTSTRAP_RUNTIME_MODULE_IDENTITY_MISMATCH',
+                     'PLATFORM_BOOTSTRAP_APT_UPDATE_FAILED', 'SYNTHETIC_PRIVATE_ERROR_SENTINEL'):
+            with self.subTest(code=code), tempfile.TemporaryFile() as stream:
+                operation = 'sha256:' + 'd' * 64
+                writer = diagnostics.DiagnosticWriter(stream.fileno(), operation)
+                error = BootstrapAuthorityError(code, reason='SYNTHETIC_PRIVATE_REASON_SENTINEL')
+                cli._diagnose_candidate_platform_failure(writer, error)
+                stream.seek(0)
+                reader = diagnostics.DiagnosticReader(operation)
+                while item := diagnostics.read_frame(stream):
+                    reader.accept(*item)
+                observed = reader.public()
+                self.assertIn('PLATFORM_PREPARATION_FAILED', observed['errors'])
+                self.assertEqual(code in observed['errors'], code != 'SYNTHETIC_PRIVATE_ERROR_SENTINEL')
+                self.assertNotIn('SYNTHETIC_PRIVATE', json.dumps(observed))
+
     def test_candidate_lifetime_closes_on_success_failure_and_cancellation(self):
         args = SimpleNamespace(verified_candidate_digest=DIGEST, profile="ONLINE_FRESH")
         for failure in (None, RuntimeError("failed"), KeyboardInterrupt()):
