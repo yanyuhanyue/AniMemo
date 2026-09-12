@@ -92,6 +92,12 @@ def probe(root,baseline):
   deployment.probe_api(manifest);deployment.probe_web(manifest)
   result['stable_http_and_release_identity']='PASS';result['datastores_and_api_web_probes']='PASS'
   phase='real_canonical_crud_and_health'
+  actual_api=deployment._container_id(manifest,'api')
+  actual_name=deployment._inspect_container(actual_api,'{{.Name}}').lstrip('/')
+  assert actual_name==namespace.compose_project+'-api-1'
+  assert actual_name!=namespace.compose_project+'-api'
+  result['old_synthesized_api_name_matches_actual']=False
+  result['owned_compose_api_id_resolved']=True
   doctor=ProductionDoctorAcceptance(releases=object(),compatibility=object(),runner=runner,namespace=namespace)
   observations=doctor._canonical_acceptance(deployment,manifest)
   result['canonical_test_names']=[x['name'] for x in observations]
@@ -107,6 +113,9 @@ def probe(root,baseline):
   with socket.socket() as closed:
    closed.settimeout(2);assert closed.connect_ex((paths.listen_host,port))!=0
   result['listener_closed']='PASS';result['status']='PASS'
+  phase='actual_posix_lifecycle_and_root_regression'
+  command([sys.executable,'-B','-m','unittest','installer.tests.test_candidate_listener','installer.tests.test_candidate_edge_proxy','installer.tests.test_candidate_input','installer.tests.test_candidate_vm_runtime_repairs','-q'],cwd=Path.cwd(),environment=environment,timeout=180)
+  result['actual_posix_lifecycle_and_root_regression']='PASS'
  except BaseException as error:
   result.update(failure_stage=phase,failure_type=type(error).__name__)
   if getattr(error,'code',None) in {'INSTALL_CANONICAL_ACCEPTANCE_FAILED','INSTALL_RUNTIME_START_FAILED'}:result['failure_code']=error.code

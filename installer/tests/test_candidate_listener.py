@@ -66,11 +66,10 @@ class CandidateListenerTests(unittest.TestCase):
             relay = CandidateLoopbackListener(
                 ("127.0.0.1", free_port()), server.getsockname()
             )
-            with socket.create_connection(relay.endpoint, timeout=2) as client:
-                with server.accept()[0]:
-                    relay.close()
-                    client.settimeout(2)
-                    self.assertEqual(client.recv(1), b"")
+            with socket.create_connection(relay.endpoint, timeout=2) as client, server.accept()[0]:
+                relay.close()
+                client.settimeout(2)
+                self.assertEqual(client.recv(1), b"")
             self.assertFalse(relay._thread.is_alive())
 
     def test_rejects_external_bind_and_existing_port_owner(self):

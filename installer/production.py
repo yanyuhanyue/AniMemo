@@ -2030,17 +2030,17 @@ class ProductionDoctorAcceptance:
         deployment: ImmutableComposeDeployment,
         manifest: dict[str, object],
     ) -> tuple[dict[str, object], ...]:
-        command = [
-            "/usr/bin/docker",
-            "exec",
-            f"{self.namespace.compose_project}-api",
-            "python",
-            "manage.py",
-            "shell",
-            "-c",
-            _CANONICAL_ACCEPTANCE_SCRIPT,
-        ]
         try:
+            command = [
+                "/usr/bin/docker",
+                "exec",
+                deployment._container_id(manifest, "api"),
+                "python",
+                "manage.py",
+                "shell",
+                "-c",
+                _CANONICAL_ACCEPTANCE_SCRIPT,
+            ]
             completed = self.runner.run(command, timeout=120)
             crud = json.loads(completed.stdout)
             if crud != {

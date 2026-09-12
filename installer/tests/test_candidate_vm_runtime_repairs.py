@@ -234,6 +234,7 @@ class CandidateVmRuntimeRepairTests(unittest.TestCase):
             releases=mock.Mock(), compatibility=mock.Mock(), runner=runner
         )
         deployment = mock.Mock()
+        deployment._container_id.return_value = "a" * 64
         deployment.probe_api.return_value = None
         deployment.probe_web.return_value = None
         manifest = {"release": {"version": "v1.1.0-rc.19"}}
@@ -254,7 +255,20 @@ class CandidateVmRuntimeRepairTests(unittest.TestCase):
         )
         deployment.probe_api.assert_called_once_with(manifest)
         deployment.probe_web.assert_called_once_with(manifest)
+        deployment._container_id.assert_called_once_with(manifest, "api")
+        self.assertEqual(runner.run.call_args.args[0][2], "a" * 64)
         self.assertIn("manage.py", runner.run.call_args.args[0])
+
+    def test_canonical_crud_rejects_unverified_api_before_exec(self):
+        runner = mock.Mock()
+        doctor = ProductionDoctorAcceptance(releases=mock.Mock(), compatibility=mock.Mock(), runner=runner)
+        deployment = mock.Mock()
+        deployment._container_id.side_effect = RuntimeError("foreign container")
+        with self.assertRaises(InstallerAdapterError) as caught:
+            doctor._canonical_acceptance(deployment, {})
+        self.assertEqual(caught.exception.code, "INSTALL_CANONICAL_ACCEPTANCE_FAILED")
+        runner.run.assert_not_called()
+        deployment.probe_api.assert_not_called()
 
     def test_atomic_private_replacement_preserves_existing_posix_owner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

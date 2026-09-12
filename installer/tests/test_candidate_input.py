@@ -114,6 +114,22 @@ class _CandidateGate:
 
 
 class CandidateInstallerCliTests(unittest.TestCase):
+    def test_candidate_lifetime_closes_on_success_failure_and_cancellation(self):
+        args = SimpleNamespace(verified_candidate_digest=DIGEST, profile="ONLINE_FRESH")
+        for failure in (None, RuntimeError("failed"), KeyboardInterrupt()):
+            composition = _ExecutingComposition()
+            with self.subTest(failure=type(failure).__name__), mock.patch.object(
+                cli, "_candidate_request", return_value=SimpleNamespace(instance_name="default")
+            ), mock.patch(
+                "installer.production.build_candidate_composition", return_value=composition
+            ), mock.patch.object(cli, "_run_candidate_composition", return_value=0, side_effect=failure):
+                if failure is None:
+                    self.assertEqual(cli._run_candidate(args), 0)
+                else:
+                    with self.assertRaises(type(failure)):
+                        cli._run_candidate(args)
+                composition.close_candidate_runtime.assert_called_once_with()
+
     def test_actual_installer_failure_code_crosses_only_the_diagnostic_allowlist(self):
         from scripts import candidate_diagnostics as diagnostics
         for failure_code in ('INSTALL_RUNTIME_START_FAILED', 'SYNTHETIC_PRIVATE_ERROR_SENTINEL'):
