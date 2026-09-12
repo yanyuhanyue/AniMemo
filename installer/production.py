@@ -3144,9 +3144,9 @@ class ProductionInstallerComposition:
                 "INSTALL_CANDIDATE_EGRESS_ISOLATION_UNVERIFIED",
                 outcome=InstallOutcome.VALIDATION_FAILED,
             ) from None
-        if network_internal is not True or service_families != [
-            "AF_UNIX",
+        if network_internal is not True or sorted(service_families) != [
             "AF_NETLINK",
+            "AF_UNIX",
         ]:
             raise InstallerError(
                 "INSTALL_CANDIDATE_EGRESS_ISOLATION_UNVERIFIED",
@@ -3157,7 +3157,8 @@ class ProductionInstallerComposition:
             "containerNetwork": network_name,
             "containerNetworkInternal": True,
             "service": self.candidate_doctor.namespace.updater_service,
-            "serviceAddressFamilies": service_families,
+            # systemd exposes a set; preserve the receipt's canonical order.
+            "serviceAddressFamilies": ["AF_UNIX", "AF_NETLINK"],
         }
         egress_isolation = {
             **egress_isolation_body,

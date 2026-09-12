@@ -48,8 +48,8 @@ try:
     override.write_bytes(corrected)
     run('daemon-reload')
     corrected_readback = run('show', name, '--property', 'RestrictAddressFamilies', '--value').split()
-    assert corrected_readback == ['AF_UNIX', 'AF_NETLINK']
     result['corrected_readback'] = corrected_readback
+    assert sorted(corrected_readback) == ['AF_NETLINK', 'AF_UNIX']
     run('start', name)
     assert run('show', name, '--property', 'ExecMainStatus', '--value') == '0'
     result['inet_socket_creation_rejected_unix_allowed'] = True
