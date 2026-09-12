@@ -76,9 +76,9 @@ def _remote_command(role: str, public_key: str = "") -> str:
             "/bin/rm -f -- /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub; "
             "/usr/bin/ssh-keygen -A; /usr/bin/systemctl restart ssh"
         )
-        argv = ["sudo", "-S", "-k", "-p", "", "--", "/bin/sh", "-ceu", script]
+        argv = ["/usr/bin/sudo", "-S", "-k", "-p", "", "--", "/bin/sh", "-ceu", script]
     elif role == "VERIFIED_SUDO":
-        argv = ["sudo", "-S", "-k", "-p", "", "-v"]
+        argv = ["/usr/bin/sudo", "-S", "-k", "-p", "", "-v"]
     else:
         raise ControllerFailure("GUEST_ROLE_REJECTED")
     program = _REMOTE_OBSERVE + 'sys.exit(subprocess.run(' + repr(argv) + ',input=password,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode)'

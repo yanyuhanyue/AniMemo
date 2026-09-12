@@ -143,6 +143,7 @@ class InstallerMaterialsTests(unittest.TestCase):
             self.assertIn("release/contract.py", names)
             self.assertIn("scripts/candidate_profile_runner.py", names)
             self.assertIn("scripts/closed_runtime_inventory.py", names)
+            self.assertIn("scripts/candidate_workload_root.py", names)
             self.assertIn("scripts/formal_profile_runner.py", names)
             self.assertIn("scripts/release_qualification.py", names)
             inventory_program = next(
@@ -248,6 +249,7 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "deploy/updater/animemo-updater.tmpfiles.conf",
                 "scripts/candidate_profile_runner.py",
                 "scripts/closed_runtime_inventory.py",
+                "scripts/candidate_workload_root.py",
                 "scripts/formal_profile_runner.py",
                 "scripts/release_qualification.py",
             )
@@ -307,6 +309,7 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "deploy/updater/animemo-updater.tmpfiles.conf",
                 "scripts/candidate_profile_runner.py",
                 "scripts/closed_runtime_inventory.py",
+                "scripts/candidate_workload_root.py",
                 "scripts/formal_profile_runner.py",
                 "scripts/release_qualification.py",
             )

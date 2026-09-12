@@ -40,6 +40,7 @@ from release.candidate import (
     CandidateContractError,
     LoadedVerifiedCandidate,
     aggregate_receipt_digest,
+    encode_aggregate_receipt_b64url,
     canonical_json_bytes,
     load_verified_candidate,
     sha256_bytes,
@@ -1335,6 +1336,7 @@ class SubprocessHostCommandRunner:
         cwd: Path, exchange: Any, timeout: int,
     ) -> subprocess.CompletedProcess[bytes]:
         """One held SSH process; only its in-process exchange may write stdin."""
+        deadline = time.monotonic() + timeout
         process = subprocess.Popen(
             tuple(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, env=dict(environment), cwd=cwd,
@@ -1343,7 +1345,7 @@ class SubprocessHostCommandRunner:
         )
         try:
             exchange(process)
-            code = process.wait(timeout=timeout)
+            code = process.wait(timeout=max(0, deadline - time.monotonic()))
             return subprocess.CompletedProcess(tuple(argv), code, b"", b"")
         finally:
             if process.poll() is None:
@@ -2174,6 +2176,10 @@ class ClosedVmwareProvider:
         self._openssh_host_environment: Mapping[str, str] | None = None
         self._readiness: ProviderReadinessReceipt | None = None
         self._accepted_host_key_digests: set[str] = set()
+        self._candidate_connections: dict[str, object] = {}
+        self._candidate_credential_results: dict[str, object] = {}
+        self._profile_operation_results: dict[str, object] = {}
+        self._candidate_acceptance_progress: dict[str, object] = {}
         self._execution: _ProviderExecutionAuthorityState | None = None
         self._execution_stack: ExitStack | None = None
         self._candidate_material_authority: HeldCandidateMaterialAuthority | None = None
@@ -4625,99 +4631,6 @@ class ClosedVmwareProvider:
             openssh=True,
         )
 
-    def _stage_candidate(
-        self,
-        authority: ProfileConnectionAuthority,
-        candidate_root: Path,
-        candidate_digest: str,
-    ) -> str:
-        if not _DIGEST.fullmatch(candidate_digest):
-            raise CandidateHarnessError("CANDIDATE_VM_STAGE_IDENTITY_INVALID")
-        digest_hex = candidate_digest.removeprefix("sha256:")
-        guest_root = f"{GUEST_CANDIDATE_ROOT}/{digest_hex}"
-        material_authority = self._candidate_material_authority
-        if self._require_execution_context and (
-            material_authority is None
-            or material_authority.loaded.root.resolve(strict=True)
-            != Path(candidate_root).resolve(strict=True)
-            or material_authority.loaded.verified["candidate_input_sha256"]
-            != candidate_digest
-            or _closed_runtime_inventory_digest(material_authority.loaded.root)
-            != material_authority.tree_inventory_identity
-        ):
-            raise CandidateHarnessError("CANDIDATE_MATERIAL_AUTHORITY_INVALID")
-        password = self._sudo_password()
-        self._ssh_checked(
-            authority,
-            "/bin/rm -rf -- /tmp/animemo-candidate-stage",
-            code="CANDIDATE_VM_STAGE_FAILED",
-        )
-        self._run(
-            self._scp_argv(
-                authority=authority,
-                source=str(candidate_root),
-                destination="/tmp/animemo-candidate-stage",
-                recursive=True,
-            ),
-            code="CANDIDATE_VM_STAGE_FAILED",
-            timeout=60 * 60,
-            openssh=True,
-        )
-        runner_path = (
-            candidate_root
-            / "installer-root"
-            / "scripts"
-            / "candidate_profile_runner.py"
-        )
-        inventory_program = runner_path.with_name("closed_runtime_inventory.py")
-        if (
-            not runner_path.is_file()
-            or runner_path.is_symlink()
-            or not inventory_program.is_file()
-            or inventory_program.is_symlink()
-        ):
-            raise CandidateHarnessError("CANDIDATE_VM_STAGE_IDENTITY_INVALID")
-        fixed_commands = (
-            f"/usr/bin/test ! -e {guest_root}",
-            f"/usr/bin/install -d -m 0700 {GUEST_CANDIDATE_ROOT}",
-            f"/bin/mv -- /tmp/animemo-candidate-stage {guest_root}",
-            f"/bin/chown -R root:root {guest_root}",
-            f"/bin/chmod -R a-w,go-rwx {guest_root}",
-            f"/usr/bin/test -r {guest_root}/verified-candidate.json",
-            (
-                f"/usr/bin/test -r {guest_root}/installer-root/scripts/"
-                "candidate_profile_runner.py"
-            ),
-            (
-                f"/usr/bin/test -r {guest_root}/installer-root/scripts/"
-                "closed_runtime_inventory.py"
-            ),
-            f"/usr/bin/test ! -e {GUEST_RECEIPT}",
-        )
-        for command in fixed_commands:
-            self._ssh_checked(
-                authority,
-                "sudo -S -p '' -- " + command,
-                code="CANDIDATE_VM_STAGE_FAILED",
-                sudo_password=password,
-            )
-        if material_authority is not None:
-            observed_inventory = self._ssh_checked(
-                authority,
-                "sudo -S -p '' -- "
-                + _guest_runtime_inventory_command(
-                    guest_root, material_root=guest_root + "/installer-root"
-                ),
-                code="CANDIDATE_VM_GUEST_MATERIAL_INVENTORY_UNAVAILABLE",
-                timeout=60 * 60,
-                sudo_password=password,
-            ).stdout.decode("ascii", errors="strict").strip()
-            if observed_inventory != material_authority.tree_inventory_identity:
-                raise CandidateHarnessError(
-                    "CANDIDATE_VM_GUEST_MATERIAL_INVENTORY_MISMATCH"
-                )
-        return guest_root
-
     def _stage_formal_workload(
         self,
         authority: ProfileConnectionAuthority,
@@ -4817,72 +4730,6 @@ class ClosedVmwareProvider:
         ):
             raise CandidateHarnessError("FORMAL_VM_WORKLOAD_INVALID")
         return root, expected_runner
-
-    def _run_profile_guest(
-        self,
-        *,
-        authority: ProfileConnectionAuthority,
-        plan: CandidateProfilePlan,
-        harness_plan: CandidateHarnessPlan,
-        guest_root: str,
-        initial_platform_state: Mapping[str, bool],
-    ) -> Mapping[str, Any]:
-        context = {
-            "base_vm_identity": harness_plan.source_vm_digest,
-            "clone_identity": plan.clone_identity,
-            "initial_platform_state": dict(initial_platform_state),
-            "original_vm_pre_hashes": dict(harness_plan.original_vm_hashes),
-            "profile": plan.profile,
-            "snapshot_disk_graph_identity": plan.snapshot_disk_graph_identity,
-            "snapshot_identity": plan.snapshot_identity,
-            "source_disk_graph_identity": harness_plan.source_disk_graph_identity,
-            "source_vm_inventory_identity": (
-                harness_plan.source_vm_inventory_identity
-            ),
-        }
-        context_b64url = base64.urlsafe_b64encode(
-            canonical_json_bytes(context)
-        ).decode("ascii").rstrip("=")
-        if re.fullmatch(r"[A-Za-z0-9_-]+", context_b64url) is None:
-            raise CandidateHarnessError("CANDIDATE_VM_PROFILE_CONTEXT_INVALID")
-        command = (
-            "sudo -S -p '' -- /usr/bin/env "
-            f"ANIMEMO_CANDIDATE_PROFILE_CONTEXT_B64URL={context_b64url} "
-            "PYTHONSAFEPATH=1 "
-            f"PYTHONPATH={guest_root}/installer-root "
-            f"/usr/bin/python3 -P -B {guest_root}/installer-root/scripts/"
-            "candidate_profile_runner.py "
-            f"--verified-candidate-digest {harness_plan.verified_candidate_digest} "
-            f"--profile {plan.profile} --public-origin {PUBLIC_ORIGIN} --execute"
-        )
-        password = self._sudo_password()
-        self._ssh_checked(
-            authority,
-            command,
-            code="CANDIDATE_VM_PROFILE_EXECUTION_FAILED",
-            sudo_password=password,
-            timeout=4 * 60 * 60,
-        )
-        completed = self._ssh_checked(
-            authority,
-            "sudo -S -p '' -- /bin/cat " + GUEST_RECEIPT,
-            code="CANDIDATE_VM_PROFILE_RECEIPT_UNAVAILABLE",
-            sudo_password=password,
-        )
-        if not completed.stdout or len(completed.stdout) > 8 * 1024 * 1024:
-            raise CandidateHarnessError("CANDIDATE_VM_PROFILE_RECEIPT_INVALID")
-        try:
-            value = json.loads(
-                completed.stdout,
-                object_pairs_hook=reject_duplicate_json_keys,
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-            raise CandidateHarnessError(
-                "CANDIDATE_VM_PROFILE_RECEIPT_INVALID"
-            ) from error
-        if type(value) is not dict:
-            raise CandidateHarnessError("CANDIDATE_VM_PROFILE_RECEIPT_INVALID")
-        return value
 
     def _run_formal_profile_guest(
         self,
@@ -5292,6 +5139,28 @@ class ClosedVmwareProvider:
 
         profile_authority_stack = ExitStack()
         clone_authority_stack = ExitStack()
+        operation = {"profile": plan.profile, "clone_vmx": str(authority.clone_vmx),
+                     "retained_work_root": str(work_root), "power_state": "NOT_STARTED",
+                     "cleanup_errors": [], "lease_released": False, "result": "ERROR"}
+        self._profile_operation_results[plan.profile] = operation
+        primary_error = None
+        def cleanup(step, action):
+            try:
+                action()
+                return True
+            except BaseException as error:
+                operation["cleanup_errors"].append({"step": step,
+                    "code": error.code if isinstance(error, CandidateHarnessError)
+                    else "CANDIDATE_PROFILE_CLEANUP_UNCLASSIFIED"})
+                return False
+        def clear_keys():
+            keys_ok = hosts_ok = True
+            if authority.ssh_root.exists():
+                keys_ok = cleanup("session_key", lambda: self._destroy_session_key(authority))
+                hosts_ok = cleanup("known_hosts", lambda: self._destroy_known_hosts(authority))
+            operation["session_keys_removed"] = keys_ok
+            operation["known_hosts_removed"] = hosts_ok
+            return keys_ok and hosts_ok
         try:
             # Paths are owned before copying; failures never lose containment
             # authority merely because preparation did not return successfully.
@@ -5307,52 +5176,72 @@ class ClosedVmwareProvider:
                     reject_running_clone=reject_running_clone,
                 )
             )
-            verified_connection = self._establish_clone_connection(
-                authority,
-                plan,
-                preboot_disk_graph_digest=preboot_disk_graph_digest,
-                preboot_snapshot_identity=preboot_snapshot_identity,
-            )
-            if self._execution is not None:
-                profile_authority_stack.enter_context(
-                    hold_windows_private_file(authority.known_hosts_file)
-                )
+            operation["power_state"] = "START_RETURNED"
             try:
                 if _formal_workload is None:
-                    guest_root = self._stage_candidate(
-                        authority,
-                        candidate_root,
-                        harness_plan.candidate_input_digest,
+                    from scripts.candidate_guest_session import (
+                        bootstrap_candidate, execute_candidate_workload,
                     )
-                    receipt = self._run_profile_guest(
-                        authority=authority,
-                        plan=plan,
-                        harness_plan=harness_plan,
-                        guest_root=guest_root,
-                        initial_platform_state=initial_platform_state,
-                    )
+                    from scripts.guest_sudo_session import ControllerFailure
+                    from scripts.guest_console_capture import ConsoleCaptureError
+                    try:
+                        verified_connection = bootstrap_candidate(
+                            self, harness_plan, plan, lease,
+                            preboot_disk_graph_digest, preboot_snapshot_identity)
+                        operation["power_state"] = "RUNNING"
+                        receipt = execute_candidate_workload(
+                            self, harness_plan, plan, lease,
+                            preboot_disk_graph_digest, preboot_snapshot_identity,
+                            candidate_root, initial_platform_state)
+                    except (ControllerFailure, ConsoleCaptureError) as error:
+                        raise CandidateHarnessError(getattr(error, "code", str(error))) from error
                 else:
-                    guest_root = self._stage_formal_workload(
-                        authority,
-                        _formal_workload,
-                    )
+                    verified_connection = self._establish_clone_connection(
+                        authority, plan,
+                        preboot_disk_graph_digest=preboot_disk_graph_digest,
+                        preboot_snapshot_identity=preboot_snapshot_identity)
+                    operation["power_state"] = "RUNNING"
+                    if self._execution is not None:
+                        profile_authority_stack.enter_context(
+                            hold_windows_private_file(authority.known_hosts_file))
+                    guest_root = self._stage_formal_workload(authority, _formal_workload)
                     receipt = self._run_formal_profile_guest(
-                        authority=authority,
-                        workload=_formal_workload,
-                        guest_root=guest_root,
-                    )
+                        authority=authority, workload=_formal_workload, guest_root=guest_root)
             except CandidateHarnessError as error:
                 profile_failure = error
                 raise
             self._stop_clone(clone_vmx)
             clone_power_state_untrusted = False
+            operation["power_state"] = "STOPPED"
             if self._hashes() != before_hashes:
                 raise CandidateHarnessError("CANDIDATE_ORIGINAL_VM_MUTATED")
-            clone_authority_stack.close()
-            profile_authority_stack.close()
-            self._remove_clone(verified_connection)
+            cleanup("clone_holds", clone_authority_stack.close)
+            cleanup("profile_holds", profile_authority_stack.close)
+            clear_keys()
+            if operation["cleanup_errors"]:
+                raise CandidateHarnessError("CANDIDATE_PROFILE_CLEANUP_FAILED")
+            if receipt.get("result") == "PASS":
+                self._remove_clone(verified_connection)
+                operation["clone_disposition"] = "REMOVED"
+            else:
+                self._quarantine_clone(authority)
+                operation["clone_disposition"] = "QUARANTINED"
+            operation["result"] = receipt.get("result", "ERROR")
             return receipt
         except BaseException as error:
+            primary_error = error
+            operation["operation_failure_code"] = (error.code if isinstance(error, CandidateHarnessError)
+                else "CANDIDATE_PROFILE_UNCLASSIFIED_ERROR")
+            if type(error) in (SessionKeyCommandError, VmHostCommandError):
+                operation["operation_failure_diagnostic"] = error.public_diagnostic()
+            if type(error) is VmHostCommandError and error.public_diagnostic()["kind"] in {
+                "TIMEOUT", "CANCELLED", "PROCESS_START_OR_WAIT_FAILED",
+            }:
+                # A timed-out VMware launcher may still be transitioning the
+                # Clone. A single empty list cannot authorize moving its data.
+                containment_required = True
+                clone_power_state_untrusted = True
+            contained = not clone_power_state_untrusted
             if authority.profile_root.exists() or authority.profile_root.is_symlink():
                 if clone_power_state_untrusted and clone_vmx is not None:
                     running = containment_required
@@ -5362,31 +5251,47 @@ class ClosedVmwareProvider:
                         except CandidateHarnessError:
                             running = True
                     if running:
-                        try:
-                            self._contain_clone(clone_vmx)
-                        except BaseException:
-                            clone_authority_stack.close()
-                            profile_authority_stack.close()
-                            self._destroy_session_key(authority)
-                            raise
-                clone_authority_stack.close()
-                profile_authority_stack.close()
-                self._quarantine_clone(authority)
-            if profile_failure is error:
-                continuation = self.inspect_profile_continuation(
-                    plan=plan,
-                    harness_plan=harness_plan,
-                )
-                if continuation.continuation_safe:
-                    raise CandidateProfileExecutionError(
-                        profile_failure.code,
-                        continuation,
-                    ) from error
+                        def contain():
+                            operation["power_state"] = "CONTAINMENT_PENDING"
+                            operation["power_state"] = self._contain_clone(clone_vmx)
+                        contained = cleanup("containment", contain)
+                    else:
+                        contained = True
+                        operation["power_state"] = "NOT_RUNNING_OBSERVED"
+                cleanup("clone_holds", clone_authority_stack.close)
+                cleanup("profile_holds", profile_authority_stack.close)
+                keys_cleared = clear_keys()
+                if contained and keys_cleared and not operation["cleanup_errors"]:
+                    if cleanup("quarantine", lambda: self._quarantine_clone(authority)):
+                        operation["clone_disposition"] = "QUARANTINED"
+                else:
+                    operation["clone_disposition"] = "RETAINED_CLEANUP_BLOCKED"
+            if profile_failure is error and not operation["cleanup_errors"]:
+                try:
+                    continuation = self.inspect_profile_continuation(plan=plan, harness_plan=harness_plan)
+                except BaseException:
+                    operation["cleanup_errors"].append({"step": "continuation",
+                        "code": "CANDIDATE_VM_CONTINUATION_UNVERIFIED"})
+                else:
+                    if continuation.continuation_safe:
+                        raise CandidateProfileExecutionError(profile_failure.code, continuation) from error
             raise
         finally:
-            clone_authority_stack.close()
-            profile_authority_stack.close()
-            self._release_provider_lease(lease, work_root=work_root)
+            self._candidate_connections.pop(plan.profile, None)
+            cleanup("clone_holds", clone_authority_stack.close)
+            cleanup("profile_holds", profile_authority_stack.close)
+            if cleanup("lease", lambda: self._release_provider_lease(lease, work_root=work_root)):
+                operation["lease_released"] = True
+            if operation["cleanup_errors"]:
+                operation["result"] = "ERROR"
+                # A lease-release failure happens after the continuation
+                # inspection. Never let that earlier receipt authorize the
+                # next Profile; preserve the primary code without its grant.
+                if isinstance(primary_error, CandidateProfileExecutionError):
+                    raise CandidateHarnessError(primary_error.code) from primary_error
+                if primary_error is not None:
+                    raise primary_error
+                raise CandidateHarnessError("CANDIDATE_PROFILE_CLEANUP_FAILED")
 
     def execute_formal_profile(
         self,
@@ -5833,6 +5738,7 @@ def _execute_harness_plan(
     provider: CandidateVmProvider,
     environment: Mapping[str, str] | None = None,
     r2_client=None,
+    plugin_origin=None,
     _state_root: Path | None = None,
     _loaded_candidate: LoadedVerifiedCandidate | None = None,
 ) -> dict[str, Any]:
@@ -5844,22 +5750,28 @@ def _execute_harness_plan(
     ):
         raise CandidateHarnessError("CANDIDATE_HARNESS_PLAN_NOT_ACCEPTED")
     try:
-        r2_prestate_receipt = verify_candidate_r2_origin_from_environment(
-            target_rc=plan.candidate_version,
-            source_sha=plan.source_sha,
-            source_tree=plan.source_tree,
-            auth_method=R2_AUTH_METHOD_ARGUMENT,
-            observation_role="PRESTATE",
-            environment=environment,
-            client=r2_client,
-        )
-        r2_prestate_receipt = validate_r2_origin_receipt(
-            r2_prestate_receipt,
-            expected_source_sha=plan.source_sha,
-            expected_source_tree=plan.source_tree,
-            expected_target_rc=plan.candidate_version,
-            expected_observation_role="PRESTATE",
-        )
+        if plugin_origin is not None:
+            from release.r2_plugin_origin import CloudflarePluginOrigin
+            if type(plugin_origin) is not CloudflarePluginOrigin:
+                raise CandidateHarnessError("R2_PLUGIN_CHANNEL_INVALID")
+            r2_prestate_receipt = plugin_origin.observe(plan, "PRESTATE")
+        else:
+            r2_prestate_receipt = verify_candidate_r2_origin_from_environment(
+                target_rc=plan.candidate_version,
+                source_sha=plan.source_sha,
+                source_tree=plan.source_tree,
+                auth_method=R2_AUTH_METHOD_ARGUMENT,
+                observation_role="PRESTATE",
+                environment=environment,
+                client=r2_client,
+            )
+            r2_prestate_receipt = validate_r2_origin_receipt(
+                r2_prestate_receipt,
+                expected_source_sha=plan.source_sha,
+                expected_source_tree=plan.source_tree,
+                expected_target_rc=plan.candidate_version,
+                expected_observation_role="PRESTATE",
+            )
         loaded = _loaded_candidate or load_verified_candidate(
             plan.verified_candidate_digest, _state_root=_state_root
         )
@@ -5874,6 +5786,10 @@ def _execute_harness_plan(
     receipts: dict[str, dict[str, Any]] = {}
     profile_results: dict[str, dict[str, str | None]] = {}
     shared_blocker_code: str | None = None
+    progress = {"r2OriginPrestateReceipt": r2_prestate_receipt, "profileReceipts": receipts,
+                "profileResults": profile_results, "candidatePrestate": candidate_prestate}
+    if type(provider) is ClosedVmwareProvider:
+        provider._candidate_acceptance_progress = progress
     for item in plan.profiles:
         result_key = PROFILE_RESULT_KEYS[item.profile]
         if shared_blocker_code is not None:
@@ -6000,6 +5916,10 @@ def _execute_harness_plan(
                 failure_code="CANDIDATE_PROFILE_RECEIPT_BINDING_MISMATCH",
             )
             continue
+        if plugin_origin is not None:
+            receipt = dict(receipt, schema="animemo.prepublication-candidate-profile-receipt/v2", version=2,
+                           plan_digest=plan.plan_digest, session_id=plan.session_id)
+            validate_profile_receipt(receipt)
         receipts[item.profile] = receipt
         digest = _profile_digest(receipt)
         if receipt["result"] == "PASS":
@@ -6037,24 +5957,31 @@ def _execute_harness_plan(
                     failure_code="CANDIDATE_ORIGINAL_VM_MUTATED",
                 )
     try:
-        r2_poststate_receipt = verify_candidate_r2_origin_from_environment(
-            target_rc=plan.candidate_version,
-            source_sha=plan.source_sha,
-            source_tree=plan.source_tree,
-            auth_method=R2_AUTH_METHOD_ARGUMENT,
-            observation_role="POSTSTATE",
-            environment=environment,
-            client=r2_client,
-        )
-        r2_poststate_receipt = validate_r2_origin_receipt(
-            r2_poststate_receipt,
-            expected_source_sha=plan.source_sha,
-            expected_source_tree=plan.source_tree,
-            expected_target_rc=plan.candidate_version,
-            expected_observation_role="POSTSTATE",
-        )
+        if plugin_origin is not None:
+            from release.r2_plugin_origin import CloudflarePluginOrigin
+            if type(plugin_origin) is not CloudflarePluginOrigin:
+                raise CandidateHarnessError("R2_PLUGIN_CHANNEL_INVALID")
+            r2_poststate_receipt = plugin_origin.observe(plan, "POSTSTATE")
+        else:
+            r2_poststate_receipt = verify_candidate_r2_origin_from_environment(
+                target_rc=plan.candidate_version,
+                source_sha=plan.source_sha,
+                source_tree=plan.source_tree,
+                auth_method=R2_AUTH_METHOD_ARGUMENT,
+                observation_role="POSTSTATE",
+                environment=environment,
+                client=r2_client,
+            )
+            r2_poststate_receipt = validate_r2_origin_receipt(
+                r2_poststate_receipt,
+                expected_source_sha=plan.source_sha,
+                expected_source_tree=plan.source_tree,
+                expected_target_rc=plan.candidate_version,
+                expected_observation_role="POSTSTATE",
+            )
     except CandidateContractError as error:
         raise CandidateHarnessError(error.code) from error
+    progress["r2OriginPoststateReceipt"] = r2_poststate_receipt
     if (
         r2_prestate_receipt["observation_id"]
         == r2_poststate_receipt["observation_id"]
@@ -6092,12 +6019,10 @@ def _execute_harness_plan(
             item.profile: item.snapshot_disk_graph_identity
             for item in plan.profiles
         },
-        "r2_origin_prestate_receipt_digest": r2_origin_receipt_digest(
-            r2_prestate_receipt
-        ),
-        "r2_origin_poststate_receipt_digest": r2_origin_receipt_digest(
-            r2_poststate_receipt
-        ),
+        "r2_origin_prestate_receipt_digest": (sha256_bytes(canonical_json_bytes(r2_prestate_receipt))
+            if plugin_origin is not None else r2_origin_receipt_digest(r2_prestate_receipt)),
+        "r2_origin_poststate_receipt_digest": (sha256_bytes(canonical_json_bytes(r2_poststate_receipt))
+            if plugin_origin is not None else r2_origin_receipt_digest(r2_poststate_receipt)),
         "r2_origin_prestate_observation_id": r2_prestate_receipt[
             "observation_id"
         ],
@@ -6119,6 +6044,11 @@ def _execute_harness_plan(
         "result": "PASS" if all_profiles_pass else "FAIL",
         "receipt_digest": "",
     }
+    if plugin_origin is not None:
+        aggregate.update(schema="animemo.prepublication-candidate-acceptance-receipt/v4", version=4,
+            plan_digest=plan.plan_digest, session_id=plan.session_id,
+            r2_origin_prestate_receipt=r2_prestate_receipt,
+            r2_origin_poststate_receipt=r2_poststate_receipt, profile_receipts=receipts)
     unsigned = dict(aggregate)
     unsigned.pop("receipt_digest")
     aggregate["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
@@ -6130,6 +6060,7 @@ def _execute_harness_plan(
         "status": aggregate["result"],
         "aggregateReceipt": aggregate,
         "aggregateReceiptSha256": aggregate_receipt_digest(aggregate),
+        "candidateAcceptanceReceiptB64url": encode_aggregate_receipt_b64url(aggregate),
         "r2OriginPrestateReceipt": r2_prestate_receipt,
         "r2OriginPoststateReceipt": r2_poststate_receipt,
         "profileReceipts": receipts,
@@ -6143,6 +6074,7 @@ def execute_harness_plan(
     provider: CandidateVmProvider,
     environment: Mapping[str, str] | None = None,
     r2_client=None,
+    plugin_origin=None,
     _state_root: Path | None = None,
     _candidate_material_authority: HeldCandidateMaterialAuthority | None = None,
 ) -> dict[str, Any]:
@@ -6165,6 +6097,7 @@ def execute_harness_plan(
                 provider=provider,
                 environment=environment,
                 r2_client=r2_client,
+                plugin_origin=plugin_origin,
                 _state_root=_state_root,
                 _loaded_candidate=loaded,
             )
@@ -6176,6 +6109,7 @@ def execute_harness_plan(
         provider=provider,
         environment=environment,
         r2_client=r2_client,
+                plugin_origin=plugin_origin,
         _state_root=_state_root,
     )
 
@@ -6188,14 +6122,33 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-source-tree", required=True)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--accept-plan-digest")
+    parser.add_argument("--authorization-id")
+    parser.add_argument("--result", type=Path)
+    parser.add_argument("--r2-origin-transport", choices=("cloudflare-plugin", "s3"), default="cloudflare-plugin")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     provider = ClosedVmwareProvider()
+    report = args.result.open("x", encoding="utf-8", newline="\n") if args.result else None
+    result = {"status": "ERROR", "r2_origin_transport": args.r2_origin_transport}
     try:
-        with provider.execution_authority(), ExitStack() as stack:
+        from scripts.candidate_guest_session import CAPTURE_AUTHORIZATION
+        from scripts.guest_console_capture import WindowsConsoleCapture
+        from scripts.isolated_guest_validation import _check_checkout
+        if args.authorization_id is not None and (
+                args.authorization_id != CAPTURE_AUTHORIZATION or not args.execute or report is None):
+            raise CandidateHarnessError("CANDIDATE_CAPTURE_AUTHORIZATION_INVALID")
+        if args.execute:
+            _check_checkout(args.expected_source_sha, args.expected_source_tree)
+            WindowsConsoleCapture().preflight()
+        with provider.execution_authority(_retain_controller_data=args.execute), ExitStack() as stack:
+            plugin_origin = None
+            if args.execute and args.r2_origin_transport == "cloudflare-plugin":
+                from release.r2_plugin_origin import CloudflarePluginOrigin
+                plugin_origin = stack.enter_context(CloudflarePluginOrigin())
+                result["r2_plugin_channel"] = str(plugin_origin.root)
             material_authority = (
                 stack.enter_context(
                     acquire_candidate_material_authority(
@@ -6217,22 +6170,38 @@ def main(argv: list[str] | None = None) -> int:
             if not args.execute:
                 print(json.dumps(plan.as_dict(), ensure_ascii=False, sort_keys=True))
                 return 0
-            if not args.accept_plan_digest:
+            result["plan"] = plan.as_dict()
+            accepted = plan.plan_digest if args.authorization_id == CAPTURE_AUTHORIZATION else args.accept_plan_digest
+            if not accepted:
                 raise CandidateHarnessError(
                     "CANDIDATE_HARNESS_PLAN_CONFIRMATION_REQUIRED"
                 )
-            result = execute_harness_plan(
+            acceptance = execute_harness_plan(
                 plan,
-                accepted_plan_digest=args.accept_plan_digest,
+                accepted_plan_digest=accepted,
                 provider=provider,
                 environment=os.environ,
+                plugin_origin=plugin_origin,
                 _candidate_material_authority=material_authority,
             )
+            result.update(acceptance)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0 if result["status"] == "PASS" else 2
-    except (CandidateHarnessError, CandidateContractError) as error:
-        print(json.dumps({"code": getattr(error, "code", str(error))}), file=sys.stderr)
+    except BaseException as error:
+        from scripts.isolated_guest_validation import _failure_code
+        result["failure_code"] = _failure_code(error)
+        print(json.dumps({"code": result["failure_code"]}), file=sys.stderr)
         return 2
+    finally:
+        if "aggregateReceipt" not in result:
+            result.update(provider._candidate_acceptance_progress)
+        result["profile_operations"] = provider._profile_operation_results
+        result["credential_results"] = provider._candidate_credential_results
+        result["host_lifecycle"] = list(getattr(provider, "_host_lifecycle_observations", ()))
+        if report is not None:
+            with report:
+                json.dump(result, report, ensure_ascii=False, sort_keys=True, indent=2)
+                report.write("\n")
 
 
 if __name__ == "__main__":
