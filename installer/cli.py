@@ -226,8 +226,9 @@ def _write(value: object, *, json_output: bool) -> None:
 
 
 def _run_candidate(args: argparse.Namespace) -> int:
+    from scripts.candidate_diagnostics import inherited_writer
+
     from .production import build_candidate_composition
-    from scripts.candidate_diagnostics import INSTALLER_FAILURE_CODES, inherited_writer
 
     diagnostic = inherited_writer()
     request = _candidate_request(args)
@@ -236,6 +237,15 @@ def _run_candidate(args: argparse.Namespace) -> int:
         profile=args.profile,
         instance_name=request.instance_name,
     )
+    try:
+        return _run_candidate_composition(args, request, composition, diagnostic)
+    finally:
+        composition.close_candidate_runtime()
+
+
+def _run_candidate_composition(args, request, composition, diagnostic) -> int:
+    from scripts.candidate_diagnostics import INSTALLER_FAILURE_CODES
+
     if diagnostic is not None:
         diagnostic.stage('PLATFORM_PREPARING')
     try:

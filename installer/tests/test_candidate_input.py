@@ -50,6 +50,7 @@ class _Composition:
     def __init__(self):
         self.plan_calls = 0
         self.execute_calls = 0
+        self.close_candidate_runtime = mock.Mock()
 
     def plan_platform(self, request, verified_at):
         self.plan_calls += 1
@@ -64,6 +65,7 @@ class _Composition:
 
 class _ExecutingComposition:
     def __init__(self):
+        self.close_candidate_runtime = mock.Mock()
         self.session = SimpleNamespace(plan=_Plan(), release=_Release())
         self.platform_receipt = SimpleNamespace(
             as_dict=lambda: {"result": "PASS"}
