@@ -72,7 +72,7 @@ class BatchSessionTests(unittest.TestCase):
             use = self.batch.issue(profile, self.lease, b.ROLES[:2])
             supervisor = guest.SessionSupervisor(use, provider=self.provider, plan=self.plan,
                 profile=profile, lease=self.lease, preboot_disk_graph_digest=runtime.disk_graph_digest,
-                preboot_snapshot_identity=runtime.snapshot_identity)
+                preboot_snapshot_identity=runtime.snapshot_identity, clock=lambda: self.time)
             try:
                 supervisor.bootstrap_rotation()
                 self.batch.role_result(profile, 'BOOTSTRAP_ROTATION', 'PASS')
@@ -248,6 +248,30 @@ class BatchSessionTests(unittest.TestCase):
         self.batch.revoke(SENTINEL.decode())
         self.batch.close()
         self.assertNotIn(SENTINEL, (self.ledger / 'result.json').read_bytes())
+
+    def test_slow_source_check_cannot_deliver_after_the_grant_deadline(self):
+        self.capture()
+        def slow_check(*_):
+            self.time += 6
+        with mock.patch.object(b, '_check_checkout', side_effect=slow_check):
+            with self.assertRaises(guest.ControllerFailure):
+                self.bootstrap(0)
+        self.assertEqual(self.batch.record['profiles']['FRESH_BASE']['BOOTSTRAP_ROTATION']['delivery_attempts'], 0)
+        self.assertTrue(all(process.stdin.getvalue() == b'' for process in self.fixture.runner.processes))
+        self.assertEqual(self.secret, b'')
+
+    def test_watchdog_can_revoke_while_the_source_check_is_blocked(self):
+        self.capture()
+        observed = []
+        def blocked_check(*_):
+            self.time += b.HARD_SECONDS
+            observed.append(self.batch.cancelled.wait(2))
+        with mock.patch.object(b, '_check_checkout', side_effect=blocked_check):
+            with self.assertRaises(guest.ControllerFailure):
+                self.bootstrap(0)
+        self.assertEqual(observed, [True])
+        self.assertEqual(self.batch.record['revocation_code'], 'CANDIDATE_BATCH_HARD_EXPIRED')
+        self.assertTrue(all(process.stdin.getvalue() == b'' for process in self.fixture.runner.processes))
 
 
 if __name__ == '__main__':

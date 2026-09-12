@@ -252,7 +252,15 @@ class CandidateBatch:
                 self.revoke('CANDIDATE_BATCH_GRANT_REJECTED')
                 raise ControllerFailure('CANDIDATE_BATCH_GRANT_REJECTED')
             use._lease.require_open()
-            _check_checkout(self.plan.source_sha, self.plan.source_tree)
+        # Git may block. Let the owner watchdog revoke while this non-secret
+        # check runs, then recheck the grant at the actual delivery boundary.
+        _check_checkout(self.plan.source_sha, self.plan.source_tree)
+        with self._lock:
+            use.check(supervisor)
+            use._lease.require_open()
+            if supervisor._clock() >= grant.expires or process.poll() is not None:
+                self.revoke('CANDIDATE_BATCH_GRANT_REJECTED')
+                raise ControllerFailure('CANDIDATE_BATCH_GRANT_REJECTED')
             entry = self._record['profiles'][use._profile.profile][role]
             key = (use._profile.profile, role)
             if key in self._attempted_roles:
