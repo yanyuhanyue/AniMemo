@@ -47,8 +47,12 @@ class CandidateVmRuntimeRepairTests(unittest.TestCase):
             )
             self.assertEqual(
                 override.read_bytes(),
-                b"networks:\n  animemo:\n    internal: true\n",
+                production._CANDIDATE_NETWORK_OVERRIDE_BYTES,
             )
+            self.assertIn(b"internal: true\n", override.read_bytes())
+            self.assertIn(b"source: /run/animemo-candidate/", override.read_bytes())
+            self.assertIn(b"read_only: true\n", override.read_bytes())
+            self.assertIn(b"create_host_path: false\n", override.read_bytes())
             if os.name != "nt":
                 self.assertEqual(override.stat().st_mode & 0o777, 0o600)
 

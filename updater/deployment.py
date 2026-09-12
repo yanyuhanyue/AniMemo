@@ -60,7 +60,15 @@ CRITICAL_LOG = re.compile(
 MIGRATION_PLAN_LINE = re.compile(
     r"^\s*\[(?P<state>[ X])\]\s+(?P<name>[A-Za-z0-9_]+\.[^\s]+)\s*$"
 )
-CANDIDATE_NETWORK_OVERRIDE_TEXT = "networks:\n  animemo:\n    internal: true\n"
+CANDIDATE_NETWORK_OVERRIDE_TEXT = (
+    "networks:\n  animemo:\n    internal: true\n"
+    "services:\n  web:\n    volumes:\n"
+    "      - type: bind\n"
+    "        source: /run/animemo-candidate/${ANIMEMO_INSTANCE_NAME}/edge-proxy-ipv4\n"
+    "        target: /etc/nginx/animemo/candidate-edge-proxy-ipv4\n"
+    "        read_only: true\n"
+    "        bind:\n          create_host_path: false\n"
+)
 BUNDLE_RESTORE_STAGE_NAME = "bundle-restore-staging"
 BUNDLE_RESTORE_CONTAINER_ROOT = "/app/runtime/bundle-restore-staging"
 BUNDLE_RESTORE_STAGE_INIT = """import json, os, stat
@@ -442,6 +450,53 @@ class ImmutableComposeDeployment:
         ):
             raise StateError("AniMemo Web proxy network identity is invalid")
         return f"{address.compressed}/32"
+
+    def candidate_internal_gateway(self, manifest: dict[str, object], service: str) -> dict[str, str]:
+        """Read one owned internal bridge by ID; it has no container default route."""
+        if self.candidate_network_override is None or service not in {"postgres", "web"}:
+            raise StateError("Candidate edge proxy scope is invalid")
+        container = self._container_id(manifest, service, include_stopped=False)
+        networks = json.loads(self._inspect_container(container, "{{json .NetworkSettings.Networks}}"))
+        name = f"{self.paths.compose_project}_animemo"
+        if not isinstance(networks, dict) or set(networks) != {name}:
+            raise StateError("Candidate edge proxy network is ambiguous")
+        endpoint = networks[name]
+        identifier = endpoint.get("NetworkID") if isinstance(endpoint, dict) else None
+        if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{64}", identifier):
+            raise StateError("Candidate edge proxy network identity is invalid")
+        result = json.loads(self.runner.run(
+            ["/usr/bin/docker", "network", "inspect", identifier], timeout=30,
+        ).stdout)
+        if not isinstance(result, list) or len(result) != 1 or not isinstance(result[0], dict):
+            raise StateError("Candidate edge proxy network observation is invalid")
+        network = result[0]
+        labels = network.get("Labels") or {}
+        ipam = network.get("IPAM") or {}
+        configs = ipam.get("Config")
+        if (network.get("Id") != identifier or network.get("Name") != name
+                or network.get("Driver") != "bridge" or network.get("Scope") != "local"
+                or network.get("Internal") is not True or network.get("EnableIPv6") is not False
+                or labels.get("com.docker.compose.project") != self.paths.compose_project
+                or labels.get("com.docker.compose.network") != "animemo"
+                or ipam.get("Driver") != "default" or not isinstance(configs, list)
+                or len(configs) != 1 or not isinstance(configs[0], dict)):
+            raise StateError("Candidate edge proxy network ownership is invalid")
+        subnet = ipaddress.ip_network(configs[0].get("Subnet"), strict=True)
+        gateway = ipaddress.ip_address(configs[0].get("Gateway"))
+        address = ipaddress.ip_address(endpoint.get("IPAddress"))
+        member = (network.get("Containers") or {}).get(container)
+        if (subnet.version != 4 or gateway.version != 4 or address.version != 4
+                or str(subnet) != configs[0]["Subnet"] or str(gateway) != configs[0]["Gateway"]
+                or gateway not in subnet or address not in subnet
+                or gateway in (subnet.network_address, subnet.broadcast_address, address)
+                or gateway.is_unspecified or gateway.is_loopback or gateway.is_multicast
+                or gateway.is_link_local or gateway.is_reserved
+                or not isinstance(member, dict)
+                or member.get("IPv4Address") != f"{address}/{subnet.prefixlen}"
+                or member.get("EndpointID") != endpoint.get("EndpointID")
+                or not endpoint.get("EndpointID")):
+            raise StateError("Candidate edge proxy gateway is invalid")
+        return {"network_id": identifier, "subnet": str(subnet), "gateway": str(gateway)}
 
     def _inspect_container(self, container: str, template: str) -> str:
         return self.runner.run(
