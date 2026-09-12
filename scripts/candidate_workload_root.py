@@ -115,7 +115,7 @@ def _copy_stage(source, destination):
 
 
 def run_fixed_candidate(*, session_id, profile, input_digest, verified_digest,
-                        inventory_digest, context):
+                        inventory_digest, context, diagnostic):
     if (os.geteuid() != 0 or re.fullmatch(r'[0-9a-f]{32}', session_id) is None
             or profile not in {'FRESH_BASE', 'DOCKER_BASE', 'RUNTIME_BASE_OFFLINE'}
             or any(re.fullmatch(r'sha256:[0-9a-f]{64}', value) is None
@@ -129,6 +129,7 @@ def run_fixed_candidate(*, session_id, profile, input_digest, verified_digest,
     fixed_root = Path('/var/lib/animemo/prepublication-candidates/v2')
     leaf = input_digest.removeprefix('sha256:')
     destination = fixed_root / leaf
+    diagnostic.stage('MATERIAL_FINALIZING')
     parent = _root_directory(fixed_root)
     try:
         os.mkdir(leaf, 0o700, dir_fd=parent)  # Never reuse a previous attempt.
@@ -145,7 +146,9 @@ def run_fixed_candidate(*, session_id, profile, input_digest, verified_digest,
     finally:
         os.close(parent)
     if closed_runtime_inventory_digest(destination) != inventory_digest:
+        diagnostic.error('MATERIAL_INVENTORY_MISMATCH')
         raise ValueError('CANDIDATE_STAGE_INVENTORY_MISMATCH')
+    diagnostic.stage('MATERIAL_VERIFIED')
     receipt = Path('/var/lib/animemo/candidate-acceptance/profile-receipt-draft.json')
     receipt_parent = _root_directory(receipt.parent)
     try:
@@ -158,22 +161,29 @@ def run_fixed_candidate(*, session_id, profile, input_digest, verified_digest,
         root = str(destination / 'installer-root')
         # -I ignores PYTHONPATH. Add exactly the verified root in a fixed
         # interpreter program; all subsequent imports come from sealed bytes.
-        program = ('import runpy,sys;from pathlib import Path;sys.path.insert(0,' + repr(root)
-            + ');from installer.offline_python_runtime import install_wheel_runtime;'
-            + 'runtime=Path(' + repr(str(receipt.parent / 'python-runtime')) + ');'
-            + 'install_wheel_runtime(Path(' + repr(root + '/wheelhouse') + '),runtime);'
-            + 'sys.path.insert(0,str(runtime));runpy.run_path('
-            + repr(root + '/scripts/candidate_profile_runner.py') + ',run_name="__main__")')
+        program = ('import sys;from pathlib import Path;sys.path.insert(0,' + repr(root)
+            + ');from scripts.candidate_runtime_entry import main;raise SystemExit(main(Path('
+            + repr(str(receipt.parent / 'python-runtime')) + ')))')
         environment = dict(os.environ)
         environment['ANIMEMO_CANDIDATE_PROFILE_CONTEXT_B64URL'] = base64.urlsafe_b64encode(
             (json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n').encode()).decode().rstrip('=')
-        completed = subprocess.run(['/usr/bin/python3', '-I', '-B', '-c', program,
-            '--verified-candidate-digest', verified_digest, '--profile', profile,
-            '--public-origin', 'https://candidate.invalid', '--execute'], env=environment,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=4 * 60 * 60)
+        diagnostic_fd = os.dup(diagnostic.fd)
+        try:
+            environment['ANIMEMO_CANDIDATE_DIAGNOSTIC_FD'] = str(diagnostic_fd)
+            environment['ANIMEMO_CANDIDATE_DIAGNOSTIC_OPERATION'] = diagnostic.operation
+            completed = subprocess.run(['/usr/bin/python3', '-I', '-B', '-c', program,
+                '--verified-candidate-digest', verified_digest, '--profile', profile,
+                '--public-origin', 'https://candidate.invalid', '--execute'], env=environment,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                pass_fds=(diagnostic_fd,), timeout=4 * 60 * 60)
+        finally:
+            os.close(diagnostic_fd)
+        diagnostic.exited('RUNTIME_RUNNER', completed.returncode)
         if completed.returncode != 0:
+            diagnostic.error('RUNNER_EXECUTION_FAILED')
             raise ValueError('CANDIDATE_PROFILE_EXECUTION_FAILED')
+        if not receipt.is_file():
+            diagnostic.error('DRAFT_MISSING')
         fd = os.open(receipt.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=receipt_parent)
         try:
             before = os.fstat(fd)
@@ -185,8 +195,8 @@ def run_fixed_candidate(*, session_id, profile, input_digest, verified_digest,
             if len(body) != before.st_size or _file_state(os.fstat(fd)) != _file_state(before):
                 raise ValueError('CANDIDATE_RECEIPT_CHANGED')
             # The Host parses duplicate keys and the complete canonical schema.
-            sys.stdout.buffer.write(body)
-            sys.stdout.buffer.flush()
+            diagnostic.stage('DRAFT_RETURNED')
+            diagnostic.frame(b'R', body)
         finally:
             os.close(fd)
     finally:

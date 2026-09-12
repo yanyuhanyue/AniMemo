@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
+from scripts.candidate_diagnostics import inherited_writer, FD_ENV, OP_ENV, bounded_process_output, DiagnosticError
 
 from durability.canonical import canonical_json_bytes as canonical_identity_bytes
 from installer.platform_bootstrap import (
@@ -91,16 +92,14 @@ class SubprocessCommandRunner:
     def run(
         self, argv: tuple[str, ...], environment: Mapping[str, str]
     ) -> tuple[int, bytes, bytes]:
-        completed = subprocess.run(
-            argv,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            env=dict(environment),
-            shell=False,
-            timeout=4 * 60 * 60,
-            check=False,
-        )
-        return completed.returncode, completed.stdout, completed.stderr
+        try:
+            return bounded_process_output(argv, environment=dict(environment), timeout=4 * 60 * 60,
+                pass_fds=((int(environment[FD_ENV]),) if FD_ENV in environment else ()))
+        except DiagnosticError as error:
+            diagnostic = inherited_writer()
+            if diagnostic is not None:
+                diagnostic.error(error.code)
+            raise ProfileRunnerError('CANDIDATE_INSTALLER_OUTPUT_OR_TIMEOUT_INVALID') from None
 
 
 @contextmanager
@@ -898,6 +897,7 @@ def execute_profile(
     context_b64url: str,
     runner: CommandRunner | None = None,
 ) -> dict[str, Any]:
+    diagnostic = inherited_writer()
     context = _decode_context(context_b64url)
     if context["profile"] != profile:
         raise ProfileRunnerError("CANDIDATE_PROFILE_CONTEXT_MISMATCH")
@@ -915,6 +915,9 @@ def execute_profile(
             "PYTHONPATH": os.pathsep.join((str(runtime), str(installer_root))),
             "PYTHONSAFEPATH": "1",
         }
+        if diagnostic is not None:
+            environment.update({FD_ENV: str(diagnostic.fd), OP_ENV: diagnostic.operation})
+            diagnostic.stage('INSTALLER_STARTING')
         return_code, stdout, _ = (runner or SubprocessCommandRunner()).run(
             installer_argv(
                 verified_candidate_digest=verified_candidate_digest,
@@ -923,8 +926,17 @@ def execute_profile(
             ),
             environment,
         )
-    output = _result_json(stdout)
+    if diagnostic is not None:
+        diagnostic.exited('INSTALLER', return_code)
+    try:
+        output = _result_json(stdout)
+    except ProfileRunnerError:
+        if diagnostic is not None:
+            diagnostic.error('INSTALLER_OUTPUT_INVALID')
+        raise
     if return_code != 0:
+        if diagnostic is not None:
+            diagnostic.error('INSTALLER_EXECUTION_FAILED')
         raise ProfileRunnerError("CANDIDATE_INSTALLER_EXECUTION_FAILED")
     completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return build_profile_receipt(
@@ -947,6 +959,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    diagnostic = inherited_writer()
+    if diagnostic is not None:
+        diagnostic.stage('RUNNER_STARTED')
     args = _parser().parse_args(argv)
     try:
         command = installer_argv(
@@ -976,6 +991,8 @@ def main(argv: list[str] | None = None) -> int:
             public_origin=args.public_origin,
             context_b64url=context,
         )
+        if diagnostic is not None:
+            diagnostic.stage('DRAFT_WRITING')
         if RECEIPT_OUTPUT.exists() or RECEIPT_OUTPUT.is_symlink():
             raise ProfileRunnerError("CANDIDATE_PROFILE_RECEIPT_OUTPUT_EXISTS")
         RECEIPT_OUTPUT.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -984,6 +1001,8 @@ def main(argv: list[str] | None = None) -> int:
             output.flush()
             os.fsync(output.fileno())
         os.chmod(RECEIPT_OUTPUT, 0o600)
+        if diagnostic is not None:
+            diagnostic.stage('DRAFT_WRITTEN')
         print(
             json.dumps(
                 {

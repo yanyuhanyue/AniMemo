@@ -227,7 +227,9 @@ def _write(value: object, *, json_output: bool) -> None:
 
 def _run_candidate(args: argparse.Namespace) -> int:
     from .production import build_candidate_composition
+    from scripts.candidate_diagnostics import inherited_writer
 
+    diagnostic = inherited_writer()
     request = _candidate_request(args)
     composition = build_candidate_composition(
         args.verified_candidate_digest,
@@ -268,15 +270,25 @@ def _run_candidate(args: argparse.Namespace) -> int:
             json_output=args.json_output,
         )
         return EXIT_VALIDATION
-    platform_receipt = composition.execute_platform(
-        session,
-        session.plan.plan_digest,
-    )
+    if diagnostic is not None:
+        diagnostic.stage('PLATFORM_PREPARING')
+    try:
+        platform_receipt = composition.execute_platform(session, session.plan.plan_digest)
+    except BaseException:
+        if diagnostic is not None:
+            diagnostic.error('PLATFORM_PREPARATION_FAILED')
+        raise
+    if diagnostic is not None:
+        diagnostic.stage('PLATFORM_READY')
     plan = composition.runtime.plan(request)
+    if diagnostic is not None:
+        diagnostic.stage('INSTALLER_RUNNING')
     result = composition.runtime.execute(
         plan,
         accepted_plan_digest=plan.plan_digest,
     )
+    if diagnostic is not None:
+        diagnostic.stage('INSTALLER_COMPLETED')
     production_observation = composition.candidate_profile_execution_observation(
         platform_plan=session.plan,
         platform_receipt=platform_receipt,

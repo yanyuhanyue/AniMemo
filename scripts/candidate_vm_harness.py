@@ -23,11 +23,12 @@ import stat
 import subprocess
 import sys
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1308,6 +1309,29 @@ class HostCommandRunner(Protocol):
     ) -> subprocess.CompletedProcess[bytes]: ...
 
 
+@contextmanager
+def _cancel_process_when_revoked(process, event):
+    finished = threading.Event()
+    def watch():
+        while not finished.wait(0.05):
+            if event is not None and event.is_set():
+                if process.poll() is None:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                return
+    thread = threading.Thread(target=watch, daemon=True) if event is not None else None
+    if thread is not None:
+        thread.start()
+    try:
+        yield
+    finally:
+        finished.set()
+        if thread is not None:
+            thread.join(timeout=1)
+
+
 class SubprocessHostCommandRunner:
     def run(
         self,
@@ -1317,7 +1341,26 @@ class SubprocessHostCommandRunner:
         cwd: Path,
         input_bytes: bytes | None = None,
         timeout: int = 300,
+        cancel_event=None,
     ) -> subprocess.CompletedProcess[bytes]:
+        if cancel_event is not None:
+            if cancel_event.is_set():
+                raise CandidateHarnessError('CANDIDATE_BATCH_REVOKED')
+            process = subprocess.Popen(tuple(argv), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(environment),
+                cwd=cwd, shell=False, creationflags=0x08000000 if os.name == 'nt' else 0)
+            try:
+                with _cancel_process_when_revoked(process, cancel_event):
+                    stdout, stderr = process.communicate(timeout=timeout)
+                if cancel_event.is_set():
+                    raise CandidateHarnessError('CANDIDATE_BATCH_REVOKED')
+                return subprocess.CompletedProcess(tuple(argv), process.returncode, stdout, stderr)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+                process.stdout.close()
+                process.stderr.close()
         return subprocess.run(  # noqa: S603 - callers construct closed argv
             tuple(argv),
             input=input_bytes,
@@ -1334,7 +1377,7 @@ class SubprocessHostCommandRunner:
 
     def run_guest_exchange(
         self, argv: Sequence[str], *, environment: Mapping[str, str],
-        cwd: Path, exchange: Any, timeout: int,
+        cwd: Path, exchange: Any, timeout: int, cancel_event=None,
     ) -> subprocess.CompletedProcess[bytes]:
         """One held SSH process; only its in-process exchange may write stdin."""
         deadline = time.monotonic() + timeout
@@ -1345,8 +1388,11 @@ class SubprocessHostCommandRunner:
             creationflags=0x08000000 if os.name == "nt" else 0,
         )
         try:
-            exchange(process)
-            code = process.wait(timeout=max(0, deadline - time.monotonic()))
+            with _cancel_process_when_revoked(process, cancel_event):
+                exchange(process)
+                code = process.wait(timeout=max(0, deadline - time.monotonic()))
+            if cancel_event is not None and cancel_event.is_set():
+                raise CandidateHarnessError('CANDIDATE_BATCH_REVOKED')
             return subprocess.CompletedProcess(tuple(argv), code, b"", b"")
         finally:
             if process.poll() is None:
@@ -2179,6 +2225,9 @@ class ClosedVmwareProvider:
         self._accepted_host_key_digests: set[str] = set()
         self._candidate_connections: dict[str, object] = {}
         self._candidate_credential_results: dict[str, object] = {}
+        self._candidate_batch = None
+        self._candidate_credential_session = None
+        self._candidate_diagnostics: dict[str, object] = {}
         self._profile_operation_results: dict[str, object] = {}
         self._candidate_acceptance_progress: dict[str, object] = {}
         self._execution: _ProviderExecutionAuthorityState | None = None
@@ -2808,6 +2857,11 @@ class ClosedVmwareProvider:
             return diagnostic
 
         try:
+            cancellation = {}
+            if self._candidate_batch is not None and type(self._runner) is SubprocessHostCommandRunner:
+                operation = self._candidate_batch._operation
+                if operation is not None and operation[0] != 'CLEANUP':
+                    cancellation['cancel_event'] = self._candidate_batch.cancelled
             if not PureWindowsPath(str(executable_path)).is_absolute():
                 raise CandidateHarnessError(
                     "WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE"
@@ -2830,6 +2884,7 @@ class ClosedVmwareProvider:
                     cwd=executable_path.parent,
                     input_bytes=input_bytes,
                     timeout=timeout,
+                    **cancellation,
                 )
             else:
                 completed = self._runner.run_guest_exchange(
@@ -2838,6 +2893,7 @@ class ClosedVmwareProvider:
                     cwd=executable_path.parent,
                     exchange=guest_exchange,
                     timeout=timeout,
+                    **cancellation,
                 )
         except (OSError, subprocess.SubprocessError, KeyboardInterrupt) as error:
             kind = ("TIMEOUT" if isinstance(error, subprocess.TimeoutExpired)
@@ -5167,16 +5223,17 @@ class ClosedVmwareProvider:
             # authority merely because preparation did not return successfully.
             clone_root, clone_vmx = authority.clone_root, authority.clone_vmx
             clone_power_state_untrusted = True
-            preboot_disk_graph_digest, preboot_snapshot_identity = (
-                self._prepare_and_start_profile_clone(
-                    authority=authority, plan=plan, harness_plan=harness_plan,
-                    before_hashes=before_hashes,
-                    profile_authority_stack=profile_authority_stack,
-                    clone_authority_stack=clone_authority_stack,
-                    checked_running_vmx_paths=checked_running_vmx_paths,
-                    reject_running_clone=reject_running_clone,
+            with (self._candidate_batch.operation('PREPARATION', plan) if self._candidate_batch else nullcontext()):
+                preboot_disk_graph_digest, preboot_snapshot_identity = (
+                    self._prepare_and_start_profile_clone(
+                        authority=authority, plan=plan, harness_plan=harness_plan,
+                        before_hashes=before_hashes,
+                        profile_authority_stack=profile_authority_stack,
+                        clone_authority_stack=clone_authority_stack,
+                        checked_running_vmx_paths=checked_running_vmx_paths,
+                        reject_running_clone=reject_running_clone,
+                    )
                 )
-            )
             operation["power_state"] = "START_RETURNED"
             try:
                 if _formal_workload is None:
@@ -5211,6 +5268,8 @@ class ClosedVmwareProvider:
             except CandidateHarnessError as error:
                 profile_failure = error
                 raise
+            if self._candidate_batch is not None:
+                self._candidate_batch.cleanup_started(plan)
             self._stop_clone(clone_vmx)
             clone_power_state_untrusted = False
             operation["power_state"] = "STOPPED"
@@ -5231,6 +5290,8 @@ class ClosedVmwareProvider:
             return receipt
         except BaseException as error:
             primary_error = error
+            if self._candidate_batch is not None:
+                self._candidate_batch.cleanup_started(plan)
             operation["operation_failure_code"] = (error.code if isinstance(error, CandidateHarnessError)
                 else "CANDIDATE_PROFILE_UNCLASSIFIED_ERROR")
             if type(error) in (SessionKeyCommandError, VmHostCommandError):
@@ -5278,11 +5339,17 @@ class ClosedVmwareProvider:
                         raise CandidateProfileExecutionError(profile_failure.code, continuation) from error
             raise
         finally:
+            if plan.profile in self._candidate_diagnostics:
+                operation['workload_diagnostic'] = self._candidate_diagnostics[plan.profile]
             self._candidate_connections.pop(plan.profile, None)
             cleanup("clone_holds", clone_authority_stack.close)
             cleanup("profile_holds", profile_authority_stack.close)
             if cleanup("lease", lambda: self._release_provider_lease(lease, work_root=work_root)):
                 operation["lease_released"] = True
+            if self._candidate_batch is not None:
+                self._candidate_batch.cleanup_finished()
+                if operation['cleanup_errors']:
+                    self._candidate_batch.revoke('CANDIDATE_PROFILE_CLEANUP_FAILED')
             if operation["cleanup_errors"]:
                 operation["result"] = "ERROR"
                 # A lease-release failure happens after the continuation
@@ -5793,6 +5860,9 @@ def _execute_harness_plan(
         provider._candidate_acceptance_progress = progress
     for item in plan.profiles:
         result_key = PROFILE_RESULT_KEYS[item.profile]
+        batch = provider._candidate_batch if type(provider) is ClosedVmwareProvider else None
+        if batch is not None and batch.cancelled.is_set():
+            shared_blocker_code = shared_blocker_code or batch.record['revocation_code']
         if shared_blocker_code is not None:
             profile_results[result_key] = _profile_result(
                 "NOT_RUN_SHARED_BLOCKER",
@@ -5934,6 +6004,8 @@ def _execute_harness_plan(
                 failure_code="CANDIDATE_PROFILE_REPORTED_FAILURE",
                 receipt_digest=digest,
             )
+    if type(provider) is ClosedVmwareProvider and provider._candidate_batch is not None:
+        provider._candidate_batch.release_secret()
     try:
         final_hashes = dict(provider.inspect_original_hashes())
     except (CandidateHarnessError, OSError, TypeError, ValueError) as error:
@@ -6177,14 +6249,28 @@ def main(argv: list[str] | None = None) -> int:
                 raise CandidateHarnessError(
                     "CANDIDATE_HARNESS_PLAN_CONFIRMATION_REQUIRED"
                 )
-            acceptance = execute_harness_plan(
-                plan,
-                accepted_plan_digest=accepted,
-                provider=provider,
-                environment=os.environ,
-                plugin_origin=plugin_origin,
-                _candidate_material_authority=material_authority,
-            )
+            from scripts.candidate_batch_session import CandidateBatch
+            batch = CandidateBatch(provider, plan)
+            provider._candidate_batch = batch
+            provider._candidate_credential_session = batch.record
+            provider._candidate_credential_results = batch.record['profiles']
+            try:
+                acceptance = execute_harness_plan(
+                    plan,
+                    accepted_plan_digest=accepted,
+                    provider=provider,
+                    environment=os.environ,
+                    plugin_origin=plugin_origin,
+                    _candidate_material_authority=material_authority,
+                )
+            except BaseException:
+                batch.revoke('CANDIDATE_BATCH_EXECUTION_INTERRUPTED')
+                raise
+            finally:
+                try:
+                    batch.close()
+                finally:
+                    provider._candidate_batch = None
             result.update(acceptance)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0 if result["status"] == "PASS" else 2
@@ -6198,6 +6284,8 @@ def main(argv: list[str] | None = None) -> int:
             result.update(provider._candidate_acceptance_progress)
         result["profile_operations"] = provider._profile_operation_results
         result["credential_results"] = provider._candidate_credential_results
+        result['credential_session'] = provider._candidate_credential_session
+        result['workload_diagnostics'] = provider._candidate_diagnostics
         result["host_lifecycle"] = list(getattr(provider, "_host_lifecycle_observations", ()))
         if report is not None:
             with report:
