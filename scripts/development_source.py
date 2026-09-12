@@ -139,13 +139,19 @@ class HeldDevelopmentSource:
         if self._closed:
             return
         self._closed = True
-        self._holds.close()
+        failure = None
+        try:
+            self._holds.close()
+        except BaseException as error:
+            failure = error
         root = self._root
         # Only this factory's exact disposable source directory is eligible.
         if (root.parent != Path('E:/') or not root.name.startswith('animemo-development-source-')
                 or root.is_symlink() or root.is_junction() or root.resolve(strict=True) != root):
             raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_CLEANUP_SCOPE_INVALID')
         shutil.rmtree(root)
+        if failure is not None:
+            raise failure
 
 
 @contextmanager
@@ -188,9 +194,8 @@ def acquire_development_source(provider, *, source_sha, source_tree):
             expected_file_identities=identities, private_root=value._source_root,
             maximum_files=4096, maximum_file_bytes=64 * 1024 * 1024,
             maximum_total_bytes=512 * 1024 * 1024))
-        if draft.parent != root or draft.resolve(strict=True) != draft or draft.is_symlink() or draft.is_junction():
-            raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_CLEANUP_SCOPE_INVALID')
-        shutil.rmtree(draft)
+        # The final snapshot also holds its draft source files without DELETE
+        # sharing. Keep both trees until close() releases every snapshot hold.
         value.inventory_digest = h._closed_runtime_inventory_digest(value._source_root)
         _check_checkout(source_sha, source_tree)
         provider._development_source_authority = value
