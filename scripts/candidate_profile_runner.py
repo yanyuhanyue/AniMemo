@@ -888,14 +888,15 @@ def build_profile_receipt(
     return draft
 
 
-def execute_profile(
+def _execute_profile_workload(
     *,
     verified_candidate_digest: str,
     profile: str,
     public_origin: str,
     context_b64url: str,
     runner: CommandRunner | None = None,
-) -> dict[str, Any]:
+    execution_root: Path | None = None,
+):
     diagnostic = inherited_writer()
     try:
         context = _decode_context(context_b64url)
@@ -913,8 +914,9 @@ def execute_profile(
                 else 'VERIFIED_CANDIDATE_INVALID')
         raise ProfileRunnerError(error.code) from error
     started = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    installer_root = loaded.root / "installer-root"
-    with _verified_wheel_runtime(installer_root) as runtime:
+    material_root = loaded.root / "installer-root"
+    installer_root = material_root if execution_root is None else execution_root
+    with _verified_wheel_runtime(material_root) as runtime:
         environment = {
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
@@ -946,6 +948,21 @@ def execute_profile(
             diagnostic.error('INSTALLER_EXECUTION_FAILED')
         raise ProfileRunnerError("CANDIDATE_INSTALLER_EXECUTION_FAILED")
     completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return loaded, context, output, started, completed
+
+
+def execute_profile(
+    *,
+    verified_candidate_digest: str,
+    profile: str,
+    public_origin: str,
+    context_b64url: str,
+    runner: CommandRunner | None = None,
+) -> dict[str, Any]:
+    loaded, context, output, started, completed = _execute_profile_workload(
+        verified_candidate_digest=verified_candidate_digest, profile=profile,
+        public_origin=public_origin, context_b64url=context_b64url, runner=runner)
+    diagnostic = inherited_writer()
     try:
         return build_profile_receipt(
             loaded=loaded,

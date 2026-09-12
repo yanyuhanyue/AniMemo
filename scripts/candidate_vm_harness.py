@@ -2611,7 +2611,11 @@ class ClosedVmwareProvider:
         plan: CandidateProfilePlan | VmProviderProfilePlan,
         harness_plan: CandidateHarnessPlan | ClosedVmProviderPlan,
     ) -> ProfileConnectionAuthority:
-        if type(harness_plan) is CandidateHarnessPlan:
+        from scripts.development_plan import is_development_plan
+        if is_development_plan(harness_plan):
+            authority_digest = harness_plan.plan_digest
+            target_version = harness_plan.candidate_version
+        elif type(harness_plan) is CandidateHarnessPlan:
             authority_digest = harness_plan.candidate_input_digest
             target_version = harness_plan.candidate_version
         elif type(harness_plan) is ClosedVmProviderPlan:
@@ -5108,11 +5112,21 @@ class ClosedVmwareProvider:
         candidate_root: Path,
         initial_platform_state: Mapping[str, bool],
         _formal_workload: ClosedFormalProfileWorkload | None = None,
+        _development: bool = False,
     ) -> Mapping[str, Any]:
+        from scripts.development_plan import is_development_plan
+        if _development:
+            from scripts.development_source import require_development_source
+            require_development_source(self, harness_plan)
+            if (_formal_workload is not None
+                    or type(self._candidate_material_authority) is not HeldCandidateMaterialAuthority
+                    or Path(candidate_root) != self._candidate_material_authority.loaded.root):
+                raise CandidateHarnessError('DEVELOPMENT_PROFILE_MATERIAL_INVALID')
         if _formal_workload is not None:
             self._validate_formal_workload(_formal_workload)
         candidate_plan_invalid = _formal_workload is None and (
-            type(harness_plan) is not CandidateHarnessPlan
+            not (type(harness_plan) is CandidateHarnessPlan
+                 or _development and is_development_plan(harness_plan))
             or type(plan) is not CandidateProfilePlan
         )
         formal_plan_invalid = _formal_workload is not None and (
@@ -5237,12 +5251,17 @@ class ClosedVmwareProvider:
                     )
                     from scripts.guest_sudo_session import ControllerFailure
                     from scripts.guest_console_capture import ConsoleCaptureError
+                    if _development:
+                        from scripts.development_guest_session import execute_development_workload
+                        execute_workload = execute_development_workload
+                    else:
+                        execute_workload = execute_candidate_workload
                     try:
                         verified_connection = bootstrap_candidate(
                             self, harness_plan, plan, lease,
                             preboot_disk_graph_digest, preboot_snapshot_identity)
                         operation["power_state"] = "RUNNING"
-                        receipt = execute_candidate_workload(
+                        receipt = execute_workload(
                             self, harness_plan, plan, lease,
                             preboot_disk_graph_digest, preboot_snapshot_identity,
                             candidate_root, initial_platform_state)
@@ -5360,6 +5379,12 @@ class ClosedVmwareProvider:
                 if primary_error is not None:
                     raise primary_error
                 raise CandidateHarnessError("CANDIDATE_PROFILE_CLEANUP_FAILED")
+
+    def execute_development_profile(self, *, plan, harness_plan, candidate_root, initial_platform_state):
+        """Run a closed development plan through the existing Clone lifecycle."""
+        return self.execute_profile(plan=plan, harness_plan=harness_plan,
+            candidate_root=candidate_root, initial_platform_state=initial_platform_state,
+            _development=True)
 
     def execute_formal_profile(
         self,
