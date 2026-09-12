@@ -57,9 +57,31 @@ _REMOTE_OBSERVE = (
     '"boot_id":open("/proc/sys/kernel/random/boot_id").read().strip(),'
     '"mac_addresses":sorted(open(p).read().strip() for p in '
     'glob.glob("/sys/class/net/*/address")),"nonce":challenge}),flush=True);'
-    'password=sys.stdin.buffer.readline(4098);'
-    'assert 1<len(password)<=4097 and password.endswith(b"\\n");'
 )
+
+_REMOTE_INPUT = '''
+password=bytearray()
+try:
+    while len(password)<4098:
+        one=bytearray(1)
+        try:
+            count=sys.stdin.buffer.raw.readinto(one)
+            if count!=1: raise ValueError('GUEST_SECRET_INPUT_INVALID')
+            password.extend(one)
+            if one[0]==10: break
+        finally:
+            one[:]=b'\\0'*len(one)
+    if not 1<len(password)<=4097 or password[-1]!=10: raise ValueError('GUEST_SECRET_INPUT_INVALID')
+    child=subprocess.Popen(ARGV,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,bufsize=0)
+    written=child.stdin.write(password)
+    if written!=len(password): raise ValueError('GUEST_SECRET_SHORT_WRITE')
+    child.stdin.flush()
+    child.stdin.close()
+finally:
+    password[:]=b'\\0'*len(password)
+    password.clear()
+sys.exit(child.wait())
+'''
 
 
 def _remote_command(role: str, public_key: str = "") -> str:
@@ -81,7 +103,7 @@ def _remote_command(role: str, public_key: str = "") -> str:
         argv = ["/usr/bin/sudo", "-S", "-k", "-p", "", "-v"]
     else:
         raise ControllerFailure("GUEST_ROLE_REJECTED")
-    program = _REMOTE_OBSERVE + 'sys.exit(subprocess.run(' + repr(argv) + ',input=password,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode)'
+    program = _REMOTE_OBSERVE + _REMOTE_INPUT.replace('ARGV', repr(argv))
     return "/usr/bin/python3 -I -B -c " + shlex.quote(program)
 
 

@@ -147,6 +147,7 @@ class ProfileCleanupTests(unittest.TestCase):
               mock.patch.object(h, 'acquire_candidate_material_authority', return_value=nullcontext()),
               mock.patch('scripts.isolated_guest_validation._check_checkout'),
               mock.patch('scripts.guest_console_capture.WindowsConsoleCapture.preflight'),
+              mock.patch('scripts.candidate_batch_session.CandidateBatch', return_value=mock.Mock(record={'profiles': {}})),
               redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO())):
             code = h.main(['--execute', '--authorization-id', session.CAPTURE_AUTHORIZATION,
                 '--r2-origin-transport', 's3', '--result', str(output),

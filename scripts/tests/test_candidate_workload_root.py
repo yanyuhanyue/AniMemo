@@ -12,6 +12,7 @@ from unittest import mock
 
 from scripts import closed_runtime_inventory as inventory
 from scripts import candidate_workload_root as root
+from scripts import candidate_diagnostics as diagnostics, candidate_runtime_entry
 
 
 def root_namespace():
@@ -158,6 +159,8 @@ class RootChainIntegrationTests(unittest.TestCase):
         source = self.stage / 'installer-root'
         (source / 'installer').mkdir(parents=True)
         (source / 'scripts').mkdir()
+        for module in (diagnostics, candidate_runtime_entry):
+            (source / 'scripts' / Path(module.__file__).name).write_bytes(Path(module.__file__).read_bytes())
         (source / 'wheelhouse').mkdir()
         (source / 'wheelhouse' / 'synthetic.whl').write_bytes(b'public synthetic wheel fixture')
         (source / 'installer' / '__init__.py').write_bytes(b'')
@@ -188,7 +191,10 @@ class RootChainIntegrationTests(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o077, 0)
             return inventory._open_directory_chain(path)
         self.namespace['_root_directory'] = test_private_root
-        self.output = io.BytesIO()
+        self.output = tempfile.TemporaryFile()
+        self.addCleanup(self.output.close)
+        self.operation = 'sha256:' + 'd' * 64
+        self.diagnostic = diagnostics.DiagnosticWriter(self.output.fileno(), self.operation)
         def allow_cleanup():
             for directory, _, _ in os.walk(self.base): os.chmod(directory, 0o700)
         self.addCleanup(allow_cleanup)
@@ -207,10 +213,10 @@ class RootChainIntegrationTests(unittest.TestCase):
         os.umask(previous_mask)
         try:
             with (mock.patch.object(os, 'geteuid', return_value=0), mock.patch.object(os, 'fstat', side_effect=projected_stat),
-                  mock.patch.dict(os.environ), mock.patch.object(self.namespace['sys'], 'stdout', SimpleNamespace(buffer=self.output))):
+                  mock.patch.dict(os.environ)):
                 self.namespace['run_fixed_candidate'](session_id=self.session, profile=self.profile,
                     input_digest=self.input_digest, verified_digest='sha256:' + 'c' * 64,
-                    inventory_digest=self.expected, context={'synthetic': True})
+                    inventory_digest=self.expected, context={'synthetic': True}, diagnostic=self.diagnostic)
         finally:
             os.chdir(previous_directory)
             os.umask(previous_mask)
@@ -218,7 +224,10 @@ class RootChainIntegrationTests(unittest.TestCase):
     def test_complete_seal_wheel_runner_and_receipt_chain_uses_real_child_and_fds(self):
         self.run_chain()
         self.assertTrue(self.marker.is_file())
-        self.assertEqual(json.loads(self.output.getvalue()), {'result': 'PASS', 'synthetic': True})
+        observed = self.read_frames()
+        self.assertEqual(observed.receipt, {'result': 'PASS', 'synthetic': True})
+        self.assertEqual(observed.public()['exit_codes']['RUNTIME_RUNNER'], 0)
+        self.assertEqual(observed.public()['last_stage'], 'DRAFT_RETURNED')
         destination = self.authority / self.input_digest.removeprefix('sha256:')
         self.assertEqual(inventory.closed_runtime_inventory_digest(destination), self.expected)
 
@@ -227,7 +236,54 @@ class RootChainIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'INVENTORY_MISMATCH'):
             self.run_chain()
         self.assertFalse(self.marker.exists())
-        self.assertEqual(self.output.getvalue(), b'')
+        self.assertIn('MATERIAL_INVENTORY_MISMATCH', self.read_frames().public()['errors'])
+
+    def read_frames(self):
+        self.output.seek(0)
+        reader = diagnostics.DiagnosticReader(self.operation)
+        while item := diagnostics.read_frame(self.output):
+            reader.accept(*item)
+        return reader
+
+    def test_actual_runtime_import_failure_reports_stage_and_exit(self):
+        self.runner.write_text("import missing_animemo_development_fixture\n", encoding='utf-8')
+        self.expected = inventory.closed_runtime_inventory_digest(self.stage)
+        with self.assertRaisesRegex(ValueError, 'PROFILE_EXECUTION_FAILED'):
+            self.run_chain()
+        observed = self.read_frames().public()
+        self.assertIn('RUNNER_INITIALIZATION_FAILED', observed['errors'])
+        self.assertEqual(observed['exit_codes']['RUNTIME_RUNNER'], 2)
+        self.assertEqual(observed['last_stage'], 'RUNNER_STARTING')
+
+    def test_actual_runtime_initialization_failure_never_runs_runner(self):
+        wheel = self.stage / 'installer-root' / 'wheelhouse' / 'synthetic.whl'
+        wheel.write_bytes(b'invalid development wheel')
+        self.expected = inventory.closed_runtime_inventory_digest(self.stage)
+        with self.assertRaisesRegex(ValueError, 'PROFILE_EXECUTION_FAILED'):
+            self.run_chain()
+        observed = self.read_frames().public()
+        self.assertIn('RUNTIME_INITIALIZATION_FAILED', observed['errors'])
+        self.assertEqual(observed['last_stage'], 'RUNTIME_INITIALIZING')
+        self.assertEqual(observed['exit_codes']['RUNTIME_RUNNER'], 2)
+        self.assertFalse(self.marker.exists())
+
+    def test_real_runner_nonzero_is_not_inferred_as_authentication_failure(self):
+        self.runner.write_text('raise SystemExit(17)\n', encoding='utf-8')
+        self.expected = inventory.closed_runtime_inventory_digest(self.stage)
+        with self.assertRaisesRegex(ValueError, 'PROFILE_EXECUTION_FAILED'):
+            self.run_chain()
+        observed = self.read_frames().public()
+        self.assertEqual(observed['exit_codes']['RUNTIME_RUNNER'], 17)
+        self.assertIn('RUNNER_EXECUTION_FAILED', observed['errors'])
+
+    def test_missing_draft_does_not_turn_successful_child_into_receipt(self):
+        self.runner.write_text('raise SystemExit(0)\n', encoding='utf-8')
+        self.expected = inventory.closed_runtime_inventory_digest(self.stage)
+        with self.assertRaises(FileNotFoundError):
+            self.run_chain()
+        observed = self.read_frames()
+        self.assertIn('DRAFT_MISSING', observed.public()['errors'])
+        self.assertIsNone(observed.receipt)
 
     def test_preexisting_receipt_is_never_reused(self):
         self.receipt.parent.mkdir(mode=0o700)

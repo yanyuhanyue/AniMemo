@@ -481,7 +481,8 @@ class GuestSudoSessionTests(unittest.TestCase):
         for role in ("BOOTSTRAP_ROTATION", "VERIFIED_SUDO"):
             code = shlex.split(c._remote_command(role, "ssh-ed25519 YWJj alias"))[-1]
             compile(code, "<guest-helper>", "exec")
-            self.assertIn('password.endswith(b"\\n")', code)
+            self.assertIn('password[-1]!=10', code)
+            self.assertLess(code.index('password.clear()'), code.index('child.wait()'))
         with self.assertRaises(c.ControllerFailure):
             c._remote_command("ARBITRARY")
 

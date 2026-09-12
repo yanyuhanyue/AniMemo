@@ -25,7 +25,7 @@ from scripts.isolated_guest_validation import _check_checkout
 from scripts import candidate_diagnostics as diagnostics
 
 
-from scripts.candidate_batch_session import CandidateBatch, AUTHORIZATION as CAPTURE_AUTHORIZATION
+from scripts.candidate_batch_session import BatchUse, CandidateBatch, AUTHORIZATION as CAPTURE_AUTHORIZATION
 MAX_RECEIPT_BYTES = 8 * 1024 * 1024
 WORKLOAD_SECONDS = 4 * 60 * 60 + 60 * 60
 
@@ -143,6 +143,7 @@ def _root_program(provider, plan, profile, initial_platform_state):
     program = ("scope={'__name__':'_animemo_fixed_root'}\n"
         + 'exec(compile(' + repr(programs[0]) + ",'<fixed-diagnostic>','exec'),scope)\n"
         + "diagnostic=scope['DiagnosticWriter'](1," + repr(operation) + ")\n"
+        + "import os\nif os.geteuid()!=0:\n diagnostic.error('ROOT_INITIALIZATION_FAILED')\n raise SystemExit(2)\n"
         + "diagnostic.stage('ROOT_STARTED')\ntry:\n"
         + ''.join(' exec(compile(' + repr(item) + ",'<fixed-candidate-root>','exec'),scope)\n" for item in programs[1:])
         + " scope['run_fixed_candidate'](**" + repr(args) + ',diagnostic=diagnostic)\n'
@@ -165,7 +166,7 @@ def _remote_workload_command(root_program, operation):
     # Only public identity and a bounded receipt reach stdout. The mutable
     # password is wiped immediately after one forwarding write, before wait.
     from scripts.guest_sudo_session import _REMOTE_OBSERVE
-    observe = _REMOTE_OBSERVE[:_REMOTE_OBSERVE.index('password=')]
+    observe = _REMOTE_OBSERVE
     argv = ['/usr/bin/sudo', '-S', '-k', '-p', '', '--', '/usr/bin/python3', '-I', '-B', '-c', root_program]
     diagnostic_source = Path(diagnostics.__file__).read_text(encoding='utf-8')
     encoded = base64.b64encode(zlib.compress(diagnostic_source.encode(), 9)).decode('ascii')
@@ -280,8 +281,10 @@ def _read_receipt(process, *, operation, provider, profile, batch=None, timeout=
 
 
 class _WorkloadSupervisor(SessionSupervisor):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, use, **kwargs):
+        if type(use) is not BatchUse:
+            raise ControllerFailure('CANDIDATE_BATCH_USE_REQUIRED')
+        super().__init__(use, **kwargs)
         self._delivery_attempts = {'CANDIDATE_WORKLOAD': 0}
         self._delivery_completed = {'CANDIDATE_WORKLOAD': 0}
         self._state = 'CANDIDATE_WORKLOAD'
@@ -308,7 +311,7 @@ class _WorkloadSupervisor(SessionSupervisor):
         # No secret or reusable grant is needed while the fixed process runs.
         self.receipt = _read_receipt(process, operation=_diagnostic_operation(self._plan, self._profile),
             provider=self._provider, profile=self._profile,
-            batch=self._batch_use._batch if self._batch_use is not None else None,
+            batch=self._batch_use._batch,
             timeout=self._workload_deadline - time.monotonic())
 
     def execute(self):

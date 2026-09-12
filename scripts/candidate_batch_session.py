@@ -20,6 +20,14 @@ HARD_SECONDS = 12 * 60 * 60
 IDLE_SECONDS = 30 * 60
 OPERATION_SECONDS = {'PREPARATION': 2 * 60 * 60, 'BOOTSTRAP': 300,
     'TRANSFER': 60 * 60, 'WORKLOAD': 5 * 60 * 60, 'CLEANUP': 30 * 60}
+REVOCATIONS = frozenset(('CANDIDATE_SECRET_USE_SCOPE_CHANGED', 'CANDIDATE_SECRET_ROLE_REJECTED',
+    'CANDIDATE_SECRET_USE_FAILED', 'CANDIDATE_BATCH_SCOPE_CHANGED', 'CANDIDATE_BATCH_HARD_EXPIRED',
+    'CANDIDATE_BATCH_OPERATION_EXPIRED', 'CANDIDATE_BATCH_IDLE_EXPIRED', 'CANDIDATE_BATCH_CAPTURE_FAILED',
+    'CANDIDATE_BATCH_GRANT_REJECTED', 'CANDIDATE_BATCH_ROLE_REPLAY', 'CANDIDATE_BATCH_DELIVERY_UNCERTAIN',
+    'CANDIDATE_BOOTSTRAP_OR_AUTHENTICATION_UNCERTAIN', 'CANDIDATE_WORKLOAD_AUTHORITY_OR_DELIVERY_UNCERTAIN',
+    'CANDIDATE_BATCH_PROFILE_FAILURE', 'CANDIDATE_PROFILE_CLEANUP_FAILED',
+    'CANDIDATE_BATCH_RECEIPT_AUTHORITY_INVALID', 'CANDIDATE_BATCH_EXECUTION_INTERRUPTED',
+    'CANDIDATE_BATCH_USE_ORDER_INVALID'))
 
 
 def reserve_capture():
@@ -179,7 +187,8 @@ class CandidateBatch:
             if self._captured_at is not None:
                 self.require_live()
                 return
-            if self._closed or self._record['session_capture_attempts'] or profile is not self.plan.profiles[0]:
+            if (self._closed or self._record['session_capture_attempts'] or profile is not self.plan.profiles[0]
+                    or self._operation is None or self._operation[:2] != ('BOOTSTRAP', profile.profile)):
                 raise ControllerFailure('CANDIDATE_BATCH_CAPTURE_REJECTED')
             self._scope()
             _check_checkout(self.plan.source_sha, self.plan.source_tree)
@@ -191,8 +200,12 @@ class CandidateBatch:
             try:
                 print('Candidate session / one sudo input for this frozen batch', flush=True)
                 self._secret = console.capture()
+                if (type(self._secret) is not bytearray or not 1 <= len(self._secret) <= 4096
+                        or any(x < 32 or x == 127 for x in self._secret)):
+                    raise ControllerFailure('SUDO_VALUE_INVALID')
                 self._record['session_capture_completed'] = 1
                 self._captured_at = self._last_idle = self._clock()
+                self._operation = ('BOOTSTRAP', profile.profile, self._captured_at + OPERATION_SECONDS['BOOTSTRAP'])
                 _check_checkout(self.plan.source_sha, self.plan.source_tree)
                 self._scope()
                 self._record['secret_state'] = 'ACTIVE'
@@ -213,8 +226,16 @@ class CandidateBatch:
         with self._lock:
             self.require_live()
             if (profile not in self.plan.profiles or roles not in (ROLES[:2], ROLES[2:])
-                    or self._operation is None or self._operation[1] != profile.profile):
+                    or self._operation is None or self._operation[:2] !=
+                    (('BOOTSTRAP' if roles == ROLES[:2] else 'WORKLOAD'), profile.profile)):
                 raise ControllerFailure('CANDIDATE_BATCH_USE_INVALID')
+            previous = self.plan.profiles[:self.plan.profiles.index(profile)]
+            if (any(self._record['profiles'][item.profile]['CANDIDATE_WORKLOAD']['operation_result']
+                    not in {'PASS', 'FAIL'} for item in previous)
+                    or (roles == ROLES[2:] and any(self._record['profiles'][profile.profile][role]['operation_result']
+                        != 'PASS' for role in ROLES[:2]))):
+                self.revoke('CANDIDATE_BATCH_USE_ORDER_INVALID')
+                raise ControllerFailure('CANDIDATE_BATCH_USE_ORDER_INVALID')
             lease.require_open()
             use = object.__new__(BatchUse)
             use._batch, use._profile, use._lease, use._roles = self, profile, lease, roles
@@ -237,6 +258,9 @@ class CandidateBatch:
             if key in self._attempted_roles:
                 self.revoke('CANDIDATE_BATCH_ROLE_REPLAY')
                 raise ControllerFailure('CANDIDATE_BATCH_ROLE_REPLAY')
+            if any((use._profile.profile, prior) not in self._completed_roles for prior in ROLES[:ROLES.index(role)]):
+                self.revoke('CANDIDATE_BATCH_USE_ORDER_INVALID')
+                raise ControllerFailure('CANDIDATE_BATCH_USE_ORDER_INVALID')
             self._attempted_roles.add(key)
             entry.update(target_verified=True, lease_verified=True, delivery_attempts=1, operation_result='UNKNOWN')
             value = bytearray(self._secret)
@@ -259,21 +283,25 @@ class CandidateBatch:
             wipe(value)
 
     def role_result(self, profile, role, result):
-        if profile not in self.plan.profiles or role not in ROLES or result not in {'PASS', 'FAIL', 'ERROR', 'UNKNOWN'}:
-            raise ControllerFailure('CANDIDATE_BATCH_RESULT_INVALID')
-        self._record['profiles'][profile.profile][role]['operation_result'] = result
+        with self._lock:
+            if (profile not in self.plan.profiles or role not in ROLES or result not in {'PASS', 'FAIL', 'ERROR', 'UNKNOWN'}
+                    or (result in {'PASS', 'FAIL'} and (profile.profile, role) not in self._completed_roles)):
+                raise ControllerFailure('CANDIDATE_BATCH_RESULT_INVALID')
+            self._record['profiles'][profile.profile][role]['operation_result'] = result
 
     def revoke(self, code):
         with self._lock:
+            if code not in REVOCATIONS:
+                code = 'CANDIDATE_BATCH_EXECUTION_INTERRUPTED'
             self._record['revocation_code'] = self._record['revocation_code'] or code
             self.cancelled.set()
             self._finish('REVOKED')
 
     def _finish(self, state):
         self._closed = True
-        if self._secret is not None:
+        if type(self._secret) is bytearray:
             wipe(self._secret)
-            self._secret = None
+        self._secret = None
         self._record['secret_state'] = state
         self._record['secret_cleanup'] = 'BEST_EFFORT_COMPLETED' if self._record['session_capture_attempts'] else 'NOT_REQUIRED'
         self._monitor_done.set()

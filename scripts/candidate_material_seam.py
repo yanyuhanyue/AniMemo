@@ -127,8 +127,8 @@ def exercise_fixed_root(destination, loaded, namespace, inventory, baseline):
     """Actual M6 root and actual Runner/Installer, in this disposable CI VM.
 
     The observed M6 failure is reproduced separately in the previous run.
-    This development variant supplies the missing, digest-verified producer
-    definition through a local reference projection. Runtime/Runner/Installer
+    This development variant adds the missing, digest-verified producer
+    definition to an explicit staged development copy. Runtime/Runner/Installer
     modules and original verified material bytes stay unchanged. The synthetic
     VM context and projection cannot issue a Host acceptance receipt.
     """
@@ -147,17 +147,45 @@ def exercise_fixed_root(destination, loaded, namespace, inventory, baseline):
         runtime_runner_exit_code=None, runtime_runner_error_code=None,
         runtime_runner_error_category=None, root_returned=False, root_error_code=None,
         root_error_category=None, draft_returned=False, host_receipt_issued=False,
-        child_timeout=False, child_stderr_limit_exceeded=False)
+        child_timeout=False, child_stderr_limit_exceeded=False,
+        installer_started=False, installer_exit_code=None, installer_reason_code=None)
     producer_reference = baseline / 'deploy/release-producer.Dockerfile'
     producer_receipt = json.loads((loaded.root / 'release-producer-toolchain-receipt.json').read_bytes())
     producer_digest = 'sha256:' + hashlib.sha256(producer_reference.read_bytes()).hexdigest()
     assert producer_digest == producer_receipt['byteAuthority']['releaseProducer']['dockerfileSha256']
-    observations.update(development_producer_reference_projection=True, producer_reference_sha256=producer_digest)
+    deployment = stage / 'installer-root' / 'deploy'
+    os.chmod(deployment, 0o700)
+    extra = deployment / producer_reference.name
+    with extra.open('xb') as output:
+        output.write(producer_reference.read_bytes())
+    os.chmod(extra, 0o500)
+    os.chmod(deployment, 0o500)
+    observations.update(development_staged_file_addition='installer-root/deploy/release-producer.Dockerfile',
+        producer_reference_sha256=producer_digest, original_verified_material_unchanged=True)
     allowed_codes = set()
-    for name in ('scripts/candidate_profile_runner.py', 'scripts/candidate_workload_root.py', 'release/candidate.py'):
-        for node in ast.walk(ast.parse((loaded.root / 'installer-root' / name).read_bytes())):
+    paths = [loaded.root / 'installer-root' / name for name in
+        ('scripts/candidate_profile_runner.py', 'scripts/candidate_workload_root.py', 'release/candidate.py')]
+    paths.extend((loaded.root / 'installer-root' / 'installer').rglob('*.py'))
+    for path in paths:
+        for node in ast.walk(ast.parse(path.read_bytes())):
             if isinstance(node, ast.Constant) and type(node.value) is str and re.fullmatch('[A-Z][A-Z0-9_]{1,119}', node.value):
                 allowed_codes.add(node.value)
+    bounded_source = (Path(__file__).parent / 'candidate_diagnostics.py').read_text(encoding='utf-8')
+    observer_program = ("import subprocess,json,os\n_dev={}\nexec(" + repr(bounded_source) + ",_dev)\n"
+        + '_allowed=' + repr(sorted(allowed_codes)) + '\n'
+        + '''def _installer_run(argv, **options):
+ assert tuple(argv[1:5])==('-P','-B','-m','installer')
+ os.write(2,b'{"installer_started":true}\\n')
+ code,output,_=_dev['bounded_process_output'](argv,environment=options['env'],timeout=600)
+ reason=None
+ try:
+  value=json.loads(output)
+  if type(value) is dict and value.get('reasonCode') in _allowed: reason=value['reasonCode']
+ except (ValueError,UnicodeError): pass
+ os.write(2,(json.dumps({'installer_exit_code':code,'installer_reason_code':reason})+'\\n').encode())
+ return subprocess.CompletedProcess(argv,code,output,b'')
+subprocess.run=_installer_run
+''')
     original_copy = namespace['_copy_stage']
     def copy(src, dst):
         original_copy(src, dst)
@@ -167,8 +195,7 @@ def exercise_fixed_root(destination, loaded, namespace, inventory, baseline):
         argv = list(argv)
         marker = 'sys.path.insert(0,str(runtime));runpy.run_path('
         assert argv[4].count(marker) == 1
-        projected = ('sys.path.insert(0,str(runtime));from release import producer_toolchain as _producer;'
-            + '_producer.DOCKERFILE_PATH=Path(' + repr(str(producer_reference)) + ');runpy.run_path(')
+        projected = 'sys.path.insert(0,str(runtime));exec(' + repr(observer_program) + ');runpy.run_path('
         argv[4] = argv[4].replace(marker, projected)
         process = subprocess.Popen(argv, env=options['env'], stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
@@ -198,12 +225,20 @@ def exercise_fixed_root(destination, loaded, namespace, inventory, baseline):
             observations['runtime_runner_exit_code'] = code
             if body and not observations['child_stderr_limit_exceeded']:
                 try:
-                    value = json.loads(body)
+                    values = [json.loads(line) for line in body.splitlines()]
                 except (ValueError, UnicodeError):
-                    value = None
-                if type(value) is dict and set(value) == {'code'} and value['code'] in allowed_codes:
-                    observations['runtime_runner_error_code'] = value['code']
-                else:
+                    values = []
+                for value in values:
+                    if type(value) is dict and set(value) == {'code'} and value['code'] in allowed_codes:
+                        observations['runtime_runner_error_code'] = value['code']
+                    elif value == {'installer_started': True}:
+                        observations['installer_started'] = True
+                    elif (type(value) is dict and set(value) == {'installer_exit_code', 'installer_reason_code'}
+                            and type(value['installer_exit_code']) is int
+                            and -255 <= value['installer_exit_code'] <= 255
+                            and (value['installer_reason_code'] is None or value['installer_reason_code'] in allowed_codes)):
+                        observations.update(value)
+                if not values:
                     # No raw line, path, module name, exception text, or traceback
                     # is retained; map only known interpreter exception classes.
                     for category in ('ModuleNotFoundError', 'ImportError', 'FileNotFoundError', 'PermissionError', 'ValueError'):
@@ -233,7 +268,7 @@ def exercise_fixed_root(destination, loaded, namespace, inventory, baseline):
         observations['root_entered'] = os.geteuid() == 0
         namespace['run_fixed_candidate'](session_id=session, profile=profile,
             input_digest=loaded.verified['candidate_input_sha256'], verified_digest=VERIFIED,
-            inventory_digest=inventory.closed_runtime_inventory_digest(loaded.root), context=context)
+            inventory_digest=inventory.closed_runtime_inventory_digest(stage), context=context)
         observations['root_returned'] = True
         observations['draft_returned'] = len(draft.getbuffer()) > 0
     except BaseException as error:

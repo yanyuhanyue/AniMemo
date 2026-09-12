@@ -32,6 +32,8 @@ jobs:
           python-version: '3.12.10'
       - run: python -m pip install --require-hashes -r release/requirements.lock
       - run: python -m pip install --require-hashes -r durability/requirements.lock
+      - name: Exercise fixed root framing with real POSIX file descriptors and children
+        run: python -m unittest scripts.tests.test_candidate_workload_root scripts.tests.test_candidate_diagnostics -q
       - name: Download the exact failed Candidate for development regression
         env:
           GH_TOKEN: ${{ github.token }}
