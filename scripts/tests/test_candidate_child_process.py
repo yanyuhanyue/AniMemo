@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import os
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -11,12 +12,23 @@ import tempfile
 import threading
 import time
 import unittest
+import warnings
 from unittest import mock
 
 from scripts import candidate_child_process as child, candidate_vm_harness as h
 
 
 class ChildProcessTests(unittest.TestCase):
+    def test_module_cli_uses_the_canonical_module_identity(self):
+        with (mock.patch.object(h, 'main', return_value=17) as canonical,
+                mock.patch.object(sys, 'argv', ['candidate_vm_harness', '--help']),
+                redirect_stdout(io.StringIO()), warnings.catch_warnings()):
+            warnings.filterwarnings('ignore', category=RuntimeWarning, module='runpy')
+            with self.assertRaises(SystemExit) as caught:
+                runpy.run_module('scripts.candidate_vm_harness', run_name='__main__')
+        self.assertEqual(caught.exception.code, 17)
+        canonical.assert_called_once_with()
+
     def test_cancellation_terminates_descendant_after_parent_exits(self):
         cancelled = threading.Event()
         program = "import subprocess,sys;subprocess.Popen([sys.executable,'-c','import time;time.sleep(15)'])"
