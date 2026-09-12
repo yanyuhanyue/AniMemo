@@ -1310,16 +1310,16 @@ class HostCommandRunner(Protocol):
 
 
 @contextmanager
-def _cancel_process_when_revoked(process, event):
+def _cancel_process_when_revoked(owner, event):
     finished = threading.Event()
+    failures = []
     def watch():
         while not finished.wait(0.05):
             if event is not None and event.is_set():
-                if process.poll() is None:
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
+                try:
+                    owner.kill()
+                except BaseException:
+                    failures.append(True)
                 return
     thread = threading.Thread(target=watch, daemon=True) if event is not None else None
     if thread is not None:
@@ -1330,6 +1330,8 @@ def _cancel_process_when_revoked(process, event):
         finished.set()
         if thread is not None:
             thread.join(timeout=1)
+        if failures:
+            raise CandidateHarnessError('CANDIDATE_CHILD_PROCESS_CANCELLATION_FAILED')
 
 
 class SubprocessHostCommandRunner:
@@ -1342,25 +1344,21 @@ class SubprocessHostCommandRunner:
         input_bytes: bytes | None = None,
         timeout: int = 300,
         cancel_event=None,
+        cancel_tree=True,
     ) -> subprocess.CompletedProcess[bytes]:
         if cancel_event is not None:
             if cancel_event.is_set():
                 raise CandidateHarnessError('CANDIDATE_BATCH_REVOKED')
-            process = subprocess.Popen(tuple(argv), stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(environment),
-                cwd=cwd, shell=False, creationflags=0x08000000 if os.name == 'nt' else 0)
-            try:
-                with _cancel_process_when_revoked(process, cancel_event):
+            from scripts.candidate_child_process import OwnedChild
+            with OwnedChild(tuple(argv), tree=cancel_tree, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(environment),
+                    cwd=cwd, shell=False) as owner:
+                process = owner.process
+                with _cancel_process_when_revoked(owner, cancel_event):
                     stdout, stderr = process.communicate(timeout=timeout)
                 if cancel_event.is_set():
                     raise CandidateHarnessError('CANDIDATE_BATCH_REVOKED')
                 return subprocess.CompletedProcess(tuple(argv), process.returncode, stdout, stderr)
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                process.wait(timeout=5)
-                process.stdout.close()
-                process.stderr.close()
         return subprocess.run(  # noqa: S603 - callers construct closed argv
             tuple(argv),
             input=input_bytes,
@@ -1377,30 +1375,23 @@ class SubprocessHostCommandRunner:
 
     def run_guest_exchange(
         self, argv: Sequence[str], *, environment: Mapping[str, str],
-        cwd: Path, exchange: Any, timeout: int, cancel_event=None,
+        cwd: Path, exchange: Any, timeout: int, cancel_event=None, cancel_tree=True,
     ) -> subprocess.CompletedProcess[bytes]:
         """One held SSH process; only its in-process exchange may write stdin."""
         deadline = time.monotonic() + timeout
-        process = subprocess.Popen(
+        from scripts.candidate_child_process import OwnedChild
+        with OwnedChild(
             tuple(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, env=dict(environment), cwd=cwd,
-            shell=False, close_fds=True,
-            creationflags=0x08000000 if os.name == "nt" else 0,
-        )
-        try:
-            with _cancel_process_when_revoked(process, cancel_event):
+            shell=False, close_fds=True, tree=cancel_tree,
+        ) as owner:
+            process = owner.process
+            with _cancel_process_when_revoked(owner, cancel_event):
                 exchange(process)
                 code = process.wait(timeout=max(0, deadline - time.monotonic()))
             if cancel_event is not None and cancel_event.is_set():
                 raise CandidateHarnessError('CANDIDATE_BATCH_REVOKED')
             return subprocess.CompletedProcess(tuple(argv), code, b"", b"")
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=5)
-            for stream in (process.stdin, process.stdout):
-                if stream is not None:
-                    stream.close()
 
 
 class PublicReadonlyTransport(Protocol):
@@ -2862,6 +2853,9 @@ class ClosedVmwareProvider:
                 operation = self._candidate_batch._operation
                 if operation is not None and operation[0] != 'CLEANUP':
                     cancellation['cancel_event'] = self._candidate_batch.cancelled
+                    # VM power state belongs to canonical soft-stop/suspend.
+                    # Never terminate a vmware-vmx through a command job.
+                    cancellation['cancel_tree'] = requested_path != VMRUN
             if not PureWindowsPath(str(executable_path)).is_absolute():
                 raise CandidateHarnessError(
                     "WINDOWS_OPENSSH_CONFIG_AUTHORITY_UNSAFE"
@@ -6224,8 +6218,8 @@ def main(argv: list[str] | None = None) -> int:
         from scripts.candidate_guest_session import CAPTURE_AUTHORIZATION
         from scripts.guest_console_capture import WindowsConsoleCapture
         from scripts.isolated_guest_validation import _check_checkout
-        if args.authorization_id is not None and (
-                args.authorization_id != CAPTURE_AUTHORIZATION or not args.execute or report is None):
+        if ((args.execute and (args.authorization_id != CAPTURE_AUTHORIZATION or report is None))
+                or (not args.execute and args.authorization_id is not None)):
             raise CandidateHarnessError("CANDIDATE_CAPTURE_AUTHORIZATION_INVALID")
         if args.execute:
             _check_checkout(args.expected_source_sha, args.expected_source_tree)

@@ -805,6 +805,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
             return_value=nullcontext(SimpleNamespace()),
         ), mock.patch("scripts.isolated_guest_validation._check_checkout"), mock.patch(
             "scripts.guest_console_capture.WindowsConsoleCapture.preflight"
+        ), mock.patch('scripts.candidate_batch_session.CandidateBatch',
+            return_value=mock.Mock(record={'profiles': {}})
         ), redirect_stdout(output):
             code = harness.main(
                 [
@@ -817,6 +819,8 @@ class CandidateVmHarnessTests(unittest.TestCase):
                     "--expected-source-tree",
                     TREE,
                     "--execute",
+                    "--authorization-id", 'ANIMEMO_V2_CANDIDATE_WORKLOAD_DIAGNOSTICS_SINGLE_CAPTURE_V1',
+                    "--result", str(self.root / 'controlled-fail-result.json'),
                     "--r2-origin-transport", "s3",
                     "--accept-plan-digest",
                     DIGEST,

@@ -60,6 +60,8 @@ Windows execution 的私有工作根使用紧凑的 `session/profile/vm` 路径�
 
 捕获完成起使用单调时钟，硬上限 12 小时；没有登记操作时空闲上限 30 分钟。准备、bootstrap、传输、workload、清理均有固定超时，真实在途操作暂停空闲计时但不延长硬上限。到期、取消或控制器退出撤销全 batch、终止本任务子进程并执行 canonical Clone containment。会话不可续期、保存、重启恢复或自动重捕获；不得持有真实秘密编辑源码或等待 CI。
 
+SCP/SSH/keygen/复制命令的后代也属于取消范围。Windows 在子进程仍处于 CREATE_SUSPENDED 时加入进程内匿名 Job，再校验并恢复该子进程唯一初始线程；关闭 Job 回收其后代，没有先启动再登记的空窗。POSIX 使用独立进程组。vmrun 命令不加入会强杀后代的 Job，虚拟机仍只能经过 canonical soft-stop/suspend 收尾。执行入口必须携带当前授权 ID 和结果路径，单独接受 plan digest 不能消费新额度。
+
 材料经无秘密 SCP 进入 session/Profile 独占 staging。Host 比对受持有材料和受审 root 程序，固定 sudo/root 程序通过 no-follow directory fd 复制，拒绝链接、特殊文件、目录替换、增长和目标预占；新 root-owned 目标封闭后校验完整库存，才从其字节安装发行 wheels、加载 Runner 和执行 Installer。离线包包含 producer lock 及校验所需的 `deploy/release-producer.Dockerfile`。
 
 ## 受限 workload 诊断
