@@ -17,6 +17,7 @@ from installer.production import (
     ProductionDoctorAcceptance,
     ProductionFreshInstallPort,
 )
+from installer.runtime import InstallerAdapterError
 
 
 class CandidateVmRuntimeRepairTests(unittest.TestCase):
