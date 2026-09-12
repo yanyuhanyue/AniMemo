@@ -64,7 +64,7 @@ def probe(root,baseline):
     source=Path.cwd()
     sys.path.insert(0,str(source))
     from release.candidate import load_verified_candidate
-    from updater.oci import ImageAcquirer
+    from updater.oci import ImageAcquirer, OCIContractError
     from updater.local_bundle import LocalBundleTransportPolicy
     from updater.deployment import HostPaths, ImmutableComposeDeployment, CANDIDATE_NETWORK_OVERRIDE_TEXT
     from installer.production import ProductionFreshInstallPort
@@ -88,6 +88,9 @@ def probe(root,baseline):
             cwd=baseline,environment=environment,timeout=900))
         loaded=load_verified_candidate(verified['verifiedCandidateDigest'])
         phase='import_actual_oci'
+        engine=json.loads(docker('info','--format','{{json .}}'))
+        result['docker_storage_driver']=engine.get('Driver')
+        result['docker_storage_status']=engine.get('DriverStatus')
         acquisition=ImageAcquirer(environment=environment).acquire_local(loaded.materials,loaded.images,LocalBundleTransportPolicy())
         images={x.role:x.canonical_reference for x in acquisition.images}
         result['actual_oci_roles']=sorted(images)
@@ -171,6 +174,15 @@ def probe(root,baseline):
         result['status']='PASS'
     except BaseException as error:
         result.update(failure_stage=phase,failure_type=type(error).__name__)
+        if type(error) is OCIContractError and error.args and error.args[0] in {
+            'OCI_IMAGE_NOT_VERIFIED','OCI_IMPORT_STAGE_UNAVAILABLE','OCI_IMPORT_STAGE_INVALID',
+            'OCI_DOCKER_LOCAL_LOAD_FAILED','OCI_DOCKER_POST_IMPORT_INSPECT_FAILED',
+            'OCI_DOCKER_POST_IMPORT_IDENTITY_INVALID','OCI_DOCKER_POST_IMPORT_DIGEST_MISMATCH',
+            'OCI_RELEASE_MATERIALS_NOT_VERIFIED','OCI_IMAGE_SET_NOT_VERIFIED',
+            'OCI_LOCAL_TRANSPORT_POLICY_INVALID','OCI_RELEASE_IDENTITY_INVALID',
+            'OCI_RELEASE_IMAGE_IDENTITY_INVALID','OCI_RELEASE_IMAGE_IDENTITY_MISMATCH',
+        }:
+            result['failure_code']=error.args[0]
     finally:
         cleanup=[]
         for identifier in owned:
