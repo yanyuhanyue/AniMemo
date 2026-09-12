@@ -267,6 +267,7 @@ class InstallerMaterialsTests(unittest.TestCase):
             source_root = temporary / "source"
             fixed = (
                 "deploy/docker-compose.yml",
+                "deploy/release-producer.Dockerfile",
                 "deploy/install-updater.sh",
                 "deploy/updater/animemo",
                 "deploy/updater/animemo-updater",
@@ -276,6 +277,8 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "scripts/candidate_profile_runner.py",
                 "scripts/closed_runtime_inventory.py",
                 "scripts/candidate_workload_root.py",
+                "scripts/candidate_diagnostics.py",
+                "scripts/candidate_runtime_entry.py",
                 "scripts/formal_profile_runner.py",
                 "scripts/release_qualification.py",
             )
@@ -327,6 +330,7 @@ class InstallerMaterialsTests(unittest.TestCase):
             source_root = temporary / "source"
             fixed = (
                 "deploy/docker-compose.yml",
+                "deploy/release-producer.Dockerfile",
                 "deploy/install-updater.sh",
                 "deploy/updater/animemo",
                 "deploy/updater/animemo-updater",
@@ -336,6 +340,8 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "scripts/candidate_profile_runner.py",
                 "scripts/closed_runtime_inventory.py",
                 "scripts/candidate_workload_root.py",
+                "scripts/candidate_diagnostics.py",
+                "scripts/candidate_runtime_entry.py",
                 "scripts/formal_profile_runner.py",
                 "scripts/release_qualification.py",
             )
