@@ -27,14 +27,16 @@ class BatchSessionTests(unittest.TestCase):
         self.fixture = fixture
         self.provider, self.plan = fixture.provider, fixture.plan
         self.time = 10.0
-        self.batch = b.CandidateBatch(self.provider, self.plan, clock=lambda: self.time)
-        self.provider._candidate_batch = self.batch
         temporary = tempfile.TemporaryDirectory(dir='E:/' if os.name == 'nt' else None)
         self.addCleanup(temporary.cleanup)
         self.ledger = Path(temporary.name) / ('a' * 64)
-        patcher = mock.patch.object(b, 'LEDGER', self.ledger)
+        self.new_ledger = Path(temporary.name) / ('b' * 64)
+        patcher = mock.patch.object(b, 'CAPTURE_LEDGERS', {
+            b.AUTHORIZATION: self.ledger, b.GATEWAY_REPAIR_AUTHORIZATION: self.new_ledger})
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.batch = b.CandidateBatch(self.provider, self.plan, clock=lambda: self.time)
+        self.provider._candidate_batch = self.batch
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(b, '_check_checkout').start()
         mock.patch.object(c, '_check_checkout').start()
@@ -146,6 +148,56 @@ class BatchSessionTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             values = list(pool.map(lambda _: reserve(), range(2)))
         self.assertCountEqual(values, ['RESERVED', 'REJECTED'])
+
+    def test_new_fixed_scope_preserves_consumed_old_scope_and_requires_explicit_selection(self):
+        b.reserve_capture()
+        (self.ledger / 'preserved.json').write_bytes(b'{"consumed":true}\n')
+        original = (self.ledger / 'preserved.json').read_bytes()
+        for unknown in (None, '', 'arbitrary-new-scope', str(self.new_ledger)):
+            with self.assertRaisesRegex(guest.ControllerFailure, 'AUTHORIZATION_INVALID'):
+                b.CandidateBatch(self.provider, self.plan, authorization_id=unknown)
+        with self.assertRaisesRegex(guest.ControllerFailure, 'ALREADY_ATTEMPTED'):
+            self.capture()
+        self.console.capture.assert_not_called()
+        self.assertFalse(self.new_ledger.exists())
+        batch = b.CandidateBatch(self.provider, self.plan, authorization_id=b.GATEWAY_REPAIR_AUTHORIZATION)
+        self.addCleanup(batch.close)
+        self.assertFalse(self.new_ledger.exists())
+        self.assertEqual(batch.record['authorization_id'], b.GATEWAY_REPAIR_AUTHORIZATION)
+        def reserve():
+            try:
+                b.reserve_capture(b.GATEWAY_REPAIR_AUTHORIZATION)
+                return 'RESERVED'
+            except guest.ControllerFailure:
+                return 'REJECTED'
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertCountEqual(list(pool.map(lambda _: reserve(), range(2))), ['RESERVED', 'REJECTED'])
+        with batch.operation('BOOTSTRAP', self.plan.profiles[0]):
+            with self.assertRaisesRegex(guest.ControllerFailure, 'ALREADY_ATTEMPTED'):
+                batch.capture_after_bootstrap_observation(self.plan.profiles[0])
+        self.console.capture.assert_not_called()
+        self.assertEqual((self.ledger / 'preserved.json').read_bytes(), original)
+
+    def test_new_scope_capture_record_and_restart_after_source_change_share_one_budget(self):
+        batch = b.CandidateBatch(self.provider, self.plan, authorization_id=b.GATEWAY_REPAIR_AUTHORIZATION)
+        self.addCleanup(batch.close)
+        with batch.operation('BOOTSTRAP', self.plan.profiles[0]), redirect_stdout(io.StringIO()):
+            batch.capture_after_bootstrap_observation(self.plan.profiles[0])
+        batch.close()
+        original = (self.new_ledger / 'result.json').read_bytes()
+        record = json.loads(original)
+        self.assertEqual(record['authorization_id'], b.GATEWAY_REPAIR_AUTHORIZATION)
+        self.assertEqual(record['session_capture_attempts'], 1)
+        self.assertFalse(self.ledger.exists())
+        changed = replace(self.plan, source_sha='f'*40, qualification_run_id=self.plan.qualification_run_id+1)
+        changed = replace(changed, plan_digest=c.h.sha256_bytes(c.h.canonical_json_bytes(changed.identity_body())))
+        restarted = b.CandidateBatch(self.provider, changed, authorization_id=b.GATEWAY_REPAIR_AUTHORIZATION)
+        self.addCleanup(restarted.close)
+        with restarted.operation('BOOTSTRAP', changed.profiles[0]):
+            with self.assertRaisesRegex(guest.ControllerFailure, 'ALREADY_ATTEMPTED'):
+                restarted.capture_after_bootstrap_observation(changed.profiles[0])
+        self.console.capture.assert_called_once()
+        self.assertEqual((self.new_ledger / 'result.json').read_bytes(), original)
 
     def test_idle_and_hard_deadlines_use_monotonic_time_and_close_owner(self):
         self.capture()

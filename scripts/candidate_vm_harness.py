@@ -6215,10 +6215,10 @@ def main(argv: list[str] | None = None) -> int:
     report = args.result.open("x", encoding="utf-8", newline="\n") if args.result else None
     result = {"status": "ERROR", "r2_origin_transport": args.r2_origin_transport}
     try:
-        from scripts.candidate_guest_session import CAPTURE_AUTHORIZATION
+        from scripts.candidate_batch_session import CAPTURE_LEDGERS, CandidateBatch
         from scripts.guest_console_capture import WindowsConsoleCapture
         from scripts.isolated_guest_validation import _check_checkout
-        if ((args.execute and (args.authorization_id != CAPTURE_AUTHORIZATION or report is None))
+        if ((args.execute and (args.authorization_id not in CAPTURE_LEDGERS or report is None))
                 or (not args.execute and args.authorization_id is not None)):
             raise CandidateHarnessError("CANDIDATE_CAPTURE_AUTHORIZATION_INVALID")
         if args.execute:
@@ -6252,13 +6252,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(plan.as_dict(), ensure_ascii=False, sort_keys=True))
                 return 0
             result["plan"] = plan.as_dict()
-            accepted = plan.plan_digest if args.authorization_id == CAPTURE_AUTHORIZATION else args.accept_plan_digest
+            accepted = plan.plan_digest
             if not accepted:
                 raise CandidateHarnessError(
                     "CANDIDATE_HARNESS_PLAN_CONFIRMATION_REQUIRED"
                 )
-            from scripts.candidate_batch_session import CandidateBatch
-            batch = CandidateBatch(provider, plan)
+            batch = CandidateBatch(provider, plan, authorization_id=args.authorization_id)
             provider._candidate_batch = batch
             provider._candidate_credential_session = batch.record
             provider._candidate_credential_results = batch.record['profiles']
