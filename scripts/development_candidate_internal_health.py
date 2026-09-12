@@ -98,6 +98,14 @@ def probe(root,baseline):
   assert actual_name!=namespace.compose_project+'-api'
   result['old_synthesized_api_name_matches_actual']=False
   result['owned_compose_api_id_resolved']=True
+  from installer.production import _CANONICAL_ACCEPTANCE_SCRIPT
+  old=runner.run(['/usr/bin/docker','exec',actual_api,'python','manage.py','shell','-c',_CANONICAL_ACCEPTANCE_SCRIPT],timeout=120)
+  try:json.loads(old.stdout)
+  except json.JSONDecodeError:
+   assert 'objects imported automatically' in old.stdout
+   assert json.loads(old.stdout.strip().splitlines()[-1])=={'create':True,'delete':True,'read':True,'update':True}
+   result['old_django_shell_stdout']='REPRODUCED_IMPORT_BANNER_BEFORE_VALID_CRUD_JSON'
+  else:raise AssertionError('expected Django shell banner')
   doctor=ProductionDoctorAcceptance(releases=object(),compatibility=object(),runner=runner,namespace=namespace)
   observations=doctor._canonical_acceptance(deployment,manifest)
   result['canonical_test_names']=[x['name'] for x in observations]

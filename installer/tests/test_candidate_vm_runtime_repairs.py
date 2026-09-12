@@ -258,6 +258,7 @@ class CandidateVmRuntimeRepairTests(unittest.TestCase):
         deployment.probe_web.assert_called_once_with(manifest)
         deployment._container_id.assert_called_once_with(manifest, "api")
         self.assertEqual(runner.run.call_args.args[0][2], "a" * 64)
+        self.assertIn("--no-imports", runner.run.call_args.args[0])
         self.assertIn("manage.py", runner.run.call_args.args[0])
 
     def test_canonical_crud_rejects_unverified_api_before_exec(self):

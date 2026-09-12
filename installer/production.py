@@ -2038,6 +2038,7 @@ class ProductionDoctorAcceptance:
                 "python",
                 "manage.py",
                 "shell",
+                "--no-imports",
                 "-c",
                 _CANONICAL_ACCEPTANCE_SCRIPT,
             ]
