@@ -6270,6 +6270,8 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     batch.close()
                 finally:
+                    provider._candidate_credential_session = batch.record
+                    provider._candidate_credential_results = batch.record['profiles']
                     provider._candidate_batch = None
             result.update(acceptance)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))

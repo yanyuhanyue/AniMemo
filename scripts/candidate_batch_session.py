@@ -86,10 +86,12 @@ class CandidateBatch:
         self._last_idle = None
         self._operation = None
         self._uses = []
+        self._attempted_roles = set()
+        self._completed_roles = set()
         self._closed = False
         self._monitor_done = threading.Event()
         self.cancelled = threading.Event()
-        self.record = dict(authorization_id=AUTHORIZATION, session_capture_attempts=0,
+        self._record = dict(authorization_id=AUTHORIZATION, session_capture_attempts=0,
             session_capture_completed=0, secret_state='NOT_CAPTURED', secret_cleanup='NOT_REQUIRED',
             revocation_code=None, hard_limit_seconds=HARD_SECONDS, idle_limit_seconds=IDLE_SECONDS,
             binding={key: getattr(plan, key) for key in ('plan_digest', 'session_id', 'source_sha',
@@ -97,6 +99,12 @@ class CandidateBatch:
             profiles={profile: {role: dict(delivery_attempts=0, delivery_completed=0,
                 target_verified=False, lease_verified=False, operation_result='NOT_RUN')
                 for role in ROLES} for profile in h.PROFILES})
+
+    @property
+    def record(self):
+        import json
+        with self._lock:
+            return json.loads(h.canonical_json_bytes(self._record))
 
     def __repr__(self):
         return '<CandidateBatch>'
@@ -130,7 +138,7 @@ class CandidateBatch:
             if expired:
                 self.revoke(expired)
             if self._closed or self.cancelled.is_set():
-                raise ControllerFailure(self.record['revocation_code'] or 'CANDIDATE_BATCH_CLOSED')
+                raise ControllerFailure(self._record['revocation_code'] or 'CANDIDATE_BATCH_CLOSED')
             self._scope()
 
     def require_live(self):
@@ -171,23 +179,23 @@ class CandidateBatch:
             if self._captured_at is not None:
                 self.require_live()
                 return
-            if self._closed or self.record['session_capture_attempts'] or profile is not self.plan.profiles[0]:
+            if self._closed or self._record['session_capture_attempts'] or profile is not self.plan.profiles[0]:
                 raise ControllerFailure('CANDIDATE_BATCH_CAPTURE_REJECTED')
             self._scope()
             _check_checkout(self.plan.source_sha, self.plan.source_tree)
             console = WindowsConsoleCapture()
             console.preflight()
             self._slot = reserve_capture()
-            self.record['session_capture_attempts'] = 1
-            self.record['secret_state'] = 'CAPTURING'
+            self._record['session_capture_attempts'] = 1
+            self._record['secret_state'] = 'CAPTURING'
             try:
                 print('Candidate session / one sudo input for this frozen batch', flush=True)
                 self._secret = console.capture()
-                self.record['session_capture_completed'] = 1
+                self._record['session_capture_completed'] = 1
                 self._captured_at = self._last_idle = self._clock()
                 _check_checkout(self.plan.source_sha, self.plan.source_tree)
                 self._scope()
-                self.record['secret_state'] = 'ACTIVE'
+                self._record['secret_state'] = 'ACTIVE'
                 threading.Thread(target=self._monitor, daemon=True).start()
             except BaseException:
                 self.revoke('CANDIDATE_BATCH_CAPTURE_FAILED')
@@ -224,10 +232,12 @@ class CandidateBatch:
                 raise ControllerFailure('CANDIDATE_BATCH_GRANT_REJECTED')
             use._lease.require_open()
             _check_checkout(self.plan.source_sha, self.plan.source_tree)
-            entry = self.record['profiles'][use._profile.profile][role]
-            if entry['delivery_attempts'] != 0:
+            entry = self._record['profiles'][use._profile.profile][role]
+            key = (use._profile.profile, role)
+            if key in self._attempted_roles:
                 self.revoke('CANDIDATE_BATCH_ROLE_REPLAY')
                 raise ControllerFailure('CANDIDATE_BATCH_ROLE_REPLAY')
+            self._attempted_roles.add(key)
             entry.update(target_verified=True, lease_verified=True, delivery_attempts=1, operation_result='UNKNOWN')
             value = bytearray(self._secret)
             value.append(10)
@@ -239,7 +249,8 @@ class CandidateBatch:
             process.stdin.close()
             with self._lock:
                 entry['delivery_completed'] = 1
-                if all(item['delivery_completed'] == 1 for roles in self.record['profiles'].values() for item in roles.values()):
+                self._completed_roles.add(key)
+                if len(self._completed_roles) == len(h.PROFILES) * len(ROLES):
                     self.release_secret()
         except BaseException:
             self.revoke('CANDIDATE_BATCH_DELIVERY_UNCERTAIN')
@@ -250,11 +261,11 @@ class CandidateBatch:
     def role_result(self, profile, role, result):
         if profile not in self.plan.profiles or role not in ROLES or result not in {'PASS', 'FAIL', 'ERROR', 'UNKNOWN'}:
             raise ControllerFailure('CANDIDATE_BATCH_RESULT_INVALID')
-        self.record['profiles'][profile.profile][role]['operation_result'] = result
+        self._record['profiles'][profile.profile][role]['operation_result'] = result
 
     def revoke(self, code):
         with self._lock:
-            self.record['revocation_code'] = self.record['revocation_code'] or code
+            self._record['revocation_code'] = self._record['revocation_code'] or code
             self.cancelled.set()
             self._finish('REVOKED')
 
@@ -263,8 +274,8 @@ class CandidateBatch:
         if self._secret is not None:
             wipe(self._secret)
             self._secret = None
-        self.record['secret_state'] = state
-        self.record['secret_cleanup'] = 'BEST_EFFORT_COMPLETED' if self.record['session_capture_attempts'] else 'NOT_REQUIRED'
+        self._record['secret_state'] = state
+        self._record['secret_cleanup'] = 'BEST_EFFORT_COMPLETED' if self._record['session_capture_attempts'] else 'NOT_REQUIRED'
         self._monitor_done.set()
         for use in self._uses:
             use._closed = True
@@ -275,8 +286,8 @@ class CandidateBatch:
                 wipe(self._secret)
                 self._secret = None
             if not self._closed:
-                self.record['secret_state'] = 'RELEASED_NO_FURTHER_USES'
-                self.record['secret_cleanup'] = 'BEST_EFFORT_COMPLETED'
+                self._record['secret_state'] = 'RELEASED_NO_FURTHER_USES'
+                self._record['secret_cleanup'] = 'BEST_EFFORT_COMPLETED'
 
     def close(self):
         with self._lock:
@@ -285,5 +296,5 @@ class CandidateBatch:
             if self._slot is not None:
                 with hold_windows_private_path_chain(self._slot, allow_leaf_child_writes=True):
                     with (self._slot / 'result.json').open('xb') as output:
-                        output.write(h.canonical_json_bytes(self.record))
+                        output.write(h.canonical_json_bytes(self._record))
                 self._slot = None
