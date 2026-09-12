@@ -37,7 +37,7 @@ class WorkloadAuthorityTests(unittest.TestCase):
                         mock.patch.object(c, '_root_program', return_value='pass')):
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.batch = b.CandidateBatch(self.provider, self.plan)
+        self.batch = b.CandidateBatch(self.provider, self.plan, authorization_id=b.AUTHORIZATION)
         self.provider._candidate_batch = self.batch
         self.addCleanup(self.batch.close)
         self.secret = bytearray(SENTINEL)

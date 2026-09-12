@@ -17,11 +17,13 @@ from scripts.isolated_guest_validation import _check_checkout
 AUTHORIZATION = 'ANIMEMO_V2_CANDIDATE_WORKLOAD_DIAGNOSTICS_SINGLE_CAPTURE_V1'
 LEDGER = Path('E:/') / hashlib.sha256(AUTHORIZATION.encode('ascii')).hexdigest()
 GATEWAY_REPAIR_AUTHORIZATION = 'ANIMEMO_V2_CANDIDATE_GATEWAY_REPAIR_SINGLE_CAPTURE_V1'
+PR247_REVALIDATION_AUTHORIZATION = 'ANIMEMO_V2_CANDIDATE_PR247_REVALIDATION_SINGLE_CAPTURE_V1'
 # These are separately authorized, globally single-use scopes. Recognizing a
 # scope does not grant it; the operator must obtain its explicit authorization.
 CAPTURE_LEDGERS = MappingProxyType({
     AUTHORIZATION: LEDGER,
     GATEWAY_REPAIR_AUTHORIZATION: Path('E:/') / hashlib.sha256(GATEWAY_REPAIR_AUTHORIZATION.encode('ascii')).hexdigest(),
+    PR247_REVALIDATION_AUTHORIZATION: Path('E:/') / hashlib.sha256(PR247_REVALIDATION_AUTHORIZATION.encode('ascii')).hexdigest(),
 })
 ROLES = ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO', 'CANDIDATE_WORKLOAD')
 HARD_SECONDS = 12 * 60 * 60
@@ -44,7 +46,7 @@ def capture_ledger(authorization_id):
     return CAPTURE_LEDGERS[authorization_id]
 
 
-def reserve_capture(authorization_id=AUTHORIZATION):
+def reserve_capture(authorization_id=None):
     ledger = capture_ledger(authorization_id)
     try:
         return create_windows_private_named_directory(ledger.parent, name=ledger.name)
@@ -95,7 +97,7 @@ class BatchUse:
 
 
 class CandidateBatch:
-    def __init__(self, provider, plan, *, authorization_id=AUTHORIZATION, clock=time.monotonic):
+    def __init__(self, provider, plan, *, authorization_id=None, clock=time.monotonic):
         self._authorization_id = authorization_id
         self._ledger = capture_ledger(authorization_id)
         if (type(provider) is not h.ClosedVmwareProvider or type(plan) is not h.CandidateHarnessPlan

@@ -819,7 +819,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
                     "--expected-source-tree",
                     TREE,
                     "--execute",
-                    "--authorization-id", 'ANIMEMO_V2_CANDIDATE_GATEWAY_REPAIR_SINGLE_CAPTURE_V1',
+                    "--authorization-id", 'ANIMEMO_V2_CANDIDATE_PR247_REVALIDATION_SINGLE_CAPTURE_V1',
                     "--result", str(self.root / 'controlled-fail-result.json'),
                     "--r2-origin-transport", "s3",
                     "--accept-plan-digest",
@@ -829,10 +829,33 @@ class CandidateVmHarnessTests(unittest.TestCase):
 
         self.assertEqual(code, 2)
         self.assertEqual(batch_factory.call_args.kwargs['authorization_id'],
-                         'ANIMEMO_V2_CANDIDATE_GATEWAY_REPAIR_SINGLE_CAPTURE_V1')
+                         'ANIMEMO_V2_CANDIDATE_PR247_REVALIDATION_SINGLE_CAPTURE_V1')
         observed = json.loads(output.getvalue())
         self.assertEqual(observed["status"], result["status"])
         self.assertEqual(observed["aggregateReceipt"], result["aggregateReceipt"])
+
+    def test_cli_rejects_missing_unknown_and_plan_only_capture_authorization(self):
+        fixed = 'ANIMEMO_V2_CANDIDATE_PR247_REVALIDATION_SINGLE_CAPTURE_V1'
+        cases = (["--execute"], ["--execute", "--authorization-id", "unknown-scope"],
+                 ["--authorization-id", fixed])
+        for index, options in enumerate(cases):
+            result_path = self.root / f'authorization-rejected-{index}.json'
+            with self.subTest(options=options), mock.patch.object(
+                harness.ClosedVmwareProvider, "execution_authority"
+            ) as authority, mock.patch(
+                "scripts.guest_console_capture.WindowsConsoleCapture.preflight"
+            ) as console, mock.patch("sys.stderr", new=io.StringIO()):
+                code = harness.main([
+                    "--verified-candidate-digest", DIGEST,
+                    "--expected-qualification-run-id", str(RUN_ID),
+                    "--expected-source-sha", SHA, "--expected-source-tree", TREE,
+                    "--result", str(result_path), *options,
+                ])
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(result_path.read_bytes())["failure_code"],
+                                 "CANDIDATE_CAPTURE_AUTHORIZATION_INVALID")
+                authority.assert_not_called()
+                console.assert_not_called()
 
     @unittest.skipUnless(os.name == "nt", "Windows Candidate material authority")
     def test_candidate_material_authority_closes_over_producer_receipt(self):
