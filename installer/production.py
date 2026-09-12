@@ -157,7 +157,7 @@ _LOCAL_DOCKER_HOST = "unix:///var/run/docker.sock"
 _CANDIDATE_NETWORK_OVERRIDE_BYTES = CANDIDATE_NETWORK_OVERRIDE_TEXT.encode("ascii")
 _CANDIDATE_EDGE_CONTROL_BASE = Path("/run/animemo-candidate")
 _CANDIDATE_SYSTEMD_NETWORK_ISOLATION_BYTES = (
-    b"[Service]\nRestrictAddressFamilies=AF_UNIX AF_NETLINK\n"
+    b"[Service]\nRestrictAddressFamilies=\nRestrictAddressFamilies=AF_UNIX AF_NETLINK\n"
 )
 _CANDIDATE_PLATFORM_LOCAL_EXECUTABLES = frozenset(
     {

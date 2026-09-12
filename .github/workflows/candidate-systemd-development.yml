@@ -1,0 +1,25 @@
+name: Candidate Systemd Development
+on:
+  push:
+    branches: [fix/candidate-installer-exit5-20260912]
+permissions:
+  contents: read
+jobs:
+  actual-systemd-seam:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Reproduce merged families and verify the exact restriction
+        run: |
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          sudo -n -- env -i PATH=/usr/bin:/bin LANG=C.UTF-8 GITHUB_ACTIONS=true /usr/bin/python3 -I -B scripts/development_candidate_systemd_probe.py "$RUNNER_TEMP/systemd-probe-result.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: candidate-systemd-development-${{ github.run_id }}
+          path: ${{ runner.temp }}/systemd-probe-result.json
+          if-no-files-found: error
+          retention-days: 14
