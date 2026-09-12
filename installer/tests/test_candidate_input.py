@@ -417,7 +417,7 @@ class CandidateInstallerCliTests(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="true"),
             SimpleNamespace(
                 returncode=0,
-                stdout="AF_UNIX AF_NETLINK\n",
+                stdout="AF_NETLINK AF_UNIX\n",
             ),
         ]
         command_delegate.run.side_effect = [
@@ -474,6 +474,8 @@ class CandidateInstallerCliTests(unittest.TestCase):
                 "containerNetworkInternal"
             ]
         )
+        self.assertEqual(observation["networkObservation"]["egressIsolation"]["serviceAddressFamilies"],
+                         ["AF_UNIX", "AF_NETLINK"])
         self.assertEqual(
             observation["imageRuntimeReadbackReceipt"]["result"], "PASS"
         )
@@ -498,6 +500,16 @@ class CandidateInstallerCliTests(unittest.TestCase):
                     SimpleNamespace(returncode=0, stdout="true"),
                     SimpleNamespace(returncode=0, stdout="AF_UNIX AF_INET\n"),
                 ],
+            ),
+            (
+                "base-service-families-merged",
+                [SimpleNamespace(returncode=0, stdout="true"),
+                 SimpleNamespace(returncode=0, stdout="AF_INET AF_INET6 AF_NETLINK AF_UNIX\n")],
+            ),
+            (
+                "duplicate-families",
+                [SimpleNamespace(returncode=0, stdout="true"),
+                 SimpleNamespace(returncode=0, stdout="AF_NETLINK AF_UNIX AF_UNIX\n")],
             ),
         ):
             command_delegate.run.side_effect = readbacks

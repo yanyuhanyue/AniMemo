@@ -110,8 +110,10 @@ Ubuntu APT argv。`expected_network_command_digests` 必须保留计划顺序且
 Docker run/Compose run/up 都必须显式 `--pull never`，
 镜像只从 verifier 已闭合的本地 OCI bytes 导入。Candidate composition 还必须加载固定字节的
 Compose override，把 Profile 实例的 `animemo` network 设置为 `internal: true`；Candidate
-Updater service 必须通过独立 systemd drop-in 固定为
-`RestrictAddressFamilies=AF_UNIX AF_NETLINK`。Profile Receipt 只能在 Docker network 与
+Updater service 必须通过独立 systemd drop-in 先以空 `RestrictAddressFamilies=` 重置
+基础服务的列表，再固定为 `RestrictAddressFamilies=AF_UNIX AF_NETLINK`。读取实际属性时
+要求准确的两个地址族且无重复，不依赖 systemd 输出顺序；Receipt 使用固定规范顺序。
+Profile Receipt 只能在 Docker network 与
 systemd property 的真实 readback 均精确匹配后记录 OS egress isolation receipt；这不会修改
 公共 DNS、Cloudflare、主机防火墙或共享生产服务。
 
