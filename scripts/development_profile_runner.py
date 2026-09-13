@@ -14,7 +14,7 @@ from release.candidate import (
     sha256_bytes,
 )
 from scripts import candidate_profile_runner as runner
-from scripts.candidate_diagnostics import inherited_writer
+from scripts.candidate_diagnostics import RUNNER_FAILURE_CODES, inherited_writer
 
 SCHEMA = 'animemo.local-installer-development-profile-report/v1'
 PURPOSE = 'LOCAL_INSTALLER_DEVELOPMENT'
@@ -43,9 +43,23 @@ def validate_development_report(value, *, loaded, expected_binding, expected_con
         raise runner.ProfileRunnerError('DEVELOPMENT_SERVICE_SOURCE_MISMATCH')
     # Reuse every production observation check. Its temporary Draft is never
     # emitted as development authority or exposed as a Candidate receipt.
-    runner.build_profile_receipt(loaded=loaded, profile=expected_context['profile'],
-        context=expected_context, installer_output=value['installer_output'],
-        started_at=value['started_at'], completed_at=value['completed_at'])
+    try:
+        runner.build_profile_receipt(loaded=loaded, profile=expected_context['profile'],
+            context=expected_context, installer_output=value['installer_output'],
+            started_at=value['started_at'], completed_at=value['completed_at'])
+    except BaseException:
+        diagnostic = inherited_writer()
+        observation = value['installer_output'].get('productionExecutionObservation')
+        if diagnostic is not None and type(observation) is dict:
+            network, pulls, doctor = (observation.get(name) for name in
+                ('networkObservation', 'externalPullObservation', 'doctorReport'))
+            if all(type(item) is dict for item in (network, pulls, doctor)):
+                commands, denied, checks = (network.get('completedCommands'),
+                    pulls.get('pullDeniedCommandDigests'), doctor.get('checks'))
+                if all(type(item) is list and len(item) <= 8 * 1024 * 1024 for item in (commands, denied, checks)):
+                    diagnostic.event('REPORT_COUNTS', commands=len(commands),
+                        pull_denied_commands=len(denied), doctor_checks=len(checks))
+        raise
     return value
 
 
@@ -106,13 +120,17 @@ def main(argv=None):
         binding = json.loads(args.binding, object_pairs_hook=reject_duplicate_json_keys)
         value = execute_development_profile(binding=binding, profile=args.profile,
             context_b64url=os.environ.get(runner.CONTEXT_ENV, ''))
+        diagnostic.stage('DRAFT_WRITING')
         with OUTPUT.open('xb') as output:
             os.chmod(OUTPUT, 0o600)
             output.write(canonical_json_bytes(value))
         diagnostic.stage('DRAFT_WRITTEN')
         return 0
-    except BaseException:
+    except BaseException as error:  # noqa: BLE001 - fixed entry emits only bounded diagnostics
         diagnostic.error('PROFILE_RECEIPT_INVALID')
+        if isinstance(error, runner.ProfileRunnerError) and error.code in RUNNER_FAILURE_CODES:
+            diagnostic.error(error.code)
+        diagnostic.fault(error)
         return 2
 
 

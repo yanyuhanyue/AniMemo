@@ -39,12 +39,16 @@ FAULT_MODULES = frozenset({
     'updater.server', 'updater.source', 'updater.binding',
     'durability.instance', 'durability.ownership', 'durability.managed_config',
     'durability.private_store',
+    'scripts.candidate_profile_runner', 'scripts.development_profile_runner',
+    'installer.development', 'installer.platform_bootstrap', 'release.candidate',
 })
 FAULT_TYPES = frozenset({
     'StateError', 'LocatorError', 'CommandExited', 'CommandTimedOut', 'CommandStartFailed',
     'PermissionError', 'FileNotFoundError', 'OSError', 'ValueError', 'TypeError',
     'KeyError', 'AttributeError', 'RecoveryRequired', 'FreshInstallOperationError',
     'PrivateStoreError', 'ManagedConfigError', 'InstallerAdapterError', 'OTHER',
+    'ProfileRunnerError', 'CandidateContractError', 'DevelopmentServiceError',
+    'PlatformBootstrapError',
 })
 INSTALLER_FAILURE_CODES = (
     'INSTALL_ROOT_PREPARATION_FAILED', 'INSTALL_CONFIG_PUBLICATION_FAILED',
@@ -84,6 +88,17 @@ PLATFORM_FAILURE_CODES = (
     'PLATFORM_BOOTSTRAP_RECEIPT_INVALID', 'PLATFORM_BOOTSTRAP_POST_QUALIFICATION_FAILED',
     'PLATFORM_BOOTSTRAP_ALREADY_RUNNING',
 )
+RUNNER_FAILURE_CODES = (
+    'CANDIDATE_INSTALLER_RESULT_INVALID', 'CANDIDATE_PROFILE_PLATFORM_STATE_MISMATCH',
+    'CANDIDATE_PROFILE_EXECUTION_OBSERVATION_INVALID', 'CANDIDATE_PROFILE_DOCTOR_RECEIPT_MISMATCH',
+    'CANDIDATE_PROFILE_DOCTOR_FAILED', 'CANDIDATE_PROFILE_CANONICAL_TEST_MISMATCH',
+    'CANDIDATE_PROFILE_COMPLETED_STEPS_MISMATCH', 'CANDIDATE_PROFILE_DOCTOR_EXECUTION_MISMATCH',
+    'CANDIDATE_PROFILE_EGRESS_ISOLATION_INVALID', 'CANDIDATE_PROFILE_NETWORK_OBSERVATION_INVALID',
+    'CANDIDATE_PROFILE_EXTERNAL_PULL_ACTIVITY', 'CANDIDATE_PROFILE_IMAGE_OBSERVATION_MISMATCH',
+    'CANDIDATE_PROFILE_RECEIPT_INVALID', 'CANDIDATE_SCHEMA_INVALID',
+    'DEVELOPMENT_PROFILE_REPORT_INVALID', 'DEVELOPMENT_PROFILE_REPORT_DIGEST_INVALID',
+    'DEVELOPMENT_PROFILE_BINDING_INVALID', 'DEVELOPMENT_MATERIAL_BINDING_INVALID',
+)
 ERRORS = (
     'UNKNOWN_BEFORE_ROOT_START', 'ROOT_INITIALIZATION_FAILED',
     'MATERIAL_FINALIZATION_FAILED', 'MATERIAL_INVENTORY_MISMATCH',
@@ -98,7 +113,7 @@ ERRORS = (
     'RUNNER_CONTEXT_INVALID', 'PROFILE_RECEIPT_INVALID',
     'PLATFORM_PACKAGE_POLICY_INVALID',
     'DEVELOPMENT_SERVICE_SOURCE_MISMATCH', 'DEVELOPMENT_INSTALLER_ENTRY_FAILED',
-) + INSTALLER_FAILURE_CODES + BOOTSTRAP_FAILURE_CODES + PLATFORM_FAILURE_CODES
+) + INSTALLER_FAILURE_CODES + BOOTSTRAP_FAILURE_CODES + PLATFORM_FAILURE_CODES + RUNNER_FAILURE_CODES
 FD_ENV = 'ANIMEMO_CANDIDATE_DIAGNOSTIC_FD'
 OP_ENV = 'ANIMEMO_CANDIDATE_DIAGNOSTIC_OPERATION'
 _OPERATION = re.compile(r'sha256:[0-9a-f]{64}\Z')
@@ -152,6 +167,10 @@ def validate_event(value, operation):
             and type(value['module']) is str and value['module'] in FAULT_MODULES
             and type(value['line']) is int and 1 <= value['line'] <= 100000
             and type(value['category']) is str and value['category'] in FAULT_TYPES)
+    elif kind == 'REPORT_COUNTS':
+        fields = {'commands', 'pull_denied_commands', 'doctor_checks'}
+        valid = (set(value) == common | fields
+            and all(type(value[key]) is int and 0 <= value[key] <= MAX_RECEIPT_BYTES for key in fields))
     else:
         valid = False
     if not valid:
@@ -193,6 +212,8 @@ class DiagnosticWriter:
                     break
                 module = trace.tb_frame.f_globals.get('__name__')
                 filename = trace.tb_frame.f_code.co_filename.replace('\\', '/')
+                if module == '__main__' and filename.endswith('/scripts/development_profile_runner.py'):
+                    module = 'scripts.development_profile_runner'
                 if (type(module) is str and module in FAULT_MODULES
                         and filename.endswith('/' + module.replace('.', '/') + '.py')
                         and 1 <= trace.tb_lineno <= 100000):

@@ -4,16 +4,18 @@ from __future__ import annotations
 import io
 import json
 import os
-import tempfile
-from pathlib import Path
 import struct
 import sys
+import tempfile
 import threading
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from scripts import candidate_diagnostics as d, candidate_guest_session as c, candidate_vm_harness as h
+from scripts import candidate_diagnostics as d
+from scripts import candidate_guest_session as c
+from scripts import candidate_vm_harness as h
 
 OPERATION = 'sha256:' + 'a' * 64
 SENTINEL = 'synthetic-diagnostic-secret-never-log'
@@ -38,6 +40,27 @@ def successful_frames(operation=OPERATION, padding=None):
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_report_counts_are_closed_bounded_integers(self):
+        fields = {'commands': 500, 'pull_denied_commands': 80, 'doctor_checks': 29}
+        value = dict(schema=d.SCHEMA, operation=OPERATION, kind='REPORT_COUNTS', **fields)
+        self.assertEqual(d.validate_event(value, OPERATION), value)
+        for changed in ({'commands': True}, {'commands': -1}, {'doctor_checks': SENTINEL},
+                        {'pull_denied_commands': d.MAX_RECEIPT_BYTES + 1}, {'extra': SENTINEL}):
+            with self.assertRaises(d.DiagnosticError):
+                d.validate_event({**value, **changed}, OPERATION)
+
+    def test_runpy_development_entry_failure_keeps_only_known_location(self):
+        namespace = {'__name__': '__main__', 'SECRET': SENTINEL}
+        exec(compile('def fail():\n raise PermissionError(SECRET)\n',  # noqa: S102 - fixed synthetic traceback
+            'X:/private-sentinel/scripts/development_profile_runner.py', 'exec'), namespace)
+        writer = d.DiagnosticWriter(0, OPERATION)
+        with mock.patch.object(writer, 'event') as emit:
+            try:
+                namespace['fail']()
+            except PermissionError as error:
+                writer.fault(error)
+        emit.assert_called_once_with('FAULT', module='scripts.development_profile_runner', line=2, category='PermissionError')
+
     def test_doctor_failure_event_contains_only_closed_check_identifiers(self):
         from durability.doctor import DOCTOR_CHECK_IDS
         self.assertEqual(d.DOCTOR_CHECKS, DOCTOR_CHECK_IDS)
