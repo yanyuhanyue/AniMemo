@@ -38,6 +38,18 @@ def successful_frames(operation=OPERATION, padding=None):
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_doctor_failure_event_contains_only_closed_check_identifiers(self):
+        from durability.doctor import DOCTOR_CHECK_IDS
+        self.assertEqual(d.DOCTOR_CHECKS, DOCTOR_CHECK_IDS)
+        reader = d.DiagnosticReader(OPERATION)
+        reader.accept(b'D', json.dumps(dict(schema=d.SCHEMA, operation=OPERATION,
+            kind='DOCTOR', failed_checks=['filesystem.permissions', 'plugins.integrity'])).encode())
+        self.assertEqual(reader.public()['events'][0]['failed_checks'],
+            ['filesystem.permissions', 'plugins.integrity'])
+        for checks in ([], [SENTINEL], ['filesystem.permissions'] * 2, [True], [{}], 'filesystem.permissions'):
+            with self.assertRaises(d.DiagnosticError):
+                d.validate_event(dict(schema=d.SCHEMA, operation=OPERATION, kind='DOCTOR', failed_checks=checks), OPERATION)
+
     def test_fault_keeps_command_caller_and_limits_nested_tracebacks(self):
         command = {'__name__': 'updater.commands', 'SECRET': SENTINEL}
         deployment = {'__name__': 'updater.deployment'}

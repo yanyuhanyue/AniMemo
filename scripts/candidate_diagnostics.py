@@ -22,6 +22,17 @@ STAGES = (
     'HOST_PARSED',
 )
 COMPONENTS = ('SUDO', 'ROOT', 'RUNTIME_RUNNER', 'INSTALLER')
+DOCTOR_CHECKS = (
+    'instance.locator', 'filesystem.roots', 'filesystem.permissions', 'filesystem.capacity',
+    'configuration.required', 'configuration.alignment', 'systemd.allowlist', 'compose.alignment',
+    'network.listen', 'identity.public-origin', 'database.postgresql.connectivity',
+    'database.schema-compatibility', 'cache.redis.connectivity', 'cache.redis.persistence-contract',
+    'service.api.health', 'service.web.health', 'updater.socket', 'updater.state',
+    'release.identity', 'release.updater-consistency', 'distribution.transport-policy',
+    'distribution.transport-receipt', 'distribution.release-identity', 'distribution.oci-identity',
+    'distribution.plan-receipt-drift', 'plugins.integrity', 'media.integrity',
+    'backup.readiness', 'compatibility.state',
+)
 FAULT_MODULES = frozenset({
     'installer.production', 'installer.runtime', 'installer.operations',
     'updater.runtime', 'updater.deployment', 'updater.state', 'updater.commands',
@@ -124,6 +135,12 @@ def validate_event(value, operation):
             and type(code) is int and -255 <= code <= 255)
     elif kind == 'ERROR':
         valid = set(value) == common | {'code'} and value['code'] in ERRORS
+    elif kind == 'DOCTOR':
+        checks = value.get('failed_checks')
+        valid = (set(value) == common | {'failed_checks'} and type(checks) is list
+            and 1 <= len(checks) <= len(DOCTOR_CHECKS)
+            and all(type(check) is str and check in DOCTOR_CHECKS for check in checks)
+            and len(set(checks)) == len(checks))
     elif kind == 'FAULT':
         valid = (set(value) == common | {'module', 'line', 'category'}
             and type(value['module']) is str and value['module'] in FAULT_MODULES

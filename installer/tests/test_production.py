@@ -31,6 +31,7 @@ from installer.platform_bootstrap import (
 )
 from installer.production import (
     LocalDockerCommandRunner,
+    ProductionDoctorAcceptance,
     ProductionFreshInstallPort,
     ProductionInstallerComposition,
     ProductionManagedConfigurationPort,
@@ -196,6 +197,94 @@ class PlatformBootstrapFixture:
 
 
 class ProductionInstallerCompositionTests(unittest.TestCase):
+    def test_incomplete_doctor_report_is_retained_and_reports_only_check_identifiers(self):
+        from durability.doctor import DoctorReport, DoctorStatus, ProbeResult, _check
+        from updater.tests.test_deployment import manifest
+
+        target = manifest()
+        policy = LocalBundleTransportPolicy()
+        materials = SimpleNamespace(manifest=target, image=lambda role: 'verified-' + role)
+        release = SimpleNamespace(material_identity_digest='verified-material', manifest_digest=digest('3'))
+        receipt = SimpleNamespace(verified_release_identity='verified-material',
+            transport_policy_identity=policy.identity, identity='a' * 64,
+            images=tuple(SimpleNamespace(role=role, canonical_reference=materials.image(role))
+                         for role in ('api', 'postgres', 'redis', 'web')))
+        releases = SimpleNamespace(materials_for=lambda _: materials,
+            distribution_policy_for=lambda _: ('local-bundle', policy.identity, 'explicit-admin-input'),
+            image_receipt_for=lambda _: receipt)
+        acceptance = ProductionDoctorAcceptance(releases=releases,
+            compatibility=SimpleNamespace(collect=lambda *_: (object(), ())))
+        checked_at = '2026-09-13T00:00:00Z'
+        report = DoctorReport(checked_at=checked_at, overall_status=DoctorStatus.FAIL,
+            checks=(_check('filesystem.permissions', ProbeResult.failed('PRIVATE_CODE_SENTINEL'), checked_at),),
+            instance_id=None, deployment_profile=None, compatibility=None)
+        writer = mock.Mock()
+        with (mock.patch('installer.production.DoctorRunner') as runner,
+              mock.patch('scripts.candidate_diagnostics.inherited_writer', return_value=writer),
+              mock.patch.dict(os.environ, {'ANIMEMO_CANDIDATE_DIAGNOSTIC_FD': '1'}),
+              mock.patch.object(acceptance, '_canonical_acceptance') as canonical):
+            runner.return_value.run.return_value = report
+            with self.assertRaisesRegex(Exception, 'INSTALL_DOCTOR_INCOMPLETE'):
+                acceptance._accept(expected_instance_id='test-instance', release=release,
+                    platform=object(), deployment=mock.Mock())
+            canonical.assert_not_called()
+        self.assertIs(acceptance.latest_report, report)
+        writer.event.assert_called_once_with('DOCTOR', failed_checks=['filesystem.permissions'])
+        self.assertNotIn('PRIVATE_CODE_SENTINEL', str(writer.mock_calls))
+
+    def test_release_staging_satisfies_doctor_modes_under_private_umask(self):
+        from durability.doctor import DoctorRunner, DoctorStatus
+        from durability.instance import APP_ROOT, parse_instance_locator
+        from scripts.tests.test_durability_doctor import FakeReadOnlyHost, locator_payload, metadata
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'verified-source'
+            source.write_bytes(b'verified-public-material')
+            target = root / 'installed'
+            files = (SimpleNamespace(path='deploy/updater/service', mode=0o644),
+                     SimpleNamespace(path='bin/launcher', mode=0o755))
+            materials = SimpleNamespace(verified=SimpleNamespace(files=files), material=lambda _: source)
+            port = object.__new__(ProductionFreshInstallPort)
+            port.releases = SimpleNamespace(materials_for=lambda _: materials)
+            port.namespace = SimpleNamespace(app_root=target)
+            port._created = set()
+            plan = SimpleNamespace(release=object(), operation_id='a' * 32)
+            staged = root / ('.animemo-' + plan.operation_id)
+            observed_modes = {}
+            original_mkdir, original_chmod = Path.mkdir, Path.chmod
+            def mkdir(path, mode=0o777, parents=False, exist_ok=False):
+                existed = path.exists()
+                original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+                if not existed:
+                    # Windows does not expose POSIX mode bits; model the same
+                    # 0077 mask inherited by the real fixed Linux root process.
+                    observed_modes[path] = mode & ~0o077
+            def chmod(path, mode, **kwargs):
+                original_chmod(path, mode, **kwargs)
+                if path.is_dir():
+                    observed_modes[path] = mode
+            previous_umask = os.umask(0o077)
+            try:
+                with mock.patch.object(Path, 'mkdir', mkdir), mock.patch.object(Path, 'chmod', chmod):
+                    port.stage_release(plan)
+            finally:
+                os.umask(previous_umask)
+            host = FakeReadOnlyHost()
+            host.metadata[APP_ROOT] = metadata(stat.S_IFDIR, observed_modes[staged])
+            observed = DoctorRunner(host=host, clock=lambda: '2026-09-13T00:00:00Z')._filesystem_permissions(
+                parse_instance_locator(locator_payload()))
+            self.assertEqual(observed.status, DoctorStatus.PASS, observed.code)
+            for relative in ('.', 'deploy', 'deploy/updater', 'bin'):
+                self.assertEqual(observed_modes[staged / relative], 0o755)
+                if os.name == 'posix':
+                    self.assertEqual(stat.S_IMODE((target / relative).stat().st_mode), 0o755)
+            for identity in files:
+                self.assertEqual((target / identity.path).read_bytes(), source.read_bytes())
+                if os.name == 'posix':
+                    self.assertEqual(stat.S_IMODE((target / identity.path).stat().st_mode), identity.mode)
+            self.assertIn(target, port._created)
+
     def test_fresh_configuration_binds_only_an_exact_owned_web_proxy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

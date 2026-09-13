@@ -2430,9 +2430,18 @@ class ProductionDoctorAcceptance:
             distribution_reader=distribution_reader,
             clock=_utc_now,
         ).run()
+        self._latest_report = report
         if report.overall_status is not DoctorStatus.PASS or any(
             check.status is not DoctorStatus.PASS for check in report.checks
         ):
+            if 'ANIMEMO_CANDIDATE_DIAGNOSTIC_FD' in os.environ:
+                from scripts.candidate_diagnostics import inherited_writer
+                diagnostic = inherited_writer()
+                if diagnostic is not None:
+                    diagnostic.event('DOCTOR', failed_checks=[
+                        check.check_id for check in report.checks
+                        if check.status is not DoctorStatus.PASS
+                    ])
             raise InstallerAdapterError(
                 "INSTALL_DOCTOR_INCOMPLETE",
                 mutation_occurred=True,
@@ -2654,16 +2663,22 @@ class ProductionFreshInstallPort:
                 "INSTALL_STAGING_EXISTS", mutation=False, recovery=False
             )
         try:
-            staging.mkdir(mode=0o755)
+            staging.mkdir(mode=0o700)
+            directories = {staging}
             for identity in materials.verified.files:
                 source = materials.material(identity.path)
                 destination = staging.joinpath(*Path(identity.path).parts)
                 destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+                directories.update(staging / parent for parent in Path(identity.path).parents)
                 with source.open("rb") as reader, destination.open("xb") as writer:
                     shutil.copyfileobj(reader, writer, 1024 * 1024)
                     writer.flush()
                     os.fsync(writer.fileno())
                 destination.chmod(identity.mode)
+            # The root runner intentionally inherits umask 0077. Publish the
+            # verified release's public directories explicitly, outermost last.
+            for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+                directory.chmod(0o755)
             os.replace(staging, target)
             self._created.add(target)
         except OSError:
