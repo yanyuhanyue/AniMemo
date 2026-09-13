@@ -28,6 +28,18 @@ SCOPE_SECONDS = 12 * 60 * 60
 SCHEMA = 'animemo.local-installer-development-capture-budget/v1'
 SLOTS = tuple(hashlib.sha256(f'{AUTHORIZATION}:capture:{index}'.encode('ascii')).hexdigest()
               for index in range(1, MAX_CAPTURES + 1))
+# The operator confirmed one twelve-hour extension for the three remaining
+# captures on 2026-09-13. This exact original scope is the only beneficiary;
+# no file, CLI flag, new authorization ID or current clock can renew the grant.
+EXTENSION_SCOPE_SHA256 = '1a48a5ad82083ff97f4580c6dee25ec15463c3275ba76211a59a4ac66b420b3f'
+EXTENSION_START_UTC = 1789266910.207901
+EXTENSION_EXPIRES_UTC = 1789310110.207901
+EXTENSION_SPENT_CAPTURES = 3
+
+
+def _has_confirmed_extension(value):
+    raw = (json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('utf-8')
+    return hashlib.sha256(raw).hexdigest() == EXTENSION_SCOPE_SHA256
 
 
 class DevelopmentScopeError(RuntimeError):
@@ -65,13 +77,32 @@ def _github_utc_upper_bound():
 
 
 def scope_deadline(value, *, monotonic_now=None, utc_now=None):
-    """Preserve the original expiry across reboot; never rewrite scope metadata."""
+    """Preserve immutable deadlines across reboot; never rewrite scope metadata."""
     monotonic_now = time.monotonic() if monotonic_now is None else monotonic_now
     utc_now = time.time() if utc_now is None else utc_now
     started_mono, started_utc = value['created_monotonic'], value['created_utc_seconds']
     _require(all(type(number) in (int, float) and math.isfinite(number)
                  for number in (started_mono, started_utc, monotonic_now, utc_now)),
              'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
+    if _has_confirmed_extension(value):
+        _require(EXTENSION_START_UTC <= utc_now < EXTENSION_EXPIRES_UTC,
+                 'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
+        # Always consult fresh time for this fixed extension. The conversion
+        # starts before the request, so network latency only shortens it.
+        trusted_utc = _github_utc_upper_bound()
+        _require(type(trusted_utc) in (int, float) and math.isfinite(trusted_utc)
+                 and abs(trusted_utc - utc_now) <= 30, 'DEVELOPMENT_CLOCK_AUTHORITY_MISMATCH')
+        effective_utc = max(utc_now, trusted_utc)
+        _require(EXTENSION_START_UTC <= effective_utc < EXTENSION_EXPIRES_UTC,
+                 'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
+        deadline = monotonic_now + EXTENSION_EXPIRES_UTC - effective_utc
+        return deadline, {'authority': 'GITHUB_HTTPS_DATE_CONFIRMED_EXTENSION',
+            'observed_monotonic': monotonic_now, 'observed_utc_seconds': utc_now,
+            'trusted_utc_upper_bound': trusted_utc,
+            'original_expires_utc_seconds': started_utc + SCOPE_SECONDS,
+            'effective_expires_utc_seconds': EXTENSION_EXPIRES_UTC,
+            'extension_scope_sha256': EXTENSION_SCOPE_SHA256,
+            'deadline_monotonic': deadline}
     elapsed_utc, elapsed_mono = utc_now - started_utc, monotonic_now - started_mono
     _require(0 <= elapsed_utc < SCOPE_SECONDS, 'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
     epoch_changed = elapsed_mono < 0 or abs(elapsed_utc - elapsed_mono) > 60
@@ -210,6 +241,9 @@ def reserve_development_capture(authorization_id, *, material_identity):
             path = LEDGER / slot
             _require(path.is_dir() and not path.is_symlink() and not path.is_junction())
         _require(sum(used) < MAX_CAPTURES, 'DEVELOPMENT_CAPTURE_BUDGET_EXHAUSTED')
+        if _has_confirmed_extension(value):
+            _require(sum(used) >= EXTENSION_SPENT_CAPTURES,
+                     'DEVELOPMENT_CAPTURE_SCOPE_INVALID')
         _require(time.monotonic() < deadline, 'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
         index = sum(used)
         path = create_windows_private_named_directory(LEDGER, name=SLOTS[index])

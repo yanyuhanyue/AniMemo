@@ -1,4 +1,5 @@
 """The development allowance is exercised only in disposable synthetic ledgers."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -190,6 +191,64 @@ class DevelopmentCaptureTests(unittest.TestCase):
         first.close()
         with self.assertRaisesRegex(d.DevelopmentScopeError, 'SCOPE_CLOSED'):
             first.require_open()
+
+    def prepare_confirmed_extension(self):
+        with mock.patch.object(d.time, 'monotonic', return_value=40000), mock.patch.object(d.time, 'time', return_value=100000):
+            for _ in range(3):
+                self.reserve().close()
+        raw = (self.root / 'scope.json').read_bytes()
+        for name, value in (('EXTENSION_SCOPE_SHA256', hashlib.sha256(raw).hexdigest()),
+                            ('EXTENSION_START_UTC', 145000), ('EXTENSION_EXPIRES_UTC', 188200)):
+            patch = mock.patch.object(d, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.clock_authority.side_effect = None
+        self.clock_authority.return_value = 145010
+        return raw
+
+    def test_confirmed_extension_keeps_original_metadata_and_only_remaining_slots(self):
+        raw = self.prepare_confirmed_extension()
+        with mock.patch.object(d.time, 'monotonic', return_value=100), mock.patch.object(d.time, 'time', return_value=145009):
+            for index in (4, 5, 6):
+                reservation = self.reserve()
+                self.assertEqual(reservation.index, index)
+                self.assertEqual(reservation.deadline, 43290)
+                self.assertEqual(reservation.time_observation['original_expires_utc_seconds'], 143200)
+                self.assertEqual(reservation.time_observation['effective_expires_utc_seconds'], 188200)
+                reservation.close()
+            with self.assertRaisesRegex(d.DevelopmentScopeError, 'BUDGET_EXHAUSTED'):
+                self.reserve()
+        self.assertEqual((self.root / 'scope.json').read_bytes(), raw)
+        self.assertEqual({p.name for p in self.root.iterdir() if p.is_dir()}, set(d.SLOTS))
+        self.assertTrue(all(not tuple((self.root / slot).iterdir()) for slot in d.SLOTS[:3]))
+
+    def test_extension_rejects_expiry_rollback_time_failure_and_different_base(self):
+        raw = self.prepare_confirmed_extension()
+        for local, trusted, code in ((188200, 188200, 'SCOPE_EXPIRED'),
+                                     (188199, 188201, 'SCOPE_EXPIRED'),
+                                     (144999, 145001, 'SCOPE_EXPIRED'),
+                                     (145009, 145100, 'CLOCK_AUTHORITY_MISMATCH'),
+                                     (145009, None, 'CLOCK_AUTHORITY_UNAVAILABLE')):
+            self.clock_authority.side_effect = d.DevelopmentScopeError('DEVELOPMENT_CLOCK_AUTHORITY_UNAVAILABLE') if trusted is None else None
+            self.clock_authority.return_value = trusted
+            with mock.patch.object(d.time, 'monotonic', return_value=100), mock.patch.object(d.time, 'time', return_value=local):
+                with self.assertRaisesRegex(d.DevelopmentScopeError, code):
+                    self.reserve()
+            self.assertFalse((self.root / d.SLOTS[3]).exists())
+        with mock.patch.object(d, 'EXTENSION_SCOPE_SHA256', 'f' * 64):
+            with self.assertRaisesRegex(d.DevelopmentScopeError, 'SCOPE_EXPIRED'):
+                d.scope_deadline(json.loads(raw), monotonic_now=100, utc_now=145009)
+        self.assertEqual((self.root / 'scope.json').read_bytes(), raw)
+
+    def test_extension_does_not_restore_missing_spent_slots(self):
+        self.prepare_confirmed_extension()
+        # Disposable synthetic ledger only: losing the third spent sentinel
+        # must not let the fixed extension recapture that attempt.
+        (self.root / d.SLOTS[2]).rmdir()
+        with mock.patch.object(d.time, 'monotonic', return_value=100), mock.patch.object(d.time, 'time', return_value=145009):
+            with self.assertRaisesRegex(d.DevelopmentScopeError, 'SCOPE_INVALID'):
+                self.reserve()
+        self.assertFalse((self.root / d.SLOTS[2]).exists())
 
 
 if __name__ == '__main__':
