@@ -120,6 +120,23 @@ DOCKER_DAEMON_OFFICIAL_LIBRARY_DISPLAY_REPOSITORIES = {
 }
 
 
+def runtime_image_readback_matches(role: str, reference: str, observed: object) -> bool:
+    """Match exact role/repository/digest authority against Docker display names."""
+    if (type(role) is not str or type(reference) is not str or type(observed) is not list
+            or any(type(item) is not str for item in observed)):
+        return False
+    repository, separator, digest = reference.partition('@')
+    if (separator != '@' or repository != REQUIRED_IMAGE_REPOSITORIES.get(role)
+            or not digest.startswith('sha256:') or len(digest) != 71
+            or any(character not in '0123456789abcdef' for character in digest[7:])):
+        return False
+    accepted = {reference}
+    display = DOCKER_DAEMON_OFFICIAL_LIBRARY_DISPLAY_REPOSITORIES.get((role, repository))
+    if display is not None:
+        accepted.add(f'{display}@{digest}')
+    return bool(accepted.intersection(observed))
+
+
 class OCIContractError(ValueError):
     """An OCI layout is not the exact immutable image DAG requested."""
 
@@ -268,17 +285,7 @@ class DockerOCIImporter:
                 or any(type(item) is not str for item in observed)
             ):
                 raise OCIContractError("OCI_DOCKER_POST_IMPORT_DIGEST_MISMATCH")
-            accepted_readbacks = {expected}
-            display_repository = (
-                DOCKER_DAEMON_OFFICIAL_LIBRARY_DISPLAY_REPOSITORIES.get(
-                    (image.role, image.repository)
-                )
-            )
-            if display_repository is not None:
-                accepted_readbacks.add(
-                    f"{display_repository}@{image.digest}"
-                )
-            if not accepted_readbacks.intersection(observed):
+            if not runtime_image_readback_matches(image.role, expected, observed):
                 raise OCIContractError("OCI_DOCKER_POST_IMPORT_DIGEST_MISMATCH")
             return expected
         finally:
@@ -465,11 +472,7 @@ class ImageAcquirer:
                 observed = json.loads(inspection.stdout)
             except (AttributeError, TypeError, json.JSONDecodeError) as error:
                 raise OCIContractError("OCI_RUNTIME_IDENTITY_UNREADABLE") from error
-            if (
-                not isinstance(observed, list)
-                or any(type(item) is not str for item in observed)
-                or reference not in observed
-            ):
+            if not runtime_image_readback_matches(role, reference, observed):
                 raise OCIContractError("OCI_RUNTIME_DIGEST_MISMATCH")
             acquired.append(
                 AcquiredRuntimeImage(

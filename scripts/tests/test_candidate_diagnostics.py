@@ -4,15 +4,18 @@ from __future__ import annotations
 import io
 import json
 import os
-from pathlib import Path
 import struct
 import sys
+import tempfile
 import threading
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from scripts import candidate_diagnostics as d, candidate_guest_session as c, candidate_vm_harness as h
+from scripts import candidate_diagnostics as d
+from scripts import candidate_guest_session as c
+from scripts import candidate_vm_harness as h
 
 OPERATION = 'sha256:' + 'a' * 64
 SENTINEL = 'synthetic-diagnostic-secret-never-log'
@@ -37,6 +40,93 @@ def successful_frames(operation=OPERATION, padding=None):
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_report_counts_are_closed_bounded_integers(self):
+        fields = {'commands': 500, 'pull_denied_commands': 80, 'doctor_checks': 29}
+        value = dict(schema=d.SCHEMA, operation=OPERATION, kind='REPORT_COUNTS', **fields)
+        self.assertEqual(d.validate_event(value, OPERATION), value)
+        for changed in ({'commands': True}, {'commands': -1}, {'doctor_checks': SENTINEL},
+                        {'pull_denied_commands': d.MAX_RECEIPT_BYTES + 1}, {'extra': SENTINEL}):
+            with self.assertRaises(d.DiagnosticError):
+                d.validate_event({**value, **changed}, OPERATION)
+
+    def test_runpy_development_entry_failure_keeps_only_known_location(self):
+        namespace = {'__name__': '__main__', 'SECRET': SENTINEL}
+        exec(compile('def fail():\n raise PermissionError(SECRET)\n',  # noqa: S102 - fixed synthetic traceback
+            'X:/private-sentinel/scripts/development_profile_runner.py', 'exec'), namespace)
+        writer = d.DiagnosticWriter(0, OPERATION)
+        with mock.patch.object(writer, 'event') as emit:
+            try:
+                namespace['fail']()
+            except PermissionError as error:
+                writer.fault(error)
+        emit.assert_called_once_with('FAULT', module='scripts.development_profile_runner', line=2, category='PermissionError')
+
+    def test_doctor_failure_event_contains_only_closed_check_identifiers(self):
+        from durability.doctor import DOCTOR_CHECK_IDS
+        self.assertEqual(d.DOCTOR_CHECKS, DOCTOR_CHECK_IDS)
+        reader = d.DiagnosticReader(OPERATION)
+        reader.accept(b'D', json.dumps(dict(schema=d.SCHEMA, operation=OPERATION,
+            kind='DOCTOR', failed_checks=['filesystem.permissions', 'plugins.integrity'])).encode())
+        self.assertEqual(reader.public()['events'][0]['failed_checks'],
+            ['filesystem.permissions', 'plugins.integrity'])
+        for checks in ([], [SENTINEL], ['filesystem.permissions'] * 2, [True], [{}], 'filesystem.permissions'):
+            with self.assertRaises(d.DiagnosticError):
+                d.validate_event(dict(schema=d.SCHEMA, operation=OPERATION, kind='DOCTOR', failed_checks=checks), OPERATION)
+
+    def test_fault_keeps_command_caller_and_limits_nested_tracebacks(self):
+        command = {'__name__': 'updater.commands', 'SECRET': SENTINEL}
+        deployment = {'__name__': 'updater.deployment'}
+        runtime = {'__name__': 'updater.runtime'}
+        exec(compile('def fail():\n raise ValueError(SECRET)\n',
+            'X:/private-sentinel/updater/commands.py', 'exec'), command)
+        deployment['command'] = command['fail']
+        exec(compile('def inspect():\n command()\n',
+            'X:/private-sentinel/updater/deployment.py', 'exec'), deployment)
+        runtime['inspect'] = deployment['inspect']
+        exec(compile('def adopt():\n try:\n  inspect()\n except ValueError as error:\n  raise RuntimeError("private-wrapper") from error\n',
+            'X:/private-sentinel/updater/runtime.py', 'exec'), runtime)
+        with tempfile.TemporaryFile() as stream:
+            writer = d.DiagnosticWriter(stream.fileno(), OPERATION)
+            try:
+                runtime['adopt']()
+            except RuntimeError as error:
+                writer.fault(error)
+            stream.seek(0)
+            reader = d.DiagnosticReader(OPERATION)
+            while item := d.read_frame(stream):
+                reader.accept(*item)
+        faults = reader.public()['events']
+        self.assertLessEqual(len(faults), 6)
+        self.assertIn(('updater.deployment', 2), {(f['module'], f['line']) for f in faults})
+        self.assertIn(('updater.runtime', 3), {(f['module'], f['line']) for f in faults})
+        for private in (SENTINEL, 'private-wrapper', 'private-sentinel'):
+            self.assertNotIn(private, json.dumps(reader.public()))
+
+    def test_fault_locations_are_bounded_without_exception_text_paths_or_locals(self):
+        namespace = {'__name__': 'updater.runtime', 'SECRET': SENTINEL}
+        exec(compile('def fail():\n raise ValueError(SECRET)\n',
+            'X:/private-sentinel/updater/runtime.py', 'exec'), namespace)
+        with tempfile.TemporaryFile() as stream:
+            writer = d.DiagnosticWriter(stream.fileno(), OPERATION)
+            try:
+                namespace['fail']()
+            except ValueError as error:
+                writer.fault(error)
+            stream.seek(0)
+            reader = d.DiagnosticReader(OPERATION)
+            while item := d.read_frame(stream):
+                reader.accept(*item)
+        fault = reader.public()['events'][0]
+        self.assertEqual({key: fault[key] for key in ('module', 'line', 'category')},
+            {'module': 'updater.runtime', 'line': 2, 'category': 'ValueError'})
+        self.assertNotIn(SENTINEL, json.dumps(reader.public()))
+        self.assertNotIn('private-sentinel', json.dumps(reader.public()))
+        for fields in ({'module': SENTINEL, 'line': 2, 'category': 'ValueError'},
+                       {'module': 'updater.runtime', 'line': True, 'category': 'ValueError'},
+                       {'module': 'updater.runtime', 'line': 2, 'category': SENTINEL}):
+            with self.assertRaises(d.DiagnosticError):
+                d.validate_event(dict(schema=d.SCHEMA, operation=OPERATION, kind='FAULT', **fields), OPERATION)
+
     def consume(self, raw):
         self.provider = SimpleNamespace(_candidate_diagnostics={})
         return c._read_receipt(SimpleNamespace(stdout=io.BytesIO(raw)), operation=OPERATION,

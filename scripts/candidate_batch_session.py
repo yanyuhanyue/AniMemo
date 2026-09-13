@@ -97,10 +97,27 @@ class BatchUse:
 
 
 class CandidateBatch:
-    def __init__(self, provider, plan, *, authorization_id=None, clock=time.monotonic):
+    def __init__(self, provider, plan, *, authorization_id=None, clock=time.monotonic, development_owner=None):
+        from scripts.development_plan import is_development_plan
+        self._development = is_development_plan(plan)
+        self._development_reservation = None
         self._authorization_id = authorization_id
-        self._ledger = capture_ledger(authorization_id)
-        if (type(provider) is not h.ClosedVmwareProvider or type(plan) is not h.CandidateHarnessPlan
+        self._development_owner = development_owner
+        if development_owner is not None:
+            from scripts.development_session_owner import DevelopmentSessionOwner
+            if not self._development or type(development_owner) is not DevelopmentSessionOwner or development_owner.closed:
+                raise ControllerFailure('DEVELOPMENT_SESSION_OWNER_INVALID')
+        if self._development:
+            from scripts import development_capture_scope as scope
+            from scripts.development_source import require_development_source
+            if authorization_id != scope.AUTHORIZATION:
+                raise ControllerFailure('DEVELOPMENT_CAPTURE_AUTHORIZATION_INVALID')
+            require_development_source(provider, plan)
+            self._ledger = scope.LEDGER
+        else:
+            self._ledger = capture_ledger(authorization_id)
+        if (type(provider) is not h.ClosedVmwareProvider
+                or not (type(plan) is h.CandidateHarnessPlan or self._development)
                 or h.sha256_bytes(h.canonical_json_bytes(plan.identity_body())) != plan.plan_digest):
             raise ControllerFailure('CANDIDATE_BATCH_SCOPE_INVALID')
         provider._require_active_execution_authority()
@@ -117,6 +134,7 @@ class CandidateBatch:
         self._completed_roles = set()
         self._closed = False
         self._monitor_done = threading.Event()
+        self._monitor_thread = None
         self.cancelled = threading.Event()
         self._record = dict(authorization_id=authorization_id, session_capture_attempts=0,
             session_capture_completed=0, secret_state='NOT_CAPTURED', secret_cleanup='NOT_REQUIRED',
@@ -126,6 +144,18 @@ class CandidateBatch:
             profiles={profile: {role: dict(delivery_attempts=0, delivery_completed=0,
                 target_verified=False, lease_verified=False, operation_result='NOT_RUN')
                 for role in ROLES} for profile in h.PROFILES})
+        if self._development:
+            self._record['purpose'] = 'LOCAL_INSTALLER_DEVELOPMENT'
+            self._record['binding'].update(execution_source_sha=plan.execution_source_sha,
+                execution_source_tree=plan.execution_source_tree,
+                execution_inventory_digest=plan.execution_inventory_digest)
+        if self._development_owner is not None:
+            self._record['development_owner_id'] = development_owner.record['owner_id']
+            self._record['secret_storage'] = 'PERSISTENT_DEVELOPMENT_MEMORY_OWNER'
+
+    def check_source(self):
+        from scripts.development_plan import execution_source
+        _check_checkout(*execution_source(self.plan))
 
     @property
     def record(self):
@@ -145,12 +175,20 @@ class CandidateBatch:
             self.revoke('CANDIDATE_BATCH_SCOPE_CHANGED')
             raise ControllerFailure('CANDIDATE_BATCH_SCOPE_CHANGED')
         self.provider._require_active_execution_authority()
+        if self._development:
+            from scripts.development_source import require_development_source
+            try:
+                require_development_source(self.provider, self.plan)
+            except BaseException:
+                self.revoke('CANDIDATE_BATCH_SCOPE_CHANGED')
+                raise ControllerFailure('DEVELOPMENT_SOURCE_AUTHORITY_INVALID') from None
 
     def _expiry(self):
         if self._captured_at is None:
             return None
         now = self._clock()
-        if now >= self._captured_at + HARD_SECONDS:
+        if (now >= self._captured_at + HARD_SECONDS
+                or self._development_reservation is not None and now >= self._development_reservation.deadline):
             return 'CANDIDATE_BATCH_HARD_EXPIRED'
         if self._operation is not None:
             if now >= self._operation[2]:
@@ -172,6 +210,8 @@ class CandidateBatch:
         self.require_active()
         if self._secret is None:
             raise ControllerFailure('CANDIDATE_BATCH_SECRET_UNAVAILABLE')
+        if self._development_owner is not None:
+            self._secret.require_live(self)
 
     @contextmanager
     def operation(self, kind, profile):
@@ -210,28 +250,61 @@ class CandidateBatch:
                     or self._operation is None or self._operation[:2] != ('BOOTSTRAP', profile.profile)):
                 raise ControllerFailure('CANDIDATE_BATCH_CAPTURE_REJECTED')
             self._scope()
-            _check_checkout(self.plan.source_sha, self.plan.source_tree)
+            self.check_source()
             console = WindowsConsoleCapture()
             console.preflight()
-            if capture_ledger(self._authorization_id) != self._ledger:
-                raise ControllerFailure('CANDIDATE_CAPTURE_AUTHORIZATION_INVALID')
-            self._slot = reserve_capture(self._authorization_id)
-            self._record['session_capture_attempts'] = 1
+            if self._development:
+                from scripts import development_capture_scope as scope
+                if self._ledger != scope.LEDGER:
+                    raise ControllerFailure('DEVELOPMENT_CAPTURE_AUTHORIZATION_INVALID')
+                try:
+                    material_identity = {key: getattr(self.plan, key) for key in (
+                        'verified_candidate_digest', 'candidate_input_digest', 'source_sha',
+                        'source_tree', 'qualification_run_id', 'candidate_version')}
+                    material_identity['qualification_run_attempt'] = 1
+                    options = ({'scope_owner': self._development_owner.scope_owner}
+                        if self._development_owner is not None else {})
+                    self._development_reservation = scope.reserve_development_capture(
+                        self._authorization_id, material_identity=material_identity, **options)
+                except scope.DevelopmentScopeError as error:
+                    raise ControllerFailure(error.code) from None
+                self._slot = self._development_reservation.path
+                self._record['development_capture_index'] = self._development_reservation.index
+                self._record['development_clock_observation'] = self._development_reservation.time_observation
+            else:
+                if capture_ledger(self._authorization_id) != self._ledger:
+                    raise ControllerFailure('CANDIDATE_CAPTURE_AUTHORIZATION_INVALID')
+                self._slot = reserve_capture(self._authorization_id)
+            owner_before = self._development_owner.record if self._development_owner is not None else None
+            self._record['session_capture_attempts'] = 1 if owner_before is None else 0
             self._record['secret_state'] = 'CAPTURING'
             try:
-                print('Candidate session / one sudo input for this frozen batch', flush=True)
-                self._secret = console.capture()
-                if (type(self._secret) is not bytearray or not 1 <= len(self._secret) <= 4096
-                        or any(x < 32 or x == 127 for x in self._secret)):
-                    raise ControllerFailure('SUDO_VALUE_INVALID')
-                self._record['session_capture_completed'] = 1
+                if self._development_owner is None:
+                    print('Candidate session / one sudo input for this frozen batch', flush=True)
+                    self._secret = console.capture()
+                    if (type(self._secret) is not bytearray or not 1 <= len(self._secret) <= 4096
+                            or any(x < 32 or x == 127 for x in self._secret)):
+                        raise ControllerFailure('SUDO_VALUE_INVALID')
+                    self._record['session_capture_completed'] = 1
+                else:
+                    print('Local development / same memory controller across remaining rounds', flush=True)
+                    self._secret, captured = self._development_owner.bind_after_verified_guest(
+                        self, self._development_reservation, console)
+                    self._record['session_capture_attempts'] = captured
+                    self._record['session_capture_completed'] = captured
+                    self._record['owner_capture_completed'] = 1
                 self._captured_at = self._last_idle = self._clock()
                 self._operation = ('BOOTSTRAP', profile.profile, self._captured_at + OPERATION_SECONDS['BOOTSTRAP'])
-                _check_checkout(self.plan.source_sha, self.plan.source_tree)
+                self.check_source()
                 self._scope()
                 self._record['secret_state'] = 'ACTIVE'
-                threading.Thread(target=self._monitor, daemon=True).start()
+                self._monitor_thread = threading.Thread(target=self._monitor, daemon=True)
+                self._monitor_thread.start()
             except BaseException:
+                if owner_before is not None:
+                    owner_after = self._development_owner.record
+                    self._record['session_capture_attempts'] = owner_after['capture_attempts'] - owner_before['capture_attempts']
+                    self._record['session_capture_completed'] = owner_after['capture_completed'] - owner_before['capture_completed']
                 self.revoke('CANDIDATE_BATCH_CAPTURE_FAILED')
                 raise
 
@@ -275,7 +348,7 @@ class CandidateBatch:
             use._lease.require_open()
         # Git may block. Let the owner watchdog revoke while this non-secret
         # check runs, then recheck the grant at the actual delivery boundary.
-        _check_checkout(self.plan.source_sha, self.plan.source_tree)
+        self.check_source()
         with self._lock:
             use.check(supervisor)
             use._lease.require_open()
@@ -292,7 +365,8 @@ class CandidateBatch:
                 raise ControllerFailure('CANDIDATE_BATCH_USE_ORDER_INVALID')
             self._attempted_roles.add(key)
             entry.update(target_verified=True, lease_verified=True, delivery_attempts=1, operation_result='UNKNOWN')
-            value = bytearray(self._secret)
+            value = (self._secret.delivery_value(self) if self._development_owner is not None
+                else bytearray(self._secret))
             value.append(10)
         try:
             written = process.stdin.write(value)
@@ -322,6 +396,8 @@ class CandidateBatch:
         with self._lock:
             if code not in REVOCATIONS:
                 code = 'CANDIDATE_BATCH_EXECUTION_INTERRUPTED'
+            if self._development_owner is not None:
+                self._development_owner.on_revocation(self, code)
             self._record['revocation_code'] = self._record['revocation_code'] or code
             self.cancelled.set()
             self._finish('REVOKED')
@@ -330,9 +406,13 @@ class CandidateBatch:
         self._closed = True
         if type(self._secret) is bytearray:
             wipe(self._secret)
+        elif self._secret is not None and self._development_owner is not None:
+            self._secret.close()
         self._secret = None
-        self._record['secret_state'] = state
+        self._record['secret_state'] = ('ROUND_CAPABILITY_' + state if self._development_owner is not None else state)
         self._record['secret_cleanup'] = 'BEST_EFFORT_COMPLETED' if self._record['session_capture_attempts'] else 'NOT_REQUIRED'
+        if self._development_owner is not None:
+            self._record['secret_cleanup'] = 'ROUND_CAPABILITY_CLOSED'
         self._monitor_done.set()
         for use in self._uses:
             use._closed = True
@@ -340,19 +420,42 @@ class CandidateBatch:
     def release_secret(self):
         with self._lock:
             if self._secret is not None:
-                wipe(self._secret)
+                if self._development_owner is not None:
+                    self._secret.close()
+                else:
+                    wipe(self._secret)
                 self._secret = None
             if not self._closed:
                 self._record['secret_state'] = 'RELEASED_NO_FURTHER_USES'
                 self._record['secret_cleanup'] = 'BEST_EFFORT_COMPLETED'
+                if self._development_owner is not None:
+                    self._record['secret_state'] = 'ROUND_CAPABILITY_RELEASED_NO_FURTHER_USES'
+                    self._record['secret_cleanup'] = 'ROUND_CAPABILITY_CLOSED'
 
     def close(self):
         with self._lock:
             self.cancelled.set()
             if not self._closed:
                 self._finish('CLOSED')
-            if self._slot is not None:
-                with hold_windows_private_path_chain(self._slot, allow_leaf_child_writes=True):
-                    with (self._slot / 'result.json').open('xb') as output:
-                        output.write(h.canonical_json_bytes(self._record))
-                self._slot = None
+            try:
+                if self._slot is not None:
+                    # The development reservation already holds its parent
+                    # chain; a second Windows DELETE hold would conflict.
+                    if self._development:
+                        with (self._slot / 'result.json').open('xb') as output:
+                            output.write(h.canonical_json_bytes(self._record))
+                    else:
+                        with hold_windows_private_path_chain(self._slot, allow_leaf_child_writes=True):
+                            with (self._slot / 'result.json').open('xb') as output:
+                                output.write(h.canonical_json_bytes(self._record))
+                    self._slot = None
+            finally:
+                if self._development_reservation is not None:
+                    self._development_reservation.close()
+                    self._development_reservation = None
+                if self._development_owner is not None:
+                    self._development_owner.close_batch(self)
+        if self._monitor_thread is not None and self._monitor_thread is not threading.current_thread():
+            self._monitor_thread.join(timeout=2)
+            if self._monitor_thread.is_alive():
+                raise ControllerFailure('CANDIDATE_BATCH_MONITOR_NOT_CLOSED')

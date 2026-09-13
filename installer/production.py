@@ -115,6 +115,7 @@ from updater.oci import (
     AcquiredRuntimeImage,
     ImageAcquirer,
     ImageAcquisitionReceipt,
+    runtime_image_readback_matches,
 )
 from updater.runtime import InitialAdoptionRequest, adopt_initial_release
 from updater.runtime_state import RuntimeState
@@ -2299,7 +2300,7 @@ class ProductionDoctorAcceptance:
             )
 
         def plugins() -> bool:
-            enabled = deployment.inspect_enabled_plugin_apis(manifest)
+            enabled = deployment.inspect_enabled_plugin_apis(manifest, running=True)
             supported = set(manifest["compatibility"]["pluginSdk"]["supportedApis"])
             return enabled.issubset(supported)
 
@@ -2430,9 +2431,18 @@ class ProductionDoctorAcceptance:
             distribution_reader=distribution_reader,
             clock=_utc_now,
         ).run()
+        self._latest_report = report
         if report.overall_status is not DoctorStatus.PASS or any(
             check.status is not DoctorStatus.PASS for check in report.checks
         ):
+            if 'ANIMEMO_CANDIDATE_DIAGNOSTIC_FD' in os.environ:
+                from scripts.candidate_diagnostics import inherited_writer
+                diagnostic = inherited_writer()
+                if diagnostic is not None:
+                    diagnostic.event('DOCTOR', failed_checks=[
+                        check.check_id for check in report.checks
+                        if check.status is not DoctorStatus.PASS
+                    ])
             raise InstallerAdapterError(
                 "INSTALL_DOCTOR_INCOMPLETE",
                 mutation_occurred=True,
@@ -2455,6 +2465,7 @@ class ProductionFreshInstallPort:
         | None = None,
         namespace: InstanceNamespace | None = None,
         candidate_network_isolation: bool = False,
+        _development_service_source=None,
     ) -> None:
         self.releases = releases
         self.configuration = configuration
@@ -2462,6 +2473,12 @@ class ProductionFreshInstallPort:
         self.doctor_acceptor = doctor_acceptor
         self.namespace = namespace or instance_namespace()
         self.candidate_network_isolation = candidate_network_isolation
+        if _development_service_source is not None:
+            from .development import DevelopmentServiceSource
+            if type(_development_service_source) is not DevelopmentServiceSource or not candidate_network_isolation:
+                raise ValueError('DEVELOPMENT_SERVICE_SOURCE_INVALID')
+            _development_service_source.verify_source()
+        self._development_service_source = _development_service_source
         self._deployment: ImmutableComposeDeployment | None = None
         self._candidate_listener = None
         self._created: set[Path] = set()
@@ -2647,16 +2664,22 @@ class ProductionFreshInstallPort:
                 "INSTALL_STAGING_EXISTS", mutation=False, recovery=False
             )
         try:
-            staging.mkdir(mode=0o755)
+            staging.mkdir(mode=0o700)
+            directories = {staging}
             for identity in materials.verified.files:
                 source = materials.material(identity.path)
                 destination = staging.joinpath(*Path(identity.path).parts)
                 destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+                directories.update(staging / parent for parent in Path(identity.path).parents)
                 with source.open("rb") as reader, destination.open("xb") as writer:
                     shutil.copyfileobj(reader, writer, 1024 * 1024)
                     writer.flush()
                     os.fsync(writer.fileno())
                 destination.chmod(identity.mode)
+            # The root runner intentionally inherits umask 0077. Publish the
+            # verified release's public directories explicitly, outermost last.
+            for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+                directory.chmod(0o755)
             os.replace(staging, target)
             self._created.add(target)
         except OSError:
@@ -2667,9 +2690,14 @@ class ProductionFreshInstallPort:
 
     def prepare_services(self, plan: InstallPlan) -> None:
         try:
+            service_root = self.namespace.app_root
+            development_source = getattr(self, '_development_service_source', None)
+            if development_source is not None:
+                development_source.verify_source()
+                service_root = development_source.root
             self.runner.run(
                 [
-                    str(self.namespace.app_root / "deploy" / "install-updater.sh"),
+                    str(service_root / "deploy" / "install-updater.sh"),
                     "--instance",
                     str(self.namespace.name),
                 ],
@@ -2959,6 +2987,7 @@ class ProductionFreshInstallPort:
                     manifest=self._manifest(plan),
                 ),
                 verifier=reverify_installer_release,
+                deployment=self._compose(plan),
             )
             if getattr(self, "candidate_network_isolation", False):
                 service_root = Path("/etc/systemd/system")
@@ -2992,7 +3021,12 @@ class ProductionFreshInstallPort:
                 timeout=120,
             )
             self._wait_for_updater_socket()
-        except Exception:  # noqa: BLE001 - fixed Updater Adapter boundary
+        except Exception as error:  # noqa: BLE001 - fixed Updater Adapter boundary
+            if 'ANIMEMO_CANDIDATE_DIAGNOSTIC_FD' in os.environ:
+                from scripts.candidate_diagnostics import inherited_writer
+                diagnostic = inherited_writer()
+                if diagnostic is not None:
+                    diagnostic.fault(error)
             _safe_adapter_error(
                 "INSTALL_UPDATER_ADOPTION_FAILED", mutation=True, recovery=True
             )
@@ -3244,11 +3278,7 @@ class ProductionInstallerComposition:
                     "INSTALL_CANDIDATE_IMAGE_READBACK_FAILED",
                     outcome=InstallOutcome.VALIDATION_FAILED,
                 ) from None
-            if (
-                type(observed) is not list
-                or item.canonical_reference not in observed
-                or any(type(reference) is not str for reference in observed)
-            ):
+            if not runtime_image_readback_matches(item.role, item.canonical_reference, observed):
                 raise InstallerError(
                     "INSTALL_CANDIDATE_IMAGE_READBACK_FAILED",
                     outcome=InstallOutcome.VALIDATION_FAILED,
@@ -3762,6 +3792,7 @@ def build_candidate_composition(
     *,
     profile: str,
     instance_name: InstanceName | str = DEFAULT_INSTANCE_NAME,
+    _development_service_source=None,
 ) -> ProductionInstallerComposition:
     """Compose the Installer around one local Candidate capability only."""
 
@@ -3783,6 +3814,11 @@ def build_candidate_composition(
             "INSTALL_VERIFIED_CANDIDATE_REQUIRED",
             outcome=InstallOutcome.VALIDATION_FAILED,
         ) from None
+    if _development_service_source is not None:
+        from .development import DevelopmentServiceSource
+        if (type(_development_service_source) is not DevelopmentServiceSource
+                or _development_service_source.verified_candidate_digest != loaded.verified_digest):
+            raise ValueError('DEVELOPMENT_SERVICE_MATERIAL_MISMATCH')
     from .platform_bootstrap import SubprocessPlatformCommandRunner
 
     namespace = instance_namespace(instance_name)
@@ -3821,9 +3857,11 @@ def build_candidate_composition(
         runner=runner,
         namespace=namespace,
         candidate_network_isolation=True,
+        _development_service_source=_development_service_source,
     )
     gate = CandidateBootstrapPrivilegeGate(
-        verified_prepublication_candidate_capability(verified_candidate_digest)
+        verified_prepublication_candidate_capability(verified_candidate_digest),
+        _development_source=_development_service_source,
     )
     runtime = Installer(
         releases=releases,

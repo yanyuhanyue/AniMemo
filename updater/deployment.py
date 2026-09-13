@@ -407,14 +407,23 @@ class ImmutableComposeDeployment:
             "io.animemo.instance-id": self.paths.instance_id,
             "io.animemo.compose-project": self.paths.compose_project,
         }
-        for label, expected in expected_labels.items():
-            actual = self._inspect_container(
-                container, f'{{{{ index .Config.Labels "{label}" }}}}'
+        # Read only the three ownership labels, from one fresh Docker snapshot.
+        # Keep this per observation so replacement containers are revalidated.
+        template = "[" + ",".join(
+            f'{{{{json (index .Config.Labels "{label}")}}}}'
+            for label in expected_labels
+        ) + "]"
+        raw = self._inspect_container(container, template)
+        try:
+            actual = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise StateError(
+                f"AniMemo {service} container ownership label is invalid"
+            ) from error
+        if actual != list(expected_labels.values()):
+            raise StateError(
+                f"AniMemo {service} container ownership label is invalid"
             )
-            if actual != expected:
-                raise StateError(
-                    f"AniMemo {service} container ownership label is invalid"
-                )
         return container
 
     def exact_web_proxy(self, manifest: dict[str, object]) -> str:
@@ -1270,14 +1279,17 @@ class ImmutableComposeDeployment:
             raise StateError("Restore integrity inspection failed")
         return dict(checks)
 
-    def inspect_enabled_plugin_apis(self, manifest: dict[str, object]) -> set[int]:
+    def inspect_enabled_plugin_apis(
+        self, manifest: dict[str, object], *, running: bool = False
+    ) -> set[int]:
+        # Adoption/Doctor observe an already verified running API. Migration
+        # and recovery can have stopped it and still need the target image.
+        invocation = ('exec', '-T') if running else (
+            'run', '--pull', 'never', '--rm', '--no-deps'
+        )
         result = self._compose(
             manifest,
-            "run",
-            "--pull",
-            "never",
-            "--rm",
-            "--no-deps",
+            *invocation,
             "api",
             "python",
             "manage.py",

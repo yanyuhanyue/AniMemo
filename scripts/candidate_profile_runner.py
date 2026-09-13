@@ -888,14 +888,16 @@ def build_profile_receipt(
     return draft
 
 
-def execute_profile(
+def _execute_profile_workload(
     *,
     verified_candidate_digest: str,
     profile: str,
     public_origin: str,
     context_b64url: str,
     runner: CommandRunner | None = None,
-) -> dict[str, Any]:
+    execution_root: Path | None = None,
+    development_binding: dict | None = None,
+):
     diagnostic = inherited_writer()
     try:
         context = _decode_context(context_b64url)
@@ -913,8 +915,9 @@ def execute_profile(
                 else 'VERIFIED_CANDIDATE_INVALID')
         raise ProfileRunnerError(error.code) from error
     started = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    installer_root = loaded.root / "installer-root"
-    with _verified_wheel_runtime(installer_root) as runtime:
+    material_root = loaded.root / "installer-root"
+    installer_root = material_root if execution_root is None else execution_root
+    with _verified_wheel_runtime(material_root) as runtime:
         environment = {
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
@@ -925,14 +928,20 @@ def execute_profile(
         if diagnostic is not None:
             environment.update({FD_ENV: str(diagnostic.fd), OP_ENV: diagnostic.operation})
             diagnostic.stage('INSTALLER_STARTING')
-        return_code, stdout, _ = (runner or SubprocessCommandRunner()).run(
-            installer_argv(
+        command = installer_argv(
                 verified_candidate_digest=verified_candidate_digest,
                 profile=profile,
                 public_origin=public_origin,
-            ),
-            environment,
-        )
+            )
+        if development_binding is not None:
+            from scripts.development_profile_runner import validate_binding
+            validate_binding(development_binding)
+            if execution_root is None or development_binding['verified_candidate_digest'] != verified_candidate_digest:
+                raise ProfileRunnerError('DEVELOPMENT_PROFILE_BINDING_INVALID')
+            command = (sys.executable, '-P', '-B', '-m', 'scripts.development_installer_entry',
+                '--profile', INSTALLER_PROFILES[profile], '--public-origin', public_origin,
+                '--binding', json.dumps(development_binding, sort_keys=True, separators=(',', ':')))
+        return_code, stdout, _ = (runner or SubprocessCommandRunner()).run(command, environment)
     if diagnostic is not None:
         diagnostic.exited('INSTALLER', return_code)
     try:
@@ -946,6 +955,21 @@ def execute_profile(
             diagnostic.error('INSTALLER_EXECUTION_FAILED')
         raise ProfileRunnerError("CANDIDATE_INSTALLER_EXECUTION_FAILED")
     completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return loaded, context, output, started, completed
+
+
+def execute_profile(
+    *,
+    verified_candidate_digest: str,
+    profile: str,
+    public_origin: str,
+    context_b64url: str,
+    runner: CommandRunner | None = None,
+) -> dict[str, Any]:
+    loaded, context, output, started, completed = _execute_profile_workload(
+        verified_candidate_digest=verified_candidate_digest, profile=profile,
+        public_origin=public_origin, context_b64url=context_b64url, runner=runner)
+    diagnostic = inherited_writer()
     try:
         return build_profile_receipt(
             loaded=loaded,

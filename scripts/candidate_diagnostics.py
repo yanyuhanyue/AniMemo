@@ -17,11 +17,39 @@ STAGES = (
     'SSH_OBSERVED', 'SUDO_STARTED', 'ROOT_STARTED', 'MATERIAL_FINALIZING',
     'MATERIAL_VERIFIED', 'RUNTIME_INITIALIZING', 'RUNTIME_READY',
     'RUNNER_STARTING', 'RUNNER_STARTED', 'INSTALLER_STARTING',
-    'PLATFORM_PREPARING', 'PLATFORM_READY', 'INSTALLER_RUNNING',
+    'PLATFORM_PREPARING', 'PLATFORM_PLANNED', 'PLATFORM_READY', 'INSTALLER_RUNNING',
     'INSTALLER_COMPLETED', 'DRAFT_WRITING', 'DRAFT_WRITTEN', 'DRAFT_RETURNED',
     'HOST_PARSED',
 )
 COMPONENTS = ('SUDO', 'ROOT', 'RUNTIME_RUNNER', 'INSTALLER')
+DOCTOR_CHECKS = (
+    'instance.locator', 'filesystem.roots', 'filesystem.permissions', 'filesystem.capacity',
+    'configuration.required', 'configuration.alignment', 'systemd.allowlist', 'compose.alignment',
+    'network.listen', 'identity.public-origin', 'database.postgresql.connectivity',
+    'database.schema-compatibility', 'cache.redis.connectivity', 'cache.redis.persistence-contract',
+    'service.api.health', 'service.web.health', 'updater.socket', 'updater.state',
+    'release.identity', 'release.updater-consistency', 'distribution.transport-policy',
+    'distribution.transport-receipt', 'distribution.release-identity', 'distribution.oci-identity',
+    'distribution.plan-receipt-drift', 'plugins.integrity', 'media.integrity',
+    'backup.readiness', 'compatibility.state',
+)
+FAULT_MODULES = frozenset({
+    'installer.production', 'installer.runtime', 'installer.operations',
+    'updater.runtime', 'updater.deployment', 'updater.state', 'updater.commands',
+    'updater.server', 'updater.source', 'updater.binding',
+    'durability.instance', 'durability.ownership', 'durability.managed_config',
+    'durability.private_store',
+    'scripts.candidate_profile_runner', 'scripts.development_profile_runner',
+    'installer.development', 'installer.platform_bootstrap', 'release.candidate',
+})
+FAULT_TYPES = frozenset({
+    'StateError', 'LocatorError', 'CommandExited', 'CommandTimedOut', 'CommandStartFailed',
+    'PermissionError', 'FileNotFoundError', 'OSError', 'ValueError', 'TypeError',
+    'KeyError', 'AttributeError', 'RecoveryRequired', 'FreshInstallOperationError',
+    'PrivateStoreError', 'ManagedConfigError', 'InstallerAdapterError', 'OTHER',
+    'ProfileRunnerError', 'CandidateContractError', 'DevelopmentServiceError',
+    'PlatformBootstrapError',
+})
 INSTALLER_FAILURE_CODES = (
     'INSTALL_ROOT_PREPARATION_FAILED', 'INSTALL_CONFIG_PUBLICATION_FAILED',
     'INSTALL_RELEASE_STAGING_FAILED', 'INSTALL_SERVICE_PREPARATION_FAILED',
@@ -30,6 +58,46 @@ INSTALLER_FAILURE_CODES = (
     'INSTALL_UPDATER_ADOPTION_FAILED', 'INSTALL_DOCTOR_FAILED',
     'INSTALL_DOCTOR_INCOMPLETE', 'INSTALL_CANONICAL_ACCEPTANCE_FAILED',
     'INSTALL_SCOPED_CLEANUP_FAILED', 'INSTALL_RECOVERY_EVIDENCE_FAILED',
+    'INSTALL_CANDIDATE_EXECUTION_OBSERVATION_UNAVAILABLE',
+    'INSTALL_CANDIDATE_COMMAND_OBSERVATION_FAILED',
+    'INSTALL_CANDIDATE_EGRESS_ISOLATION_UNVERIFIED',
+    'INSTALL_CANDIDATE_IMAGE_READBACK_FAILED',
+    'INSTALL_CANDIDATE_NETWORK_OBSERVATION_FAILED',
+    'INSTALL_CANDIDATE_EXTERNAL_PULL_DETECTED',
+)
+BOOTSTRAP_FAILURE_CODES = (
+    'CANDIDATE_BOOTSTRAP_RELEASE_BINDING_MISMATCH',
+    'CANDIDATE_BOOTSTRAP_MATERIAL_UNAVAILABLE',
+    'CANDIDATE_BOOTSTRAP_MATERIAL_IDENTITY_MISMATCH',
+    'CANDIDATE_BOOTSTRAP_RUNTIME_MODULE_MISSING',
+    'CANDIDATE_BOOTSTRAP_RUNTIME_MODULE_INVALID',
+    'CANDIDATE_BOOTSTRAP_RUNTIME_MODULE_IDENTITY_MISMATCH',
+    'CANDIDATE_BOOTSTRAP_DEVELOPMENT_SOURCE_INVALID',
+    'CANDIDATE_BOOTSTRAP_TRUST_PROVISIONING_FAILED',
+    'CANDIDATE_BOOTSTRAP_TRUST_RECEIPT_INVALID',
+)
+PLATFORM_FAILURE_CODES = (
+    'PLATFORM_BOOTSTRAP_OS_UNSUPPORTED', 'PLATFORM_BOOTSTRAP_ARCH_UNSUPPORTED',
+    'PLATFORM_BOOTSTRAP_ROOT_REQUIRED', 'PLATFORM_BOOTSTRAP_PACKAGE_MANAGER_UNAVAILABLE',
+    'PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID', 'PLATFORM_BOOTSTRAP_APT_LOCK_TIMEOUT',
+    'PLATFORM_BOOTSTRAP_APT_UPDATE_FAILED', 'PLATFORM_BOOTSTRAP_PACKAGE_UNAVAILABLE',
+    'PLATFORM_BOOTSTRAP_DOCKER_INSTALL_FAILED', 'PLATFORM_BOOTSTRAP_COMPOSE_INSTALL_FAILED',
+    'PLATFORM_BOOTSTRAP_POSTGRES_CLIENT_INSTALL_FAILED', 'PLATFORM_BOOTSTRAP_DOCKER_DAEMON_FAILED',
+    'PLATFORM_BOOTSTRAP_HOST_STATE_INCONSISTENT', 'PLATFORM_BOOTSTRAP_OFFLINE_CAPABILITY_MISSING',
+    'PLATFORM_BOOTSTRAP_PLAN_NOT_ACCEPTED', 'PLATFORM_BOOTSTRAP_PLAN_CHANGED',
+    'PLATFORM_BOOTSTRAP_RECEIPT_INVALID', 'PLATFORM_BOOTSTRAP_POST_QUALIFICATION_FAILED',
+    'PLATFORM_BOOTSTRAP_ALREADY_RUNNING',
+)
+RUNNER_FAILURE_CODES = (
+    'CANDIDATE_INSTALLER_RESULT_INVALID', 'CANDIDATE_PROFILE_PLATFORM_STATE_MISMATCH',
+    'CANDIDATE_PROFILE_EXECUTION_OBSERVATION_INVALID', 'CANDIDATE_PROFILE_DOCTOR_RECEIPT_MISMATCH',
+    'CANDIDATE_PROFILE_DOCTOR_FAILED', 'CANDIDATE_PROFILE_CANONICAL_TEST_MISMATCH',
+    'CANDIDATE_PROFILE_COMPLETED_STEPS_MISMATCH', 'CANDIDATE_PROFILE_DOCTOR_EXECUTION_MISMATCH',
+    'CANDIDATE_PROFILE_EGRESS_ISOLATION_INVALID', 'CANDIDATE_PROFILE_NETWORK_OBSERVATION_INVALID',
+    'CANDIDATE_PROFILE_EXTERNAL_PULL_ACTIVITY', 'CANDIDATE_PROFILE_IMAGE_OBSERVATION_MISMATCH',
+    'CANDIDATE_PROFILE_RECEIPT_INVALID', 'CANDIDATE_SCHEMA_INVALID',
+    'DEVELOPMENT_PROFILE_REPORT_INVALID', 'DEVELOPMENT_PROFILE_REPORT_DIGEST_INVALID',
+    'DEVELOPMENT_PROFILE_BINDING_INVALID', 'DEVELOPMENT_MATERIAL_BINDING_INVALID',
 )
 ERRORS = (
     'UNKNOWN_BEFORE_ROOT_START', 'ROOT_INITIALIZATION_FAILED',
@@ -44,7 +112,8 @@ ERRORS = (
     'PRODUCER_TOOLCHAIN_INVALID', 'VERIFIED_CANDIDATE_INVALID',
     'RUNNER_CONTEXT_INVALID', 'PROFILE_RECEIPT_INVALID',
     'PLATFORM_PACKAGE_POLICY_INVALID',
-) + INSTALLER_FAILURE_CODES
+    'DEVELOPMENT_SERVICE_SOURCE_MISMATCH', 'DEVELOPMENT_INSTALLER_ENTRY_FAILED',
+) + INSTALLER_FAILURE_CODES + BOOTSTRAP_FAILURE_CODES + PLATFORM_FAILURE_CODES + RUNNER_FAILURE_CODES
 FD_ENV = 'ANIMEMO_CANDIDATE_DIAGNOSTIC_FD'
 OP_ENV = 'ANIMEMO_CANDIDATE_DIAGNOSTIC_OPERATION'
 _OPERATION = re.compile(r'sha256:[0-9a-f]{64}\Z')
@@ -87,6 +156,21 @@ def validate_event(value, operation):
             and type(code) is int and -255 <= code <= 255)
     elif kind == 'ERROR':
         valid = set(value) == common | {'code'} and value['code'] in ERRORS
+    elif kind == 'DOCTOR':
+        checks = value.get('failed_checks')
+        valid = (set(value) == common | {'failed_checks'} and type(checks) is list
+            and 1 <= len(checks) <= len(DOCTOR_CHECKS)
+            and all(type(check) is str and check in DOCTOR_CHECKS for check in checks)
+            and len(set(checks)) == len(checks))
+    elif kind == 'FAULT':
+        valid = (set(value) == common | {'module', 'line', 'category'}
+            and type(value['module']) is str and value['module'] in FAULT_MODULES
+            and type(value['line']) is int and 1 <= value['line'] <= 100000
+            and type(value['category']) is str and value['category'] in FAULT_TYPES)
+    elif kind == 'REPORT_COUNTS':
+        fields = {'commands', 'pull_denied_commands', 'doctor_checks'}
+        valid = (set(value) == common | fields
+            and all(type(value[key]) is int and 0 <= value[key] <= MAX_RECEIPT_BYTES for key in fields))
     else:
         valid = False
     if not valid:
@@ -113,6 +197,38 @@ class DiagnosticWriter:
 
     def exited(self, component, exit_code):
         self.event('EXIT', component=component, exit_code=exit_code)
+
+    def fault(self, error):
+        """Expose six bounded call sites, never exception text or locals."""
+        seen = set()
+        emitted = set()
+        for _ in range(4):
+            if error is None or id(error) in seen:
+                break
+            seen.add(id(error))
+            trace, locations = error.__traceback__, []
+            for _ in range(80):
+                if trace is None:
+                    break
+                module = trace.tb_frame.f_globals.get('__name__')
+                filename = trace.tb_frame.f_code.co_filename.replace('\\', '/')
+                if module == '__main__' and filename.endswith('/scripts/development_profile_runner.py'):
+                    module = 'scripts.development_profile_runner'
+                if (type(module) is str and module in FAULT_MODULES
+                        and filename.endswith('/' + module.replace('.', '/') + '.py')
+                        and 1 <= trace.tb_lineno <= 100000):
+                    locations.append((module, trace.tb_lineno))
+                trace = trace.tb_next
+            for module, line in reversed(locations[-3:]):
+                if len(emitted) >= 6:
+                    return
+                if (module, line) in emitted:
+                    continue
+                emitted.add((module, line))
+                category = type(error).__name__
+                self.event('FAULT', module=module, line=line,
+                    category=category if category in FAULT_TYPES else 'OTHER')
+            error = error.__cause__ if error.__cause__ is not None else error.__context__
 
     def frame(self, kind, raw):
         limit = MAX_DIAGNOSTIC_BYTES if kind == b'D' else MAX_RECEIPT_BYTES

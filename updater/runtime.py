@@ -184,7 +184,14 @@ class HostAgentRuntime:
         resolver_factory=None,
         local_bundle_resolver_factory=None,
         transport_policy: ExplicitTransportPolicy | None = None,
+        deployment: ImmutableComposeDeployment | None = None,
     ) -> HostAgentRuntime:
+        if deployment is not None and (
+            type(deployment) is not ImmutableComposeDeployment
+            or deployment.paths != paths
+            or deployment.managed_environment != dict(managed_environment or {})
+        ):
+            raise StateError("Initial deployment differs from the bound runtime")
         state_root = paths.state_root
         slots = ReleaseSlots(state_root / "releases")
         runtime_state = RuntimeState(state_root)
@@ -257,10 +264,11 @@ class HostAgentRuntime:
             or source_policy.identity != selected_policy.identity
         ):
             raise StateError("Release Resolver and transport policy differ")
-        deployment = ImmutableComposeDeployment(
-            paths,
-            managed_environment=managed_environment,
-        )
+        if deployment is None:
+            deployment = ImmutableComposeDeployment(
+                paths,
+                managed_environment=managed_environment,
+            )
         runtime_binding = (
             CanonicalRuntimeBinding(
                 registry=registry,
@@ -561,7 +569,7 @@ class HostAgentRuntime:
                 raise StateError(
                     "Initial adoption live contracts differ from the release"
                 )
-            enabled_plugin_apis = self.deployment.inspect_enabled_plugin_apis(verified)
+            enabled_plugin_apis = self.deployment.inspect_enabled_plugin_apis(verified, running=True)
             supported = set(verified["compatibility"]["pluginSdk"]["supportedApis"])
             if not enabled_plugin_apis.issubset(supported):
                 raise StateError(
@@ -752,6 +760,7 @@ def adopt_initial_release(
     request: InitialAdoptionRequest,
     *,
     verifier: InitialAdoptionVerifier | None = None,
+    deployment: ImmutableComposeDeployment | None = None,
 ) -> AdoptionReceipt:
     """Host-only exact initial adoption; the locator is published last."""
 
@@ -789,5 +798,6 @@ def adopt_initial_release(
             )
         ),
         background=False,
+        deployment=deployment,
     )
     return runtime.adopt_initial_release(request, verifier=verifier)

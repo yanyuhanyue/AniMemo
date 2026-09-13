@@ -114,6 +114,54 @@ class _CandidateGate:
 
 
 class CandidateInstallerCliTests(unittest.TestCase):
+    def test_observation_failures_after_install_keep_only_fixed_diagnostic_codes(self):
+        from scripts import candidate_diagnostics as diagnostics
+        for code in ('INSTALL_CANDIDATE_IMAGE_READBACK_FAILED', 'SYNTHETIC_PRIVATE_ERROR_SENTINEL'):
+            with self.subTest(code=code), tempfile.TemporaryFile() as stream:
+                composition = _ExecutingComposition()
+                composition.candidate_profile_execution_observation = mock.Mock(side_effect=InstallerError(
+                    code, outcome=InstallOutcome.VALIDATION_FAILED))
+                operation = 'sha256:' + 'd' * 64
+                writer = diagnostics.DiagnosticWriter(stream.fileno(), operation)
+                with (mock.patch('installer.production.build_candidate_composition', return_value=composition),
+                      mock.patch.object(diagnostics, 'inherited_writer', return_value=writer)):
+                    args = cli._parser().parse_args(['candidate', '--verified-candidate-digest', DIGEST,
+                        '--profile', 'ONLINE_FRESH', '--public-origin', 'https://candidate.invalid',
+                        '--execute', '--accept', '--json'])
+                    with self.assertRaises(InstallerError):
+                        cli._run_candidate(args)
+                stream.seek(0)
+                reader = diagnostics.DiagnosticReader(operation)
+                while item := diagnostics.read_frame(stream):
+                    reader.accept(*item)
+                observed = reader.public()
+                self.assertEqual(observed['last_stage'], 'INSTALLER_COMPLETED')
+                self.assertIn('INSTALLER_OUTPUT_INVALID', observed['errors'])
+                self.assertEqual(code in observed['errors'], code != 'SYNTHETIC_PRIVATE_ERROR_SENTINEL')
+                self.assertNotIn('SYNTHETIC_PRIVATE', json.dumps(observed))
+                composition.close_candidate_runtime.assert_called_once()
+
+    def test_platform_diagnostics_preserve_fixed_causes_and_exclude_unknown_text(self):
+        from scripts import candidate_diagnostics as diagnostics
+        from installer.platform_bootstrap import PLATFORM_BOOTSTRAP_ERROR_CODES
+
+        self.assertEqual(set(diagnostics.PLATFORM_FAILURE_CODES), PLATFORM_BOOTSTRAP_ERROR_CODES)
+        for code in ('CANDIDATE_BOOTSTRAP_RUNTIME_MODULE_IDENTITY_MISMATCH',
+                     'PLATFORM_BOOTSTRAP_APT_UPDATE_FAILED', 'SYNTHETIC_PRIVATE_ERROR_SENTINEL'):
+            with self.subTest(code=code), tempfile.TemporaryFile() as stream:
+                operation = 'sha256:' + 'd' * 64
+                writer = diagnostics.DiagnosticWriter(stream.fileno(), operation)
+                error = BootstrapAuthorityError(code, reason='SYNTHETIC_PRIVATE_REASON_SENTINEL')
+                cli._diagnose_candidate_platform_failure(writer, error)
+                stream.seek(0)
+                reader = diagnostics.DiagnosticReader(operation)
+                while item := diagnostics.read_frame(stream):
+                    reader.accept(*item)
+                observed = reader.public()
+                self.assertIn('PLATFORM_PREPARATION_FAILED', observed['errors'])
+                self.assertEqual(code in observed['errors'], code != 'SYNTHETIC_PRIVATE_ERROR_SENTINEL')
+                self.assertNotIn('SYNTHETIC_PRIVATE', json.dumps(observed))
+
     def test_candidate_lifetime_closes_on_success_failure_and_cancellation(self):
         args = SimpleNamespace(verified_candidate_digest=DIGEST, profile="ONLINE_FRESH")
         for failure in (None, RuntimeError("failed"), KeyboardInterrupt()):
@@ -383,6 +431,7 @@ class CandidateInstallerCliTests(unittest.TestCase):
         self.assertEqual(gate.binding, (release.version, release.commit))
 
     def test_real_candidate_composition_builds_execution_bound_observation(self):
+        from updater.oci import REQUIRED_IMAGE_REPOSITORIES
         releases = CandidateReleasePort.__new__(CandidateReleasePort)
         image_receipt = ImageAcquisitionReceipt(
             verified_release_identity="sha256:" + "1" * 64,
@@ -390,8 +439,8 @@ class CandidateInstallerCliTests(unittest.TestCase):
             images=tuple(
                 AcquiredRuntimeImage(
                     role=role,
-                    canonical_reference=f"example.invalid/{role}@sha256:" + "3" * 64,
-                    observed_reference=f"example.invalid/{role}@sha256:" + "3" * 64,
+                    canonical_reference=REQUIRED_IMAGE_REPOSITORIES[role] + "@sha256:" + "3" * 64,
+                    observed_reference=REQUIRED_IMAGE_REPOSITORIES[role] + "@sha256:" + "3" * 64,
                 )
                 for role in ("api", "postgres", "redis", "web")
             ),
@@ -443,7 +492,7 @@ class CandidateInstallerCliTests(unittest.TestCase):
             *[
                 SimpleNamespace(
                     returncode=0,
-                    stdout=json.dumps([image.canonical_reference]),
+                    stdout=json.dumps([image.canonical_reference.removeprefix('docker.io/library/')]),
                 )
                 for image in image_receipt.images
             ],

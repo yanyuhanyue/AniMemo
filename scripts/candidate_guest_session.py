@@ -120,6 +120,14 @@ def _stage_candidate(provider, authority, plan, profile, candidate_root):
         timeout=60 * 60, openssh=True)
 
 
+def _profile_context(plan, profile, initial_platform_state):
+    return dict(base_vm_identity=plan.source_vm_digest, clone_identity=profile.clone_identity,
+        initial_platform_state=dict(initial_platform_state), original_vm_pre_hashes=dict(plan.original_vm_hashes),
+        profile=profile.profile, snapshot_disk_graph_identity=profile.snapshot_disk_graph_identity,
+        snapshot_identity=profile.snapshot_identity, source_disk_graph_identity=plan.source_disk_graph_identity,
+        source_vm_inventory_identity=plan.source_vm_inventory_identity)
+
+
 def _root_program(provider, plan, profile, initial_platform_state):
     material = provider._candidate_material_authority
     loaded = material.loaded
@@ -131,11 +139,7 @@ def _root_program(provider, plan, profile, initial_platform_state):
         if trusted != reviewed:
             raise ControllerFailure('CANDIDATE_ROOT_PROGRAM_SOURCE_MISMATCH')
         programs.append(trusted.decode('utf-8'))
-    context = dict(base_vm_identity=plan.source_vm_digest, clone_identity=profile.clone_identity,
-        initial_platform_state=dict(initial_platform_state), original_vm_pre_hashes=dict(plan.original_vm_hashes),
-        profile=profile.profile, snapshot_disk_graph_identity=profile.snapshot_disk_graph_identity,
-        snapshot_identity=profile.snapshot_identity, source_disk_graph_identity=plan.source_disk_graph_identity,
-        source_vm_inventory_identity=plan.source_vm_inventory_identity)
+    context = _profile_context(plan, profile, initial_platform_state)
     args = dict(session_id=plan.session_id, profile=profile.profile, input_digest=plan.candidate_input_digest,
         verified_digest=plan.verified_candidate_digest, inventory_digest=material.tree_inventory_identity,
         context=context)
@@ -301,7 +305,10 @@ class _WorkloadSupervisor(SessionSupervisor):
                     'host_key_digest': self._provider._read_known_host_key(self._authority)})
                 _continuing_connection(self._provider, self._plan, self._profile, self._lease,
                     self._preboot_disk, self._preboot_snapshot, observation)
-                _check_checkout(self._plan.source_sha, self._plan.source_tree)
+                if self._batch_use._batch._development:
+                    self._batch_use._batch.check_source()
+                else:
+                    _check_checkout(self._plan.source_sha, self._plan.source_tree)
                 self._grant = _Grant(self, self._execution, process, 'CANDIDATE_WORKLOAD',
                     min(self._expires, self._clock() + 5))
                 self._consume(self._grant, process, 'CANDIDATE_WORKLOAD')
@@ -314,9 +321,12 @@ class _WorkloadSupervisor(SessionSupervisor):
             batch=self._batch_use._batch,
             timeout=self._workload_deadline - time.monotonic())
 
+    def _program(self):
+        return _root_program(self._provider, self._plan, self._profile,
+            h._initial_platform_state(self._profile.profile))
+
     def execute(self):
-        command = _remote_workload_command(_root_program(self._provider, self._plan, self._profile,
-            h._initial_platform_state(self._profile.profile)), _diagnostic_operation(self._plan, self._profile))
+        command = _remote_workload_command(self._program(), _diagnostic_operation(self._plan, self._profile))
         try:
             self._workload_deadline = time.monotonic() + WORKLOAD_SECONDS
             with hold_windows_private_file(self._authority.known_hosts_file):
