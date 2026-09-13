@@ -257,6 +257,7 @@ class CandidateBatch:
                     raise ControllerFailure(error.code) from None
                 self._slot = self._development_reservation.path
                 self._record['development_capture_index'] = self._development_reservation.index
+                self._record['development_clock_observation'] = self._development_reservation.time_observation
             else:
                 if capture_ledger(self._authorization_id) != self._ledger:
                     raise ControllerFailure('CANDIDATE_CAPTURE_AUTHORIZATION_INVALID')

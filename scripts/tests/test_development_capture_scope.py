@@ -24,6 +24,40 @@ class DevelopmentAuthorizationTests(unittest.TestCase):
             with self.assertRaisesRegex(d.DevelopmentScopeError, 'AUTHORIZATION_INVALID'):
                 d.reserve_development_capture(value, material_identity=MATERIAL)
 
+    def test_https_clock_accepts_only_fresh_fixed_origin_headers_without_credentials(self):
+        from email.message import Message
+        from types import SimpleNamespace
+
+        for kind in ('valid', 'cached', 'redirected', 'duplicate', 'missing', 'http-error'):
+            with self.subTest(kind=kind):
+                headers = Message()
+                if kind != 'missing':
+                    headers.add_header('Date', 'Sun, 13 Sep 2026 01:00:00 GMT')
+                if kind == 'duplicate':
+                    headers.add_header('Date', 'Sun, 13 Sep 2026 01:00:00 GMT')
+                if kind == 'cached':
+                    headers.add_header('Age', '5')
+                response = SimpleNamespace(headers=headers, status=403 if kind == 'http-error' else 200)
+                captured = []
+                def open_request(request, timeout):
+                    captured.append(request)
+                    self.assertEqual(timeout, 10)
+                    self.assertTrue(request.full_url.startswith('https://api.github.com/rate_limit?animemo_clock_nonce='))
+                    self.assertNotIn('Authorization', request.headers)
+                    response.geturl = lambda: 'https://other.invalid/' if kind == 'redirected' else request.full_url
+                    context = mock.MagicMock()
+                    context.__enter__.return_value = response
+                    return context
+                with mock.patch('urllib.request.build_opener', return_value=SimpleNamespace(open=open_request)) as build:
+                    if kind == 'valid':
+                        self.assertEqual(d._github_utc_upper_bound(), 1789261201)
+                    else:
+                        with self.assertRaisesRegex(d.DevelopmentScopeError, 'CLOCK_AUTHORITY_UNAVAILABLE'):
+                            d._github_utc_upper_bound()
+                self.assertEqual(len(captured), 1)
+                self.assertEqual(build.call_args.args[0].proxies, {})
+                self.assertIsNone(build.call_args.args[1].redirect_request())
+
 
 @unittest.skipUnless(os.name == 'nt', 'real Windows private directory and process locking')
 class DevelopmentCaptureTests(unittest.TestCase):
@@ -33,6 +67,10 @@ class DevelopmentCaptureTests(unittest.TestCase):
         self.root = Path(temporary.name) / ('a' * 64)
         patch = mock.patch.object(d, 'LEDGER', self.root)
         patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch.object(d, '_github_utc_upper_bound',
+            side_effect=d.DevelopmentScopeError('DEVELOPMENT_CLOCK_AUTHORITY_UNAVAILABLE'))
+        self.clock_authority = patch.start()
         self.addCleanup(patch.stop)
 
     def reserve(self):
@@ -53,7 +91,7 @@ class DevelopmentCaptureTests(unittest.TestCase):
         for expected in range(2, 7):
             reservation = self.reserve()
             self.assertEqual(reservation.index, expected)
-            self.assertEqual(reservation.deadline, first.deadline)
+            self.assertLessEqual(reservation.deadline, first.deadline + 0.1)
             paths.append(reservation.path)
             reservation.close()
         self.assertEqual(len(set(paths)), 6)
@@ -72,9 +110,47 @@ class DevelopmentCaptureTests(unittest.TestCase):
             (metadata['created_monotonic'], metadata['created_utc_seconds'] - 1),
         ):
             with mock.patch.object(d.time, 'monotonic', return_value=monotonic_now), mock.patch.object(d.time, 'time', return_value=utc_now):
-                with self.assertRaisesRegex(d.DevelopmentScopeError, 'SCOPE_EXPIRED'):
+                with self.assertRaisesRegex(d.DevelopmentScopeError, 'SCOPE_EXPIRED|CLOCK_AUTHORITY_UNAVAILABLE'):
                     self.reserve()
         self.assertFalse((self.root / d.SLOTS[1]).exists())
+
+    def test_reboot_uses_next_spent_slot_and_original_utc_deadline_without_metadata_edit(self):
+        with mock.patch.object(d.time, 'monotonic', return_value=40000), mock.patch.object(d.time, 'time', return_value=100000):
+            first = self.reserve()
+            first.close()
+        metadata = (self.root / 'scope.json').read_bytes()
+        # The previous result is absent, exactly as after an interrupted owner.
+        self.clock_authority.side_effect = None
+        self.clock_authority.return_value = 140001
+        with mock.patch.object(d.time, 'monotonic', return_value=100), mock.patch.object(d.time, 'time', return_value=140000):
+            second = self.reserve()
+            self.assertEqual(second.index, 2)
+            self.assertEqual(second.deadline, 3299)
+            self.assertEqual(second.time_observation['original_expires_utc_seconds'], 143200)
+            self.assertEqual(second.time_observation['authority'], 'GITHUB_HTTPS_DATE')
+            second.close()
+        self.assertEqual((self.root / 'scope.json').read_bytes(), metadata)
+        self.assertEqual({p.name for p in self.root.iterdir() if p.is_dir()}, set(d.SLOTS[:2]))
+
+    def test_reboot_cannot_hide_wall_clock_rollback_or_extend_expired_utc_budget(self):
+        with mock.patch.object(d.time, 'monotonic', return_value=40000), mock.patch.object(d.time, 'time', return_value=100000):
+            self.reserve().close()
+        self.clock_authority.side_effect = None
+        for local_utc, trusted_utc, code in ((140000, 144000, 'CLOCK_AUTHORITY_MISMATCH'),
+                                          (143199, 143201, 'SCOPE_EXPIRED')):
+            self.clock_authority.return_value = trusted_utc
+            with mock.patch.object(d.time, 'monotonic', return_value=100), mock.patch.object(d.time, 'time', return_value=local_utc):
+                with self.assertRaisesRegex(d.DevelopmentScopeError, code):
+                    self.reserve()
+            self.assertFalse((self.root / d.SLOTS[1]).exists())
+
+    def test_reboot_with_larger_new_uptime_still_clamps_to_original_utc_deadline(self):
+        self.clock_authority.side_effect = None
+        self.clock_authority.return_value = 140001
+        deadline, observation = d.scope_deadline({'created_monotonic': 10, 'created_utc_seconds': 100000},
+            monotonic_now=1000, utc_now=140000)
+        self.assertEqual(deadline, 4199)
+        self.assertTrue(observation['clock_epoch_changed'])
 
     def test_existing_empty_ledger_is_not_reinitialized(self):
         self.root.mkdir()

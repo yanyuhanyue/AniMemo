@@ -36,6 +36,62 @@ class DevelopmentScopeError(RuntimeError):
         super().__init__(code)
 
 
+def _github_utc_upper_bound():
+    """Get fresh public HTTPS time after a clock epoch change, without tokens."""
+    from email.utils import parsedate_to_datetime
+    import secrets
+    from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, *_args, **_kwargs):
+            return None
+
+    url = 'https://api.github.com/rate_limit?animemo_clock_nonce=' + secrets.token_hex(16)
+    request = Request(url, headers={'User-Agent': 'AniMemo-local-development-clock',
+        'Cache-Control': 'no-cache, no-store', 'Pragma': 'no-cache', 'Accept': 'application/json'})
+    try:
+        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=10) as response:
+            dates = response.headers.get_all('Date', [])
+            _require(response.status == 200 and response.geturl() == url
+                and len(dates) == 1 and response.headers.get('Age', '0') == '0')
+            stamp = parsedate_to_datetime(dates[0])
+            _require(stamp.tzinfo is not None)
+            # Date has whole-second precision. Use its upper bound so this
+            # observation can only shorten the original UTC deadline.
+            return stamp.timestamp() + 1
+    except Exception:
+        raise DevelopmentScopeError('DEVELOPMENT_CLOCK_AUTHORITY_UNAVAILABLE') from None
+
+
+def scope_deadline(value, *, monotonic_now=None, utc_now=None):
+    """Preserve the original expiry across reboot; never rewrite scope metadata."""
+    monotonic_now = time.monotonic() if monotonic_now is None else monotonic_now
+    utc_now = time.time() if utc_now is None else utc_now
+    started_mono, started_utc = value['created_monotonic'], value['created_utc_seconds']
+    _require(all(type(number) in (int, float) and math.isfinite(number)
+                 for number in (started_mono, started_utc, monotonic_now, utc_now)),
+             'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
+    elapsed_utc, elapsed_mono = utc_now - started_utc, monotonic_now - started_mono
+    _require(0 <= elapsed_utc < SCOPE_SECONDS, 'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
+    epoch_changed = elapsed_mono < 0 or abs(elapsed_utc - elapsed_mono) > 60
+    trusted_utc = None
+    if epoch_changed:
+        trusted_utc = _github_utc_upper_bound()
+        _require(type(trusted_utc) in (int, float) and math.isfinite(trusted_utc)
+                 and abs(trusted_utc - utc_now) <= 30, 'DEVELOPMENT_CLOCK_AUTHORITY_MISMATCH')
+        elapsed_utc = max(elapsed_utc, trusted_utc - started_utc)
+        _require(0 <= elapsed_utc < SCOPE_SECONDS, 'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
+        deadline = monotonic_now + SCOPE_SECONDS - elapsed_utc
+    else:
+        _require(0 <= elapsed_mono < SCOPE_SECONDS, 'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
+        deadline = min(started_mono + SCOPE_SECONDS, monotonic_now + SCOPE_SECONDS - elapsed_utc)
+    return deadline, {'authority': 'GITHUB_HTTPS_DATE' if epoch_changed else 'LOCAL_UTC_AND_MONOTONIC',
+        'clock_epoch_changed': epoch_changed, 'observed_monotonic': monotonic_now,
+        'observed_utc_seconds': utc_now, 'trusted_utc_upper_bound': trusted_utc,
+        'original_expires_utc_seconds': started_utc + SCOPE_SECONDS,
+        'deadline_monotonic': deadline}
+
+
 def _require(value, code='DEVELOPMENT_CAPTURE_SCOPE_INVALID'):
     if not value:
         raise DevelopmentScopeError(code)
@@ -67,7 +123,7 @@ def _lock(descriptor):
 
 
 class DevelopmentCaptureReservation:
-    __slots__ = ('path', 'index', 'deadline', '_holds', '_closed')
+    __slots__ = ('path', 'index', 'deadline', 'time_observation', '_holds', '_closed')
 
     def __init__(self, *_args, **_kwargs):
         raise TypeError('Development capture reservations are issued only by reserve')
@@ -144,11 +200,7 @@ def reserve_development_capture(authorization_id, *, material_identity):
                  and type(value['max_captures']) is int and value['max_captures'] == MAX_CAPTURES
                  and type(value['scope_seconds']) is int and value['scope_seconds'] == SCOPE_SECONDS)
         _require(value['material_identity'] == material_identity, 'DEVELOPMENT_CAPTURE_MATERIAL_CHANGED')
-        for name, current in (('created_monotonic', monotonic_now), ('created_utc_seconds', utc_now)):
-            started = value[name]
-            _require(type(started) in (int, float) and math.isfinite(started)
-                     and 0 <= current - started < SCOPE_SECONDS,
-                     'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
+        deadline, time_observation = scope_deadline(value, monotonic_now=monotonic_now, utc_now=utc_now)
         children = {p.name for p in LEDGER.iterdir()}
         _require(children <= {'scope.json', 'owner.lock', *SLOTS})
         used = [slot in children for slot in SLOTS]
@@ -157,12 +209,13 @@ def reserve_development_capture(authorization_id, *, material_identity):
             path = LEDGER / slot
             _require(path.is_dir() and not path.is_symlink() and not path.is_junction())
         _require(sum(used) < MAX_CAPTURES, 'DEVELOPMENT_CAPTURE_BUDGET_EXHAUSTED')
+        _require(time.monotonic() < deadline, 'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
         index = sum(used)
         path = create_windows_private_named_directory(LEDGER, name=SLOTS[index])
         holds.enter_context(hold_windows_private_working_directory(path))
         reservation = object.__new__(DevelopmentCaptureReservation)
         reservation.path, reservation.index = path, index + 1
-        reservation.deadline = value['created_monotonic'] + SCOPE_SECONDS
+        reservation.deadline, reservation.time_observation = deadline, time_observation
         reservation._holds, reservation._closed = holds.pop_all(), False
         return reservation
     except DevelopmentScopeError:
