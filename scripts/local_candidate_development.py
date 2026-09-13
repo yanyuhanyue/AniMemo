@@ -11,6 +11,7 @@ from scripts.candidate_batch_session import CandidateBatch
 from scripts.development_capture_scope import AUTHORIZATION, DevelopmentScopeError
 from scripts.development_plan import from_material_plan
 from scripts.development_source import acquire_development_source, require_material_compatibility
+from scripts.development_session_owner import DevelopmentOwnerError
 from scripts.guest_console_capture import ConsoleCaptureError, WindowsConsoleCapture
 from scripts.guest_sudo_session import ControllerFailure
 from scripts.isolated_guest_validation import _check_checkout
@@ -19,12 +20,12 @@ SCHEMA = 'animemo.local-installer-development-batch-report/v1'
 
 
 def _failure(error):
-    if isinstance(error, (h.CandidateHarnessError, ControllerFailure, DevelopmentScopeError, ConsoleCaptureError)):
+    if isinstance(error, (h.CandidateHarnessError, ControllerFailure, DevelopmentScopeError, ConsoleCaptureError, DevelopmentOwnerError)):
         return getattr(error, 'code', str(error))
     return 'DEVELOPMENT_EXECUTION_INTERRUPTED_OR_UNCLASSIFIED'
 
 
-def run(args):
+def run(args, *, session_owner=None):
     result = {'schema': SCHEMA, 'purpose': 'LOCAL_INSTALLER_DEVELOPMENT', 'status': 'ERROR',
         'started_at': datetime.now(timezone.utc).isoformat(), 'all_profiles_pass': False,
         'candidate_acceptance_authority_granted': False, 'publish_authorized': False,
@@ -33,6 +34,10 @@ def run(args):
         'cleanup_errors': [], 'source_preserved': False}
     provider = None
     try:
+        if session_owner is not None:
+            from scripts.development_session_owner import DevelopmentSessionOwner
+            if type(session_owner) is not DevelopmentSessionOwner or session_owner.closed or not args.execute:
+                raise ControllerFailure('DEVELOPMENT_SESSION_OWNER_INVALID')
         if args.authorization_id is not None and (not args.execute or args.authorization_id != AUTHORIZATION):
             raise ControllerFailure('DEVELOPMENT_CAPTURE_AUTHORIZATION_INVALID')
         if args.execute and (args.authorization_id != AUTHORIZATION or args.result is None):
@@ -66,7 +71,8 @@ def run(args):
                         if not args.execute:
                             result['status'] = 'PLAN_ONLY'
                         else:
-                            batch = CandidateBatch(provider, plan, authorization_id=args.authorization_id)
+                            batch = CandidateBatch(provider, plan, authorization_id=args.authorization_id,
+                                development_owner=session_owner)
                             provider._candidate_batch = batch
                             try:
                                 for index, profile in enumerate(plan.profiles):
@@ -124,8 +130,13 @@ def run(args):
         if result['status'] == 'PASS':
             session = result['credential_session']
             roles = [role for profile in session['profiles'].values() for role in profile.values()]
-            if (session['session_capture_attempts'] != 1 or session['session_capture_completed'] != 1
-                    or session['secret_state'] != 'CLOSED' or len(roles) != 9
+            capture_valid = (session['session_capture_attempts'] == session['session_capture_completed'] == 1
+                if session_owner is None else session.get('development_owner_id') == session_owner.record['owner_id']
+                and session.get('owner_capture_completed') == 1
+                and session['session_capture_attempts'] == session['session_capture_completed']
+                and session['session_capture_attempts'] in (0, 1))
+            if (not capture_valid
+                    or session['secret_state'] != ('CLOSED' if session_owner is None else 'ROUND_CAPABILITY_CLOSED') or len(roles) != 9
                     or any(role['delivery_attempts'] != 1 or role['delivery_completed'] != 1
                            or role['operation_result'] != 'PASS' for role in roles)):
                 result['status'] = 'ERROR'

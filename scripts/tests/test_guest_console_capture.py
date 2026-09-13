@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 import types
 import unittest
 from unittest import mock
@@ -52,6 +53,7 @@ class ConsoleFixture:
             GetCurrentProcessId=Function(lambda: self.current_pid),
             FlushConsoleInputBuffer=Function(self.flush),
             ReadConsoleW=Function(self.read),
+            CancelIoEx=Function(lambda handle, overlapped: 1),
             WriteConsoleW=Function(self.write),
             GetConsoleScreenBufferInfo=Function(self.screen_info),
             FillConsoleOutputCharacterW=Function(self.fill),
@@ -141,6 +143,37 @@ class ConsoleFixture:
 
 
 class ConsoleCaptureTests(unittest.TestCase):
+    def test_owner_cancellation_unblocks_read_without_reading_or_injecting_input(self):
+        api = ConsoleFixture('')
+        cancelled, blocked, released = threading.Event(), threading.Event(), threading.Event()
+        captured_buffers = []
+        def read(handle, value, size, count, reserved):
+            captured_buffers.append(value)
+            blocked.set()
+            self.assertTrue(released.wait(2))
+            count._obj.value = 0
+            return 1  # Console cancellation may return success with no characters.
+        def cancel(handle, overlapped):
+            self.assertEqual(handle, api.handles[c.STD_INPUT_HANDLE])
+            self.assertIsNone(overlapped)
+            released.set()
+            return 1
+        api.kernel32.ReadConsoleW = Function(read)
+        api.kernel32.CancelIoEx = Function(cancel)
+        def expire():
+            if blocked.wait(2):
+                cancelled.set()
+        timer = threading.Thread(target=expire)
+        timer.start()
+        try:
+            with self.assertRaisesRegex(c.ConsoleCaptureError, 'CREDENTIAL_CAPTURE_CANCELLED'):
+                c.WindowsConsoleCapture(_api=api).capture(cancelled=cancelled)
+        finally:
+            released.set()
+            timer.join(timeout=2)
+        self.assertEqual(api.mode, api.original_mode)
+        self.assertTrue(all(buffer[0] == 0 for buffer in captured_buffers))
+
     def assert_mutable_buffers_wiped(self, channel, expected_code):
         buffers = []
         real_memset = ctypes.memset

@@ -166,6 +166,43 @@ def _lock(descriptor):
         raise DevelopmentScopeError('DEVELOPMENT_CAPTURE_SCOPE_BUSY') from None
 
 
+class DevelopmentScopeOwner:
+    """Keep the existing exclusive ledger lock throughout one memory session."""
+    def __init__(self, *_args, **_kwargs):
+        raise TypeError('Scope owners are acquired from the fixed ledger')
+
+    def __reduce__(self):
+        raise TypeError('Scope owners cannot be serialized')
+
+    def require_open(self):
+        _require(not self._closed and self._root == LEDGER, 'DEVELOPMENT_CAPTURE_SCOPE_CLOSED')
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            self._holds.close()
+
+
+def acquire_development_scope_owner():
+    _require(os.name == 'nt', 'DEVELOPMENT_NATIVE_WINDOWS_REQUIRED')
+    holds = ExitStack()
+    try:
+        _require(LEDGER.is_dir() and not LEDGER.is_symlink() and not LEDGER.is_junction())
+        holds.enter_context(hold_windows_private_path_chain(LEDGER, allow_leaf_child_writes=True))
+        descriptor = _closed_file(LEDGER / 'owner.lock', flags=os.O_RDWR)
+        holds.callback(os.close, descriptor)
+        _lock(descriptor)
+        owner = object.__new__(DevelopmentScopeOwner)
+        owner._root, owner._closed, owner._holds = LEDGER, False, holds.pop_all()
+        return owner
+    except DevelopmentScopeError:
+        raise
+    except Exception:
+        raise DevelopmentScopeError('DEVELOPMENT_CAPTURE_SCOPE_UNAVAILABLE') from None
+    finally:
+        holds.close()
+
+
 class DevelopmentCaptureReservation:
     __slots__ = ('path', 'index', 'deadline', 'time_observation', '_holds', '_closed')
 
@@ -185,7 +222,7 @@ class DevelopmentCaptureReservation:
             self._holds.close()
 
 
-def reserve_development_capture(authorization_id, *, material_identity):
+def reserve_development_capture(authorization_id, *, material_identity, scope_owner=None):
     """Reserve a base or explicitly added round under an immutable deadline.
 
     Call only after the exact Guest, source and material checks. Cancelled,
@@ -207,16 +244,20 @@ def reserve_development_capture(authorization_id, *, material_identity):
     holds = ExitStack()
     try:
         created = False
-        if not LEDGER.exists():
+        if scope_owner is not None:
+            _require(type(scope_owner) is DevelopmentScopeOwner)
+            scope_owner.require_open()
+        elif not LEDGER.exists():
             try:
                 create_windows_private_named_directory(LEDGER.parent, name=LEDGER.name)
                 created = True
             except Exception:
                 _require(LEDGER.is_dir(), 'DEVELOPMENT_CAPTURE_SCOPE_UNAVAILABLE')
-        holds.enter_context(hold_windows_private_path_chain(LEDGER, allow_leaf_child_writes=True))
-        descriptor = _closed_file(LEDGER / 'owner.lock', flags=os.O_RDWR | os.O_CREAT)
-        holds.callback(os.close, descriptor)
-        _lock(descriptor)
+        if scope_owner is None:
+            holds.enter_context(hold_windows_private_path_chain(LEDGER, allow_leaf_child_writes=True))
+            descriptor = _closed_file(LEDGER / 'owner.lock', flags=os.O_RDWR | os.O_CREAT)
+            holds.callback(os.close, descriptor)
+            _lock(descriptor)
         metadata = LEDGER / 'scope.json'
         monotonic_now, utc_now = time.monotonic(), time.time()
         if created:

@@ -79,6 +79,7 @@ class _ConsoleAPI:
                 (self.user32.IsWindowVisible, [HANDLE], BOOL),
                 (self.kernel32.FlushConsoleInputBuffer, [HANDLE], BOOL),
                 (self.kernel32.ReadConsoleW, [HANDLE, LPWCHAR, DWORD, LPDWORD, ctypes.c_void_p], BOOL),
+                (self.kernel32.CancelIoEx, [HANDLE, ctypes.c_void_p], BOOL),
                 (self.kernel32.WriteConsoleW, [HANDLE, LPWCHAR, DWORD, LPDWORD, ctypes.c_void_p], BOOL),
                 (self.kernel32.GetConsoleScreenBufferInfo, [HANDLE, ctypes.POINTER(CONSOLE_SCREEN_BUFFER_INFO)], BOOL),
                 (self.kernel32.FillConsoleOutputCharacterW, [HANDLE, ctypes.c_wchar, DWORD, COORD, LPDWORD], BOOL),
@@ -192,7 +193,7 @@ class WindowsConsoleCapture:
                 or written.value != 1 or not kernel.SetConsoleCursorPosition(stdout, position)):
             raise ConsoleCaptureError("CREDENTIAL_CONSOLE_OUTPUT_FAILED")
 
-    def capture(self) -> bytearray:
+    def capture(self, *, cancelled=None) -> bytearray:
         """Read once into mutable storage; no argv/env/file/stdin-stream input."""
         with self._lock:
             if self._attempted:
@@ -203,7 +204,11 @@ class WindowsConsoleCapture:
         character = (WCHAR * 1)()
         restore = None
         error = None
+        finished = threading.Event()
+        cancellation_thread = None
         try:
+            if cancelled is not None and type(cancelled) is not threading.Event:
+                raise ConsoleCaptureError('CREDENTIAL_CAPTURE_CANCELLED')
             stdin, stdout, window, original_mode, output_mode = self._snapshot()
             kernel = self._api.kernel32
             hidden_mode = original_mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)
@@ -213,13 +218,27 @@ class WindowsConsoleCapture:
                 raise ConsoleCaptureError("CREDENTIAL_CONSOLE_MODE_FAILED")
             if not kernel.FlushConsoleInputBuffer(stdin):
                 raise ConsoleCaptureError("CREDENTIAL_CONSOLE_INPUT_FAILED")
+            if cancelled is not None:
+                def cancel_pending_read():
+                    # This unique Console handle belongs to this process.
+                    # Cancellation never reads input or terminates a thread.
+                    while not finished.wait(0.05):
+                        if cancelled.is_set():
+                            kernel.CancelIoEx(stdin, None)
+                cancellation_thread = threading.Thread(target=cancel_pending_read, daemon=True)
+                cancellation_thread.start()
             self._write_public(stdout, _PROMPT)
             length = 0
             while True:
+                if cancelled is not None and cancelled.is_set():
+                    raise ConsoleCaptureError('CREDENTIAL_CAPTURE_CANCELLED')
                 if self._snapshot() != (stdin, stdout, window, hidden_mode, output_mode):
                     raise ConsoleCaptureError("CREDENTIAL_CONSOLE_CHANGED")
                 count = DWORD()
-                if not kernel.ReadConsoleW(stdin, character, 1, ctypes.byref(count), None) or count.value != 1:
+                read_ok = kernel.ReadConsoleW(stdin, character, 1, ctypes.byref(count), None)
+                if cancelled is not None and cancelled.is_set():
+                    raise ConsoleCaptureError('CREDENTIAL_CAPTURE_CANCELLED')
+                if not read_ok or count.value != 1:
                     raise ConsoleCaptureError("CREDENTIAL_CONSOLE_INPUT_FAILED")
                 if self._snapshot() != (stdin, stdout, window, hidden_mode, output_mode):
                     raise ConsoleCaptureError("CREDENTIAL_CONSOLE_CHANGED")
@@ -260,6 +279,9 @@ class WindowsConsoleCapture:
         except BaseException:
             error = "CREDENTIAL_CHANNEL_UNAVAILABLE"
         finally:
+            finished.set()
+            if cancellation_thread is not None:
+                cancellation_thread.join(timeout=1)
             ctypes.memset(value, 0, ctypes.sizeof(value))
             ctypes.memset(character, 0, ctypes.sizeof(character))
             if restore is not None:
