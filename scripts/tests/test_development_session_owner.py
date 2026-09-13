@@ -14,6 +14,7 @@ from unittest import mock
 from scripts import candidate_batch_session as batches
 from scripts import candidate_guest_session as guests
 from scripts import development_capture_scope as scope
+from scripts import development_controller as controller
 from scripts import development_session_owner as owners
 from scripts.tests import test_local_candidate_development as development_fixtures
 
@@ -58,6 +59,19 @@ class DevelopmentMemoryOwnerTests(unittest.TestCase):
         with batch.operation('BOOTSTRAP', plan.profiles[0]), redirect_stdout(io.StringIO()):
             batch.capture_after_bootstrap_observation(plan.profiles[0])
         return batch
+
+    def test_deadline_clears_owner_while_status_replacement_is_blocked(self):
+        self.begin(9)
+        failure = OSError('synthetic public status sharing error')
+        failure.winerror = 5
+        self.owner._deadline = time.monotonic() + 0.15
+        with mock.patch.object(controller.os, 'replace', side_effect=failure):
+            controller.publish_status(scope.LEDGER, {'synthetic': True},
+                stopped=threading.Event(), cancelled=lambda: self.owner.closed)
+        self.assertTrue(self.owner.closed)
+        self.assertEqual(self.owner.record['close_reason'], 'DEVELOPMENT_SESSION_EXPIRED')
+        self.assertEqual(self.secret, b'')
+        (scope.LEDGER / 'status.next.json').unlink()
 
     def completed_failure(self, batch):
         # The producer/Guest protocol tests exercise delivery; this test keeps

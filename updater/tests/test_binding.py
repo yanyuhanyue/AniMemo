@@ -55,6 +55,9 @@ class AdoptionReleaseSource:
 
 
 class AdoptionDeployment:
+    def __init__(self):
+        self.plugin_inspection_modes = []
+
     def verify_deployment_contract(self, target):
         return None
 
@@ -69,7 +72,8 @@ class AdoptionDeployment:
             ],
         }
 
-    def inspect_enabled_plugin_apis(self, target):
+    def inspect_enabled_plugin_apis(self, target, *, running=False):
+        self.plugin_inspection_modes.append(running)
         return {2}
 
 
@@ -222,6 +226,7 @@ class InitialAdoptionRecoveryTests(unittest.TestCase):
                 release_identity_from_manifest(target),
             )
             self.assertIsNone(runtime.agent.operations.recovery_block())
+            self.assertEqual(deployment.plugin_inspection_modes, [True, True])
 
 
 if __name__ == "__main__":

@@ -76,6 +76,26 @@ def _write_new(path, value):
     return 'sha256:' + hashlib.sha256(raw).hexdigest()
 
 
+def publish_status(control_root, value, *, stopped, cancelled=lambda: False):
+    temporary = control_root / 'status.next.json'
+    _write_new(temporary, value)
+    # Windows returns ACCESS_DENIED for an ordinary read handle without
+    # FILE_SHARE_DELETE, as well as the more specific sharing/lock errors.
+    # Retry only publication of these already-fsynced public bytes. Persistent
+    # access failures and all other errors still close the owner in serve().
+    for attempt in range(51):
+        if cancelled():
+            return
+        try:
+            os.replace(temporary, control_root / 'status.json')
+            return
+        except OSError as error:
+            if getattr(error, 'winerror', None) not in {5, 32, 33} or attempt == 50:
+                raise
+            if stopped.wait(0.1):
+                return
+
+
 def stable_identities(checkout):
     return {name: hashlib.sha256(_read(checkout / name)).hexdigest() for name in STABLE_FILES}
 
@@ -224,6 +244,59 @@ def round_modules(checkout, source_inventory, stable):
         importlib.invalidate_caches()
 
 
+def validate_previous_session(previous_path):
+    """Accept initial cancelled round 8 or a cleaned status-failure restart.
+
+    This is public history validation, not a credential or budget grant. A new
+    owner must still acquire the original ledger and match its spent prefix.
+    """
+    raw = _read(previous_path)
+    previous = _json(raw)
+    _require(previous.get('status') == 'FAIL' and previous.get('source_preserved') is True
+        and previous.get('cleanup_errors') == [] and previous.get('private_material_root_released') is True
+        and previous.get('private_execution_source_root_released') is True)
+    session = previous['credential_session']
+    if previous.get('failure_code') == 'CREDENTIAL_CAPTURE_CANCELLED':
+        _require(session.get('development_capture_index') == 8
+            and session.get('session_capture_attempts') == 1 and session.get('session_capture_completed') == 0)
+        return raw, previous, 8
+    _require(previous.get('failure_code') == 'DEVELOPMENT_SESSION_CLOSED'
+        and session.get('session_capture_attempts') == session.get('session_capture_completed') == 0
+        and 'development_capture_index' not in session)
+    prior_owner = _json(_read(previous_path.parent / 'owner-final.json', 8192))
+    _require(prior_owner.get('schema') == 'animemo.local-development-memory-owner/v1'
+        and prior_owner.get('state') == 'CLOSED'
+        and prior_owner.get('close_reason') == 'DEVELOPMENT_CONTROLLER_STATUS_FAILED'
+        and prior_owner.get('secret_cleanup') == 'BEST_EFFORT_COMPLETED'
+        and prior_owner.get('capture_attempts') == prior_owner.get('capture_completed') == 1
+        and prior_owner.get('owner_id') == session.get('development_owner_id')
+        and type(prior_owner.get('last_reserved_round')) is int
+        and 9 <= prior_owner['last_reserved_round'] < 12)
+    profiles = ('FRESH_BASE', 'DOCKER_BASE', 'RUNTIME_BASE_OFFLINE')
+    roles = ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO', 'CANDIDATE_WORKLOAD')
+    _require(set(session['profiles']) == set(profiles)
+        and all(set(session['profiles'][profile]) == set(roles) for profile in profiles)
+        and all(role.get('delivery_attempts') == role.get('delivery_completed') == 0
+            and role.get('operation_result') == 'NOT_RUN'
+            and role.get('target_verified') is False and role.get('lease_verified') is False
+            for profile in session['profiles'].values() for role in profile.values()))
+    _require(set(previous['profile_results']) == set(profiles)
+        and previous['profile_results']['FRESH_BASE']['status'] == 'ERROR'
+        and all(previous['profile_results'][profile]['status'] == 'NOT_RUN_SHARED_BLOCKER' for profile in profiles[1:])
+        and set(previous['profile_operations']) == {'FRESH_BASE'})
+    operation = previous['profile_operations']['FRESH_BASE']
+    _require(operation.get('power_state') == 'STOPPED' and operation.get('clone_disposition') == 'QUARANTINED'
+        and operation.get('cleanup_errors') == [] and all(operation.get(key) is True
+            for key in ('session_keys_removed', 'known_hosts_removed', 'lease_released')))
+    _require(all(not Path(previous[key]).exists() for key in ('private_material_root', 'private_execution_source_root')))
+    material = prior_owner['material_identity']
+    plan = previous['plan']
+    _require(material['verified_candidate_digest'] == plan['verifiedCandidateDigest']
+        and material['source_sha'] == plan['materialSourceSha'] and material['source_tree'] == plan['materialSourceTree']
+        and material['qualification_run_id'] == plan['qualificationRunId'])
+    return raw, previous, prior_owner['last_reserved_round']
+
+
 def serve(control_root, previous_result):
 
     from release.formal_windows_pretrust import (
@@ -241,14 +314,7 @@ def serve(control_root, previous_result):
     stable = stable_identities(checkout)
     common = _git(checkout, 'rev-parse', '--git-common-dir').decode('utf-8').strip()
     common_directory = (checkout / common).resolve(strict=True)
-    previous_raw = _read(previous_result)
-    previous = _json(previous_raw)
-    _require(previous.get('status') == 'FAIL' and previous.get('source_preserved') is True
-        and previous.get('cleanup_errors') == [] and previous.get('private_material_root_released') is True
-        and previous.get('private_execution_source_root_released') is True)
-    _require(previous['credential_session']['development_capture_index'] == 8
-        and previous['credential_session']['session_capture_completed'] == 0
-        and previous['failure_code'] == 'CREDENTIAL_CAPTURE_CANCELLED')
+    previous_raw, previous, expected_spent = validate_previous_session(previous_result)
     WindowsConsoleCapture().preflight()
     material = _json(_read(scope.LEDGER / 'scope.json', 4096))['material_identity']
     _require(material['verified_candidate_digest'] == previous['plan']['verifiedCandidateDigest']
@@ -265,19 +331,29 @@ def serve(control_root, previous_result):
     try:
         with hold_windows_private_path_chain(control_root, allow_leaf_child_writes=True):
             owner = acquire_development_session_owner(material_identity=material)
+            _require(owner.record['last_reserved_round'] == expected_spent)
             def status():
                 try:
-                    while not done.wait(0.5):
+                    while not owner.closed and not done.wait(0.5):
                         value = {'schema': 'animemo.local-development-controller-status/v1',
                             'owner': owner.record, 'previous_result_sha256': previous_digest,
                             'controller_source_sha': source_sha, 'controller_source_tree': source_tree,
                             'stable_source_identities': stable}
-                        temporary = control_root / 'status.next.json'
-                        _write_new(temporary, value)
-                        os.replace(temporary, control_root / 'status.json')
-                except BaseException:  # noqa: BLE001 - status failure must close the memory owner
+                        publish_status(control_root, value, stopped=done, cancelled=lambda: owner.closed)
+                except BaseException as error:  # noqa: BLE001 - status failure must close the memory owner
                     owner.close('DEVELOPMENT_CONTROLLER_STATUS_FAILED')
                     done.set()
+                    try:
+                        _write_new(control_root / 'status-failure.json', {
+                            'schema': 'animemo.local-development-status-failure/v1',
+                            'error_type': type(error).__name__ if type(error).__name__ in {
+                                'PermissionError', 'FileExistsError', 'FileNotFoundError',
+                                'OSError', 'DevelopmentOwnerError'} else 'UNCLASSIFIED',
+                            'winerror': getattr(error, 'winerror', None) if type(getattr(error, 'winerror', None)) is int else None,
+                            'errno': getattr(error, 'errno', None) if type(getattr(error, 'errno', None)) is int else None,
+                        })
+                    except BaseException:  # noqa: BLE001, S110 - diagnostics cannot delay owner cleanup
+                        pass
             status_thread = threading.Thread(target=status, daemon=True)
             status_thread.start()
             while not owner.closed:

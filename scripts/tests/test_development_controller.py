@@ -1,14 +1,117 @@
+import copy
 import hashlib
 import json
+import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts import development_controller as controller
 from scripts import development_session_owner as owners
 
 
 class DevelopmentControllerTests(unittest.TestCase):
+    def test_status_failure_restart_requires_closed_owner_zero_use_and_full_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profiles = ('FRESH_BASE', 'DOCKER_BASE', 'RUNTIME_BASE_OFFLINE')
+            role = {'delivery_attempts': 0, 'delivery_completed': 0, 'operation_result': 'NOT_RUN',
+                'target_verified': False, 'lease_verified': False}
+            material = {'verified_candidate_digest': 'sha256:' + 'a' * 64,
+                'source_sha': 'b' * 40, 'source_tree': 'c' * 40, 'qualification_run_id': 123}
+            owner = {'schema': 'animemo.local-development-memory-owner/v1', 'state': 'CLOSED',
+                'close_reason': 'DEVELOPMENT_CONTROLLER_STATUS_FAILED', 'secret_cleanup': 'BEST_EFFORT_COMPLETED',
+                'capture_attempts': 1, 'capture_completed': 1, 'owner_id': 'd' * 32, 'last_reserved_round': 9,
+                'material_identity': material}
+            previous = {'status': 'FAIL', 'source_preserved': True, 'cleanup_errors': [],
+                'private_material_root_released': True, 'private_execution_source_root_released': True,
+                'private_material_root': str(root / 'absent-material'), 'private_execution_source_root': str(root / 'absent-source'),
+                'failure_code': 'DEVELOPMENT_SESSION_CLOSED', 'credential_session': {
+                    'session_capture_attempts': 0, 'session_capture_completed': 0, 'development_owner_id': owner['owner_id'],
+                    'profiles': {profile: {name: dict(role) for name in ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO', 'CANDIDATE_WORKLOAD')}
+                        for profile in profiles}},
+                'profile_results': {profile: {'status': 'ERROR' if profile == 'FRESH_BASE' else 'NOT_RUN_SHARED_BLOCKER'}
+                    for profile in profiles},
+                'profile_operations': {'FRESH_BASE': {'power_state': 'STOPPED', 'clone_disposition': 'QUARANTINED',
+                    'cleanup_errors': [], 'session_keys_removed': True, 'known_hosts_removed': True, 'lease_released': True}},
+                'plan': {'verifiedCandidateDigest': material['verified_candidate_digest'], 'materialSourceSha': material['source_sha'],
+                    'materialSourceTree': material['source_tree'], 'qualificationRunId': material['qualification_run_id']}}
+            result = root / 'round-0010-result.json'
+            def validate(report, final):
+                result.write_text(json.dumps(report), encoding='utf-8')
+                (root / 'owner-final.json').write_text(json.dumps(final), encoding='utf-8')
+                return controller.validate_previous_session(result)
+            self.assertEqual(validate(previous, owner)[2], 9)
+            for key, value in (('state', 'READY'), ('close_reason', 'DEVELOPMENT_SESSION_EXPIRED'),
+                    ('secret_cleanup', 'UNKNOWN'), ('last_reserved_round', 12), ('owner_id', 'e' * 32)):
+                with self.subTest(key=key), self.assertRaises(owners.DevelopmentOwnerError):
+                    validate(previous, {**owner, key: value})
+            for path, value in (
+                (('credential_session', 'session_capture_attempts'), 1),
+                (('credential_session', 'profiles', 'FRESH_BASE', 'BOOTSTRAP_ROTATION', 'delivery_attempts'), 1),
+                (('profile_operations', 'FRESH_BASE', 'power_state'), 'RUNNING'),
+                (('profile_operations', 'FRESH_BASE', 'lease_released'), False),
+                (('profile_results', 'DOCKER_BASE', 'status'), 'PASS'),
+                (('plan', 'materialSourceSha'), 'f' * 40),
+            ):
+                changed = copy.deepcopy(previous)
+                entry = changed
+                for part in path[:-1]:
+                    entry = entry[part]
+                entry[path[-1]] = value
+                with self.subTest(path=path), self.assertRaises(owners.DevelopmentOwnerError):
+                    validate(changed, owner)
+            (root / 'absent-source').mkdir()
+            with self.assertRaises(owners.DevelopmentOwnerError):
+                validate(previous, owner)
+
+    def test_status_retry_is_bounded_and_unknown_errors_are_not_retried(self):
+        for code, attempts in ((5, 51), (32, 51), (33, 51), (2, 1), (None, 1)):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                failure = OSError('synthetic status replacement error')
+                if code is not None:
+                    failure.winerror = code
+                stopped = mock.Mock()
+                stopped.wait.return_value = False
+                with (
+                    mock.patch.object(controller.os, 'replace', side_effect=failure) as replace,
+                    self.assertRaises(OSError),
+                ):
+                    controller.publish_status(Path(directory), {'synthetic': True}, stopped=stopped)
+                self.assertEqual(replace.call_count, attempts)
+                self.assertEqual(stopped.wait.call_count, attempts - 1)
+
+    def test_status_retry_stops_without_rewriting_or_a_tail_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            failure = OSError('synthetic sharing error')
+            failure.winerror = 5
+            stopped = threading.Event()
+            stopped.set()
+            root = Path(directory)
+            with mock.patch.object(controller.os, 'replace', side_effect=failure) as replace:
+                controller.publish_status(root, {'synthetic': True}, stopped=stopped)
+            self.assertEqual(replace.call_count, 1)
+            self.assertEqual(json.loads((root / 'status.next.json').read_bytes()), {'synthetic': True})
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows atomic replacement sharing semantics')
+    def test_status_publication_survives_a_brief_ordinary_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'status.json'
+            target.write_bytes(b'{"synthetic":1}\n')
+            reader = target.open('rb')
+            released = threading.Timer(0.2, reader.close)
+            released.start()
+            try:
+                controller.publish_status(root, {'synthetic': 2}, stopped=threading.Event())
+                self.assertEqual(json.loads(target.read_bytes()), {'synthetic': 2})
+                self.assertFalse((root / 'status.next.json').exists())
+            finally:
+                released.join()
+                reader.close()
+
     def inventory(self, checkout):
         return {path.relative_to(checkout).as_posix(): hashlib.sha1(
             b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
