@@ -1270,14 +1270,17 @@ class ImmutableComposeDeployment:
             raise StateError("Restore integrity inspection failed")
         return dict(checks)
 
-    def inspect_enabled_plugin_apis(self, manifest: dict[str, object]) -> set[int]:
+    def inspect_enabled_plugin_apis(
+        self, manifest: dict[str, object], *, running: bool = False
+    ) -> set[int]:
+        # Adoption/Doctor observe an already verified running API. Migration
+        # and recovery can have stopped it and still need the target image.
+        invocation = ('exec', '-T') if running else (
+            'run', '--pull', 'never', '--rm', '--no-deps'
+        )
         result = self._compose(
             manifest,
-            "run",
-            "--pull",
-            "never",
-            "--rm",
-            "--no-deps",
+            *invocation,
             "api",
             "python",
             "manage.py",

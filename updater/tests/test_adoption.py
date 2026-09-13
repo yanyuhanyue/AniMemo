@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from dataclasses import replace
 
 from durability.instance import (
     LocatorError,
@@ -14,8 +15,10 @@ from durability.instance import (
 )
 from scripts.tests.test_durability_instance import locator_payload
 from updater.errors import StateError
+from installer.production import LocalDockerCommandRunner
+from updater.deployment import CANDIDATE_NETWORK_OVERRIDE_TEXT, HostPaths, ImmutableComposeDeployment
 from updater.runtime import HostAgentRuntime, InitialAdoptionRequest
-from updater.tests.test_deployment import manifest
+from updater.tests.test_deployment import FakeRunner, manifest
 
 
 class ReleaseSourceAdapter:
@@ -51,7 +54,9 @@ class RunningDeploymentAdapter:
             ],
         }
 
-    def inspect_enabled_plugin_apis(self, target):
+    def inspect_enabled_plugin_apis(self, target, *, running=False):
+        if not running:
+            raise StateError('Adoption must observe the verified running API')
         return {2}
 
 
@@ -65,6 +70,49 @@ def adoption_request(target: dict[str, object]) -> InitialAdoptionRequest:
 
 
 class InitialAdoptionTests(unittest.TestCase):
+    def test_adoption_keeps_installer_network_and_records_only_running_api_query(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = HostPaths.testing(app=root / 'app', data=root / 'data', state=root / 'state')
+            private = paths.data_root / 'private'
+            private.mkdir(parents=True, mode=0o700)
+            override = private / 'candidate-network-isolation.yml'
+            override.write_text(CANDIDATE_NETWORK_OVERRIDE_TEXT, encoding='utf-8')
+            override.chmod(0o600)
+            delegate = FakeRunner()
+            runner = LocalDockerCommandRunner(delegate)
+            deployment = ImmutableComposeDeployment(paths, runner=runner, candidate_network_override=override)
+            runtime = HostAgentRuntime._build(paths=paths, socket_path=root / 'run/updater.sock',
+                bootstrap_manifest=root / 'unused.json', background=False, deployment=deployment)
+            target = manifest()
+            contracts = {key + 'Contract': target['compatibility'][key]['contract']
+                         for key in ('database', 'configuration')}
+            with (mock.patch.object(deployment, 'verify_deployment_contract'),
+                  mock.patch.object(deployment, 'verify_health'),
+                  mock.patch.object(deployment, 'inspect_runtime_contracts', return_value=contracts)):
+                receipt = runtime.adopt_initial_release(adoption_request(target), verifier=lambda _: target)
+            self.assertIs(runtime.deployment, deployment)
+            self.assertIs(runtime.agent.executor.deployment, deployment)
+            self.assertEqual(runtime.agent.operations.get(receipt.operation_id)['status'], 'succeeded')
+            self.assertEqual(len(delegate.calls), 1)
+            argv, _ = delegate.calls[0]
+            self.assertEqual(argv[:3], ('/usr/bin/docker', '--host', 'unix:///var/run/docker.sock'))
+            self.assertIn(str(override), argv)
+            self.assertEqual(argv[-6:], ('exec', '-T', 'api', 'python', 'manage.py', 'list_enabled_plugin_apis'))
+            self.assertEqual(len(runner.completed_commands), 1)
+            self.assertEqual(runtime.runtime_state.read()['enabledPluginApis'], [2])
+
+    def test_adoption_deployment_must_match_runtime_paths_and_managed_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = HostPaths.testing(app=root / 'app', data=root / 'data', state=root / 'state')
+            invalid = (object(), ImmutableComposeDeployment(replace(paths, instance_id='different')),
+                       ImmutableComposeDeployment(paths, managed_environment={'CONFIG': 'different'}))
+            for deployment in invalid:
+                with self.subTest(deployment=type(deployment).__name__), self.assertRaisesRegex(StateError, 'differs from the bound runtime'):
+                    HostAgentRuntime._build(paths=paths, socket_path=root / 'run/updater.sock',
+                        bootstrap_manifest=root / 'unused.json', background=False, deployment=deployment)
+
     def make_runtime(self, root: Path, target: dict[str, object]):
         runtime = HostAgentRuntime.testing(
             app_root=root / "app",

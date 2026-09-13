@@ -38,6 +38,35 @@ def successful_frames(operation=OPERATION, padding=None):
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_fault_keeps_command_caller_and_limits_nested_tracebacks(self):
+        command = {'__name__': 'updater.commands', 'SECRET': SENTINEL}
+        deployment = {'__name__': 'updater.deployment'}
+        runtime = {'__name__': 'updater.runtime'}
+        exec(compile('def fail():\n raise ValueError(SECRET)\n',
+            'X:/private-sentinel/updater/commands.py', 'exec'), command)
+        deployment['command'] = command['fail']
+        exec(compile('def inspect():\n command()\n',
+            'X:/private-sentinel/updater/deployment.py', 'exec'), deployment)
+        runtime['inspect'] = deployment['inspect']
+        exec(compile('def adopt():\n try:\n  inspect()\n except ValueError as error:\n  raise RuntimeError("private-wrapper") from error\n',
+            'X:/private-sentinel/updater/runtime.py', 'exec'), runtime)
+        with tempfile.TemporaryFile() as stream:
+            writer = d.DiagnosticWriter(stream.fileno(), OPERATION)
+            try:
+                runtime['adopt']()
+            except RuntimeError as error:
+                writer.fault(error)
+            stream.seek(0)
+            reader = d.DiagnosticReader(OPERATION)
+            while item := d.read_frame(stream):
+                reader.accept(*item)
+        faults = reader.public()['events']
+        self.assertLessEqual(len(faults), 6)
+        self.assertIn(('updater.deployment', 2), {(f['module'], f['line']) for f in faults})
+        self.assertIn(('updater.runtime', 3), {(f['module'], f['line']) for f in faults})
+        for private in (SENTINEL, 'private-wrapper', 'private-sentinel'):
+            self.assertNotIn(private, json.dumps(reader.public()))
+
     def test_fault_locations_are_bounded_without_exception_text_paths_or_locals(self):
         namespace = {'__name__': 'updater.runtime', 'SECRET': SENTINEL}
         exec(compile('def fail():\n raise ValueError(SECRET)\n',

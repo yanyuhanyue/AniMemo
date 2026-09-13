@@ -263,6 +263,23 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
             with self.assertRaisesRegex(StateError, "ownership label is invalid"):
                 deployment._container_id(manifest(), "api")
 
+    def test_plugin_inspection_queries_existing_api_without_creation_preparation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            self.assertEqual(deployment.inspect_enabled_plugin_apis(manifest(), running=True), {2})
+            deployment.prepare_bundle_restore_staging.assert_not_called()
+            self.assertEqual(runner.calls[-1][0][-6:],
+                ('exec', '-T', 'api', 'python', 'manage.py', 'list_enabled_plugin_apis'))
+
+    def test_target_plugin_inspection_still_runs_target_image_when_api_is_stopped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            runner.running_services.remove('api')
+            self.assertEqual(deployment.inspect_enabled_plugin_apis(manifest()), {2})
+            deployment.prepare_bundle_restore_staging.assert_called_once()
+            self.assertEqual(runner.calls[-1][0][-9:],
+                ('run', '--pull', 'never', '--rm', '--no-deps', 'api', 'python', 'manage.py', 'list_enabled_plugin_apis'))
+
     def test_exact_web_proxy_returns_the_running_owned_container_ipv4(self):
         with tempfile.TemporaryDirectory() as directory:
             deployment, runner, _ = self.make(directory)

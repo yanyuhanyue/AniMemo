@@ -2299,7 +2299,7 @@ class ProductionDoctorAcceptance:
             )
 
         def plugins() -> bool:
-            enabled = deployment.inspect_enabled_plugin_apis(manifest)
+            enabled = deployment.inspect_enabled_plugin_apis(manifest, running=True)
             supported = set(manifest["compatibility"]["pluginSdk"]["supportedApis"])
             return enabled.issubset(supported)
 
@@ -2971,6 +2971,7 @@ class ProductionFreshInstallPort:
                     manifest=self._manifest(plan),
                 ),
                 verifier=reverify_installer_release,
+                deployment=self._compose(plan),
             )
             if getattr(self, "candidate_network_isolation", False):
                 service_root = Path("/etc/systemd/system")

@@ -157,13 +157,14 @@ class DiagnosticWriter:
         self.event('EXIT', component=component, exit_code=exit_code)
 
     def fault(self, error):
-        """Expose at most four code locations, never exception text or locals."""
+        """Expose six bounded call sites, never exception text or locals."""
         seen = set()
+        emitted = set()
         for _ in range(4):
             if error is None or id(error) in seen:
                 break
             seen.add(id(error))
-            trace, location = error.__traceback__, None
+            trace, locations = error.__traceback__, []
             for _ in range(80):
                 if trace is None:
                     break
@@ -172,11 +173,17 @@ class DiagnosticWriter:
                 if (type(module) is str and module in FAULT_MODULES
                         and filename.endswith('/' + module.replace('.', '/') + '.py')
                         and 1 <= trace.tb_lineno <= 100000):
-                    location = {'module': module, 'line': trace.tb_lineno}
+                    locations.append((module, trace.tb_lineno))
                 trace = trace.tb_next
-            if location is not None:
+            for module, line in reversed(locations[-3:]):
+                if len(emitted) >= 6:
+                    return
+                if (module, line) in emitted:
+                    continue
+                emitted.add((module, line))
                 category = type(error).__name__
-                self.event('FAULT', **location, category=category if category in FAULT_TYPES else 'OTHER')
+                self.event('FAULT', module=module, line=line,
+                    category=category if category in FAULT_TYPES else 'OTHER')
             error = error.__cause__ if error.__cause__ is not None else error.__context__
 
     def frame(self, kind, raw):
