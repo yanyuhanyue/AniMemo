@@ -9,6 +9,7 @@ from unittest import mock
 
 from installer import bootstrap, development
 from scripts.closed_runtime_inventory import closed_runtime_inventory_digest
+from scripts.tests.trust_kit_fixture import simulated_test_root_ownership
 
 
 class DevelopmentBootstrapTests(unittest.TestCase):
@@ -60,9 +61,15 @@ class DevelopmentBootstrapTests(unittest.TestCase):
 
     def test_formal_default_rejects_changed_code_while_development_verifies_exact_new_tree(self):
         formal = bootstrap.CandidateBootstrapPrivilegeGate(self.capability)
-        original_authority = self.verify(formal)
+        # Hosted non-root test runners model only fixture ownership; the
+        # production loader still checks actual file shape and content bytes.
+        with simulated_test_root_ownership():
+            original_authority = self.verify(formal)
         (self.root / 'installer/production.py').write_bytes(b'current changed Installer\n')
-        with self.assertRaisesRegex(bootstrap.BootstrapAuthorityError, 'RUNTIME_MODULE_IDENTITY_MISMATCH'):
+        with (
+            simulated_test_root_ownership(),
+            self.assertRaisesRegex(bootstrap.BootstrapAuthorityError, 'RUNTIME_MODULE_IDENTITY_MISMATCH'),
+        ):
             self.verify(formal)
         source = self.development_source()
         gate = bootstrap.CandidateBootstrapPrivilegeGate(self.capability, _development_source=source)
