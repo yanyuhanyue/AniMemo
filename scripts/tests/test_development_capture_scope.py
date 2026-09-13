@@ -28,7 +28,7 @@ class DevelopmentAuthorizationTests(unittest.TestCase):
         from email.message import Message
         from types import SimpleNamespace
 
-        for kind in ('valid', 'cached', 'redirected', 'duplicate', 'missing', 'http-error'):
+        for kind in ('valid', 'cached', 'duplicate-age', 'redirected', 'duplicate', 'missing', 'http-error'):
             with self.subTest(kind=kind):
                 headers = Message()
                 if kind != 'missing':
@@ -37,6 +37,9 @@ class DevelopmentAuthorizationTests(unittest.TestCase):
                     headers.add_header('Date', 'Sun, 13 Sep 2026 01:00:00 GMT')
                 if kind == 'cached':
                     headers.add_header('Age', '5')
+                if kind == 'duplicate-age':
+                    headers.add_header('Age', '0')
+                    headers.add_header('Age', '20')
                 response = SimpleNamespace(headers=headers, status=403 if kind == 'http-error' else 200)
                 captured = []
                 def open_request(request, timeout):

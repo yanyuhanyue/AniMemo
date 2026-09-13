@@ -52,8 +52,9 @@ def _github_utc_upper_bound():
     try:
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=10) as response:
             dates = response.headers.get_all('Date', [])
+            ages = response.headers.get_all('Age', [])
             _require(response.status == 200 and response.geturl() == url
-                and len(dates) == 1 and response.headers.get('Age', '0') == '0')
+                and len(dates) == 1 and ages in ([], ['0']))
             stamp = parsedate_to_datetime(dates[0])
             _require(stamp.tzinfo is not None)
             # Date has whole-second precision. Use its upper bound so this
