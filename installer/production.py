@@ -115,6 +115,7 @@ from updater.oci import (
     AcquiredRuntimeImage,
     ImageAcquirer,
     ImageAcquisitionReceipt,
+    runtime_image_readback_matches,
 )
 from updater.runtime import InitialAdoptionRequest, adopt_initial_release
 from updater.runtime_state import RuntimeState
@@ -3277,11 +3278,7 @@ class ProductionInstallerComposition:
                     "INSTALL_CANDIDATE_IMAGE_READBACK_FAILED",
                     outcome=InstallOutcome.VALIDATION_FAILED,
                 ) from None
-            if (
-                type(observed) is not list
-                or item.canonical_reference not in observed
-                or any(type(reference) is not str for reference in observed)
-            ):
+            if not runtime_image_readback_matches(item.role, item.canonical_reference, observed):
                 raise InstallerError(
                     "INSTALL_CANDIDATE_IMAGE_READBACK_FAILED",
                     outcome=InstallOutcome.VALIDATION_FAILED,

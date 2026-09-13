@@ -323,12 +323,19 @@ def _run_candidate_composition(args, request, composition, diagnostic) -> int:
         raise
     if diagnostic is not None:
         diagnostic.stage('INSTALLER_COMPLETED')
-    production_observation = composition.candidate_profile_execution_observation(
-        platform_plan=session.plan,
-        platform_receipt=platform_receipt,
-        installer_plan=plan,
-        installer_result=result,
-    )
+    try:
+        production_observation = composition.candidate_profile_execution_observation(
+            platform_plan=session.plan,
+            platform_receipt=platform_receipt,
+            installer_plan=plan,
+            installer_result=result,
+        )
+    except BaseException as error:
+        if diagnostic is not None:
+            diagnostic.error('INSTALLER_OUTPUT_INVALID')
+            if isinstance(error, InstallerError) and error.code in INSTALLER_FAILURE_CODES:
+                diagnostic.error(error.code)
+        raise
     _write(
         {
             "mode": "EXECUTE",
