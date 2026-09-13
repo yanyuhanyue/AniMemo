@@ -309,6 +309,8 @@ class CandidateVmRuntimeRepairTests(unittest.TestCase):
         fresh._ownership_receipt = mock.Mock(return_value=object())
         fresh._locator = mock.Mock(return_value=object())
         fresh._manifest = mock.Mock(return_value={"release": {"version": release.version}})
+        deployment = object()
+        fresh._compose = mock.Mock(return_value=deployment)
 
         receipt_store = mock.Mock()
         receipt_store.path = Path("/tmp/ownership.json")
@@ -326,12 +328,14 @@ class CandidateVmRuntimeRepairTests(unittest.TestCase):
             return_value=receipt_store,
         ), mock.patch.object(
             production, "adopt_initial_release"
-        ), mock.patch.object(
+        ) as adopt, mock.patch.object(
             fresh, "_wait_for_updater_socket", create=True
         ) as wait_for_socket:
             fresh.adopt_updater(plan)
 
         wait_for_socket.assert_called_once_with()
+        fresh._compose.assert_called_once_with(plan)
+        self.assertIs(adopt.call_args.kwargs["deployment"], deployment)
         self.assertEqual(
             fresh.runner.run.call_args.args[0],
             [

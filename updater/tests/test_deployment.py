@@ -110,6 +110,15 @@ class FakeRunner:
                 ) + "\n"
             elif ".Config.Image" in template:
                 stdout = self.container_images[service] + "\n"
+            elif template.startswith("["):
+                stdout = json.dumps([
+                    self.container_labels[service].get(label)
+                    for label in (
+                        "io.animemo.instance-name",
+                        "io.animemo.instance-id",
+                        "io.animemo.compose-project",
+                    )
+                ]) + "\n"
             else:
                 for label, value in self.container_labels[service].items():
                     if label in template:
@@ -253,6 +262,40 @@ class ImmutableComposeDeploymentTests(unittest.TestCase):
         # exercised independently by test_bundle_restore_deployment fixtures.
         deployment.prepare_bundle_restore_staging = mock.Mock()
         return deployment, runner, probes
+
+    def test_container_ownership_uses_one_fresh_atomic_label_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, runner, _ = self.make(directory)
+            self.assertEqual(deployment._container_id(manifest(), "api"), "api-container")
+            self.assertEqual(len(runner.calls), 2)
+            self.assertEqual(runner.calls[-1][0][:3],
+                             ("/usr/bin/docker", "inspect", "--format"))
+            self.assertEqual(runner.calls[-1][0][3],
+                '[{{json (index .Config.Labels "io.animemo.instance-name")}},'
+                '{{json (index .Config.Labels "io.animemo.instance-id")}},'
+                '{{json (index .Config.Labels "io.animemo.compose-project")}}]')
+            runner.container_labels["api"]["io.animemo.instance-id"] = "changed"
+            with self.assertRaisesRegex(StateError, "ownership label is invalid"):
+                deployment._container_id(manifest(), "api")
+            self.assertEqual(len(runner.calls), 4)
+
+    def test_container_ownership_rejects_invalid_atomic_label_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment, _, _ = self.make(directory)
+            valid = ["default", "00000000-0000-4000-8000-000000000000", "animemo-default"]
+            invalid = ["not-json", "null", "{}", "[]", json.dumps(valid + ["extra"])]
+            for index in range(3):
+                for value in (None, "", "foreign", 0, True, [], {}):
+                    labels = valid.copy()
+                    labels[index] = value
+                    invalid.append(json.dumps(labels))
+            for raw in invalid:
+                with (
+                    self.subTest(raw=raw),
+                    mock.patch.object(deployment, "_inspect_container", return_value=raw),
+                    self.assertRaisesRegex(StateError, "ownership label is invalid"),
+                ):
+                    deployment._container_id(manifest(), "api")
 
     def test_container_ownership_label_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
