@@ -233,6 +233,13 @@ class DevelopmentRunnerTests(unittest.TestCase):
 
 
 class DevelopmentEntryTests(unittest.TestCase):
+    def test_complete_result_export_rejects_json_type_loss_and_invalid_numbers(self):
+        valid={'status':'PASS','profile_reports':{'FRESH_BASE':{'commands':[{'return_code':0}]}}}
+        self.assertEqual(json.loads(cli.result_bytes(valid)),valid)
+        for invalid in ({'status':'PASS','commands':(1,2)}, {'status':'PASS','number':float('nan')}):
+            with self.assertRaisesRegex(cli.h.CandidateHarnessError,'DEVELOPMENT_RESULT_EXPORT_INVALID'):
+                cli.result_bytes(invalid)
+
     def test_missing_unknown_and_plan_only_authorizations_fail_before_provider(self):
         for execute, authorization in ((True, None), (True, batch.PR247_REVALIDATION_AUTHORIZATION),
                                         (True, 'unknown'), (False, scope.AUTHORIZATION)):

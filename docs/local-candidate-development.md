@@ -5,6 +5,20 @@
 受保护合并 → 最终准确 main 的正式 Q 与 Candidate。
 
 本地提交只用于冻结和记录每轮源码。调试过程中不需要推送提交或派发 Q。
+
+涉及 Candidate 汇总/运输/消费者的变更，pre-pr 还需运行完整输出链：
+
+```text
+python -X utf8 -m scripts.candidate_receipt_regression --fixture scripts/tests/fixtures/candidate-wire-real-scale.json.xz --output-directory <new-local-test-directory>
+```
+
+该入口不启动 VM、不捕获密码、不调用 Origin 或工作流。fixture 保留旧执行的完整三份
+Profile、两份 Origin 和计划；新构造的 Aggregate、wire、文件回读及下游消费全部标为
+`NON_AUTHORITATIVE_LOCAL_REGRESSION`，不能回填旧正式结果。可通过 `--state-root` 读取
+实际已验证材料，在本地验证 Publish Candidate 子消费者；未提供该上下文时必须到达正确
+的缺失材料拒绝门。Freshness 输入组只组装并计量，不 dispatch。
+该真实规模链路也由现有 `scripts/tests` 覆盖，在实际 Windows/Python 与 GitHub Linux
+消费环境验证。约 400 条命令和完整 VM inventory 不裁剪；增长输入超出预算必须稳定拒绝。
 已经完成的 Q 可以提供四套 OCI、离线 wheels、平台资格和发行材料；这些原字节保持。
 开发入口单独封闭当前源码，报告同时记录材料源码和执行源码。
 

@@ -321,6 +321,89 @@ class PluginAcceptanceTests(unittest.TestCase):
                 provider=self.provider, plugin_origin=self.channel)
         self.assertEqual(caught.exception.code, 'CANDIDATE_RECEIPT_WIRE_SIZE_LIMIT')
 
+    def test_complete_valid_envelope_at_exact_48k_boundary(self):
+        def envelope_wire(raw, compressed):
+            envelope = {'schema':contract.RECEIPT_WIRE_SCHEMA, 'encoding':'zlib',
+                'receipt_sha256':h.sha256_bytes(raw), 'receipt_bytes':len(raw),
+                'payload':base64.urlsafe_b64encode(compressed).decode().rstrip('=')}
+            return base64.urlsafe_b64encode(h.canonical_json_bytes(envelope)).decode().rstrip('=')
+        found = None
+        for fraction in range(1, 30):
+            receipt = copy.deepcopy(self.receipt)
+            receipt['completed_at'] = '2026-08-25T12:04:00.' + str(fraction) + 'Z'
+            seal(receipt)
+            raw = h.canonical_json_bytes(contract.validate_aggregate_receipt(receipt))
+            compressed = zlib.compress(raw, 9)
+            def padded(count):
+                # Valid empty, non-final stored DEFLATE blocks. They change
+                # transport size without adding or removing any receipt byte.
+                return compressed[:2] + b'\x00\x00\x00\xff\xff' * count + compressed[2:]
+            low, high = 0, 10000
+            while low < high:
+                middle = (low + high) // 2
+                if len(envelope_wire(raw, padded(middle))) < 49152:
+                    low = middle + 1
+                else:
+                    high = middle
+            if len(envelope_wire(raw, padded(low))) == 49152:
+                found = (receipt, raw, compressed, low)
+                break
+        self.assertIsNotNone(found)
+        receipt, raw, compressed, count = found
+        for offset in (-1, 0, 1):
+            wire = envelope_wire(raw, compressed[:2] + b'\x00\x00\x00\xff\xff' * (count + offset) + compressed[2:])
+            if offset > 0:
+                self.assertGreater(len(wire), 49152)
+                with self.assertRaises(contract.CandidateContractError):
+                    contract.decode_aggregate_receipt_b64url(wire)
+            else:
+                self.assertLessEqual(len(wire), 49152)
+                self.assertEqual(contract.decode_aggregate_receipt_b64url(wire), (receipt, raw))
+                if offset == 0:
+                    wire_path = self.root / 'exact-limit-wire.txt'
+                    wire_path.write_bytes(wire.encode('ascii'))
+                    decoded_path = self.root / 'exact-limit-decoded.json'
+                    self.assertEqual(cli.main(['decode-candidate-acceptance-receipt',
+                        '--value-file',str(wire_path),'--output',str(decoded_path)]),0)
+                    self.assertEqual(decoded_path.read_bytes(),raw)
+
+    def test_wire_duplicate_keys_invalid_utf8_and_unknown_version_reject(self):
+        wire = contract.encode_aggregate_receipt_b64url(self.receipt)
+        raw = base64.urlsafe_b64decode(wire + '=' * (-len(wire) % 4))
+        duplicate = raw.replace(b'"encoding":"zlib"', b'"encoding":"zlib","encoding":"zlib"')
+        self.assertNotEqual(duplicate, raw)
+        with self.assertRaises(contract.CandidateContractError):
+            contract.decode_aggregate_receipt_b64url(base64.urlsafe_b64encode(duplicate).decode().rstrip('='))
+        envelope = json.loads(raw)
+        envelope.update(receipt_bytes=1, receipt_sha256=h.sha256_bytes(b'\xff'),
+            payload=base64.urlsafe_b64encode(zlib.compress(b'\xff')).decode().rstrip('='))
+        with self.assertRaises(contract.CandidateContractError):
+            contract.decode_aggregate_receipt_b64url(base64.urlsafe_b64encode(h.canonical_json_bytes(envelope)).decode().rstrip('='))
+        envelope['schema'] = 'animemo.candidate-acceptance-wire/v999'
+        with self.assertRaises(contract.CandidateContractError):
+            contract.decode_aggregate_receipt_b64url(base64.urlsafe_b64encode(h.canonical_json_bytes(envelope)).decode().rstrip('='))
+
+    def test_verified_partial_layers_are_saved_before_export_failure(self):
+        from scripts.candidate_result import CandidateResultFile
+        for phase in ('encode', 'decode'):
+            path = self.root / (phase + '-partial.json')
+            writer = CandidateResultFile(path)
+            self.provider._candidate_result_checkpoint = lambda progress: writer.write({'status':'RUNNING', **progress})
+            observations = [self.receipt['r2_origin_prestate_receipt'], self.receipt['r2_origin_poststate_receipt']]
+            target = 'encode_aggregate_receipt_b64url' if phase == 'encode' else 'decode_aggregate_receipt_b64url'
+            with (mock.patch.object(self.channel, 'observe', side_effect=observations),
+                  mock.patch.object(h, 'load_verified_candidate', return_value=self.loaded),
+                  mock.patch.object(h, target, side_effect=contract.CandidateContractError('CANDIDATE_RECEIPT_WIRE_SIZE_LIMIT')),
+                  self.assertRaises(h.CandidateHarnessError)):
+                h.execute_harness_plan(self.plan, accepted_plan_digest=self.plan.plan_digest,
+                    provider=self.provider, plugin_origin=self.channel)
+            saved = json.loads(path.read_bytes())
+            self.assertEqual(saved['stage'], 'WIRE')
+            self.assertEqual(len(saved['profileReceipts']), 3)
+            contract.validate_aggregate_receipt(saved['aggregateReceipt'])
+            self.assertIn('r2OriginPoststateReceipt', saved)
+            self.assertNotIn('candidateAcceptanceReceiptB64url', saved)
+
 
 if __name__ == '__main__':
     unittest.main()

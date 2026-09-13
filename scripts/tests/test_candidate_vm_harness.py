@@ -832,7 +832,10 @@ class CandidateVmHarnessTests(unittest.TestCase):
                          'ANIMEMO_V2_CANDIDATE_PR247_REVALIDATION_SINGLE_CAPTURE_V1')
         observed = json.loads(output.getvalue())
         self.assertEqual(observed["status"], result["status"])
-        self.assertEqual(observed["aggregateReceipt"], result["aggregateReceipt"])
+        self.assertEqual(observed['controller_exit_code'], code)
+        saved = json.loads((self.root / 'controlled-fail-result.json').read_bytes())
+        self.assertEqual(saved['aggregateReceipt'], result['aggregateReceipt'])
+        self.assertEqual(saved['controller_exit_code'], code)
 
     def test_cli_rejects_missing_unknown_and_plan_only_capture_authorization(self):
         fixed = 'ANIMEMO_V2_CANDIDATE_PR247_REVALIDATION_SINGLE_CAPTURE_V1'

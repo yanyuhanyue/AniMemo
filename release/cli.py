@@ -569,7 +569,17 @@ def _verify_publish_candidate_input(args) -> dict[str, object]:
 
 
 def _decode_candidate_acceptance_receipt(args) -> dict[str, object]:
-    receipt, encoded = decode_aggregate_receipt_b64url(args.value)
+    value = args.value
+    source = getattr(args, 'value_file', None)
+    if source is not None:
+        from release.candidate import MAX_RECEIPT_WIRE_B64URL_BYTES
+        try:
+            raw = read_bounded_release_file(source, subject='Candidate receipt wire',
+                maximum=MAX_RECEIPT_WIRE_B64URL_BYTES, allow_empty=False)
+            value = raw.decode('ascii')
+        except (OSError, UnicodeError, ValueError) as error:
+            raise CandidateContractError('CANDIDATE_RECEIPT_WIRE_FILE_INVALID') from error
+    receipt, encoded = decode_aggregate_receipt_b64url(value)
     if args.output.exists() or args.output.is_symlink():
         raise CandidateContractError("CANDIDATE_RECEIPT_OUTPUT_EXISTS")
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -1269,7 +1279,10 @@ def _parser() -> argparse.ArgumentParser:
     candidate_receipt = subparsers.add_parser(
         "decode-candidate-acceptance-receipt"
     )
-    candidate_receipt.add_argument("--value", required=True)
+    wire_input = candidate_receipt.add_mutually_exclusive_group(required=True)
+    wire_input.add_argument("--value")
+    wire_input.add_argument("--value-file", type=Path,
+        help="Read the exact bounded ASCII wire from a file without passing it through argv")
     candidate_receipt.add_argument("--output", type=Path, required=True)
     candidate_receipt.set_defaults(handler=_decode_candidate_acceptance_receipt)
 
