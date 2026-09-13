@@ -6281,7 +6281,7 @@ def _record_candidate_failure(result, error, stage):
     code = error.code if isinstance(error, CandidateResultError) else _failure_code(error)
     if isinstance(error, CandidateResultError):
         result['output_failure_code'] = code
-    if 'failure_code' not in result and stage in {'ORIGIN_POSTSTATE', 'AGGREGATE', 'WIRE'}:
+    if 'failure_code' not in result:
         for profile in PROFILES:
             prior = result.get('profileResults', {}).get(PROFILE_RESULT_KEYS[profile], {})
             if prior.get('failure_code'):
@@ -6381,6 +6381,8 @@ def main(argv: list[str] | None = None) -> int:
         result['host_lifecycle'] = list(getattr(provider, '_host_lifecycle_observations', ()))
         result['controller_exit_code'] = 0 if result['status'] in {'PASS', 'PLAN_ONLY'} else 2
         if report is not None:
+            if report.cleanup_errors:
+                result['output_cleanup_errors'] = list(report.cleanup_errors)
             try:
                 report.write(result)
             except CandidateResultError as error:
@@ -6390,10 +6392,15 @@ def main(argv: list[str] | None = None) -> int:
                 result['output_cleanup_errors'] = list(report.cleanup_errors)
         payload = result['plan'] if result['status'] == 'PLAN_ONLY' else {
             key: result[key] for key in ('status', 'stage', 'failure_code', 'failure_stage',
-                'secondary_failures', 'output_failure_code', 'controller_exit_code', 'wireMetrics') if key in result}
+                'secondary_failures', 'output_failure_code', 'output_cleanup_errors',
+                'controller_exit_code', 'wireMetrics') if key in result}
         try:
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            sys.stdout.flush()
         except (OSError, UnicodeError):
+            # Do not let interpreter shutdown flush the failed stream again and
+            # replace this controlled nonzero exit with Python's exit status 120.
+            sys.stdout = None
             _record_candidate_failure(result, CandidateResultError('CANDIDATE_RESULT_STDOUT_FAILED'), 'OUTPUT')
             result['controller_exit_code'] = 2
             if report is not None:

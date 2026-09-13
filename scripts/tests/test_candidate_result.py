@@ -4,6 +4,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager, nullcontext, redirect_stdout
@@ -55,7 +57,7 @@ class CandidateResultTests(unittest.TestCase):
         wait.assert_called_once_with(0.1)
         self.assertEqual(json.loads(writer.path.read_bytes()),{'status':'PASS'})
 
-    def _run_entry(self, execute, *, cleanup_error=None, final_write_error=False):
+    def _run_entry(self, execute, *, cleanup_error=None, final_write_error=False, stdout=None):
         path=self.root/'entry.json'
         plan=SimpleNamespace(plan_digest='sha256:'+'a'*64,as_dict=lambda:{'planDigest':'sha256:'+'a'*64})
         batch=mock.Mock(record={'profiles':{}})
@@ -71,7 +73,7 @@ class CandidateResultTests(unittest.TestCase):
             if final_write_error and value.get('status')=='PASS':
                 raise CandidateResultError('CANDIDATE_RESULT_WRITE_FAILED')
             return original(writer,value)
-        stdout=io.StringIO()
+        stdout=io.StringIO() if stdout is None else stdout
         with (mock.patch.object(h.ClosedVmwareProvider,'execution_authority',side_effect=authority),
               mock.patch.object(h,'acquire_candidate_material_authority',return_value=nullcontext(SimpleNamespace())),
               mock.patch.object(h,'build_harness_plan',return_value=plan),
@@ -125,6 +127,55 @@ class CandidateResultTests(unittest.TestCase):
         h._record_candidate_failure(result,h.CandidateHarnessError('R2_PLUGIN_POSTSTATE_FAILED'),'ORIGIN_POSTSTATE')
         self.assertEqual(result['failure_code'],'CANDIDATE_PROFILE_REPORTED_FAILURE')
         self.assertEqual(result['secondary_failures'],[{'stage':'ORIGIN_POSTSTATE','code':'R2_PLUGIN_POSTSTATE_FAILED'}])
+
+    def test_profile_checkpoint_error_keeps_prior_workload_failure_primary(self):
+        result={'status':'RUNNING','profileResults':{'fresh_base':{'failure_code':'CANDIDATE_PROFILE_REPORTED_FAILURE'}}}
+        h._record_candidate_failure(result,CandidateResultError('CANDIDATE_RESULT_WRITE_FAILED'),'PROFILES')
+        self.assertEqual(result['failure_code'],'CANDIDATE_PROFILE_REPORTED_FAILURE')
+        self.assertEqual(result['output_failure_code'],'CANDIDATE_RESULT_WRITE_FAILED')
+        self.assertEqual(result['secondary_failures'],[{'stage':'PROFILES','code':'CANDIDATE_RESULT_WRITE_FAILED'}])
+
+    def test_failed_snapshot_temp_cleanup_is_in_the_final_file(self):
+        def execute(*_,**kwargs):
+            with (mock.patch('scripts.candidate_result.os.replace',side_effect=OSError('controlled')),
+                    mock.patch.object(Path,'unlink',side_effect=OSError('controlled cleanup'))):
+                kwargs['provider']._candidate_result_checkpoint({'stage':'WIRE','aggregateReceipt':{'synthetic':True}})
+        code,summary,saved=self._run_entry(execute)
+        self.assertEqual(code,2)
+        self.assertEqual(saved['output_cleanup_errors'],['CANDIDATE_RESULT_TEMP_CLEANUP_FAILED'])
+        self.assertEqual(summary['output_cleanup_errors'],saved['output_cleanup_errors'])
+        self.assertEqual(saved['failure_code'],'CANDIDATE_RESULT_WRITE_FAILED')
+
+    def test_actual_python_flush_failure_saves_error_and_exits_two(self):
+        program='''
+import io, json, sys
+from contextlib import nullcontext
+from unittest import mock
+from scripts.tests import test_candidate_result as tests
+class BrokenFlush(io.StringIO):
+    def flush(self):
+        raise OSError('controlled deferred output failure')
+case=tests.CandidateResultTests()
+case.setUp()
+stream=BrokenFlush()
+sys.stdout=stream
+try:
+    with mock.patch.object(tests,'redirect_stdout',side_effect=lambda _:nullcontext()):
+        code,summary,saved=case._run_entry(lambda *_,**__:{'status':'PASS','stage':'COMPLETE'},stdout=stream)
+    sys.__stdout__.write(json.dumps({'main_return':code,'saved':saved})+'\\n')
+    sys.__stdout__.flush()
+finally:
+    case.doCleanups()
+raise SystemExit(code)
+'''
+        completed=subprocess.run([sys.executable,'-X','utf8','-B','-c',program],
+            cwd=Path(__file__).resolve().parents[2],capture_output=True,timeout=30,check=False)
+        self.assertEqual(completed.returncode,2,completed.stderr)
+        value=json.loads(completed.stdout)
+        self.assertEqual(value['main_return'],2)
+        self.assertEqual(value['saved']['status'],'ERROR')
+        self.assertEqual(value['saved']['controller_exit_code'],2)
+        self.assertEqual(value['saved']['failure_code'],'CANDIDATE_RESULT_STDOUT_FAILED')
 
 
 if __name__=='__main__':

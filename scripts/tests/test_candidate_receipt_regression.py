@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,31 @@ class RealScaleReceiptTests(unittest.TestCase):
             self.assertEqual(result.returncode,2)
             self.assertEqual(json.loads(result.stderr)['code'],'CANDIDATE_RECEIPT_WIRE_FILE_INVALID')
             self.assertFalse(output.exists())
+
+    def _assert_cli_file_rejected(self,wire):
+        output=self.root/'rejected-output.json'
+        result=subprocess.run([sys.executable,'-X','utf8','-B','-m','release.cli',
+            'decode-candidate-acceptance-receipt','--value-file',str(wire),'--output',str(output)],
+            cwd=Path(__file__).resolve().parents[2],capture_output=True,timeout=10,check=False)
+        self.assertEqual(result.returncode,2)
+        self.assertEqual(json.loads(result.stderr)['code'],'CANDIDATE_RECEIPT_WIRE_FILE_INVALID')
+        self.assertFalse(output.exists())
+
+    def test_actual_cli_rejects_directory_and_hardlinked_file(self):
+        self._assert_cli_file_rejected(self.root)
+        wire=self.root/'wire.txt'
+        wire.write_bytes(b'wire')
+        os.link(wire,self.root/'other-link.txt')
+        self._assert_cli_file_rejected(wire)
+
+    @unittest.skipUnless(os.name=='posix','actual Linux FIFO and symlink behavior')
+    def test_actual_linux_cli_rejects_fifo_without_waiting_for_a_writer(self):
+        wire=self.root/'fifo'
+        os.mkfifo(wire)
+        self._assert_cli_file_rejected(wire)
+        link=self.root/'symlink'
+        link.symlink_to(wire)
+        self._assert_cli_file_rejected(link)
 
 
 if __name__ == '__main__':

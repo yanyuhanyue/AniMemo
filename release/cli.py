@@ -574,10 +574,8 @@ def _decode_candidate_acceptance_receipt(args) -> dict[str, object]:
     if source is not None:
         from release.candidate import MAX_RECEIPT_WIRE_B64URL_BYTES
         try:
-            with source.open('rb') as stream:
-                raw = stream.read(MAX_RECEIPT_WIRE_B64URL_BYTES + 1)
-            if not 0 < len(raw) <= MAX_RECEIPT_WIRE_B64URL_BYTES:
-                raise ValueError('wire size')
+            raw = read_bounded_release_file(source, subject='Candidate receipt wire',
+                maximum=MAX_RECEIPT_WIRE_B64URL_BYTES, allow_empty=False)
             value = raw.decode('ascii')
         except (OSError, UnicodeError, ValueError) as error:
             raise CandidateContractError('CANDIDATE_RECEIPT_WIRE_FILE_INVALID') from error
