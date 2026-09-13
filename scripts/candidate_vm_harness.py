@@ -6160,13 +6160,15 @@ def _execute_harness_plan(
     aggregate["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
     try:
         validate_aggregate_receipt(aggregate)
+        aggregate_digest = aggregate_receipt_digest(aggregate)
+        wire = encode_aggregate_receipt_b64url(aggregate)
     except CandidateContractError as error:
         raise CandidateHarnessError(error.code) from error
     return {
         "status": aggregate["result"],
         "aggregateReceipt": aggregate,
-        "aggregateReceiptSha256": aggregate_receipt_digest(aggregate),
-        "candidateAcceptanceReceiptB64url": encode_aggregate_receipt_b64url(aggregate),
+        "aggregateReceiptSha256": aggregate_digest,
+        "candidateAcceptanceReceiptB64url": wire,
         "r2OriginPrestateReceipt": r2_prestate_receipt,
         "r2OriginPoststateReceipt": r2_poststate_receipt,
         "profileReceipts": receipts,

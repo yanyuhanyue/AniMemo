@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import lzma
 import os
 import re
 import shutil
@@ -116,6 +117,8 @@ MAX_RECEIPT_B64URL_BYTES = 512 * 1024
 MAX_RECEIPT_WIRE_B64URL_BYTES = 48 * 1024
 MAX_RECEIPT_JSON_BYTES = MAX_RECEIPT_B64URL_BYTES * 3 // 4
 RECEIPT_WIRE_SCHEMA = "animemo.candidate-acceptance-wire/v1"
+RECEIPT_XZ_WIRE_SCHEMA = "animemo.candidate-acceptance-wire/v2"
+MAX_RECEIPT_XZ_MEMORY_BYTES = 8 * 1024 * 1024
 MAX_CONTROLLER_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_CONTROLLER_EXPANDED_BYTES = 6 * 1024 * 1024 * 1024
 MIN_CONTROLLER_DISK_RESERVE_BYTES = 2 * 1024 * 1024 * 1024
@@ -2349,6 +2352,14 @@ def encode_aggregate_receipt_b64url(value: object) -> str:
     }
     wire = base64.urlsafe_b64encode(canonical_json_bytes(envelope)).decode("ascii").rstrip("=")
     if len(wire) > MAX_RECEIPT_WIRE_B64URL_BYTES:
+        # Complete command inventories repeat beyond DEFLATE's history window.
+        # Keep the original receipt bytes and dispatch bound with a longer
+        # compression dictionary, rather than discarding observed commands.
+        envelope.update(schema=RECEIPT_XZ_WIRE_SCHEMA, encoding="xz",
+            payload=base64.urlsafe_b64encode(lzma.compress(encoded, format=lzma.FORMAT_XZ,
+                check=lzma.CHECK_CRC32, preset=4)).decode("ascii").rstrip("="))
+        wire = base64.urlsafe_b64encode(canonical_json_bytes(envelope)).decode("ascii").rstrip("=")
+    if len(wire) > MAX_RECEIPT_WIRE_B64URL_BYTES:
         _reject("CANDIDATE_RECEIPT_WIRE_SIZE_LIMIT")
     return wire
 
@@ -2356,22 +2367,30 @@ def encode_aggregate_receipt_b64url(value: object) -> str:
 def decode_aggregate_receipt_b64url(value: str) -> tuple[dict[str, Any], bytes]:
     decoded = _decode_receipt_base64(value, MAX_RECEIPT_B64URL_BYTES)
     body = _strict_json_bytes(decoded, code="CANDIDATE_ACCEPTANCE_RECEIPT_INVALID")
-    if type(body) is dict and body.get("schema") == RECEIPT_WIRE_SCHEMA:
+    if type(body) is dict and body.get("schema") in (RECEIPT_WIRE_SCHEMA, RECEIPT_XZ_WIRE_SCHEMA):
+        encoding = "xz" if body["schema"] == RECEIPT_XZ_WIRE_SCHEMA else "zlib"
         if (len(value) > MAX_RECEIPT_WIRE_B64URL_BYTES
                 or set(body) != {"schema", "encoding", "receipt_sha256", "receipt_bytes", "payload"}
-                or body["encoding"] != "zlib"
+                or body["encoding"] != encoding
                 or type(body["receipt_bytes"]) is not int
                 or not 0 < body["receipt_bytes"] <= MAX_RECEIPT_JSON_BYTES
                 or canonical_json_bytes(body) != decoded):
             _reject("CANDIDATE_RECEIPT_WIRE_INVALID")
         compressed = _decode_receipt_base64(body["payload"], MAX_RECEIPT_WIRE_B64URL_BYTES)
         try:
-            inflater = zlib.decompressobj()
-            decoded = inflater.decompress(compressed, body["receipt_bytes"] + 1)
-        except zlib.error as error:
+            if encoding == "xz":
+                inflater = lzma.LZMADecompressor(format=lzma.FORMAT_XZ,
+                    memlimit=MAX_RECEIPT_XZ_MEMORY_BYTES)
+                decoded = inflater.decompress(compressed, max_length=body["receipt_bytes"] + 1)
+                unconsumed = False
+            else:
+                inflater = zlib.decompressobj()
+                decoded = inflater.decompress(compressed, body["receipt_bytes"] + 1)
+                unconsumed = bool(inflater.unconsumed_tail)
+        except (zlib.error, lzma.LZMAError) as error:
             raise CandidateContractError("CANDIDATE_RECEIPT_WIRE_INVALID") from error
         if (len(decoded) != body["receipt_bytes"] or not inflater.eof
-                or inflater.unused_data or inflater.unconsumed_tail
+                or inflater.unused_data or unconsumed
                 or sha256_bytes(decoded) != body["receipt_sha256"]):
             _reject("CANDIDATE_RECEIPT_WIRE_INVALID")
     receipt = validate_aggregate_receipt(
