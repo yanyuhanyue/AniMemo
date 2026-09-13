@@ -283,8 +283,15 @@ Freshness workflow 必须接收非可选 `candidate_acceptance_receipt_b64url`�
 `encode_aggregate_receipt_b64url` 生成 `animemo.candidate-acceptance-wire/v1`：canonical JSON
 envelope 包含 zlib payload、原始回执字节数与 SHA-256，外层使用 unpadded base64url，
 最多 48 KiB，为 [GitHub 全部 workflow_dispatch inputs 的 65,535 字符上限](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_dispatchinputs)
-留出其他绑定字段的空间。解码最多输出 384 KiB，拒绝截断、拼接或尾随流、超限解压、
+留出其他绑定字段的空间。若完整命令清单使 v1 超限，编码器改用
+`animemo.candidate-acceptance-wire/v2` 的 `xz` payload（preset 4、CRC32），仍保持原始
+回执字节和 48 KiB 上限。v2 解码只接受 XZ，使用 8 MiB 解压内存上限；两个版本均
+最多输出 384 KiB，拒绝截断、拼接或尾随流、超限解压、
 错误长度/摘要、额外字段与非 canonical JSON；历史直接 base64url 格式保留原有验证。
+编码仍超限时 Harness 保留具体 `CANDIDATE_RECEIPT_WIRE_SIZE_LIMIT`，不将其改报为宿主
+执行权限故障，也不删减实际观察。XZ 的内存及输出边界使用
+[Python LZMADecompressor](https://docs.python.org/3/library/lzma.html#lzma.LZMADecompressor)
+的 `memlimit` 与 `max_length`。
 Harness 的 `candidateAcceptanceReceiptB64url` 即为下一阶段输入，生成它不派发工作流。
 解码后的原始完整 Aggregate 字节保持不变；Freshness Artifact 为十文件闭合集合，
 包含原始 `candidate-acceptance-receipt.json`，并绑定其 SHA256、Qualification Run、

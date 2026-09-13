@@ -5,6 +5,7 @@ import base64
 import copy
 import hashlib
 import json
+import lzma
 import zlib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -238,6 +239,87 @@ class PluginAcceptanceTests(unittest.TestCase):
             bad = base64.urlsafe_b64encode(h.canonical_json_bytes(value)).decode().rstrip('=')
             with self.subTest(mutation=mutation), self.assertRaises(contract.CandidateContractError):
                 contract.decode_aggregate_receipt_b64url(bad)
+
+    def test_complete_command_inventories_fit_without_dropping_observations(self):
+        receipt = copy.deepcopy(self.receipt)
+        hashes = {f'snapshot-disk-with-long-name-{i}.vmdk':
+            'sha256:' + hashlib.sha256(str(i).encode()).hexdigest() for i in range(63)}
+        receipt['original_vm_hashes'] = hashes
+        receipt['base_vm_identity'] = h.sha256_bytes(h.canonical_json_bytes(hashes))
+        # The same real command vocabulary recurs across Profiles, but its
+        # previous occurrence is beyond DEFLATE's 32 KiB history window.
+        commands = [{'argv_digest': 'sha256:' + hashlib.sha256(f'command-{i}'.encode()).hexdigest(),
+            'boundary': 'RUNTIME', 'classification': 'LOCAL_ONLY',
+            'external_pull_disposition': 'NOT_APPLICABLE', 'operation': 'local',
+            'return_code': 0} for i in range(400)]
+        for name, detail in receipt['profile_receipts'].items():
+            detail.update(base_vm_identity=receipt['base_vm_identity'],
+                original_vm_pre_hashes=hashes, original_vm_post_hashes=hashes)
+            detail['network_observation']['completed_commands'] = commands
+            inventory = h.sha256_bytes(h.canonical_json_bytes(commands))
+            detail['network_observation']['completed_command_inventory_digest'] = inventory
+            detail['external_pull_observation']['runtime_command_inventory_digest'] = inventory
+            receipt['profile_results'][name.lower()]['receipt_digest'] = h.sha256_bytes(h.canonical_json_bytes(detail))
+        seal(receipt)
+        raw = h.canonical_json_bytes(contract.validate_aggregate_receipt(receipt))
+        self.assertLessEqual(len(raw), contract.MAX_RECEIPT_JSON_BYTES)
+        old = {'schema': contract.RECEIPT_WIRE_SCHEMA, 'encoding': 'zlib',
+            'receipt_sha256': h.sha256_bytes(raw), 'receipt_bytes': len(raw),
+            'payload': base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode().rstrip('=')}
+        self.assertGreater(len(base64.urlsafe_b64encode(h.canonical_json_bytes(old))),
+            contract.MAX_RECEIPT_WIRE_B64URL_BYTES)
+        wire = contract.encode_aggregate_receipt_b64url(receipt)
+        self.assertLessEqual(len(wire), contract.MAX_RECEIPT_WIRE_B64URL_BYTES)
+        envelope = json.loads(base64.urlsafe_b64decode(wire + '=' * (-len(wire) % 4)))
+        self.assertEqual(envelope['schema'], contract.RECEIPT_XZ_WIRE_SCHEMA)
+        self.assertEqual(envelope['encoding'], 'xz')
+        self.assertEqual(contract.decode_aggregate_receipt_b64url(wire), (receipt, raw))
+        self.consume(receipt, 'complete-inventory')
+
+    def test_xz_wire_bounds_memory_output_and_one_complete_stream(self):
+        raw = h.canonical_json_bytes(self.receipt)
+        compressed = lzma.compress(raw, preset=4, check=lzma.CHECK_CRC32)
+        envelope = {'schema': contract.RECEIPT_XZ_WIRE_SCHEMA, 'encoding': 'xz',
+            'receipt_sha256': h.sha256_bytes(raw), 'receipt_bytes': len(raw),
+            'payload': base64.urlsafe_b64encode(compressed).decode().rstrip('=')}
+        wire = base64.urlsafe_b64encode(h.canonical_json_bytes(envelope)).decode().rstrip('=')
+        self.assertEqual(contract.decode_aggregate_receipt_b64url(wire), (self.receipt, raw))
+        for mutation in ('digest', 'size', 'trailing', 'truncated', 'bomb', 'memory',
+                         'extra', 'boolean', 'encoding', 'schema', 'list-schema',
+                         'object-schema', 'format', 'corrupt'):
+            value, payload = copy.deepcopy(envelope), compressed
+            if mutation == 'digest': value['receipt_sha256'] = 'sha256:' + 'f' * 64
+            elif mutation == 'size': value['receipt_bytes'] -= 1
+            elif mutation == 'trailing': payload += lzma.compress(b'{}', preset=4)
+            elif mutation == 'truncated': payload = payload[:-1]
+            elif mutation == 'bomb':
+                payload = lzma.compress(b'x' * (contract.MAX_RECEIPT_JSON_BYTES + 1), preset=4)
+                value['receipt_bytes'] = contract.MAX_RECEIPT_JSON_BYTES
+            elif mutation == 'memory':
+                payload = lzma.compress(raw, filters=[{'id': lzma.FILTER_LZMA2, 'dict_size': 16 * 1024 * 1024}])
+            elif mutation == 'extra': value['arbitrary'] = True
+            elif mutation == 'boolean': value['receipt_bytes'] = True
+            elif mutation == 'encoding': value['encoding'] = 'zlib'
+            elif mutation == 'schema': value['schema'] = contract.RECEIPT_WIRE_SCHEMA
+            elif mutation == 'list-schema': value['schema'] = []
+            elif mutation == 'object-schema': value['schema'] = {}
+            elif mutation == 'format': payload = lzma.compress(raw, format=lzma.FORMAT_ALONE, preset=4)
+            else: payload = b'broken xz'
+            value['payload'] = base64.urlsafe_b64encode(payload).decode().rstrip('=')
+            bad = base64.urlsafe_b64encode(h.canonical_json_bytes(value)).decode().rstrip('=')
+            with self.subTest(mutation=mutation), self.assertRaises(contract.CandidateContractError):
+                contract.decode_aggregate_receipt_b64url(bad)
+
+    def test_wire_failure_retains_specific_harness_error(self):
+        observations = [self.receipt['r2_origin_prestate_receipt'], self.receipt['r2_origin_poststate_receipt']]
+        with (mock.patch.object(self.channel, 'observe', side_effect=observations),
+              mock.patch.object(h, 'load_verified_candidate', return_value=self.loaded),
+              mock.patch.object(h, 'encode_aggregate_receipt_b64url',
+                  side_effect=contract.CandidateContractError('CANDIDATE_RECEIPT_WIRE_SIZE_LIMIT')),
+              self.assertRaises(h.CandidateHarnessError) as caught):
+            h.execute_harness_plan(self.plan, accepted_plan_digest=self.plan.plan_digest,
+                provider=self.provider, plugin_origin=self.channel)
+        self.assertEqual(caught.exception.code, 'CANDIDATE_RECEIPT_WIRE_SIZE_LIMIT')
 
 
 if __name__ == '__main__':
