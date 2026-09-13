@@ -26,7 +26,7 @@ class DevelopmentControllerTests(unittest.TestCase):
                     'from scripts.development_capture_scope import DevelopmentScopeOwner\n'
                     'VALUE = round_helper.VALUE\n', encoding='utf-8')
                 from scripts import development_capture_scope as scope
-                with controller.round_modules(checkout, self.inventory(checkout)) as entry:
+                with controller.round_modules(checkout, self.inventory(checkout), {}) as entry:
                     self.assertEqual(entry.VALUE, name)
                     self.assertIs(entry.DevelopmentSessionOwner, owners.DevelopmentSessionOwner)
                     self.assertIs(entry.DevelopmentScopeOwner, scope.DevelopmentScopeOwner)
@@ -40,12 +40,12 @@ class DevelopmentControllerTests(unittest.TestCase):
             entry.write_text('VALUE = "verified"\n', encoding='utf-8')
             inventory = self.inventory(root)
             entry.write_text('raise AssertionError("unverified code executed")\n', encoding='utf-8')
-            with self.assertRaises(owners.DevelopmentOwnerError), controller.round_modules(root, inventory):
+            with self.assertRaises(owners.DevelopmentOwnerError), controller.round_modules(root, inventory, {}):
                 self.fail('changed code imported')
             entry.write_text('from scripts import untracked\n', encoding='utf-8')
             inventory = self.inventory(root)
             (root / 'scripts/untracked.py').write_text('raise AssertionError("untracked code executed")\n', encoding='utf-8')
-            with self.assertRaises(ModuleNotFoundError), controller.round_modules(root, inventory):
+            with self.assertRaises(ModuleNotFoundError), controller.round_modules(root, inventory, {}):
                 self.fail('untracked code imported')
 
     @unittest.skipUnless(Path(controller.GIT).is_file(), 'fixed Windows git')
@@ -62,7 +62,8 @@ class DevelopmentControllerTests(unittest.TestCase):
             sha = controller._git(root, 'rev-parse', 'HEAD').decode().strip()
             tree = controller._git(root, 'rev-parse', 'HEAD^{tree}').decode().strip()
             def verify():
-                return controller.verify_checkout(root, source_sha=sha, source_tree=tree, common_directory=root / '.git')
+                return controller.verify_checkout(root, source_sha=sha, source_tree=tree,
+                    common_directory=root / '.git', stable={'scripts/local_candidate_development.py': hashlib.sha256(b'VALUE = 1\n').hexdigest()})
             self.assertIn('scripts/local_candidate_development.py', verify())
             source.write_bytes(b'raise AssertionError("must never execute")\n')
             with self.assertRaises(owners.DevelopmentOwnerError):
@@ -71,6 +72,18 @@ class DevelopmentControllerTests(unittest.TestCase):
             controller._git(root, 'rm', '--cached', '--', 'scripts/local_candidate_development.py')
             with self.assertRaises(owners.DevelopmentOwnerError):
                 verify()
+
+    def test_stable_identity_is_bound_to_the_actual_bytes_executed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'scripts').mkdir()
+            path = root / 'scripts/local_candidate_development.py'
+            path.write_bytes(b'VALUE = "changed control source"\n')
+            stable = {'scripts/local_candidate_development.py': hashlib.sha256(b'VALUE = "original"\n').hexdigest()}
+            # Even an internally consistent new Git blob cannot replace a
+            # fixed controller module accepted by a previous path observation.
+            with self.assertRaises(owners.DevelopmentOwnerError), controller.round_modules(root, self.inventory(root), stable):
+                self.fail('changed stable code imported')
 
     def test_requests_bind_owner_next_round_previous_result_and_frozen_control_code(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -91,7 +91,7 @@ def _git(checkout, *arguments, codes=(0,)):
     return result.stdout
 
 
-def verify_checkout(checkout, *, source_sha, source_tree, common_directory):
+def verify_checkout(checkout, *, source_sha, source_tree, common_directory, stable):
     """Verify source before any of its modules are imported into the owner process."""
     _require(not _git(checkout, 'config', '--name-only', '--get-regexp',
         r'^(core\.(fsmonitor|hookspath|attributesfile)|filter\..*\.(clean|process)|include.*\.path)$', codes=(0, 1)))
@@ -113,6 +113,8 @@ def verify_checkout(checkout, *, source_sha, source_tree, common_directory):
         # a worktree-configured clean filter or fsmonitor during validation.
         data = _read(checkout / name, 64 * 1024 * 1024, allow_empty=True)
         _require(hashlib.sha1(b'blob ' + str(len(data)).encode('ascii') + b'\0' + data).hexdigest() == digest)
+        if name in stable:
+            _require(hashlib.sha256(data).hexdigest() == stable[name])
         if name.endswith('.py') and name.split('/')[0] in PROJECT_PACKAGES:
             files[name] = digest
     for record in filter(None, _git(checkout, 'ls-files', '--stage', '-z').split(b'\0')):
@@ -120,14 +122,14 @@ def verify_checkout(checkout, *, source_sha, source_tree, common_directory):
         mode, digest, stage = header.split(' ')
         _require(stage == '0' and name not in index)
         index[name] = (mode, digest)
-    _require(index == tree)
+    _require(index == tree and set(stable) <= set(tree))
     _require(bool(files) and len(files) <= 4096)
     return files
 
 
 class VerifiedProjectImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-    def __init__(self, checkout, files):
-        self.checkout, self.files = checkout, dict(files)
+    def __init__(self, checkout, files, stable):
+        self.checkout, self.files, self.stable = checkout, dict(files), dict(stable)
 
     def _name(self, fullname):
         relative = fullname.replace('.', '/')
@@ -155,6 +157,8 @@ class VerifiedProjectImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader
         name = self._name(module.__name__)
         data = _read(self.checkout / name, allow_empty=True)
         _require(hashlib.sha1(b'blob ' + str(len(data)).encode('ascii') + b'\0' + data).hexdigest() == self.files[name])
+        if name in self.stable:
+            _require(hashlib.sha256(data).hexdigest() == self.stable[name])
         # Compile the same verified bytes; ordinary import would reopen a path
         # after checking it and permit a replacement between check and execution.
         exec(compile(data, str(self.checkout / name), 'exec'), module.__dict__)  # noqa: S102 - exact Git blob verified above
@@ -176,14 +180,14 @@ def validate_request(value, *, owner_record, previous_digest, checkout_parent, s
 
 
 @contextmanager
-def round_modules(checkout, source_inventory):
+def round_modules(checkout, source_inventory, stable):
     """Each round gets one coherent module generation; the owner and lock stay fixed."""
     def selected(name):
         return name not in STABLE_MODULES and name != 'scripts' and any(
             name == prefix or name.startswith(prefix + '.') for prefix in PROJECT_PACKAGES)
     saved = {name: module for name, module in tuple(sys.modules.items()) if selected(name)}
     old_path, old_cwd = list(sys.path), Path.cwd()
-    importer = VerifiedProjectImporter(checkout, source_inventory)
+    importer = VerifiedProjectImporter(checkout, source_inventory, stable)
     scripts = importlib.import_module('scripts')
     old_namespace = scripts.__path__
     for name in saved:
@@ -286,10 +290,10 @@ def serve(control_root, previous_result):
                 next_checkout = validate_request(request, owner_record=owner.record, previous_digest=previous_digest,
                     checkout_parent=checkout.parent, stable=stable)
                 inventory = verify_checkout(next_checkout, source_sha=request['source_sha'],
-                    source_tree=request['source_tree'], common_directory=common_directory)
+                    source_tree=request['source_tree'], common_directory=common_directory, stable=stable)
                 result_path = control_root / f'round-{index:04d}-result.json'
                 _require(not result_path.exists())
-                with round_modules(next_checkout, inventory) as entry:
+                with round_modules(next_checkout, inventory, stable) as entry:
                     args = SimpleNamespace(execute=True, authorization_id=scope.AUTHORIZATION, result=result_path,
                         verified_candidate_digest=material['verified_candidate_digest'], qualification_run_id=material['qualification_run_id'],
                         material_source_sha=material['source_sha'], material_source_tree=material['source_tree'],
