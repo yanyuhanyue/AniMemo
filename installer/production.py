@@ -3004,7 +3004,12 @@ class ProductionFreshInstallPort:
                 timeout=120,
             )
             self._wait_for_updater_socket()
-        except Exception:  # noqa: BLE001 - fixed Updater Adapter boundary
+        except Exception as error:  # noqa: BLE001 - fixed Updater Adapter boundary
+            if 'ANIMEMO_CANDIDATE_DIAGNOSTIC_FD' in os.environ:
+                from scripts.candidate_diagnostics import inherited_writer
+                diagnostic = inherited_writer()
+                if diagnostic is not None:
+                    diagnostic.fault(error)
             _safe_adapter_error(
                 "INSTALL_UPDATER_ADOPTION_FAILED", mutation=True, recovery=True
             )

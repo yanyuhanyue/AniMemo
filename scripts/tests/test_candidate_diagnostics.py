@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import tempfile
 from pathlib import Path
 import struct
 import sys
@@ -37,6 +38,31 @@ def successful_frames(operation=OPERATION, padding=None):
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_fault_locations_are_bounded_without_exception_text_paths_or_locals(self):
+        namespace = {'__name__': 'updater.runtime', 'SECRET': SENTINEL}
+        exec(compile('def fail():\n raise ValueError(SECRET)\n',
+            'X:/private-sentinel/updater/runtime.py', 'exec'), namespace)
+        with tempfile.TemporaryFile() as stream:
+            writer = d.DiagnosticWriter(stream.fileno(), OPERATION)
+            try:
+                namespace['fail']()
+            except ValueError as error:
+                writer.fault(error)
+            stream.seek(0)
+            reader = d.DiagnosticReader(OPERATION)
+            while item := d.read_frame(stream):
+                reader.accept(*item)
+        fault = reader.public()['events'][0]
+        self.assertEqual({key: fault[key] for key in ('module', 'line', 'category')},
+            {'module': 'updater.runtime', 'line': 2, 'category': 'ValueError'})
+        self.assertNotIn(SENTINEL, json.dumps(reader.public()))
+        self.assertNotIn('private-sentinel', json.dumps(reader.public()))
+        for fields in ({'module': SENTINEL, 'line': 2, 'category': 'ValueError'},
+                       {'module': 'updater.runtime', 'line': True, 'category': 'ValueError'},
+                       {'module': 'updater.runtime', 'line': 2, 'category': SENTINEL}):
+            with self.assertRaises(d.DiagnosticError):
+                d.validate_event(dict(schema=d.SCHEMA, operation=OPERATION, kind='FAULT', **fields), OPERATION)
+
     def consume(self, raw):
         self.provider = SimpleNamespace(_candidate_diagnostics={})
         return c._read_receipt(SimpleNamespace(stdout=io.BytesIO(raw)), operation=OPERATION,

@@ -22,6 +22,19 @@ STAGES = (
     'HOST_PARSED',
 )
 COMPONENTS = ('SUDO', 'ROOT', 'RUNTIME_RUNNER', 'INSTALLER')
+FAULT_MODULES = frozenset({
+    'installer.production', 'installer.runtime', 'installer.operations',
+    'updater.runtime', 'updater.deployment', 'updater.state', 'updater.commands',
+    'updater.server', 'updater.source', 'updater.binding',
+    'durability.instance', 'durability.ownership', 'durability.managed_config',
+    'durability.private_store',
+})
+FAULT_TYPES = frozenset({
+    'StateError', 'LocatorError', 'CommandExited', 'CommandTimedOut', 'CommandStartFailed',
+    'PermissionError', 'FileNotFoundError', 'OSError', 'ValueError', 'TypeError',
+    'KeyError', 'AttributeError', 'RecoveryRequired', 'FreshInstallOperationError',
+    'PrivateStoreError', 'ManagedConfigError', 'InstallerAdapterError', 'OTHER',
+})
 INSTALLER_FAILURE_CODES = (
     'INSTALL_ROOT_PREPARATION_FAILED', 'INSTALL_CONFIG_PUBLICATION_FAILED',
     'INSTALL_RELEASE_STAGING_FAILED', 'INSTALL_SERVICE_PREPARATION_FAILED',
@@ -111,6 +124,11 @@ def validate_event(value, operation):
             and type(code) is int and -255 <= code <= 255)
     elif kind == 'ERROR':
         valid = set(value) == common | {'code'} and value['code'] in ERRORS
+    elif kind == 'FAULT':
+        valid = (set(value) == common | {'module', 'line', 'category'}
+            and type(value['module']) is str and value['module'] in FAULT_MODULES
+            and type(value['line']) is int and 1 <= value['line'] <= 100000
+            and type(value['category']) is str and value['category'] in FAULT_TYPES)
     else:
         valid = False
     if not valid:
@@ -137,6 +155,29 @@ class DiagnosticWriter:
 
     def exited(self, component, exit_code):
         self.event('EXIT', component=component, exit_code=exit_code)
+
+    def fault(self, error):
+        """Expose at most four code locations, never exception text or locals."""
+        seen = set()
+        for _ in range(4):
+            if error is None or id(error) in seen:
+                break
+            seen.add(id(error))
+            trace, location = error.__traceback__, None
+            for _ in range(80):
+                if trace is None:
+                    break
+                module = trace.tb_frame.f_globals.get('__name__')
+                filename = trace.tb_frame.f_code.co_filename.replace('\\', '/')
+                if (type(module) is str and module in FAULT_MODULES
+                        and filename.endswith('/' + module.replace('.', '/') + '.py')
+                        and 1 <= trace.tb_lineno <= 100000):
+                    location = {'module': module, 'line': trace.tb_lineno}
+                trace = trace.tb_next
+            if location is not None:
+                category = type(error).__name__
+                self.event('FAULT', **location, category=category if category in FAULT_TYPES else 'OTHER')
+            error = error.__cause__ if error.__cause__ is not None else error.__context__
 
     def frame(self, kind, raw):
         limit = MAX_DIAGNOSTIC_BYTES if kind == b'D' else MAX_RECEIPT_BYTES
