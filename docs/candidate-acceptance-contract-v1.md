@@ -137,6 +137,21 @@ listener 释放后结束。不安装长期代理服务，不将此开发/验收�
 
 ## 4. VM Harness 与原始 VM 保护
 
+固定单次范围 `ANIMEMO_V2_CANDIDATE_RECEIPT_WIRE_REPAIR_SINGLE_CAPTURE_V1` 使用既有
+ASCII ID SHA-256 派生的 `E:/09cc87e4269208d86d4ab8afab9a1ea66509d2d24e006d4c38d907c2f2dacae2`。
+入口识别不等于授权；仍须本次操作员明确授权，冻结准确 source/tree/Q/材料/plan/session，
+在捕获前独占 reserve。一轮最多一次原生输入、三 Profile 九次固定角色交付，沿用
+12 小时总上限和 30 分钟无在途操作空闲上限。旧三个范围及开发账本不改变、不退款；
+任意 ID、后缀、重启或新 Q 不能生成额外额度。未来 main/Q 不写入源码。
+
+Harness 在每份已验证 Profile/Origin 之后写入已独占保留结果路径的原子快照；合法
+Aggregate 的保存先于 wire 导出。输出失败仍整体 ERROR，已保存的合法部分不能获得发布
+权威。主失败、输出失败和后续 cleanup/POSTSTATE 错误分别保留。只有资源上下文全部关闭、
+最终结果落盘后才输出成功摘要；`controller_exit_code` 对应实际 Python 返回值。
+执行模式 stdout 为简短状态，完整内容通过 `--result` 文件交付；原生 Console 宿主的退出码
+不能替代控制器 JSON 和 Python 进程退出状态。结果写入只在 Windows 5/32/33 短读冲突时对
+同一文件有界重试，持续失败保留上一个完整快照并返回非零。
+
 唯一入口为：
 
 ```text
@@ -293,6 +308,9 @@ envelope 包含 zlib payload、原始回执字节数与 SHA-256，外层使用 u
 [Python LZMADecompressor](https://docs.python.org/3/library/lzma.html#lzma.LZMADecompressor)
 的 `memlimit` 与 `max_length`。
 Harness 的 `candidateAcceptanceReceiptB64url` 即为下一阶段输入，生成它不派发工作流。
+Windows 文件式消费使用 `python -X utf8 -m release.cli decode-candidate-acceptance-receipt
+--value-file <wire.txt> --output <receipt.json>`，文件必须是无换行的完整 ASCII wire，最多
+48 KiB；`--value` 与 `--value-file` 互斥。长 wire 无需进入 Windows argv 或环境变量。
 解码后的原始完整 Aggregate 字节保持不变；Freshness Artifact 为十文件闭合集合，
 包含原始 `candidate-acceptance-receipt.json`，并绑定其 SHA256、Qualification Run、
 intended main SHA/tree 与 candidate version，同时保留双快照、至少 60 秒间隔和 15 分钟

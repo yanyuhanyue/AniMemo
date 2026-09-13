@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 
@@ -15,8 +16,21 @@ from scripts.development_session_owner import DevelopmentOwnerError
 from scripts.guest_console_capture import ConsoleCaptureError, WindowsConsoleCapture
 from scripts.guest_sudo_session import ControllerFailure
 from scripts.isolated_guest_validation import _check_checkout
+from release.materials import reject_duplicate_json_keys
 
 SCHEMA = 'animemo.local-installer-development-batch-report/v1'
+
+
+def result_bytes(result):
+    """The next JSON consumer must recover the complete development result."""
+    try:
+        raw = h.canonical_json_bytes(result)
+        decoded = json.loads(raw, object_pairs_hook=reject_duplicate_json_keys)
+        if decoded != result or h.canonical_json_bytes(decoded) != raw:
+            raise ValueError('result changed on decoding')
+        return raw
+    except (TypeError, ValueError) as error:
+        raise h.CandidateHarnessError('DEVELOPMENT_RESULT_EXPORT_INVALID') from error
 
 
 def _failure(error):
@@ -142,6 +156,11 @@ def run(args, *, session_owner=None):
                 result['status'] = 'ERROR'
                 result['all_profiles_pass'] = False
                 result['failure_code'] = 'DEVELOPMENT_CAPTURE_ACCOUNTING_INVALID'
+    if result['status'] == 'PASS':
+        try:
+            result_bytes(result)
+        except h.CandidateHarnessError as error:
+            result.update(status='ERROR', all_profiles_pass=False, failure_code=error.code)
     return result
 
 
@@ -161,13 +180,19 @@ def main(argv=None):
     output = args.result.open('xb') if args.result is not None else None
     try:
         result = run(args)
-        raw = h.canonical_json_bytes(result)
+        raw = result_bytes(result)
         if output is not None:
             output.write(raw)
             output.flush()
             os.fsync(output.fileno())
+            if args.result.read_bytes() != raw:
+                raise h.CandidateHarnessError('DEVELOPMENT_RESULT_READBACK_INVALID')
         print(raw.decode('utf-8'), end='')
         return 0 if result['status'] in {'PASS', 'PLAN_ONLY'} else 2
+    except (OSError, h.CandidateHarnessError):
+        import sys
+        print(json.dumps({'status':'ERROR','failure_code':'DEVELOPMENT_RESULT_EXPORT_FAILED'}),file=sys.stderr)
+        return 2
     finally:
         if output is not None:
             output.close()

@@ -42,6 +42,7 @@ from release.candidate import (
     LoadedVerifiedCandidate,
     aggregate_receipt_digest,
     encode_aggregate_receipt_b64url,
+    decode_aggregate_receipt_b64url,
     canonical_json_bytes,
     load_verified_candidate,
     sha256_bytes,
@@ -5824,6 +5825,101 @@ def _profile_result(
     }
 
 
+def build_candidate_aggregate(plan, *, profile_results, receipts, candidate_prestate,
+        candidate_poststate, r2_prestate_receipt, r2_poststate_receipt, plugin_origin):
+    """Construct and validate content; this does not grant execution or release authority."""
+    completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    all_profiles_pass = all(
+        profile_results[PROFILE_RESULT_KEYS[profile]]["status"] == "PASS"
+        for profile in PROFILES
+    )
+    aggregate = {
+        "schema": "animemo.prepublication-candidate-acceptance-receipt/v3",
+        "version": 3,
+        "candidate_input_digest": plan.candidate_input_digest,
+        "verified_candidate_digest": plan.verified_candidate_digest,
+        "qualification_run_id": plan.qualification_run_id,
+        "qualification_run_attempt": 1,
+        "source_sha": plan.source_sha,
+        "source_tree": plan.source_tree,
+        "candidate_version": plan.candidate_version,
+        "base_vm_identity": plan.source_vm_digest,
+        "source_vm_inventory_identity": plan.source_vm_inventory_identity,
+        "source_disk_graph_identity": plan.source_disk_graph_identity,
+        "original_vm_hashes": dict(sorted(plan.original_vm_hashes.items())),
+        "snapshot_identities": {
+            item.profile: item.snapshot_identity for item in plan.profiles
+        },
+        "snapshot_disk_graph_identities": {
+            item.profile: item.snapshot_disk_graph_identity
+            for item in plan.profiles
+        },
+        "r2_origin_prestate_receipt_digest": (sha256_bytes(canonical_json_bytes(r2_prestate_receipt))
+            if plugin_origin is not None else r2_origin_receipt_digest(r2_prestate_receipt)),
+        "r2_origin_poststate_receipt_digest": (sha256_bytes(canonical_json_bytes(r2_poststate_receipt))
+            if plugin_origin is not None else r2_origin_receipt_digest(r2_poststate_receipt)),
+        "r2_origin_prestate_observation_id": r2_prestate_receipt[
+            "observation_id"
+        ],
+        "r2_origin_poststate_observation_id": r2_poststate_receipt[
+            "observation_id"
+        ],
+        "profile_results": profile_results,
+        "all_profiles_pass": all_profiles_pass,
+        "candidate_prestate": candidate_prestate,
+        "candidate_poststate": candidate_poststate,
+        "repository_mutation_count": 0,
+        "publication_mutation_count": 0,
+        "shared_host_connection_count": 0,
+        "secret_sweep": 0,
+        "placeholder_sweep": 0,
+        "release_authority_granted": False,
+        "publish_authorized": False,
+        "completed_at": completed,
+        "result": "PASS" if all_profiles_pass else "FAIL",
+        "receipt_digest": "",
+    }
+    if plugin_origin is not None:
+        aggregate.update(schema="animemo.prepublication-candidate-acceptance-receipt/v4", version=4,
+            plan_digest=plan.plan_digest, session_id=plan.session_id,
+            r2_origin_prestate_receipt=r2_prestate_receipt,
+            r2_origin_poststate_receipt=r2_poststate_receipt, profile_receipts=receipts)
+    unsigned = dict(aggregate)
+    unsigned.pop("receipt_digest")
+    aggregate["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
+    try:
+        return validate_aggregate_receipt(aggregate)
+    except CandidateContractError as error:
+        raise CandidateHarnessError(error.code) from error
+
+
+def export_candidate_aggregate(aggregate):
+    """Export complete verified bytes and verify the exact bounded round trip."""
+    try:
+        wire = encode_aggregate_receipt_b64url(aggregate)
+        decoded, raw = decode_aggregate_receipt_b64url(wire)
+        if decoded != aggregate or raw != canonical_json_bytes(aggregate):
+            raise CandidateContractError('CANDIDATE_RECEIPT_EXPORT_MISMATCH')
+        envelope = json.loads(base64.urlsafe_b64decode(wire + '=' * (-len(wire) % 4)))
+        payload = envelope['payload']
+        compressed = base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4))
+        return {'candidateAcceptanceReceiptB64url': wire, 'wireMetrics': {
+            'schema': envelope['schema'], 'encoding': envelope['encoding'],
+            'canonical_json_bytes': len(raw), 'compressed_bytes': len(compressed),
+            'wire_characters': len(wire), 'wire_remaining_characters': 48 * 1024 - len(wire),
+            'decoded_bytes_identical': True}}
+    except CandidateContractError as error:
+        raise CandidateHarnessError(error.code) from error
+
+
+def _checkpoint_candidate(provider, progress):
+    if type(provider) is ClosedVmwareProvider:
+        provider._candidate_acceptance_progress = progress
+    checkpoint = getattr(provider, '_candidate_result_checkpoint', None)
+    if checkpoint is not None:
+        checkpoint(progress)
+
+
 def _execute_harness_plan(
     plan: CandidateHarnessPlan,
     *,
@@ -5872,6 +5968,8 @@ def _execute_harness_plan(
             raise CandidateHarnessError("CANDIDATE_MATERIAL_AUTHORITY_INVALID")
     except CandidateContractError as error:
         raise CandidateHarnessError(error.code) from error
+    progress = {"r2OriginPrestateReceipt": r2_prestate_receipt, "stage": "ORIGIN_PRESTATE"}
+    _checkpoint_candidate(provider, progress)
     candidate_prestate = {
         **_read_expected_external_state(provider, plan.candidate_version),
         "r2_origin": r2_prestate_receipt["result"],
@@ -5879,10 +5977,9 @@ def _execute_harness_plan(
     receipts: dict[str, dict[str, Any]] = {}
     profile_results: dict[str, dict[str, str | None]] = {}
     shared_blocker_code: str | None = None
-    progress = {"r2OriginPrestateReceipt": r2_prestate_receipt, "profileReceipts": receipts,
-                "profileResults": profile_results, "candidatePrestate": candidate_prestate}
-    if type(provider) is ClosedVmwareProvider:
-        provider._candidate_acceptance_progress = progress
+    progress.update(profileReceipts=receipts, profileResults=profile_results,
+        candidatePrestate=candidate_prestate, stage='PROFILES')
+    _checkpoint_candidate(provider, progress)
     for item in plan.profiles:
         result_key = PROFILE_RESULT_KEYS[item.profile]
         batch = provider._candidate_batch if type(provider) is ClosedVmwareProvider else None
@@ -6037,6 +6134,7 @@ def _execute_harness_plan(
                 failure_code="CANDIDATE_PROFILE_REPORTED_FAILURE",
                 receipt_digest=digest,
             )
+        _checkpoint_candidate(provider, progress)
     if type(provider) is ClosedVmwareProvider and provider._candidate_batch is not None:
         provider._candidate_batch.release_secret()
     try:
@@ -6062,6 +6160,8 @@ def _execute_harness_plan(
                     "NOT_RUN_SHARED_BLOCKER",
                     failure_code="CANDIDATE_ORIGINAL_VM_MUTATED",
                 )
+    progress['stage'] = 'ORIGIN_POSTSTATE'
+    _checkpoint_candidate(provider, progress)
     try:
         if plugin_origin is not None:
             from release.r2_plugin_origin import CloudflarePluginOrigin
@@ -6088,6 +6188,7 @@ def _execute_harness_plan(
     except CandidateContractError as error:
         raise CandidateHarnessError(error.code) from error
     progress["r2OriginPoststateReceipt"] = r2_poststate_receipt
+    _checkpoint_candidate(provider, progress)
     if (
         r2_prestate_receipt["observation_id"]
         == r2_poststate_receipt["observation_id"]
@@ -6099,80 +6200,18 @@ def _execute_harness_plan(
     }
     if candidate_poststate != candidate_prestate:
         raise CandidateHarnessError("CANDIDATE_VERSION_STATE_DRIFT")
-    completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    all_profiles_pass = all(
-        profile_results[PROFILE_RESULT_KEYS[profile]]["status"] == "PASS"
-        for profile in PROFILES
-    )
-    aggregate = {
-        "schema": "animemo.prepublication-candidate-acceptance-receipt/v3",
-        "version": 3,
-        "candidate_input_digest": plan.candidate_input_digest,
-        "verified_candidate_digest": plan.verified_candidate_digest,
-        "qualification_run_id": plan.qualification_run_id,
-        "qualification_run_attempt": 1,
-        "source_sha": plan.source_sha,
-        "source_tree": plan.source_tree,
-        "candidate_version": plan.candidate_version,
-        "base_vm_identity": plan.source_vm_digest,
-        "source_vm_inventory_identity": plan.source_vm_inventory_identity,
-        "source_disk_graph_identity": plan.source_disk_graph_identity,
-        "original_vm_hashes": dict(sorted(plan.original_vm_hashes.items())),
-        "snapshot_identities": {
-            item.profile: item.snapshot_identity for item in plan.profiles
-        },
-        "snapshot_disk_graph_identities": {
-            item.profile: item.snapshot_disk_graph_identity
-            for item in plan.profiles
-        },
-        "r2_origin_prestate_receipt_digest": (sha256_bytes(canonical_json_bytes(r2_prestate_receipt))
-            if plugin_origin is not None else r2_origin_receipt_digest(r2_prestate_receipt)),
-        "r2_origin_poststate_receipt_digest": (sha256_bytes(canonical_json_bytes(r2_poststate_receipt))
-            if plugin_origin is not None else r2_origin_receipt_digest(r2_poststate_receipt)),
-        "r2_origin_prestate_observation_id": r2_prestate_receipt[
-            "observation_id"
-        ],
-        "r2_origin_poststate_observation_id": r2_poststate_receipt[
-            "observation_id"
-        ],
-        "profile_results": profile_results,
-        "all_profiles_pass": all_profiles_pass,
-        "candidate_prestate": candidate_prestate,
-        "candidate_poststate": candidate_poststate,
-        "repository_mutation_count": 0,
-        "publication_mutation_count": 0,
-        "shared_host_connection_count": 0,
-        "secret_sweep": 0,
-        "placeholder_sweep": 0,
-        "release_authority_granted": False,
-        "publish_authorized": False,
-        "completed_at": completed,
-        "result": "PASS" if all_profiles_pass else "FAIL",
-        "receipt_digest": "",
-    }
-    if plugin_origin is not None:
-        aggregate.update(schema="animemo.prepublication-candidate-acceptance-receipt/v4", version=4,
-            plan_digest=plan.plan_digest, session_id=plan.session_id,
-            r2_origin_prestate_receipt=r2_prestate_receipt,
-            r2_origin_poststate_receipt=r2_poststate_receipt, profile_receipts=receipts)
-    unsigned = dict(aggregate)
-    unsigned.pop("receipt_digest")
-    aggregate["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
-    try:
-        validate_aggregate_receipt(aggregate)
-        aggregate_digest = aggregate_receipt_digest(aggregate)
-        wire = encode_aggregate_receipt_b64url(aggregate)
-    except CandidateContractError as error:
-        raise CandidateHarnessError(error.code) from error
-    return {
-        "status": aggregate["result"],
-        "aggregateReceipt": aggregate,
-        "aggregateReceiptSha256": aggregate_digest,
-        "candidateAcceptanceReceiptB64url": wire,
-        "r2OriginPrestateReceipt": r2_prestate_receipt,
-        "r2OriginPoststateReceipt": r2_poststate_receipt,
-        "profileReceipts": receipts,
-    }
+    progress['stage'] = 'AGGREGATE'
+    aggregate = build_candidate_aggregate(plan, profile_results=profile_results, receipts=receipts,
+        candidate_prestate=candidate_prestate, candidate_poststate=candidate_poststate,
+        r2_prestate_receipt=r2_prestate_receipt, r2_poststate_receipt=r2_poststate_receipt,
+        plugin_origin=plugin_origin)
+    progress.update(aggregateReceipt=aggregate, aggregateReceiptSha256=aggregate_receipt_digest(aggregate),
+        stage='WIRE')
+    _checkpoint_candidate(provider, progress)
+    exported = export_candidate_aggregate(aggregate)
+    progress.update(exported)
+    _checkpoint_candidate(provider, progress)
+    return {**progress, 'status': aggregate['result'], 'stage': 'COMPLETE'}
 
 
 def execute_harness_plan(
@@ -6236,97 +6275,133 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _record_candidate_failure(result, error, stage):
+    from scripts.candidate_result import CandidateResultError
+    from scripts.isolated_guest_validation import _failure_code
+    code = error.code if isinstance(error, CandidateResultError) else _failure_code(error)
+    if isinstance(error, CandidateResultError):
+        result['output_failure_code'] = code
+    if 'failure_code' not in result and stage in {'ORIGIN_POSTSTATE', 'AGGREGATE', 'WIRE'}:
+        for profile in PROFILES:
+            prior = result.get('profileResults', {}).get(PROFILE_RESULT_KEYS[profile], {})
+            if prior.get('failure_code'):
+                result.update(failure_code=prior['failure_code'], failure_stage='PROFILE')
+                break
+    if 'failure_code' not in result:
+        result.update(failure_code=code, failure_stage=stage)
+    elif code != result['failure_code']:
+        secondary = {'stage': stage, 'code': code}
+        if secondary not in result.setdefault('secondary_failures', []):
+            result['secondary_failures'].append(secondary)
+    result['status'] = 'ERROR'
+
+
 def main(argv: list[str] | None = None) -> int:
+    from scripts.candidate_result import CandidateResultFile, CandidateResultError
     args = _parser().parse_args(argv)
     provider = ClosedVmwareProvider()
-    report = args.result.open("x", encoding="utf-8", newline="\n") if args.result else None
-    result = {"status": "ERROR", "r2_origin_transport": args.r2_origin_transport}
+    report = None
+    result = {'status': 'RUNNING', 'stage': 'PREPARATION',
+        'r2_origin_transport': args.r2_origin_transport, 'secondary_failures': []}
+    def checkpoint(progress):
+        result.update(progress)
+        if report is not None:
+            report.write(result)
+    provider._candidate_result_checkpoint = checkpoint
     try:
+        if args.result is not None:
+            report = CandidateResultFile(args.result)
+            checkpoint({})
         from scripts.candidate_batch_session import CAPTURE_LEDGERS, CandidateBatch
         from scripts.guest_console_capture import WindowsConsoleCapture
         from scripts.isolated_guest_validation import _check_checkout
         if ((args.execute and (args.authorization_id not in CAPTURE_LEDGERS or report is None))
                 or (not args.execute and args.authorization_id is not None)):
-            raise CandidateHarnessError("CANDIDATE_CAPTURE_AUTHORIZATION_INVALID")
+            raise CandidateHarnessError('CANDIDATE_CAPTURE_AUTHORIZATION_INVALID')
         if args.execute:
             _check_checkout(args.expected_source_sha, args.expected_source_tree)
             WindowsConsoleCapture().preflight()
         with provider.execution_authority(_retain_controller_data=args.execute), ExitStack() as stack:
-            plugin_origin = None
-            if args.execute and args.r2_origin_transport == "cloudflare-plugin":
-                from release.r2_plugin_origin import CloudflarePluginOrigin
-                plugin_origin = stack.enter_context(CloudflarePluginOrigin())
-                result["r2_plugin_channel"] = str(plugin_origin.root)
-            material_authority = (
-                stack.enter_context(
-                    acquire_candidate_material_authority(
-                        args.verified_candidate_digest,
-                        provider=provider,
-                    )
-                )
-                if args.execute
-                else None
-            )
-            plan = build_harness_plan(
-                verified_candidate_digest=args.verified_candidate_digest,
-                expected_qualification_run_id=args.expected_qualification_run_id,
-                expected_source_sha=args.expected_source_sha,
-                expected_source_tree=args.expected_source_tree,
-                provider=provider,
-                _candidate_material_authority=material_authority,
-            )
-            if not args.execute:
-                print(json.dumps(plan.as_dict(), ensure_ascii=False, sort_keys=True))
-                return 0
-            result["plan"] = plan.as_dict()
-            accepted = plan.plan_digest
-            if not accepted:
-                raise CandidateHarnessError(
-                    "CANDIDATE_HARNESS_PLAN_CONFIRMATION_REQUIRED"
-                )
-            batch = CandidateBatch(provider, plan, authorization_id=args.authorization_id)
-            provider._candidate_batch = batch
-            provider._candidate_credential_session = batch.record
-            provider._candidate_credential_results = batch.record['profiles']
             try:
-                acceptance = execute_harness_plan(
-                    plan,
-                    accepted_plan_digest=accepted,
-                    provider=provider,
-                    environment=os.environ,
-                    plugin_origin=plugin_origin,
-                    _candidate_material_authority=material_authority,
-                )
-            except BaseException:
-                batch.revoke('CANDIDATE_BATCH_EXECUTION_INTERRUPTED')
-                raise
-            finally:
-                try:
-                    batch.close()
-                finally:
+                plugin_origin = None
+                if args.execute and args.r2_origin_transport == 'cloudflare-plugin':
+                    from release.r2_plugin_origin import CloudflarePluginOrigin
+                    plugin_origin = stack.enter_context(CloudflarePluginOrigin())
+                    result['r2_plugin_channel'] = str(plugin_origin.root)
+                material_authority = (stack.enter_context(acquire_candidate_material_authority(
+                    args.verified_candidate_digest, provider=provider)) if args.execute else None)
+                plan = build_harness_plan(verified_candidate_digest=args.verified_candidate_digest,
+                    expected_qualification_run_id=args.expected_qualification_run_id,
+                    expected_source_sha=args.expected_source_sha,
+                    expected_source_tree=args.expected_source_tree, provider=provider,
+                    _candidate_material_authority=material_authority)
+                result['plan'] = plan.as_dict()
+                if not args.execute:
+                    result.update(status='PLAN_ONLY', stage='COMPLETE')
+                else:
+                    if not plan.plan_digest:
+                        raise CandidateHarnessError('CANDIDATE_HARNESS_PLAN_CONFIRMATION_REQUIRED')
+                    batch = CandidateBatch(provider, plan, authorization_id=args.authorization_id)
+                    provider._candidate_batch = batch
                     provider._candidate_credential_session = batch.record
                     provider._candidate_credential_results = batch.record['profiles']
-                    provider._candidate_batch = None
-            result.update(acceptance)
-            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-            return 0 if result["status"] == "PASS" else 2
+                    try:
+                        acceptance = execute_harness_plan(plan, accepted_plan_digest=plan.plan_digest,
+                            provider=provider, environment=os.environ, plugin_origin=plugin_origin,
+                            _candidate_material_authority=material_authority)
+                    except BaseException as error:
+                        _record_candidate_failure(result, error, result['stage'])
+                        batch.revoke('CANDIDATE_BATCH_EXECUTION_INTERRUPTED')
+                        raise
+                    finally:
+                        try:
+                            batch.close()
+                        except BaseException as error:
+                            _record_candidate_failure(result, error, 'CREDENTIAL_CLEANUP')
+                            raise
+                        finally:
+                            provider._candidate_credential_session = batch.record
+                            provider._candidate_credential_results = batch.record['profiles']
+                            provider._candidate_batch = None
+                    result.update(acceptance)
+            except BaseException as error:
+                _record_candidate_failure(result, error, result['stage'])
+                raise
     except BaseException as error:
-        from scripts.isolated_guest_validation import _failure_code
-        result["failure_code"] = _failure_code(error)
-        print(json.dumps({"code": result["failure_code"]}), file=sys.stderr)
-        return 2
+        _record_candidate_failure(result, error,
+            'HOST_CLEANUP' if 'failure_code' in result or result['stage'] == 'COMPLETE' else result['stage'])
     finally:
-        if "aggregateReceipt" not in result:
-            result.update(provider._candidate_acceptance_progress)
-        result["profile_operations"] = provider._profile_operation_results
-        result["credential_results"] = provider._candidate_credential_results
+        provider._candidate_result_checkpoint = None
+        # Snapshots already contain every validated Profile/Origin/Aggregate;
+        # resource closure is recorded before the final success is published.
+        result['profile_operations'] = provider._profile_operation_results
+        result['credential_results'] = provider._candidate_credential_results
         result['credential_session'] = provider._candidate_credential_session
         result['workload_diagnostics'] = provider._candidate_diagnostics
-        result["host_lifecycle"] = list(getattr(provider, "_host_lifecycle_observations", ()))
+        result['host_lifecycle'] = list(getattr(provider, '_host_lifecycle_observations', ()))
+        result['controller_exit_code'] = 0 if result['status'] in {'PASS', 'PLAN_ONLY'} else 2
         if report is not None:
-            with report:
-                json.dump(result, report, ensure_ascii=False, sort_keys=True, indent=2)
-                report.write("\n")
+            try:
+                report.write(result)
+            except CandidateResultError as error:
+                _record_candidate_failure(result, error, 'OUTPUT')
+                result['controller_exit_code'] = 2
+            if report.cleanup_errors:
+                result['output_cleanup_errors'] = list(report.cleanup_errors)
+        payload = result['plan'] if result['status'] == 'PLAN_ONLY' else {
+            key: result[key] for key in ('status', 'stage', 'failure_code', 'failure_stage',
+                'secondary_failures', 'output_failure_code', 'controller_exit_code', 'wireMetrics') if key in result}
+        try:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        except (OSError, UnicodeError):
+            _record_candidate_failure(result, CandidateResultError('CANDIDATE_RESULT_STDOUT_FAILED'), 'OUTPUT')
+            result['controller_exit_code'] = 2
+            if report is not None:
+                try:
+                    report.write(result)
+                except CandidateResultError as error:
+                    _record_candidate_failure(result, error, 'OUTPUT')
+    return result['controller_exit_code']
 
 
 if __name__ == "__main__":

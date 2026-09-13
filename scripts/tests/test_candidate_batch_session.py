@@ -20,6 +20,14 @@ from scripts.tests.test_guest_sudo_session import SENTINEL, InputSink
 
 
 class FixedAuthorizationTests(unittest.TestCase):
+    def test_wire_repair_scope_has_one_fixed_ascii_ledger_without_reserving(self):
+        self.assertEqual(b.capture_ledger(b.WIRE_REPAIR_AUTHORIZATION),
+            Path('E:/09cc87e4269208d86d4ab8afab9a1ea66509d2d24e006d4c38d907c2f2dacae2'))
+        for unknown in (b.WIRE_REPAIR_AUTHORIZATION + '_NEXT',
+                        b.WIRE_REPAIR_AUTHORIZATION.replace('_V1', '_V2')):
+            with self.assertRaisesRegex(guest.ControllerFailure, 'AUTHORIZATION_INVALID'):
+                b.capture_ledger(unknown)
+
     def test_pr247_scope_uses_only_its_fixed_ascii_digest_path_without_reserving(self):
         # Only resolve the production path. Every actual reserve uses the
         # isolated mappings in BatchSessionTests; this never touches a ledger.
@@ -44,13 +52,15 @@ class BatchSessionTests(unittest.TestCase):
         self.ledger = Path(temporary.name) / ('a' * 64)
         self.new_ledger = Path(temporary.name) / ('b' * 64)
         self.legacy_ledger = Path(temporary.name) / ('c' * 64)
+        self.pr247_ledger = Path(temporary.name) / ('d' * 64)
         patcher = mock.patch.object(b, 'CAPTURE_LEDGERS', {
             b.AUTHORIZATION: self.legacy_ledger, b.GATEWAY_REPAIR_AUTHORIZATION: self.new_ledger,
-            b.PR247_REVALIDATION_AUTHORIZATION: self.ledger})
+            b.PR247_REVALIDATION_AUTHORIZATION: self.pr247_ledger,
+            b.WIRE_REPAIR_AUTHORIZATION: self.ledger})
         patcher.start()
         self.addCleanup(patcher.stop)
         self.batch = b.CandidateBatch(self.provider, self.plan,
-            authorization_id=b.PR247_REVALIDATION_AUTHORIZATION, clock=lambda: self.time)
+            authorization_id=b.WIRE_REPAIR_AUTHORIZATION, clock=lambda: self.time)
         self.provider._candidate_batch = self.batch
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(b, '_check_checkout').start()
@@ -156,7 +166,7 @@ class BatchSessionTests(unittest.TestCase):
     def test_two_launchers_race_for_the_same_irreversible_capture(self):
         def reserve():
             try:
-                b.reserve_capture(b.PR247_REVALIDATION_AUTHORIZATION)
+                b.reserve_capture(b.WIRE_REPAIR_AUTHORIZATION)
                 return 'RESERVED'
             except guest.ControllerFailure:
                 return 'REJECTED'
@@ -167,7 +177,8 @@ class BatchSessionTests(unittest.TestCase):
     def test_new_fixed_scope_preserves_consumed_old_scope_and_requires_explicit_selection(self):
         originals = {}
         for authorization, ledger in ((b.AUTHORIZATION, self.legacy_ledger),
-                                      (b.GATEWAY_REPAIR_AUTHORIZATION, self.new_ledger)):
+                                      (b.GATEWAY_REPAIR_AUTHORIZATION, self.new_ledger),
+                                      (b.PR247_REVALIDATION_AUTHORIZATION, self.pr247_ledger)):
             b.reserve_capture(authorization)
             (ledger / 'preserved.json').write_bytes(b'{"consumed":true}\n')
             originals[ledger] = (ledger / 'preserved.json').read_bytes()
@@ -182,13 +193,13 @@ class BatchSessionTests(unittest.TestCase):
             b.reserve_capture()
         self.console.capture.assert_not_called()
         self.assertFalse(self.ledger.exists())
-        batch = b.CandidateBatch(self.provider, self.plan, authorization_id=b.PR247_REVALIDATION_AUTHORIZATION)
+        batch = b.CandidateBatch(self.provider, self.plan, authorization_id=b.WIRE_REPAIR_AUTHORIZATION)
         self.addCleanup(batch.close)
         self.assertFalse(self.ledger.exists())
-        self.assertEqual(batch.record['authorization_id'], b.PR247_REVALIDATION_AUTHORIZATION)
+        self.assertEqual(batch.record['authorization_id'], b.WIRE_REPAIR_AUTHORIZATION)
         def reserve():
             try:
-                b.reserve_capture(b.PR247_REVALIDATION_AUTHORIZATION)
+                b.reserve_capture(b.WIRE_REPAIR_AUTHORIZATION)
                 return 'RESERVED'
             except guest.ControllerFailure:
                 return 'REJECTED'
@@ -202,19 +213,19 @@ class BatchSessionTests(unittest.TestCase):
             self.assertEqual((ledger / 'preserved.json').read_bytes(), original)
 
     def test_new_scope_capture_record_and_restart_after_source_change_share_one_budget(self):
-        batch = b.CandidateBatch(self.provider, self.plan, authorization_id=b.PR247_REVALIDATION_AUTHORIZATION)
+        batch = b.CandidateBatch(self.provider, self.plan, authorization_id=b.WIRE_REPAIR_AUTHORIZATION)
         self.addCleanup(batch.close)
         with batch.operation('BOOTSTRAP', self.plan.profiles[0]), redirect_stdout(io.StringIO()):
             batch.capture_after_bootstrap_observation(self.plan.profiles[0])
         batch.close()
         original = (self.ledger / 'result.json').read_bytes()
         record = json.loads(original)
-        self.assertEqual(record['authorization_id'], b.PR247_REVALIDATION_AUTHORIZATION)
+        self.assertEqual(record['authorization_id'], b.WIRE_REPAIR_AUTHORIZATION)
         self.assertEqual(record['session_capture_attempts'], 1)
         self.assertFalse(self.new_ledger.exists())
         changed = replace(self.plan, source_sha='f'*40, qualification_run_id=self.plan.qualification_run_id+1)
         changed = replace(changed, plan_digest=c.h.sha256_bytes(c.h.canonical_json_bytes(changed.identity_body())))
-        restarted = b.CandidateBatch(self.provider, changed, authorization_id=b.PR247_REVALIDATION_AUTHORIZATION)
+        restarted = b.CandidateBatch(self.provider, changed, authorization_id=b.WIRE_REPAIR_AUTHORIZATION)
         self.addCleanup(restarted.close)
         with restarted.operation('BOOTSTRAP', changed.profiles[0]):
             with self.assertRaisesRegex(guest.ControllerFailure, 'ALREADY_ATTEMPTED'):
