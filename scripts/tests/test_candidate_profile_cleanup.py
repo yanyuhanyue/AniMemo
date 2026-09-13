@@ -138,7 +138,8 @@ class ProfileCleanupTests(unittest.TestCase):
         plan = SimpleNamespace(plan_digest='sha256:' + 'a' * 64, as_dict=lambda: {'syntheticPlan': True})
         output = self.fixture.root / 'result.json'
         def failed(*args, **kwargs):
-            self.provider._candidate_acceptance_progress = {'profileReceipts': {'FRESH_BASE': {'synthetic': True}}}
+            h._checkpoint_candidate(self.provider, {'stage': 'ORIGIN_POSTSTATE',
+                'profileReceipts': {'FRESH_BASE': {'synthetic': True}}})
             raise h.CandidateHarnessError('R2_PLUGIN_RESPONSE_TIMEOUT')
         with (mock.patch.object(h, 'ClosedVmwareProvider', return_value=self.provider),
               mock.patch.object(self.provider, 'execution_authority', return_value=nullcontext()) as authority,
