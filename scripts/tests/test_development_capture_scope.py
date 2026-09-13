@@ -219,7 +219,7 @@ class DevelopmentCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(d.DevelopmentScopeError, 'BUDGET_EXHAUSTED'):
                 self.reserve()
         self.assertEqual((self.root / 'scope.json').read_bytes(), raw)
-        self.assertEqual({p.name for p in self.root.iterdir() if p.is_dir()}, set(d.SLOTS))
+        self.assertEqual({p.name for p in self.root.iterdir() if p.is_dir()}, set(d.SLOTS[:d.MAX_CAPTURES]))
         self.assertTrue(all(not tuple((self.root / slot).iterdir()) for slot in d.SLOTS[:3]))
 
     def test_extension_rejects_expiry_rollback_time_failure_and_different_base(self):
@@ -249,6 +249,51 @@ class DevelopmentCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(d.DevelopmentScopeError, 'SCOPE_INVALID'):
                 self.reserve()
         self.assertFalse((self.root / d.SLOTS[2]).exists())
+
+    def test_explicit_addition_uses_slots_seven_to_twelve_without_resetting_scope(self):
+        raw = self.prepare_confirmed_extension()
+        with mock.patch.object(d.time, 'monotonic', return_value=100), mock.patch.object(d.time, 'time', return_value=145009):
+            for _ in range(3):
+                self.reserve().close()
+            with self.assertRaisesRegex(d.DevelopmentScopeError, 'BUDGET_EXHAUSTED'):
+                self.reserve()
+            with mock.patch.object(d, 'ADDITIONAL_SCOPE_SHA256', hashlib.sha256(raw).hexdigest()):
+                for index in range(7, 13):
+                    reservation = self.reserve()
+                    self.assertEqual(reservation.index, index)
+                    self.assertEqual(reservation.deadline, 43290)
+                    self.assertEqual(reservation.time_observation['effective_capture_limit'], 12)
+                    self.assertEqual(reservation.time_observation['spent_captures_before_reserve'], index - 1)
+                    self.assertEqual(reservation.time_observation['effective_expires_utc_seconds'], 188200)
+                    reservation.close()
+                with self.assertRaisesRegex(d.DevelopmentScopeError, 'BUDGET_EXHAUSTED'):
+                    self.reserve()
+        self.assertEqual((self.root / 'scope.json').read_bytes(), raw)
+        self.assertEqual({p.name for p in self.root.iterdir() if p.is_dir()}, set(d.SLOTS))
+        self.assertTrue(all(not tuple((self.root / slot).iterdir()) for slot in d.SLOTS[:6]))
+
+    def test_additional_grant_requires_all_original_spent_slots(self):
+        raw = self.prepare_confirmed_extension()
+        with (mock.patch.object(d, 'ADDITIONAL_SCOPE_SHA256', hashlib.sha256(raw).hexdigest()),
+              mock.patch.object(d.time, 'monotonic', return_value=100),
+              mock.patch.object(d.time, 'time', return_value=145009)):
+            with self.assertRaisesRegex(d.DevelopmentScopeError, 'SCOPE_INVALID'):
+                self.reserve()
+        self.assertFalse((self.root / d.SLOTS[3]).exists())
+
+    def test_added_captures_keep_fixed_time_and_material_binding(self):
+        raw = self.prepare_confirmed_extension()
+        with mock.patch.object(d.time, 'monotonic', return_value=100), mock.patch.object(d.time, 'time', return_value=145009):
+            for _ in range(3):
+                self.reserve().close()
+        with mock.patch.object(d, 'ADDITIONAL_SCOPE_SHA256', hashlib.sha256(raw).hexdigest()):
+            with mock.patch.object(d.time, 'monotonic', return_value=100), mock.patch.object(d.time, 'time', return_value=188200):
+                with self.assertRaisesRegex(d.DevelopmentScopeError, 'SCOPE_EXPIRED'):
+                    self.reserve()
+            with self.assertRaisesRegex(d.DevelopmentScopeError, 'MATERIAL_CHANGED'):
+                d.reserve_development_capture(d.AUTHORIZATION, material_identity={**MATERIAL, 'qualification_run_id': 10})
+        self.assertFalse((self.root / d.SLOTS[6]).exists())
+        self.assertEqual((self.root / 'scope.json').read_bytes(), raw)
 
 
 if __name__ == '__main__':

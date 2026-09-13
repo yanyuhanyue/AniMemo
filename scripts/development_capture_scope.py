@@ -24,10 +24,11 @@ from release.formal_windows_pretrust import (
 AUTHORIZATION = 'ANIMEMO_V2_LOCAL_INSTALLER_DEVELOPMENT_V1'
 LEDGER = Path('E:/') / hashlib.sha256(AUTHORIZATION.encode('ascii')).hexdigest()
 MAX_CAPTURES = 6
+ADDITIONAL_MAX_CAPTURES = 12
 SCOPE_SECONDS = 12 * 60 * 60
 SCHEMA = 'animemo.local-installer-development-capture-budget/v1'
 SLOTS = tuple(hashlib.sha256(f'{AUTHORIZATION}:capture:{index}'.encode('ascii')).hexdigest()
-              for index in range(1, MAX_CAPTURES + 1))
+              for index in range(1, ADDITIONAL_MAX_CAPTURES + 1))
 # The operator confirmed one twelve-hour extension for the three remaining
 # captures on 2026-09-13. This exact original scope is the only beneficiary;
 # no file, CLI flag, new authorization ID or current clock can renew the grant.
@@ -35,11 +36,22 @@ EXTENSION_SCOPE_SHA256 = '1a48a5ad82083ff97f4580c6dee25ec15463c3275ba76211a59a4a
 EXTENSION_START_UTC = 1789266910.207901
 EXTENSION_EXPIRES_UTC = 1789310110.207901
 EXTENSION_SPENT_CAPTURES = 3
+# A later explicit operator grant adds six attempts to this same spent scope;
+# it does not change the original metadata or the fixed extension deadline.
+ADDITIONAL_SCOPE_SHA256 = '1a48a5ad82083ff97f4580c6dee25ec15463c3275ba76211a59a4ac66b420b3f'
+
+
+def _scope_sha256(value):
+    raw = (json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('utf-8')
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _has_confirmed_extension(value):
-    raw = (json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('utf-8')
-    return hashlib.sha256(raw).hexdigest() == EXTENSION_SCOPE_SHA256
+    return _scope_sha256(value) == EXTENSION_SCOPE_SHA256
+
+
+def _has_additional_capture_grant(value):
+    return _has_confirmed_extension(value) and _scope_sha256(value) == ADDITIONAL_SCOPE_SHA256
 
 
 class DevelopmentScopeError(RuntimeError):
@@ -174,7 +186,7 @@ class DevelopmentCaptureReservation:
 
 
 def reserve_development_capture(authorization_id, *, material_identity):
-    """Reserve at most six rounds under one fixed twelve-hour task budget.
+    """Reserve a base or explicitly added round under an immutable deadline.
 
     Call only after the exact Guest, source and material checks. Cancelled,
     invalid, partial and crashed captures all consume their reserved round.
@@ -240,10 +252,17 @@ def reserve_development_capture(authorization_id, *, material_identity):
         for slot in SLOTS[:sum(used)]:
             path = LEDGER / slot
             _require(path.is_dir() and not path.is_symlink() and not path.is_junction())
-        _require(sum(used) < MAX_CAPTURES, 'DEVELOPMENT_CAPTURE_BUDGET_EXHAUSTED')
-        if _has_confirmed_extension(value):
+        added = _has_additional_capture_grant(value)
+        capture_limit = ADDITIONAL_MAX_CAPTURES if added else MAX_CAPTURES
+        _require(sum(used) < capture_limit, 'DEVELOPMENT_CAPTURE_BUDGET_EXHAUSTED')
+        if added:
+            _require(sum(used) >= MAX_CAPTURES, 'DEVELOPMENT_CAPTURE_SCOPE_INVALID')
+        elif _has_confirmed_extension(value):
             _require(sum(used) >= EXTENSION_SPENT_CAPTURES,
                      'DEVELOPMENT_CAPTURE_SCOPE_INVALID')
+        time_observation = {**time_observation, 'effective_capture_limit': capture_limit,
+            'spent_captures_before_reserve': sum(used),
+            'additional_capture_grant_scope_sha256': ADDITIONAL_SCOPE_SHA256 if added else None}
         _require(time.monotonic() < deadline, 'DEVELOPMENT_CAPTURE_SCOPE_EXPIRED')
         index = sum(used)
         path = create_windows_private_named_directory(LEDGER, name=SLOTS[index])
