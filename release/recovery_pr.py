@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from .publication_remote import _NoRedirect
+from .publication_remote import GitHubReadError, _NoRedirect, read_github_response
 from .recovery_contract import RecoveryError, policy, require
 
 PR_API_VERSION = "2022-11-28"
@@ -27,7 +27,8 @@ def merge_cli_command(number):
     p = policy()
     require(
         type(number) is int
-        and number in {p["sourcePr"], p["previousTool"]["sourcePr"]},
+        and number
+        in {p["sourcePr"], p["parentTool"]["sourcePr"], p["previousTool"]["sourcePr"]},
         "RECOVERY_PR_TARGET_INVALID",
     )
     return (
@@ -44,9 +45,15 @@ def merge_cli_command(number):
 
 def merge_cli_response(raw):
     try:
-        header, body = raw.replace(b"\r\n", b"\n").split(b"\n\n", 1)
+        positions = [
+            (raw.find(mark, 0, 65536), mark) for mark in (b"\r\n\r\n", b"\n\n")
+        ]
+        positions = [(index, mark) for index, mark in positions if index >= 0]
+        require(bool(positions), "RECOVERY_PR_RESPONSE_INVALID")
+        header, body = raw.split(min(positions)[1], 1)
         lines = header.decode("ascii").splitlines()
         status = int(lines[0].split()[1])
+        require(100 <= status <= 599, "RECOVERY_PR_RESPONSE_INVALID")
         headers = {
             k.lower(): v.strip()
             for line in lines[1:]
@@ -66,7 +73,8 @@ def merge_request(number: int) -> MergeResponse:
     p = policy()
     require(
         type(number) is int
-        and number in {p["sourcePr"], p["previousTool"]["sourcePr"]},
+        and number
+        in {p["sourcePr"], p["parentTool"]["sourcePr"], p["previousTool"]["sourcePr"]},
         "RECOVERY_PR_TARGET_INVALID",
     )
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -82,11 +90,12 @@ def merge_request(number: int) -> MergeResponse:
     )
 
     def read(response):
+        observed = read_github_response(response, 4 * 1024 * 1024 + 1)
         return MergeResponse(
-            response.status,
-            response.read(4 * 1024 * 1024 + 1),
-            response.headers.get("X-GitHub-Api-Version-Selected"),
-            response.headers.get("X-GitHub-Request-Id"),
+            observed.status,
+            observed.body,
+            observed.selected_version,
+            observed.request_id,
         )
 
     try:
@@ -96,6 +105,8 @@ def merge_request(number: int) -> MergeResponse:
             return read(response)
     except urllib.error.HTTPError as error:
         return read(error)
+    except GitHubReadError:
+        raise
     except (OSError, TimeoutError):
         raise RecoveryError("RECOVERY_PR_TRANSPORT_UNKNOWN") from None
 

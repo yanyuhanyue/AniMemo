@@ -7,6 +7,7 @@ are validation evidence only and are never executed.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -81,6 +82,33 @@ class GitHubResponse:
     selected_version: str | None = None
 
 
+class GitHubReadError(ConnectionError):
+    """Headers were received, but the response body could not be read."""
+
+    code = "RECOVERY_RESPONSE_BODY_INCOMPLETE"
+
+    def __init__(self, response):
+        self.response = response
+        super().__init__(self.code)
+
+
+def read_github_response(response, maximum=None):
+    headers = GitHubResponse(
+        response.status,
+        b"",
+        response.headers.get("Link"),
+        response.headers.get("X-GitHub-Request-Id"),
+        response.headers.get("X-GitHub-Api-Version-Selected"),
+    )
+    try:
+        body = response.read() if maximum is None else response.read(maximum)
+    except (OSError, http.client.HTTPException):
+        raise GitHubReadError(headers) from None
+    return GitHubResponse(
+        headers.status, body, headers.link, headers.request_id, headers.selected_version
+    )
+
+
 GitHubRequester = Callable[[str, str, Mapping[str, Any] | None], GitHubResponse]
 
 
@@ -117,11 +145,13 @@ def github_request(
         with urllib.request.build_opener(_NoRedirect()).open(
             request, timeout=45
         ) as response:
-            return GitHubResponse(response.status, response.read(), response.headers.get("Link"), response.headers.get("X-GitHub-Request-Id"), response.headers.get("X-GitHub-Api-Version-Selected"))
+            return read_github_response(response)
     except urllib.error.HTTPError as error:
         # The response body can contain transport diagnostics. It stays in
         # memory and is never copied to the ledger or exception text.
-        return GitHubResponse(error.code, error.read(), error.headers.get("Link"), error.headers.get("X-GitHub-Request-Id"), error.headers.get("X-GitHub-Api-Version-Selected"))
+        return read_github_response(error)
+    except GitHubReadError:
+        raise
     except (OSError, TimeoutError) as error:
         raise ConnectionError("GitHub remote state is unknown") from error
 
@@ -140,7 +170,24 @@ def _json_object(response: GitHubResponse) -> dict[str, Any] | None:
     return value
 
 
-def _open_github_asset_stream(url: str, token: str):
+def _open_github_asset_stream(url: str, token: str, *, observe=None):
+    def open_request(opener, request, role):
+        if observe:
+            observe("REQUEST", role, None)
+        try:
+            response = opener.open(request, timeout=90)
+        except urllib.error.HTTPError as error:
+            if observe:
+                observe("RESPONSE", role, error)
+            raise
+        except (OSError, http.client.HTTPException):
+            if observe:
+                observe("NO_RESPONSE", role, None)
+            raise
+        if observe:
+            observe("RESPONSE", role, response)
+        return response
+
     authenticated = urllib.request.Request(
         url,
         headers={
@@ -152,7 +199,7 @@ def _open_github_asset_stream(url: str, token: str):
     )
     opener = urllib.request.build_opener(_NoRedirect())
     try:
-        return opener.open(authenticated, timeout=90)
+        return open_request(opener, authenticated, "GITHUB_TOKEN")
     except urllib.error.HTTPError as error:
         if error.code not in {301, 302, 303, 307, 308}:
             raise
@@ -179,8 +226,8 @@ def _open_github_asset_stream(url: str, token: str):
             "User-Agent": "AniMemo-publication-transaction/1",
         },
     )
-    return urllib.request.build_opener(_NoRedirect()).open(
-        unauthenticated, timeout=90
+    return open_request(
+        urllib.request.build_opener(_NoRedirect()), unauthenticated, "ANONYMOUS"
     )
 
 
@@ -251,7 +298,9 @@ class RegistryAdapter:
                 digest = result.stdout.decode("ascii", errors="strict").strip()
             except UnicodeDecodeError:
                 return "UNKNOWN", None
-            return ("PRESENT", digest) if _SHA256.fullmatch(digest) else ("UNKNOWN", None)
+            return (
+                ("PRESENT", digest) if _SHA256.fullmatch(digest) else ("UNKNOWN", None)
+            )
         if _ABSENT_REGISTRY.search(result.stderr):
             return "ABSENT", None
         return "UNKNOWN", None
@@ -269,7 +318,9 @@ class RegistryAdapter:
                 return RemoteObservation.same(intent.expected_identity)
             return RemoteObservation.different(digest)
         if self.source_reference is not None:
-            source_state, source_digest = self._digest_observation(self.source_reference)
+            source_state, source_digest = self._digest_observation(
+                self.source_reference
+            )
             if source_state == "PRESENT" and source_digest == self.expected_digest:
                 return RemoteObservation.absent()
             if source_state == "PRESENT" and source_digest is not None:
@@ -455,35 +506,43 @@ class GitHubReleaseAdapterBase:
         self.tag = tag
         self.request = request
 
-    def _next_release_page(self, response: GitHubResponse, page: int, *, endpoint: str | None = None) -> bool:
+    def _next_release_page(
+        self, response: GitHubResponse, page: int, *, endpoint: str | None = None
+    ) -> bool:
         # Never follow a server-supplied URL with credentials. Validate all
         # advertised links, then construct the next numbered request locally.
         if response.link is None:
             return False
-        expected = urllib.parse.urlsplit("/" + (endpoint or f"repos/{self.repository}/releases"))
+        expected = urllib.parse.urlsplit(
+            "/" + (endpoint or f"repos/{self.repository}/releases")
+        )
         fixed_query = urllib.parse.parse_qs(expected.query, strict_parsing=True)
         relations: dict[str, int] = {}
         for entry in response.link.split(","):
-            match = re.fullmatch(r'\s*<([^<>]+)>;\s*rel="(next|prev|first|last)"\s*', entry)
+            match = re.fullmatch(
+                r'\s*<([^<>]+)>;\s*rel="(next|prev|first|last)"\s*', entry
+            )
             if match is None or match[2] in relations:
                 raise ConnectionError("GitHub release pagination is unknown")
             parsed = urllib.parse.urlsplit(match[1])
             query = urllib.parse.parse_qs(parsed.query, strict_parsing=True)
             if (
-                parsed.scheme != "https" or parsed.netloc != "api.github.com"
+                parsed.scheme != "https"
+                or parsed.netloc != "api.github.com"
                 or parsed.path != expected.path
-                or parsed.fragment or set(query) != {"per_page", "page"} | set(fixed_query)
+                or parsed.fragment
+                or set(query) != {"per_page", "page"} | set(fixed_query)
                 or any(query.get(k) != v for k, v in fixed_query.items())
-                or query["per_page"] != ["100"] or len(query["page"]) != 1
+                or query["per_page"] != ["100"]
+                or len(query["page"]) != 1
                 or not re.fullmatch(r"[1-9][0-9]*", query["page"][0])
                 or int(query["page"][0]) > 100
                 or (match[2] == "next" and int(query["page"][0]) != page + 1)
             ):
                 raise ConnectionError("GitHub release pagination is unknown")
             relations[match[2]] = int(query["page"][0])
-        if (
-            (relations.get("last", page) > page and "next" not in relations)
-            or ("last" in relations and relations["last"] < relations.get("next", page))
+        if (relations.get("last", page) > page and "next" not in relations) or (
+            "last" in relations and relations["last"] < relations.get("next", page)
         ):
             raise ConnectionError("GitHub release pagination is incomplete")
         return "next" in relations
@@ -491,7 +550,9 @@ class GitHubReleaseAdapterBase:
     def _release(self) -> dict[str, Any] | None:
         encoded = urllib.parse.quote(self.tag, safe="")
         published = _json_object(
-            self.request("GET", f"repos/{self.repository}/releases/tags/{encoded}", None)
+            self.request(
+                "GET", f"repos/{self.repository}/releases/tags/{encoded}", None
+            )
         )
         if published is not None:
             return published
@@ -503,7 +564,9 @@ class GitHubReleaseAdapterBase:
         matches: list[int] = []
         for page in range(1, 101):
             response = self.request(
-                "GET", f"repos/{self.repository}/releases?per_page=100&page={page}", None
+                "GET",
+                f"repos/{self.repository}/releases?per_page=100&page={page}",
+                None,
             )
             if response.status != 200:
                 raise ConnectionError("GitHub release listing is unknown")
@@ -535,7 +598,9 @@ class GitHubReleaseAdapterBase:
         else:
             raise ConnectionError("GitHub release listing is incomplete")
         if not matches:
-            repository = _json_object(self.request("GET", f"repos/{self.repository}", None))
+            repository = _json_object(
+                self.request("GET", f"repos/{self.repository}", None)
+            )
             permissions = repository.get("permissions") if repository else None
             if not isinstance(permissions, dict) or permissions.get("push") is not True:
                 raise ConnectionError("GitHub draft visibility is unknown")
@@ -674,7 +739,11 @@ class GitHubAssetAdapter(GitHubReleaseAdapterBase):
         assets = release.get("assets")
         if not isinstance(assets, list):
             return RemoteObservation.unknown("GITHUB_ASSET_READBACK_INVALID")
-        matches = [item for item in assets if isinstance(item, dict) and item.get("name") == self.path.name]
+        matches = [
+            item
+            for item in assets
+            if isinstance(item, dict) and item.get("name") == self.path.name
+        ]
         if not matches:
             return RemoteObservation.absent()
         if len(matches) != 1:
@@ -781,7 +850,11 @@ class GitHubPublishAdapter(GitHubReleaseAdapterBase):
             if name in actual_assets or item.get("state", "uploaded") != "uploaded":
                 return RemoteObservation.unknown("GITHUB_PUBLISH_ASSET_INCOMPLETE")
             expected = self.expected_assets.get(name)
-            if digest is None and expected is not None and item.get("size") == expected["size"]:
+            if (
+                digest is None
+                and expected is not None
+                and item.get("size") == expected["size"]
+            ):
                 # Individual asset transaction steps independently download and
                 # hash every null-digest API response before Publish can run.
                 digest = expected["sha256"]
@@ -1012,7 +1085,10 @@ def build_publication_runtime(
     if not notes.is_file() or notes.is_symlink():
         raise PublicationTransactionError("TRANSACTION_RELEASE_NOTES_MISSING")
     body = notes.read_bytes()
-    if "sha256:" + hashlib.sha256(body).hexdigest() != plan["release_notes_markdown_sha256"]:
+    if (
+        "sha256:" + hashlib.sha256(body).hexdigest()
+        != plan["release_notes_markdown_sha256"]
+    ):
         raise PublicationTransactionError("TRANSACTION_RELEASE_NOTES_MISMATCH")
 
     intents: list[MutationIntent] = []
@@ -1021,7 +1097,9 @@ def build_publication_runtime(
     external_steps: list[str] = []
     publication_steps: list[str] = []
 
-    def add(name: str, kind: str, key: str, identity: str, adapter: Any, group: list[str]) -> None:
+    def add(
+        name: str, kind: str, key: str, identity: str, adapter: Any, group: list[str]
+    ) -> None:
         intents.append(MutationIntent(name, kind, key, identity))
         adapters[name] = adapter
         group.append(name)
@@ -1100,7 +1178,11 @@ def build_publication_runtime(
         if not separator or not re.fullmatch(r"[0-9a-f]{64}", digest_hex, re.ASCII):
             raise PublicationTransactionError("TRANSACTION_CHECKSUMS_INVALID")
         path = asset_root / name
-        if path.parent.resolve() != asset_root.resolve() or not path.is_file() or path.is_symlink():
+        if (
+            path.parent.resolve() != asset_root.resolve()
+            or not path.is_file()
+            or path.is_symlink()
+        ):
             raise PublicationTransactionError("TRANSACTION_CHECKSUMS_INVALID")
         # Artifact locators are part of durable intent identities. Keep their
         # spelling portable when replaying a Linux transaction on Windows.

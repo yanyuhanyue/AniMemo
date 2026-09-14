@@ -486,7 +486,7 @@ class _GitHubReadOnlyObservationBoundary:
         from release.recovery_contract import policy as recovery_policy
         rp = recovery_policy()
         if any(type(number) is int and command == merge_cli_command(number)
-               for number in (rp["sourcePr"], rp["previousTool"]["sourcePr"])):
+               for number in (rp["sourcePr"], rp["parentTool"]["sourcePr"], rp["previousTool"]["sourcePr"])):
             return True
         if len(command) == 5 and command[:4] == ("gh", "api", "--method", "GET"):
             endpoint = command[4]
@@ -552,6 +552,15 @@ class _GitHubReadOnlyObservationBoundary:
     ) -> bytes:
         if not _GitHubReadOnlyObservationBoundary._read_only_gh_command(command):
             _reject()
+        recovery_read = getattr(self, "_recovery_read_diagnostics", False)
+        simple_get = len(command) == 5 and command[:4] == ("gh", "api", "--method", "GET")
+        rest_read = command[:4] == ("gh", "api", "--method", "GET")
+        if recovery_read:
+            self._diagnose_recovery_read({"phase": "REQUEST" if rest_read else "COMMAND_START",
+                "endpointCategory": "RECOVERY_CONSUMER_REST" if rest_read else "RECOVERY_CONSUMER_PROOF",
+                "credentialRole": "GH_CLI_EXISTING_READ", "method": "GET" if rest_read else None,
+                "requestedVersion": "2026-03-10" if simple_get else "2022-11-28" if rest_read else None,
+                "status": None, "selectedVersion": None, "requestId": None})
         try:
             with _VerifiedRegularFile(
                 self._gh_executable,
@@ -571,7 +580,9 @@ class _GitHubReadOnlyObservationBoundary:
                 ):
                     _reject("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE")
                 # Ordinary read-only REST consumers retain one explicit contract.
-                rest_headers = ("-H", "X-GitHub-Api-Version: 2026-03-10") if len(command) == 5 and command[:4] == ("gh", "api", "--method", "GET") else ()
+                rest_headers = ("-H", "X-GitHub-Api-Version: 2026-03-10") if simple_get else ()
+                if recovery_read and simple_get:
+                    rest_headers += ("--include",)
                 completed = subprocess.run(
                     ("gh.exe", *command[1:], *rest_headers),
                     executable=str(self._gh_executable),
@@ -588,12 +599,42 @@ class _GitHubReadOnlyObservationBoundary:
                 "CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE"
             ) from error
         except (OSError, subprocess.SubprocessError) as error:
+            if recovery_read:
+                self._diagnose_recovery_read({**self._last_recovery_read, "phase": "NO_RESPONSE", "errorCategory": "TRANSPORT_UNKNOWN"})
             raise ControllerReleaseAuthorityError(
                 "CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE"
             ) from error
-        if completed.returncode != 0 or len(completed.stdout) > maximum:
+        output = completed.stdout
+        if recovery_read:
+            diagnostic = {**self._last_recovery_read, "phase": "COMMAND_RESULT", "status": None,
+                          "errorCategory": "CLI_READ_STATUS_UNAVAILABLE"}
+            if rest_read:
+                from release.recovery_pr import merge_cli_response
+                try:
+                    parsed = merge_cli_response(output)
+                    diagnostic.update(phase="RESPONSE", status=parsed.status, selectedVersion=parsed.selected_version, requestId=parsed.request_id,
+                                      errorCategory="NONE" if completed.returncode == 0 and parsed.status == 200 else "HTTP_READ_FAILED")
+                    if simple_get:
+                        output = parsed.body
+                except Exception:
+                    diagnostic.update(phase="UNPARSEABLE_RESPONSE", errorCategory="HTTP_HEADERS_UNKNOWN")
+            self._diagnose_recovery_read(diagnostic)
+            if rest_read and (diagnostic["phase"] != "RESPONSE" or diagnostic["status"] != 200
+                              or diagnostic["selectedVersion"] not in {None, diagnostic["requestedVersion"]}):
+                _reject("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE")
+        if completed.returncode != 0 or len(output) > maximum:
             _reject("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE")
-        return completed.stdout
+        return output
+
+    def _diagnose_recovery_read(self, value):
+        import sys
+        safe = lambda text: text if type(text) is str and re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", text) else None
+        value = {**value, "requestId": safe(value.get("requestId")), "selectedVersion": safe(value.get("selectedVersion"))}
+        self._last_recovery_read = value
+        try:
+            print(json.dumps({"recoveryConsumerRead": value}, sort_keys=True), file=sys.stderr)
+        except OSError:
+            self._recovery_diagnostics_incomplete = True
 
     def _gh_json(self, endpoint: str) -> dict[str, Any]:
         if (
@@ -653,6 +694,7 @@ class _GitHubReadOnlyObservationBoundary:
         return read_merge_identity(number, branch, request=lambda number: merge_cli_response(self._run(merge_cli_command(number))))
 
     def _validate_recovery_workflow(self, run):
+        self._recovery_read_diagnostics = True
         from release.recovery_contract import execution_title
         workflow = self._gh_json(f"repos/{_REPOSITORY}/actions/workflows/release-recovery.yml")
         if (type(workflow.get("id")) is not int or run.get("workflow_id") != workflow["id"]
@@ -664,6 +706,7 @@ class _GitHubReadOnlyObservationBoundary:
 
     def _recovery_record(self, listing, run, request):
         """Accept only the separately authenticated original-RC recovery record."""
+        self._recovery_read_diagnostics = True
         from release.recovery_contract import RecoveryError, instant, validate_tool_chain, validate_superseded_run
         from release.recovery_contract import policy as recovery_policy
         from release.recovery_evidence import validate_execution_record
@@ -704,7 +747,13 @@ class _GitHubReadOnlyObservationBoundary:
             old_commit = self._gh_json(f"repos/{_REPOSITORY}/git/commits/{old['sha']}")
             old_reviewed = self._gh_json(f"repos/{_REPOSITORY}/git/commits/{old['reviewedHead']}")
             old_run = self._gh_json(f"repos/{_REPOSITORY}/actions/runs/{p['supersededFailure']['runId']}")
-            validate_tool_chain(pr, commit, reviewed["tree"]["sha"], old_pr, old_commit, old_reviewed)
+            parent = p["parentTool"]
+            parent_facts = (
+                self._merge_identity(parent["sourcePr"], parent["sourceBranch"]),
+                self._gh_json(f"repos/{_REPOSITORY}/git/commits/{parent['sha']}"),
+                self._gh_json(f"repos/{_REPOSITORY}/git/commits/{parent['reviewedHead']}"),
+            )
+            validate_tool_chain(pr, commit, reviewed["tree"]["sha"], old_pr, old_commit, old_reviewed, parent_facts)
             validate_superseded_run(old_run, claim["workflowId"])
             if (
                 pr.get("merged") is not True or pr.get("merge_commit_sha") != claim["toolSha"]
@@ -712,7 +761,7 @@ class _GitHubReadOnlyObservationBoundary:
                 or commit.get("tree", {}).get("sha") != claim["toolTree"]
                 or reviewed.get("tree", {}).get("sha") != claim["toolTree"]
                 or reviewed.get("sha") != claim["reviewedHead"]
-                or [parent.get("sha") for parent in commit.get("parents", [])] != [p["previousTool"]["sha"]]
+                or [parent.get("sha") for parent in commit.get("parents", [])] != [p["parentTool"]["sha"]]
                 or run["id"] != claim["runId"] or run["head_sha"] != claim["toolSha"]
                 or run.get("workflow_id") != claim["workflowId"]
                 or run.get("actor", {}).get("id") != p["ownerId"]

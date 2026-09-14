@@ -71,13 +71,21 @@ class RecoveryPlatform:
         previous_reviewed = remote.get(
             f"{remote.base}/git/commits/{previous['reviewedHead']}"
         )
+        parent = p["parentTool"]
+        parent_facts = (
+            remote.merge_identity(parent["sourcePr"], parent["sourceBranch"]),
+            remote.get(f"{remote.base}/git/commits/{parent['sha']}"),
+            remote.get(f"{remote.base}/git/commits/{parent['reviewedHead']}"),
+        )
         superseded_run = remote.get(
             f"{remote.base}/actions/runs/{p['supersededFailure']['runId']}"
         )
         repo = remote.get(remote.base)
         main = remote.get(f"{remote.base}/git/ref/heads/main")["object"]["sha"]
         reviewed = remote.get(f"{remote.base}/git/commits/{pr['head']['sha']}")
-        require(reviewed.get("sha") == pr["head"]["sha"], "RECOVERY_REVIEWED_HEAD_INVALID")
+        require(
+            reviewed.get("sha") == pr["head"]["sha"], "RECOVERY_REVIEWED_HEAD_INVALID"
+        )
         runs = remote.listed(
             f"{remote.base}/actions/workflows/{workflow['id']}/runs?event=workflow_dispatch",
             "workflow_runs",
@@ -102,6 +110,7 @@ class RecoveryPlatform:
             previous_pr=previous_pr,
             previous_commit=previous_commit,
             previous_reviewed=previous_reviewed,
+            parent_facts=parent_facts,
             superseded_run=superseded_run,
             execution_runs=runs["workflow_runs"],
             now=self.now(),

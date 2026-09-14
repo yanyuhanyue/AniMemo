@@ -71,7 +71,13 @@ def execution_title(mode: str) -> str:
 
 
 def validate_tool_chain(
-    pr, commit, reviewed_tree, previous_pr, previous_commit, previous_reviewed
+    pr,
+    commit,
+    reviewed_tree,
+    previous_pr,
+    previous_commit,
+    previous_reviewed,
+    parent_facts,
 ):
     from .recovery_pr import validate_pr
 
@@ -82,6 +88,35 @@ def validate_tool_chain(
         "RECOVERY_PR_BINDING_PENDING",
     )
     validate_pr(pr, number=p["sourcePr"], branch=p["sourceBranch"])
+    parent = p["parentTool"]
+    require(
+        parent
+        == {
+            "sha": "37c707dcdeb4519ddc09e2bbc8e5edce0f6dfdb4",
+            "tree": "d6511a2339bb747837b4fa10c61355a715a1db07",
+            "sourcePr": 256,
+            "sourceBranch": "fix/rc-api-contract-recovery-v2-20260914",
+            "reviewedHead": "6a5417856c91e8414e47f421f8237bfb61bd03ee",
+            "parent": "508099fe32f5d88865aec7217513320006117de2",
+        }
+        and p["sourcePr"] not in {255, 256}
+        and p["sourceBranch"] == "fix/rc-read-observation-diagnostics-20260914"
+        and parent["parent"] == old["sha"],
+        "RECOVERY_PARENT_TOOL_BINDING_INVALID",
+    )
+    parent_pr, parent_commit, parent_reviewed = parent_facts
+    validate_pr(parent_pr, number=parent["sourcePr"], branch=parent["sourceBranch"])
+    require(
+        parent_pr["merge_commit_sha"] == parent["sha"]
+        and parent_pr["head"]["sha"] == parent["reviewedHead"]
+        and parent_commit.get("sha") == parent["sha"]
+        and parent_commit.get("tree", {}).get("sha") == parent["tree"]
+        and [item.get("sha") for item in parent_commit.get("parents", [])]
+        == [old["sha"]]
+        and parent_reviewed.get("sha") == parent["reviewedHead"]
+        and parent_reviewed.get("tree", {}).get("sha") == parent["tree"],
+        "RECOVERY_PARENT_TOOL_INVALID",
+    )
     validate_pr(previous_pr, number=old["sourcePr"], branch=old["sourceBranch"])
     require(
         previous_pr["merge_commit_sha"] == old["sha"]
@@ -102,7 +137,7 @@ def validate_tool_chain(
         and commit.get("tree", {}).get("sha") == reviewed_tree
         and type(reviewed_tree) is str
         and re.fullmatch(r"[0-9a-f]{40}", reviewed_tree) is not None
-        and [item.get("sha") for item in commit.get("parents", [])] == [old["sha"]],
+        and [item.get("sha") for item in commit.get("parents", [])] == [parent["sha"]],
         "RECOVERY_TOOL_CHAIN_INVALID",
     )
 
@@ -152,6 +187,7 @@ def validate_execution(
     previous_pr: Mapping[str, Any],
     previous_commit: Mapping[str, Any],
     previous_reviewed: Mapping[str, Any],
+    parent_facts: tuple,
     superseded_run: Mapping[str, Any],
     execution_runs: list[Mapping[str, Any]],
     now: datetime,
@@ -213,6 +249,7 @@ def validate_execution(
         and type(workflow.get("id")) is int
         and run.get("workflow_id") == workflow.get("id")
         and workflow.get("path") == p["workflow"]
+        and workflow.get("name") == "Existing RC Recovery"
         and workflow.get("state") == "active",
         "RECOVERY_WORKFLOW_INVALID",
     )
@@ -234,6 +271,7 @@ def validate_execution(
         previous_pr,
         previous_commit,
         previous_reviewed,
+        parent_facts,
     )
     validate_superseded_run(superseded_run, workflow["id"])
     prior_runs = [r for r in execution_runs if r.get("id") == superseded_run["id"]]
@@ -250,7 +288,7 @@ def validate_execution(
         "RECOVERY_TOOL_DRIFT",
     )
     require(
-        parent_sha == p["previousTool"]["sha"] and checkout_tree == reviewed_tree,
+        parent_sha == p["parentTool"]["sha"] and checkout_tree == reviewed_tree,
         "RECOVERY_REVIEW_TREE_DRIFT",
     )
     require(
@@ -296,6 +334,20 @@ def validate_execution(
         )
         first = min(executions, key=lambda r: (instant(r["created_at"]), r["id"]))
         require(first["id"] == run["id"], "RECOVERY_EXECUTION_ALREADY_CONSUMED")
+        require(len(executions) == 1, "RECOVERY_EXECUTION_ALREADY_CONSUMED")
+    else:
+        inspections = [
+            r
+            for r in execution_runs
+            if r.get("display_title") == execution_title("inspect")
+            and r.get("id") != p["priorInspectionRun"]
+        ]
+        require(
+            any(r.get("id") == run["id"] for r in inspections)
+            and len(inspections) <= p["diagnosticInspectLimit"]
+            and all(r.get("run_attempt") == 1 for r in inspections),
+            "RECOVERY_INSPECT_ALLOWANCE_INVALID",
+        )
     binding = {
         "schema": "animemo.source-bound-recovery-claim/v2"
         if mode == "execute"
@@ -306,6 +358,7 @@ def validate_execution(
         "operatorId": p["ownerId"],
         "sourcePr": p["sourcePr"],
         "previousTool": p["previousTool"],
+        "parentTool": p["parentTool"],
         "supersededFailure": p["supersededFailure"],
         "subject": p["subject"],
         "toolSha": tool,
@@ -349,6 +402,7 @@ def validate_context(value: Mapping[str, Any]) -> dict[str, Any]:
         "operatorId",
         "sourcePr",
         "previousTool",
+        "parentTool",
         "supersededFailure",
         "subject",
         "toolSha",
@@ -387,6 +441,7 @@ def validate_context(value: Mapping[str, Any]) -> dict[str, Any]:
         "operatorId": p["ownerId"],
         "sourcePr": p["sourcePr"],
         "previousTool": p["previousTool"],
+        "parentTool": p["parentTool"],
         "supersededFailure": p["supersededFailure"],
         "subject": p["subject"],
         "workflow": p["workflow"],

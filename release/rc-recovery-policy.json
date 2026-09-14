@@ -5,8 +5,8 @@
   "repositoryId": 1327429673,
   "ownerId": 111261350,
   "operator": "yanyuhanyue",
-  "sourcePr": 256,
-  "sourceBranch": "fix/rc-api-contract-recovery-v2-20260914",
+  "sourcePr": null,
+  "sourceBranch": "fix/rc-read-observation-diagnostics-20260914",
   "workflow": ".github/workflows/release-recovery.yml",
   "subject": {
     "sha": "715e997e1b8ef552376148fee62b08d7c0c35364",
@@ -379,5 +379,16 @@
       "size_in_bytes": 276,
       "digest": "sha256:8045e0b99f27d65af04ae8db4e5915cdcd3cd1e0a0eb391ad4facb4671b5b99a"
     }
-  }
+  },
+  "parentTool": {
+    "sha": "37c707dcdeb4519ddc09e2bbc8e5edce0f6dfdb4",
+    "tree": "d6511a2339bb747837b4fa10c61355a715a1db07",
+    "sourcePr": 256,
+    "sourceBranch": "fix/rc-api-contract-recovery-v2-20260914",
+    "reviewedHead": "6a5417856c91e8414e47f421f8237bfb61bd03ee",
+    "parent": "508099fe32f5d88865aec7217513320006117de2"
+  },
+  "authorizationAmendedAt": "2026-09-14T12:16:36.421330Z",
+  "diagnosticInspectLimit": 3,
+  "priorInspectionRun": 34836712429
 }
