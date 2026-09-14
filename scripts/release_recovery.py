@@ -43,6 +43,7 @@ def main() -> int:
     root = None
     owned = False
     engine = None
+    remote = None
     try:
         require(os.environ.get("GITHUB_ACTIONS") == "true", "RECOVERY_HOST_UNTRUSTED")
         event_path, root = trusted_runner_paths(repository, os.environ)
@@ -125,6 +126,8 @@ def main() -> int:
             "recoveryRunMayBeConsumed": os.environ.get("GITHUB_RUN_ID"),
             "releaseState": "UNKNOWN_READ_PLATFORM_BEFORE_ANY_FOLLOWUP",
         }
+        if remote is not None and remote.last_read_diagnostic is not None:
+            failure["lastRead"] = remote.last_read_diagnostic
         if engine is not None:
             failure["writeRequests"] = engine.remote.write_requests
             failure["lastConfirmedJournalHead"] = (

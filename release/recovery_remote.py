@@ -11,6 +11,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import subprocess
 import urllib.error
 import urllib.parse
@@ -67,17 +68,46 @@ class GitHubRecoveryRemote:
         self.write_requests: list[dict[str, Any]] = []
         self.base = "repos/" + self.p["repository"]
         self.before_send = before_send
+        self.read_sequence = 0
+        self.last_read_diagnostic = None
+
+    def _record_read(self, value):
+        self.last_read_diagnostic = dict(value)
+        with (self.output / "http-read-diagnostics.jsonl").open(
+            "a", encoding="utf-8"
+        ) as stream:
+            stream.write(json.dumps(value, sort_keys=True) + "\n")
 
     def merge_identity(self, number, branch):
         from .recovery_pr import read_merge_identity
 
+        self.read_sequence += 1
+        initial = {
+            "sequence": self.read_sequence,
+            "phase": "REQUEST",
+            "endpointCategory": "PR_MERGE_IDENTITY",
+            "credentialRole": "GITHUB_TOKEN",
+            "method": "GET",
+            "requestedVersion": "2022-11-28",
+            "status": None,
+            "requestId": None,
+            "selectedVersion": None,
+        }
+        self._record_read(initial)
+
         def diagnose(value):
+            self._record_read({**initial, **value, "phase": "RESPONSE"})
             with (self.output / "pr-api-diagnostics.jsonl").open(
                 "a", encoding="utf-8"
             ) as stream:
                 stream.write(json.dumps(value, sort_keys=True) + "\n")
 
-        return read_merge_identity(number, branch, diagnose=diagnose)
+        try:
+            return read_merge_identity(number, branch, diagnose=diagnose)
+        except Exception:
+            if self.last_read_diagnostic["phase"] == "REQUEST":
+                self._record_read({**initial, "phase": "NO_RESPONSE"})
+            raise
 
     def _final_send_check(self):
         require(not self.read_only, "RECOVERY_READ_ONLY")
@@ -85,6 +115,76 @@ class GitHubRecoveryRemote:
         self.before_send()
 
     def get_response(
+        self, endpoint: str, *, administration: bool = False
+    ) -> GitHubResponse:
+        path = endpoint.removeprefix(self.base).split("?", 1)[0]
+        category = {
+            "": "REPOSITORY",
+            "/git/ref/heads/main": "CURRENT_MAIN",
+            "/immutable-releases": "IMMUTABLE_SETTING",
+            "/branches/main/protection": "BRANCH_PROTECTION",
+            f"/releases/{self.p['ordinaryDraft']}": "ORDINARY_DRAFT",
+            f"/releases/{self.p['transaction']['draft_id']}": "RC_DRAFT",
+            "/releases": "RELEASE_LIST",
+        }.get(path)
+        if category is None:
+            category = next(
+                (
+                    label
+                    for prefix, label in (
+                        ("/git/commits/", "GIT_COMMIT"),
+                        ("/actions/runs/", "ACTIONS_RUN_OR_ARTIFACTS"),
+                        (
+                            "/actions/workflows/",
+                            "WORKFLOW_HISTORY"
+                            if "?" in endpoint
+                            else "WORKFLOW_DEFINITION",
+                        ),
+                        ("/contents/", "FROZEN_DRAFTER_FILE"),
+                        ("/releases/tags/", "RC_BY_TAG"),
+                        ("/releases/", "RELEASE_ASSETS"),
+                        ("/git/", "TAG_IDENTITY"),
+                    )
+                    if path.startswith(prefix)
+                ),
+                "OTHER_READ",
+            )
+        self.read_sequence += 1
+        diagnostic = {
+            "sequence": self.read_sequence,
+            "phase": "REQUEST",
+            "endpointCategory": category,
+            "credentialRole": "ADMIN_READ" if administration else "GITHUB_TOKEN",
+            "method": "GET",
+            "requestedVersion": "2026-03-10",
+            "status": None,
+            "requestId": None,
+            "selectedVersion": None,
+        }
+
+        self._record_read(diagnostic)
+        try:
+            response = self._get_response(endpoint, administration=administration)
+        except Exception:
+            self._record_read({**diagnostic, "phase": "NO_RESPONSE"})
+            raise
+        safe = lambda value: (
+            value
+            if type(value) is str and re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", value)
+            else None
+        )
+        self._record_read(
+            {
+                **diagnostic,
+                "phase": "RESPONSE",
+                "status": response.status,
+                "requestId": safe(response.request_id),
+                "selectedVersion": safe(response.selected_version),
+            }
+        )
+        return response
+
+    def _get_response(
         self, endpoint: str, *, administration: bool = False
     ) -> GitHubResponse:
         require(
@@ -116,10 +216,19 @@ class GitHubRecoveryRemote:
                 request, timeout=45
             ) as response:
                 return GitHubResponse(
-                    response.status, response.read(), response.headers.get("Link")
+                    response.status,
+                    response.read(),
+                    response.headers.get("Link"),
+                    response.headers.get("X-GitHub-Request-Id"),
+                    response.headers.get("X-GitHub-Api-Version-Selected"),
                 )
         except urllib.error.HTTPError as error:
-            return GitHubResponse(error.code, error.read())
+            return GitHubResponse(
+                error.code,
+                error.read(),
+                request_id=error.headers.get("X-GitHub-Request-Id"),
+                selected_version=error.headers.get("X-GitHub-Api-Version-Selected"),
+            )
 
     def get(self, endpoint: str, *, administration: bool = False) -> Any:
         response = self.get_response(endpoint, administration=administration)

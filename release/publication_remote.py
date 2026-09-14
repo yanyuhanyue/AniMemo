@@ -77,6 +77,8 @@ class GitHubResponse:
     status: int
     body: bytes
     link: str | None = None
+    request_id: str | None = None
+    selected_version: str | None = None
 
 
 GitHubRequester = Callable[[str, str, Mapping[str, Any] | None], GitHubResponse]
@@ -115,11 +117,11 @@ def github_request(
         with urllib.request.build_opener(_NoRedirect()).open(
             request, timeout=45
         ) as response:
-            return GitHubResponse(response.status, response.read(), response.headers.get("Link"))
+            return GitHubResponse(response.status, response.read(), response.headers.get("Link"), response.headers.get("X-GitHub-Request-Id"), response.headers.get("X-GitHub-Api-Version-Selected"))
     except urllib.error.HTTPError as error:
         # The response body can contain transport diagnostics. It stays in
         # memory and is never copied to the ledger or exception text.
-        return GitHubResponse(error.code, error.read(), error.headers.get("Link"))
+        return GitHubResponse(error.code, error.read(), error.headers.get("Link"), error.headers.get("X-GitHub-Request-Id"), error.headers.get("X-GitHub-Api-Version-Selected"))
     except (OSError, TimeoutError) as error:
         raise ConnectionError("GitHub remote state is unknown") from error
 

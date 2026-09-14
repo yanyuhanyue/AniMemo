@@ -652,6 +652,16 @@ class _GitHubReadOnlyObservationBoundary:
         from release.recovery_pr import read_merge_identity, merge_cli_command, merge_cli_response
         return read_merge_identity(number, branch, request=lambda number: merge_cli_response(self._run(merge_cli_command(number))))
 
+    def _validate_recovery_workflow(self, run):
+        from release.recovery_contract import execution_title
+        workflow = self._gh_json(f"repos/{_REPOSITORY}/actions/workflows/release-recovery.yml")
+        if (type(workflow.get("id")) is not int or run.get("workflow_id") != workflow["id"]
+                or workflow.get("name") != "Existing RC Recovery"
+                or workflow.get("path") != ".github/workflows/release-recovery.yml"
+                or workflow.get("state") != "active"
+                or run.get("display_title") != execution_title("execute")):
+            _reject()
+
     def _recovery_record(self, listing, run, request):
         """Accept only the separately authenticated original-RC recovery record."""
         from release.recovery_contract import RecoveryError, instant, validate_tool_chain, validate_superseded_run
@@ -796,7 +806,7 @@ class _GitHubReadOnlyObservationBoundary:
         run: dict[str, Any],
         *,
         run_id: int,
-        name: str,
+        name: str | None,
         path: str,
         head: str,
         events: frozenset[str],
@@ -805,7 +815,7 @@ class _GitHubReadOnlyObservationBoundary:
         repository = run.get("repository")
         if (
             run.get("id") != run_id
-            or run.get("name") != name
+            or (name is not None and run.get("name") != name)
             or run.get("path") != path
             or run.get("event") not in events
             or run.get("status") != "completed"
@@ -1567,11 +1577,13 @@ class _GitHubReadOnlyObservationBoundary:
             f"repos/{_REPOSITORY}/actions/runs/{publish_run_id}"
         )
         recovered = publish_run.get("path") == ".github/workflows/release-recovery.yml"
+        if recovered:
+            self._validate_recovery_workflow(publish_run)
         execution_head = str(publish_run.get("head_sha")) if recovered else str(request["finalRepoHead"])
         self._validate_run(
             publish_run,
             run_id=publish_run_id,
-            name="Existing RC Recovery" if recovered else "Release Producer",
+            name=None if recovered else "Release Producer",
             path=".github/workflows/release-recovery.yml" if recovered else _RELEASE_WORKFLOW,
             head=execution_head,
             events=frozenset({"workflow_dispatch"}),

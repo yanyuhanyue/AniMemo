@@ -48,7 +48,7 @@ class RecoveryConsumerTests(unittest.TestCase):
             **fixture["run"],
             "status": "completed",
             "conclusion": "success",
-            "name": "Existing RC Recovery",
+            "name": fixture["run"]["display_title"],
         }
         self.record = {
             **copy.deepcopy(self.capture["execution"]),
@@ -95,6 +95,7 @@ class RecoveryConsumerTests(unittest.TestCase):
         claim = self.record["claim"]
         base = "repos/" + p["repository"]
         self.api = {
+            base + "/actions/workflows/release-recovery.yml": {"id": fixture["workflow"]["id"], "path": p["workflow"], "name": "Existing RC Recovery", "state": "active"},
             base + f"/pulls/{p['sourcePr']}": fixture["pull_request"],
             base + "/pulls/255": fixture["previous_pr"],
             base + "/git/commits/" + p["previousTool"]["sha"]: fixture[
