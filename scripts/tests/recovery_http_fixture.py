@@ -37,6 +37,11 @@ class FixtureHTTP:
             b + "/actions/workflows/release-recovery.yml": f["workflow"],
             b + f"/pulls/{p['sourcePr']}": f["pull_request"],
             b + "/pulls/255": f["previous_pr"],
+            b + "/pulls/257": f["diagnostic_facts"][0],
+            b + "/git/commits/" + p["diagnosticTool"]["sha"]: f["diagnostic_facts"][1],
+            b + "/git/commits/" + p["diagnosticTool"]["reviewedHead"]: f[
+                "diagnostic_facts"
+            ][2],
             b + "/pulls/256": f["parent_facts"][0],
             b + "/git/commits/" + p["parentTool"]["sha"]: f["parent_facts"][1],
             b + "/git/commits/" + p["parentTool"]["reviewedHead"]: f["parent_facts"][2],

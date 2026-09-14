@@ -486,7 +486,7 @@ class _GitHubReadOnlyObservationBoundary:
         from release.recovery_contract import policy as recovery_policy
         rp = recovery_policy()
         if any(type(number) is int and command == merge_cli_command(number)
-               for number in (rp["sourcePr"], rp["parentTool"]["sourcePr"], rp["previousTool"]["sourcePr"])):
+               for number in (rp["sourcePr"], rp["parentTool"]["sourcePr"], rp["previousTool"]["sourcePr"], rp["diagnosticTool"]["sourcePr"])):
             return True
         if len(command) == 5 and command[:4] == ("gh", "api", "--method", "GET"):
             endpoint = command[4]
@@ -753,7 +753,13 @@ class _GitHubReadOnlyObservationBoundary:
                 self._gh_json(f"repos/{_REPOSITORY}/git/commits/{parent['sha']}"),
                 self._gh_json(f"repos/{_REPOSITORY}/git/commits/{parent['reviewedHead']}"),
             )
-            validate_tool_chain(pr, commit, reviewed["tree"]["sha"], old_pr, old_commit, old_reviewed, parent_facts)
+            diagnostic = p["diagnosticTool"]
+            diagnostic_facts = (
+                self._merge_identity(diagnostic["sourcePr"], diagnostic["sourceBranch"]),
+                self._gh_json(f"repos/{_REPOSITORY}/git/commits/{diagnostic['sha']}"),
+                self._gh_json(f"repos/{_REPOSITORY}/git/commits/{diagnostic['reviewedHead']}"),
+            )
+            validate_tool_chain(pr, commit, reviewed["tree"]["sha"], old_pr, old_commit, old_reviewed, parent_facts, diagnostic_facts)
             validate_superseded_run(old_run, claim["workflowId"])
             if (
                 pr.get("merged") is not True or pr.get("merge_commit_sha") != claim["toolSha"]
@@ -761,7 +767,7 @@ class _GitHubReadOnlyObservationBoundary:
                 or commit.get("tree", {}).get("sha") != claim["toolTree"]
                 or reviewed.get("tree", {}).get("sha") != claim["toolTree"]
                 or reviewed.get("sha") != claim["reviewedHead"]
-                or [parent.get("sha") for parent in commit.get("parents", [])] != [p["parentTool"]["sha"]]
+                or [parent.get("sha") for parent in commit.get("parents", [])] != [p["diagnosticTool"]["sha"]]
                 or run["id"] != claim["runId"] or run["head_sha"] != claim["toolSha"]
                 or run.get("workflow_id") != claim["workflowId"]
                 or run.get("actor", {}).get("id") != p["ownerId"]

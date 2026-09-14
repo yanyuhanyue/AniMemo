@@ -117,11 +117,11 @@ def execution_fixture():
         "checkout_sha": tool,
         "checkout_tree": tree,
         "reviewed_tree": tree,
-        "parent_sha": p["parentTool"]["sha"],
+        "parent_sha": p["diagnosticTool"]["sha"],
         "tool_commit": {
             "sha": tool,
             "tree": {"sha": tree},
-            "parents": [{"sha": p["parentTool"]["sha"]}],
+            "parents": [{"sha": p["diagnosticTool"]["sha"]}],
         },
         "parent_facts": (
             {
@@ -144,6 +144,27 @@ def execution_fixture():
                 "tree": {"sha": p["parentTool"]["tree"]},
             },
         ),
+        "diagnostic_facts": (
+            {
+                **copy.deepcopy(pr),
+                "number": p["diagnosticTool"]["sourcePr"],
+                "merge_commit_sha": p["diagnosticTool"]["sha"],
+                "head": {
+                    "sha": p["diagnosticTool"]["reviewedHead"],
+                    "ref": p["diagnosticTool"]["sourceBranch"],
+                    "repo": repo,
+                },
+            },
+            {
+                "sha": p["diagnosticTool"]["sha"],
+                "tree": {"sha": p["diagnosticTool"]["tree"]},
+                "parents": [{"sha": p["parentTool"]["sha"]}],
+            },
+            {
+                "sha": p["diagnosticTool"]["reviewedHead"],
+                "tree": {"sha": p["diagnosticTool"]["tree"]},
+            },
+        ),
         "previous_pr": previous_pr,
         "previous_commit": {
             "sha": old["sha"],
@@ -152,7 +173,19 @@ def execution_fixture():
         },
         "previous_reviewed": {"sha": old["reviewedHead"], "tree": {"sha": old["tree"]}},
         "superseded_run": superseded,
-        "execution_runs": [superseded, run],
+        "execution_runs": [
+            superseded,
+            run,
+            {
+                **run,
+                "id": p["diagnosticTool"]["inspectionRun"],
+                "head_sha": p["diagnosticTool"]["sha"],
+                "display_title": execution_title("inspect"),
+                "status": "completed",
+                "conclusion": "failure",
+                "created_at": "2026-09-14T11:58:00Z",
+            },
+        ],
         "now": datetime(2026, 9, 14, 12, 1, tzinfo=timezone.utc),
     }
 

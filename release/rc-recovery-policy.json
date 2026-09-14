@@ -5,8 +5,8 @@
   "repositoryId": 1327429673,
   "ownerId": 111261350,
   "operator": "yanyuhanyue",
-  "sourcePr": 257,
-  "sourceBranch": "fix/rc-read-observation-diagnostics-20260914",
+  "sourcePr": 258,
+  "sourceBranch": "fix/rc-read-observation-followup-20260914",
   "workflow": ".github/workflows/release-recovery.yml",
   "subject": {
     "sha": "715e997e1b8ef552376148fee62b08d7c0c35364",
@@ -390,5 +390,14 @@
   },
   "authorizationAmendedAt": "2026-09-14T12:16:36.421330Z",
   "diagnosticInspectLimit": 3,
-  "priorInspectionRun": 34836712429
+  "priorInspectionRun": 34836712429,
+  "diagnosticTool": {
+    "sha": "e7d6d81778ca36bee30e6c8fa72797b944e674cb",
+    "tree": "825cffb4f7d3334fbae388a4e0e5c456946db338",
+    "sourcePr": 257,
+    "sourceBranch": "fix/rc-read-observation-diagnostics-20260914",
+    "reviewedHead": "6429180331eae15c8923dec2fe33720ae8024751",
+    "parent": "37c707dcdeb4519ddc09e2bbc8e5edce0f6dfdb4",
+    "inspectionRun": 34848406402
+  }
 }
