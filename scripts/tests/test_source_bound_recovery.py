@@ -84,6 +84,23 @@ def execution_fixture():
         "head": {"sha": head, "ref": p["sourceBranch"], "repo": repo},
         "base": {"ref": "main", "repo": repo},
     }
+    old = p["previousTool"]
+    previous_pr = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "release/fixtures/rc-pr255-api-2022-11-28.json"
+        ).read_bytes()
+    )["body"]
+    superseded = {
+        **run,
+        "id": p["supersededFailure"]["runId"],
+        "head_sha": old["sha"],
+        "created_at": p["supersededFailure"]["createdAt"],
+        "status": "completed",
+        "conclusion": "failure",
+        "display_title": "Existing RC recovery execute | "
+        + p["supersededFailure"]["scope"],
+    }
     return {
         "environment": env,
         "event": event,
@@ -95,8 +112,21 @@ def execution_fixture():
         "checkout_sha": tool,
         "checkout_tree": tree,
         "reviewed_tree": tree,
-        "parent_sha": p["subject"]["sha"],
-        "execution_runs": [run],
+        "parent_sha": old["sha"],
+        "tool_commit": {
+            "sha": tool,
+            "tree": {"sha": tree},
+            "parents": [{"sha": old["sha"]}],
+        },
+        "previous_pr": previous_pr,
+        "previous_commit": {
+            "sha": old["sha"],
+            "tree": {"sha": old["tree"]},
+            "parents": [{"sha": p["subject"]["sha"]}],
+        },
+        "previous_reviewed": {"sha": old["reviewedHead"], "tree": {"sha": old["tree"]}},
+        "superseded_run": superseded,
+        "execution_runs": [superseded, run],
         "now": datetime(2026, 9, 14, 12, 1, tzinfo=timezone.utc),
     }
 
@@ -145,8 +175,8 @@ class SourceBoundAuthorityTests(unittest.TestCase):
         fixture = execution_fixture()
         claim = validate_execution(**fixture)
         self.assertNotEqual(claim["toolSha"], claim["subject"]["sha"])
-        self.assertEqual(claim["issuedAt"], "2026-09-14T07:12:07.159000Z")
-        self.assertEqual(claim["expiresAt"], "2026-09-15T07:12:07.159000Z")
+        self.assertEqual(claim["issuedAt"], "2026-09-14T09:55:15.462000Z")
+        self.assertEqual(claim["expiresAt"], "2026-09-15T09:55:15.462000Z")
         self.assertEqual(claim["draftId"], 388147631)
 
     def test_untrusted_or_changed_platform_context_is_rejected(self):
@@ -191,7 +221,7 @@ class SourceBoundAuthorityTests(unittest.TestCase):
             "status": "completed",
             "conclusion": "failure",
         }
-        fixture["execution_runs"] = [previous, fixture["run"]]
+        fixture["execution_runs"] += [previous]
         with self.assertRaisesRegex(RecoveryError, "ALREADY_CONSUMED"):
             validate_execution(**fixture)
 
@@ -302,7 +332,7 @@ class SourceBoundAuthorityTests(unittest.TestCase):
                 now[0] += timedelta(seconds=900)
                 precheck.before_write()
                 self.assertNotEqual(first["identity"], precheck.current["identity"])
-                self.assertEqual(claim["expiresAt"], "2026-09-15T07:12:07.159000Z")
+                self.assertEqual(claim["expiresAt"], "2026-09-15T09:55:15.462000Z")
                 self.assertEqual(
                     precheck.current["claimBinding"], claim["bindingDigest"]
                 )
@@ -572,8 +602,8 @@ class SourceBoundAuthorityTests(unittest.TestCase):
 
     def test_dispatch_never_restarts_fixed_user_authorization_window(self):
         fixture = execution_fixture()
-        fixture["run"]["created_at"] = "2026-09-15T08:00:00Z"
-        fixture["now"] = datetime(2026, 9, 15, 8, 1, tzinfo=timezone.utc)
+        fixture["run"]["created_at"] = "2026-09-15T10:00:00Z"
+        fixture["now"] = datetime(2026, 9, 15, 10, 1, tzinfo=timezone.utc)
         with self.assertRaisesRegex(RecoveryError, "AUTHORIZATION_EXPIRED"):
             validate_execution(**fixture)
 
@@ -599,6 +629,7 @@ class SourceBoundAuthorityTests(unittest.TestCase):
                 "actions": "read",
                 "packages": "read",
                 "attestations": "read",
+                "pull-requests": "read",
             },
         )
         for job in workflow["jobs"].values():

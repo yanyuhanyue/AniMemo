@@ -122,9 +122,13 @@
         "initialRevision",
         "draftId",
         "subject",
-        "writeSteps"
+        "writeSteps",
+        "previousTool",
+        "supersededFailure"
       ],
       "properties": {
+        "previousTool": {"type": "object"},
+        "supersededFailure": {"type": "object"},
         "schema": {
           "type": "string"
         },

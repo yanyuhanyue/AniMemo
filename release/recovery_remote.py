@@ -59,7 +59,8 @@ def file_digest(path: Path) -> tuple[str, int]:
 
 
 class GitHubRecoveryRemote:
-    def __init__(self, *, output: Path, before_send=None) -> None:
+    def __init__(self, *, output: Path, before_send=None, read_only=False) -> None:
+        self.read_only = read_only
         self.p = policy()
         self.output = output
         self.verified_assets: dict[int, str] = {}
@@ -67,7 +68,19 @@ class GitHubRecoveryRemote:
         self.base = "repos/" + self.p["repository"]
         self.before_send = before_send
 
+    def merge_identity(self, number, branch):
+        from .recovery_pr import read_merge_identity
+
+        def diagnose(value):
+            with (self.output / "pr-api-diagnostics.jsonl").open(
+                "a", encoding="utf-8"
+            ) as stream:
+                stream.write(json.dumps(value, sort_keys=True) + "\n")
+
+        return read_merge_identity(number, branch, diagnose=diagnose)
+
     def _final_send_check(self):
+        require(not self.read_only, "RECOVERY_READ_ONLY")
         require(callable(self.before_send), "RECOVERY_SEND_GUARD_MISSING")
         self.before_send()
 
@@ -358,6 +371,8 @@ class GitHubRecoveryRemote:
                     "api",
                     "--method",
                     "GET",
+                    "-H",
+                    "X-GitHub-Api-Version: 2026-03-10",
                     f"{self.base}/actions/artifacts/{artifact['id']}/zip",
                 ),
                 stdout=stream,
@@ -422,6 +437,43 @@ class GitHubRecoveryRemote:
                 }
             )
         return results
+
+
+class ReadOnlyRecoveryJournal:
+    """Original journal reader with an allowlist at the lowest Git transport."""
+
+    def __init__(self, repository):
+        from .publication_transaction import (
+            GitRemoteAppendOnlyJournal,
+            _run_git_command,
+        )
+
+        def read(command, timeout, input_bytes, environment):
+            require(
+                command[3]
+                in {
+                    "ls-remote",
+                    "fetch",
+                    "rev-parse",
+                    "rev-list",
+                    "ls-tree",
+                    "show",
+                    "cat-file",
+                },
+                "RECOVERY_READ_ONLY",
+            )
+            return _run_git_command(command, timeout, input_bytes, environment)
+
+        self.__reader = GitRemoteAppendOnlyJournal(repository, run_git=read)
+
+    def load(self, operation_id):
+        return self.__reader.load(operation_id)
+
+    def _remote_head(self, operation_id):
+        return self.__reader._remote_head(operation_id)
+
+    def append(self, value):
+        raise RecoveryError("RECOVERY_READ_ONLY")
 
 
 class GuardedRecoveryJournal:

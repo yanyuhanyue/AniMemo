@@ -482,6 +482,12 @@ class _GitHubReadOnlyObservationBoundary:
             type(item) is not str or "\x00" in item for item in command
         ):
             return False
+        from release.recovery_pr import merge_cli_command
+        from release.recovery_contract import policy as recovery_policy
+        rp = recovery_policy()
+        if any(type(number) is int and command == merge_cli_command(number)
+               for number in (rp["sourcePr"], rp["previousTool"]["sourcePr"])):
+            return True
         if len(command) == 5 and command[:4] == ("gh", "api", "--method", "GET"):
             endpoint = command[4]
             return not endpoint.startswith(("/", "-")) and endpoint.startswith(
@@ -564,8 +570,10 @@ class _GitHubReadOnlyObservationBoundary:
                     or "sha256:" + digest.hexdigest() != self._gh_sha256
                 ):
                     _reject("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_UNAVAILABLE")
+                # Ordinary read-only REST consumers retain one explicit contract.
+                rest_headers = ("-H", "X-GitHub-Api-Version: 2026-03-10") if len(command) == 5 and command[:4] == ("gh", "api", "--method", "GET") else ()
                 completed = subprocess.run(
-                    ("gh.exe", *command[1:]),
+                    ("gh.exe", *command[1:], *rest_headers),
                     executable=str(self._gh_executable),
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
@@ -606,6 +614,7 @@ class _GitHubReadOnlyObservationBoundary:
             headers={
                 "Accept": "application/vnd.github+json",
                 "User-Agent": "AniMemo-controller-release-verifier/1",
+                "X-GitHub-Api-Version": "2026-03-10",
             },
             method="GET",
         )
@@ -639,9 +648,13 @@ class _GitHubReadOnlyObservationBoundary:
             timeout=180,
         )
 
+    def _merge_identity(self, number, branch):
+        from release.recovery_pr import read_merge_identity, merge_cli_command, merge_cli_response
+        return read_merge_identity(number, branch, request=lambda number: merge_cli_response(self._run(merge_cli_command(number))))
+
     def _recovery_record(self, listing, run, request):
         """Accept only the separately authenticated original-RC recovery record."""
-        from release.recovery_contract import RecoveryError, instant
+        from release.recovery_contract import RecoveryError, instant, validate_tool_chain, validate_superseded_run
         from release.recovery_contract import policy as recovery_policy
         from release.recovery_evidence import validate_execution_record
         p = recovery_policy()
@@ -673,15 +686,23 @@ class _GitHubReadOnlyObservationBoundary:
                     _reject()
                 record = validate_execution_record(_json_bytes(encoded))
             claim = record["claim"]
-            pr = self._gh_json(f"repos/{_REPOSITORY}/pulls/{p['sourcePr']}")
+            pr = self._merge_identity(p["sourcePr"], p["sourceBranch"])
             commit = self._gh_json(f"repos/{_REPOSITORY}/git/commits/{claim['toolSha']}")
             reviewed = self._gh_json(f"repos/{_REPOSITORY}/git/commits/{claim['reviewedHead']}")
+            old = p["previousTool"]
+            old_pr = self._merge_identity(old["sourcePr"], old["sourceBranch"])
+            old_commit = self._gh_json(f"repos/{_REPOSITORY}/git/commits/{old['sha']}")
+            old_reviewed = self._gh_json(f"repos/{_REPOSITORY}/git/commits/{old['reviewedHead']}")
+            old_run = self._gh_json(f"repos/{_REPOSITORY}/actions/runs/{p['supersededFailure']['runId']}")
+            validate_tool_chain(pr, commit, reviewed["tree"]["sha"], old_pr, old_commit, old_reviewed)
+            validate_superseded_run(old_run, claim["workflowId"])
             if (
                 pr.get("merged") is not True or pr.get("merge_commit_sha") != claim["toolSha"]
                 or pr.get("head", {}).get("sha") != claim["reviewedHead"]
                 or commit.get("tree", {}).get("sha") != claim["toolTree"]
                 or reviewed.get("tree", {}).get("sha") != claim["toolTree"]
-                or [parent.get("sha") for parent in commit.get("parents", [])] != [p["subject"]["sha"]]
+                or reviewed.get("sha") != claim["reviewedHead"]
+                or [parent.get("sha") for parent in commit.get("parents", [])] != [p["previousTool"]["sha"]]
                 or run["id"] != claim["runId"] or run["head_sha"] != claim["toolSha"]
                 or run.get("workflow_id") != claim["workflowId"]
                 or run.get("actor", {}).get("id") != p["ownerId"]

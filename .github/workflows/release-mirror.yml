@@ -66,6 +66,7 @@ jobs:
           [[ "$release_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]
           metadata="$RUNNER_TEMP/release-metadata.json"
           gh api --method GET \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
             "repos/yanyuhanyue/AniMemo/releases/tags/$release_tag" > "$metadata"
           jq -e --arg tag "$release_tag" '
             type == "object" and

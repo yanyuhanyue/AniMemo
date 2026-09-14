@@ -95,12 +95,24 @@ class RecoveryConsumerTests(unittest.TestCase):
         claim = self.record["claim"]
         base = "repos/" + p["repository"]
         self.api = {
-            base + "/pulls/255": fixture["pull_request"],
+            base + f"/pulls/{p['sourcePr']}": fixture["pull_request"],
+            base + "/pulls/255": fixture["previous_pr"],
+            base + "/git/commits/" + p["previousTool"]["sha"]: fixture[
+                "previous_commit"
+            ],
+            base + "/git/commits/" + p["previousTool"]["reviewedHead"]: fixture[
+                "previous_reviewed"
+            ],
+            base + f"/actions/runs/{p['supersededFailure']['runId']}": fixture[
+                "superseded_run"
+            ],
             base + "/git/commits/" + claim["toolSha"]: {
+                "sha": claim["toolSha"],
                 "tree": {"sha": claim["toolTree"]},
-                "parents": [{"sha": p["subject"]["sha"]}],
+                "parents": [{"sha": p["previousTool"]["sha"]}],
             },
             base + "/git/commits/" + claim["reviewedHead"]: {
+                "sha": claim["reviewedHead"],
                 "tree": {"sha": claim["toolTree"]}
             },
             base
@@ -150,7 +162,18 @@ class RecoveryConsumerTests(unittest.TestCase):
 
     def observe_record(self):
         with (
-            mock.patch.object(self.boundary, "_run", return_value=self.raw),
+            mock.patch.object(
+                self.boundary,
+                "_run",
+                side_effect=lambda cmd, **kw: (
+                    (
+                        b"HTTP/2.0 200 OK\nX-GitHub-Api-Version-Selected: 2022-11-28\n\n"
+                        + json.dumps(self.api[cmd[-1]]).encode()
+                    )
+                    if "--include" in cmd
+                    else self.raw
+                ),
+            ),
             mock.patch.object(
                 self.boundary,
                 "_gh_json",
@@ -389,9 +412,14 @@ class RecoveryConsumerTests(unittest.TestCase):
                 mock.patch.object(
                     self.boundary,
                     "_run",
-                    side_effect=lambda command, **_k: downloads[
-                        int(command[-1].split("/")[-2])
-                    ],
+                    side_effect=lambda command, **_k: (
+                        (
+                            b"HTTP/2.0 200 OK\nX-GitHub-Api-Version-Selected: 2022-11-28\n\n"
+                            + json.dumps(self.api[command[-1]]).encode()
+                        )
+                        if "--include" in command
+                        else downloads[int(command[-1].split("/")[-2])]
+                    ),
                 )
             )
             stack.enter_context(

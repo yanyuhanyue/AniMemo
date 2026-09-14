@@ -1,7 +1,7 @@
 """Closed, one-operation recovery authority. A hash is a binding, not a permit.
 
 Production authority comes from the operator's explicit one-run dispatch through
-the reviewed, protected PR #255 workflow and independently retrieved GitHub facts.
+the reviewed, protected recovery workflow and independently retrieved GitHub facts.
 The immutable product subject and the recovery tool deliberately remain separate.
 """
 
@@ -70,6 +70,71 @@ def execution_title(mode: str) -> str:
     return f"Existing RC recovery {mode} | {policy()['scope']}"
 
 
+def validate_tool_chain(
+    pr, commit, reviewed_tree, previous_pr, previous_commit, previous_reviewed
+):
+    from .recovery_pr import validate_pr
+
+    p = policy()
+    old = p["previousTool"]
+    require(
+        type(p["sourcePr"]) is int and p["sourcePr"] != old["sourcePr"],
+        "RECOVERY_PR_BINDING_PENDING",
+    )
+    validate_pr(pr, number=p["sourcePr"], branch=p["sourceBranch"])
+    validate_pr(previous_pr, number=old["sourcePr"], branch=old["sourceBranch"])
+    require(
+        previous_pr["merge_commit_sha"] == old["sha"]
+        and previous_pr["head"]["sha"] == old["reviewedHead"],
+        "RECOVERY_PREVIOUS_PR_INVALID",
+    )
+    require(
+        previous_commit.get("sha") == old["sha"]
+        and previous_commit.get("tree", {}).get("sha") == old["tree"]
+        and [item.get("sha") for item in previous_commit.get("parents", [])]
+        == [p["subject"]["sha"]]
+        and previous_reviewed.get("sha") == old["reviewedHead"]
+        and previous_reviewed.get("tree", {}).get("sha") == old["tree"],
+        "RECOVERY_PREVIOUS_TOOL_INVALID",
+    )
+    require(
+        commit.get("sha") == pr["merge_commit_sha"]
+        and commit.get("tree", {}).get("sha") == reviewed_tree
+        and type(reviewed_tree) is str
+        and re.fullmatch(r"[0-9a-f]{40}", reviewed_tree) is not None
+        and [item.get("sha") for item in commit.get("parents", [])] == [old["sha"]],
+        "RECOVERY_TOOL_CHAIN_INVALID",
+    )
+
+
+def validate_superseded_run(run, workflow_id):
+    p = policy()
+    old = p["supersededFailure"]
+    require(
+        run.get("id") == old["runId"]
+        and run.get("run_attempt") == old["runAttempt"]
+        and run.get("created_at") == old["createdAt"]
+        and run.get("head_sha") == old["toolSha"]
+        and run.get("status") == "completed"
+        and run.get("conclusion") == "failure"
+        and run.get("event") == "workflow_dispatch"
+        and run.get("head_branch") == "main"
+        and run.get("path", "").split("@")[0] == p["workflow"]
+        and run.get("workflow_id") == workflow_id
+        and run.get("display_title") == f"Existing RC recovery execute | {old['scope']}"
+        and all(
+            run.get(key, {}).get("id") == p["repositoryId"]
+            for key in ("repository", "head_repository")
+        )
+        and all(
+            run.get(key, {}).get("id") == p["ownerId"]
+            and run.get(key, {}).get("login") == p["operator"]
+            for key in ("actor", "triggering_actor")
+        ),
+        "RECOVERY_SUPERSEDED_RUN_INVALID",
+    )
+
+
 def validate_execution(
     *,
     environment: Mapping[str, str],
@@ -83,6 +148,11 @@ def validate_execution(
     checkout_tree: str,
     reviewed_tree: str,
     parent_sha: str,
+    tool_commit: Mapping[str, Any],
+    previous_pr: Mapping[str, Any],
+    previous_commit: Mapping[str, Any],
+    previous_reviewed: Mapping[str, Any],
+    superseded_run: Mapping[str, Any],
     execution_runs: list[Mapping[str, Any]],
     now: datetime,
 ) -> dict[str, Any]:
@@ -157,27 +227,19 @@ def validate_execution(
     require(
         run.get("display_title") == execution_title(mode), "RECOVERY_RUN_TITLE_INVALID"
     )
-    require(
-        pull_request.get("number") == p["sourcePr"]
-        and pull_request.get("merged") is True
-        and pull_request.get("state") == "closed",
-        "RECOVERY_TOOL_NOT_MERGED",
+    validate_tool_chain(
+        pull_request,
+        tool_commit,
+        reviewed_tree,
+        previous_pr,
+        previous_commit,
+        previous_reviewed,
     )
-    require(
-        pull_request.get("head", {}).get("repo", {}).get("id") == p["repositoryId"]
-        and pull_request.get("head", {}).get("ref") == p["sourceBranch"],
-        "RECOVERY_TOOL_SOURCE_INVALID",
-    )
-    require(
-        pull_request.get("base", {}).get("repo", {}).get("id") == p["repositoryId"]
-        and pull_request.get("base", {}).get("ref") == "main",
-        "RECOVERY_TOOL_SOURCE_INVALID",
-    )
-    tool = pull_request.get("merge_commit_sha")
-    require(
-        isinstance(tool, str) and re.fullmatch(r"[0-9a-f]{40}", tool) is not None,
-        "RECOVERY_TOOL_INVALID",
-    )
+    validate_superseded_run(superseded_run, workflow["id"])
+    prior_runs = [r for r in execution_runs if r.get("id") == superseded_run["id"]]
+    require(len(prior_runs) == 1, "RECOVERY_SUPERSEDED_HISTORY_MISSING")
+    validate_superseded_run(prior_runs[0], workflow["id"])
+    tool = pull_request["merge_commit_sha"]
     require(
         tool
         == main_sha
@@ -188,7 +250,7 @@ def validate_execution(
         "RECOVERY_TOOL_DRIFT",
     )
     require(
-        parent_sha == p["subject"]["sha"] and checkout_tree == reviewed_tree,
+        parent_sha == p["previousTool"]["sha"] and checkout_tree == reviewed_tree,
         "RECOVERY_REVIEW_TREE_DRIFT",
     )
     require(
@@ -204,6 +266,15 @@ def validate_execution(
         <= now
         < issued + timedelta(seconds=p["authorizationSeconds"]),
         "RECOVERY_AUTHORIZATION_EXPIRED",
+    )
+    require(
+        all(
+            r.get("display_title")
+            in {execution_title("inspect"), execution_title("execute")}
+            for r in execution_runs
+            if instant(r["created_at"]) >= issued
+        ),
+        "RECOVERY_RUN_HISTORY_TITLE_INVALID",
     )
     if mode == "execute":
         executions = [
@@ -226,12 +297,16 @@ def validate_execution(
         first = min(executions, key=lambda r: (instant(r["created_at"]), r["id"]))
         require(first["id"] == run["id"], "RECOVERY_EXECUTION_ALREADY_CONSUMED")
     binding = {
-        "schema": "animemo.source-bound-recovery-claim/v1",
+        "schema": "animemo.source-bound-recovery-claim/v2"
+        if mode == "execute"
+        else "animemo.recovery-inspection-context/v2",
         "scope": p["scope"],
         "authority": "GITHUB_PROTECTED_WORKFLOW_DISPATCH",
         "repositoryId": p["repositoryId"],
         "operatorId": p["ownerId"],
         "sourcePr": p["sourcePr"],
+        "previousTool": p["previousTool"],
+        "supersededFailure": p["supersededFailure"],
         "subject": p["subject"],
         "toolSha": tool,
         "toolTree": checkout_tree,
@@ -250,16 +325,21 @@ def validate_execution(
         "operationId": p["transaction"]["operation_id"],
         "planDigest": p["transaction"]["plan_digest"],
         "draftId": p["transaction"]["draft_id"],
-        "writeSteps": p["remainingSteps"],
+        "writeSteps": p["remainingSteps"] if mode == "execute" else [],
     }
     binding["nonce"] = identity(
         {"scope": p["scope"], "runId": run["id"], "createdAt": utc(run_created)}
     )
     binding["bindingDigest"] = identity(binding)
-    return validate_claim(binding)
+    return validate_context(binding)
 
 
 def validate_claim(value: Mapping[str, Any]) -> dict[str, Any]:
+    require(value.get("mode") == "execute", "RECOVERY_EXECUTION_NOT_AUTHORIZED")
+    return validate_context(value)
+
+
+def validate_context(value: Mapping[str, Any]) -> dict[str, Any]:
     p = policy()
     keys = {
         "schema",
@@ -268,6 +348,8 @@ def validate_claim(value: Mapping[str, Any]) -> dict[str, Any]:
         "repositoryId",
         "operatorId",
         "sourcePr",
+        "previousTool",
+        "supersededFailure",
         "subject",
         "toolSha",
         "toolTree",
@@ -294,13 +376,18 @@ def validate_claim(value: Mapping[str, Any]) -> dict[str, Any]:
         isinstance(value, Mapping) and set(value) == keys,
         "RECOVERY_CLAIM_FIELDS_INVALID",
     )
+    mode = value["mode"]
     expected = {
-        "schema": "animemo.source-bound-recovery-claim/v1",
+        "schema": "animemo.source-bound-recovery-claim/v2"
+        if mode == "execute"
+        else "animemo.recovery-inspection-context/v2",
         "scope": p["scope"],
         "authority": "GITHUB_PROTECTED_WORKFLOW_DISPATCH",
         "repositoryId": p["repositoryId"],
         "operatorId": p["ownerId"],
         "sourcePr": p["sourcePr"],
+        "previousTool": p["previousTool"],
+        "supersededFailure": p["supersededFailure"],
         "subject": p["subject"],
         "workflow": p["workflow"],
         "runAttempt": 1,
@@ -310,7 +397,7 @@ def validate_claim(value: Mapping[str, Any]) -> dict[str, Any]:
         "operationId": p["transaction"]["operation_id"],
         "planDigest": p["transaction"]["plan_digest"],
         "draftId": p["transaction"]["draft_id"],
-        "writeSteps": p["remainingSteps"],
+        "writeSteps": p["remainingSteps"] if mode == "execute" else [],
     }
     require(
         all(value[k] == v for k, v in expected.items()), "RECOVERY_CLAIM_SCOPE_INVALID"

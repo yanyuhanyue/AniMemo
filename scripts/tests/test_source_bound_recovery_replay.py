@@ -21,10 +21,9 @@ from release.recovery_contract import (
     RecoveryError,
     identity,
     policy,
-    validate_execution,
 )
-from release.recovery_remote import file_digest
-from scripts.tests.test_source_bound_recovery import execution_fixture
+from release.recovery_remote import GitHubRecoveryRemote, file_digest
+from scripts.tests.recovery_http_fixture import FixtureHTTP, ProductionFixturePlatform
 
 
 class IsolatedJournal:
@@ -55,12 +54,13 @@ class IsolatedJournal:
         return accepted
 
 
-class SimulatedRemote:
+class SimulatedRemote(GitHubRecoveryRemote):
     """Only transport outcomes are simulated; no canonical gate is replaced."""
 
     base = "repos/yanyuhanyue/AniMemo"
 
     def __init__(self, assets, *, real_bytes, outcome="ack", published=False):
+        super().__init__(output=assets.parent)
         self.assets, self.real_bytes, self.outcome = assets, real_bytes, outcome
         self.write_requests = []
         p = policy()
@@ -80,14 +80,6 @@ class SimulatedRemote:
         if self.release["draft"] is False and not published_allowed:
             raise RecoveryError("RECOVERY_DRAFT_STATE_INVALID")
         return copy.deepcopy(self.release)
-
-    def listed(self, endpoint, key):
-        assert key == "artifacts"
-        rows = [
-            {**item, "expired": False}
-            for item in policy()["qualificationArtifacts"].values()
-        ]
-        return {"total_count": len(rows), "artifacts": rows}
 
     def verify_proofs(self, _root):
         return [
@@ -153,39 +145,12 @@ class SimulatedRemote:
         )
 
 
-class SimulatedPlatform:
-    def __init__(self, remote, root):
-        self.remote, self.repository = remote, root
-        self.fixture = execution_fixture()
-        self.claim = validate_execution(**self.fixture)
-
-    def now(self):
-        return self.fixture["now"]
-
-    def execution(self):
-        return copy.deepcopy(self.claim)
-
-    def validate_active(self, claim):
-        assert claim == self.claim
-        return self.now()
-
-    def validate_settings(self):
-        pass
-
-    def tag(self):
-        return {"object": policy()["tagObject"], "commit": policy()["subject"]["sha"]}
-
-    def registry(self):
-        return {
-            s["name"]: s["expectedIdentity"]
-            for s in policy()["steps"]
-            if s["name"].startswith("registry-")
-        }
-
-
 class OriginalJournalReplayTests(unittest.TestCase):
     def replay(self, outcome="ack", real_materials=None, capture=None):
-        with tempfile.TemporaryDirectory() as directory:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            FixtureHTTP().installed() as http,
+        ):
             root = Path(directory)
             backend = IsolatedJournal(root / "journal")
             if real_materials:
@@ -203,7 +168,9 @@ class OriginalJournalReplayTests(unittest.TestCase):
                     Path(__file__).resolve().parents[2]
                     / "release/fixtures/rc-recovery-notes.md"
                 )
-                (assets / "release-notes.md").write_bytes(notes_path.read_bytes())
+                (assets / "release-notes.md").write_bytes(
+                    notes_path.read_text(encoding="utf-8").encode("utf-8")
+                )
                 for name in {**p["plan"]["assets"], **p["plan"]["transport_assets"]}:
                     (assets / name).write_bytes(b"fixture")
                 (assets / "checksums.txt").write_text(
@@ -226,10 +193,12 @@ class OriginalJournalReplayTests(unittest.TestCase):
             remote = SimulatedRemote(
                 assets, real_bytes=bool(real_materials), outcome=outcome
             )
-            platform = SimulatedPlatform(remote, root)
+            platform = ProductionFixturePlatform(remote, root)
             engine = ExistingRCRecovery(
                 platform=platform, backend=backend, materials=materials, root=root
             )
+            platform.claim = engine.claim
+            self.assertTrue(any("/pulls/" in req["url"] for req in http.requests))
             original = backend.load(platform.claim["operationId"])
             before = {
                 path.name: path.read_bytes()
@@ -316,10 +285,101 @@ class OriginalJournalReplayTests(unittest.TestCase):
         material_result = (
             Path(__file__).resolve().parents[4]
             / ".animemo-audit-work"
-            / "rc-source-bound-recovery-20260914-v1"
-            / "material-replay-final-result.json"
+            / "rc-api-contract-recovery-v2-20260914"
+            / "material-replay-result.json"
         )
         self.replay(real_materials=material_result)
+
+    @unittest.skipUnless(
+        os.environ.get("ANIMEMO_RECOVERY_REPLAY_REAL_BYTES") == "1",
+        "Original bytes are local acceptance inputs",
+    )
+    def test_full_inspect_reads_original_bytes_proofs_and_production_draft(self):
+        import subprocess
+
+        from release.recovery_contract import execution_title
+        from scripts.tests.test_source_bound_recovery import execution_fixture
+
+        material_result = (
+            Path(__file__).resolve().parents[4]
+            / ".animemo-audit-work/rc-api-contract-recovery-v2-20260914/material-replay-result.json"
+        )
+        materials = json.loads(material_result.read_bytes())
+        fixture_root = Path(__file__).resolve().parents[2] / "release/fixtures"
+        proof_responses = json.loads(
+            (fixture_root / "rc-original-proof-responses.json").read_bytes()
+        )
+        f = execution_fixture()
+        f["event"]["inputs"]["operation"] = "inspect"
+        f["run"]["display_title"] = execution_title("inspect")
+        http = FixtureHTTP(f)
+        draft = json.loads(
+            (fixture_root / "rc-original-draft-response.json").read_bytes()
+        )
+        http.values.update(
+            {
+                http.base + "/releases/tags/v2.0.0-rc.1": {},
+                http.base + "/releases?per_page=100&page=1": [draft],
+                http.base + "/releases/388147631": draft,
+                http.base + "/releases/388147631/assets?per_page=100&page=1": [],
+            }
+        )
+        http.statuses[http.base + "/releases/tags/v2.0.0-rc.1"] = 404
+        proof_calls = []
+
+        def verified(command, **kwargs):
+            p = policy()
+            allowed = {
+                (
+                    "gh",
+                    "attestation",
+                    "verify",
+                    f"oci://ghcr.io/yanyuhanyue/animemo-{name}@{p['plan'][name + '_digest']}"
+                    if name in {"api", "web"}
+                    else str(Path(materials["assetRoot"]) / name),
+                    "--repo",
+                    p["repository"],
+                    "--signer-workflow",
+                    p["repository"] + "/.github/workflows/release.yml",
+                    "--source-digest",
+                    p["subject"]["sha"],
+                    "--format",
+                    "json",
+                ): name
+                for name in proof_responses
+            }
+            assert command in allowed, "Unexpected subprocess/write during inspection"
+            proof_calls.append(allowed[command])
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps(proof_responses[allowed[command]]).encode(), b""
+            )
+
+        with tempfile.TemporaryDirectory() as directory, http.installed():
+            root = Path(directory)
+            backend = IsolatedJournal(root / "journal")
+            before = backend.load(policy()["transaction"]["operation_id"])
+            remote = GitHubRecoveryRemote(output=root, read_only=True)
+            platform = ProductionFixturePlatform(remote, root, f)
+            with (
+                mock.patch.object(
+                    backend,
+                    "append",
+                    side_effect=AssertionError("inspect journal write"),
+                ),
+                mock.patch("subprocess.run", side_effect=verified),
+            ):
+                result = ExistingRCRecovery(
+                    platform=platform, backend=backend, materials=materials, root=root
+                ).run()
+            self.assertEqual(result["status"], "INSPECTED")
+            self.assertEqual(remote.write_requests, [])
+            self.assertEqual(backend.load(before["operationId"]), before)
+            self.assertEqual(
+                len(proof_calls), 10
+            )  # Two full, identical precheck snapshots.
+            self.assertTrue(
+                any("releases?per_page" in request["url"] for request in http.requests)
+            )
 
 
 if __name__ == "__main__":

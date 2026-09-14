@@ -61,10 +61,23 @@ class RecoveryPlatform:
         )
         run = remote.get(f"{remote.base}/actions/runs/{rid}")
         workflow = remote.get(f"{remote.base}/actions/workflows/release-recovery.yml")
-        pr = remote.get(f"{remote.base}/pulls/{p['sourcePr']}")
+        pr = remote.merge_identity(p["sourcePr"], p["sourceBranch"])
+        previous = p["previousTool"]
+        previous_pr = remote.merge_identity(
+            previous["sourcePr"], previous["sourceBranch"]
+        )
+        tool_commit = remote.get(f"{remote.base}/git/commits/{pr['merge_commit_sha']}")
+        previous_commit = remote.get(f"{remote.base}/git/commits/{previous['sha']}")
+        previous_reviewed = remote.get(
+            f"{remote.base}/git/commits/{previous['reviewedHead']}"
+        )
+        superseded_run = remote.get(
+            f"{remote.base}/actions/runs/{p['supersededFailure']['runId']}"
+        )
         repo = remote.get(remote.base)
         main = remote.get(f"{remote.base}/git/ref/heads/main")["object"]["sha"]
         reviewed = remote.get(f"{remote.base}/git/commits/{pr['head']['sha']}")
+        require(reviewed.get("sha") == pr["head"]["sha"], "RECOVERY_REVIEWED_HEAD_INVALID")
         runs = remote.listed(
             f"{remote.base}/actions/workflows/{workflow['id']}/runs?event=workflow_dispatch",
             "workflow_runs",
@@ -84,7 +97,12 @@ class RecoveryPlatform:
             checkout_sha=self.git("rev-parse", "HEAD"),
             checkout_tree=self.git("rev-parse", "HEAD^{tree}"),
             reviewed_tree=reviewed["tree"]["sha"],
-            parent_sha=self.git("rev-parse", "HEAD^"),
+            parent_sha=self.git("show", "-s", "--format=%P", "HEAD"),
+            tool_commit=tool_commit,
+            previous_pr=previous_pr,
+            previous_commit=previous_commit,
+            previous_reviewed=previous_reviewed,
+            superseded_run=superseded_run,
             execution_runs=runs["workflow_runs"],
             now=self.now(),
         )
@@ -491,14 +509,16 @@ class ExistingRCRecovery:
         )
         self.attempted = set()
         self.guard = None
-        self.remote.before_send = self.precheck.final_send_check
-        self.backend.before_push = self.precheck.final_send_check
+        if self.claim["mode"] == "execute":
+            self.remote.before_send = self.precheck.final_send_check
+            self.backend.before_push = self.precheck.final_send_check
 
     def run(self):
         self.precheck.refresh()
         if self.claim["mode"] == "inspect":
             return {
                 "status": "INSPECTED",
+                "context": self.claim,
                 "remoteMutations": 0,
                 "precheck": self.precheck.current,
             }
@@ -540,7 +560,7 @@ class ExistingRCRecovery:
             Path(self.materials["assetRoot"]) / "publication-transaction-ledger.json"
         ).write_bytes(canonical_json_bytes(final))
         return {
-            "schema": "animemo.existing-rc-recovery-execution/v1",
+            "schema": "animemo.existing-rc-recovery-execution/v2",
             "status": "TRANSACTION_COMPLETE",
             "claim": self.claim,
             "originalPublishRun": policy()["originalPublishRun"],

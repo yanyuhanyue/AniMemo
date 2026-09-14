@@ -1,5 +1,5 @@
 name: Existing RC Recovery
-run-name: Existing RC recovery ${{ inputs.operation }} | ANIMEMO_V2_EXISTING_RC_SOURCE_BOUND_RECOVERY_V1
+run-name: Existing RC recovery ${{ inputs.operation }} | ANIMEMO_V2_EXISTING_RC_SOURCE_BOUND_RECOVERY_API_FIX_V2
 
 on:
   workflow_dispatch:
@@ -28,6 +28,7 @@ permissions:
   actions: read
   packages: read
   attestations: read
+  pull-requests: read
 
 jobs:
   inspect:
@@ -67,6 +68,7 @@ jobs:
       actions: read
       packages: read
       attestations: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

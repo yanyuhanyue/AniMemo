@@ -288,6 +288,7 @@ class ControllerReleaseAuthorityVerifierTests(unittest.TestCase):
                 )
 
             self.assertEqual(observed, b"{}")
+            self.assertEqual(run.call_args.args[0][-2:], ("-H", "X-GitHub-Api-Version: 2026-03-10"))
             self.assertEqual(
                 run.call_args.args[0][0:4],
                 ("gh.exe", "api", "--method", "GET"),
