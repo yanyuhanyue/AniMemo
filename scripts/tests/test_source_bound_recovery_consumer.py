@@ -48,7 +48,7 @@ class RecoveryConsumerTests(unittest.TestCase):
             **fixture["run"],
             "status": "completed",
             "conclusion": "success",
-            "name": "Existing RC Recovery",
+            "name": fixture["run"]["display_title"],
         }
         self.record = {
             **copy.deepcopy(self.capture["execution"]),
@@ -95,8 +95,12 @@ class RecoveryConsumerTests(unittest.TestCase):
         claim = self.record["claim"]
         base = "repos/" + p["repository"]
         self.api = {
+            base + "/actions/workflows/release-recovery.yml": {"id": fixture["workflow"]["id"], "path": p["workflow"], "name": "Existing RC Recovery", "state": "active"},
             base + f"/pulls/{p['sourcePr']}": fixture["pull_request"],
             base + "/pulls/255": fixture["previous_pr"],
+            base + "/pulls/256": fixture["parent_facts"][0],
+            base + "/git/commits/" + p["parentTool"]["sha"]: fixture["parent_facts"][1],
+            base + "/git/commits/" + p["parentTool"]["reviewedHead"]: fixture["parent_facts"][2],
             base + "/git/commits/" + p["previousTool"]["sha"]: fixture[
                 "previous_commit"
             ],
@@ -109,7 +113,7 @@ class RecoveryConsumerTests(unittest.TestCase):
             base + "/git/commits/" + claim["toolSha"]: {
                 "sha": claim["toolSha"],
                 "tree": {"sha": claim["toolTree"]},
-                "parents": [{"sha": p["previousTool"]["sha"]}],
+                "parents": [{"sha": p["parentTool"]["sha"]}],
             },
             base + "/git/commits/" + claim["reviewedHead"]: {
                 "sha": claim["reviewedHead"],

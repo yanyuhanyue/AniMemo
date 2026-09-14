@@ -124,10 +124,12 @@
         "subject",
         "writeSteps",
         "previousTool",
+        "parentTool",
         "supersededFailure"
       ],
       "properties": {
         "previousTool": {"type": "object"},
+        "parentTool": {"type": "object"},
         "supersededFailure": {"type": "object"},
         "schema": {
           "type": "string"

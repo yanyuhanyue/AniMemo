@@ -105,19 +105,45 @@ def execution_fixture():
         "environment": env,
         "event": event,
         "run": run,
-        "workflow": {"id": 902, "path": p["workflow"], "state": "active"},
+        "workflow": {
+            "id": 902,
+            "path": p["workflow"],
+            "name": "Existing RC Recovery",
+            "state": "active",
+        },
         "repository": repo,
         "pull_request": pr,
         "main_sha": tool,
         "checkout_sha": tool,
         "checkout_tree": tree,
         "reviewed_tree": tree,
-        "parent_sha": old["sha"],
+        "parent_sha": p["parentTool"]["sha"],
         "tool_commit": {
             "sha": tool,
             "tree": {"sha": tree},
-            "parents": [{"sha": old["sha"]}],
+            "parents": [{"sha": p["parentTool"]["sha"]}],
         },
+        "parent_facts": (
+            {
+                **copy.deepcopy(pr),
+                "number": p["parentTool"]["sourcePr"],
+                "merge_commit_sha": p["parentTool"]["sha"],
+                "head": {
+                    "sha": p["parentTool"]["reviewedHead"],
+                    "ref": p["parentTool"]["sourceBranch"],
+                    "repo": repo,
+                },
+            },
+            {
+                "sha": p["parentTool"]["sha"],
+                "tree": {"sha": p["parentTool"]["tree"]},
+                "parents": [{"sha": old["sha"]}],
+            },
+            {
+                "sha": p["parentTool"]["reviewedHead"],
+                "tree": {"sha": p["parentTool"]["tree"]},
+            },
+        ),
         "previous_pr": previous_pr,
         "previous_commit": {
             "sha": old["sha"],

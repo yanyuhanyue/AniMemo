@@ -15,7 +15,7 @@ from .recovery_contract import identity, instant, policy, require, validate_clai
 from .recovery_remote import file_digest
 
 
-def fixed_proof_runner(material_root: Path):
+def fixed_proof_runner(material_root: Path, remote=None):
     p = policy()
     require(
         material_root.is_absolute() and material_root.resolve() == material_root,
@@ -71,8 +71,14 @@ def fixed_proof_runner(material_root: Path):
         matches = [command for command in allowed if argv == command]
         require(len(matches) == 1, "RECOVERY_PROOF_COMMAND_INVALID")
         # Execute the command constructed above, never the callback's argv.
-        result = subprocess.run(
-            matches[0], capture_output=True, timeout=180, check=False
+        result = (
+            remote.run_read_command(
+                matches[0], category="PLATFORM_PROOF_VERIFY", timeout=180
+            )
+            if remote is not None
+            else subprocess.run(
+                matches[0], capture_output=True, timeout=180, check=False
+            )
         )
         require(result.returncode == 0, "RECOVERY_PLATFORM_PROOF_UNAVAILABLE")
         return result.stdout
@@ -109,7 +115,11 @@ def collect_evidence(remote, *, material_root: Path, output: Path, execution: di
         )
         # No Authorization header exists on this transport or its redirects.
         with (
-            urllib.request.urlopen(expected_url, timeout=180) as stream,
+            remote.open_read_stream(
+                lambda url=expected_url: urllib.request.urlopen(url, timeout=180),
+                category="ANONYMOUS_ASSET",
+                role="ANONYMOUS",
+            ) as stream,
             (public / name).open("xb") as target,
         ):
             digest = hashlib.sha256()
@@ -156,7 +166,7 @@ def collect_evidence(remote, *, material_root: Path, output: Path, execution: di
         "installer-materials": str(material_root / "installer-materials.tar"),
     }
     envelope = GitHubAttestationAcquirer(
-        runner=fixed_proof_runner(material_root)
+        runner=fixed_proof_runner(material_root, remote)
     ).acquire_and_export(
         repository=p["repository"],
         tag=p["subject"]["release_tag"],

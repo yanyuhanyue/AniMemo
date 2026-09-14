@@ -43,6 +43,7 @@ def main() -> int:
     root = None
     owned = False
     engine = None
+    remote = None
     try:
         require(os.environ.get("GITHUB_ACTIONS") == "true", "RECOVERY_HOST_UNTRUSTED")
         event_path, root = trusted_runner_paths(repository, os.environ)
@@ -125,6 +126,27 @@ def main() -> int:
             "recoveryRunMayBeConsumed": os.environ.get("GITHUB_RUN_ID"),
             "releaseState": "UNKNOWN_READ_PLATFORM_BEFORE_ANY_FOLLOWUP",
         }
+        if remote is not None and remote.last_read_diagnostic is not None:
+            last = remote.last_read_diagnostic
+            # A later identity/material failure must not blame a successful GET.
+            field = (
+                "lastRead"
+                if (
+                    last.get("phase") != "RESPONSE"
+                    or last.get("status") != 200
+                    or code.startswith(
+                        (
+                            "RECOVERY_PR_",
+                            "RECOVERY_PAGINATION_",
+                            "RECOVERY_REMOTE_JSON_",
+                            "RECOVERY_API_VERSION_",
+                        )
+                    )
+                )
+                else "lastObservedRead"
+            )
+            failure[field] = dict(last)
+            failure["diagnosticsIncomplete"] = remote.diagnostics_incomplete
         if engine is not None:
             failure["writeRequests"] = engine.remote.write_requests
             failure["lastConfirmedJournalHead"] = (
@@ -143,9 +165,12 @@ def main() -> int:
             except Exception:  # noqa: BLE001 - failed readback must remain explicitly unknown
                 failure["readbackStatus"] = "UNKNOWN"
         if owned and root is not None and (root / "evidence").is_dir():
-            (root / "evidence" / "failure.json").write_bytes(
-                canonical_json_bytes(failure)
-            )
+            try:
+                (root / "evidence" / "failure.json").write_bytes(
+                    canonical_json_bytes(failure)
+                )
+            except OSError:
+                failure["diagnosticsIncomplete"] = True
         print(json.dumps(failure), file=sys.stderr)
         return 2
 

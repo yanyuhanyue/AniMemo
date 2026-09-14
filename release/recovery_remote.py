@@ -11,10 +11,12 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,7 @@ from .publication_remote import (
     _NoRedirect,
     _open_github_asset_stream,
     github_request,
+    read_github_response,
 )
 from .publication_transaction import _next_snapshot
 from .recovery_contract import (
@@ -67,17 +70,236 @@ class GitHubRecoveryRemote:
         self.write_requests: list[dict[str, Any]] = []
         self.base = "repos/" + self.p["repository"]
         self.before_send = before_send
+        self.read_sequence = 0
+        self.last_read_diagnostic = None
+        self.diagnostics_incomplete = False
+
+    def _record_read(self, value):
+        self.last_read_diagnostic = dict(value)
+        try:
+            with (self.output / "http-read-diagnostics.jsonl").open(
+                "a", encoding="utf-8"
+            ) as stream:
+                stream.write(json.dumps(value, sort_keys=True) + "\n")
+        except OSError:
+            # Observability failure cannot replace the actual request failure.
+            self.diagnostics_incomplete = True
+
+    @staticmethod
+    def _safe(value):
+        return (
+            value
+            if type(value) is str and re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", value)
+            else None
+        )
+
+    def _record_read_exception(self, initial, error):
+        response = getattr(error, "response", None)
+        self._record_read(
+            {
+                **initial,
+                "phase": "RESPONSE_BODY_ERROR"
+                if response is not None
+                else "NO_RESPONSE",
+                "status": response.status if response is not None else None,
+                "requestId": self._safe(response.request_id)
+                if response is not None
+                else None,
+                "selectedVersion": self._safe(response.selected_version)
+                if response is not None
+                else None,
+                "errorCategory": "RESPONSE_BODY_INCOMPLETE"
+                if response is not None
+                else "TRANSPORT_OR_CREDENTIAL_UNKNOWN",
+            }
+        )
+
+    def run_read_command(self, command, *, category, timeout):
+        """Opaque CLI verification has no exposed HTTP status; never infer one."""
+        require(
+            category in {"ORIGINAL_PROOF_VERIFY", "PLATFORM_PROOF_VERIFY"},
+            "RECOVERY_READ_CATEGORY_INVALID",
+        )
+        self.read_sequence += 1
+        initial = {
+            "sequence": self.read_sequence,
+            "phase": "COMMAND_START",
+            "endpointCategory": category,
+            "credentialRole": "GH_CLI_EXISTING_READ",
+            "method": None,
+            "requestedVersion": None,
+            "selectedVersion": None,
+            "requestId": None,
+            "status": None,
+        }
+        self._record_read(initial)
+        try:
+            result = subprocess.run(
+                command, capture_output=True, timeout=timeout, check=False
+            )
+        except (OSError, subprocess.SubprocessError):
+            self._record_read(
+                {
+                    **initial,
+                    "phase": "COMMAND_ERROR",
+                    "errorCategory": "CLI_READ_STATUS_UNAVAILABLE",
+                }
+            )
+            raise RecoveryError("RECOVERY_PROOF_TRANSPORT_UNKNOWN") from None
+        self._record_read(
+            {
+                **initial,
+                "phase": "COMMAND_RESULT",
+                "commandReturnCode": result.returncode,
+                "errorCategory": "NONE"
+                if result.returncode == 0
+                else "CLI_READ_STATUS_UNAVAILABLE",
+            }
+        )
+        return result
+
+    def asset_observer(self):
+        current = {}
+
+        def observe(phase, role, response):
+            if phase == "REQUEST":
+                self.read_sequence += 1
+                current.clear()
+                current.update(
+                    sequence=self.read_sequence,
+                    endpointCategory="AUTHENTICATED_ASSET"
+                    if role == "GITHUB_TOKEN"
+                    else "ASSET_CDN",
+                    credentialRole=role,
+                    method="GET",
+                    requestedVersion="2026-03-10" if role == "GITHUB_TOKEN" else None,
+                )
+            self._record_read(
+                {
+                    **current,
+                    "phase": phase,
+                    "status": response.status if response is not None else None,
+                    "requestId": self._safe(response.headers.get("X-GitHub-Request-Id"))
+                    if response is not None
+                    else None,
+                    "selectedVersion": self._safe(
+                        response.headers.get("X-GitHub-Api-Version-Selected")
+                    )
+                    if response is not None
+                    else None,
+                }
+            )
+
+        return observe
+
+    @contextmanager
+    def open_read_stream(self, opener, *, category, role, traced=False):
+        require(
+            category in {"AUTHENTICATED_ASSET", "ANONYMOUS_ASSET"},
+            "RECOVERY_READ_CATEGORY_INVALID",
+        )
+        self.read_sequence += 1
+        initial = {
+            "sequence": self.read_sequence,
+            "phase": "REQUEST",
+            "endpointCategory": category,
+            "credentialRole": role,
+            "method": "GET",
+            "requestedVersion": "2026-03-10" if role == "GITHUB_TOKEN" else None,
+            "selectedVersion": None,
+            "requestId": None,
+            "status": None,
+        }
+        if not traced:
+            self._record_read(initial)
+        try:
+            stream = opener()
+        except urllib.error.HTTPError as error:
+            if traced:
+                raise RecoveryError("RECOVERY_ASSET_READ_FAILED") from None
+            self._record_read(
+                {
+                    **initial,
+                    "phase": "RESPONSE",
+                    "status": error.code,
+                    "requestId": self._safe(error.headers.get("X-GitHub-Request-Id")),
+                    "selectedVersion": self._safe(
+                        error.headers.get("X-GitHub-Api-Version-Selected")
+                    ),
+                    "errorCategory": "HTTP_NON_200",
+                }
+            )
+            raise RecoveryError("RECOVERY_ASSET_READ_FAILED") from None
+        except (OSError, http.client.HTTPException):
+            if traced:
+                raise RecoveryError("RECOVERY_ASSET_READ_FAILED") from None
+            self._record_read(
+                {
+                    **initial,
+                    "phase": "NO_RESPONSE",
+                    "errorCategory": "STREAM_OPEN_UNKNOWN",
+                }
+            )
+            raise RecoveryError("RECOVERY_ASSET_READ_FAILED") from None
+        response = {
+            **initial,
+            "phase": "RESPONSE",
+            "status": getattr(stream, "status", None),
+            "requestId": self._safe(stream.headers.get("X-GitHub-Request-Id")),
+            "selectedVersion": self._safe(
+                stream.headers.get("X-GitHub-Api-Version-Selected")
+            ),
+        }
+        if traced:
+            response = dict(self.last_read_diagnostic)
+        else:
+            self._record_read(response)
+        try:
+            with stream:
+                yield stream
+        except Exception:
+            self._record_read(
+                {
+                    **response,
+                    "phase": "RESPONSE_BODY_ERROR",
+                    "errorCategory": "STREAM_OR_BYTES_INVALID",
+                }
+            )
+            raise
 
     def merge_identity(self, number, branch):
         from .recovery_pr import read_merge_identity
 
-        def diagnose(value):
-            with (self.output / "pr-api-diagnostics.jsonl").open(
-                "a", encoding="utf-8"
-            ) as stream:
-                stream.write(json.dumps(value, sort_keys=True) + "\n")
+        self.read_sequence += 1
+        initial = {
+            "sequence": self.read_sequence,
+            "phase": "REQUEST",
+            "endpointCategory": "PR_MERGE_IDENTITY",
+            "credentialRole": "GITHUB_TOKEN",
+            "method": "GET",
+            "requestedVersion": "2022-11-28",
+            "status": None,
+            "requestId": None,
+            "selectedVersion": None,
+        }
+        self._record_read(initial)
 
-        return read_merge_identity(number, branch, diagnose=diagnose)
+        def diagnose(value):
+            self._record_read({**initial, **value, "phase": "RESPONSE"})
+            try:
+                with (self.output / "pr-api-diagnostics.jsonl").open(
+                    "a", encoding="utf-8"
+                ) as stream:
+                    stream.write(json.dumps(value, sort_keys=True) + "\n")
+            except OSError:
+                self.diagnostics_incomplete = True
+
+        try:
+            return read_merge_identity(number, branch, diagnose=diagnose)
+        except Exception as error:
+            if self.last_read_diagnostic["phase"] == "REQUEST":
+                self._record_read_exception(initial, error)
+            raise
 
     def _final_send_check(self):
         require(not self.read_only, "RECOVERY_READ_ONLY")
@@ -85,6 +307,86 @@ class GitHubRecoveryRemote:
         self.before_send()
 
     def get_response(
+        self, endpoint: str, *, administration: bool = False
+    ) -> GitHubResponse:
+        path = endpoint.removeprefix(self.base).split("?", 1)[0]
+        category = {
+            "": "REPOSITORY",
+            "/git/ref/heads/main": "CURRENT_MAIN",
+            "/immutable-releases": "IMMUTABLE_SETTING",
+            "/branches/main/protection": "BRANCH_PROTECTION",
+            f"/releases/{self.p['ordinaryDraft']}": "ORDINARY_DRAFT",
+            f"/releases/{self.p['transaction']['draft_id']}": "RC_DRAFT",
+            "/releases": "RELEASE_LIST",
+        }.get(path)
+        if category is None:
+            category = next(
+                (
+                    label
+                    for prefix, label in (
+                        ("/git/commits/", "GIT_COMMIT"),
+                        ("/git/trees/", "GIT_TREE"),
+                        ("/git/blobs/", "GIT_BLOB"),
+                        ("/actions/runs", "ACTIONS_RUN_OR_ARTIFACTS"),
+                        ("/actions/artifacts/", "QUALIFICATION_ARTIFACT"),
+                        ("/attestations/", "ORIGINAL_ATTESTATION"),
+                        ("/actions/runs/", "ACTIONS_RUN_OR_ARTIFACTS"),
+                        (
+                            "/actions/workflows/",
+                            "WORKFLOW_HISTORY"
+                            if "?" in endpoint
+                            else "WORKFLOW_DEFINITION",
+                        ),
+                        ("/contents/", "FROZEN_DRAFTER_FILE"),
+                        ("/releases/tags/", "RC_BY_TAG"),
+                        ("/releases/", "RELEASE_ASSETS"),
+                        ("/git/", "TAG_IDENTITY"),
+                    )
+                    if path.startswith(prefix)
+                ),
+                "OTHER_READ",
+            )
+        self.read_sequence += 1
+        diagnostic = {
+            "sequence": self.read_sequence,
+            "phase": "REQUEST",
+            "endpointCategory": category,
+            "credentialRole": "ADMIN_READ" if administration else "GITHUB_TOKEN",
+            "method": "GET",
+            "requestedVersion": "2026-03-10",
+            "status": None,
+            "requestId": None,
+            "selectedVersion": None,
+        }
+
+        self._record_read(diagnostic)
+        try:
+            response = self._get_response(endpoint, administration=administration)
+        except Exception as error:
+            self._record_read_exception(diagnostic, error)
+            raise
+        safe = lambda value: (
+            value
+            if type(value) is str and re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", value)
+            else None
+        )
+        self._record_read(
+            {
+                **diagnostic,
+                "phase": "RESPONSE",
+                "status": response.status,
+                "requestId": safe(response.request_id),
+                "selectedVersion": safe(response.selected_version),
+                "errorCategory": "NONE" if response.status == 200 else "HTTP_NON_200",
+            }
+        )
+        require(
+            response.selected_version in {None, "2026-03-10"},
+            "RECOVERY_API_VERSION_CONFLICT",
+        )
+        return response
+
+    def _get_response(
         self, endpoint: str, *, administration: bool = False
     ) -> GitHubResponse:
         require(
@@ -115,11 +417,9 @@ class GitHubRecoveryRemote:
             with urllib.request.build_opener(_NoRedirect()).open(
                 request, timeout=45
             ) as response:
-                return GitHubResponse(
-                    response.status, response.read(), response.headers.get("Link")
-                )
+                return read_github_response(response)
         except urllib.error.HTTPError as error:
-            return GitHubResponse(error.code, error.read())
+            return read_github_response(error)
 
     def get(self, endpoint: str, *, administration: bool = False) -> Any:
         response = self.get_response(endpoint, administration=administration)
@@ -154,6 +454,10 @@ class GitHubRecoveryRemote:
                 )
             except (ValueError, UnicodeDecodeError, ConnectionError):
                 raise RecoveryError("RECOVERY_PAGINATION_INVALID") from None
+            require(
+                not key or isinstance(value, dict) and key in value,
+                "RECOVERY_PAGINATION_INVALID",
+            )
             items = value[key] if key else value
             require(
                 isinstance(items, list) and len(items) <= 100,
@@ -263,7 +567,14 @@ class GitHubRecoveryRemote:
             if self.verified_assets.get(asset["id"]) != fingerprint:
                 token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
                 require(bool(token), "RECOVERY_CREDENTIAL_MISSING")
-                with _open_github_asset_stream(asset["url"], token) as stream:
+                with self.open_read_stream(
+                    lambda url=asset["url"], token=token: _open_github_asset_stream(
+                        url, token, observe=self.asset_observer()
+                    ),
+                    category="AUTHENTICATED_ASSET",
+                    role="GITHUB_TOKEN",
+                    traced=True,
+                ) as stream:
                     self._verify_stream(stream, item)
                 self.verified_assets[asset["id"]] = fingerprint
         value["assets"] = assets
@@ -364,23 +675,99 @@ class GitHubRecoveryRemote:
 
     def download_artifact(self, artifact: dict[str, Any], path: Path) -> None:
         require(not path.exists(), "RECOVERY_OUTPUT_EXISTS")
-        with path.open("xb") as stream:
+        self.read_sequence += 1
+        initial = {
+            "sequence": self.read_sequence,
+            "phase": "REQUEST",
+            "endpointCategory": "QUALIFICATION_ARTIFACT_DOWNLOAD",
+            "credentialRole": "GITHUB_TOKEN",
+            "method": "GET",
+            "requestedVersion": "2026-03-10",
+            "selectedVersion": None,
+            "requestId": None,
+            "status": None,
+        }
+        self._record_read(initial)
+        try:
             result = subprocess.run(
                 (
                     "gh",
                     "api",
                     "--method",
                     "GET",
+                    "--include",
                     "-H",
                     "X-GitHub-Api-Version: 2026-03-10",
                     f"{self.base}/actions/artifacts/{artifact['id']}/zip",
                 ),
-                stdout=stream,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 timeout=600,
                 check=False,
             )
+        except (OSError, subprocess.SubprocessError):
+            self._record_read(
+                {
+                    **initial,
+                    "phase": "NO_RESPONSE",
+                    "errorCategory": "ARTIFACT_TRANSPORT_UNKNOWN",
+                }
+            )
+            raise RecoveryError("RECOVERY_ARTIFACT_DOWNLOAD_FAILED") from None
+        raw = result.stdout
+        candidates = [
+            (raw.find(mark, 0, 65536), mark) for mark in (b"\r\n\r\n", b"\n\n")
+        ]
+        candidates = [(index, mark) for index, mark in candidates if index >= 0]
+        separator = min(candidates)[1] if candidates else b"\r\n\r\n"
+        head, found, content = raw.partition(separator)
+        try:
+            require(
+                bool(found) and len(head) <= 65536, "RECOVERY_ARTIFACT_RESPONSE_INVALID"
+            )
+            lines = head.decode("ascii").splitlines()
+            status = int(lines[0].split()[1])
+            require(100 <= status <= 599, "RECOVERY_ARTIFACT_RESPONSE_INVALID")
+            headers = {
+                k.lower(): v.strip()
+                for line in lines[1:]
+                for k, _, v in [line.partition(":")]
+            }
+        except (ValueError, IndexError, RecoveryError):
+            self._record_read(
+                {
+                    **initial,
+                    "phase": "UNPARSEABLE_RESPONSE",
+                    "errorCategory": "ARTIFACT_HEADERS_UNKNOWN",
+                }
+            )
+            raise RecoveryError("RECOVERY_ARTIFACT_RESPONSE_INVALID") from None
+        self._record_read(
+            {
+                **initial,
+                "phase": "RESPONSE",
+                "status": status,
+                "selectedVersion": self._safe(
+                    headers.get("x-github-api-version-selected")
+                ),
+                "requestId": self._safe(headers.get("x-github-request-id")),
+                "errorCategory": "NONE"
+                if result.returncode == 0 and status == 200
+                else "ARTIFACT_READ_FAILED",
+            }
+        )
         require(result.returncode == 0, "RECOVERY_ARTIFACT_DOWNLOAD_FAILED")
+        require(status == 200, "RECOVERY_ARTIFACT_DOWNLOAD_FAILED")
+        require(
+            headers.get("x-github-api-version-selected") in {None, "2026-03-10"},
+            "RECOVERY_API_VERSION_CONFLICT",
+        )
+        require(
+            len(content) == artifact["size_in_bytes"]
+            and "sha256:" + hashlib.sha256(content).hexdigest() == artifact["digest"],
+            "RECOVERY_ARTIFACT_DIGEST_MISMATCH",
+        )
+        with path.open("xb") as stream:
+            stream.write(content)
         require(
             file_digest(path) == (artifact["digest"], artifact["size_in_bytes"]),
             "RECOVERY_ARTIFACT_DIGEST_MISMATCH",
@@ -404,7 +791,7 @@ class GitHubRecoveryRemote:
         ]
         results = []
         for name, locator in subjects:
-            result = subprocess.run(
+            result = self.run_read_command(
                 (
                     "gh",
                     "attestation",
@@ -419,9 +806,8 @@ class GitHubRecoveryRemote:
                     "--format",
                     "json",
                 ),
-                capture_output=True,
+                category="ORIGINAL_PROOF_VERIFY",
                 timeout=180,
-                check=False,
             )
             require(result.returncode == 0, "RECOVERY_ORIGINAL_PROOF_UNKNOWN")
             proof = json.loads(result.stdout)
