@@ -6,6 +6,33 @@
 
 本地提交只用于冻结和记录每轮源码。调试过程中不需要推送提交或派发 Q。
 
+## 发布读取链 pre-pr
+
+发布 Workflow、材料 schema 或回执消费者变更，先用保存的真实输入执行：
+
+```text
+python -X utf8 -m scripts.release_publication_preflight --qualification-directory <Q ZIP及run/jobs/artifacts元数据目录> --freshness-directory <F ZIP及run/artifacts元数据目录> --candidate-receipt <原始canonical回执> --output-directory <新开发输出目录>
+```
+
+入口运行当前 YAML 的完整读取、Phase B、十文件 Freshness、材料再次消费、portable
+和 publication plan，停止在任何事务之前。GitHub GET 使用经摘要复核的缓存原字节，
+未知请求拒绝；原 Q、回执和 F 不修改。输出始终是 `NON_AUTHORITATIVE_TEST`。
+缺输入为 NOT_RUN，阶段失败为 FAIL，不能将缓存输出存在视为通过。
+
+过期 F 的正例仅可显式传 `--test-clock <历史测试时刻>`，同时保留真实当前时钟下的
+过期拒绝；该参数不进入生产 CLI 或 Workflow。Windows 可用 `--bash`、`--jq` 指定
+现有工具；`--windows-file-mode-adapter` 只验证本机复制和内容边界，POSIX 权限语义
+由 Linux CI 验证。完整真实材料重放是本地准入；CI 的持久 fixture 回归不替代它。
+现有 scripts 测试组执行实际 shell/CLI、完整 v3 Q 与四 OCI portable 的计划消费、
+诊断、mask、绝对根目录及已有 Freshness/事务反例。发布工作流和直接辅助文件单独
+变化时，现有分类器也选择该组；不新增独立 gate。
+
+正式新捕获范围 `ANIMEMO_V2_CANDIDATE_PUBLISH_WORKFLOW_REPAIR_SINGLE_CAPTURE_V1`
+仅映射到 `E:/4a2d914222bec5bf24ac0eae902dcd07f25b74a596c184f1647da693efe0992d`。
+识别不授予权限，不预建账本；须在独立操作员授权、最终合并源码及准确 Q/计划全部
+通过后捕获。一次尝试最多三个 Profile、九次固定角色交付；既有12小时总期限和
+30分钟空闲期限保持，失败或取消不能通过重启、更换源码或删除记录恢复预算。
+
 涉及 Candidate 汇总/运输/消费者的变更，pre-pr 还需运行完整输出链：
 
 ```text

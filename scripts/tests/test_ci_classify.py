@@ -52,6 +52,13 @@ def parsed(result: dict[str, str]) -> dict[str, object]:
 
 
 class CiClassificationTests(unittest.TestCase):
+    def test_publication_read_path_changes_select_existing_scripts_regressions(self):
+        for path in (".github/workflows/release.yml", ".github/workflows/release-metadata-freshness.yml",
+                     "scripts/release_publication_preflight.py", "scripts/release-input-diagnostics.sh",
+                     "scripts/mask-candidate-receipt.sh", "scripts/tests/test_publish_preflight_version.py"):
+            with self.subTest(path=path):
+                self.assertEqual(classify_paths([path])["run_plugins"], "true")
+
     def test_authority_document_is_canonical_exclusive_and_runner_temp_bound(self):
         result = classify_paths(["src/pages/Journal.jsx"])
         scalars = json.loads(result["authority_scalars_json"])

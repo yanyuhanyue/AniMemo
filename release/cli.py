@@ -924,8 +924,15 @@ def _plan_publication(args) -> dict[str, object]:
 
 
 def _plan_publication_files(args) -> dict[str, object]:
+    from scripts.release_qualification import QualificationError, validate_qualification_evidence
+
     snapshot = PublicationInputSnapshot()
-    qualification = _read_json(args.qualification, snapshot=snapshot)
+    try:
+        qualification = validate_qualification_evidence(
+            _read_json(args.qualification, snapshot=snapshot)
+        )
+    except QualificationError as error:
+        raise PublicationError("Qualification schema or identity is invalid") from error
     notes = validate_release_notes(_read_json(args.release_notes, snapshot=snapshot))
     markdown = snapshot.read(
         args.release_notes_markdown,
@@ -949,7 +956,7 @@ def _plan_publication_files(args) -> dict[str, object]:
         raise PublicationError(
             "qualification, Release Notes, and publication identity tuple differ"
         )
-    qualification_identity = qualification.get("artifact_sha256")
+    qualification_identity = qualification["qualification_sha256"]
     assets = {}
     for name in CANONICAL_RELEASE_ASSETS:
         path = args.asset_directory / name

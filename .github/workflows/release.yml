@@ -78,6 +78,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Mask Candidate receipt transport
+        shell: bash
+        run: bash scripts/mask-candidate-receipt.sh
       - name: Bind the dispatch ref to an authorized release candidate
         id: candidate
         env:
@@ -191,7 +194,7 @@ jobs:
             test "$(jq -r '.qualification_run_id' "$RUNNER_TEMP/publish-candidate-acceptance-receipt.json")" = \
               "$QUALIFICATION_RUN_ID"
             release_tag="$(jq -r '.candidate_version' "$RUNNER_TEMP/publish-candidate-acceptance-receipt.json")"
-            target_version="$(jq -r '.target_version' "$RUNNER_TEMP/publish-candidate-acceptance-receipt.json")"
+            target_version="$(python -c 'import sys; from release.contract import rc_target_version; print(rc_target_version(sys.argv[1]))' "$release_tag")"
             [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-${RELEASE_CHANNEL}\.[1-9][0-9]*$ ]]
             [[ "$target_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
             test "${release_tag%%-*}" = "$target_version"
@@ -517,6 +520,9 @@ jobs:
           persist-credentials: false
           ref: main
           fetch-depth: 0
+      - name: Mask Candidate receipt transport
+        shell: bash
+        run: bash scripts/mask-candidate-receipt.sh
       - name: Gate exact GitHub CLI security baseline
         uses: ./.github/actions/setup-pinned-gh-cli
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -552,6 +558,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source scripts/release-input-diagnostics.sh
+          release_input_stage QUALIFICATION_RUN_METADATA
           test -n "$QUALIFICATION_RUN_ID"
           [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           mkdir -p "$RUNNER_TEMP/qualification-archive"
@@ -582,6 +590,7 @@ jobs:
           test "$qualification_workflow_ref" = "$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/$run_branch"
           printf '%s\n' "$qualification_workflow_ref" > "$RUNNER_TEMP/qualification-workflow-ref.txt"
           printf '%s\n' "$run_head" > "$RUNNER_TEMP/qualification-workflow-sha.txt"
+          release_input_stage QUALIFICATION_ARTIFACT_METADATA
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/artifacts?per_page=100" \
             > "$RUNNER_TEMP/qualification-artifacts.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/jobs?per_page=100" \
@@ -620,6 +629,7 @@ jobs:
           [[ "$controller_metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           test "$controller_expired" = "false"
           test "$controller_head" = "${{ needs.preflight.outputs.candidate_sha }}"
+          release_input_stage QUALIFICATION_DOWNLOAD
           curl --fail --location --silent --show-error \
             -H "Authorization: Bearer $GH_TOKEN" \
             "$archive_url" -o "$RUNNER_TEMP/qualification-archive/evidence.zip"
@@ -631,12 +641,14 @@ jobs:
             -o "$RUNNER_TEMP/qualification-archive/controller-authority.zip"
           controller_actual_digest="sha256:$(sha256sum "$RUNNER_TEMP/qualification-archive/controller-authority.zip" | awk '{print $1}')"
           test "$controller_actual_digest" = "$controller_metadata_digest"
+          release_input_stage QUALIFICATION_EXTRACT
           python -m release.cli extract-qualification-artifact \
             --archive "$RUNNER_TEMP/qualification-archive/evidence.zip" \
             --destination "$RUNNER_TEMP/qualification" \
             --qualification-run-id "$QUALIFICATION_RUN_ID" \
             --expected-sha256 "$metadata_digest" \
             --require-candidate-contract
+          release_input_stage QUALIFICATION_MATERIALS
           evidence_file="$RUNNER_TEMP/qualification/release-qualification-$QUALIFICATION_RUN_ID.json"
           test -f "$evidence_file"
           platform_file="$RUNNER_TEMP/qualification/platform-qualification.json"
@@ -657,7 +669,7 @@ jobs:
           test -f "$prepublication_file"
           test -f "$installer_materials"
           test -f "$deployment_contract"
-          test "$(jq -r '.schemaVersion' "$prepublication_file")" = "2"
+          # The canonical materials verifier below owns the current schema version.
           test "$(jq -r '.candidateSha' "$prepublication_file")" = "${{ needs.preflight.outputs.candidate_sha }}"
           candidate_tree="$(git rev-parse '${{ needs.preflight.outputs.candidate_sha }}^{tree}')"
           test "$(jq -r '.candidateTreeSha' "$prepublication_file")" = "$candidate_tree"
@@ -667,6 +679,7 @@ jobs:
             --deployment-contract "$deployment_contract" \
             --expected-candidate-sha "${{ needs.preflight.outputs.candidate_sha }}" \
             --expected-candidate-tree-sha "$candidate_tree"
+          release_input_stage QUALIFICATION_NOTES
           notes_identity="$(jq -r '.identity // empty' "$notes_file")"
           notes_markdown_sha256="sha256:$(sha256sum "$notes_markdown" | awk '{print $1}')"
           test "$(jq -r '.release_notes.snapshot_identity // empty' "$evidence_file")" = "$notes_identity"
@@ -690,12 +703,14 @@ jobs:
             --release-tag "$(jq -er '.context.release_tag' "$notes_file")" \
             --target-version "$(jq -er '.context.target_version' "$notes_file")" \
             --channel "$(jq -er '.context.channel' "$notes_file")"
+          release_input_stage QUALIFICATION_PLATFORM
           python scripts/platform_qualification.py verify \
             --input "$platform_file" \
             --candidate-sha "${{ needs.preflight.outputs.candidate_sha }}" \
             --run-id "$QUALIFICATION_RUN_ID" \
             --run-attempt "$run_attempt" \
             --workflow-path .github/workflows/release.yml
+          release_input_stage QUALIFICATION_CANDIDATE_BYTES
           containing_artifact_id="$(jq -r '.id' "$RUNNER_TEMP/qualification-artifact.json")"
           [[ "$containing_artifact_id" =~ ^[1-9][0-9]*$ ]]
           candidate_tree="$(git rev-parse '${{ needs.preflight.outputs.candidate_sha }}^{tree}')"
@@ -732,6 +747,7 @@ jobs:
             test -f "$candidate_root/$name"
             test ! -L "$candidate_root/$name"
           done
+          release_input_stage QUALIFICATION_CONTROLLER
           phase_b_request="$RUNNER_TEMP/phase-b-controller-request.json"
           jq -n \
             --arg repository "$GITHUB_REPOSITORY" \
@@ -790,6 +806,7 @@ jobs:
             > "$RUNNER_TEMP/phase-b-controller-verification-result.json"
           test "$(jq -er '.status' "$RUNNER_TEMP/phase-b-controller-verification.json")" = "PASS"
           test "$(jq -er '.candidateBytesRebuildCount' "$RUNNER_TEMP/phase-b-controller-verification.json")" = "0"
+          release_input_stage CANDIDATE_RECEIPT
           python -m release.cli decode-candidate-acceptance-receipt \
             --value "${{ inputs.candidate_acceptance_receipt_b64url }}" \
             --output "$RUNNER_TEMP/candidate-acceptance-receipt.json" \
@@ -800,6 +817,7 @@ jobs:
           test "$(jq -er '.candidate_input_digest' \
             "$RUNNER_TEMP/candidate-acceptance-receipt.json")" = \
             "$candidate_input_digest"
+          release_input_stage PUBLISH_CANDIDATE_PLAN
           python -m release.cli verify-publish-candidate-input \
             --state-root "$verified_state" \
             --verified-candidate-digest "$verified_candidate_digest" \
@@ -811,8 +829,18 @@ jobs:
             "$RUNNER_TEMP/publish-candidate-plan.json")" = "0"
           test "$(jq -er '.manifest_generation_count' \
             "$RUNNER_TEMP/publish-candidate-plan.json")" = "0"
+          release_input_stage QUALIFICATION_OUTPUT
           cp "$RUNNER_TEMP/qualification-run.json" "$RUNNER_TEMP/qualification-metadata-run.json"
           cp "$RUNNER_TEMP/qualification-artifact.json" "$RUNNER_TEMP/qualification-metadata-artifact.json"
+          release_input_diagnostic PASS 0 null
+      - name: Preserve publication input failure diagnostics
+        if: ${{ failure() && inputs.operation == 'publish' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-input-diagnostics-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-input-diagnostics.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Enforce Phase B Release Producer authority
         if: ${{ inputs.operation == 'publish' }}
         env:
@@ -978,6 +1006,9 @@ jobs:
           persist-credentials: false
           ref: main
           fetch-depth: 0
+      - name: Mask Candidate receipt transport
+        shell: bash
+        run: bash scripts/mask-candidate-receipt.sh
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12.10"
@@ -1908,7 +1939,7 @@ jobs:
           actual_directories="$(find validated-release-input -mindepth 1 \
             -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort)"
           test "$actual_directories" = "$expected_directories"
-          candidate_state="validated-release-input/verified-candidate-state"
+          candidate_state="$PWD/validated-release-input/verified-candidate-state"
           test -d "$candidate_state" && test ! -L "$candidate_state"
           chmod 0700 "$candidate_state"
           find "$candidate_state" -mindepth 1 -maxdepth 1 -type d \
@@ -2168,60 +2199,18 @@ jobs:
           test -f "$qualification_source" && test ! -L "$qualification_source"
           qualification_bytes_sha256="$(sha256sum "$qualification_source" \
             | awk '{print $1}')"
-          publication_qualification="$(mktemp "$RUNNER_TEMP/publication-qualification-compat.XXXXXX.json")"
-          cleanup_publication_qualification() {
-            rm -f -- "$publication_qualification"
-          }
-          trap cleanup_publication_qualification EXIT
-          qualification_identity="$(
-            python - "$qualification_source" "$publication_qualification" <<'PY'
-          import json
-          import stat
-          import sys
-          from pathlib import Path
-
-          from scripts.release_qualification import validate_qualification_evidence
-
-          source_path = Path(sys.argv[1])
-          destination = Path(sys.argv[2])
-          source = json.loads(source_path.read_bytes())
-          qualification = validate_qualification_evidence(source)
-          if qualification["schema"] != "animemo.release-qualification/v3":
-              raise SystemExit("unsupported publication Qualification schema")
-          qualification_identity = qualification["qualification_sha256"]
-          compatibility = dict(qualification)
-          compatibility.pop("qualification_sha256")
-          compatibility["artifact_sha256"] = qualification_identity
-          expected_keys = (
-              set(qualification) - {"qualification_sha256"}
-          ) | {"artifact_sha256"}
-          if set(compatibility) != expected_keys:
-              raise SystemExit("publication Qualification projection differs")
-          destination_stat = destination.lstat()
-          if not stat.S_ISREG(destination_stat.st_mode) or destination_stat.st_nlink != 1:
-              raise SystemExit("publication Qualification projection is unsafe")
-          destination.write_bytes(
-              (json.dumps(compatibility, sort_keys=True, separators=(",", ":")) + "\n").encode(
-                  "utf-8"
-              )
-          )
-          print(qualification_identity)
-          PY
-          )"
+          qualification_identity="$(jq -er '.qualification_sha256' "$qualification_source")"
           python -m release.cli plan-publication-files \
             --repository "$GITHUB_REPOSITORY" \
             --channel "${{ inputs.channel }}" \
             --tag "$RELEASE_TAG" --commit "$GITHUB_SHA" \
-            --qualification "$publication_qualification" \
+            --qualification "$qualification_source" \
             --release-notes release-output/release-notes.json \
             --release-notes-markdown release-output/release-notes.md \
             --asset-directory release-output \
             --portable "release-output/$PORTABLE_ASSET" \
             --api-digest "$API_DIGEST" --web-digest "$WEB_DIGEST" \
             --output release-output/publication-plan.json
-          cleanup_publication_qualification
-          test ! -e "$publication_qualification" && test ! -L "$publication_qualification"
-          trap - EXIT
           test "$(sha256sum "$qualification_source" | awk '{print $1}')" = \
             "$qualification_bytes_sha256"
           test "$(jq -er '.qualification_sha256' "$qualification_source")" = \
