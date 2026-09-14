@@ -26,6 +26,7 @@ from release.contract import rc_target_version
 
 SOURCE = Path(__file__).resolve().parents[1]
 WINDOWS_JQ_SHA256 = "23cb60a1354eed6bcc8d9b9735e8c7b388cd1fdcb75726b93bc299ef22dd9334"
+WINDOWS_JQ_PATH = Path.home() / ".animemo/tools/jq-1.8.1-windows-amd64.exe"
 
 
 def _bash_executable():
@@ -58,18 +59,14 @@ def _source_commit(env):
     return _git_revision("HEAD", env)
 
 
-def _prepare_jq(supplied, tools):
+def _prepare_jq(tools):
     """Stage a trusted jq file without trusting any sibling executables."""
     if os.name == "nt":
-        if supplied is None:
-            raise ValueError("PINNED_WINDOWS_JQ_REQUIRED")
-        payload = Path(supplied).read_bytes()
+        payload = WINDOWS_JQ_PATH.read_bytes()
         if hashlib.sha256(payload).hexdigest() != WINDOWS_JQ_SHA256:
             raise ValueError("WINDOWS_JQ_DIGEST_MISMATCH")
         target = tools / "jq.exe"
     else:
-        if supplied is not None:
-            raise ValueError("JQ_OVERRIDE_WINDOWS_ONLY")
         payload = Path("/usr/bin/jq").read_bytes()
         target = tools / "jq"
     with target.open("xb") as stream:
@@ -296,7 +293,7 @@ def replay(args):
     )
     for path in (temp, workspace, tools):
         path.mkdir()
-    _prepare_jq(args.jq, tools)
+    _prepare_jq(tools)
     document = yaml.safe_load(
         (SOURCE / ".github/workflows/release.yml").read_text("utf-8")
     )
@@ -543,11 +540,6 @@ def main():
         "output-directory",
     ):
         parser.add_argument("--" + name, type=Path, required=True)
-    parser.add_argument(
-        "--jq",
-        type=Path,
-        help="Windows only: official jq 1.8.1 amd64; fixed SHA-256 verified before staging",
-    )
     parser.add_argument(
         "--test-clock",
         help="Explicit NON_AUTHORITATIVE_TEST clock; no receipt bytes change",

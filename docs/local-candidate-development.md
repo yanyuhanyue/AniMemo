@@ -21,7 +21,8 @@ python -X utf8 -m scripts.release_publication_preflight --qualification-director
 
 过期 F 的正例仅可显式传 `--test-clock <历史测试时刻>`，同时保留真实当前时钟下的
 过期拒绝；该参数不进入生产 CLI 或 Workflow。Bash 使用平台固定安装位置，Windows
-须用 `--jq` 提供官方 jq 1.8.1 amd64 文件，固定 SHA-256 校验后复制到本轮工具目录，
+从用户目录的 `.animemo/tools/jq-1.8.1-windows-amd64.exe` 读取官方 jq 1.8.1 amd64，
+固定 SHA-256 校验后复制到本轮工具目录，
 其原目录不加入 PATH；Linux 使用 `/usr/bin/jq`。入口清除 Bash 初始化变量与导出函数，
 仅使用固定系统工具路径。`--windows-file-mode-adapter` 只验证本机复制和内容边界，POSIX 权限语义
 由 Linux CI 验证。完整真实材料重放是本地准入；CI 的持久 fixture 回归不替代它。

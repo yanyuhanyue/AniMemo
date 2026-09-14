@@ -89,8 +89,9 @@ class PublicationShellBoundaryTests(unittest.TestCase):
                 any(k in env for k in ("BASH_ENV", "ENV", "BASH_FUNC_git%%"))
             )
 
+    @unittest.skipUnless(os.name == "nt", "Windows pinned jq staging")
     def test_untrusted_jq_is_rejected_without_staging_or_execution(self):
-        from scripts.release_publication_preflight import _prepare_jq
+        from scripts import release_publication_preflight as preflight
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -98,13 +99,17 @@ class PublicationShellBoundaryTests(unittest.TestCase):
             tools.mkdir()
             fake = root / "jq.exe"
             fake.write_bytes(b"untrusted executable")
-            with mock.patch("subprocess.run") as run, self.assertRaises(ValueError):
-                _prepare_jq(fake, tools)
+            with (
+                mock.patch.object(preflight, "WINDOWS_JQ_PATH", fake),
+                mock.patch("subprocess.run") as run,
+                self.assertRaises(ValueError),
+            ):
+                preflight._prepare_jq(tools)
             run.assert_not_called()
             self.assertEqual(list(tools.iterdir()), [])
 
     @unittest.skipUnless(os.name == "nt", "Windows pinned jq staging")
-    def test_jq_staging_copies_only_verified_bytes_from_supplied_directory(self):
+    def test_jq_staging_copies_only_verified_bytes_from_fixed_directory(self):
         from scripts import release_publication_preflight as preflight
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -115,10 +120,13 @@ class PublicationShellBoundaryTests(unittest.TestCase):
             source = root / "jq.exe"
             source.write_bytes(payload)
             (root / "git.exe").write_bytes(b"hostile sibling")
-            with mock.patch.object(
-                preflight, "WINDOWS_JQ_SHA256", hashlib.sha256(payload).hexdigest()
+            with (
+                mock.patch.object(
+                    preflight, "WINDOWS_JQ_SHA256", hashlib.sha256(payload).hexdigest()
+                ),
+                mock.patch.object(preflight, "WINDOWS_JQ_PATH", source),
             ):
-                preflight._prepare_jq(source, tools)
+                preflight._prepare_jq(tools)
             source.write_bytes(b"subsequent replacement")
             self.assertEqual((tools / "jq.exe").read_bytes(), payload)
             self.assertEqual([p.name for p in tools.iterdir()], ["jq.exe"])
@@ -136,20 +144,20 @@ class PublicationShellBoundaryTests(unittest.TestCase):
             "receipt",
             "--output-directory",
             "output",
-            "--jq",
-            "jq",
-            "--bash",
-            "untrusted-program",
         ]
-        with (
-            mock.patch.object(sys, "argv", arguments),
-            mock.patch("subprocess.run") as run,
-            redirect_stderr(io.StringIO()),
-            self.assertRaises(SystemExit) as caught,
-        ):
-            main()
-        self.assertEqual(caught.exception.code, 2)
-        run.assert_not_called()
+        for option in ("--bash", "--jq"):
+            with (
+                self.subTest(option=option),
+                mock.patch.object(
+                    sys, "argv", arguments + [option, "untrusted-program"]
+                ),
+                mock.patch("subprocess.run") as run,
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as caught,
+            ):
+                main()
+            self.assertEqual(caught.exception.code, 2)
+            run.assert_not_called()
         self.assertIn(
             _bash_executable(), {"C:/Program Files/Git/bin/bash.exe", "/usr/bin/bash"}
         )
