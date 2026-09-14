@@ -1,12 +1,12 @@
 {
-  "schema": "animemo.existing-rc-recovery-policy/v2",
-  "scope": "ANIMEMO_V2_EXISTING_RC_SOURCE_BOUND_RECOVERY_API_FIX_V2",
+  "schema": "animemo.existing-rc-recovery-policy/v1",
+  "scope": "ANIMEMO_V2_EXISTING_RC_SOURCE_BOUND_RECOVERY_V1",
   "repository": "yanyuhanyue/AniMemo",
   "repositoryId": 1327429673,
   "ownerId": 111261350,
   "operator": "yanyuhanyue",
-  "sourcePr": null,
-  "sourceBranch": "fix/rc-api-contract-recovery-v2-20260914",
+  "sourcePr": 255,
+  "sourceBranch": "fix/rc-draft-discovery-20260914",
   "workflow": ".github/workflows/release-recovery.yml",
   "subject": {
     "sha": "715e997e1b8ef552376148fee62b08d7c0c35364",
@@ -357,27 +357,5 @@
     }
   },
   "protectionIdentity": "sha256:7512050484e454fe2cb1f46f45e4cde92b9021ec028fdb4560739c6d408a04a1",
-  "authorizationIssuedAt": "2026-09-14T09:55:15.462Z",
-  "previousTool": {
-    "sha": "508099fe32f5d88865aec7217513320006117de2",
-    "tree": "7a6209ff2bd23fb85e8026425512ece64d6aa9cf",
-    "sourcePr": 255,
-    "sourceBranch": "fix/rc-draft-discovery-20260914",
-    "reviewedHead": "c6a5489946710e4ff4a57390c72df7c14f0fd872",
-    "parent": "715e997e1b8ef552376148fee62b08d7c0c35364"
-  },
-  "supersededFailure": {
-    "scope": "ANIMEMO_V2_EXISTING_RC_SOURCE_BOUND_RECOVERY_V1",
-    "runId": 34827731807,
-    "runAttempt": 1,
-    "createdAt": "2026-09-14T09:23:58Z",
-    "toolSha": "508099fe32f5d88865aec7217513320006117de2",
-    "conclusion": "failure",
-    "authorizationIssuedAt": "2026-09-14T07:12:07.159Z",
-    "artifact": {
-      "id": 10341100887,
-      "size_in_bytes": 276,
-      "digest": "sha256:8045e0b99f27d65af04ae8db4e5915cdcd3cd1e0a0eb391ad4facb4671b5b99a"
-    }
-  }
+  "authorizationIssuedAt": "2026-09-14T07:12:07.159Z"
 }

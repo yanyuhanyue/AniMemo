@@ -1473,7 +1473,11 @@ def _run_gh(arguments: tuple[str, ...], *, cwd: Path | None = None) -> bytes:
 
 
 def _gh_json(arguments: tuple[str, ...]) -> dict[str, Any]:
-    output = _run_gh(arguments)
+    from .contract import REPOSITORY
+
+    if len(arguments) != 2 or arguments[0] != "api" or not arguments[1].startswith(f"repos/{REPOSITORY}/"):
+        raise MirrorError("GitHub Release metadata target is invalid")
+    output = _run_gh(("api", "--method", "GET", "-H", "X-GitHub-Api-Version: 2026-03-10", arguments[1]))
     try:
         value = json.loads(
             output.decode("utf-8", errors="strict"),

@@ -15,7 +15,7 @@ from release.recovery import ExistingRCRecovery, RecoveryPlatform
 from release.recovery_contract import policy, require
 from release.recovery_evidence import collect_evidence
 from release.recovery_materials import decode_original_aggregate, prepare_materials
-from release.recovery_remote import GitHubRecoveryRemote
+from release.recovery_remote import GitHubRecoveryRemote, ReadOnlyRecoveryJournal
 
 
 def trusted_runner_paths(repository: Path, environment):
@@ -55,7 +55,8 @@ def main() -> int:
         owned = True
         evidence = root / "evidence"
         evidence.mkdir(mode=0o700)
-        remote = GitHubRecoveryRemote(output=evidence)
+        read_only = event.get("inputs", {}).get("operation") == "inspect"
+        remote = GitHubRecoveryRemote(output=evidence, read_only=read_only)
         platform = RecoveryPlatform(remote, repository, os.environ, event)
         # Validate the trusted source before consuming any operator input.
         platform.execution()
@@ -72,7 +73,11 @@ def main() -> int:
         (evidence / "material-verification.json").write_bytes(
             canonical_json_bytes(materials)
         )
-        backend = GitRemoteAppendOnlyJournal(repository)
+        backend = (
+            ReadOnlyRecoveryJournal(repository)
+            if read_only
+            else GitRemoteAppendOnlyJournal(repository)
+        )
         os.chdir(root)
         engine = ExistingRCRecovery(
             platform=platform, backend=backend, materials=materials, root=evidence

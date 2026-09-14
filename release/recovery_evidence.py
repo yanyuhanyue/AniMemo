@@ -229,7 +229,7 @@ def validate_execution_record(record):
     claim = validate_claim(record["claim"])
     require(
         claim["mode"] == "execute"
-        and record["schema"] == "animemo.existing-rc-recovery-execution/v1"
+        and record["schema"] == "animemo.existing-rc-recovery-execution/v2"
         and record["status"] == "EVIDENCE_VERIFIED",
         "RECOVERY_EXECUTION_RECORD_INVALID",
     )
