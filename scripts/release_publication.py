@@ -178,6 +178,8 @@ def _transaction_run(args: argparse.Namespace) -> dict[str, Any]:
     ledger = controller.ledger
     for name in names:
         ledger = controller.advance(name)
+        if not any(step["name"] == name and step["committed"] for step in ledger["steps"]):
+            raise PublicationTransactionError("TRANSACTION_STEP_NOT_COMMITTED")
     return {
         "schema": "animemo.publication-transaction-command/v1",
         "command": "run",

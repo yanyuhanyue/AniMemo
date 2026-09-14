@@ -91,7 +91,135 @@
         "COMPLETE"
       ]
     },
-    "ledgerIdentity": {"$ref": "#/$defs/sha256"}
+    "ledgerIdentity": {"$ref": "#/$defs/sha256"},
+    "sourceBoundRecovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "scope",
+        "authority",
+        "toolSha",
+        "toolTree",
+        "reviewedHead",
+        "workflow",
+        "mode",
+        "issuedAt",
+        "runCreatedAt",
+        "expiresAt",
+        "initialHead",
+        "initialLedgerIdentity",
+        "operationId",
+        "planDigest",
+        "nonce",
+        "bindingDigest",
+        "repositoryId",
+        "operatorId",
+        "sourcePr",
+        "workflowId",
+        "runId",
+        "runAttempt",
+        "initialRevision",
+        "draftId",
+        "subject",
+        "writeSteps"
+      ],
+      "properties": {
+        "schema": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "authority": {
+          "type": "string"
+        },
+        "toolSha": {
+          "type": "string"
+        },
+        "toolTree": {
+          "type": "string"
+        },
+        "reviewedHead": {
+          "type": "string"
+        },
+        "workflow": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "issuedAt": {
+          "type": "string"
+        },
+        "runCreatedAt": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "type": "string"
+        },
+        "initialHead": {
+          "type": "string"
+        },
+        "initialLedgerIdentity": {
+          "type": "string"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "planDigest": {
+          "type": "string"
+        },
+        "nonce": {
+          "type": "string"
+        },
+        "bindingDigest": {
+          "type": "string"
+        },
+        "repositoryId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "operatorId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sourcePr": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "workflowId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "runId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "runAttempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "initialRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "draftId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "subject": {
+          "type": "object"
+        },
+        "writeSteps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      }
+    }
   },
   "$defs": {
     "sha256": {

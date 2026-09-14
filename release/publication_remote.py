@@ -76,6 +76,7 @@ def run_command(argv: tuple[str, ...], timeout_seconds: int) -> CommandResult:
 class GitHubResponse:
     status: int
     body: bytes
+    link: str | None = None
 
 
 GitHubRequester = Callable[[str, str, Mapping[str, Any] | None], GitHubResponse]
@@ -114,11 +115,11 @@ def github_request(
         with urllib.request.build_opener(_NoRedirect()).open(
             request, timeout=45
         ) as response:
-            return GitHubResponse(response.status, response.read())
+            return GitHubResponse(response.status, response.read(), response.headers.get("Link"))
     except urllib.error.HTTPError as error:
         # The response body can contain transport diagnostics. It stays in
         # memory and is never copied to the ledger or exception text.
-        return GitHubResponse(error.code, error.read())
+        return GitHubResponse(error.code, error.read(), error.headers.get("Link"))
     except (OSError, TimeoutError) as error:
         raise ConnectionError("GitHub remote state is unknown") from error
 
@@ -452,11 +453,104 @@ class GitHubReleaseAdapterBase:
         self.tag = tag
         self.request = request
 
+    def _next_release_page(self, response: GitHubResponse, page: int, *, endpoint: str | None = None) -> bool:
+        # Never follow a server-supplied URL with credentials. Validate all
+        # advertised links, then construct the next numbered request locally.
+        if response.link is None:
+            return False
+        expected = urllib.parse.urlsplit("/" + (endpoint or f"repos/{self.repository}/releases"))
+        fixed_query = urllib.parse.parse_qs(expected.query, strict_parsing=True)
+        relations: dict[str, int] = {}
+        for entry in response.link.split(","):
+            match = re.fullmatch(r'\s*<([^<>]+)>;\s*rel="(next|prev|first|last)"\s*', entry)
+            if match is None or match[2] in relations:
+                raise ConnectionError("GitHub release pagination is unknown")
+            parsed = urllib.parse.urlsplit(match[1])
+            query = urllib.parse.parse_qs(parsed.query, strict_parsing=True)
+            if (
+                parsed.scheme != "https" or parsed.netloc != "api.github.com"
+                or parsed.path != expected.path
+                or parsed.fragment or set(query) != {"per_page", "page"} | set(fixed_query)
+                or any(query.get(k) != v for k, v in fixed_query.items())
+                or query["per_page"] != ["100"] or len(query["page"]) != 1
+                or not re.fullmatch(r"[1-9][0-9]*", query["page"][0])
+                or int(query["page"][0]) > 100
+                or (match[2] == "next" and int(query["page"][0]) != page + 1)
+            ):
+                raise ConnectionError("GitHub release pagination is unknown")
+            relations[match[2]] = int(query["page"][0])
+        if (
+            (relations.get("last", page) > page and "next" not in relations)
+            or ("last" in relations and relations["last"] < relations.get("next", page))
+        ):
+            raise ConnectionError("GitHub release pagination is incomplete")
+        return "next" in relations
+
     def _release(self) -> dict[str, Any] | None:
         encoded = urllib.parse.quote(self.tag, safe="")
-        return _json_object(
+        published = _json_object(
             self.request("GET", f"repos/{self.repository}/releases/tags/{encoded}", None)
         )
+        if published is not None:
+            return published
+
+        # The by-tag endpoint returns published releases only. A 404 cannot
+        # prove that this transaction's draft is absent. Scan the authenticated
+        # release collection completely, then refresh the unique match by ID.
+        seen_ids: set[int] = set()
+        matches: list[int] = []
+        for page in range(1, 101):
+            response = self.request(
+                "GET", f"repos/{self.repository}/releases?per_page=100&page={page}", None
+            )
+            if response.status != 200:
+                raise ConnectionError("GitHub release listing is unknown")
+            try:
+                has_next = self._next_release_page(response, page)
+                items = json.loads(response.body.decode("utf-8", errors="strict"))
+            except (UnicodeDecodeError, ValueError) as error:
+                raise ConnectionError("GitHub release listing is unknown") from error
+            if not isinstance(items, list) or len(items) > 100:
+                raise ConnectionError("GitHub release listing is unknown")
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ConnectionError("GitHub release listing is unknown")
+                release_id = item.get("id")
+                if (
+                    type(release_id) is not int
+                    or release_id <= 0
+                    or release_id in seen_ids
+                    or not isinstance(item.get("tag_name"), str)
+                ):
+                    raise ConnectionError("GitHub release listing is unknown")
+                seen_ids.add(release_id)
+                if item["tag_name"] == self.tag:
+                    matches.append(release_id)
+            if has_next and not items:
+                raise ConnectionError("GitHub release listing is incomplete")
+            if len(items) < 100 and not has_next:
+                break
+        else:
+            raise ConnectionError("GitHub release listing is incomplete")
+        if not matches:
+            repository = _json_object(self.request("GET", f"repos/{self.repository}", None))
+            permissions = repository.get("permissions") if repository else None
+            if not isinstance(permissions, dict) or permissions.get("push") is not True:
+                raise ConnectionError("GitHub draft visibility is unknown")
+            return None
+        if len(matches) != 1:
+            raise ConnectionError("GitHub release listing is ambiguous")
+        release = _json_object(
+            self.request("GET", f"repos/{self.repository}/releases/{matches[0]}", None)
+        )
+        if (
+            release is None
+            or type(release.get("id")) is not int
+            or release["id"] != matches[0]
+            or release.get("tag_name") != self.tag
+        ):
+            raise ConnectionError("GitHub release identity changed during readback")
+        return release
 
 
 class GitHubDraftAdapter(GitHubReleaseAdapterBase):
@@ -584,6 +678,8 @@ class GitHubAssetAdapter(GitHubReleaseAdapterBase):
         if len(matches) != 1:
             return RemoteObservation.unknown("GITHUB_ASSET_READBACK_AMBIGUOUS")
         item = matches[0]
+        if item.get("state", "uploaded") != "uploaded":
+            return RemoteObservation.unknown("GITHUB_ASSET_UPLOAD_INCOMPLETE")
         digest = item.get("digest")
         size = item.get("size")
         if isinstance(digest, str) and _SHA256.fullmatch(digest):
@@ -680,6 +776,8 @@ class GitHubPublishAdapter(GitHubReleaseAdapterBase):
                 return RemoteObservation.unknown("GITHUB_PUBLISH_READBACK_INVALID")
             digest = item.get("digest")
             name = item["name"]
+            if name in actual_assets or item.get("state", "uploaded") != "uploaded":
+                return RemoteObservation.unknown("GITHUB_PUBLISH_ASSET_INCOMPLETE")
             expected = self.expected_assets.get(name)
             if digest is None and expected is not None and item.get("size") == expected["size"]:
                 # Individual asset transaction steps independently download and
@@ -1002,7 +1100,9 @@ def build_publication_runtime(
         path = asset_root / name
         if path.parent.resolve() != asset_root.resolve() or not path.is_file() or path.is_symlink():
             raise PublicationTransactionError("TRANSACTION_CHECKSUMS_INVALID")
-        checksum_subjects.append((str(path), "sha256:" + digest_hex))
+        # Artifact locators are part of durable intent identities. Keep their
+        # spelling portable when replaying a Linux transaction on Windows.
+        checksum_subjects.append((path.as_posix(), "sha256:" + digest_hex))
     attestation_source = (
         source_sha if prerelease else os.environ.get("GITHUB_SHA", source_sha)
     )
