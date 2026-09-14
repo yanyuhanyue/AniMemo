@@ -34,6 +34,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Mask Candidate receipt transport
+        shell: bash
+        run: bash scripts/mask-candidate-receipt.sh
       - name: Bind the trusted runner to exact main
         env:
           INTENDED_MAIN_SHA: ${{ inputs.intended_main_sha }}

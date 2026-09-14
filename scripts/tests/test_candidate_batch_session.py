@@ -20,6 +20,14 @@ from scripts.tests.test_guest_sudo_session import SENTINEL, InputSink
 
 
 class FixedAuthorizationTests(unittest.TestCase):
+    def test_publish_workflow_repair_scope_resolves_without_reserving(self):
+        self.assertEqual(b.capture_ledger(b.PUBLISH_WORKFLOW_REPAIR_AUTHORIZATION),
+            Path('E:/4a2d914222bec5bf24ac0eae902dcd07f25b74a596c184f1647da693efe0992d'))
+        for unknown in (b.PUBLISH_WORKFLOW_REPAIR_AUTHORIZATION + '_NEXT',
+                        b.PUBLISH_WORKFLOW_REPAIR_AUTHORIZATION.replace('_V1', '_V2')):
+            with self.assertRaisesRegex(guest.ControllerFailure, 'AUTHORIZATION_INVALID'):
+                b.capture_ledger(unknown)
+
     def test_wire_repair_scope_has_one_fixed_ascii_ledger_without_reserving(self):
         self.assertEqual(b.capture_ledger(b.WIRE_REPAIR_AUTHORIZATION),
             Path('E:/09cc87e4269208d86d4ab8afab9a1ea66509d2d24e006d4c38d907c2f2dacae2'))
@@ -53,9 +61,11 @@ class BatchSessionTests(unittest.TestCase):
         self.new_ledger = Path(temporary.name) / ('b' * 64)
         self.legacy_ledger = Path(temporary.name) / ('c' * 64)
         self.pr247_ledger = Path(temporary.name) / ('d' * 64)
+        self.publish_repair_ledger = Path(temporary.name) / ('e' * 64)
         patcher = mock.patch.object(b, 'CAPTURE_LEDGERS', {
             b.AUTHORIZATION: self.legacy_ledger, b.GATEWAY_REPAIR_AUTHORIZATION: self.new_ledger,
             b.PR247_REVALIDATION_AUTHORIZATION: self.pr247_ledger,
+            b.PUBLISH_WORKFLOW_REPAIR_AUTHORIZATION: self.publish_repair_ledger,
             b.WIRE_REPAIR_AUTHORIZATION: self.ledger})
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -232,6 +242,25 @@ class BatchSessionTests(unittest.TestCase):
                 restarted.capture_after_bootstrap_observation(changed.profiles[0])
         self.console.capture.assert_called_once()
         self.assertEqual((self.ledger / 'result.json').read_bytes(), original)
+
+    def test_publish_repair_owner_keeps_one_capture_across_restart(self):
+        authorization = b.PUBLISH_WORKFLOW_REPAIR_AUTHORIZATION
+        batch = b.CandidateBatch(self.provider, self.plan, authorization_id=authorization)
+        self.addCleanup(batch.close)
+        self.assertFalse(self.publish_repair_ledger.exists())
+        with batch.operation('BOOTSTRAP', self.plan.profiles[0]), redirect_stdout(io.StringIO()):
+            batch.capture_after_bootstrap_observation(self.plan.profiles[0])
+        batch.close()
+        original = (self.publish_repair_ledger / 'result.json').read_bytes()
+        self.assertEqual(json.loads(original)['authorization_id'], authorization)
+        self.assertEqual(json.loads(original)['session_capture_attempts'], 1)
+        restarted = b.CandidateBatch(self.provider, self.plan, authorization_id=authorization)
+        self.addCleanup(restarted.close)
+        with restarted.operation('BOOTSTRAP', self.plan.profiles[0]):
+            with self.assertRaisesRegex(guest.ControllerFailure, 'ALREADY_ATTEMPTED'):
+                restarted.capture_after_bootstrap_observation(self.plan.profiles[0])
+        self.console.capture.assert_called_once()
+        self.assertEqual((self.publish_repair_ledger / 'result.json').read_bytes(), original)
 
     def test_idle_and_hard_deadlines_use_monotonic_time_and_close_owner(self):
         self.capture()

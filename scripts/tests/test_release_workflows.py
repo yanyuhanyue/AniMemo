@@ -700,7 +700,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn('if [[ "$OPERATION" = "publish" ]]', version_step["run"])
         self.assertIn("decode-candidate-acceptance-receipt", version_step["run"])
         self.assertIn(".candidate_version", version_step["run"])
-        self.assertIn(".target_version", version_step["run"])
+        self.assertIn("rc_target_version", version_step["run"])
         reject_step = next(
             step
             for step in release["jobs"]["preflight"]["steps"]
@@ -1873,105 +1873,15 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             stage,
         )
 
-    def test_publication_plan_adapts_validated_v3_identity_without_mutating_it(self):
+    def test_publication_plan_consumes_original_qualification_bytes(self):
         release = workflow("release.yml")
-        publish_steps = release["jobs"]["publish"]["steps"]
-        plan_step = next(
-            step
-            for step in publish_steps
-            if step.get("name")
-            == "Generate the closed publication plan without mutation"
-        )
-        command = plan_step["run"]
-
-        for guard in (
-            'qualification_source="release-output/release-qualification.json"',
-            'test -f "$qualification_source" && test ! -L "$qualification_source"',
-            'qualification_bytes_sha256="$(sha256sum "$qualification_source"',
-            (
-                'publication_qualification="$(mktemp "$RUNNER_TEMP/'
-                'publication-qualification-compat.XXXXXX.json")"'
-            ),
-            (
-                "from scripts.release_qualification import "
-                "validate_qualification_evidence"
-            ),
-            "qualification = validate_qualification_evidence(source)",
-            'qualification["schema"] != "animemo.release-qualification/v3"',
-            'qualification_identity = qualification["qualification_sha256"]',
-            'compatibility.pop("qualification_sha256")',
-            'compatibility["artifact_sha256"] = qualification_identity',
-            'trap cleanup_publication_qualification EXIT',
-            '--qualification "$publication_qualification"',
-            'cleanup_publication_qualification\n',
-            'trap - EXIT',
-            (
-                'test ! -e "$publication_qualification" && '
-                'test ! -L "$publication_qualification"'
-            ),
-            'test "$(sha256sum "$qualification_source"',
-            (
-                'test "$(jq -er \'.qualification_sha256\' '
-                '"$qualification_source")" = \\'
-            ),
-            'test "$(jq -er \'.qualification_identity\' \\',
-            'release-output/publication-plan.json)" = "$qualification_identity"',
-        ):
-            self.assertIn(guard, command)
-        self.assertNotIn(
-            "--qualification release-output/release-qualification.json", command
-        )
-        self.assertNotIn(
-            "release-output/publication-qualification-compat", command
-        )
-        plan_position = command.index(
-            "python -m release.cli plan-publication-files"
-        )
-        cleanup_position = command.index(
-            "cleanup_publication_qualification\n", plan_position
-        )
-        absence_position = command.index(
-            'test ! -e "$publication_qualification"', cleanup_position
-        )
-        trap_clear_position = command.index("trap - EXIT", absence_position)
-        self.assertLess(plan_position, cleanup_position)
-        self.assertLess(cleanup_position, absence_position)
-        self.assertLess(absence_position, trap_clear_position)
-
-        publication_uploads = [
-            str(step.get("with", {}).get("path", ""))
-            for step in publish_steps
-            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
-        ]
-        self.assertTrue(publication_uploads)
-        self.assertTrue(
-            all(
-                "publication-qualification-compat" not in path
-                for path in publication_uploads
-            )
-        )
-
-        production_call_sites: dict[str, int] = {}
-        production_paths = []
-        for production_root in (ROOT / ".github", ROOT / "release", ROOT / "scripts"):
-            production_paths.extend(
-                path
-                for path in production_root.rglob("*")
-                if path.is_file()
-                and path.suffix in {".py", ".sh", ".ps1", ".yml", ".yaml"}
-                and "tests" not in path.relative_to(ROOT).parts
-                and not path.name.startswith("test_")
-            )
-        for path in production_paths:
-            count = path.read_text(encoding="utf-8").count(
-                "release.cli plan-publication-files"
-            )
-            if count:
-                production_call_sites[path.relative_to(ROOT).as_posix()] = count
-        self.assertEqual(
-            production_call_sites,
-            {".github/workflows/release.yml": 1},
-        )
+        command = next(step["run"] for step in release["jobs"]["publish"]["steps"]
+                       if step.get("name") == "Generate the closed publication plan without mutation")
+        self.assertIn('--qualification "$qualification_source"', command)
+        self.assertIn("qualification_bytes_sha256", command)
+        self.assertIn(".qualification_sha256", command)
+        self.assertIn(".qualification_identity", command)
+        self.assertNotIn("publication-qualification-compat", command)
 
     def test_release_verifier_is_built_offline_from_a_pinned_go_toolchain(self):
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(

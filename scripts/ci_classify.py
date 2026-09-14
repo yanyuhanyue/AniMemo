@@ -240,7 +240,13 @@ def _is_ci_authority(path: str) -> bool:
 
 def _is_release_core(path: str) -> bool:
     return path.startswith(("release/", "scripts/tests/test_release_")) or path in {
+        ".github/workflows/release.yml",
+        ".github/workflows/release-metadata-freshness.yml",
         "scripts/release_authority.py",
+        "scripts/release_publication_preflight.py",
+        "scripts/release-input-diagnostics.sh",
+        "scripts/mask-candidate-receipt.sh",
+        "scripts/tests/test_publish_preflight_version.py",
         "scripts/tests/test_deployment_updater_contract.py",
         "tests/release-gate.test.mjs",
     }
