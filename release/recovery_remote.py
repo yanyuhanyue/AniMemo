@@ -309,6 +309,7 @@ class GitHubRecoveryRemote:
     def get_response(
         self, endpoint: str, *, administration: bool = False
     ) -> GitHubResponse:
+        administration = administration or self._approved_draft_read(endpoint)
         path = endpoint.removeprefix(self.base).split("?", 1)[0]
         category = {
             "": "REPOSITORY",
@@ -396,7 +397,8 @@ class GitHubRecoveryRemote:
         if not administration:
             return github_request("GET", endpoint, None)
         require(
-            endpoint
+            self._approved_draft_read(endpoint)
+            or endpoint
             in {
                 self.base + "/immutable-releases",
                 self.base + "/branches/main/protection",
@@ -420,6 +422,33 @@ class GitHubRecoveryRemote:
                 return read_github_response(response)
         except urllib.error.HTTPError as error:
             return read_github_response(error)
+
+    def _approved_draft_read(self, endpoint):
+        """Select the already approved read role before sending, with no fallback."""
+        path, separator, query = endpoint.partition("?")
+        fixed = {
+            f"{self.base}/releases/{self.p['ordinaryDraft']}",
+            f"{self.base}/releases/{self.p['transaction']['draft_id']}",
+            f"{self.base}/releases/tags/{self.p['subject']['release_tag']}",
+        }
+        paged = {
+            f"{self.base}/releases",
+            f"{self.base}/releases/{self.p['transaction']['draft_id']}/assets",
+        }
+        if path in fixed:
+            return not separator
+        if path not in paged:
+            return False
+        if not separator:
+            return True
+        pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+        return (
+            len(pairs) == 2
+            and dict(pairs).get("per_page") == "100"
+            and set(dict(pairs)) == {"per_page", "page"}
+            and re.fullmatch(r"[1-9][0-9]?|100", dict(pairs).get("page", ""))
+            is not None
+        )
 
     def get(self, endpoint: str, *, administration: bool = False) -> Any:
         response = self.get_response(endpoint, administration=administration)

@@ -98,6 +98,9 @@ class RecoveryConsumerTests(unittest.TestCase):
             base + "/actions/workflows/release-recovery.yml": {"id": fixture["workflow"]["id"], "path": p["workflow"], "name": "Existing RC Recovery", "state": "active"},
             base + f"/pulls/{p['sourcePr']}": fixture["pull_request"],
             base + "/pulls/255": fixture["previous_pr"],
+            base + "/pulls/257": fixture["diagnostic_facts"][0],
+            base + "/git/commits/" + p["diagnosticTool"]["sha"]: fixture["diagnostic_facts"][1],
+            base + "/git/commits/" + p["diagnosticTool"]["reviewedHead"]: fixture["diagnostic_facts"][2],
             base + "/pulls/256": fixture["parent_facts"][0],
             base + "/git/commits/" + p["parentTool"]["sha"]: fixture["parent_facts"][1],
             base + "/git/commits/" + p["parentTool"]["reviewedHead"]: fixture["parent_facts"][2],
@@ -113,7 +116,7 @@ class RecoveryConsumerTests(unittest.TestCase):
             base + "/git/commits/" + claim["toolSha"]: {
                 "sha": claim["toolSha"],
                 "tree": {"sha": claim["toolTree"]},
-                "parents": [{"sha": p["parentTool"]["sha"]}],
+                "parents": [{"sha": p["diagnosticTool"]["sha"]}],
             },
             base + "/git/commits/" + claim["reviewedHead"]: {
                 "sha": claim["reviewedHead"],

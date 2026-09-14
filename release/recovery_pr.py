@@ -28,7 +28,12 @@ def merge_cli_command(number):
     require(
         type(number) is int
         and number
-        in {p["sourcePr"], p["parentTool"]["sourcePr"], p["previousTool"]["sourcePr"]},
+        in {
+            p["sourcePr"],
+            p["parentTool"]["sourcePr"],
+            p["diagnosticTool"]["sourcePr"],
+            p["previousTool"]["sourcePr"],
+        },
         "RECOVERY_PR_TARGET_INVALID",
     )
     return (
@@ -74,7 +79,12 @@ def merge_request(number: int) -> MergeResponse:
     require(
         type(number) is int
         and number
-        in {p["sourcePr"], p["parentTool"]["sourcePr"], p["previousTool"]["sourcePr"]},
+        in {
+            p["sourcePr"],
+            p["parentTool"]["sourcePr"],
+            p["diagnosticTool"]["sourcePr"],
+            p["previousTool"]["sourcePr"],
+        },
         "RECOVERY_PR_TARGET_INVALID",
     )
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")

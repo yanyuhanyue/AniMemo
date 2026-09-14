@@ -77,6 +77,12 @@ class RecoveryPlatform:
             remote.get(f"{remote.base}/git/commits/{parent['sha']}"),
             remote.get(f"{remote.base}/git/commits/{parent['reviewedHead']}"),
         )
+        diagnostic = p["diagnosticTool"]
+        diagnostic_facts = (
+            remote.merge_identity(diagnostic["sourcePr"], diagnostic["sourceBranch"]),
+            remote.get(f"{remote.base}/git/commits/{diagnostic['sha']}"),
+            remote.get(f"{remote.base}/git/commits/{diagnostic['reviewedHead']}"),
+        )
         superseded_run = remote.get(
             f"{remote.base}/actions/runs/{p['supersededFailure']['runId']}"
         )
@@ -111,6 +117,7 @@ class RecoveryPlatform:
             previous_commit=previous_commit,
             previous_reviewed=previous_reviewed,
             parent_facts=parent_facts,
+            diagnostic_facts=diagnostic_facts,
             superseded_run=superseded_run,
             execution_runs=runs["workflow_runs"],
             now=self.now(),

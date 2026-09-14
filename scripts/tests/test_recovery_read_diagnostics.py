@@ -36,7 +36,7 @@ class RecoveryReadDiagnosticsTests(unittest.TestCase):
         for suffix, role, category in (
             ("/branches/main/protection", "ADMIN_READ", "BRANCH_PROTECTION"),
             ("/immutable-releases", "ADMIN_READ", "IMMUTABLE_SETTING"),
-            ("/releases/373784357", "GITHUB_TOKEN", "ORDINARY_DRAFT"),
+            ("/releases/373784357", "ADMIN_READ", "ORDINARY_DRAFT"),
         ):
             for status in (403, 404, 503):
                 http = FixtureHTTP()
