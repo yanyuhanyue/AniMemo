@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -12,6 +14,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -635,6 +638,137 @@ class _GitHubReadOnlyObservationBoundary:
             ),
             timeout=180,
         )
+
+    def _recovery_record(self, listing, run, request):
+        """Accept only the separately authenticated original-RC recovery record."""
+        from release.recovery_contract import RecoveryError, instant
+        from release.recovery_contract import policy as recovery_policy
+        from release.recovery_evidence import validate_execution_record
+        p = recovery_policy()
+        expected = {
+            "finalRepoHead": p["subject"]["sha"], "finalRepoTree": p["subject"]["tree"],
+            "qualificationRunId": p["subject"]["qualification_run_id"],
+            "candidateInputSha256": p["subject"]["candidate_input_sha256"],
+            "verifiedCandidateIdentity": p["subject"]["verified_candidate_sha256"],
+            "candidateAggregateReceiptSha256": p["subject"]["candidate_aggregate_sha256"],
+            "releaseTag": p["subject"]["release_tag"],
+            "apiDigest": p["plan"]["api_digest"], "webDigest": p["plan"]["web_digest"],
+        }
+        if any(request.get(k) != v for k, v in expected.items()):
+            _reject()
+        artifact = self._select_artifact(listing, run_id=run["id"], head=run["head_sha"], name=f"release-recovery-execution-{request['releaseTag']}")
+        if type(artifact.get("size_in_bytes")) is not int or not 0 < artifact["size_in_bytes"] <= _MAX_COMMAND_BYTES:
+            _reject()
+        raw = self._run(("gh", "api", "--method", "GET", f"repos/{_REPOSITORY}/actions/artifacts/{artifact['id']}/zip"), timeout=180)
+        if len(raw) != artifact["size_in_bytes"] or sha256_bytes(raw) != artifact["digest"]:
+            _reject()
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                matches = [item for item in archive.infolist() if item.filename == "execution-record.json"]
+                if len(matches) != 1 or matches[0].file_size > 1024 * 1024 or len(archive.infolist()) > 256:
+                    _reject()
+                with archive.open(matches[0]) as member:
+                    encoded = member.read(1024 * 1024 + 1)
+                if len(encoded) > 1024 * 1024:
+                    _reject()
+                record = validate_execution_record(_json_bytes(encoded))
+            claim = record["claim"]
+            pr = self._gh_json(f"repos/{_REPOSITORY}/pulls/{p['sourcePr']}")
+            commit = self._gh_json(f"repos/{_REPOSITORY}/git/commits/{claim['toolSha']}")
+            reviewed = self._gh_json(f"repos/{_REPOSITORY}/git/commits/{claim['reviewedHead']}")
+            if (
+                pr.get("merged") is not True or pr.get("merge_commit_sha") != claim["toolSha"]
+                or pr.get("head", {}).get("sha") != claim["reviewedHead"]
+                or commit.get("tree", {}).get("sha") != claim["toolTree"]
+                or reviewed.get("tree", {}).get("sha") != claim["toolTree"]
+                or [parent.get("sha") for parent in commit.get("parents", [])] != [p["subject"]["sha"]]
+                or run["id"] != claim["runId"] or run["head_sha"] != claim["toolSha"]
+                or run.get("workflow_id") != claim["workflowId"]
+                or run.get("actor", {}).get("id") != p["ownerId"]
+                or run.get("triggering_actor", {}).get("id") != p["ownerId"]
+                or run.get("repository", {}).get("id") != p["repositoryId"]
+                or run.get("head_repository", {}).get("id") != p["repositoryId"]
+                or instant(run["created_at"]) != instant(claim["runCreatedAt"])
+            ):
+                _reject()
+            self._verify_recovery_journal(record)
+        except (ValueError, KeyError, OSError, RecoveryError, zipfile.BadZipFile) as error:
+            raise ControllerReleaseAuthorityError("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_INVALID") from error
+        return record
+
+    def _download_recovery_metadata(self, artifact, destination, names):
+        """Bind the small closed metadata ZIP to its authenticated Artifact ID."""
+        if type(artifact.get("size_in_bytes")) is not int or not 0 < artifact["size_in_bytes"] <= _MAX_COMMAND_BYTES:
+            _reject()
+        raw = self._run(("gh", "api", "--method", "GET", f"repos/{_REPOSITORY}/actions/artifacts/{artifact['id']}/zip"), timeout=180)
+        if len(raw) != artifact["size_in_bytes"] or sha256_bytes(raw) != artifact["digest"]:
+            _reject()
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                entries = archive.infolist()
+                if len(entries) != len(names) or {i.filename for i in entries} != names or sum(i.file_size for i in entries) > 8 * 1024 * 1024:
+                    _reject()
+                for item in entries:
+                    if item.is_dir() or item.file_size > _MAX_COMMAND_BYTES:
+                        _reject()
+                    with archive.open(item) as source:
+                        value = source.read(_MAX_COMMAND_BYTES + 1)
+                    if len(value) != item.file_size:
+                        _reject()
+                    with (destination / item.filename).open("xb") as target:
+                        target.write(value)
+        except (OSError, ValueError, zipfile.BadZipFile) as error:
+            raise ControllerReleaseAuthorityError("CONTROLLER_RELEASE_AUTHORITY_EVIDENCE_INVALID") from error
+
+    def _verify_recovery_journal(self, record):
+        from release.publication_transaction import _validate_recovery_transition
+        from release.recovery_contract import policy as recovery_policy
+        p = recovery_policy()
+        ref = self._gh_json(f"repos/{_REPOSITORY}/git/ref/heads/publication-transactions/{p['transaction']['operation_id'][7:]}")
+        head = record["finalJournalHead"]
+        if ref.get("object", {}).get("sha") != head or not isinstance(head, str) or _COMMIT.fullmatch(head) is None:
+            _reject()
+        chain = []
+        for _ in range(128):
+            commit = self._gh_json(f"repos/{_REPOSITORY}/git/commits/{head}")
+            tree = self._gh_json(f"repos/{_REPOSITORY}/git/trees/{commit['tree']['sha']}")
+            entries = tree.get("tree")
+            if tree.get("truncated") is True or type(entries) is not list or len(entries) != 1 or entries[0].get("path") != "ledger.json" or entries[0].get("type") != "blob" or entries[0].get("mode") != "100644":
+                _reject()
+            blob = self._gh_json(f"repos/{_REPOSITORY}/git/blobs/{entries[0]['sha']}")
+            if blob.get("encoding") != "base64" or type(blob.get("size")) is not int or not 0 < blob["size"] <= 1024 * 1024:
+                _reject()
+            raw = base64.b64decode(blob["content"].replace("\n", ""), validate=True)
+            if len(raw) != blob["size"]:
+                _reject()
+            ledger = validate_ledger(_json_bytes(raw))
+            if ledger["operationId"] != p["transaction"]["operation_id"]:
+                _reject()
+            chain.append((head, ledger))
+            parents = commit.get("parents")
+            if type(parents) is not list or len(parents) > 1:
+                _reject()
+            if not parents:
+                break
+            head = parents[0]["sha"]
+            if not isinstance(head, str) or _COMMIT.fullmatch(head) is None:
+                _reject()
+        else:
+            _reject()
+        previous = None
+        for commit_sha, ledger in reversed(chain):
+            if previous is None:
+                if ledger["revision"] != 0 or ledger["previousLedgerIdentity"] is not None:
+                    _reject()
+            elif ledger["revision"] != previous["revision"] + 1 or ledger["previousLedgerIdentity"] != previous["ledgerIdentity"]:
+                _reject()
+            if ledger["revision"] == 30 and commit_sha != p["transaction"]["observed_head"]:
+                _reject()
+            _validate_recovery_transition(previous, ledger)
+            previous = ledger
+        final = chain[0][1]
+        if final.get("sourceBoundRecovery") != record["claim"] or final["ledgerIdentity"] != record["finalLedgerIdentity"] or final["revision"] != record["finalRevision"] or final["finalState"] != "COMPLETE":
+            _reject()
 
     @staticmethod
     def _validate_run(
@@ -1411,12 +1545,14 @@ class _GitHubReadOnlyObservationBoundary:
         publish_run = self._gh_json(
             f"repos/{_REPOSITORY}/actions/runs/{publish_run_id}"
         )
+        recovered = publish_run.get("path") == ".github/workflows/release-recovery.yml"
+        execution_head = str(publish_run.get("head_sha")) if recovered else str(request["finalRepoHead"])
         self._validate_run(
             publish_run,
             run_id=publish_run_id,
-            name="Release Producer",
-            path=_RELEASE_WORKFLOW,
-            head=str(request["finalRepoHead"]),
+            name="Existing RC Recovery" if recovered else "Release Producer",
+            path=".github/workflows/release-recovery.yml" if recovered else _RELEASE_WORKFLOW,
+            head=execution_head,
             events=frozenset({"workflow_dispatch"}),
             head_branches=frozenset({"main"}),
         )
@@ -1424,7 +1560,7 @@ class _GitHubReadOnlyObservationBoundary:
             self._gh_json(
                 f"repos/{_REPOSITORY}/actions/runs/{publish_run_id}/jobs?per_page=100"
             ),
-            name="publish-immutable-prerelease",
+            name="recover-existing-rc" if recovered else "publish-immutable-prerelease",
         )
         commit = self._gh_json(
             f"repos/{_REPOSITORY}/git/commits/{request['finalRepoHead']}"
@@ -1437,11 +1573,12 @@ class _GitHubReadOnlyObservationBoundary:
         publish_artifacts = self._gh_json(
             f"repos/{_REPOSITORY}/actions/runs/{publish_run_id}/artifacts?per_page=100"
         )
+        recovery_record = self._recovery_record(publish_artifacts, publish_run, request) if recovered else None
         metadata_name = f"release-publication-metadata-{request['releaseTag']}"
-        self._select_artifact(
+        metadata_artifact = self._select_artifact(
             publish_artifacts,
             run_id=publish_run_id,
-            head=str(request["finalRepoHead"]),
+            head=execution_head,
             name=metadata_name,
         )
         mirror_run = self._gh_json(f"repos/{_REPOSITORY}/actions/runs/{mirror_run_id}")
@@ -1450,9 +1587,9 @@ class _GitHubReadOnlyObservationBoundary:
             run_id=mirror_run_id,
             name="Release Mirror",
             path=_MIRROR_WORKFLOW,
-            head=str(request["finalRepoHead"]),
-            events=frozenset({"release", "workflow_dispatch"}),
-            head_branches=frozenset({"main", str(request["releaseTag"])}),
+            head=execution_head,
+            events=frozenset({"workflow_dispatch"} if recovered else {"release", "workflow_dispatch"}),
+            head_branches=frozenset({"main"} if recovered else {"main", str(request["releaseTag"])}),
         )
         self._require_successful_job(
             self._gh_json(
@@ -1478,20 +1615,32 @@ class _GitHubReadOnlyObservationBoundary:
                 mirror_public_root,
             ):
                 path.mkdir(mode=0o700)
-            self._download_artifact(
-                run_id=publish_run_id,
-                name=metadata_name,
-                destination=metadata_root,
-            )
+            if recovered:
+                self._download_recovery_metadata(metadata_artifact, metadata_root, _RELEASE_METADATA_FILES | {f"animemo-{request['releaseTag']}-release-attestation.json"})
+            else:
+                self._download_artifact(run_id=publish_run_id, name=metadata_name, destination=metadata_root)
             candidate, publication_plan, _ledger = self._verify_metadata(
                 metadata_root, request
             )
+            if recovery_record is not None and (
+                _ledger.get("sourceBoundRecovery") != recovery_record["claim"]
+                or _ledger["ledgerIdentity"] != recovery_record["finalLedgerIdentity"]
+                or _ledger["revision"] != recovery_record["finalRevision"]
+            ):
+                _reject()
             release_id, tag_object, release_assets = self._verify_public_release(
                 root=public_root,
                 metadata_root=metadata_root,
                 request=request,
                 publication_plan=publication_plan,
             )
+            if recovery_record is not None:
+                from release.recovery_contract import policy as recovery_policy
+                sidecar_path = metadata_root / f"animemo-{request['releaseTag']}-release-attestation.json"
+                if (release_id != recovery_record["releaseId"]
+                    or tag_object != recovery_policy()["tagObject"]
+                    or _hash_file(sidecar_path, maximum=4 * 1024 * 1024)[0] != recovery_record["sidecarSha256"]):
+                    _reject()
             candidate_assets = {
                 "checksums.txt": candidate["checksums_sha256"],
                 "deployment-contract.json": candidate["deployment_contract_sha256"],
@@ -1543,17 +1692,16 @@ class _GitHubReadOnlyObservationBoundary:
             )
             self._verify_registry(request)
             mirror_name = f"release-mirror-{release_id}"
-            self._select_artifact(
+            mirror_artifact = self._select_artifact(
                 mirror_artifacts,
                 run_id=mirror_run_id,
-                head=str(request["finalRepoHead"]),
+                head=execution_head,
                 name=mirror_name,
             )
-            self._download_artifact(
-                run_id=mirror_run_id,
-                name=mirror_name,
-                destination=mirror_root,
-            )
+            if recovered:
+                self._download_recovery_metadata(mirror_artifact, mirror_root, {"release-mirror.json"})
+            else:
+                self._download_artifact(run_id=mirror_run_id, name=mirror_name, destination=mirror_root)
             self._closed_directory(mirror_root, frozenset({"release-mirror.json"}))
             self._verify_mirror(
                 artifact_root=mirror_root,

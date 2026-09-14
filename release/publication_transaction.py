@@ -466,6 +466,17 @@ def validate_ledger(value: Any) -> dict[str, Any]:
         raise PublicationTransactionError("TRANSACTION_LEDGER_SCHEMA_INVALID")
     if snapshot["ledgerIdentity"] != _ledger_identity(snapshot):
         raise PublicationTransactionError("TRANSACTION_LEDGER_IDENTITY_MISMATCH")
+    if "sourceBoundRecovery" in snapshot:
+        from .recovery_contract import (
+            RecoveryError,
+            validate_bound_ledger,
+            validate_claim,
+        )
+        try:
+            validate_claim(snapshot["sourceBoundRecovery"])
+            validate_bound_ledger(snapshot)
+        except RecoveryError as error:
+            raise PublicationTransactionError(error.code) from None
     expected_operation = _identity(
         {
             "schema": "animemo.publication-operation-key/v1",
@@ -565,6 +576,16 @@ def validate_ledger(value: Any) -> dict[str, Any]:
     return snapshot
 
 
+def _validate_recovery_transition(previous, current) -> None:
+    if "sourceBoundRecovery" not in current and (previous is None or "sourceBoundRecovery" not in previous):
+        return
+    from .recovery_contract import RecoveryError, validate_claim_transition
+    try:
+        validate_claim_transition(previous, current)
+    except RecoveryError as error:
+        raise PublicationTransactionError(error.code) from None
+
+
 def _next_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(snapshot, Mapping):
         raise PublicationTransactionError("TRANSACTION_LEDGER_INVALID")
@@ -651,6 +672,7 @@ class LocalAtomicJournal:
                 or snapshot["previousLedgerIdentity"] != previous["ledgerIdentity"]
             ):
                 raise PublicationTransactionError("TRANSACTION_JOURNAL_CHAIN_INVALID")
+            _validate_recovery_transition(previous, snapshot)
             previous = snapshot
         return copy.deepcopy(previous)
 
@@ -672,6 +694,7 @@ class LocalAtomicJournal:
             )
         if not valid_parent:
             raise PublicationTransactionError("TRANSACTION_JOURNAL_APPEND_CONFLICT")
+        _validate_recovery_transition(current, value)
         final = directory / (
             f"{value['revision']:06d}-{value['ledgerIdentity'].replace(':', '-')}.json"
         )
@@ -859,6 +882,7 @@ class GitRemoteAppendOnlyJournal:
                 )
             if not valid_chain:
                 raise PublicationTransactionError("TRANSACTION_JOURNAL_CHAIN_INVALID")
+            _validate_recovery_transition(previous, snapshot)
             previous_commit = commit
             previous = snapshot
         return copy.deepcopy(previous)
@@ -886,6 +910,7 @@ class GitRemoteAppendOnlyJournal:
             )
         if not valid_parent:
             raise PublicationTransactionError("TRANSACTION_JOURNAL_APPEND_CONFLICT")
+        _validate_recovery_transition(current, value)
         blob = self._git("hash-object", "-w", "--stdin", input_bytes=_canonical_bytes(value))
         blob_sha = blob.stdout.decode("ascii", errors="strict").strip()
         if blob.returncode != 0 or not _HEX.fullmatch(blob_sha):
@@ -917,6 +942,11 @@ class GitRemoteAppendOnlyJournal:
         if commit.returncode != 0 or not _HEX.fullmatch(commit_sha):
             raise PublicationTransactionError("TRANSACTION_JOURNAL_OBJECT_WRITE_FAILED")
         ref = self._ref(value["operationId"])
+        if "sourceBoundRecovery" in value:
+            before_push = getattr(self, "before_push", None)
+            if not callable(before_push):
+                raise PublicationTransactionError("TRANSACTION_RECOVERY_SEND_GUARD_MISSING")
+            before_push()
         try:
             pushed = self._git(
                 "push",
@@ -932,6 +962,7 @@ class GitRemoteAppendOnlyJournal:
             loaded = self.load(value["operationId"])
             if loaded is None or loaded["ledgerIdentity"] != value["ledgerIdentity"]:
                 raise PublicationTransactionError("TRANSACTION_JOURNAL_READBACK_UNKNOWN")
+            self.last_written_head = commit_sha
             return loaded
         if observed == parent or (observed is None and parent is None):
             code = "TRANSACTION_JOURNAL_APPEND_NOT_COMMITTED"
@@ -983,6 +1014,9 @@ class DurablePublicationController:
 
     def _require_same_transaction(self, loaded: Mapping[str, Any]) -> None:
         observed = validate_ledger(loaded)
+        claim = observed.get("sourceBoundRecovery")
+        if claim is not None and getattr(self.journal, "recovery_binding_identity", None) != claim["bindingDigest"]:
+            raise PublicationTransactionError("TRANSACTION_RECOVERY_ENTRY_REQUIRED")
         static_fields = (
             "operationId",
             "planSchema",

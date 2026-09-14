@@ -453,11 +453,13 @@ class GitHubReleaseAdapterBase:
         self.tag = tag
         self.request = request
 
-    def _next_release_page(self, response: GitHubResponse, page: int) -> bool:
+    def _next_release_page(self, response: GitHubResponse, page: int, *, endpoint: str | None = None) -> bool:
         # Never follow a server-supplied URL with credentials. Validate all
         # advertised links, then construct the next numbered request locally.
         if response.link is None:
             return False
+        expected = urllib.parse.urlsplit("/" + (endpoint or f"repos/{self.repository}/releases"))
+        fixed_query = urllib.parse.parse_qs(expected.query, strict_parsing=True)
         relations: dict[str, int] = {}
         for entry in response.link.split(","):
             match = re.fullmatch(r'\s*<([^<>]+)>;\s*rel="(next|prev|first|last)"\s*', entry)
@@ -467,8 +469,9 @@ class GitHubReleaseAdapterBase:
             query = urllib.parse.parse_qs(parsed.query, strict_parsing=True)
             if (
                 parsed.scheme != "https" or parsed.netloc != "api.github.com"
-                or parsed.path != f"/repos/{self.repository}/releases"
-                or parsed.fragment or set(query) != {"per_page", "page"}
+                or parsed.path != expected.path
+                or parsed.fragment or set(query) != {"per_page", "page"} | set(fixed_query)
+                or any(query.get(k) != v for k, v in fixed_query.items())
                 or query["per_page"] != ["100"] or len(query["page"]) != 1
                 or not re.fullmatch(r"[1-9][0-9]*", query["page"][0])
                 or int(query["page"][0]) > 100
@@ -1097,7 +1100,9 @@ def build_publication_runtime(
         path = asset_root / name
         if path.parent.resolve() != asset_root.resolve() or not path.is_file() or path.is_symlink():
             raise PublicationTransactionError("TRANSACTION_CHECKSUMS_INVALID")
-        checksum_subjects.append((str(path), "sha256:" + digest_hex))
+        # Artifact locators are part of durable intent identities. Keep their
+        # spelling portable when replaying a Linux transaction on Windows.
+        checksum_subjects.append((path.as_posix(), "sha256:" + digest_hex))
     attestation_source = (
         source_sha if prerelease else os.environ.get("GITHUB_SHA", source_sha)
     )

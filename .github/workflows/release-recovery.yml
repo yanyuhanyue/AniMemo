@@ -1,0 +1,100 @@
+name: Existing RC Recovery
+run-name: Existing RC recovery ${{ inputs.operation }} | ANIMEMO_V2_EXISTING_RC_SOURCE_BOUND_RECOVERY_V1
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Read-only inspection or the single authorised existing RC execution
+        type: choice
+        options: [inspect, execute]
+        default: inspect
+        required: true
+      authorization_scope:
+        description: Exact operator-approved existing RC recovery scope
+        type: string
+        required: true
+      candidate_acceptance_receipt_b64url:
+        description: Original M1 Candidate aggregate transport
+        type: string
+        required: true
+
+concurrency:
+  group: animemo-existing-rc-recovery-627690999ef42730f1034eff3f29b084e34bc8d24b0329043b683d48696f98c0
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+  attestations: read
+
+jobs:
+  inspect:
+    if: inputs.operation == 'inspect'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: bash scripts/mask-candidate-receipt.sh
+      - uses: ./.github/actions/setup-pinned-gh-cli
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r release/requirements.lock
+      - run: python -m scripts.release_recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANIMEMO_RELEASE_ADMIN_READ_TOKEN: ${{ secrets.ANIMEMO_RELEASE_ADMIN_READ_TOKEN }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: release-recovery-inspection-${{ github.run_id }}
+          path: ${{ runner.temp }}/animemo-existing-rc-recovery/evidence
+          if-no-files-found: error
+          retention-days: 90
+
+  recover:
+    name: recover-existing-rc
+    if: inputs.operation == 'execute'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+      actions: read
+      packages: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: bash scripts/mask-candidate-receipt.sh
+      - uses: ./.github/actions/setup-pinned-gh-cli
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12.10"
+      - run: python -m pip install --require-hashes -r release/requirements.lock
+      - name: Configure only this checkout's authenticated journal transport
+        run: git config --local credential.https://github.com.helper '!gh auth git-credential'
+      - name: Recover the authorised existing transaction and verify original proofs
+        run: python -m scripts.release_recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANIMEMO_RELEASE_ADMIN_READ_TOKEN: ${{ secrets.ANIMEMO_RELEASE_ADMIN_READ_TOKEN }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-publication-metadata-v2.0.0-rc.1
+          path: ${{ runner.temp }}/animemo-existing-rc-recovery/metadata
+          if-no-files-found: error
+          retention-days: 90
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: release-recovery-execution-v2.0.0-rc.1
+          path: ${{ runner.temp }}/animemo-existing-rc-recovery/evidence
+          if-no-files-found: error
+          retention-days: 90
