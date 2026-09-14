@@ -1,6 +1,6 @@
 """Original 31 snapshots through the production engine with isolated transports.
 
-Set ANIMEMO_RECOVERY_REPLAY_MATERIALS to a verified prepare_materials result for
+Set ANIMEMO_RECOVERY_REPLAY_REAL_BYTES=1 to use this task's prepare_materials result for
 the full original-byte replay. CI exercises the same controller and journal
 using transport stubs; it never has a recovery credential or remote endpoint.
 """
@@ -309,11 +309,17 @@ class OriginalJournalReplayTests(unittest.TestCase):
         self.replay("missing")
 
     @unittest.skipUnless(
-        os.environ.get("ANIMEMO_RECOVERY_REPLAY_MATERIALS"),
+        os.environ.get("ANIMEMO_RECOVERY_REPLAY_REAL_BYTES") == "1",
         "Full original asset bytes are a separate local acceptance input",
     )
     def test_full_original_bytes_and_live_precheck(self):
-        self.replay(real_materials=os.environ["ANIMEMO_RECOVERY_REPLAY_MATERIALS"])
+        material_result = (
+            Path(__file__).resolve().parents[4]
+            / ".animemo-audit-work"
+            / "rc-source-bound-recovery-20260914-v1"
+            / "material-replay-final-result.json"
+        )
+        self.replay(real_materials=material_result)
 
 
 if __name__ == "__main__":

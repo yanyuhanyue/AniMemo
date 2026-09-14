@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -619,6 +621,126 @@ class SourceBoundAuthorityTests(unittest.TestCase):
         ):
             self.assertEqual(release_recovery.main(), 2)
             remote.assert_not_called()
+
+    def test_runner_paths_are_derived_from_checkout_and_reject_environment_redirection(
+        self,
+    ):
+        from scripts.release_recovery import trusted_runner_paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory).resolve()
+            repo = work / "AniMemo" / "AniMemo"
+            repo.mkdir(parents=True)
+            temporary = work / "_temp"
+            (temporary / "_github_workflow").mkdir(parents=True)
+            event = temporary / "_github_workflow" / "event.json"
+            event.write_bytes(b"{}")
+            environment = {
+                "RUNNER_TEMP": temporary.as_posix(),
+                "GITHUB_EVENT_PATH": event.as_posix(),
+            }
+            self.assertEqual(
+                trusted_runner_paths(repo, environment),
+                (event, temporary / "animemo-existing-rc-recovery"),
+            )
+            for update in (
+                {"RUNNER_TEMP": "/etc"},
+                {"GITHUB_EVENT_PATH": "/etc/passwd"},
+                {"RUNNER_TEMP": temporary.as_posix() + "/../_temp"},
+            ):
+                with (
+                    self.subTest(update=update),
+                    self.assertRaisesRegex(RecoveryError, "RUNNER_PATHS_INVALID"),
+                ):
+                    trusted_runner_paths(repo, {**environment, **update})
+
+    def test_proof_commands_require_complete_fixed_arguments(self):
+        from release.recovery_evidence import fixed_proof_runner
+
+        p = policy()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            runner = fixed_proof_runner(root)
+            valid = (
+                "gh",
+                "release",
+                "verify-asset",
+                p["subject"]["release_tag"],
+                str(root / next(iter(p["plan"]["transport_assets"]))),
+                "--repo",
+                p["repository"],
+                "--format",
+                "json",
+            )
+            with mock.patch(
+                "release.recovery_evidence.subprocess.run",
+                return_value=mock.Mock(returncode=0, stdout=b"[]"),
+            ) as execute:
+                self.assertEqual(runner(valid), b"[]")
+                self.assertEqual(execute.call_args.args[0], valid)
+                execute.reset_mock()
+                for command in (
+                    valid + ("--insecure",),
+                    ("evil", *valid[1:]),
+                    (*valid[:4], "/tmp/other", *valid[5:]),
+                    (
+                        "gh",
+                        "attestation",
+                        "verify",
+                        "oci://evil.invalid/image",
+                        "--repo",
+                        p["repository"],
+                    ),
+                ):
+                    with (
+                        self.subTest(command=command),
+                        self.assertRaisesRegex(RecoveryError, "PROOF_COMMAND_INVALID"),
+                    ):
+                        runner(command)
+                execute.assert_not_called()
+
+    def test_cli_existing_output_is_preserved_before_transport(self):
+        import contextlib
+        import io
+
+        from scripts import release_recovery
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event = root / "event.json"
+            event.write_bytes(b"{}")
+            output = root / "existing"
+            (output / "evidence").mkdir(parents=True)
+            sentinel = output / "evidence" / "failure.json"
+            sentinel.write_bytes(b"previous evidence")
+            with (
+                mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}),
+                mock.patch.object(
+                    release_recovery,
+                    "trusted_runner_paths",
+                    return_value=(event, output),
+                ),
+                mock.patch.object(release_recovery, "GitHubRecoveryRemote") as remote,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(release_recovery.main(), 2)
+            remote.assert_not_called()
+            self.assertEqual(sentinel.read_bytes(), b"previous evidence")
+
+    @unittest.skipUnless(
+        os.environ.get("GITHUB_ACTIONS") == "true" and sys.platform == "linux",
+        "Actual hosted runner layout is verified on Linux CI",
+    )
+    def test_actual_hosted_runner_paths_match_reviewed_entry(self):
+        import os
+
+        from scripts.release_recovery import trusted_runner_paths
+
+        event, output = trusted_runner_paths(
+            Path(__file__).resolve().parents[2], os.environ
+        )
+        self.assertEqual(event.name, "event.json")
+        self.assertEqual(output.name, "animemo-existing-rc-recovery")
 
 
 if __name__ == "__main__":

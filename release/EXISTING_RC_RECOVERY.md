@@ -65,8 +65,9 @@ scripts.tests.test_source_bound_recovery_consumer`。
 
 fixtures 保存原 31 份 journal 和 notes，用隔离 local journal/fake transport
 覆盖生产 runtime/controller/guard 的续接和失败路径。完整原字节回放可设置
-`ANIMEMO_RECOVERY_REPLAY_MATERIALS` 为本任务实际 `prepare_materials` 结果 JSON。
-此环境变量只被测试读取，生产入口不接受它。测试输出均非发行权限或正式验收。
+`ANIMEMO_RECOVERY_REPLAY_REAL_BYTES=1`，读取本工作区本任务固定目录的实际
+`material-replay-final-result.json`。环境变量只控制是否运行，不提供文件路径，
+生产入口不接受它。测试输出均非发行权限或正式验收。
 
 出现真实写入不确定、确定性实现错误或过期时，保全 journal 与远端对象；
 不得边改代码边续用许可。新的运行需要绑定最新真实状态的独立窄授权。

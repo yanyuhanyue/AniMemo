@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from release.candidate import canonical_json_bytes
+from release.materials import read_bounded_release_file
 from release.publication_transaction import GitRemoteAppendOnlyJournal
 from release.recovery import ExistingRCRecovery, RecoveryPlatform
 from release.recovery_contract import policy, require
@@ -17,19 +18,41 @@ from release.recovery_materials import decode_original_aggregate, prepare_materi
 from release.recovery_remote import GitHubRecoveryRemote
 
 
+def trusted_runner_paths(repository: Path, environment):
+    # The checkout source is fixed by __file__, not a supplied directory.
+    # Hosted checkout layout: <work>/<repository>/<repository>; the runner's
+    # event and temporary directories are siblings of the outer checkout.
+    temporary = repository.parent.parent / "_temp"
+    event = temporary / "_github_workflow" / "event.json"
+    require(
+        environment.get("RUNNER_TEMP") == temporary.as_posix()
+        and environment.get("GITHUB_EVENT_PATH") == event.as_posix(),
+        "RECOVERY_RUNNER_PATHS_INVALID",
+    )
+    require(
+        temporary.is_dir()
+        and temporary.resolve() == temporary
+        and event.resolve() == event,
+        "RECOVERY_RUNNER_PATHS_INVALID",
+    )
+    return event, temporary / "animemo-existing-rc-recovery"
+
+
 def main() -> int:
     repository = Path(__file__).resolve().parents[1]
     root = None
+    owned = False
     engine = None
     try:
         require(os.environ.get("GITHUB_ACTIONS") == "true", "RECOVERY_HOST_UNTRUSTED")
+        event_path, root = trusted_runner_paths(repository, os.environ)
         event = json.loads(
-            Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8")
-        )
-        root = (
-            Path(os.environ["RUNNER_TEMP"]).resolve() / "animemo-existing-rc-recovery"
+            read_bounded_release_file(
+                event_path, maximum=128 * 1024, subject="Recovery platform event"
+            )
         )
         root.mkdir(mode=0o700)
+        owned = True
         evidence = root / "evidence"
         evidence.mkdir(mode=0o700)
         remote = GitHubRecoveryRemote(output=evidence)
@@ -114,7 +137,7 @@ def main() -> int:
                 )
             except Exception:  # noqa: BLE001 - failed readback must remain explicitly unknown
                 failure["readbackStatus"] = "UNKNOWN"
-        if root is not None and (root / "evidence").is_dir():
+        if owned and root is not None and (root / "evidence").is_dir():
             (root / "evidence" / "failure.json").write_bytes(
                 canonical_json_bytes(failure)
             )

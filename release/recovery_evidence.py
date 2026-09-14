@@ -15,6 +15,71 @@ from .recovery_contract import identity, instant, policy, require, validate_clai
 from .recovery_remote import file_digest
 
 
+def fixed_proof_runner(material_root: Path):
+    p = policy()
+    require(
+        material_root.is_absolute() and material_root.resolve() == material_root,
+        "RECOVERY_PROOF_ROOT_INVALID",
+    )
+    repository, tag = p["repository"], p["subject"]["release_tag"]
+    portable = next(iter(p["plan"]["transport_assets"]))
+    allowed = [
+        ("gh", "release", "verify", tag, "--repo", repository, "--format", "json"),
+        (
+            "gh",
+            "release",
+            "verify-asset",
+            tag,
+            str(material_root / portable),
+            "--repo",
+            repository,
+            "--format",
+            "json",
+        ),
+    ]
+    subjects = [
+        "oci://ghcr.io/yanyuhanyue/animemo-" + role + "@" + p["plan"][role + "_digest"]
+        for role in ("api", "web")
+    ]
+    subjects.extend(
+        str(material_root / name)
+        for name in (
+            "release-manifest.json",
+            "deployment-contract.json",
+            "installer-materials.tar",
+        )
+    )
+    allowed.extend(
+        (
+            "gh",
+            "attestation",
+            "verify",
+            subject,
+            "--repo",
+            repository,
+            "--signer-workflow",
+            repository + "/.github/workflows/release.yml",
+            "--source-digest",
+            p["subject"]["sha"],
+            "--format",
+            "json",
+        )
+        for subject in subjects
+    )
+
+    def run(argv):
+        matches = [command for command in allowed if argv == command]
+        require(len(matches) == 1, "RECOVERY_PROOF_COMMAND_INVALID")
+        # Execute the command constructed above, never the callback's argv.
+        result = subprocess.run(
+            matches[0], capture_output=True, timeout=180, check=False
+        )
+        require(result.returncode == 0, "RECOVERY_PLATFORM_PROOF_UNAVAILABLE")
+        return result.stdout
+
+    return run
+
+
 def collect_evidence(remote, *, material_root: Path, output: Path, execution: dict):
     p = policy()
     release = remote.draft(published_allowed=True)
@@ -82,20 +147,6 @@ def collect_evidence(remote, *, material_root: Path, output: Path, execution: di
         canonical_json_bytes(public_result)
     )
 
-    def verified_command(argv):
-        require(
-            argv[:3]
-            in {
-                ("gh", "release", "verify"),
-                ("gh", "release", "verify-asset"),
-                ("gh", "attestation", "verify"),
-            },
-            "RECOVERY_PROOF_COMMAND_INVALID",
-        )
-        result = subprocess.run(argv, capture_output=True, timeout=180, check=False)
-        require(result.returncode == 0, "RECOVERY_PLATFORM_PROOF_UNAVAILABLE")
-        return result.stdout
-
     portable = next(iter(p["plan"]["transport_assets"]))
     subjects = {
         "api-image": "oci://ghcr.io/yanyuhanyue/animemo-api@" + p["plan"]["api_digest"],
@@ -104,7 +155,9 @@ def collect_evidence(remote, *, material_root: Path, output: Path, execution: di
         "deployment-contract": str(material_root / "deployment-contract.json"),
         "installer-materials": str(material_root / "installer-materials.tar"),
     }
-    envelope = GitHubAttestationAcquirer(runner=verified_command).acquire_and_export(
+    envelope = GitHubAttestationAcquirer(
+        runner=fixed_proof_runner(material_root)
+    ).acquire_and_export(
         repository=p["repository"],
         tag=p["subject"]["release_tag"],
         commit=p["subject"]["sha"],
