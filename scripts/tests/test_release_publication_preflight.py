@@ -27,6 +27,133 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class PublicationShellBoundaryTests(unittest.TestCase):
+    def test_archive_source_tree_uses_real_git_and_rejects_option_input(self):
+        from scripts.release_publication_preflight import (
+            _git_revision,
+            _replay_environment,
+            _source_commit,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            env = _replay_environment(Path(temporary))
+            sha = _source_commit(env)
+            tree = _git_revision(f"{sha}^{{tree}}", env)
+            self.assertRegex(tree, r"^[0-9a-f]{40}$")
+            for invalid in ("--help", "-c", "HEAD^{tree}", "x" * 40 + "^{tree}"):
+                with mock.patch("subprocess.run") as run, self.assertRaises(ValueError):
+                    _git_revision(invalid, env)
+                run.assert_not_called()
+
+    def test_replay_ignores_inherited_tools_and_shell_initialization(self):
+        from scripts.release_publication_preflight import (
+            _bash_executable,
+            _replay_environment,
+            _source_commit,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            hostile = root / "untrusted-jq-parent"
+            hostile.mkdir()
+            marker = root / "executed"
+            injected = f"printf injected > '{marker.as_posix()}'\n"
+            (hostile / "git").write_text("#!/bin/bash\n" + injected, encoding="utf-8")
+            (hostile / "git").chmod(0o700)
+            initializer = hostile / "init.sh"
+            initializer.write_text(injected, encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PATH": str(hostile),
+                    "BASH_ENV": initializer.as_posix(),
+                    "ENV": initializer.as_posix(),
+                    "BASH_FUNC_git%%": "() { " + injected.strip() + "; }",
+                },
+            ):
+                env = _replay_environment(tools)
+                observed_commit = _source_commit(env)
+            self.assertRegex(observed_commit, r"^[0-9a-f]{40}$")
+            result = subprocess.run(
+                [_bash_executable(), "--noprofile", "--norc", "-c", "git --version"],
+                env=env,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(result.stdout.startswith(b"git version "))
+            self.assertFalse(marker.exists())
+            self.assertNotIn(str(hostile), env["PATH"])
+            self.assertFalse(
+                any(k in env for k in ("BASH_ENV", "ENV", "BASH_FUNC_git%%"))
+            )
+
+    def test_untrusted_jq_is_rejected_without_staging_or_execution(self):
+        from scripts.release_publication_preflight import _prepare_jq
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            fake = root / "jq.exe"
+            fake.write_bytes(b"untrusted executable")
+            with mock.patch("subprocess.run") as run, self.assertRaises(ValueError):
+                _prepare_jq(fake, tools)
+            run.assert_not_called()
+            self.assertEqual(list(tools.iterdir()), [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows pinned jq staging")
+    def test_jq_staging_copies_only_verified_bytes_from_supplied_directory(self):
+        from scripts import release_publication_preflight as preflight
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            payload = b"verified test fixture"
+            source = root / "jq.exe"
+            source.write_bytes(payload)
+            (root / "git.exe").write_bytes(b"hostile sibling")
+            with mock.patch.object(
+                preflight, "WINDOWS_JQ_SHA256", hashlib.sha256(payload).hexdigest()
+            ):
+                preflight._prepare_jq(source, tools)
+            source.write_bytes(b"subsequent replacement")
+            self.assertEqual((tools / "jq.exe").read_bytes(), payload)
+            self.assertEqual([p.name for p in tools.iterdir()], ["jq.exe"])
+
+    def test_cli_cannot_choose_an_arbitrary_shell_executable(self):
+        from scripts.release_publication_preflight import _bash_executable, main
+
+        arguments = [
+            "preflight",
+            "--qualification-directory",
+            "q",
+            "--freshness-directory",
+            "f",
+            "--candidate-receipt",
+            "receipt",
+            "--output-directory",
+            "output",
+            "--jq",
+            "jq",
+            "--bash",
+            "untrusted-program",
+        ]
+        with (
+            mock.patch.object(sys, "argv", arguments),
+            mock.patch("subprocess.run") as run,
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            main()
+        self.assertEqual(caught.exception.code, 2)
+        run.assert_not_called()
+        self.assertIn(
+            _bash_executable(), {"C:/Program Files/Git/bin/bash.exe", "/usr/bin/bash"}
+        )
+
     def test_timeout_and_launch_failure_leave_terminal_stage_with_unknown_exit(self):
         from scripts.release_publication_preflight import (
             PreflightStageError,

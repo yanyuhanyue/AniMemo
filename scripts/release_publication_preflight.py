@@ -13,7 +13,6 @@ import json
 import os
 import re
 import runpy
-import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -26,6 +25,79 @@ import yaml
 from release.contract import rc_target_version
 
 SOURCE = Path(__file__).resolve().parents[1]
+WINDOWS_JQ_SHA256 = "23cb60a1354eed6bcc8d9b9735e8c7b388cd1fdcb75726b93bc299ef22dd9334"
+
+
+def _bash_executable():
+    """Select the supported host runtime; CLI inputs cannot select a program."""
+    if os.name == "nt":
+        return "C:/Program Files/Git/bin/bash.exe"
+    return "/usr/bin/bash"
+
+
+def _git_revision(revision, env):
+    if revision != "HEAD" and re.fullmatch(r"[0-9a-f]{40}\^\{tree\}", revision) is None:
+        raise ValueError("PREFLIGHT_GIT_REVISION_INVALID")
+    executable = (
+        "C:/Program Files/Git/cmd/git.exe" if os.name == "nt" else "/usr/bin/git"
+    )
+    return (
+        subprocess.run(
+            [executable, "rev-parse", "--verify", revision],
+            cwd=SOURCE,
+            env=env,
+            capture_output=True,
+            check=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+
+
+def _source_commit(env):
+    return _git_revision("HEAD", env)
+
+
+def _prepare_jq(supplied, tools):
+    """Stage a trusted jq file without trusting any sibling executables."""
+    if os.name == "nt":
+        if supplied is None:
+            raise ValueError("PINNED_WINDOWS_JQ_REQUIRED")
+        payload = Path(supplied).read_bytes()
+        if hashlib.sha256(payload).hexdigest() != WINDOWS_JQ_SHA256:
+            raise ValueError("WINDOWS_JQ_DIGEST_MISMATCH")
+        target = tools / "jq.exe"
+    else:
+        if supplied is not None:
+            raise ValueError("JQ_OVERRIDE_WINDOWS_ONLY")
+        payload = Path("/usr/bin/jq").read_bytes()
+        target = tools / "jq"
+    with target.open("xb") as stream:
+        stream.write(payload)
+    if hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256(payload).digest():
+        raise ValueError("STAGED_JQ_DIGEST_MISMATCH")
+    target.chmod(0o700)
+
+
+def _replay_environment(tools):
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "CDPATH", "GLOBIGNORE"}
+        and not key.startswith("BASH_FUNC_")
+    }
+    paths = (
+        [
+            "C:/Program Files/Git/usr/bin",
+            "C:/Program Files/Git/bin",
+            "C:/Program Files/Git/cmd",
+        ]
+        if os.name == "nt"
+        else ["/usr/bin", "/bin"]
+    )
+    env["PATH"] = os.pathsep.join([str(tools), *paths])
+    return env
 
 
 def _python_child(arguments):
@@ -224,10 +296,13 @@ def replay(args):
     )
     for path in (temp, workspace, tools):
         path.mkdir()
+    _prepare_jq(args.jq, tools)
     document = yaml.safe_load(
         (SOURCE / ".github/workflows/release.yml").read_text("utf-8")
     )
-    env = os.environ.copy()
+    env = _replay_environment(tools)
+    if _git_revision(f"{sha}^{{tree}}", env) != tree:
+        raise ValueError("ARCHIVED_SOURCE_TREE_MISMATCH")
     env.update(
         {
             "PYTHONPATH": str(SOURCE),
@@ -276,14 +351,6 @@ def replay(args):
     with zipfile.ZipFile(qroot / "evidence.zip") as archive:
         qualification = json.loads(archive.read(f"release-qualification-{qid}.json"))
     env["UPGRADE_BASE_SHA"] = qualification["upgrade_base_sha"]
-    env["PATH"] = os.pathsep.join(
-        [
-            str(tools),
-            str(Path(args.jq).absolute().parent),
-            str(Path(sys.executable).parent),
-            env["PATH"],
-        ]
-    )
     if args.test_clock:
         datetime.fromisoformat(args.test_clock.replace("Z", "+00:00"))
         env["ANIMEMO_PREFLIGHT_TEST_CLOCK"] = args.test_clock
@@ -333,6 +400,7 @@ git() {{
   [[ "$1" == rev-parse || ( "$1" == tag && "$2" == --list ) ]] || return 92
   for arg in "$@"; do case "$arg" in -d|--delete|-f|--force) return 92 ;; esac; done
   if [[ "$1" == rev-parse && "$2" == 'HEAD^{{commit}}' ]]; then printf '%s\\n' {_shell(sha)};
+  elif [[ "$1" == rev-parse && "$2" == 'HEAD^{{tree}}' ]]; then printf '%s\\n' {_shell(tree)};
   else command git -C {_shell(SOURCE.as_posix())} "$@"; fi
 }}
 gh() {{ [[ "$1" == api && $# == 2 ]] || return 93; case "$2" in
@@ -396,13 +464,7 @@ source {_shell((SOURCE / "scripts/release-input-diagnostics.sh").as_posix())}
         ("publish", "Assemble the portable transport from accepted OCI layouts"),
         ("publish", "Generate the closed publication plan without mutation"),
     ]
-    source_commit = (
-        subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=SOURCE, capture_output=True, check=True
-        )
-        .stdout.decode()
-        .strip()
-    )
+    source_commit = _source_commit(env)
     summary = {
         "context": "NON_AUTHORITATIVE_TEST",
         "execution_source_commit": source_commit,
@@ -444,7 +506,7 @@ source {_shell((SOURCE / "scripts/release-input-diagnostics.sh").as_posix())}
             if index in (1, 4):
                 stage_env["GH_TOKEN"] = "NON_AUTHORITATIVE_TEST"
             result = subprocess.run(
-                [args.bash, "--noprofile", "--norc", str(script)],
+                [_bash_executable(), "--noprofile", "--norc", "--", str(script)],
                 cwd=workspace,
                 env=stage_env,
                 capture_output=True,
@@ -482,10 +544,9 @@ def main():
     ):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument(
-        "--bash", default=shutil.which("bash"), required=shutil.which("bash") is None
-    )
-    parser.add_argument(
-        "--jq", default=shutil.which("jq"), required=shutil.which("jq") is None
+        "--jq",
+        type=Path,
+        help="Windows only: official jq 1.8.1 amd64; fixed SHA-256 verified before staging",
     )
     parser.add_argument(
         "--test-clock",
