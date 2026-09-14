@@ -5,7 +5,7 @@
   "repositoryId": 1327429673,
   "ownerId": 111261350,
   "operator": "yanyuhanyue",
-  "sourcePr": null,
+  "sourcePr": 258,
   "sourceBranch": "fix/rc-read-observation-followup-20260914",
   "workflow": ".github/workflows/release-recovery.yml",
   "subject": {
