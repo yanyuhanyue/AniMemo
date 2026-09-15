@@ -88,8 +88,12 @@ def _origin(plan, role, *, plugin_origin=None):
 def _controller_clone(provider, plan, result):
     """Hold one canonical clone through observation, capture and containment."""
     provider._require_active_execution_authority()
+    from scripts.development_plan import is_development_plan
+    if is_development_plan(plan):
+        from scripts.development_source import require_development_source
+        require_development_source(provider,plan)
     if (type(provider) is not h.ClosedVmwareProvider
-            or type(plan) is not h.CandidateHarnessPlan
+            or not (type(plan) is h.CandidateHarnessPlan or is_development_plan(plan))
             or h.sha256_bytes(h.canonical_json_bytes(plan.identity_body())) != plan.plan_digest
             or type(provider._candidate_material_authority) is not h.HeldCandidateMaterialAuthority
             or provider._candidate_material_authority.loaded.verified_digest != plan.verified_candidate_digest

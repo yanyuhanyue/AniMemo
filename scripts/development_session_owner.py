@@ -86,7 +86,9 @@ class DevelopmentSessionOwner:
         with self._lock:
             return {'schema': SCHEMA, 'owner_id': self._id, 'state': self._state,
                 'capture_attempts': self._attempts, 'capture_completed': self._completed,
-                'last_reserved_round': self._index, 'capture_limit': self._limit,
+                'last_reserved_round': self._index,
+                'capture_limit': 1 if getattr(self, '_authorization', None) is not None else self._limit,
+                'round_limit': self._limit,
                 'material_identity': dict(self._material), 'expires_utc_seconds': self._expires_utc,
                 'secret_cleanup': self._cleanup, 'close_reason': self._reason}
 
@@ -102,6 +104,17 @@ class DevelopmentSessionOwner:
         return self._scope_owner
 
     def _live(self):
+        authorization = getattr(self, '_authorization', None)
+        if authorization is not None:
+            try:
+                authorization.require_open()
+            except BaseException:
+                self.close('DEVELOPMENT_SESSION_EXPIRED')
+                raise
+            if self._active_operation():
+                self._idle_since = self._clock()
+            elif self._completed and self._clock() - self._idle_since >= 30 * 60:
+                self.close('DEVELOPMENT_SESSION_IDLE_EXPIRED')
         if self._clock() >= self._deadline:
             self.close('DEVELOPMENT_SESSION_EXPIRED')
         _require(self._state != 'CLOSED', 'DEVELOPMENT_SESSION_CLOSED')
@@ -112,6 +125,28 @@ class DevelopmentSessionOwner:
             _require(self._batch is batch and self._state == 'ROUND_ACTIVE'
                 and type(self._secret) is bytearray and self._completed == 1)
 
+    def register_preparation(self, batch, reservation):
+        """Account for a bounded, authorized round without issuing secret use."""
+        from scripts.candidate_batch_session import CandidateBatch
+        from scripts.guest_batch_scope import LocalRoundReservation
+        with self._lock:
+            self._live()
+            _require(type(batch) is CandidateBatch and batch._development_owner is self
+                and type(reservation) is LocalRoundReservation
+                and reservation.scope is self._authorization
+                and self._state == 'READY' and self._batch is None and self._pending is None
+                and getattr(self, '_preparing_batch', None) is None
+                and reservation.index == self._index + 1 <= self._limit
+                and _material(batch.plan) == self._material)
+            reservation.require_open()
+            self._preparing_batch = batch
+
+    def _active_operation(self):
+        batch = self._batch or getattr(self, '_preparing_batch', None)
+        operation = None if batch is None else batch._operation
+        return (batch is not None and not batch._closed and not batch.cancelled.is_set()
+            and operation is not None and self._clock() < operation[2])
+
     def bind_after_verified_guest(self, batch, reservation, console):
         from scripts.candidate_batch_session import CandidateBatch
         from scripts.development_capture_scope import (
@@ -119,27 +154,34 @@ class DevelopmentSessionOwner:
             SLOTS,
             DevelopmentCaptureReservation,
         )
+        from scripts.guest_batch_scope import LocalRoundReservation
+        authorization = getattr(self, '_authorization', None)
         with self._lock:
             self._live()
             _require(type(batch) is CandidateBatch and batch._development
-                and type(reservation) is DevelopmentCaptureReservation)
+                and type(reservation) is (LocalRoundReservation if authorization is not None else DevelopmentCaptureReservation))
             reservation.require_open()
             _require(self._state == 'READY' and self._batch is None and self._pending is None
+                and (authorization is None or getattr(self, '_preparing_batch', None) is batch)
                 and _material(batch.plan) == self._material
                 and batch.plan.session_id not in self._sessions
                 and not ({profile.clone_identity for profile in batch.plan.profiles} & self._clones)
                 and reservation.index == self._index + 1 <= self._limit
-                and reservation.path == LEDGER / SLOTS[reservation.index - 1]
+                and (reservation.scope is authorization if authorization is not None
+                     else reservation.path == LEDGER / SLOTS[reservation.index - 1])
                 and reservation.time_observation['effective_expires_utc_seconds'] == self._expires_utc)
             self._index = reservation.index
             self._sessions.add(batch.plan.session_id)
             self._clones.update(profile.clone_identity for profile in batch.plan.profiles)
             self._deadline = min(self._deadline, reservation.deadline)
             self._batch = batch
+            self._preparing_batch = None
             self._state = 'CAPTURING' if self._secret is None else 'ROUND_ACTIVE'
             capture = self._secret is None
             if capture:
                 _require(self._attempts == 0)
+                if authorization is not None:
+                    authorization.consume_capture()
                 self._attempts = 1
         # Do not hold the owner lock while Console input waits. Its independent
         # deadline monitor must remain able to close the owner.
@@ -154,6 +196,9 @@ class DevelopmentSessionOwner:
                     _require(self._batch is batch and self._state == 'CAPTURING')
                     self._secret, secret = secret, None
                     self._completed = 1
+                    if authorization is not None:
+                        self._deadline = min(self._deadline, self._clock() + 12 * 60 * 60)
+                        self._idle_since = self._clock()
                     self._state = 'ROUND_ACTIVE'
             except BaseException:
                 self.close('DEVELOPMENT_SESSION_CAPTURE_FAILED')
@@ -180,6 +225,9 @@ class DevelopmentSessionOwner:
 
     def close_batch(self, batch):
         with self._lock:
+            if getattr(self, '_preparing_batch', None) is batch:
+                self._preparing_batch = None
+                self.close('DEVELOPMENT_PREPARATION_ENDED_BEFORE_VERIFIED_GUEST')
             if self._batch is batch:
                 self._pending = batch.plan.session_id
                 self._batch = None
@@ -267,15 +315,31 @@ class DevelopmentSessionOwner:
             self._done.set()
             if self._batch is not None:
                 self._batch.cancelled.set()
+            if getattr(self, '_preparing_batch', None) is not None:
+                self._preparing_batch.cancelled.set()
 
     def dispose(self):
         self.close()
-        self._thread.join(timeout=2)
-        self._scope_owner.close()
+        try:
+            self._thread.join(timeout=2)
+            _require(not self._thread.is_alive(), 'DEVELOPMENT_OWNER_THREAD_CLEANUP_FAILED')
+        finally:
+            self._scope_owner.close()
 
     def _monitor(self):
         while not self._done.wait(0.25):
             with self._lock:
+                if getattr(self, '_authorization', None) is not None:
+                    preparing = getattr(self, '_preparing_batch', None)
+                    operation = None if preparing is None else preparing._operation
+                    if operation is not None and self._clock() >= operation[2]:
+                        self.close('DEVELOPMENT_PREPARATION_OPERATION_EXPIRED')
+                        return
+                    if self._active_operation():
+                        self._idle_since = self._clock()
+                    elif self._completed and self._clock() - self._idle_since >= 30 * 60:
+                        self.close('DEVELOPMENT_SESSION_IDLE_EXPIRED')
+                        return
                 if self._clock() >= self._deadline:
                     self.close('DEVELOPMENT_SESSION_EXPIRED')
                     return
@@ -307,6 +371,34 @@ def acquire_development_session_owner(*, material_identity, clock=time.monotonic
     owner._attempts = owner._completed = 0
     owner._sessions, owner._clones = set(), set()
     owner._state, owner._cleanup = 'READY', 'NOT_REQUIRED'
+    owner._thread = threading.Thread(target=owner._monitor, daemon=True)
+    owner._thread.start()
+    return owner
+
+
+def acquire_confirmed_development_owner(*, authorization, material_identity, clock=time.monotonic):
+    """Reuse the reviewed owner with one new native-confirmed, single-use scope."""
+    from scripts.guest_batch_scope import LocalBatchAuthorization
+    _require(type(authorization) is LocalBatchAuthorization
+        and authorization.purpose == 'LOCAL_INSTALLER_DEVELOPMENT'
+        and authorization.body['material_identity'] == {
+            key: value for key, value in material_identity.items() if key != 'qualification_run_attempt'})
+    authorization.require_open()
+    # This factory is the sole owner issuer for the new scope; the older
+    # ledger/resume factory is retained only for its separately bound history.
+    owner = object.__new__(DevelopmentSessionOwner)
+    owner._authorization = authorization
+    owner._id, owner._material = uuid.uuid4().hex, dict(material_identity)
+    owner._clock, owner._deadline = clock, authorization.deadline
+    owner._expires_utc = authorization.expires_utc
+    owner._limit, owner._index = authorization.round_limit, 0
+    owner._lock, owner._done = threading.RLock(), threading.Event()
+    owner._scope_owner = authorization
+    owner._secret = owner._batch = owner._pending = owner._reason = None
+    owner._attempts = owner._completed = 0
+    owner._sessions, owner._clones = set(), set()
+    owner._state, owner._cleanup = 'READY', 'NOT_REQUIRED'
+    owner._idle_since = clock()
     owner._thread = threading.Thread(target=owner._monitor, daemon=True)
     owner._thread.start()
     return owner

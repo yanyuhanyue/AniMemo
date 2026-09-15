@@ -60,7 +60,14 @@ class ConsoleFixture:
             SetConsoleCursorPosition=Function(self.set_cursor),
             WideCharToMultiByte=Function(self.encode),
         )
-        self.user32 = types.SimpleNamespace(IsWindowVisible=Function(lambda window: self.visible))
+        self.confirmations = []
+        self.confirm_answer = 7
+        self.user32 = types.SimpleNamespace(IsWindowVisible=Function(lambda window: self.visible),
+            MessageBoxW=Function(self.confirm))
+
+    def confirm(self, window, text, title, flags):
+        self.confirmations.append((window, text, title, flags))
+        return self.confirm_answer
 
     def process_list(self, output, capacity):
         if len(self.clients) <= capacity:
@@ -143,6 +150,28 @@ class ConsoleFixture:
 
 
 class ConsoleCaptureTests(unittest.TestCase):
+    def test_batch_confirmation_defaults_to_no_and_never_reads_password(self):
+        fixture = ConsoleFixture()
+        capture = c.WindowsConsoleCapture(_api=fixture)
+        with self.assertRaisesRegex(c.ConsoleCaptureError, 'BATCH_CONFIRMATION_CANCELLED'):
+            capture.confirm_batch('Synthetic frozen plan')
+        self.assertEqual(fixture.confirmations[0][3], 0x124)
+        self.assertEqual(fixture.read_modes, [])
+        self.assertEqual(fixture.set_modes, [])
+        fixture.confirm_answer = 6
+        capture.confirm_batch('Synthetic frozen plan')
+        self.assertFalse(capture._attempted)
+
+    def test_batch_confirmation_rechecks_console_after_dialog(self):
+        fixture = ConsoleFixture()
+        def drift(*args):
+            fixture.mode ^= 1
+            return 6
+        fixture.user32.MessageBoxW = Function(drift)
+        with self.assertRaisesRegex(c.ConsoleCaptureError, 'BATCH_CONFIRMATION_CANCELLED'):
+            c.WindowsConsoleCapture(_api=fixture).confirm_batch('Synthetic frozen plan')
+        self.assertEqual(fixture.read_modes, [])
+
     def test_owner_cancellation_unblocks_read_without_reading_or_injecting_input(self):
         api = ConsoleFixture('')
         cancelled, blocked, released = threading.Event(), threading.Event(), threading.Event()

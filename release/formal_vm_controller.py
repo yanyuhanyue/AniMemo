@@ -286,7 +286,7 @@ class _QualifiedCandidateFormalRecord:
     loaded: LoadedVerifiedCandidate
     candidate_material_authority: object | None
     candidate_plan_digest: str
-    candidate_provider_execution_authority_receipt_digest: str
+    candidate_history_evidence_digest: str
     candidate_material_authority_identity: str
     candidate_material_tree_inventory_identity: str
     candidate_aggregate_receipt_digest: str
@@ -381,8 +381,8 @@ class QualifiedCandidateFormalAuthority:
         return self._record().candidate_plan_digest
 
     @property
-    def candidate_provider_execution_authority_receipt_digest(self) -> str:
-        return self._record().candidate_provider_execution_authority_receipt_digest
+    def candidate_history_evidence_digest(self) -> str:
+        return self._record().candidate_history_evidence_digest
 
     @property
     def candidate_material_authority_identity(self) -> str:
@@ -464,7 +464,7 @@ def _issue_qualified_candidate_formal_authority(
     loaded: LoadedVerifiedCandidate,
     candidate_material_authority: object | None = None,
     candidate_plan_digest: str,
-    candidate_provider_execution_authority_receipt_digest: str,
+    candidate_history_evidence_digest: str,
     candidate_aggregate_receipt_digest: str,
     candidate_profile_receipt_digests: Mapping[str, str],
     base_vm_identity: str,
@@ -492,7 +492,7 @@ def _issue_qualified_candidate_formal_authority(
         candidate_material_authority_identity = "sha256:" + "0" * 64
         candidate_material_tree_inventory_identity = "sha256:" + "0" * 64
     if not _is_digest(candidate_plan_digest) or not _is_digest(
-        candidate_provider_execution_authority_receipt_digest
+        candidate_history_evidence_digest
     ):
         _formal_reject("FORMAL_CANDIDATE_SOURCE_AUTHORITY_INVALID")
     candidate_source_vm_authority_identity = _candidate_source_vm_authority_identity(
@@ -510,8 +510,8 @@ def _issue_qualified_candidate_formal_authority(
         loaded=loaded,
         candidate_material_authority=candidate_material_authority,
         candidate_plan_digest=candidate_plan_digest,
-        candidate_provider_execution_authority_receipt_digest=(
-            candidate_provider_execution_authority_receipt_digest
+        candidate_history_evidence_digest=(
+            candidate_history_evidence_digest
         ),
         candidate_material_authority_identity=(
             candidate_material_authority_identity
@@ -866,7 +866,7 @@ def close_qualified_candidate_for_formal(
             loaded=loaded,
             candidate_material_authority=material_authority,
             candidate_plan_digest=candidate_plan.plan_digest,
-            candidate_provider_execution_authority_receipt_digest=(
+            candidate_history_evidence_digest=(
                 provider_execution_receipt.receipt_digest
             ),
             candidate_aggregate_receipt_digest=aggregate_digest,
@@ -924,7 +924,7 @@ class VerifiedFormalRcAuthority:
     candidate_aggregate_receipt_digest: str
     candidate_profile_receipt_digests: Mapping[str, str]
     candidate_plan_digest: str
-    candidate_provider_execution_authority_receipt_digest: str
+    candidate_history_evidence_digest: str
     candidate_material_authority_identity: str
     candidate_material_tree_inventory_identity: str
     candidate_base_vm_identity: str
@@ -955,7 +955,7 @@ class VerifiedFormalRcAuthority:
         candidate_aggregate_receipt_digest: str,
         candidate_profile_receipt_digests: Mapping[str, str],
         candidate_plan_digest: str,
-        candidate_provider_execution_authority_receipt_digest: str,
+        candidate_history_evidence_digest: str,
         candidate_base_vm_identity: str,
         candidate_original_vm_hashes: Mapping[str, str],
         candidate_snapshot_identities: Mapping[str, str],
@@ -978,7 +978,7 @@ class VerifiedFormalRcAuthority:
             or not _is_digest(candidate_aggregate_receipt_digest)
             or not _is_digest(candidate_plan_digest)
             or not _is_digest(
-                candidate_provider_execution_authority_receipt_digest
+                candidate_history_evidence_digest
             )
             or not _is_digest(candidate_material_authority_identity)
             or not _is_digest(candidate_material_tree_inventory_identity)
@@ -1070,8 +1070,8 @@ class VerifiedFormalRcAuthority:
             candidate_aggregate_receipt_digest=(candidate_aggregate_receipt_digest),
             candidate_profile_receipt_digests=(closed_candidate_profile_receipts),
             candidate_plan_digest=candidate_plan_digest,
-            candidate_provider_execution_authority_receipt_digest=(
-                candidate_provider_execution_authority_receipt_digest
+            candidate_history_evidence_digest=(
+                candidate_history_evidence_digest
             ),
             candidate_material_authority_identity=(
                 candidate_material_authority_identity
@@ -1856,11 +1856,76 @@ def validate_formal_execution_receipt(value: object) -> dict[str, Any]:
     )
     _canonical_utc_seconds(receipt["accepted_at"])
     _canonical_utc_seconds(receipt["observed_at"])
+    audit = receipt.get('credential_session')
+    _validate_formal_credentials(audit, receipt)
     unsigned = dict(receipt)
     receipt_digest = unsigned.pop("receipt_digest")
     if receipt_digest != sha256_bytes(canonical_json_bytes(unsigned)):
         _formal_reject("FORMAL_EXECUTION_RECEIPT_DIGEST_MISMATCH")
     return receipt
+
+
+def _validate_formal_credentials(audit, receipt):
+    """Validate public capture/closure accounting bound by the receipt digest."""
+    def require(condition):
+        if not condition:
+            raise ValueError('FORMAL_CREDENTIAL_SESSION_INVALID')
+    try:
+        require(type(audit) is dict and set(audit) == {'schema','confirmation','batch','cleanup_completed','profile_resources'})
+        require(audit['schema'] == 'animemo.formal-credential-session/v1' and audit['cleanup_completed'] is True)
+        confirmation, batch = audit['confirmation'], audit['batch']
+        require(type(confirmation) is dict and type(batch) is dict)
+        require(confirmation['purpose'] == batch['purpose'] == 'FORMAL_POSTPUBLICATION')
+        require(confirmation['capture_limit'] == confirmation['round_limit'] == 1)
+        require(batch['authorization_id'] == confirmation['authorization_id'] == receipt['operator_identity'])
+        require(batch['authorization_id'] not in {'ANIMEMO_V2_RC1_FORMAL_SINGLE_CAPTURE_V1','ANIMEMO_V2_ATTESTATION_FORMAL_SEAMS_LOCAL_DEV_V1'})
+        require(batch['secret_state'] in {'CLOSED','REVOKED'})
+        require(type(batch['session_capture_attempts']) is int and batch['session_capture_attempts'] in (0,1))
+        require(type(batch['session_capture_completed']) is int and 0 <= batch['session_capture_completed'] <= batch['session_capture_attempts'])
+        require(batch['secret_cleanup'] == ('BEST_EFFORT_COMPLETED' if batch['session_capture_attempts'] else 'NOT_REQUIRED'))
+        binding = batch['binding']
+        plan = dict(confirmation['initial_plan'])
+        digest = plan.pop('planDigest')
+        require(digest == sha256_bytes(canonical_json_bytes(plan)) == confirmation['initial_plan_digest'] == binding['plan_digest'])
+        require(plan['purpose'] == 'FORMAL_POSTPUBLICATION')
+        for key, field in (('session_id','sessionId'),('source_sha','sourceSha'),('source_tree','sourceTree'),
+            ('qualification_run_id','qualificationRunId'),('candidate_input_digest','candidateInputDigest'),
+            ('verified_candidate_digest','verifiedCandidateDigest'),('formal_authority_identity','authorityDigest'),
+            ('execution_source_sha','executionSourceSha'),('execution_source_tree','executionSourceTree')):
+            require(binding[key] == plan[field])
+        require(binding['verified_candidate_digest'] == receipt['verified_candidate_digest'])
+        require(binding['execution_source_sha'] == receipt['current_workflow_commit'] == confirmation['execution_source_sha'])
+        require(plan['executionInventoryDigest'] == receipt['tool_identity'])
+        confirmed = confirmation['confirmed_utc_seconds']
+        require(type(confirmed) in (int,float))
+        require(datetime.fromtimestamp(confirmed,timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ') == receipt['accepted_at'])
+        require(_canonical_utc_seconds(receipt['observed_at']) >= _canonical_utc_seconds(receipt['accepted_at']))
+        profiles = batch['profiles']
+        require(set(profiles) == {'FRESH_BASE','DOCKER_BASE','RUNTIME_BASE_OFFLINE'})
+        for roles in profiles.values():
+            require(set(roles) == {'BOOTSTRAP_ROTATION','VERIFIED_SUDO','FORMAL_WORKLOAD'})
+            for role in roles.values():
+                require(type(role['delivery_attempts']) is int and role['delivery_attempts'] in (0,1))
+                require(type(role['delivery_completed']) is int and 0 <= role['delivery_completed'] <= role['delivery_attempts'])
+                if receipt['result'] == 'PASS':
+                    require(role['delivery_attempts'] == role['delivery_completed'] == 1)
+                    require(role['target_verified'] is True and role['lease_verified'] is True and role['operation_result'] == 'PASS')
+        if receipt['result'] == 'PASS':
+            require(batch['session_capture_attempts'] == batch['session_capture_completed'] == 1)
+            require(batch['secret_state'] == 'CLOSED' and batch['revocation_code'] is None)
+            require(set(audit['profile_resources']) == set(profiles))
+        planned = {item['profile']:item for item in plan['profiles']}
+        require(len(plan['profiles']) == 3 and set(planned) == set(profiles))
+        for profile, resource in audit['profile_resources'].items():
+            require(resource['profile'] == profile and resource['clone_identity'] == planned[profile]['cloneIdentity'])
+            require(resource['snapshot_identity'] == planned[profile]['snapshotIdentity'])
+            require(resource['cleanup_errors'] == [] and resource['lease_released'] is True)
+            require(resource['power_state'] in {'STOPPED','NOT_STARTED','NOT_RUNNING_OBSERVED'})
+            require(resource['session_keys_removed'] is True and resource['known_hosts_removed'] is True)
+            if receipt['result'] == 'PASS':
+                require(resource['result'] == 'PASS' and resource['power_state'] == 'STOPPED')
+    except (AssertionError,KeyError,TypeError,ValueError,OverflowError,OSError) as error:
+        raise FormalProducerError('FORMAL_CREDENTIAL_SESSION_INVALID') from error
 
 
 def validate_formal_acceptance_bundle(value: object) -> dict[str, Any]:
@@ -1928,6 +1993,17 @@ def validate_formal_acceptance_bundle(value: object) -> dict[str, Any]:
         _formal_reject("FORMAL_ACCEPTANCE_PROFILE_SET_INVALID")
     aggregate = validate_formal_aggregate_receipt(value["aggregateReceipt"])
     execution = validate_formal_execution_receipt(value["executionReceipt"])
+    if 'credential_session' in execution:
+        binding = execution['credential_session']['batch']['binding']
+        if (binding['formal_authority_identity'] != acceptance_input['rc_authority_identity']
+                or binding['source_sha'] != acceptance_input['source_sha']
+                or binding['source_tree'] != acceptance_input['source_tree']):
+            _formal_reject('FORMAL_CREDENTIAL_SESSION_INVALID')
+        resources = execution['credential_session']['profile_resources']
+        for formal, base in zip(FORMAL_PROFILES,('FRESH_BASE','DOCKER_BASE','RUNTIME_BASE_OFFLINE'),strict=True):
+            if (resources[base]['clone_identity'] != profiles[formal]['clone_identity']
+                    or resources[base]['snapshot_identity'] != profiles[formal]['snapshot_identity']):
+                _formal_reject('FORMAL_CREDENTIAL_SESSION_INVALID')
     rc_authorities = {receipt["rc_authority_identity"] for receipt in profiles.values()}
     expected_authorities = {
         "formal_fresh": profiles["FORMAL_FRESH"]["profile_authority_identity"],
@@ -2109,7 +2185,10 @@ class ProductionFormalAuthorityVerifier:
         runner: VerifierRunner = _production_verifier_runner,
         _parent_path_authority: HeldWindowsPrivatePathAuthority | None = None,
     ) -> None:
-        if type(plan.qualified_candidate) is not QualifiedCandidateFormalAuthority:
+        from release.formal_candidate_history import PublishedCandidateFormalAuthority
+        if type(plan.qualified_candidate) not in {
+            QualifiedCandidateFormalAuthority, PublishedCandidateFormalAuthority,
+        }:
             _formal_reject("FORMAL_QUALIFIED_CANDIDATE_REQUIRED")
         if plan.private_work_root is None:
             _formal_reject("FORMAL_PRIVATE_WORK_ROOT_REQUIRED")
@@ -2695,9 +2774,9 @@ class ProductionFormalAuthorityVerifier:
             ),
             candidate_profile_receipt_digests=(self._candidate_profile_receipt_digests),
             candidate_plan_digest=self._candidate_plan_digest,
-            candidate_provider_execution_authority_receipt_digest=(
+            candidate_history_evidence_digest=(
                 self._qualified_candidate
-                .candidate_provider_execution_authority_receipt_digest
+                .candidate_history_evidence_digest
             ),
             candidate_material_authority_identity=(
                 self._qualified_candidate.candidate_material_authority_identity
@@ -2776,7 +2855,7 @@ def _validate_verified_authority(
         )
         or not _is_digest(authority.candidate_plan_digest)
         or not _is_digest(
-            authority.candidate_provider_execution_authority_receipt_digest
+            authority.candidate_history_evidence_digest
         )
         or not _is_digest(authority.candidate_material_authority_identity)
         or not _is_digest(
@@ -3107,6 +3186,12 @@ class FormalVmController:
                     failure_code="FORMAL_PROFILE_ACCEPTANCE_FAILED",
                     receipt_digest=receipt["receipt_digest"],
                 )
+        credential_session = None
+        finalize = getattr(self._profile_executor, 'finalize_execution', None)
+        if finalize is not None:
+            execution, credential_session = finalize(execution,failure_code=shared_blocker)
+            if type(execution) is not FormalExecutionContext:
+                _formal_reject('FORMAL_CONTROLLER_INPUT_INVALID')
         all_profiles_pass = all(
             results[FORMAL_PROFILE_RESULT_KEYS[profile]]["status"] == "PASS"
             for profile in FORMAL_PROFILES
@@ -3165,8 +3250,8 @@ class FormalVmController:
             "candidate_source_vm_authority_identity": (
                 authority.candidate_source_vm_authority_identity
             ),
-            "candidate_provider_execution_authority_receipt_digest": (
-                authority.candidate_provider_execution_authority_receipt_digest
+            "candidate_history_evidence_digest": (
+                authority.candidate_history_evidence_digest
             ),
             "candidate_material_authority_identity": (
                 authority.candidate_material_authority_identity
@@ -3224,6 +3309,8 @@ class FormalVmController:
             "release_authority_granted": False,
             "publish_authorized": False,
         }
+        if credential_session is not None:
+            execution_unsigned['credential_session'] = credential_session
         execution_receipt = validate_formal_execution_receipt(
             {
                 **execution_unsigned,

@@ -193,11 +193,8 @@ def _production_executor_output(
         issue_formal_candidate_bound_offline_verifier,
     )
     from installer.runtime import (
-        InstallerMode,
         InstallOutcome,
-        InstallRequest,
         InstallTransportSource,
-        ReleaseSelector,
         explicit_transport_policy,
     )
 
@@ -240,15 +237,16 @@ def _production_executor_output(
             transport_policy=explicit_transport_policy(transport),
         )
     try:
-        request = InstallRequest(
-            mode=InstallerMode.FRESH,
-            selector=ReleaseSelector(version=authority.rc_tag),
-            public_origin=PUBLIC_ORIGIN,
-            transport_source=transport,
-            non_interactive=True,
-        )
+        request = _install_request(authority, authority_root, profile)
+        from scripts.candidate_diagnostics import inherited_writer
+        diagnostic = inherited_writer()
+        if diagnostic is not None:
+            diagnostic.stage('INSTALLER_STARTING')
+            diagnostic.stage('PLATFORM_PREPARING')
         observed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         session = composition.plan_platform(request, observed_at)
+        if diagnostic is not None:
+            diagnostic.stage('PLATFORM_PLANNED')
         if (
             session.release.version != authority.rc_tag
             or session.release.commit != authority.source_sha
@@ -257,11 +255,18 @@ def _production_executor_output(
         platform_receipt = composition.execute_platform(
             session, session.plan.plan_digest
         )
+        if diagnostic is not None:
+            diagnostic.stage('PLATFORM_READY')
         plan = composition.runtime.plan(request)
+        if diagnostic is not None:
+            diagnostic.stage('INSTALLER_RUNNING')
         result = composition.runtime.execute(
             plan, accepted_plan_digest=plan.plan_digest
         )
         install_succeeded = result.outcome is InstallOutcome.SUCCEEDED
+        if diagnostic is not None:
+            diagnostic.stage('INSTALLER_COMPLETED')
+            diagnostic.exited('INSTALLER', 0 if install_succeeded else 2)
         fresh = getattr(composition.runtime, "_fresh", None)
         doctor = getattr(fresh, "doctor_acceptor", None)
         if type(doctor) is not ProductionDoctorAcceptance:
@@ -313,7 +318,7 @@ def _production_executor_output(
                     session.release.deployment_identity_digest
                 ),
                 "installerMaterialsIdentity": (
-                    session.release.material_identity_digest
+                    materials.installer_archive_sha256
                 ),
                 "apiDigest": images["api"]["digest"],
                 "webDigest": images["web"]["digest"],
@@ -344,6 +349,24 @@ def _production_executor_output(
         }
     finally:
         composition.close_formal_authority()
+
+
+def _install_request(authority: FormalAuthorityRequest, authority_root: Path, profile: str):
+    from installer.runtime import (
+        InstallRequest, InstallerMode, ReleaseSelector, InstallTransportSource,
+    )
+    if profile not in FORMAL_PROFILES:
+        _reject("FORMAL_PROFILE_INVALID")
+    offline = profile == "FORMAL_OFFLINE"
+    return InstallRequest(
+        mode=InstallerMode.FRESH,
+        selector=ReleaseSelector(version=authority.rc_tag),
+        public_origin=PUBLIC_ORIGIN,
+        transport_source=InstallTransportSource.LOCAL_BUNDLE if offline else InstallTransportSource.GITHUB,
+        local_bundle_payload=authority_root / f"animemo-{authority.rc_tag}-portable.tar" if offline else None,
+        local_bundle_release_attestation=authority_root / "release-attestation.sigstore.json" if offline else None,
+        non_interactive=True,
+    )
 
 
 class ProductionFormalInstallExecutor:
@@ -656,6 +679,10 @@ def main(argv: list[str] | None = None) -> int:
             profile=args.profile,
             context_b64url=os.environ.get(CONTEXT_ENV, ""),
         )
+        from scripts.candidate_diagnostics import inherited_writer
+        diagnostic = inherited_writer()
+        if diagnostic is not None:
+            diagnostic.stage('DRAFT_WRITING')
         FORMAL_GUEST_RECEIPT.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         descriptor = os.open(FORMAL_GUEST_RECEIPT, flags, 0o600)
@@ -663,6 +690,8 @@ def main(argv: list[str] | None = None) -> int:
             output.write(canonical_json_bytes(receipt))
             output.flush()
             os.fsync(output.fileno())
+        if diagnostic is not None:
+            diagnostic.stage('DRAFT_WRITTEN')
         print(json.dumps({"status": receipt["result"]}, sort_keys=True))
         return 0
     except (FormalProfileRunnerError, FormalProducerError) as error:

@@ -6,7 +6,6 @@ Profile lease. Neither commands nor secrets are accepted from a CLI or file.
 from __future__ import annotations
 
 import base64
-import json
 import os
 from pathlib import Path
 import queue
@@ -21,11 +20,10 @@ from release.formal_windows_pretrust import (
 )
 from scripts import candidate_vm_harness as h
 from scripts.guest_sudo_session import SessionSupervisor, ControllerFailure, _Grant, _read_observation
-from scripts.isolated_guest_validation import _check_checkout
 from scripts import candidate_diagnostics as diagnostics
 
 
-from scripts.candidate_batch_session import BatchUse, CandidateBatch, AUTHORIZATION as CAPTURE_AUTHORIZATION
+from scripts.candidate_batch_session import BatchUse, CandidateBatch
 MAX_RECEIPT_BYTES = 8 * 1024 * 1024
 WORKLOAD_SECONDS = 4 * 60 * 60 + 60 * 60
 
@@ -166,7 +164,7 @@ def _diagnostic_operation(plan, profile):
         profile=profile.profile, session_id=plan.session_id)))
 
 
-def _remote_workload_command(root_program, operation):
+def _remote_workload_command(root_program, operation, *, formal_ssh_context=False):
     # Only public identity and a bounded receipt reach stdout. The mutable
     # password is wiped immediately after one forwarding write, before wait.
     from scripts.guest_sudo_session import _REMOTE_OBSERVE
@@ -180,7 +178,13 @@ def _remote_workload_command(root_program, operation):
         + "diagnostic=scope['DiagnosticWriter'](1," + repr(operation) + ')\n'
         + "reader=scope['DiagnosticReader'](" + repr(operation) + ")\n"
         + "diagnostic.stage('SSH_OBSERVED')\n")
-    program = observe + setup + '''password=bytearray()
+    ssh_setup = ("import os,ipaddress\nssh_flow=os.environ.get('SSH_CONNECTION','').split()\n"
+        "if len(ssh_flow)!=4: raise ValueError('FORMAL_SSH_FLOW_UNAVAILABLE')\n"
+        "ipaddress.ip_address(ssh_flow[0]);ipaddress.ip_address(ssh_flow[2])\n"
+        "if not all(value.isdecimal() and 0<int(value)<65536 for value in (ssh_flow[1],ssh_flow[3])): raise ValueError('FORMAL_SSH_FLOW_INVALID')\n"
+        if formal_ssh_context else '')
+    argv_expression = repr(argv) + (' + ssh_flow' if formal_ssh_context else '')
+    program = observe + setup + ssh_setup + '''password=bytearray()
 child=None
 try:
     while len(password)<4098:
@@ -193,7 +197,7 @@ try:
         finally:
             one[:]=b'\\0'*len(one)
     if not 1<len(password)<=4097 or password[-1]!=10: raise ValueError('CANDIDATE_SECRET_INPUT_INVALID')
-    child=subprocess.Popen(''' + repr(argv) + ''',stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,bufsize=0)
+    child=subprocess.Popen(''' + argv_expression + ''',stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,bufsize=0)
     diagnostic.stage('SUDO_STARTED')
     written=child.stdin.write(password)
     if written!=len(password): raise ValueError('CANDIDATE_SECRET_SHORT_WRITE')
@@ -285,13 +289,14 @@ def _read_receipt(process, *, operation, provider, profile, batch=None, timeout=
 
 
 class _WorkloadSupervisor(SessionSupervisor):
+    _role = 'CANDIDATE_WORKLOAD'
     def __init__(self, use, **kwargs):
         if type(use) is not BatchUse:
             raise ControllerFailure('CANDIDATE_BATCH_USE_REQUIRED')
         super().__init__(use, **kwargs)
-        self._delivery_attempts = {'CANDIDATE_WORKLOAD': 0}
-        self._delivery_completed = {'CANDIDATE_WORKLOAD': 0}
-        self._state = 'CANDIDATE_WORKLOAD'
+        self._delivery_attempts = {self._role: 0}
+        self._delivery_completed = {self._role: 0}
+        self._state = self._role
 
     def _exchange_workload(self, process):
         try:
@@ -305,13 +310,10 @@ class _WorkloadSupervisor(SessionSupervisor):
                     'host_key_digest': self._provider._read_known_host_key(self._authority)})
                 _continuing_connection(self._provider, self._plan, self._profile, self._lease,
                     self._preboot_disk, self._preboot_snapshot, observation)
-                if self._batch_use._batch._development:
-                    self._batch_use._batch.check_source()
-                else:
-                    _check_checkout(self._plan.source_sha, self._plan.source_tree)
-                self._grant = _Grant(self, self._execution, process, 'CANDIDATE_WORKLOAD',
+                self._batch_use._batch.check_source()
+                self._grant = _Grant(self, self._execution, process, self._role,
                     min(self._expires, self._clock() + 5))
-                self._consume(self._grant, process, 'CANDIDATE_WORKLOAD')
+                self._consume(self._grant, process, self._role)
                 self._state = 'DELIVERED'
         finally:
             self._clear_secret()
@@ -326,14 +328,15 @@ class _WorkloadSupervisor(SessionSupervisor):
             h._initial_platform_state(self._profile.profile))
 
     def execute(self):
-        command = _remote_workload_command(self._program(), _diagnostic_operation(self._plan, self._profile))
+        command = _remote_workload_command(self._program(), _diagnostic_operation(self._plan, self._profile),
+            formal_ssh_context=self._role == 'FORMAL_WORKLOAD')
         try:
             self._workload_deadline = time.monotonic() + WORKLOAD_SECONDS
             with hold_windows_private_file(self._authority.known_hosts_file):
                 self._provider._run(self._provider._ssh_argv(self._authority, command),
                     code='CANDIDATE_VM_PROFILE_EXECUTION_FAILED', timeout=WORKLOAD_SECONDS,
                     openssh=True, guest_exchange=self._exchange_workload)
-            if self._delivery_completed['CANDIDATE_WORKLOAD'] != 1:
+            if self._delivery_completed[self._role] != 1:
                 raise ControllerFailure('CANDIDATE_WORKLOAD_NOT_DELIVERED')
             return self.receipt
         except WorkloadFailure as error:

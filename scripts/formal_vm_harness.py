@@ -13,7 +13,7 @@ import stat
 import sys
 import tarfile
 from collections.abc import Mapping
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
@@ -736,6 +736,7 @@ def _prepare_runtime_snapshot(
     installer_materials: Path,
     private_work_root: Path,
     parent_path_authority: HeldWindowsPrivatePathAuthority | None = None,
+    linux_gh_package: Path | None = None,
 ) -> tuple[_FormalRuntimeSnapshot, Path]:
     installer_materials = Path(installer_materials)
     try:
@@ -818,6 +819,14 @@ def _prepare_runtime_snapshot(
                 assert_windows_private_acl(target)
         if inspect_installer_materials(installer_materials) != material_identity:
             raise FormalProducerError("FORMAL_RUNTIME_ASSET_REBOUND")
+        _copy_closed_asset(installer_materials, snapshot / 'installer-materials.tar',
+            maximum=2 * 1024 * 1024 * 1024)
+        if linux_gh_package is not None:
+            from installer.formal_bootstrap import GH_DEB_NAME, GH_DEB_SHA256
+            target = snapshot / GH_DEB_NAME
+            _copy_closed_asset(linux_gh_package, target, maximum=20 * 1024 * 1024)
+            if hashlib.sha256(target.read_bytes()).hexdigest() != GH_DEB_SHA256:
+                raise FormalProducerError('FORMAL_LINUX_GH_PACKAGE_MISMATCH')
         authority_path = snapshot / "formal-rc-authority.json"
         _write_closed_asset(
             authority_path,
@@ -1018,6 +1027,9 @@ class ClosedFormalVmProfileExecutor:
         installer_materials: Path | None = None,
         private_work_root: Path | None = None,
         parent_path_authority: HeldWindowsPrivatePathAuthority | None = None,
+        local_authorization_id: str | None = None,
+        linux_gh_package: Path | None = None,
+        windows_gh: Path | None = None,
     ) -> None:
         self._authority_root = Path(authority_root)
         self._installer_materials = (
@@ -1036,26 +1048,102 @@ class ClosedFormalVmProfileExecutor:
         self._plan: ClosedVmProviderPlan | None = None
         self._snapshot_temporary: _FormalRuntimeSnapshot | None = None
         self._staging_root: Path | None = None
+        self._local_authorization_id = local_authorization_id
+        self._linux_gh_package = linux_gh_package
+        self._windows_gh = windows_gh
+        self.product_preflight = None
+        self._local_authorization = None
+        self._batch = None
+        self._cleanup_done = False
+        self.final_execution = None
+        self.credential_session = None
 
     def cleanup(self) -> None:
+        if self._cleanup_done:
+            return
         temporary = self._snapshot_temporary
         self._snapshot_temporary = None
         self._staging_root = None
         self._plan = None
         self._authority_identity = None
-        if temporary is not None:
-            temporary.cleanup()
+        try:
+            if self._batch is not None:
+                self._batch.close()
+        finally:
+            self._provider._candidate_batch = None
+            try:
+                if self._local_authorization is not None:
+                    self._local_authorization.close()
+            finally:
+                if temporary is not None:
+                    temporary.cleanup()
+        self._cleanup_done = True
+
+    def finalize_execution(self, execution, *, failure_code=None):
+        """Close the real credential round before any successful evidence exists."""
+        if type(self._provider) is not ClosedVmwareProvider:
+            self.cleanup()
+            return execution, None
+        confirmation = (dict(self._local_authorization.body)
+            if self._local_authorization is not None else None)
+        self.cleanup()
+        if confirmation is None or self._batch is None:
+            raise FormalProducerError(failure_code or 'FORMAL_LOCAL_CONFIRMATION_REQUIRED')
+        from dataclasses import replace
+        from datetime import datetime, timezone
+        self.credential_session = {'schema':'animemo.formal-credential-session/v1',
+            'confirmation':confirmation,'batch':self._batch.record,'cleanup_completed':True,
+            'profile_resources':json.loads(canonical_json_bytes(self._provider._profile_operation_results))}
+        self.final_execution = replace(execution,
+            accepted_at=datetime.fromtimestamp(confirmation['confirmed_utc_seconds'],timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            observed_at=datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+        return self.final_execution, self.credential_session
 
     def _plan_for(self, authority: VerifiedFormalRcAuthority) -> ClosedVmProviderPlan:
         if self._plan is None:
+            if type(self._provider) is ClosedVmwareProvider:
+                from scripts.formal_product_probe import probe_published_product
+                if self._windows_gh is None or self._local_authorization_id is None:
+                    raise FormalProducerError('FORMAL_PRODUCT_PREFLIGHT_INPUT_REQUIRED')
+                probe_root=create_windows_private_directory(self._private_work_root,prefix='product-preflight')
+                self.product_preflight=probe_published_product(
+                    loaded=self._provider._candidate_material_authority.loaded,
+                    windows_gh=self._windows_gh,publication_root=self._authority_root,output_root=probe_root)
+                if (self.product_preflight.get('gh_returncode')!=0
+                        or self.product_preflight.get('parser_result')!='PASS'):
+                    raise FormalProducerError('FORMAL_PRODUCT_ATTESTATION_PREFLIGHT_REJECTED')
             self._snapshot_temporary, self._staging_root = _prepare_runtime_snapshot(
                 self._authority_root,
                 authority,
                 installer_materials=self._installer_materials,
                 private_work_root=self._private_work_root,
                 parent_path_authority=self._parent_path_authority,
+                linux_gh_package=self._linux_gh_package,
             )
             self._plan = _provider_plan(authority, self._provider)
+            if self._local_authorization_id is not None:
+                from scripts.candidate_batch_session import CandidateBatch
+                from scripts.development_source import HeldDevelopmentSource
+                from scripts.formal_plan import from_provider_plan
+                from scripts.guest_batch_scope import confirm_local_batch
+                source = getattr(self._provider, '_development_source_authority', None)
+                if type(source) is not HeldDevelopmentSource or self._linux_gh_package is None:
+                    raise FormalProducerError('FORMAL_HELD_TOOL_SOURCE_REQUIRED')
+                source.require_open()
+                self._plan = from_provider_plan(self._plan,
+                    loaded=self._provider._candidate_material_authority.loaded,
+                    execution_source_sha=source.source_sha,execution_source_tree=source.source_tree,
+                    execution_inventory_digest=source.inventory_digest)
+                from scripts.guest_sudo_session import ControllerFailure
+                from scripts.guest_console_capture import ConsoleCaptureError
+                try:
+                    self._local_authorization = confirm_local_batch(
+                        authorization_id=self._local_authorization_id,purpose='FORMAL_POSTPUBLICATION',plan=self._plan)
+                    self._batch = CandidateBatch(self._provider,self._plan,
+                        authorization_id=self._local_authorization_id,local_authorization=self._local_authorization)
+                except (ControllerFailure,ConsoleCaptureError) as error:
+                    raise FormalProducerError(getattr(error,'code',str(error))) from error
+                self._provider._candidate_batch = self._batch
             self._authority_identity = authority.identity
         if self._authority_identity != authority.identity:
             raise FormalProducerError("FORMAL_VM_AUTHORITY_REBOUND")
@@ -2272,6 +2360,15 @@ def create_release_continuation_parent_worker(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AniMemo Formal VM producer")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument('--published',action='store_true',help='Read current Q, Candidate history and immutable RC in a new process')
+    parser.add_argument('--confirm-batch',action='store_true')
+    parser.add_argument('--authorization-id')
+    parser.add_argument('--qualification-run-id',type=int)
+    for name in ('source-sha','source-tree','version','verified-candidate-digest','candidate-aggregate-digest'):
+        parser.add_argument('--'+name)
+    for name in ('windows-gh','linux-gh-package','final-archive','controller-archive','platform-archive',
+                 'asset-root','sidecar','candidate-aggregate','output'):
+        parser.add_argument('--'+name,type=Path)
     return parser
 
 
@@ -2311,6 +2408,10 @@ def execute_qualified_formal_production(
     output_root: Path,
     provider: ClosedVmwareProvider | None = None,
     _parent_path_authority: HeldWindowsPrivatePathAuthority | None = None,
+    local_authorization_id: str | None = None,
+    linux_gh_package: Path | None = None,
+    windows_gh: Path | None = None,
+    _output_transaction_sink: list | None = None,
 ) -> dict[str, Any]:
     """One in-memory Candidate→Formal continuation entry for the parent worker.
 
@@ -2318,6 +2419,11 @@ def execute_qualified_formal_production(
     it is the closed object returned by the Candidate controller continuation.
     """
 
+    if _output_transaction_sink is not None and (type(_output_transaction_sink) is not list or _output_transaction_sink):
+        raise FormalProducerError('FORMAL_OUTPUT_TRANSACTION_INVALID')
+    if (type(provider) is ClosedVmwareProvider and getattr(provider,'_execution',None) is not None
+            and _output_transaction_sink is None):
+        raise FormalProducerError('FORMAL_OUTER_LIFECYCLE_COMMIT_REQUIRED')
     request = qualified_candidate.issue_request(
         publication_identity=publication_identity,
         attestation_claim_identities=attestation_claim_identities,
@@ -2352,8 +2458,9 @@ def execute_qualified_formal_production(
         candidate_material_tree_inventory_identity=(
             qualified_candidate.candidate_material_tree_inventory_identity
         ),
-        parent_path_authority=_parent_path_authority,
+        parent_path_authority=(None if _output_transaction_sink is not None else _parent_path_authority),
     )
+    transferred = False
     try:
         if transaction.reused:
             return {
@@ -2362,13 +2469,21 @@ def execute_qualified_formal_production(
                 "status": transaction.existing_status,
             }
         active_provider = provider or ClosedVmwareProvider()
-        with active_provider.execution_authority():
+        if getattr(active_provider, '_execution', None) is not None:
+            active_provider._require_active_execution_authority()
+            provider_context = nullcontext()
+        else:
+            provider_context = active_provider.execution_authority()
+        with provider_context:
             executor = ClosedFormalVmProfileExecutor(
                 authority_root=publication_root,
                 provider=active_provider,
                 installer_materials=qualified_candidate.installer_materials,
                 private_work_root=private_work_root,
                 parent_path_authority=_parent_path_authority,
+                local_authorization_id=local_authorization_id,
+                linux_gh_package=linux_gh_package,
+                windows_gh=windows_gh,
             )
             try:
                 result = FormalVmController(
@@ -2377,25 +2492,50 @@ def execute_qualified_formal_production(
                     ),
                     profile_executor=executor,
                 ).execute(request, execution)
-                transaction.commit(result)
-                return result
-            finally:
+            except BaseException:
+                try:
+                    executor.cleanup()
+                except BaseException:
+                    pass  # Preserve the primary error; no output is committed.
+                raise
+            else:
                 executor.cleanup()
+        if executor.final_execution is not None:
+            transaction._execution = executor.final_execution
+        if _output_transaction_sink is None:
+            transaction.commit(result)
+        else:
+            _output_transaction_sink.append((transaction,result))
+            transferred = True
+        return result
     finally:
-        transaction.cleanup()
+        if not transferred:
+            transaction.cleanup()
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.published:
+            from scripts.published_formal_entry import run
+            required=('qualification_run_id','source_sha','source_tree','version','verified_candidate_digest',
+                'candidate_aggregate_digest','windows_gh','final_archive','controller_archive','platform_archive',
+                'asset_root','sidecar','candidate_aggregate','output')
+            if any(getattr(args,name) is None for name in required) or args.execute and args.linux_gh_package is None:
+                raise FormalProducerError('FORMAL_PUBLISHED_INPUTS_REQUIRED')
+            result=run(args)
+            print(json.dumps({'status':result.get('status',result.get('result',{}).get('status')),
+                'evidence_root':result['evidence_root'],'formal_execution':result['formal_execution']},sort_keys=True))
+            return 0 if result.get('status')=='INPUT_READBACK_ONLY' or result.get('result',{}).get('status')=='PASS' else 2
         if args.execute:
-            raise FormalProducerError("FORMAL_PARENT_WORKER_CAPABILITY_REQUIRED")
+            raise FormalProducerError("FORMAL_PUBLISHED_INPUTS_REQUIRED")
         print(
             json.dumps(
                 {
                     "mode": "PLAN_ONLY",
                     "profiles": list(FORMAL_PROFILES),
-                    "parentWorkerCapabilityRequired": True,
+                    "parentWorkerCapabilityRequired": False,
+                    "publishedEvidenceReadbackRequired": True,
                     "provenanceBeforeClone": True,
                     "releaseAuthorityGranted": False,
                     "publishAuthorized": False,

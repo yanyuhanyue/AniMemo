@@ -121,6 +121,8 @@ _FIXED_DEPLOYMENT_FILES = (
     "scripts/candidate_diagnostics.py",
     "scripts/candidate_runtime_entry.py",
     "scripts/formal_profile_runner.py",
+    "scripts/formal_runtime_entry.py",
+    "scripts/formal_workload_root.py",
     "scripts/release_qualification.py",
 )
 

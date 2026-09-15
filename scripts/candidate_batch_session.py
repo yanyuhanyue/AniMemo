@@ -101,12 +101,28 @@ class BatchUse:
 
 
 class CandidateBatch:
-    def __init__(self, provider, plan, *, authorization_id=None, clock=time.monotonic, development_owner=None):
+    def __init__(self, provider, plan, *, authorization_id=None, clock=time.monotonic, development_owner=None, local_authorization=None):
         from scripts.development_plan import is_development_plan
+        from scripts.formal_plan import is_formal_plan
+        from scripts.guest_batch_scope import LocalBatchAuthorization
         self._development = is_development_plan(plan)
+        self._formal = is_formal_plan(plan)
+        self._roles = ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO', 'FORMAL_WORKLOAD') if self._formal else ROLES
         self._development_reservation = None
         self._authorization_id = authorization_id
         self._development_owner = development_owner
+        self._local_authorization = local_authorization or getattr(development_owner, '_authorization', None)
+        if self._local_authorization is not None:
+            if (type(self._local_authorization) is not LocalBatchAuthorization
+                    or self._local_authorization.authorization_id != authorization_id
+                    or self._local_authorization.purpose != ('LOCAL_INSTALLER_DEVELOPMENT' if self._development
+                        else 'FORMAL_POSTPUBLICATION' if self._formal else 'CANDIDATE_ACCEPTANCE')):
+                raise ControllerFailure('LOCAL_BATCH_AUTHORIZATION_INVALID')
+            self._local_authorization.require_open()
+            if self._development and development_owner is None:
+                raise ControllerFailure('DEVELOPMENT_SESSION_OWNER_REQUIRED')
+        if self._formal and self._local_authorization is None:
+            raise ControllerFailure('FORMAL_LOCAL_BATCH_AUTHORIZATION_REQUIRED')
         if development_owner is not None:
             from scripts.development_session_owner import DevelopmentSessionOwner
             if not self._development or type(development_owner) is not DevelopmentSessionOwner or development_owner.closed:
@@ -114,14 +130,15 @@ class CandidateBatch:
         if self._development:
             from scripts import development_capture_scope as scope
             from scripts.development_source import require_development_source
-            if authorization_id != scope.AUTHORIZATION:
+            if authorization_id != (self._local_authorization.authorization_id
+                    if self._local_authorization is not None else scope.AUTHORIZATION):
                 raise ControllerFailure('DEVELOPMENT_CAPTURE_AUTHORIZATION_INVALID')
             require_development_source(provider, plan)
-            self._ledger = scope.LEDGER
+            self._ledger = self._local_authorization.root if self._local_authorization is not None else scope.LEDGER
         else:
-            self._ledger = capture_ledger(authorization_id)
+            self._ledger = self._local_authorization.root if self._local_authorization is not None else capture_ledger(authorization_id)
         if (type(provider) is not h.ClosedVmwareProvider
-                or not (type(plan) is h.CandidateHarnessPlan or self._development)
+                or not (type(plan) is h.CandidateHarnessPlan or self._development or self._formal)
                 or h.sha256_bytes(h.canonical_json_bytes(plan.identity_body())) != plan.plan_digest):
             raise ControllerFailure('CANDIDATE_BATCH_SCOPE_INVALID')
         provider._require_active_execution_authority()
@@ -147,7 +164,11 @@ class CandidateBatch:
                 'source_tree', 'qualification_run_id', 'candidate_input_digest', 'verified_candidate_digest')},
             profiles={profile: {role: dict(delivery_attempts=0, delivery_completed=0,
                 target_verified=False, lease_verified=False, operation_result='NOT_RUN')
-                for role in ROLES} for profile in h.PROFILES})
+                for role in self._roles} for profile in h.PROFILES})
+        if self._formal:
+            self._record['purpose'] = 'FORMAL_POSTPUBLICATION'
+            self._record['binding'].update(formal_authority_identity=plan.authority_digest,
+                execution_source_sha=plan.execution_source_sha,execution_source_tree=plan.execution_source_tree)
         if self._development:
             self._record['purpose'] = 'LOCAL_INSTALLER_DEVELOPMENT'
             self._record['binding'].update(execution_source_sha=plan.execution_source_sha,
@@ -156,6 +177,16 @@ class CandidateBatch:
         if self._development_owner is not None:
             self._record['development_owner_id'] = development_owner.record['owner_id']
             self._record['secret_storage'] = 'PERSISTENT_DEVELOPMENT_MEMORY_OWNER'
+        if self._local_authorization is not None:
+            self._development_reservation = self._local_authorization.reserve_round(plan)
+            self._slot = self._development_reservation.path
+            self._record['development_capture_index'] = self._development_reservation.index
+            self._record['development_clock_observation'] = self._development_reservation.time_observation
+            if self._development_owner is not None:
+                self._development_owner.register_preparation(self, self._development_reservation)
+            else:
+                self._monitor_thread = threading.Thread(target=self._monitor, daemon=True)
+                self._monitor_thread.start()
 
     def check_source(self):
         from scripts.development_plan import execution_source
@@ -179,6 +210,8 @@ class CandidateBatch:
             self.revoke('CANDIDATE_BATCH_SCOPE_CHANGED')
             raise ControllerFailure('CANDIDATE_BATCH_SCOPE_CHANGED')
         self.provider._require_active_execution_authority()
+        if self._local_authorization is not None:
+            self._local_authorization.require_open()
         if self._development:
             from scripts.development_source import require_development_source
             try:
@@ -186,8 +219,16 @@ class CandidateBatch:
             except BaseException:
                 self.revoke('CANDIDATE_BATCH_SCOPE_CHANGED')
                 raise ControllerFailure('DEVELOPMENT_SOURCE_AUTHORITY_INVALID') from None
+        if self._formal:
+            from scripts.formal_guest_session import require_formal_tool_source
+            require_formal_tool_source(self.provider, self.plan)
 
     def _expiry(self):
+        if self._local_authorization is not None:
+            try:
+                self._local_authorization.require_open()
+            except ControllerFailure:
+                return 'CANDIDATE_BATCH_HARD_EXPIRED'
         if self._captured_at is None:
             return None
         now = self._clock()
@@ -259,7 +300,7 @@ class CandidateBatch:
             console.preflight()
             if self._development:
                 from scripts import development_capture_scope as scope
-                if self._ledger != scope.LEDGER:
+                if self._ledger != (self._local_authorization.root if self._local_authorization is not None else scope.LEDGER):
                     raise ControllerFailure('DEVELOPMENT_CAPTURE_AUTHORIZATION_INVALID')
                 try:
                     material_identity = {key: getattr(self.plan, key) for key in (
@@ -268,24 +309,31 @@ class CandidateBatch:
                     material_identity['qualification_run_attempt'] = 1
                     options = ({'scope_owner': self._development_owner.scope_owner}
                         if self._development_owner is not None else {})
-                    self._development_reservation = scope.reserve_development_capture(
-                        self._authorization_id, material_identity=material_identity, **options)
+                    if self._local_authorization is not None:
+                        self._development_reservation.require_open()
+                    else:
+                        self._development_reservation = scope.reserve_development_capture(
+                            self._authorization_id, material_identity=material_identity, **options)
                 except scope.DevelopmentScopeError as error:
                     raise ControllerFailure(error.code) from None
                 self._slot = self._development_reservation.path
                 self._record['development_capture_index'] = self._development_reservation.index
                 self._record['development_clock_observation'] = self._development_reservation.time_observation
             else:
-                if capture_ledger(self._authorization_id) != self._ledger:
-                    raise ControllerFailure('CANDIDATE_CAPTURE_AUTHORIZATION_INVALID')
-                self._slot = reserve_capture(self._authorization_id)
+                if self._local_authorization is not None:
+                    self._development_reservation.require_open()
+                    self._local_authorization.consume_capture()
+                else:
+                    if capture_ledger(self._authorization_id) != self._ledger:
+                        raise ControllerFailure('CANDIDATE_CAPTURE_AUTHORIZATION_INVALID')
+                    self._slot = reserve_capture(self._authorization_id)
             owner_before = self._development_owner.record if self._development_owner is not None else None
             self._record['session_capture_attempts'] = 1 if owner_before is None else 0
             self._record['secret_state'] = 'CAPTURING'
             try:
                 if self._development_owner is None:
-                    print('Candidate session / one sudo input for this frozen batch', flush=True)
-                    self._secret = console.capture()
+                    print(('Formal' if self._formal else 'Candidate')+' session / one sudo input for this frozen batch', flush=True)
+                    self._secret = console.capture(cancelled=self.cancelled)
                     if (type(self._secret) is not bytearray or not 1 <= len(self._secret) <= 4096
                             or any(x < 32 or x == 127 for x in self._secret)):
                         raise ControllerFailure('SUDO_VALUE_INVALID')
@@ -302,8 +350,9 @@ class CandidateBatch:
                 self.check_source()
                 self._scope()
                 self._record['secret_state'] = 'ACTIVE'
-                self._monitor_thread = threading.Thread(target=self._monitor, daemon=True)
-                self._monitor_thread.start()
+                if self._monitor_thread is None:
+                    self._monitor_thread = threading.Thread(target=self._monitor, daemon=True)
+                    self._monitor_thread.start()
             except BaseException:
                 if owner_before is not None:
                     owner_after = self._development_owner.record
@@ -323,15 +372,15 @@ class CandidateBatch:
     def issue(self, profile, lease, roles):
         with self._lock:
             self.require_live()
-            if (profile not in self.plan.profiles or roles not in (ROLES[:2], ROLES[2:])
+            if (profile not in self.plan.profiles or roles not in (self._roles[:2], self._roles[2:])
                     or self._operation is None or self._operation[:2] !=
-                    (('BOOTSTRAP' if roles == ROLES[:2] else 'WORKLOAD'), profile.profile)):
+                    (('BOOTSTRAP' if roles == self._roles[:2] else 'WORKLOAD'), profile.profile)):
                 raise ControllerFailure('CANDIDATE_BATCH_USE_INVALID')
             previous = self.plan.profiles[:self.plan.profiles.index(profile)]
-            if (any(self._record['profiles'][item.profile]['CANDIDATE_WORKLOAD']['operation_result']
+            if (any(self._record['profiles'][item.profile][self._roles[2]]['operation_result']
                     not in {'PASS', 'FAIL'} for item in previous)
-                    or (roles == ROLES[2:] and any(self._record['profiles'][profile.profile][role]['operation_result']
-                        != 'PASS' for role in ROLES[:2]))):
+                    or (roles == self._roles[2:] and any(self._record['profiles'][profile.profile][role]['operation_result']
+                        != 'PASS' for role in self._roles[:2]))):
                 self.revoke('CANDIDATE_BATCH_USE_ORDER_INVALID')
                 raise ControllerFailure('CANDIDATE_BATCH_USE_ORDER_INVALID')
             lease.require_open()
@@ -364,7 +413,7 @@ class CandidateBatch:
             if key in self._attempted_roles:
                 self.revoke('CANDIDATE_BATCH_ROLE_REPLAY')
                 raise ControllerFailure('CANDIDATE_BATCH_ROLE_REPLAY')
-            if any((use._profile.profile, prior) not in self._completed_roles for prior in ROLES[:ROLES.index(role)]):
+            if any((use._profile.profile, prior) not in self._completed_roles for prior in self._roles[:self._roles.index(role)]):
                 self.revoke('CANDIDATE_BATCH_USE_ORDER_INVALID')
                 raise ControllerFailure('CANDIDATE_BATCH_USE_ORDER_INVALID')
             self._attempted_roles.add(key)
@@ -381,7 +430,7 @@ class CandidateBatch:
             with self._lock:
                 entry['delivery_completed'] = 1
                 self._completed_roles.add(key)
-                if len(self._completed_roles) == len(h.PROFILES) * len(ROLES):
+                if len(self._completed_roles) == len(h.PROFILES) * len(self._roles):
                     self.release_secret()
         except BaseException:
             self.revoke('CANDIDATE_BATCH_DELIVERY_UNCERTAIN')
@@ -391,7 +440,7 @@ class CandidateBatch:
 
     def role_result(self, profile, role, result):
         with self._lock:
-            if (profile not in self.plan.profiles or role not in ROLES or result not in {'PASS', 'FAIL', 'ERROR', 'UNKNOWN'}
+            if (profile not in self.plan.profiles or role not in self._roles or result not in {'PASS', 'FAIL', 'ERROR', 'UNKNOWN'}
                     or (result in {'PASS', 'FAIL'} and (profile.profile, role) not in self._completed_roles)):
                 raise ControllerFailure('CANDIDATE_BATCH_RESULT_INVALID')
             self._record['profiles'][profile.profile][role]['operation_result'] = result
@@ -445,7 +494,7 @@ class CandidateBatch:
                 if self._slot is not None:
                     # The development reservation already holds its parent
                     # chain; a second Windows DELETE hold would conflict.
-                    if self._development:
+                    if self._development or self._local_authorization is not None:
                         with (self._slot / 'result.json').open('xb') as output:
                             output.write(h.canonical_json_bytes(self._record))
                     else:
