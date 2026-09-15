@@ -42,6 +42,11 @@ class FixtureHTTP:
             b + "/git/commits/" + p["diagnosticTool"]["reviewedHead"]: f[
                 "diagnostic_facts"
             ][2],
+            b + "/pulls/258": f["draft_read_facts"][0],
+            b + "/git/commits/" + p["draftReadTool"]["sha"]: f["draft_read_facts"][1],
+            b + "/git/commits/" + p["draftReadTool"]["reviewedHead"]: f[
+                "draft_read_facts"
+            ][2],
             b + "/pulls/256": f["parent_facts"][0],
             b + "/git/commits/" + p["parentTool"]["sha"]: f["parent_facts"][1],
             b + "/git/commits/" + p["parentTool"]["reviewedHead"]: f["parent_facts"][2],

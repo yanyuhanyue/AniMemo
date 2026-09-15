@@ -31,6 +31,7 @@ from .publication_remote import (
     read_github_response,
 )
 from .publication_transaction import _next_snapshot
+from .recovery_read_diagnostics import response_clues, strict_json
 from .recovery_contract import (
     RecoveryError,
     identity,
@@ -111,6 +112,7 @@ class GitHubRecoveryRemote:
                 "errorCategory": "RESPONSE_BODY_INCOMPLETE"
                 if response is not None
                 else "TRANSPORT_OR_CREDENTIAL_UNKNOWN",
+                **(response_clues(response) if response is not None else {}),
             }
         )
 
@@ -120,6 +122,52 @@ class GitHubRecoveryRemote:
             category in {"ORIGINAL_PROOF_VERIFY", "PLATFORM_PROOF_VERIFY"},
             "RECOVERY_READ_CATEGORY_INVALID",
         )
+        command = tuple(command)
+        repo, tag = self.p["repository"], self.p["subject"]["release_tag"]
+        valid = command == (
+            "gh",
+            "release",
+            "verify",
+            tag,
+            "--repo",
+            repo,
+            "--format",
+            "json",
+        )
+        if len(command) == 9 and command[:4] == ("gh", "release", "verify-asset", tag):
+            asset = Path(command[4])
+            valid = (
+                asset.is_absolute()
+                and asset.name in self.p["plan"]["transport_assets"]
+                and command[5:] == ("--repo", repo, "--format", "json")
+            )
+        if len(command) == 12 and command[:3] == ("gh", "attestation", "verify"):
+            locator = command[3]
+            fixed_oci = {
+                f"oci://ghcr.io/yanyuhanyue/animemo-{role}@{self.p['plan'][role + '_digest']}"
+                for role in ("api", "web")
+            }
+            asset = Path(locator)
+            valid = (
+                locator in fixed_oci
+                or asset.is_absolute()
+                and asset.name
+                in {
+                    "release-manifest.json",
+                    "deployment-contract.json",
+                    "installer-materials.tar",
+                }
+            ) and command[4:] == (
+                "--repo",
+                repo,
+                "--signer-workflow",
+                repo + "/.github/workflows/release.yml",
+                "--source-digest",
+                self.p["subject"]["sha"],
+                "--format",
+                "json",
+            )
+        require(valid, "RECOVERY_PROOF_COMMAND_INVALID")
         self.read_sequence += 1
         initial = {
             "sequence": self.read_sequence,
@@ -309,7 +357,6 @@ class GitHubRecoveryRemote:
     def get_response(
         self, endpoint: str, *, administration: bool = False
     ) -> GitHubResponse:
-        administration = administration or self._approved_draft_read(endpoint)
         path = endpoint.removeprefix(self.base).split("?", 1)[0]
         category = {
             "": "REPOSITORY",
@@ -379,6 +426,7 @@ class GitHubRecoveryRemote:
                 "requestId": safe(response.request_id),
                 "selectedVersion": safe(response.selected_version),
                 "errorCategory": "NONE" if response.status == 200 else "HTTP_NON_200",
+                **response_clues(response),
             }
         )
         require(
@@ -395,10 +443,14 @@ class GitHubRecoveryRemote:
             "RECOVERY_API_TARGET_INVALID",
         )
         if not administration:
+            require(
+                not endpoint.startswith(self.base + "/releases")
+                or self._approved_draft_read(endpoint),
+                "RECOVERY_DRAFT_READ_TARGET_INVALID",
+            )
             return github_request("GET", endpoint, None)
         require(
-            self._approved_draft_read(endpoint)
-            or endpoint
+            endpoint
             in {
                 self.base + "/immutable-releases",
                 self.base + "/branches/main/protection",
@@ -424,7 +476,7 @@ class GitHubRecoveryRemote:
             return read_github_response(error)
 
     def _approved_draft_read(self, endpoint):
-        """Select the already approved read role before sending, with no fallback."""
+        """Only fixed Draft discovery surfaces may use the native job token."""
         path, separator, query = endpoint.partition("?")
         fixed = {
             f"{self.base}/releases/{self.p['ordinaryDraft']}",
@@ -454,7 +506,7 @@ class GitHubRecoveryRemote:
         response = self.get_response(endpoint, administration=administration)
         require(response.status == 200, "RECOVERY_REMOTE_READ_UNKNOWN")
         try:
-            return json.loads(response.body)
+            return strict_json(response.body)
         except (ValueError, UnicodeDecodeError):
             raise RecoveryError("RECOVERY_REMOTE_JSON_INVALID") from None
 
@@ -477,7 +529,7 @@ class GitHubRecoveryRemote:
             )
             require(response.status == 200, "RECOVERY_REMOTE_READ_UNKNOWN")
             try:
-                value = json.loads(response.body)
+                value = strict_json(response.body)
                 has_next = pagination._next_release_page(
                     response, page, endpoint=endpoint
                 )
@@ -521,7 +573,13 @@ class GitHubRecoveryRemote:
 
     def readonly_request(self, method, endpoint, payload):
         require(method == "GET" and payload is None, "RECOVERY_READONLY_BOUNDARY")
-        return self.get_response(endpoint)
+        response = self.get_response(endpoint)
+        if response.status == 200:
+            try:
+                strict_json(response.body)
+            except (ValueError, UnicodeDecodeError):
+                raise RecoveryError("RECOVERY_REMOTE_JSON_INVALID") from None
+        return response
 
     def draft(self, *, published_allowed: bool = False) -> dict[str, Any]:
         expected = self.p["transaction"]
@@ -624,6 +682,7 @@ class GitHubRecoveryRemote:
         )
 
     def upload(self, path: Path) -> MutationResponse:
+        require(not self.read_only, "RECOVERY_READ_ONLY")
         draft = self.draft()
         declared = {**self.p["plan"]["assets"], **self.p["plan"]["transport_assets"]}
         require(
@@ -685,6 +744,7 @@ class GitHubRecoveryRemote:
             connection.close()
 
     def publish(self) -> MutationResponse:
+        require(not self.read_only, "RECOVERY_READ_ONLY")
         draft = self.draft()
         require(len(draft["assets"]) == 5, "RECOVERY_ASSETS_INCOMPLETE")
         self._final_send_check()
@@ -946,6 +1006,7 @@ class GuardedRecoveryJournal:
         return copy.deepcopy(current)
 
     def append(self, value):
+        require(self.claim["mode"] == "execute", "RECOVERY_EXECUTION_NOT_AUTHORIZED")
         self._alive()
         self.before_write()
         current = self.load(self.claim["operationId"])

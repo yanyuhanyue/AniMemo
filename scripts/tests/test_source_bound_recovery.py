@@ -117,11 +117,11 @@ def execution_fixture():
         "checkout_sha": tool,
         "checkout_tree": tree,
         "reviewed_tree": tree,
-        "parent_sha": p["diagnosticTool"]["sha"],
+        "parent_sha": p["draftReadTool"]["sha"],
         "tool_commit": {
             "sha": tool,
             "tree": {"sha": tree},
-            "parents": [{"sha": p["diagnosticTool"]["sha"]}],
+            "parents": [{"sha": p["draftReadTool"]["sha"]}],
         },
         "parent_facts": (
             {
@@ -165,6 +165,27 @@ def execution_fixture():
                 "tree": {"sha": p["diagnosticTool"]["tree"]},
             },
         ),
+        "draft_read_facts": (
+            {
+                **copy.deepcopy(pr),
+                "number": p["draftReadTool"]["sourcePr"],
+                "merge_commit_sha": p["draftReadTool"]["sha"],
+                "head": {
+                    "sha": p["draftReadTool"]["reviewedHead"],
+                    "ref": p["draftReadTool"]["sourceBranch"],
+                    "repo": repo,
+                },
+            },
+            {
+                "sha": p["draftReadTool"]["sha"],
+                "tree": {"sha": p["draftReadTool"]["tree"]},
+                "parents": [{"sha": p["diagnosticTool"]["sha"]}],
+            },
+            {
+                "sha": p["draftReadTool"]["reviewedHead"],
+                "tree": {"sha": p["draftReadTool"]["tree"]},
+            },
+        ),
         "previous_pr": previous_pr,
         "previous_commit": {
             "sha": old["sha"],
@@ -184,6 +205,15 @@ def execution_fixture():
                 "status": "completed",
                 "conclusion": "failure",
                 "created_at": "2026-09-14T11:58:00Z",
+            },
+            {
+                **run,
+                "id": p["draftReadTool"]["inspectionRun"],
+                "head_sha": p["draftReadTool"]["sha"],
+                "display_title": execution_title("inspect"),
+                "status": "completed",
+                "conclusion": "failure",
+                "created_at": "2026-09-14T11:59:00Z",
             },
         ],
         "now": datetime(2026, 9, 14, 12, 1, tzinfo=timezone.utc),

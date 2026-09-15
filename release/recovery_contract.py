@@ -79,6 +79,7 @@ def validate_tool_chain(
     previous_reviewed,
     parent_facts,
     diagnostic_facts,
+    draft_read_facts,
 ):
     from .recovery_pr import validate_pr
 
@@ -100,8 +101,8 @@ def validate_tool_chain(
             "reviewedHead": "6a5417856c91e8414e47f421f8237bfb61bd03ee",
             "parent": "508099fe32f5d88865aec7217513320006117de2",
         }
-        and p["sourcePr"] not in {255, 256, 257}
-        and p["sourceBranch"] == "fix/rc-read-observation-followup-20260914"
+        and p["sourcePr"] not in {255, 256, 257, 258}
+        and p["sourceBranch"] == "fix/rc-hosted-draft-read-r5-20260915"
         and parent["parent"] == old["sha"],
         "RECOVERY_PARENT_TOOL_BINDING_INVALID",
     )
@@ -148,6 +149,35 @@ def validate_tool_chain(
         and diagnostic_reviewed.get("tree", {}).get("sha") == diagnostic["tree"],
         "RECOVERY_DIAGNOSTIC_TOOL_INVALID",
     )
+    draft_read = p["draftReadTool"]
+    require(
+        draft_read
+        == {
+            "sha": "013171b19cce543addb56a0a8381a20aa38245f6",
+            "tree": "c9a96617332b84e4ed7e04b24d722b7d285ac9be",
+            "sourcePr": 258,
+            "sourceBranch": "fix/rc-read-observation-followup-20260914",
+            "reviewedHead": "de9a98c55c365e20089bf346a14684172ec5daed",
+            "parent": "e7d6d81778ca36bee30e6c8fa72797b944e674cb",
+            "inspectionRun": 34857289912,
+        },
+        "RECOVERY_DRAFT_READ_TOOL_BINDING_INVALID",
+    )
+    draft_read_pr, draft_read_commit, draft_read_reviewed = draft_read_facts
+    validate_pr(
+        draft_read_pr, number=draft_read["sourcePr"], branch=draft_read["sourceBranch"]
+    )
+    require(
+        draft_read_pr["merge_commit_sha"] == draft_read["sha"]
+        and draft_read_pr["head"]["sha"] == draft_read["reviewedHead"]
+        and draft_read_commit.get("sha") == draft_read["sha"]
+        and draft_read_commit.get("tree", {}).get("sha") == draft_read["tree"]
+        and [i.get("sha") for i in draft_read_commit.get("parents", [])]
+        == [diagnostic["sha"]]
+        and draft_read_reviewed.get("sha") == draft_read["reviewedHead"]
+        and draft_read_reviewed.get("tree", {}).get("sha") == draft_read["tree"],
+        "RECOVERY_DRAFT_READ_TOOL_INVALID",
+    )
     require(
         previous_pr["merge_commit_sha"] == old["sha"]
         and previous_pr["head"]["sha"] == old["reviewedHead"],
@@ -168,7 +198,7 @@ def validate_tool_chain(
         and type(reviewed_tree) is str
         and re.fullmatch(r"[0-9a-f]{40}", reviewed_tree) is not None
         and [item.get("sha") for item in commit.get("parents", [])]
-        == [diagnostic["sha"]],
+        == [draft_read["sha"]],
         "RECOVERY_TOOL_CHAIN_INVALID",
     )
 
@@ -220,6 +250,7 @@ def validate_execution(
     previous_reviewed: Mapping[str, Any],
     parent_facts: tuple,
     diagnostic_facts: tuple,
+    draft_read_facts: tuple,
     superseded_run: Mapping[str, Any],
     execution_runs: list[Mapping[str, Any]],
     now: datetime,
@@ -305,6 +336,7 @@ def validate_execution(
         previous_reviewed,
         parent_facts,
         diagnostic_facts,
+        draft_read_facts,
     )
     validate_superseded_run(superseded_run, workflow["id"])
     prior_runs = [r for r in execution_runs if r.get("id") == superseded_run["id"]]
@@ -321,7 +353,7 @@ def validate_execution(
         "RECOVERY_TOOL_DRIFT",
     )
     require(
-        parent_sha == p["diagnosticTool"]["sha"] and checkout_tree == reviewed_tree,
+        parent_sha == p["draftReadTool"]["sha"] and checkout_tree == reviewed_tree,
         "RECOVERY_REVIEW_TREE_DRIFT",
     )
     require(
@@ -357,6 +389,33 @@ def validate_execution(
             for k in ("actor", "triggering_actor")
         ),
         "RECOVERY_DIAGNOSTIC_RUN_INVALID",
+    )
+    draft_read_runs = [
+        r for r in execution_runs if r.get("id") == p["draftReadTool"]["inspectionRun"]
+    ]
+    require(len(draft_read_runs) == 1, "RECOVERY_DRAFT_READ_HISTORY_MISSING")
+    draft_read_run = draft_read_runs[0]
+    require(
+        draft_read_run.get("head_sha") == p["draftReadTool"]["sha"]
+        and draft_read_run.get("display_title") == execution_title("inspect")
+        and draft_read_run.get("run_attempt") == 1
+        and draft_read_run.get("event") == "workflow_dispatch"
+        and draft_read_run.get("head_branch") == "main"
+        and draft_read_run.get("path", "").split("@")[0] == p["workflow"]
+        and draft_read_run.get("workflow_id") == workflow["id"]
+        and draft_read_run.get("status") == "completed"
+        and draft_read_run.get("conclusion") == "failure"
+        and instant(draft_read_run["created_at"]) < run_created
+        and all(
+            draft_read_run.get(k, {}).get("id") == p["repositoryId"]
+            for k in ("repository", "head_repository")
+        )
+        and all(
+            draft_read_run.get(k, {}).get("id") == p["ownerId"]
+            and draft_read_run.get(k, {}).get("login") == p["operator"]
+            for k in ("actor", "triggering_actor")
+        ),
+        "RECOVERY_DRAFT_READ_RUN_INVALID",
     )
     require(
         issued
@@ -420,6 +479,7 @@ def validate_execution(
         "previousTool": p["previousTool"],
         "parentTool": p["parentTool"],
         "diagnosticTool": p["diagnosticTool"],
+        "draftReadTool": p["draftReadTool"],
         "supersededFailure": p["supersededFailure"],
         "subject": p["subject"],
         "toolSha": tool,
@@ -465,6 +525,7 @@ def validate_context(value: Mapping[str, Any]) -> dict[str, Any]:
         "previousTool",
         "parentTool",
         "diagnosticTool",
+        "draftReadTool",
         "supersededFailure",
         "subject",
         "toolSha",
@@ -505,6 +566,7 @@ def validate_context(value: Mapping[str, Any]) -> dict[str, Any]:
         "previousTool": p["previousTool"],
         "parentTool": p["parentTool"],
         "diagnosticTool": p["diagnosticTool"],
+        "draftReadTool": p["draftReadTool"],
         "supersededFailure": p["supersededFailure"],
         "subject": p["subject"],
         "workflow": p["workflow"],

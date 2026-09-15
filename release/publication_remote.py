@@ -80,6 +80,10 @@ class GitHubResponse:
     link: str | None = None
     request_id: str | None = None
     selected_version: str | None = None
+    accepted_permissions: str | None = None
+    rate_remaining: str | None = None
+    rate_reset: str | None = None
+    retry_after: str | None = None
 
 
 class GitHubReadError(ConnectionError):
@@ -99,13 +103,25 @@ def read_github_response(response, maximum=None):
         response.headers.get("Link"),
         response.headers.get("X-GitHub-Request-Id"),
         response.headers.get("X-GitHub-Api-Version-Selected"),
+        response.headers.get("X-Accepted-GitHub-Permissions"),
+        response.headers.get("X-RateLimit-Remaining"),
+        response.headers.get("X-RateLimit-Reset"),
+        response.headers.get("Retry-After"),
     )
     try:
         body = response.read() if maximum is None else response.read(maximum)
     except (OSError, http.client.HTTPException):
         raise GitHubReadError(headers) from None
     return GitHubResponse(
-        headers.status, body, headers.link, headers.request_id, headers.selected_version
+        headers.status,
+        body,
+        headers.link,
+        headers.request_id,
+        headers.selected_version,
+        headers.accepted_permissions,
+        headers.rate_remaining,
+        headers.rate_reset,
+        headers.retry_after,
     )
 
 

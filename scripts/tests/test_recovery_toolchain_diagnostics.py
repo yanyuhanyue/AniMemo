@@ -268,8 +268,7 @@ class ToolchainDiagnosticsTests(unittest.TestCase):
         f = execution_fixture()
         f["run"]["display_title"] = execution_title("inspect")
         f["event"]["inputs"]["operation"] = "inspect"
-        for i in (800,):
-            f["execution_runs"].append({**f["run"], "id": i, "head_sha": "e" * 40})
+        f["execution_runs"].append({**f["run"], "id": policy()["priorInspectionRun"], "head_sha": policy()["parentTool"]["sha"]})
         self.assertEqual(self.run_platform(f)["writeSteps"], [])
         f["execution_runs"].append({**f["run"], "id": 802})
         with self.assertRaisesRegex(RecoveryError, "INSPECT_ALLOWANCE"):

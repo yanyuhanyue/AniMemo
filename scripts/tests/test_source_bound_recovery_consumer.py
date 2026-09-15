@@ -101,6 +101,9 @@ class RecoveryConsumerTests(unittest.TestCase):
             base + "/pulls/257": fixture["diagnostic_facts"][0],
             base + "/git/commits/" + p["diagnosticTool"]["sha"]: fixture["diagnostic_facts"][1],
             base + "/git/commits/" + p["diagnosticTool"]["reviewedHead"]: fixture["diagnostic_facts"][2],
+            base + "/pulls/258": fixture["draft_read_facts"][0],
+            base + "/git/commits/" + p["draftReadTool"]["sha"]: fixture["draft_read_facts"][1],
+            base + "/git/commits/" + p["draftReadTool"]["reviewedHead"]: fixture["draft_read_facts"][2],
             base + "/pulls/256": fixture["parent_facts"][0],
             base + "/git/commits/" + p["parentTool"]["sha"]: fixture["parent_facts"][1],
             base + "/git/commits/" + p["parentTool"]["reviewedHead"]: fixture["parent_facts"][2],
@@ -116,7 +119,7 @@ class RecoveryConsumerTests(unittest.TestCase):
             base + "/git/commits/" + claim["toolSha"]: {
                 "sha": claim["toolSha"],
                 "tree": {"sha": claim["toolTree"]},
-                "parents": [{"sha": p["diagnosticTool"]["sha"]}],
+                "parents": [{"sha": p["draftReadTool"]["sha"]}],
             },
             base + "/git/commits/" + claim["reviewedHead"]: {
                 "sha": claim["reviewedHead"],

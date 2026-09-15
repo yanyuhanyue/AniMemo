@@ -44,6 +44,16 @@ class RecoveryPlatform:
         return current
 
     def git(self, *args):
+        require(
+            args
+            in {
+                ("rev-parse", "HEAD"),
+                ("rev-parse", "HEAD^{tree}"),
+                ("show", "-s", "--format=%P", "HEAD"),
+                ("status", "--porcelain", "--untracked-files=all"),
+            },
+            "RECOVERY_GIT_READONLY_BOUNDARY",
+        )
         result = subprocess.run(
             ("git", "-C", str(self.repository), *args),
             capture_output=True,
@@ -83,6 +93,12 @@ class RecoveryPlatform:
             remote.get(f"{remote.base}/git/commits/{diagnostic['sha']}"),
             remote.get(f"{remote.base}/git/commits/{diagnostic['reviewedHead']}"),
         )
+        draft_read = p["draftReadTool"]
+        draft_read_facts = (
+            remote.merge_identity(draft_read["sourcePr"], draft_read["sourceBranch"]),
+            remote.get(f"{remote.base}/git/commits/{draft_read['sha']}"),
+            remote.get(f"{remote.base}/git/commits/{draft_read['reviewedHead']}"),
+        )
         superseded_run = remote.get(
             f"{remote.base}/actions/runs/{p['supersededFailure']['runId']}"
         )
@@ -118,6 +134,7 @@ class RecoveryPlatform:
             previous_reviewed=previous_reviewed,
             parent_facts=parent_facts,
             diagnostic_facts=diagnostic_facts,
+            draft_read_facts=draft_read_facts,
             superseded_run=superseded_run,
             execution_runs=runs["workflow_runs"],
             now=self.now(),
@@ -194,6 +211,49 @@ class RecoveryPlatform:
             ]
             require(not conflicts, "RECOVERY_COMPETING_EXECUTION")
         return now
+
+    def initial_draft_reads(self):
+        """Same native-token discovery/asset path used again by execute precheck."""
+        self.validate_settings()
+        draft = self.remote.draft()
+        # A by-tag 200 is not evidence of a complete authenticated collection.
+        releases = self.remote.listed(f"{self.remote.base}/releases")
+        require(
+            all(
+                type(r.get("tag_name")) is str
+                and type(r.get("id")) is int
+                and r["id"] > 0
+                for r in releases
+            ),
+            "RECOVERY_INITIAL_DISCOVERY_CONFLICT",
+        )
+        matches = [
+            r for r in releases if r.get("tag_name") == self.p["subject"]["release_tag"]
+        ]
+        require(
+            len(matches) == 1 and matches[0]["id"] == draft["id"],
+            "RECOVERY_INITIAL_DISCOVERY_CONFLICT",
+        )
+        require(
+            draft.get("draft") is True
+            and draft.get("immutable") is False
+            and draft.get("published_at") is None
+            and draft.get("assets") == [],
+            "RECOVERY_INITIAL_DRAFT_CHANGED",
+        )
+        return {
+            "status": "FIXED_DRAFT_READS_VERIFIED",
+            "fullInspectionPassed": False,
+            "ordinaryDraftId": self.p["ordinaryDraft"],
+            "transactionDraftId": draft["id"],
+            "credentialRole": "GITHUB_TOKEN",
+            "draftState": "DRAFT_EMPTY",
+            "canonicalDiscovery": "COMPLETE_UNIQUE",
+            "assetList": "EMPTY",
+            "platformReportedJobPermissions": None,
+            "platformReportedJobPermissionsStatus": "UNKNOWN",
+            "remoteMutations": 0,
+        }
 
     def registry(self):
         values = {}
@@ -492,6 +552,7 @@ class RecoveryAdapter:
 
     def mutate(self, intent):
         e = self.engine
+        require(e.claim["mode"] == "execute", "RECOVERY_EXECUTION_NOT_AUTHORIZED")
         require(
             intent == self.intent
             and intent.name in policy()["remainingSteps"]

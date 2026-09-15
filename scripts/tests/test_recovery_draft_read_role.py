@@ -1,4 +1,4 @@
-"""The observed R3 draft denial selects a fixed existing GET role in R4."""
+"""Native job token serves fixed draft GETs after the R4 ADMIN_READ denial."""
 
 import copy
 import json
@@ -39,7 +39,7 @@ class DraftReadRoleTests(unittest.TestCase):
             if "/releases" in request.full_url:
                 self.assertEqual(
                     dict(request.header_items())["Authorization"],
-                    "Bearer synthetic-admin-read",
+                    "Bearer synthetic-test-token",
                 )
                 checked.append(request.full_url)
             return http.open(request, *args, **kwargs)
@@ -66,7 +66,7 @@ class DraftReadRoleTests(unittest.TestCase):
                 ],
             )  # Discovery refresh and recovery identity validation each read the ID.
             self.assertEqual(
-                remote.last_read_diagnostic["credentialRole"], "ADMIN_READ"
+                remote.last_read_diagnostic["credentialRole"], "GITHUB_TOKEN"
             )
             self.assertEqual(remote.write_requests, [])
 
@@ -81,7 +81,7 @@ class DraftReadRoleTests(unittest.TestCase):
             self.assertEqual(sum(r["url"] == url for r in http.requests), 1)
             self.assertEqual(remote.last_read_diagnostic["status"], 403)
             self.assertEqual(
-                remote.last_read_diagnostic["credentialRole"], "ADMIN_READ"
+                remote.last_read_diagnostic["credentialRole"], "GITHUB_TOKEN"
             )
             with self.assertRaisesRegex(RecoveryError, "READ_ONLY"):
                 remote._final_send_check()
