@@ -282,6 +282,17 @@ class CandidatePlatformCommandObserver:
             argv, timeout=timeout, environment=environment
         )
         classification = self._classification(argv)
+        if getattr(result, "outcome", None) != "EXITED" or type(result.returncode) is not int:
+            # An attempted launch/timeout is not a completed command. APT's
+            # caller retains its operation-specific error and observation.
+            if classification == "APT_NETWORK":
+                return result
+            from .platform_bootstrap import PlatformBootstrapError
+
+            raise PlatformBootstrapError(
+                "PLATFORM_BOOTSTRAP_HOST_STATE_INCONSISTENT",
+                command_result=result,
+            )
         self._completed_commands.append(
             {
                 **_completed_command_observation(
@@ -291,7 +302,7 @@ class CandidatePlatformCommandObserver:
                         if classification == "APT_NETWORK"
                         else "local"
                     ),
-                    return_code=int(result.returncode),
+                    return_code=result.returncode,
                 ),
                 "classification": classification,
             }

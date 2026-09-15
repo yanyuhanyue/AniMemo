@@ -931,6 +931,25 @@ def _docker_daemon_identity(
     return _sha256_identity({"mainPid": int(values[0]), "started": int(values[1])})
 
 
+def _optional_postgres_client_major(
+    runner: PlatformCommandRunner, executable: str,
+) -> int | None:
+    if executable not in {"/usr/bin/pg_dump", "/usr/bin/psql"}:
+        _reject("PLATFORM_BOOTSTRAP_HOST_STATE_INCONSISTENT")
+    try:
+        Path(executable).lstat()
+    except FileNotFoundError:
+        # Fresh hosts legitimately lack these package-provided clients. This
+        # is a filesystem capability observation, never a synthetic exit code.
+        return None
+    except OSError:
+        _reject("PLATFORM_BOOTSTRAP_HOST_STATE_INCONSISTENT")
+    # Keep existing pg_wrapper link semantics. An existing entry that cannot
+    # launch (including disappearance after lstat) remains a hard failure.
+    result = _command(runner, (executable, "--version"))
+    return _postgres_major(result.stdout) if result.returncode == 0 else None
+
+
 def collect_bootstrap_host_facts(
     runner: PlatformCommandRunner | None = None,
 ) -> BootstrapHostFacts:
@@ -1028,8 +1047,8 @@ def collect_bootstrap_host_facts(
         ).returncode
         == 0
     )
-    pg_dump_result = _command(runner, ("/usr/bin/pg_dump", "--version"))
-    psql_result = _command(runner, ("/usr/bin/psql", "--version"))
+    pg_dump_major = _optional_postgres_client_major(runner, "/usr/bin/pg_dump")
+    psql_major = _optional_postgres_client_major(runner, "/usr/bin/psql")
     docker_config_path = Path("/etc/docker/daemon.json")
     if docker_config_path.exists() or docker_config_path.is_symlink():
         docker_config_identity = _trusted_file_identity(
@@ -1063,14 +1082,8 @@ def collect_bootstrap_host_facts(
         compose_v2_available=compose,
         compose_v2_identity=compose_identity,
         docker_config_identity=docker_config_identity,
-        pg_dump_major=(
-            _postgres_major(pg_dump_result.stdout)
-            if pg_dump_result.returncode == 0
-            else None
-        ),
-        psql_major=(
-            _postgres_major(psql_result.stdout) if psql_result.returncode == 0 else None
-        ),
+        pg_dump_major=pg_dump_major,
+        psql_major=psql_major,
         installed_policy_packages=tuple(installed),
     )
 

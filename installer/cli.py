@@ -251,6 +251,7 @@ def _diagnose_candidate_platform_failure(diagnostic, error):
         # Installer/platform failure with a secondary logging exception.
         try:
             diagnostic.error('PLATFORM_PREPARATION_FAILED')
+            diagnostic.fault(error)
             code = getattr(error, 'code', None)
             if type(code) is str and code in (*BOOTSTRAP_FAILURE_CODES, *PLATFORM_FAILURE_CODES):
                 diagnostic.error(code)

@@ -68,7 +68,7 @@ class CandidateVmRuntimeRepairTests(unittest.TestCase):
 
     def test_candidate_command_observers_record_completed_network_boundaries(self) -> None:
         platform_delegate = mock.Mock()
-        platform_delegate.run.return_value = SimpleNamespace(returncode=0)
+        platform_delegate.run.return_value = SimpleNamespace(returncode=0, outcome="EXITED")
         platform = CandidatePlatformCommandObserver(platform_delegate)
         platform.run(
             ("/usr/bin/apt-get", "update"),
