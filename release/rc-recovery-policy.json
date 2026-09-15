@@ -5,7 +5,7 @@
   "repositoryId": 1327429673,
   "ownerId": 111261350,
   "operator": "yanyuhanyue",
-  "sourcePr": null,
+  "sourcePr": 259,
   "sourceBranch": "fix/rc-hosted-draft-read-r5-20260915",
   "workflow": ".github/workflows/release-recovery.yml",
   "subject": {
