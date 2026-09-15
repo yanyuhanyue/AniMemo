@@ -128,6 +128,8 @@ def run(args, *, session_owner=None, confirmed_owner_sink=None):
                         result['development_mode'] = plan.identity_body()['developmentMode']
                         result['profile_results'] = {profile.profile: {'status': 'NOT_RUN', 'failure_code': None}
                             for profile in plan.profiles}
+                        from scripts.development_guest_session import preflight_development_workload_commands
+                        result['workload_command_preflight'] = preflight_development_workload_commands(provider, plan)
                         if not args.execute:
                             result['status'] = 'PLAN_ONLY'
                         else:

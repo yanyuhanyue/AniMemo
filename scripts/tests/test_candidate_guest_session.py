@@ -158,7 +158,8 @@ class WorkloadAuthorityTests(unittest.TestCase):
 
 class WorkloadTransportTests(unittest.TestCase):
     def test_remote_program_is_parseable_and_has_one_fixed_sudo_process(self):
-        program = shlex.split(c._remote_workload_command('pass', OPERATION))[-1]
+        from scripts.tests.workload_transport_fixture import decode_workload_transport
+        program = decode_workload_transport(c._remote_workload_command('pass', OPERATION))
         compile(program, '<synthetic-remote>', 'exec')
         self.assertEqual(program.count('subprocess.Popen('), 1)
         self.assertLess(program.index('password.clear()'), program.index('child.wait()'))
@@ -167,17 +168,89 @@ class WorkloadTransportTests(unittest.TestCase):
 
     def test_all_candidate_sudo_executables_are_absolute_and_ignore_guest_path(self):
         from scripts import guest_sudo_session as bootstrap
-        programs = [c._remote_workload_command('pass', OPERATION)]
-        programs += [bootstrap._remote_command(role, 'ssh-ed25519 YWJj alias')
+        from scripts.tests.workload_transport_fixture import decode_workload_transport
+        programs = [decode_workload_transport(c._remote_workload_command('pass', OPERATION))]
+        programs += [shlex.split(bootstrap._remote_command(role, 'ssh-ed25519 YWJj alias'))[-1]
                      for role in ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO')]
-        for command in programs:
-            tree = ast.parse(shlex.split(command)[-1])
+        for program in programs:
+            tree = ast.parse(program)
             sudo_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute) and node.func.attr in {'run', 'Popen'}
                 and node.args and isinstance(node.args[0], ast.List)
                 and any(isinstance(item, ast.Constant) and item.value == '-S' for item in node.args[0].elts)]
             self.assertEqual(len(sudo_calls), 1)
             self.assertEqual(sudo_calls[0].args[0].elts[0].value, '/usr/bin/sudo')
+
+    def test_compressed_transport_decodes_exact_original_and_preserves_formal_ssh_arguments(self):
+        from scripts.tests.workload_transport_fixture import decode_workload_transport
+        real_compress = c.zlib.compress
+        for formal in (False, True):
+            inputs = []
+            def observed_compress(value, *args, **kwargs):
+                inputs.append(value)
+                return real_compress(value, *args, **kwargs)
+            with mock.patch.object(c.zlib, 'compress', side_effect=observed_compress):
+                command = c._remote_workload_command('pass # exact root marker', OPERATION,
+                    formal_ssh_context=formal)
+            program = decode_workload_transport(command)
+            self.assertEqual(program.encode('utf-8'), inputs[-1])
+            compile(program, '<decoded-transport>', 'exec')
+            calls = [node for node in ast.walk(ast.parse(program)) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute) and node.func.attr == 'Popen']
+            self.assertEqual(len(calls), 1)
+            argument = calls[0].args[0]
+            if formal:
+                self.assertIsInstance(argument, ast.BinOp)
+                self.assertEqual(argument.right.id, 'ssh_flow')
+                argument = argument.left
+            self.assertEqual(ast.literal_eval(argument)[-1], 'pass # exact root marker')
+            self.assertIn('d.eof and not d.unconsumed_tail and not d.unused_data', command)
+            self.assertIn("raise ValueError", command)
+            self.assertNotIn('assert ', command)
+
+    def test_full_windows_command_budget_counts_utf16_quotes_and_terminal_nul(self):
+        import subprocess
+        self.assertEqual(c.validate_workload_command_budget(('x' * 32766,))[
+            'windows_command_utf16_units_including_nul'], 32767)
+        self.assertEqual(c.validate_workload_command_budget(('x' * 32764 + '\U0001f642',))[
+            'windows_command_utf16_units_including_nul'], 32767)
+        for argv in [('x' * 32767,), ('x' * 32765 + '\U0001f642',), ('bad\0argument',), ('\ud800',)]:
+            with self.subTest(argv_length=len(argv[0])), self.assertRaises(c.ControllerFailure):
+                c.validate_workload_command_budget(argv)
+        quoted = ('C:/path with spaces/ssh.exe', 'argument "quoted" and trailing\\')
+        self.assertEqual(c.validate_workload_command_budget(quoted)[
+            'windows_command_utf16_units_including_nul'],
+            len(subprocess.list2cmdline(quoted).encode('utf-16-le')) // 2 + 1)
+
+    def test_actual_wrapper_rejects_oversize_truncation_and_trailing_data_before_compile(self):
+        import base64
+        import zlib
+        wrapper = shlex.split(c._remote_workload_command('pass', OPERATION))[-1]
+        payload = next(ast.literal_eval(node.args[0]) for node in ast.walk(ast.parse(wrapper))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'b64decode')
+        def substitute(compressed):
+            self.assertEqual(wrapper.count(repr(payload)), 1)
+            return wrapper.replace(repr(payload), repr(base64.b64encode(compressed).decode('ascii')))
+        harmless = zlib.compress(b'result = 17\n')
+        prefix = b'result = 17\n#'
+        maximum = zlib.compress(prefix + b'x' * (c.MAX_REMOTE_PROGRAM_BYTES - len(prefix)))
+        for valid in (harmless, maximum):
+            scope = {}
+            exec(substitute(valid), scope)
+            self.assertEqual(scope['result'], 17)
+        for compressed in (zlib.compress(b'x' * (c.MAX_REMOTE_PROGRAM_BYTES + 1)),
+                           harmless[:-1], harmless + b'extra', harmless + harmless):
+            with self.subTest(size=len(compressed)), mock.patch('builtins.compile') as compiler:
+                with self.assertRaisesRegex(ValueError, 'WORKLOAD_PROGRAM_SIZE_INVALID'):
+                    exec(substitute(compressed), {})
+                compiler.assert_not_called()
+
+    def test_oversized_remote_source_and_context_are_rejected_before_transport(self):
+        with self.assertRaisesRegex(c.ControllerFailure, 'WORKLOAD_PROGRAM_SIZE_INVALID'):
+            c._remote_workload_command('x' * c.MAX_REMOTE_PROGRAM_BYTES, OPERATION)
+        with self.assertRaisesRegex(c.ControllerFailure, 'WORKLOAD_CONTEXT_INVALID'):
+            c.validate_workload_context({'text': 'x' * (64 * 1024)})
 
 
 if __name__ == '__main__':

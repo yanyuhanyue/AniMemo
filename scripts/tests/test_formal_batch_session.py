@@ -97,8 +97,9 @@ class FormalBatchSessionTests(unittest.TestCase):
                 self.fixture.batch.issue(profile,self.fixture.lease,('CANDIDATE_WORKLOAD',))
 
     def test_remote_wrapper_carries_only_public_exact_ssh_flow_to_fixed_root(self):
+        from scripts.tests.workload_transport_fixture import decode_workload_transport
         command=guests._remote_workload_command('pass','sha256:'+'1'*64,formal_ssh_context=True)
-        code=shlex.split(command)[-1]
+        code=decode_workload_transport(command)
         compile(code,'<synthetic-formal-remote>','exec')
         self.assertIn("os.environ.get('SSH_CONNECTION','').split()",code)
         self.assertIn('+ ssh_flow',code)

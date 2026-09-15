@@ -31,11 +31,13 @@ def _root_program(provider, plan, profile):
         if held != (Path(__file__).resolve().parent / name).read_bytes():
             raise ControllerFailure('DEVELOPMENT_ROOT_PROGRAM_SOURCE_MISMATCH')
         programs.append(held.decode('utf-8'))
+    context = c._profile_context(plan, profile, h._initial_platform_state(profile.profile))
+    c.validate_workload_context(context)
     args = dict(profile=profile.profile, input_digest=plan.candidate_input_digest,
         material_inventory_digest=provider._candidate_material_authority.tree_inventory_identity,
         execution_inventory_digest=plan.execution_inventory_digest,
         binding=development_binding(plan),
-        context=c._profile_context(plan, profile, h._initial_platform_state(profile.profile)))
+        context=context)
     operation = c._diagnostic_operation(plan, profile)
     program = ("scope={'__name__':'_animemo_fixed_development_root'}\n"
         + 'exec(compile(' + repr(programs[0]) + ",'<fixed-diagnostic>','exec'),scope)\n"
@@ -46,10 +48,26 @@ def _root_program(provider, plan, profile):
         + " scope['run_fixed_development'](**" + repr(args) + ',diagnostic=diagnostic)\n'
         + "except BaseException:\n diagnostic.error('ROOT_EXECUTION_FAILED')\n diagnostic.exited('ROOT',2)\n raise SystemExit(2)\n"
         + "diagnostic.exited('ROOT',0)\n")
-    encoded = base64.b64encode(zlib.compress(program.encode('utf-8'), 9)).decode('ascii')
-    if len(encoded) > 20000:
+    raw = program.encode('utf-8')
+    if len(raw) > c.MAX_ROOT_PROGRAM_BYTES:
         raise ControllerFailure('DEVELOPMENT_ROOT_PROGRAM_SIZE_INVALID')
+    encoded = base64.b64encode(zlib.compress(raw, 9)).decode('ascii')
     return 'import base64,zlib;exec(compile(zlib.decompress(base64.b64decode(' + repr(encoded) + ")), '<fixed-development-root>', 'exec'))"
+
+
+def preflight_development_workload_commands(provider, plan):
+    """Construct each real fixed command with held inputs before confirmation."""
+    profiles = {}
+    for profile in plan.profiles:
+        root = _root_program(provider, plan, profile)
+        remote = c._remote_workload_command(root, c._diagnostic_operation(plan, profile))
+        authority = provider._active_profile_authority(profile, plan)
+        argv = provider._ssh_argv(authority, remote)
+        budget = c.validate_workload_command_budget((str(provider._tool_path(h.SSH)), *argv[1:]))
+        profiles[profile.profile] = dict(root_program_utf8_bytes=len(root.encode('utf-8')),
+            remote_command_utf8_bytes=len(remote.encode('utf-8')), **budget)
+    return dict(schema='animemo.development-workload-command-preflight/v1',
+                profiles=profiles, secret_capture_required=False)
 
 
 class _DevelopmentWorkloadSupervisor(c._WorkloadSupervisor):
@@ -98,10 +116,13 @@ def execute_development_workload(provider, plan, profile, lease, disk, snapshot,
                 if error.revoke_batch:
                     batch.revoke('CANDIDATE_BATCH_PROFILE_FAILURE')
                 raise
-            except BaseException:
+            except BaseException as error:
                 provider._candidate_diagnostics.get(profile.profile, {})['host_receipt_parse'] = 'REJECTED'
                 batch.role_result(profile, 'CANDIDATE_WORKLOAD', 'ERROR')
                 batch.revoke('CANDIDATE_BATCH_RECEIPT_AUTHORITY_INVALID')
+                code = str(error) if isinstance(error, ControllerFailure) else None
+                if code in c.WORKLOAD_CONSTRUCTION_FAILURE_CODES:
+                    raise ControllerFailure(code) from None
                 raise ControllerFailure('DEVELOPMENT_WORKLOAD_VALIDATION_FAILED') from None
             finally:
                 if supervisor is not None:

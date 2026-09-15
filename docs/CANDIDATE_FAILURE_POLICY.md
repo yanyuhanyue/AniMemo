@@ -33,3 +33,11 @@ Candidate/DEV 循环必须消费 `validate_business_continuation(provider, plan,
 诊断模式的 APT 操作按开发 Guest 写入计数。诊断报告可为 PASS 或 FAIL；成功传输一个 FAIL 报告时 Runner/root/sudo 可返回 0，这表示报告运输完成，报告内真实 APT returncode 和 FAIL 不变。专用 validator 必须绑定模式、源码、Guest/上下文和观察，常规 Candidate 路径不接受这类报告。纯平台诊断的 owner 收尾原因是 DEVELOPMENT_PLATFORM_DIAGNOSTIC_COMPLETED；它不能替代 DEVELOPMENT_PREACCEPTANCE_PASSED。
 
 无凭据回归入口包括 `scripts.tests.test_candidate_failure_policy`、`scripts.tests.test_graded_supervisor`、`scripts.tests.test_candidate_profile_cleanup`、`scripts.tests.test_candidate_plugin_acceptance`，覆盖真实本机子进程配合合成秘密、分级判断、最终清理、即时撤销和完整回执消费者。测试模拟的 Guest/VM/材料不是真实预验收；真实开发验证须保持同一冻结源码与材料，改代码前先关闭现有秘密会话。
+
+## 确认前的工作负载构造检查
+
+开发入口先从实际持有的源码、材料与每个选定 Profile 构造固定程序和完整 SSH 参数，再允许本机确认。上下文限制为 64 KiB，root 源程序限制为 128 KiB，固定传输程序限制为 256 KiB。传输包装采用压缩，并检查解压长度、流结束和额外尾部；其内容仍是固定受审程序。
+
+完整参数按 Windows 实际引用规则序列化，以 UTF-16 单元计数并包含终止 NUL，必须不超过 32,767。实际启动前再次检查解析后的工具路径与完整参数。合法上下文也可能超出进程参数预算，此时在确认和密码采集前拒绝；报告只记录尺寸、上限及固定错误码。不能以缩短标识、丢弃上下文或重新采集密码绕过边界。
+
+上限依据：[Microsoft CreateProcessW 文档](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw)。命令构造错误与真实 Guest 执行失败分别保留，不将未执行 APT 解释为 APT 的失败或成功。

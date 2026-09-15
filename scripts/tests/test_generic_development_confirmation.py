@@ -115,3 +115,51 @@ class GenericDevelopmentConfirmationTests(TestCase):
         self.assertEqual(report['memory_owner']['state'], 'CLOSED')
         self.assertEqual(secret, b'')
         self.assertEqual(json.loads(entry.result_bytes(report)), report)
+
+    def test_workload_construction_failure_precedes_native_confirmation_and_capture(self):
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from scripts import local_candidate_development as entry, development_guest_session as guest
+        provider = mock.MagicMock()
+        provider._execution.root = self.root / 'provider'
+        provider._execution.work_root = self.root / 'work'
+        provider._profile_operation_results = {}
+        provider._candidate_diagnostics = {}
+        provider._host_lifecycle_observations = []
+        provider.execution_authority.return_value = nullcontext()
+        provider.bind_candidate_material_authority.return_value = nullcontext()
+        material = SimpleNamespace(loaded=SimpleNamespace(root=self.root / 'material' / 'root'))
+        source = SimpleNamespace(root=self.root / 'source' / 'root',
+            inventory_digest=self.plan.execution_inventory_digest)
+        base = self.plan.__dict__.copy()
+        for field in ('execution_source_sha', 'execution_source_tree', 'execution_inventory_digest', 'platform_diagnostic'):
+            base.pop(field)
+        base['candidate_version'] = 'v2.0.0-rc.2'
+        base_plan = entry.h.CandidateHarnessPlan(**base)
+        from dataclasses import replace
+        base_plan = replace(base_plan, plan_digest=entry.h.sha256_bytes(entry.h.canonical_json_bytes(base_plan.identity_body())))
+        options = SimpleNamespace(execute=True, confirm_batch=True,
+            authorization_id='ANIMEMO_SYNTHETIC_COMMAND_PREFLIGHT_V1', result=self.root / 'result.json',
+            execution_source_sha=self.plan.execution_source_sha, execution_source_tree=self.plan.execution_source_tree,
+            material_source_sha=self.plan.source_sha, material_source_tree=self.plan.source_tree,
+            verified_candidate_digest=self.plan.verified_candidate_digest,
+            qualification_run_id=self.plan.qualification_run_id, platform_diagnostic=False)
+        with (mock.patch.object(entry, '_check_checkout'),
+              mock.patch.object(entry, 'require_material_compatibility'),
+              mock.patch.object(entry.WindowsConsoleCapture, 'preflight'),
+              mock.patch.object(entry.h, 'ClosedVmwareProvider', return_value=provider),
+              mock.patch.object(entry.h, 'acquire_candidate_material_authority', return_value=nullcontext(material)),
+              mock.patch.object(entry, 'acquire_development_source', return_value=nullcontext(source)),
+              mock.patch.object(entry.h, 'build_harness_plan', return_value=base_plan),
+              mock.patch.object(guest, 'preflight_development_workload_commands',
+                  side_effect=scopes.ControllerFailure('CANDIDATE_WORKLOAD_COMMAND_LIMIT_EXCEEDED')) as preflight,
+              mock.patch.object(scopes, 'confirm_local_batch') as confirm,
+              mock.patch.object(entry.CandidateBatch, 'capture_after_bootstrap_observation') as capture):
+            report = entry.run(options)
+        self.assertEqual(report['failure_code'], 'CANDIDATE_WORKLOAD_COMMAND_LIMIT_EXCEEDED')
+        self.assertEqual(report['status'], 'ERROR')
+        self.assertIsNone(report['credential_session'])
+        preflight.assert_called_once()
+        confirm.assert_not_called()
+        capture.assert_not_called()
+        provider.execute_development_profile.assert_not_called()

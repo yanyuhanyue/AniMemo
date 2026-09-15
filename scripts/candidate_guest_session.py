@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import queue
 import shlex
+import subprocess
 import threading
 import time
 import zlib
@@ -27,6 +28,35 @@ from release.candidate_failure_policy import BUSINESS, business_failure_diagnost
 from scripts.candidate_batch_session import BatchUse, CandidateBatch
 MAX_RECEIPT_BYTES = 8 * 1024 * 1024
 WORKLOAD_SECONDS = 4 * 60 * 60 + 60 * 60
+MAX_ROOT_PROGRAM_BYTES = 128 * 1024
+MAX_REMOTE_PROGRAM_BYTES = 256 * 1024
+WINDOWS_COMMAND_MAXIMUM_UNITS = 32767
+WORKLOAD_CONSTRUCTION_FAILURE_CODES = frozenset({
+    'CANDIDATE_ROOT_PROGRAM_SIZE_INVALID', 'CANDIDATE_ROOT_PROGRAM_SOURCE_MISMATCH',
+    'DEVELOPMENT_ROOT_PROGRAM_SIZE_INVALID', 'DEVELOPMENT_ROOT_PROGRAM_SOURCE_MISMATCH',
+    'CANDIDATE_WORKLOAD_CONTEXT_INVALID', 'CANDIDATE_WORKLOAD_PROGRAM_SIZE_INVALID',
+    'CANDIDATE_WORKLOAD_COMMAND_LIMIT_EXCEEDED', 'CANDIDATE_WORKLOAD_COMMAND_INVALID',
+})
+
+
+def validate_workload_command_budget(resolved_argv):
+    """Bound the actual Windows CreateProcessW command, including its NUL."""
+    if (not resolved_argv or any(type(value) is not str or '\0' in value for value in resolved_argv)):
+        raise ControllerFailure('CANDIDATE_WORKLOAD_COMMAND_INVALID')
+    try:
+        units = len(subprocess.list2cmdline(resolved_argv).encode('utf-16-le')) // 2 + 1
+    except UnicodeEncodeError:
+        raise ControllerFailure('CANDIDATE_WORKLOAD_COMMAND_INVALID') from None
+    if units > WINDOWS_COMMAND_MAXIMUM_UNITS:
+        raise ControllerFailure('CANDIDATE_WORKLOAD_COMMAND_LIMIT_EXCEEDED')
+    return {'windows_command_utf16_units_including_nul': units,
+            'windows_command_maximum_units': WINDOWS_COMMAND_MAXIMUM_UNITS}
+
+
+def validate_workload_context(context):
+    from scripts.candidate_profile_runner import MAX_CONTEXT_BYTES
+    if len(h.canonical_json_bytes(context)) > MAX_CONTEXT_BYTES:
+        raise ControllerFailure('CANDIDATE_WORKLOAD_CONTEXT_INVALID')
 
 
 @dataclass(frozen=True)
@@ -139,6 +169,7 @@ def _root_program(provider, plan, profile, initial_platform_state):
             raise ControllerFailure('CANDIDATE_ROOT_PROGRAM_SOURCE_MISMATCH')
         programs.append(trusted.decode('utf-8'))
     context = _profile_context(plan, profile, initial_platform_state)
+    validate_workload_context(context)
     args = dict(session_id=plan.session_id, profile=profile.profile, input_digest=plan.candidate_input_digest,
         verified_digest=plan.verified_candidate_digest, inventory_digest=material.tree_inventory_identity,
         context=context)
@@ -152,9 +183,10 @@ def _root_program(provider, plan, profile, initial_platform_state):
         + " scope['run_fixed_candidate'](**" + repr(args) + ',diagnostic=diagnostic)\n'
         + "except BaseException:\n diagnostic.error('ROOT_EXECUTION_FAILED')\n diagnostic.exited('ROOT',2)\n raise SystemExit(2)\n"
         + "diagnostic.exited('ROOT',0)\n")
-    encoded = base64.b64encode(zlib.compress(program.encode('utf-8'), level=9)).decode('ascii')
-    if len(encoded) > 20000:
+    raw = program.encode('utf-8')
+    if len(raw) > MAX_ROOT_PROGRAM_BYTES:
         raise ControllerFailure('CANDIDATE_ROOT_PROGRAM_SIZE_INVALID')
+    encoded = base64.b64encode(zlib.compress(raw, level=9)).decode('ascii')
     return 'import base64,zlib;exec(compile(zlib.decompress(base64.b64decode(' + repr(encoded) + ")), '<fixed-candidate-root>', 'exec'))"
 
 
@@ -225,7 +257,20 @@ if not reader.public()['root_started']:
 diagnostic.exited('SUDO',code)
 sys.exit(code)
 '''
-    return '/usr/bin/python3 -I -B -c ' + shlex.quote(program)
+    raw = program.encode('utf-8')
+    if len(raw) > MAX_REMOTE_PROGRAM_BYTES:
+        raise ControllerFailure('CANDIDATE_WORKLOAD_PROGRAM_SIZE_INVALID')
+    encoded = base64.b64encode(zlib.compress(raw, 9)).decode('ascii')
+    # This is a fixed public program built from held source and exact context;
+    # no untrusted bytes can enter its compressed payload. Verify its decoded
+    # size too, while preserving the exact original program before execution.
+    wrapper = ('import base64,zlib;d=zlib.decompressobj();p=d.decompress(base64.b64decode('
+        + repr(encoded) + '),' + str(MAX_REMOTE_PROGRAM_BYTES + 1) + ')\n'
+        + 'if not (len(p)<=' + str(MAX_REMOTE_PROGRAM_BYTES)
+        + ' and d.eof and not d.unconsumed_tail and not d.unused_data):'
+        + " raise ValueError('CANDIDATE_WORKLOAD_PROGRAM_SIZE_INVALID')\n"
+        + "exec(compile(p,'<fixed-workload-transport>','exec'))")
+    return '/usr/bin/python3 -I -B -c ' + shlex.quote(wrapper)
 
 
 class WorkloadFailure(ControllerFailure):
@@ -360,8 +405,10 @@ class _WorkloadSupervisor(SessionSupervisor):
             formal_ssh_context=self._role == 'FORMAL_WORKLOAD')
         try:
             self._workload_deadline = time.monotonic() + WORKLOAD_SECONDS
+            argv = self._provider._ssh_argv(self._authority, command)
+            validate_workload_command_budget((str(self._provider._tool_path(h.SSH)), *argv[1:]))
             with hold_windows_private_file(self._authority.known_hosts_file):
-                completed = self._provider._run(self._provider._ssh_argv(self._authority, command),
+                completed = self._provider._run(argv,
                     code='CANDIDATE_VM_PROFILE_EXECUTION_FAILED', timeout=WORKLOAD_SECONDS,
                     allowed=frozenset({0, 2}), openssh=True, guest_exchange=self._exchange_workload)
             if (self._delivery_attempts[self._role] != 1 or self._delivery_completed[self._role] != 1
