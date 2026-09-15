@@ -66,6 +66,7 @@ def run(args):
     report={'schema':'animemo.published-formal-entry/v1','evidence_root':str(root),
         'tool_source_sha':tool_sha,'tool_source_tree':tool_tree,'formal_execution':'NOT_RUN',
         'release_authority_granted':False,'publish_authorized':False}
+    pending_output=[]
     try:
         with ExitStack() as stack:
             parent=stack.enter_context(hold_windows_private_path_authority(root,allow_leaf_child_writes=True))
@@ -113,8 +114,11 @@ def run(args):
                                         publication_root=publication_root,private_work_root=root,output_root=root/'formal-output',
                                         provider=provider,_parent_path_authority=parent,
                                         local_authorization_id=args.authorization_id,linux_gh_package=args.linux_gh_package,
-                                        windows_gh=gh)
-                                    report.update(formal_execution='EXECUTED',result=result)
+                                        windows_gh=gh,_output_transaction_sink=pending_output)
+                                    audit=result.get('executionReceipt',{}).get('credential_session',{})
+                                    resources=audit.get('profile_resources',{})
+                                    report.update(formal_execution=('EXECUTED' if result.get('status')=='PASS'
+                                        else 'ATTEMPTED' if resources else 'NOT_RUN'),result=result)
                             else:
                                 from scripts.formal_product_probe import probe_published_product
                                 report['product_preflight']=probe_published_product(loaded=material.loaded,windows_gh=gh,
@@ -123,7 +127,19 @@ def run(args):
                         finally:
                             history.close()
             report['current_holds_released']=True
+        # The entry owns the outer material/source/provider/path lifecycles.
+        # Their exits must all succeed before any consumable PASS is committed.
+        if pending_output:
+            transaction,result=pending_output[0]
+            transaction.commit(result)
+            transaction.cleanup()
+            pending_output.clear()
     except BaseException as error:
+        for transaction,_result in pending_output:
+            try:
+                transaction.cleanup()
+            except BaseException:
+                pass  # Preserve the primary failure and never commit.
         report.update(status='ERROR',failure_code=getattr(error,'code','FORMAL_ENTRY_FAILED'))
         try:
             with args.output.open('x',encoding='utf-8') as stream:

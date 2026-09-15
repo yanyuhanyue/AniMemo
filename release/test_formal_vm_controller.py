@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from release.formal_credential_test_support import with_test_credentials
+
 import hashlib
 import json
 import os
@@ -484,13 +486,13 @@ class FormalVmControllerTests(unittest.TestCase):
     def _execution_context() -> FormalExecutionContext:
         return FormalExecutionContext(
             accepted_at="2026-08-30T01:02:03Z",
-            observed_at="2026-08-30T01:01:59Z",
+            observed_at="2026-08-30T01:02:03Z",
             operator_identity="formal-reviewer",
             run_id="formal-run-1",
             run_attempt=1,
             correlation_id="formal-correlation-1",
             current_workflow_commit="e" * 40,
-            execution_environment="windows-vmware-private",
+            execution_environment="test-private-vm",
             tool_identity="sha256:" + "f" * 64,
         )
 
@@ -649,7 +651,7 @@ class FormalVmControllerTests(unittest.TestCase):
         ):
             FormalVmController(
                 authority_verifier=RejectingVerifier(),
-                profile_executor=Executor(),
+                profile_executor=with_test_credentials(Executor()),
             ).execute(self._authority_request(), self._execution_context())
         self.assertEqual(events, ["provenance"])
 
@@ -690,7 +692,7 @@ class FormalVmControllerTests(unittest.TestCase):
 
         result = FormalVmController(
             authority_verifier=Verifier(),
-            profile_executor=Executor(),
+            profile_executor=with_test_credentials(Executor()),
         ).execute(request, self._execution_context())
 
         self.assertEqual(
@@ -753,7 +755,7 @@ class FormalVmControllerTests(unittest.TestCase):
             docker_base_identity="sha256:" + "9" * 64,
             runtime_base_identity="sha256:" + "a" * 64,
             accepted_at="2026-08-30T01:02:03Z",
-            observed_at="2026-08-30T01:01:59Z",
+            observed_at="2026-08-30T01:02:03Z",
             operator_identity="formal-schema-parity",
         )
         evidence = record["formal_evidence"]
@@ -903,7 +905,7 @@ class FormalVmControllerTests(unittest.TestCase):
                 return FormalVmControllerTests._observation(authority, profile)
 
         result = FormalVmController(
-            authority_verifier=Verifier(), profile_executor=Executor()
+            authority_verifier=Verifier(), profile_executor=with_test_credentials(Executor())
         ).execute(request, self._execution_context())
         tampered = json.loads(json.dumps(result["rcLiveAcceptanceInput"]))
         tampered["formal_profile_receipt_digests"]["formal_fresh"] = (
@@ -962,7 +964,7 @@ class FormalVmControllerTests(unittest.TestCase):
                 return FormalVmControllerTests._observation(authority, profile)
 
         result = FormalVmController(
-            authority_verifier=Verifier(), profile_executor=Executor()
+            authority_verifier=Verifier(), profile_executor=with_test_credentials(Executor())
         ).execute(request, self._execution_context())
         mixed_input = json.loads(json.dumps(result["rcLiveAcceptanceInput"]))
         mixed_input["source_sha"] = "f" * 40
@@ -1000,7 +1002,7 @@ class FormalVmControllerTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             formal_provenance.FormalProducerError,
-            "FORMAL_ACCEPTANCE_BUNDLE_BINDING_MISMATCH",
+            "FORMAL_CREDENTIAL_SESSION_INVALID",
         ):
             validate_formal_acceptance_bundle(
                 {
@@ -1038,7 +1040,7 @@ class FormalVmControllerTests(unittest.TestCase):
                 return FormalVmControllerTests._observation(authority, profile)
 
         result = FormalVmController(
-            authority_verifier=Verifier(), profile_executor=Executor()
+            authority_verifier=Verifier(), profile_executor=with_test_credentials(Executor())
         ).execute(request, self._execution_context())
         profiles = dict(result["profileReceipts"])
         profiles["FORMAL_FRESH"], profiles["FORMAL_DOCKER"] = (
@@ -1093,14 +1095,14 @@ class FormalVmControllerTests(unittest.TestCase):
                 return FormalVmControllerTests._observation(authority, profile)
 
         controller = FormalVmController(
-            authority_verifier=Verifier(), profile_executor=Executor()
+            authority_verifier=Verifier(), profile_executor=with_test_credentials(Executor())
         )
         first = controller.execute(request, self._execution_context())
         second = controller.execute(
             request,
             FormalExecutionContext(
                 accepted_at="2026-08-31T11:12:13Z",
-                observed_at="2026-08-31T11:12:11Z",
+                observed_at="2026-08-31T11:12:14Z",
                 operator_identity="different-display-name",
                 run_id="formal-run-2",
                 run_attempt=2,
@@ -1235,7 +1237,7 @@ class FormalVmControllerTests(unittest.TestCase):
                 )
 
         result = FormalVmController(
-            authority_verifier=Verifier(), profile_executor=Executor()
+            authority_verifier=Verifier(), profile_executor=with_test_credentials(Executor())
         ).execute(request, self._execution_context())
         docker = result["aggregateReceipt"]["profile_results"]["formal_docker"]
         self.assertEqual(docker["status"], "FAIL")
@@ -1283,7 +1285,7 @@ class FormalVmControllerTests(unittest.TestCase):
                 return FormalVmControllerTests._observation(authority, profile)
 
         result = FormalVmController(
-            authority_verifier=Verifier(), profile_executor=Executor()
+            authority_verifier=Verifier(), profile_executor=with_test_credentials(Executor())
         ).execute(request, self._execution_context())
         self.assertEqual(called, ["FORMAL_FRESH", "FORMAL_DOCKER", "FORMAL_OFFLINE"])
         self.assertEqual(result["status"], "FAIL")

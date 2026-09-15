@@ -5205,6 +5205,7 @@ class ClosedVmwareProvider:
         profile_authority_stack = ExitStack()
         clone_authority_stack = ExitStack()
         operation = {"profile": plan.profile, "clone_vmx": str(authority.clone_vmx),
+                     "clone_identity": plan.clone_identity, "snapshot_identity": plan.snapshot_identity,
                      "retained_work_root": str(work_root), "power_state": "NOT_STARTED",
                      "cleanup_errors": [], "lease_released": False, "result": "ERROR"}
         self._profile_operation_results[plan.profile] = operation

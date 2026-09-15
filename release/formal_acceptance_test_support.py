@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from release.formal_credential_test_support import with_test_credentials
+
 import hashlib
 import json
 from typing import Any
@@ -256,7 +258,7 @@ def build_test_formal_acceptance(
     try:
         result = FormalVmController(
             authority_verifier=Verifier(),
-            profile_executor=Executor(),
+            profile_executor=with_test_credentials(Executor()),
         ).execute(
             request,
             FormalExecutionContext(

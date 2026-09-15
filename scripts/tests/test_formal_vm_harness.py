@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from release.formal_credential_test_support import with_test_credentials
+
 import hashlib
 import inspect
 import io
@@ -1017,7 +1019,7 @@ class FormalVmHarnessTests(unittest.TestCase):
         )
         execution = FormalExecutionContext(
             accepted_at="2026-08-30T01:02:03Z",
-            observed_at="2026-08-30T01:01:59Z",
+            observed_at="2026-08-30T01:02:03Z",
             operator_identity="formal-reviewer",
             run_id="formal-run-1",
             run_attempt=1,
@@ -1077,8 +1079,8 @@ class FormalVmHarnessTests(unittest.TestCase):
             [
                 "preflight",
                 "profiles",
-                "commit",
                 "runtime-cleanup",
+                "commit",
                 "output-cleanup",
             ],
         )
@@ -1551,7 +1553,7 @@ class FormalVmHarnessTests(unittest.TestCase):
                 self.request(),
                 FormalExecutionContext(
                     accepted_at="2026-08-30T01:02:03Z",
-                    observed_at="2026-08-30T01:01:59Z",
+                    observed_at="2026-08-30T01:02:03Z",
                     operator_identity="formal-reviewer",
                     run_id="formal-run-1",
                     run_attempt=1,
@@ -1758,7 +1760,7 @@ class FormalVmHarnessTests(unittest.TestCase):
         request = self.request()
         execution = FormalExecutionContext(
             accepted_at="2026-08-30T01:02:03Z",
-            observed_at="2026-08-30T01:01:59Z",
+            observed_at="2026-08-30T01:02:03Z",
             operator_identity="formal-reviewer",
             run_id="formal-run-1",
             run_attempt=1,
@@ -1854,7 +1856,7 @@ class FormalVmHarnessTests(unittest.TestCase):
                     request=self.request(),
                     execution=FormalExecutionContext(
                         accepted_at="2026-08-30T01:02:03Z",
-                        observed_at="2026-08-30T01:01:59Z",
+                        observed_at="2026-08-30T01:02:03Z",
                         operator_identity="formal-reviewer",
                         run_id="formal-run-1",
                         run_attempt=1,
@@ -1885,7 +1887,7 @@ class FormalVmHarnessTests(unittest.TestCase):
         authority = self.authority()
         execution = FormalExecutionContext(
             accepted_at="2026-08-30T01:02:03Z",
-            observed_at="2026-08-30T01:01:59Z",
+            observed_at="2026-08-30T01:02:03Z",
             operator_identity="formal-reviewer",
             run_id="formal-run-failure",
             run_attempt=1,
@@ -1904,7 +1906,7 @@ class FormalVmHarnessTests(unittest.TestCase):
                 raise FormalProducerError("FORMAL_VM_PROVIDER_FAILED")
 
         result = FormalVmController(
-            authority_verifier=Verifier(), profile_executor=Executor()
+            authority_verifier=Verifier(), profile_executor=with_test_credentials(Executor())
         ).execute(request, execution)
         self.assertEqual(result["status"], "FAIL")
         self.assertIsNone(result["rcLiveAcceptanceInput"])
@@ -1963,7 +1965,7 @@ class FormalVmHarnessTests(unittest.TestCase):
         authority = self.authority()
         execution = FormalExecutionContext(
             accepted_at="2026-08-30T01:02:03Z",
-            observed_at="2026-08-30T01:01:59Z",
+            observed_at="2026-08-30T01:02:03Z",
             operator_identity="formal-reviewer",
             run_id="formal-run-controlled-failure",
             run_attempt=1,
@@ -1986,7 +1988,7 @@ class FormalVmHarnessTests(unittest.TestCase):
                 )
 
         result = FormalVmController(
-            authority_verifier=Verifier(), profile_executor=Executor()
+            authority_verifier=Verifier(), profile_executor=with_test_credentials(Executor())
         ).execute(request, execution)
         transaction_kwargs = {
             "candidate_aggregate_receipt_digest": (

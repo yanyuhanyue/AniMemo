@@ -5,6 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "credential_session",
     "schema", "version", "formal_authority_identity", "verified_candidate_digest",
     "candidate_aggregate_receipt_digest", "candidate_profile_receipt_digests",
     "candidate_source_vm_authority_identity",
@@ -25,6 +26,7 @@
     "receipt_digest"
   ],
   "properties": {
+    "credential_session": {"type": "object"},
     "schema": {"const": "animemo.formal-execution-receipt/v1"},
     "version": {"const": 1},
     "formal_authority_identity": {"$ref": "#/$defs/digest"},

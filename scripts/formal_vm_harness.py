@@ -1054,8 +1054,13 @@ class ClosedFormalVmProfileExecutor:
         self.product_preflight = None
         self._local_authorization = None
         self._batch = None
+        self._cleanup_done = False
+        self.final_execution = None
+        self.credential_session = None
 
     def cleanup(self) -> None:
+        if self._cleanup_done:
+            return
         temporary = self._snapshot_temporary
         self._snapshot_temporary = None
         self._staging_root = None
@@ -1072,6 +1077,28 @@ class ClosedFormalVmProfileExecutor:
             finally:
                 if temporary is not None:
                     temporary.cleanup()
+        self._cleanup_done = True
+
+    def finalize_execution(self, execution):
+        """Close the real credential round before any successful evidence exists."""
+        if type(self._provider) is not ClosedVmwareProvider:
+            self.cleanup()
+            return execution, None
+        confirmation = (dict(self._local_authorization.body)
+            if self._local_authorization is not None else None)
+        self.cleanup()
+        if confirmation is None or self._batch is None:
+            raise FormalProducerError('FORMAL_PRODUCT_ATTESTATION_PREFLIGHT_REJECTED'
+                if self.product_preflight is not None else 'FORMAL_LOCAL_CONFIRMATION_REQUIRED')
+        from dataclasses import replace
+        from datetime import datetime, timezone
+        self.credential_session = {'schema':'animemo.formal-credential-session/v1',
+            'confirmation':confirmation,'batch':self._batch.record,'cleanup_completed':True,
+            'profile_resources':json.loads(canonical_json_bytes(self._provider._profile_operation_results))}
+        self.final_execution = replace(execution,
+            accepted_at=datetime.fromtimestamp(confirmation['confirmed_utc_seconds'],timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            observed_at=datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+        return self.final_execution, self.credential_session
 
     def _plan_for(self, authority: VerifiedFormalRcAuthority) -> ClosedVmProviderPlan:
         if self._plan is None:
@@ -2380,6 +2407,7 @@ def execute_qualified_formal_production(
     local_authorization_id: str | None = None,
     linux_gh_package: Path | None = None,
     windows_gh: Path | None = None,
+    _output_transaction_sink: list | None = None,
 ) -> dict[str, Any]:
     """One in-memory Candidate→Formal continuation entry for the parent worker.
 
@@ -2387,6 +2415,11 @@ def execute_qualified_formal_production(
     it is the closed object returned by the Candidate controller continuation.
     """
 
+    if _output_transaction_sink is not None and (type(_output_transaction_sink) is not list or _output_transaction_sink):
+        raise FormalProducerError('FORMAL_OUTPUT_TRANSACTION_INVALID')
+    if (type(provider) is ClosedVmwareProvider and getattr(provider,'_execution',None) is not None
+            and _output_transaction_sink is None):
+        raise FormalProducerError('FORMAL_OUTER_LIFECYCLE_COMMIT_REQUIRED')
     request = qualified_candidate.issue_request(
         publication_identity=publication_identity,
         attestation_claim_identities=attestation_claim_identities,
@@ -2423,6 +2456,7 @@ def execute_qualified_formal_production(
         ),
         parent_path_authority=_parent_path_authority,
     )
+    transferred = False
     try:
         if transaction.reused:
             return {
@@ -2454,12 +2488,25 @@ def execute_qualified_formal_production(
                     ),
                     profile_executor=executor,
                 ).execute(request, execution)
-                transaction.commit(result)
-                return result
-            finally:
+            except BaseException:
+                try:
+                    executor.cleanup()
+                except BaseException:
+                    pass  # Preserve the primary error; no output is committed.
+                raise
+            else:
                 executor.cleanup()
+        if executor.final_execution is not None:
+            transaction._execution = executor.final_execution
+        if _output_transaction_sink is None:
+            transaction.commit(result)
+        else:
+            _output_transaction_sink.append((transaction,result))
+            transferred = True
+        return result
     finally:
-        transaction.cleanup()
+        if not transferred:
+            transaction.cleanup()
 
 
 def main(argv: list[str] | None = None) -> int:
