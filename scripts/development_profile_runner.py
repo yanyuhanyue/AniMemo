@@ -24,6 +24,9 @@ _DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 
 
 def validate_development_report(value, *, loaded, expected_binding, expected_context, expected_service_source):
+    validate_binding(expected_binding)
+    if expected_binding['workload_mode'] != 'CLEAN_PREACCEPTANCE':
+        raise runner.ProfileRunnerError('DEVELOPMENT_PROFILE_BINDING_INVALID')
     fields = {'schema', 'purpose', 'result', 'binding', 'context', 'installer_output',
               'started_at', 'completed_at', 'candidate_acceptance_authority_granted',
               'publish_authorized', 'report_digest'}
@@ -67,7 +70,9 @@ def validate_binding(binding):
     if (type(binding) is not dict or set(binding) != {'plan_digest', 'session_id',
             'execution_source_sha', 'execution_source_tree', 'execution_inventory_digest',
             'verified_candidate_digest', 'material_source_sha', 'material_source_tree',
-            'qualification_run_id'}
+            'qualification_run_id', 'workload_mode'}
+            or type(binding['workload_mode']) is not str
+            or binding['workload_mode'] not in {'CLEAN_PREACCEPTANCE', 'PLATFORM_DIAGNOSTIC'}
             or any(type(binding[name]) is not str or not _SHA.fullmatch(binding[name])
                    for name in ('execution_source_sha', 'execution_source_tree', 'material_source_sha', 'material_source_tree'))
             or any(type(binding[name]) is not str or not _DIGEST.fullmatch(binding[name])
@@ -80,6 +85,8 @@ def validate_binding(binding):
 
 def execute_development_profile(*, binding, profile, context_b64url, command_runner=None):
     validate_binding(binding)
+    if binding['workload_mode'] != 'CLEAN_PREACCEPTANCE':
+        raise runner.ProfileRunnerError('DEVELOPMENT_PROFILE_BINDING_INVALID')
     before = load_verified_candidate(binding['verified_candidate_digest']).candidate_input
     if (before['source_sha'] != binding['material_source_sha']
             or before['source_tree'] != binding['material_source_tree']

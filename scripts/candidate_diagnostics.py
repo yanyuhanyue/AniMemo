@@ -8,6 +8,7 @@ import signal
 import struct
 import subprocess
 import threading
+from datetime import datetime
 
 SCHEMA = 'animemo.candidate-operation-diagnostic/v1'
 MAX_DIAGNOSTIC_BYTES = 16 * 1024
@@ -100,6 +101,7 @@ RUNNER_FAILURE_CODES = (
     'DEVELOPMENT_PROFILE_BINDING_INVALID', 'DEVELOPMENT_MATERIAL_BINDING_INVALID',
 )
 ERRORS = (
+    'APT_DIAGNOSTIC_WRITE_FAILED',
     'UNKNOWN_BEFORE_ROOT_START', 'ROOT_INITIALIZATION_FAILED',
     'MATERIAL_FINALIZATION_FAILED', 'MATERIAL_INVENTORY_MISMATCH',
     'RUNTIME_INITIALIZATION_FAILED', 'RUNNER_INITIALIZATION_FAILED',
@@ -117,6 +119,13 @@ ERRORS = (
 FD_ENV = 'ANIMEMO_CANDIDATE_DIAGNOSTIC_FD'
 OP_ENV = 'ANIMEMO_CANDIDATE_DIAGNOSTIC_OPERATION'
 _OPERATION = re.compile(r'sha256:[0-9a-f]{64}\Z')
+APT_OUTCOMES = ('EXITED', 'TIMEOUT', 'CANCELLED', 'LAUNCH_FAILED', 'PROCESS_ERROR',
+                'TOOL_VERSION_UNSUPPORTED')
+APT_CATEGORIES = ('SIGNATURE', 'CERTIFICATE', 'SOURCE_IDENTITY', 'LOCK', 'RATE_LIMIT',
+                  'DNS', 'NETWORK', 'DISK', 'PARTIAL_INDEX', 'FETCH_FAILED', 'NONE', 'UNKNOWN')
+APT_HOSTS = ('archive.ubuntu.com', 'security.ubuntu.com', 'ports.ubuntu.com')
+APT_INDEXES = ('InRelease', 'Release', 'Packages', 'Translation', 'DEP-11', 'Contents')
+APT_SECONDARY_ERRORS = ('PROCESS_CLEANUP_FAILED', 'OUTPUT_DRAIN_FAILED')
 
 
 class DiagnosticError(ValueError):
@@ -138,6 +147,60 @@ def _json(data):
             parse_constant=lambda _: (_ for _ in ()).throw(DiagnosticError()))
     except (ValueError, UnicodeError):
         raise DiagnosticError() from None
+
+
+def validate_apt_observation(value):
+    """Closed fields only: raw APT text/URLs/environment are never transportable."""
+    def enum_list(items, choices):
+        return (type(items) is list and len(items) <= len(choices)
+            and all(type(item) is str and item in choices for item in items)
+            and len(set(items)) == len(items))
+
+    fields = {'operation_class', 'tool', 'tool_version', 'argv_contract', 'started_at',
+              'ended_at', 'returncode', 'outcome', 'categories', 'stdout', 'stderr', 'secondary_errors'}
+    if type(value) is not dict or set(value) != fields:
+        raise DiagnosticError()
+    version, code = value['tool_version'], value['returncode']
+    if not (value['operation_class'] in ('UPDATE', 'INSTALL', 'SIMULATE')
+            and value['tool'] == '/usr/bin/apt-get'
+            and (version is None or type(version) is str and re.fullmatch(
+                r'[0-9]+\.[0-9]+(?:\.[0-9]+)?[a-zA-Z0-9.+~:-]{0,32}', version))
+            and type(value['argv_contract']) is str and _OPERATION.fullmatch(value['argv_contract'])
+            and (code is None or type(code) is int and -255 <= code <= 255)
+            and value['outcome'] in APT_OUTCOMES
+            and (value['outcome'] != 'EXITED' or code is not None)
+            and enum_list(value['categories'], APT_CATEGORIES + APT_OUTCOMES[1:])
+            and value['categories']
+            and enum_list(value['secondary_errors'], APT_SECONDARY_ERRORS)):
+        raise DiagnosticError()
+    try:
+        stamps = [value[name] for name in ('started_at', 'ended_at')]
+        if not all(type(stamp) is str and re.fullmatch(
+                r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z', stamp)
+                for stamp in stamps):
+            raise ValueError()
+        if datetime.fromisoformat(stamps[0]) > datetime.fromisoformat(stamps[1]):
+            raise ValueError()
+    except ValueError:
+        raise DiagnosticError() from None
+    for name in ('stdout', 'stderr'):
+        stream = value[name]
+        if not (type(stream) is dict and set(stream) == {
+                'bytes_seen', 'truncated', 'missing', 'categories', 'hosts', 'indexes'}
+                and type(stream['bytes_seen']) is int and 0 <= stream['bytes_seen'] <= 2**63 - 1
+                and type(stream['truncated']) is bool and type(stream['missing']) is bool
+                and enum_list(stream['categories'], APT_CATEGORIES[:-2])
+                and enum_list(stream['hosts'], APT_HOSTS)
+                and enum_list(stream['indexes'], APT_INDEXES)):
+            raise DiagnosticError()
+    categories = set(value['stdout']['categories']) | set(value['stderr']['categories'])
+    if value['outcome'] != 'EXITED':
+        categories.add(value['outcome'])
+    if not categories:
+        categories.add('NONE' if code == 0 else 'UNKNOWN')
+    if set(value['categories']) != categories:
+        raise DiagnosticError()
+    return value
 
 
 def validate_event(value, operation):
@@ -171,6 +234,10 @@ def validate_event(value, operation):
         fields = {'commands', 'pull_denied_commands', 'doctor_checks'}
         valid = (set(value) == common | fields
             and all(type(value[key]) is int and 0 <= value[key] <= MAX_RECEIPT_BYTES for key in fields))
+    elif kind == 'APT':
+        valid = set(value) == common | {'observation'}
+        if valid:
+            validate_apt_observation(value['observation'])
     else:
         valid = False
     if not valid:

@@ -55,9 +55,10 @@ def _require_plan(purpose, plan):
         else type(plan) is CandidateHarnessPlan if purpose == 'CANDIDATE_ACCEPTANCE'
         else is_formal_plan(plan) if purpose == 'FORMAL_POSTPUBLICATION' else False)
     _require(accepted)
+    expected_profiles = ('FRESH_BASE',) if is_development_plan(plan) and plan.platform_diagnostic else PROFILES
     _require(sha256_bytes(canonical_json_bytes(plan.identity_body())) == plan.plan_digest
-        and tuple(p.profile for p in plan.profiles) == PROFILES
-        and len({p.clone_identity for p in plan.profiles}) == len(PROFILES))
+        and tuple(p.profile for p in plan.profiles) == expected_profiles
+        and len({p.clone_identity for p in plan.profiles}) == len(expected_profiles))
 
 
 class LocalRoundReservation:
@@ -91,7 +92,8 @@ class LocalBatchAuthorization:
         self.deadline = monotonic_now + WINDOW_SECONDS
         self.expires_utc = body['confirmed_utc_seconds'] + WINDOW_SECONDS
         self.purpose, self.authorization_id = body['purpose'], body['authorization_id']
-        self.round_limit = PURPOSES[self.purpose]
+        self.round_limit = body['round_limit']
+        _require(type(self.round_limit) is int and 1 <= self.round_limit <= PURPOSES[self.purpose])
         self._reservations, self._sessions, self._clones = [], set(), set()
         self._closed, self._capture_consumed = False, False
         self._lock = threading.RLock()
@@ -147,33 +149,47 @@ class LocalBatchAuthorization:
         raise TypeError('Local batch consent cannot be serialized')
 
 
-def confirm_local_batch(*, authorization_id, purpose, plan):
-    from scripts.candidate_vm_harness import canonical_json_bytes, sha256_bytes
+def validate_authorization_id(authorization_id, purpose):
+    """Validate a label; only native confirmation can issue runtime consent."""
     _require(type(authorization_id) is str and re.fullmatch('[A-Z][A-Z0-9_]{15,159}', authorization_id)
         and authorization_id != RETIRED_FORMAL_AUTHORIZATION and purpose in PURPOSES)
     _require(authorization_id != DEVELOPMENT_AUTHORIZATION or purpose == 'LOCAL_INSTALLER_DEVELOPMENT')
+
+
+def authorization_root(authorization_id):
+    return Path('E:/')/hashlib.sha256(authorization_id.encode('ascii')).hexdigest()
+
+
+def confirm_local_batch(*, authorization_id, purpose, plan, round_limit=1):
+    from scripts.candidate_vm_harness import canonical_json_bytes, sha256_bytes
+    from release.candidate_failure_policy import FAILURE_POLICY
+    validate_authorization_id(authorization_id, purpose)
+    _require(type(round_limit) is int and 1 <= round_limit <= PURPOSES[purpose])
     _require_plan(purpose, plan)
     if purpose == 'LOCAL_INSTALLER_DEVELOPMENT':
         from scripts.development_plan import is_development_plan
-        _require(is_development_plan(plan) and authorization_id == DEVELOPMENT_AUTHORIZATION)
+        _require(is_development_plan(plan))
     elif purpose == 'CANDIDATE_ACCEPTANCE':
         from scripts.candidate_vm_harness import CandidateHarnessPlan
         _require(type(plan) is CandidateHarnessPlan)
     else:
         from scripts.formal_plan import is_formal_plan
         _require(is_formal_plan(plan))
-    root = Path('E:/')/hashlib.sha256(authorization_id.encode('ascii')).hexdigest()
+    root = authorization_root(authorization_id)
     _require(not root.exists())
     body = {'schema': 'animemo.local-batch-confirmation/v1', 'purpose': purpose,
         'authorization_id': authorization_id, 'initial_plan_digest': plan.plan_digest,
         'material_identity': material_identity(plan), 'initial_plan': plan.as_dict(),
-        'round_limit': PURPOSES[purpose], 'capture_limit': 1, 'window_seconds': WINDOW_SECONDS,
+        'round_limit': round_limit, 'capture_limit': 1, 'window_seconds': WINDOW_SECONDS,
+        'failure_policy': FAILURE_POLICY,
         'release_authority_granted': False, 'publish_authorized': False}
     body['execution_source_sha'] = getattr(plan, 'execution_source_sha', plan.source_sha)
     body['execution_source_tree'] = getattr(plan, 'execution_source_tree', plan.source_tree)
     console = WindowsConsoleCapture()
     console.confirm_batch('PREPRODUCTION ONLY. Confirm this frozen batch before any Clone.\n'
         'One password capture only; cancelling/failing does not restore it.\n'
+        'A verified business failure may continue only after complete Profile cleanup; '
+        'identity, delivery, timeout or cleanup uncertainty revokes the batch.\n'
         + json.dumps({key: value for key, value in body.items() if key != 'initial_plan'}, ensure_ascii=False, indent=2)
         + '\nProfiles: '+json.dumps([p.as_dict() for p in plan.profiles],ensure_ascii=False))
     holds = ExitStack()

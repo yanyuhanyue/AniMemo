@@ -17,6 +17,18 @@ from scripts import development_capture_scope as scope
 from scripts import development_controller as controller
 from scripts import development_session_owner as owners
 from scripts.tests import test_local_candidate_development as development_fixtures
+from scripts.tests.test_candidate_diagnostics import business_failure_diagnostic
+from release.candidate_failure_policy import FAILURE_POLICY, BUSINESS
+
+
+def cleaned_business_operation():
+    return {'failure_policy': FAILURE_POLICY, 'failure_classification': BUSINESS,
+        'workload_process_completed': True, 'workload_delivery_completed': True,
+        'workload_identity_rechecked': True, 'workload_supervisor_closed': True,
+        'continuation_source_verified': True, 'power_state': 'STOPPED',
+        'cleanup_errors': [], 'session_keys_removed': True, 'known_hosts_removed': True,
+        'lease_released': True, 'continuation_authorized': True,
+        'continuation_receipt_digest': 'sha256:' + 'a' * 64}
 
 
 @unittest.skipUnless(os.name == 'nt', 'real Windows scope locking')
@@ -77,23 +89,23 @@ class DevelopmentMemoryOwnerTests(unittest.TestCase):
         # The producer/Guest protocol tests exercise delivery; this test keeps
         # the resulting closed record to exercise the owner handoff itself.
         profile = batch.plan.profiles[0].profile
-        for role, entry in batch._record['profiles'][profile].items():
-            entry.update(delivery_attempts=1, delivery_completed=1, target_verified=True, lease_verified=True,
-                operation_result='ERROR' if role == 'CANDIDATE_WORKLOAD' else 'PASS')
-        batch.revoke('CANDIDATE_SECRET_USE_FAILED')
+        for name, roles in batch._record['profiles'].items():
+            for role, entry in roles.items():
+                entry.update(delivery_attempts=1, delivery_completed=1, target_verified=True, lease_verified=True,
+                    operation_result='FAIL' if name == profile and role == 'CANDIDATE_WORKLOAD' else 'PASS')
         batch.close()
         return {'credential_session': batch.record, 'source_preserved': True, 'cleanup_errors': [],
-            'profile_results': {name: {'status': 'ERROR' if name == profile else 'NOT_RUN_SHARED_BLOCKER'}
+            'failure_policy': FAILURE_POLICY,
+            'profile_results': {name: {'status': 'ERROR' if name == profile else 'PASS'}
                 for name in ('FRESH_BASE', 'DOCKER_BASE', 'RUNTIME_BASE_OFFLINE')},
             'private_material_root_released': True, 'private_execution_source_root_released': True,
             'private_material_root': str(scope.LEDGER.parent / 'absent-material'),
             'private_execution_source_root': str(scope.LEDGER.parent / 'absent-source'),
-            'profile_operations': {profile: {'power_state': 'STOPPED', 'clone_disposition': 'QUARANTINED',
-                'cleanup_errors': [], 'session_keys_removed': True, 'known_hosts_removed': True, 'lease_released': True}},
-            'workload_diagnostics': {profile: {'root_started': True, 'transport_error': None,
-                'profile_draft_received': False, 'host_receipt_parse': 'NOT_REACHED',
-                'exit_codes': {'INSTALLER': 0, 'RUNTIME_RUNNER': 2, 'ROOT': 2, 'SUDO': 2},
-                'errors': ['PROFILE_RECEIPT_INVALID', 'RUNNER_EXECUTION_FAILED', 'ROOT_EXECUTION_FAILED']}},
+            'profile_operations': {name: {**cleaned_business_operation(),
+                'clone_disposition': 'QUARANTINED' if name == profile else 'REMOVED',
+                'clone_vmx': str(scope.LEDGER.parent / ('removed-' + name))}
+                for name in batch._record['profiles']},
+            'workload_diagnostics': {profile: business_failure_diagnostic()},
             'status': 'FAIL', 'all_profiles_pass': False}
 
     def test_four_rounds_capture_once_and_keep_scope_exclusive_between_rounds(self):
@@ -158,6 +170,7 @@ class DevelopmentMemoryOwnerTests(unittest.TestCase):
         self.assertEqual(self.secret, self.original)
         batch.close()
         report = {'credential_session': batch.record, 'source_preserved': True, 'cleanup_errors': [],
+            'failure_policy': FAILURE_POLICY,
             'profile_results': {name: {'status': 'PASS'} for name in ('FRESH_BASE', 'DOCKER_BASE', 'RUNTIME_BASE_OFFLINE')},
             'private_material_root_released': True, 'private_execution_source_root_released': True,
             'private_material_root': str(scope.LEDGER.parent / 'absent-material'),
@@ -181,7 +194,7 @@ class DevelopmentMemoryOwnerTests(unittest.TestCase):
     def test_later_fatal_revocation_is_not_hidden_by_earlier_generic_failure(self):
         batch = self.begin(9)
         batch.revoke('CANDIDATE_SECRET_USE_FAILED')
-        self.assertEqual(self.secret, self.original)
+        self.assertEqual(self.secret, b'')
         batch.revoke('CANDIDATE_BATCH_DELIVERY_UNCERTAIN')
         self.assertEqual(self.secret, b'')
         self.assertTrue(self.owner.closed)
@@ -256,9 +269,7 @@ class DevelopmentMemoryOwnerTests(unittest.TestCase):
 
 class DevelopmentFailureClassificationTests(unittest.TestCase):
     def test_only_complete_authenticated_execution_failure_is_retained(self):
-        value = {'root_started': True, 'transport_error': None, 'profile_draft_received': False,
-            'host_receipt_parse': 'NOT_REACHED', 'errors': ['PROFILE_RECEIPT_INVALID'],
-            'exit_codes': {'INSTALLER': 0, 'ROOT': 2, 'RUNTIME_RUNNER': 2, 'SUDO': 2}}
+        value = business_failure_diagnostic()
         self.assertTrue(owners.authenticated_execution_failure(value))
         for changes in ({'root_started': False}, {'transport_error': 'TRANSPORT_TRUNCATED'},
                 {'profile_draft_received': True}, {'host_receipt_parse': 'REJECTED'},

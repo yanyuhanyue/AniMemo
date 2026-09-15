@@ -40,8 +40,9 @@ class FormalBatchSessionTests(unittest.TestCase):
         fixture.provider._development_source_authority=source
         root=Path(self.enterContext(private_windows_test_directory()))
         body=dict(purpose='FORMAL_POSTPUBLICATION',authorization_id='ANIMEMO_SYNTHETIC_FORMAL_TEST_V1',
+            round_limit=1,
             confirmed_utc_seconds=time.time(),material_identity=scopes.material_identity(plan),
-            initial_plan_digest=plan.plan_digest)
+            initial_plan_digest=plan.plan_digest, initial_plan=plan.as_dict())
         scope=scopes.LocalBatchAuthorization(scopes._ISSUER,body=body,root=root,
             holds=ExitStack(),monotonic_now=time.monotonic())
         self.addCleanup(scope.close)

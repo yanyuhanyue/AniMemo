@@ -69,6 +69,7 @@ from release.formal_windows_pretrust import (
     inspect_windows_pe_imports,
 )
 from release.materials import reject_duplicate_json_keys
+from release.candidate_failure_policy import FAILURE_POLICY, BUSINESS, SECURITY, cleanup_allows_continuation
 from release.contract import ReleaseContractError, rc_target_version
 from release.r2_prestate import (
     R2_AUTH_METHOD_ARGUMENT,
@@ -1751,6 +1752,7 @@ class CandidateHarnessPlan:
         return {
             "schema": "animemo.prepublication-candidate-vm-plan/v1",
             "version": 1,
+            "failurePolicy": FAILURE_POLICY,
             "mode": "PLAN_ONLY",
             "verifiedCandidateDigest": self.verified_candidate_digest,
             "candidateInputDigest": self.candidate_input_digest,
@@ -5207,7 +5209,9 @@ class ClosedVmwareProvider:
         operation = {"profile": plan.profile, "clone_vmx": str(authority.clone_vmx),
                      "clone_identity": plan.clone_identity, "snapshot_identity": plan.snapshot_identity,
                      "retained_work_root": str(work_root), "power_state": "NOT_STARTED",
-                     "cleanup_errors": [], "lease_released": False, "result": "ERROR"}
+                     "cleanup_errors": [], "lease_released": False, "result": "ERROR",
+                     "failure_policy": FAILURE_POLICY, "failure_classification": None,
+                     "continuation_authorized": False}
         self._profile_operation_results[plan.profile] = operation
         primary_error = None
         continue_batch_failure = False
@@ -5219,6 +5223,8 @@ class ClosedVmwareProvider:
                 operation["cleanup_errors"].append({"step": step,
                     "code": error.code if isinstance(error, CandidateHarnessError)
                     else "CANDIDATE_PROFILE_CLEANUP_UNCLASSIFIED"})
+                if self._candidate_batch is not None:
+                    self._candidate_batch.revoke('CANDIDATE_PROFILE_CLEANUP_FAILED')
                 return False
         def clear_keys():
             keys_ok = hosts_ok = True
@@ -5307,10 +5313,14 @@ class ClosedVmwareProvider:
             return receipt
         except BaseException as error:
             primary_error = error
+            operation['failure_classification'] = BUSINESS if continue_batch_failure else SECURITY
             if self._candidate_batch is not None:
                 if not continue_batch_failure:
                     self._candidate_batch.revoke('CANDIDATE_BATCH_PROFILE_FAILURE')
                 self._candidate_batch.cleanup_started(plan)
+                if continue_batch_failure:
+                    operation['continuation_source_verified'] = cleanup(
+                        'continuation_source', self._candidate_batch.check_source)
             operation["operation_failure_code"] = (error.code if isinstance(error, CandidateHarnessError)
                 else "CANDIDATE_PROFILE_UNCLASSIFIED_ERROR")
             if type(error) in (SessionKeyCommandError, VmHostCommandError):
@@ -5347,15 +5357,6 @@ class ClosedVmwareProvider:
                         operation["clone_disposition"] = "QUARANTINED"
                 else:
                     operation["clone_disposition"] = "RETAINED_CLEANUP_BLOCKED"
-            if profile_failure is error and not operation["cleanup_errors"]:
-                try:
-                    continuation = self.inspect_profile_continuation(plan=plan, harness_plan=harness_plan)
-                except BaseException:
-                    operation["cleanup_errors"].append({"step": "continuation",
-                        "code": "CANDIDATE_VM_CONTINUATION_UNVERIFIED"})
-                else:
-                    if continuation.continuation_safe:
-                        raise CandidateProfileExecutionError(profile_failure.code, continuation) from error
             raise
         finally:
             if plan.profile in self._candidate_diagnostics:
@@ -5379,6 +5380,26 @@ class ClosedVmwareProvider:
                 if primary_error is not None:
                     raise primary_error
                 raise CandidateHarnessError("CANDIDATE_PROFILE_CLEANUP_FAILED")
+            if primary_error is not None and continue_batch_failure:
+                # Lease release is part of cleanup. A receipt issued before
+                # this point must never authorize reuse after a failed release.
+                try:
+                    if (profile_failure is not primary_error
+                            or not cleanup_allows_continuation(operation)
+                            or self._candidate_batch is None or self._candidate_batch.cancelled.is_set()):
+                        raise CandidateHarnessError('CANDIDATE_VM_CONTINUATION_UNVERIFIED')
+                    self._candidate_batch.check_source()
+                    continuation = self.inspect_profile_continuation(plan=plan, harness_plan=harness_plan)
+                    _validate_continuation_receipt(continuation, profile=plan, plan=harness_plan)
+                except BaseException:
+                    operation['cleanup_errors'].append({'step': 'continuation',
+                        'code': 'CANDIDATE_VM_CONTINUATION_UNVERIFIED'})
+                    if self._candidate_batch is not None:
+                        self._candidate_batch.revoke('CANDIDATE_PROFILE_CLEANUP_FAILED')
+                    raise primary_error
+                operation['continuation_authorized'] = True
+                operation['continuation_receipt_digest'] = continuation.receipt_digest
+                raise CandidateProfileExecutionError(primary_error.code, continuation) from primary_error
 
     def execute_development_profile(self, *, plan, harness_plan, candidate_root, initial_platform_state):
         """Run a closed development plan through the existing Clone lifecycle."""
@@ -5824,6 +5845,20 @@ def _profile_result(
     }
 
 
+def validate_business_continuation(provider, harness_plan, profile, error):
+    """Consume the provider's post-cleanup decision, not an exception message."""
+    if type(error) is not CandidateProfileExecutionError:
+        raise CandidateHarnessError('CANDIDATE_VM_CONTINUATION_UNVERIFIED')
+    operation = getattr(provider, '_profile_operation_results', {}).get(profile.profile)
+    if (not cleanup_allows_continuation(operation)
+            or operation.get('continuation_authorized') is not True
+            or operation.get('continuation_receipt_digest') != error.continuation_receipt.receipt_digest
+            or getattr(provider, '_candidate_batch', None) is None
+            or provider._candidate_batch.cancelled.is_set()):
+        raise CandidateHarnessError('CANDIDATE_VM_CONTINUATION_UNVERIFIED')
+    return _validate_continuation_receipt(error.continuation_receipt, profile=profile, plan=harness_plan)
+
+
 def build_candidate_aggregate(plan, *, profile_results, receipts, candidate_prestate,
         candidate_poststate, r2_prestate_receipt, r2_poststate_receipt, plugin_origin):
     """Construct and validate content; this does not grant execution or release authority."""
@@ -5879,7 +5914,8 @@ def build_candidate_aggregate(plan, *, profile_results, receipts, candidate_pres
         "receipt_digest": "",
     }
     if plugin_origin is not None:
-        aggregate.update(schema="animemo.prepublication-candidate-acceptance-receipt/v4", version=4,
+        aggregate.update(schema="animemo.prepublication-candidate-acceptance-receipt/v5", version=5,
+            failure_policy=FAILURE_POLICY,
             plan_digest=plan.plan_digest, session_id=plan.session_id,
             r2_origin_prestate_receipt=r2_prestate_receipt,
             r2_origin_poststate_receipt=r2_poststate_receipt, profile_receipts=receipts)
@@ -5976,8 +6012,13 @@ def _execute_harness_plan(
     receipts: dict[str, dict[str, Any]] = {}
     profile_results: dict[str, dict[str, str | None]] = {}
     shared_blocker_code: str | None = None
+    def shared_blocker(code):
+        active = provider._candidate_batch if type(provider) is ClosedVmwareProvider else None
+        if active is not None:
+            active.revoke('CANDIDATE_BATCH_PROFILE_FAILURE')
+        return code
     progress.update(profileReceipts=receipts, profileResults=profile_results,
-        candidatePrestate=candidate_prestate, stage='PROFILES')
+        candidatePrestate=candidate_prestate, stage='PROFILES', failure_policy=FAILURE_POLICY)
     _checkpoint_candidate(provider, progress)
     for item in plan.profiles:
         result_key = PROFILE_RESULT_KEYS[item.profile]
@@ -6002,13 +6043,9 @@ def _execute_harness_plan(
             )
         except CandidateProfileExecutionError as error:
             try:
-                _validate_continuation_receipt(
-                    error.continuation_receipt,
-                    profile=item,
-                    plan=plan,
-                )
+                validate_business_continuation(provider, plan, item, error)
             except CandidateHarnessError as continuation_error:
-                shared_blocker_code = continuation_error.code
+                shared_blocker_code = shared_blocker(continuation_error.code)
                 profile_results[result_key] = _profile_result(
                     "ERROR",
                     failure_code=shared_blocker_code,
@@ -6020,14 +6057,14 @@ def _execute_harness_plan(
                 )
             continue
         except CandidateHarnessError as error:
-            shared_blocker_code = error.code
+            shared_blocker_code = shared_blocker(error.code)
             profile_results[result_key] = _profile_result(
                 "ERROR",
                 failure_code=shared_blocker_code,
             )
             continue
         except Exception:
-            shared_blocker_code = "CANDIDATE_PROFILE_UNCLASSIFIED_ERROR"
+            shared_blocker_code = shared_blocker("CANDIDATE_PROFILE_UNCLASSIFIED_ERROR")
             profile_results[result_key] = _profile_result(
                 "ERROR",
                 failure_code=shared_blocker_code,
@@ -6036,14 +6073,14 @@ def _execute_harness_plan(
         try:
             observed_original_hashes = dict(provider.inspect_original_hashes())
         except (CandidateHarnessError, OSError, TypeError, ValueError):
-            shared_blocker_code = "CANDIDATE_ORIGINAL_VM_STATE_UNVERIFIED"
+            shared_blocker_code = shared_blocker("CANDIDATE_ORIGINAL_VM_STATE_UNVERIFIED")
             profile_results[result_key] = _profile_result(
                 "ERROR",
                 failure_code=shared_blocker_code,
             )
             continue
         if observed_original_hashes != dict(plan.original_vm_hashes):
-            shared_blocker_code = "CANDIDATE_ORIGINAL_VM_MUTATED"
+            shared_blocker_code = shared_blocker("CANDIDATE_ORIGINAL_VM_MUTATED")
             profile_results[result_key] = _profile_result(
                 "ERROR",
                 failure_code=shared_blocker_code,
@@ -6060,7 +6097,7 @@ def _execute_harness_plan(
                 plan=plan,
             )
         except (CandidateHarnessError, OSError, TypeError, ValueError):
-            shared_blocker_code = "CANDIDATE_VM_CONTINUATION_UNVERIFIED"
+            shared_blocker_code = shared_blocker("CANDIDATE_VM_CONTINUATION_UNVERIFIED")
             profile_results[result_key] = _profile_result(
                 "ERROR",
                 failure_code=shared_blocker_code,
@@ -6073,6 +6110,7 @@ def _execute_harness_plan(
                 observed_original_hashes=observed_original_hashes,
             )
         except CandidateHarnessError as error:
+            shared_blocker_code = shared_blocker(error.code)
             if batch is not None:
                 batch.revoke('CANDIDATE_BATCH_RECEIPT_AUTHORITY_INVALID')
                 provider._candidate_diagnostics.get(item.profile, {})['host_receipt_parse'] = 'REJECTED'
@@ -6106,6 +6144,7 @@ def _execute_harness_plan(
             or receipt["original_vm_post_hashes"]
             != observed_original_hashes
         ):
+            shared_blocker_code = shared_blocker("CANDIDATE_PROFILE_RECEIPT_BINDING_MISMATCH")
             if batch is not None:
                 batch.revoke('CANDIDATE_BATCH_RECEIPT_AUTHORITY_INVALID')
                 provider._candidate_diagnostics.get(item.profile, {})['host_receipt_parse'] = 'REJECTED'

@@ -8,7 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from scripts import development_controller as c
-from scripts.guest_batch_scope import DEVELOPMENT_AUTHORIZATION
 
 
 def serve(args):
@@ -44,9 +43,9 @@ def serve(args):
                     stopped.set()
             status_thread = threading.Thread(target=status,daemon=True)
             status_thread.start()
-            first = SimpleNamespace(**vars(args), execute=True, confirm_batch=True,
-                authorization_id=DEVELOPMENT_AUTHORIZATION, execution_source_sha=sha,
-                execution_source_tree=tree,result=root/'round-0001-result.json')
+            first = SimpleNamespace(**{**vars(args), 'execute':True, 'confirm_batch':True,
+                'execution_source_sha':sha, 'execution_source_tree':tree,
+                'result':root/'round-0001-result.json'})
             report = run(first,confirmed_owner_sink=owners)
             previous['digest'] = c._write_new(first.result,report)
             if not owners:
@@ -112,6 +111,8 @@ def serve(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--control-root',required=True,type=Path)
+    parser.add_argument('--authorization-id',required=True)
+    parser.add_argument('--platform-diagnostic',action='store_true')
     parser.add_argument('--verified-candidate-digest',required=True)
     parser.add_argument('--qualification-run-id',required=True,type=int)
     parser.add_argument('--material-source-sha',required=True)

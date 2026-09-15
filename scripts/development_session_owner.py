@@ -6,11 +6,9 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from release.candidate_failure_policy import FAILURE_POLICY, business_failure_diagnostic, cleanup_allows_continuation
 
 SCHEMA = 'animemo.local-development-memory-owner/v1'
-# Application/report failures may retire a round while cleanup is checked.
-# Every other revocation still clears the owner immediately.
-RETAIN_PENDING_CLEANUP = frozenset({'CANDIDATE_SECRET_USE_FAILED', 'CANDIDATE_BATCH_PROFILE_FAILURE'})
 
 
 class DevelopmentOwnerError(RuntimeError):
@@ -31,23 +29,7 @@ def _material(plan):
 
 
 def authenticated_execution_failure(diagnostic):
-    from scripts.candidate_diagnostics import (
-        INSTALLER_FAILURE_CODES,
-        RUNNER_FAILURE_CODES,
-    )
-    if type(diagnostic) is not dict:
-        return False
-    codes = diagnostic.get('exit_codes', {})
-    allowed_errors = {'PROFILE_RECEIPT_INVALID', 'RUNNER_EXECUTION_FAILED', 'ROOT_EXECUTION_FAILED',
-        'INSTALLER_OUTPUT_INVALID', 'INSTALLER_EXECUTION_FAILED',
-        *INSTALLER_FAILURE_CODES, *RUNNER_FAILURE_CODES}
-    return (diagnostic.get('root_started') is True and diagnostic.get('transport_error') is None
-        and diagnostic.get('profile_draft_received') is False
-        and diagnostic.get('host_receipt_parse') == 'NOT_REACHED'
-        and type(codes) is dict and type(codes.get('INSTALLER')) is int and 0 <= codes['INSTALLER'] <= 255
-        and all(type(codes.get(key)) is int and codes[key] == 2 for key in ('RUNTIME_RUNNER', 'ROOT', 'SUDO'))
-        and type(diagnostic.get('errors')) is list and bool(diagnostic['errors'])
-        and all(type(code) is str and code in allowed_errors for code in diagnostic['errors']))
+    return business_failure_diagnostic(diagnostic)
 
 
 class DevelopmentSecretUse:
@@ -85,6 +67,7 @@ class DevelopmentSessionOwner:
     def record(self):
         with self._lock:
             return {'schema': SCHEMA, 'owner_id': self._id, 'state': self._state,
+                'failure_policy': FAILURE_POLICY,
                 'capture_attempts': self._attempts, 'capture_completed': self._completed,
                 'last_reserved_round': self._index,
                 'capture_limit': 1 if getattr(self, '_authorization', None) is not None else self._limit,
@@ -220,7 +203,10 @@ class DevelopmentSessionOwner:
 
     def on_revocation(self, batch, code):
         with self._lock:
-            if batch._development_owner is self and code not in RETAIN_PENDING_CLEANUP:
+            # Business failures no longer revoke: only a provider-proven,
+            # fully cleaned Profile may continue within its frozen batch.
+            # Every actual revocation wipes the owning secret immediately.
+            if batch._development_owner is self:
                 self.close(code)
 
     def close_batch(self, batch):
@@ -247,6 +233,7 @@ class DevelopmentSessionOwner:
                 and session.get('development_owner_id') == self._id
                 and session.get('development_capture_index') == self._index
                 and self._state == 'CLEANUP_PENDING'
+                and report.get('failure_policy') == FAILURE_POLICY
                 and report.get('source_preserved') is True and report.get('cleanup_errors') == []
                 and report.get('private_material_root_released') is True
                 and report.get('private_execution_source_root_released') is True
@@ -254,17 +241,23 @@ class DevelopmentSessionOwner:
             operations = report['profile_operations']
             results = report['profile_results']
             profiles = ('FRESH_BASE', 'DOCKER_BASE', 'RUNTIME_BASE_OFFLINE')
+            authorization = getattr(self, '_authorization', None)
+            if authorization is not None:
+                initial = authorization.body['initial_plan']
+                _require(initial.get('failurePolicy') == FAILURE_POLICY)
+                selected = tuple(item['profile'] for item in initial['profiles'])
+                diagnostic = initial.get('developmentMode') == 'PLATFORM_DIAGNOSTIC'
+                _require(selected == (('FRESH_BASE',) if diagnostic else profiles))
+                profiles = selected
             _require(type(operations) is dict and bool(operations)
                 and type(results) is dict and set(results) == set(profiles)
                 and set(session['profiles']) == set(profiles))
             statuses = [results[profile]['status'] for profile in profiles]
             if report.get('status') == 'PASS':
-                _require(report.get('all_profiles_pass') is True and statuses == ['PASS'] * 3)
+                _require(report.get('all_profiles_pass') is True and statuses == ['PASS'] * len(profiles))
             else:
                 _require(report.get('status') == 'FAIL' and report.get('all_profiles_pass') is False
-                    and statuses.count('ERROR') == 1)
-                failed = statuses.index('ERROR')
-                _require(statuses == ['PASS'] * failed + ['ERROR'] + ['NOT_RUN_SHARED_BLOCKER'] * (2 - failed))
+                    and 'ERROR' in statuses and set(statuses) <= {'PASS', 'ERROR'})
             _require(set(operations) == {profile for profile in profiles if results[profile]['status'] in {'PASS', 'ERROR'}})
             for profile in profiles:
                 if results[profile]['status'] == 'NOT_RUN_SHARED_BLOCKER':
@@ -285,16 +278,21 @@ class DevelopmentSessionOwner:
                 _require(all(roles[role]['operation_result'] == 'PASS' for role in ('BOOTSTRAP_ROTATION', 'VERIFIED_SUDO')))
                 if roles['CANDIDATE_WORKLOAD']['operation_result'] != 'PASS':
                     diagnostic = report['workload_diagnostics'][profile]
-                    _require(authenticated_execution_failure(diagnostic))
+                    _require(roles['CANDIDATE_WORKLOAD']['operation_result'] == 'FAIL'
+                        and authenticated_execution_failure(diagnostic)
+                        and cleanup_allows_continuation(operation)
+                        and operation.get('continuation_authorized') is True
+                        and type(operation.get('continuation_receipt_digest')) is str)
             with self._lock:
                 self._live()
                 _require(expected == (self._pending, self._index, self._id) and self._state == "CLEANUP_PENDING")
                 self._pending = None
                 if report.get('all_profiles_pass') is True and report.get('status') == 'PASS':
-                    _require(set(operations) == {'FRESH_BASE', 'DOCKER_BASE', 'RUNTIME_BASE_OFFLINE'}
+                    _require(set(operations) == set(profiles)
                         and all(role['operation_result'] == 'PASS' for profile in session['profiles'].values()
                             for role in profile.values()))
-                    self.close('DEVELOPMENT_PREACCEPTANCE_PASSED')
+                    self.close('DEVELOPMENT_PLATFORM_DIAGNOSTIC_COMPLETED'
+                        if authorization is not None and diagnostic else 'DEVELOPMENT_PREACCEPTANCE_PASSED')
                 elif self._index >= self._limit:
                     self.close('DEVELOPMENT_ROUND_BUDGET_EXHAUSTED')
                 else:

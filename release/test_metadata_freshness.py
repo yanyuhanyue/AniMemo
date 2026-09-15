@@ -370,6 +370,8 @@ class MetadataFreshnessTests(unittest.TestCase):
         unsigned = dict(aggregate)
         unsigned.pop("receipt_digest")
         aggregate["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
+        from scripts.tests.candidate_policy_fixture import current_policy_receipt
+        aggregate = current_policy_receipt(aggregate)
         self.candidate_receipt = self.root / "candidate-acceptance-receipt.json"
         self.candidate_receipt.write_bytes(canonical_json_bytes(aggregate))
         self.candidate_receipt_sha256 = sha256_bytes(
@@ -726,13 +728,8 @@ class MetadataFreshnessTests(unittest.TestCase):
 
     def test_valid_overall_fail_aggregate_cannot_start_freshness(self) -> None:
         receipt = json.loads(self.candidate_receipt.read_bytes())
-        receipt["profile_results"]["fresh_base"] = {
-            "status": "FAIL",
-            "failure_code": "CANDIDATE_PROFILE_REPORTED_FAILURE",
-            "receipt_digest": "sha256:" + "8" * 64,
-        }
-        receipt["all_profiles_pass"] = False
-        receipt["result"] = "FAIL"
+        from scripts.tests.candidate_policy_fixture import fail_profile
+        fail_profile(receipt)
         unsigned = dict(receipt)
         unsigned.pop("receipt_digest")
         receipt["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))

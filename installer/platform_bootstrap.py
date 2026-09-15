@@ -14,9 +14,7 @@ import os
 import platform as host_platform
 import re
 import shlex
-import signal
 import stat
-import subprocess
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -47,7 +45,6 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _APT_COMMAND_TIMEOUT_SECONDS = 900
 _APT_LOCK_TIMEOUT_SECONDS = 30
 _APT_RETRIES = 2
-_APT_INSTALL_TIMEOUT_RETRIES = 1
 _COMMAND_TIMEOUT_SECONDS = 120
 _SYSTEM_COMPOSE_PLUGIN_PATHS = (
     Path("/usr/libexec/docker/cli-plugins/docker-compose"),
@@ -84,11 +81,12 @@ PLATFORM_BOOTSTRAP_ERROR_CODES = frozenset(
 
 
 class PlatformBootstrapError(RuntimeError):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, command_result=None) -> None:
         if code not in PLATFORM_BOOTSTRAP_ERROR_CODES:
             code = "PLATFORM_BOOTSTRAP_HOST_STATE_INCONSISTENT"
         super().__init__(code)
         self.code = code
+        self.command_result = command_result
 
 
 def _reject(code: str) -> None:
@@ -410,9 +408,12 @@ class PlatformBootstrapReceipt:
 
 @dataclass(frozen=True)
 class PlatformCommandResult:
-    returncode: int
+    returncode: int | None
     stdout: bytes = b""
     stderr: bytes = b""
+    outcome: str = "EXITED"
+    observation: dict | None = None
+    diagnostic_error: str | None = None
 
 
 class PlatformCommandRunner(Protocol):
@@ -433,58 +434,53 @@ class SubprocessPlatformCommandRunner:
         timeout: int,
         environment: Mapping[str, str],
     ) -> PlatformCommandResult:
-        process: subprocess.Popen[bytes] | None = None
-        try:
-            process = subprocess.Popen(
-                list(argv),
-                cwd="/",
-                env=dict(environment),
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=os.name == "posix",
-            )
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            if process is not None:
-                try:
-                    if os.name == "posix":
-                        os.killpg(process.pid, signal.SIGTERM)
-                    else:  # pragma: no cover - production host is POSIX
-                        process.kill()
-                    process.communicate(timeout=5)
-                except (OSError, subprocess.SubprocessError):
-                    pass
-                finally:
-                    try:
-                        if os.name == "posix":
-                            # The leader may already be reaped while a descendant
-                            # that closed inherited pipes still lives in this PGID.
-                            # Always close that residual process group after grace.
-                            os.killpg(process.pid, signal.SIGKILL)
-                        elif process.poll() is None:  # pragma: no cover - POSIX prod
-                            process.kill()
-                    except OSError:
-                        pass
-                    try:
-                        process.communicate(timeout=5)
-                    except (OSError, subprocess.SubprocessError):
-                        pass
-            return PlatformCommandResult(returncode=124, stderr=b"command timeout")
-        except (OSError, subprocess.SubprocessError):
-            if process is not None:
-                try:
-                    process.kill()
-                    process.communicate(timeout=5)
-                except (OSError, subprocess.SubprocessError):
-                    pass
-            return PlatformCommandResult(returncode=126, stderr=b"command failed")
-        return PlatformCommandResult(
-            returncode=process.returncode,
-            stdout=stdout[: 1024 * 1024],
-            stderr=stderr[: 1024 * 1024],
+        from .apt_diagnostics import apt_observation, capture_process
+
+        is_apt = argv[0] == "/usr/bin/apt-get" and any(
+            operation in argv for operation in ("update", "install")
         )
+        version = None
+        if is_apt:
+            probe = capture_process(("/usr/bin/apt-get", "--version"),
+                timeout=_COMMAND_TIMEOUT_SECONDS, environment=environment)
+            first_line = probe.stdout.split(b"\n", 1)[0]
+            match = re.fullmatch(rb"apt ([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:[a-zA-Z0-9.+~:-]{0,32})?) \(amd64\)", first_line)
+            if (probe.outcome == "EXITED" and probe.returncode == 0 and match
+                    and not probe.secondary_errors
+                    and not any(summary['missing'] or summary['truncated']
+                                for summary in (probe.stdout_summary, probe.stderr_summary))):
+                version = match.group(1).decode("ascii")
+            # Ubuntu 24.04's reviewed APT 2.8 family supports error-on=any.
+            # An unknown tool is never invoked with assumed option semantics.
+            if version is None or not version.startswith("2.8."):
+                from dataclasses import replace
+                blocked = replace(probe, returncode=None, outcome="TOOL_VERSION_UNSUPPORTED")
+                observation = apt_observation(argv, blocked, version)
+                return self._apt_result(blocked, observation)
+        result = capture_process(argv, timeout=timeout, environment=environment)
+        if is_apt:
+            return self._apt_result(result, apt_observation(argv, result, version))
+        if (result.secondary_errors or any(summary['missing'] or summary['truncated']
+                for summary in (result.stdout_summary, result.stderr_summary))):
+            raise PlatformBootstrapError('PLATFORM_BOOTSTRAP_HOST_STATE_INCONSISTENT',
+                                         command_result=result)
+        return PlatformCommandResult(result.returncode, result.stdout, result.stderr, result.outcome)
+
+    @staticmethod
+    def _apt_result(result, observation):
+        from scripts.candidate_diagnostics import DiagnosticError, inherited_writer
+
+        diagnostic_error = None
+        try:
+            writer = inherited_writer()
+            if writer is not None:
+                writer.event('APT', observation=observation)
+        except (DiagnosticError, OSError):
+            # Preserve the process result even when its secondary diagnostic
+            # channel fails. The caller attaches both to the platform failure.
+            diagnostic_error = 'APT_DIAGNOSTIC_WRITE_FAILED'
+        return PlatformCommandResult(result.returncode, result.stdout, result.stderr,
+            result.outcome, observation, diagnostic_error)
 
 
 _COMMAND_ENVIRONMENT = MappingProxyType(
@@ -504,11 +500,21 @@ def _command(
     *,
     timeout: int = _COMMAND_TIMEOUT_SECONDS,
 ) -> PlatformCommandResult:
-    return runner.run(
+    result = runner.run(
         tuple(argv),
         timeout=timeout,
         environment=_COMMAND_ENVIRONMENT,
     )
+    if argv[0] != '/usr/bin/apt-get' and result.outcome != 'EXITED':
+        raise PlatformBootstrapError('PLATFORM_BOOTSTRAP_HOST_STATE_INCONSISTENT',
+                                     command_result=result)
+    secondary_failure = result.diagnostic_error or result.observation is not None and (
+        result.observation['secondary_errors'] or any(result.observation[name]['missing']
+                                                    for name in ('stdout', 'stderr')))
+    if secondary_failure and result.returncode == 0 and result.outcome == 'EXITED':
+        raise PlatformBootstrapError('PLATFORM_BOOTSTRAP_HOST_STATE_INCONSISTENT',
+                                     command_result=result)
+    return result
 
 
 def _trusted_root_regular(path: Path) -> bool:
@@ -1286,7 +1292,7 @@ def _apt_argv(operation: str, packages: tuple[str, ...] = ()) -> tuple[str, ...]
         "APT::Get::allow-Change-Held-Packages=false",
     )
     if operation == "update" and not packages:
-        return (*prefix, "update")
+        return (*prefix, "--error-on=any", "update")
     if operation in {"install", "simulate"} and packages:
         allowed = frozenset(PLATFORM_PACKAGE_POLICY.body()["packageNames"])
         if not set(packages).issubset(allowed) or len(packages) != len(set(packages)):
@@ -1366,7 +1372,9 @@ def _verify_existing_docker_transaction(
     packages: tuple[str, ...],
 ) -> None:
     result = _command(runner, _apt_argv("simulate", packages))
-    if result.returncode != 0:
+    if (result.returncode != 0 or result.outcome != 'EXITED'
+            or result.observation is not None and any(result.observation[name]['truncated']
+                                                     for name in ('stdout', 'stderr'))):
         _reject("PLATFORM_BOOTSTRAP_PACKAGE_UNAVAILABLE")
     protected = {
         "containerd",
@@ -1502,11 +1510,15 @@ class ProductionPlatformBootstrap:
                         _apt_argv("update"),
                         timeout=_APT_COMMAND_TIMEOUT_SECONDS,
                     )
-                    if result.returncode != 0:
-                        _reject(
+                    incomplete = result.observation is not None and bool(
+                        {'PARTIAL_INDEX', 'FETCH_FAILED'} & set(result.observation['categories'])
+                    )
+                    if result.returncode != 0 or result.outcome != "EXITED" or incomplete:
+                        raise PlatformBootstrapError(
                             "PLATFORM_BOOTSTRAP_APT_LOCK_TIMEOUT"
                             if _apt_lock_failed(result)
-                            else "PLATFORM_BOOTSTRAP_APT_UPDATE_FAILED"
+                            else "PLATFORM_BOOTSTRAP_APT_UPDATE_FAILED",
+                            command_result=result,
                         )
                     continue
                 if action.kind in {
@@ -1526,23 +1538,16 @@ class ProductionPlatformBootstrap:
                         _apt_argv("install", action.packages),
                         timeout=_APT_COMMAND_TIMEOUT_SECONDS,
                     )
-                    for _ in range(_APT_INSTALL_TIMEOUT_RETRIES):
-                        if result.returncode != 124:
-                            break
-                        result = _command(
-                            self._runner,
-                            _apt_argv("install", action.packages),
-                            timeout=_APT_COMMAND_TIMEOUT_SECONDS,
-                        )
-                    if result.returncode != 0:
+                    if result.returncode != 0 or result.outcome != "EXITED":
                         if _apt_lock_failed(result):
-                            _reject("PLATFORM_BOOTSTRAP_APT_LOCK_TIMEOUT")
-                        _reject(
+                            raise PlatformBootstrapError("PLATFORM_BOOTSTRAP_APT_LOCK_TIMEOUT",
+                                                         command_result=result)
+                        raise PlatformBootstrapError(
                             {
                                 PlatformBootstrapActionKind.INSTALL_DOCKER: "PLATFORM_BOOTSTRAP_DOCKER_INSTALL_FAILED",
                                 PlatformBootstrapActionKind.INSTALL_COMPOSE: "PLATFORM_BOOTSTRAP_COMPOSE_INSTALL_FAILED",
                                 PlatformBootstrapActionKind.INSTALL_POSTGRES_CLIENT: "PLATFORM_BOOTSTRAP_POSTGRES_CLIENT_INSTALL_FAILED",
-                            }[action.kind]
+                            }[action.kind], command_result=result,
                         )
                     continue
                 if action.kind is PlatformBootstrapActionKind.ENABLE_DOCKER_DAEMON:
@@ -1550,7 +1555,7 @@ class ProductionPlatformBootstrap:
                         self._runner,
                         ("/usr/bin/systemctl", "enable", "--now", "docker"),
                     )
-                    if result.returncode != 0:
+                    if result.returncode != 0 or result.outcome != "EXITED":
                         _reject("PLATFORM_BOOTSTRAP_DOCKER_DAEMON_FAILED")
                     continue
                 _reject("PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID")

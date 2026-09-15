@@ -6,9 +6,12 @@ import sys
 from scripts.candidate_diagnostics import inherited_writer
 
 
-def main(material_root):
+def main(material_root, *, workload_mode='CLEAN_PREACCEPTANCE'):
     diagnostic = inherited_writer()
     if diagnostic is None:
+        return 2
+    if workload_mode not in {'CLEAN_PREACCEPTANCE', 'PLATFORM_DIAGNOSTIC'}:
+        diagnostic.error('RUNNER_CONTEXT_INVALID')
         return 2
     root = Path(__file__).resolve().parents[1]
     diagnostic.stage('RUNTIME_INITIALIZING')
@@ -23,7 +26,9 @@ def main(material_root):
     diagnostic.stage('RUNTIME_READY')
     diagnostic.stage('RUNNER_STARTING')
     try:
-        runpy.run_path(str(root / 'scripts/development_profile_runner.py'), run_name='__main__')
+        name = ('development_platform_diagnostic.py' if workload_mode == 'PLATFORM_DIAGNOSTIC'
+                else 'development_profile_runner.py')
+        runpy.run_path(str(root / 'scripts' / name), run_name='__main__')
     except SystemExit as error:
         return error.code if type(error.code) is int and 0 <= error.code <= 255 else (0 if error.code is None else 2)
     except BaseException:

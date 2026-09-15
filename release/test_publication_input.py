@@ -4,6 +4,7 @@ import copy
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from scripts.tests.candidate_policy_fixture import current_policy_receipt, fail_profile
 
 from release.candidate import (
     LoadedVerifiedCandidate,
@@ -60,7 +61,7 @@ def _receipt(loaded: LoadedVerifiedCandidate) -> dict[str, object]:
     unsigned = dict(receipt)
     unsigned.pop("receipt_digest")
     receipt["receipt_digest"] = sha256_bytes(canonical_json_bytes(unsigned))
-    return receipt
+    return current_policy_receipt(receipt)
 
 
 def _resign_receipt(receipt: dict[str, object]) -> dict[str, object]:
@@ -131,14 +132,7 @@ class PublishCandidateInputTests(unittest.TestCase):
     def test_valid_overall_fail_aggregate_cannot_authorize_publication(self):
         loaded = _loaded()
         receipt = _receipt(loaded)
-        receipt["profile_results"]["fresh_base"] = {
-            "status": "FAIL",
-            "failure_code": "CANDIDATE_PROFILE_REPORTED_FAILURE",
-            "receipt_digest": "sha256:" + "8" * 64,
-        }
-        receipt["all_profiles_pass"] = False
-        receipt["result"] = "FAIL"
-        _resign_receipt(receipt)
+        fail_profile(receipt)
 
         with self.assertRaisesRegex(
             PublicationInputError,

@@ -21,8 +21,9 @@ class LocalBatchScopeTests(unittest.TestCase):
         self.plan = fixture.plan
         self.root = Path(self.enterContext(private_windows_test_directory()))
         body = dict(purpose='LOCAL_INSTALLER_DEVELOPMENT', authorization_id=scope.DEVELOPMENT_AUTHORIZATION,
+            round_limit=12,
             confirmed_utc_seconds=time.time(), material_identity=scope.material_identity(self.plan),
-            initial_plan_digest=self.plan.plan_digest)
+            initial_plan_digest=self.plan.plan_digest, initial_plan=self.plan.as_dict())
         self.authorization = scope.LocalBatchAuthorization(scope._ISSUER, body=body, root=self.root,
             holds=ExitStack(), monotonic_now=time.monotonic())
         self.addCleanup(self.authorization.close)
@@ -104,8 +105,9 @@ class ConfirmedOwnerIntegrationTests(unittest.TestCase):
         self.plan = self.fixture.plan
         self.root = Path(self.enterContext(private_windows_test_directory()))
         body = dict(purpose='LOCAL_INSTALLER_DEVELOPMENT',authorization_id=scope.DEVELOPMENT_AUTHORIZATION,
+            round_limit=12,
             confirmed_utc_seconds=time.time(),material_identity=scope.material_identity(self.plan),
-            initial_plan_digest=self.plan.plan_digest)
+            initial_plan_digest=self.plan.plan_digest, initial_plan=self.plan.as_dict())
         self.authorization = scope.LocalBatchAuthorization(scope._ISSUER,body=body,root=self.root,
             holds=ExitStack(),monotonic_now=time.monotonic())
         self.owner = owners.acquire_confirmed_development_owner(authorization=self.authorization,

@@ -150,7 +150,8 @@ class DevelopmentRunnerTests(unittest.TestCase):
             'verified_candidate_digest': self.loaded.verified_digest,
             'material_source_sha': self.loaded.candidate_input['source_sha'],
             'material_source_tree': self.loaded.candidate_input['source_tree'],
-            'qualification_run_id': self.loaded.candidate_input['qualification_run_id']}
+            'qualification_run_id': self.loaded.candidate_input['qualification_run_id'],
+            'workload_mode': 'CLEAN_PREACCEPTANCE'}
         service = self.root / 'service-source'
         for name in PACKAGES:
             path = service / name / '__init__.py'

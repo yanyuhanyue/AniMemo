@@ -244,15 +244,25 @@ def _run_candidate(args: argparse.Namespace) -> int:
 
 
 def _diagnose_candidate_platform_failure(diagnostic, error):
-    from scripts.candidate_diagnostics import BOOTSTRAP_FAILURE_CODES, PLATFORM_FAILURE_CODES
+    from scripts.candidate_diagnostics import BOOTSTRAP_FAILURE_CODES, PLATFORM_FAILURE_CODES, DiagnosticError
 
     if diagnostic is not None:
-        diagnostic.error('PLATFORM_PREPARATION_FAILED')
-        code = getattr(error, 'code', None)
-        if type(code) is str and code in (*BOOTSTRAP_FAILURE_CODES, *PLATFORM_FAILURE_CODES):
-            diagnostic.error(code)
-        if code == 'PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID':
-            diagnostic.error('PLATFORM_PACKAGE_POLICY_INVALID')
+        # A broken diagnostics descriptor must never replace the original
+        # Installer/platform failure with a secondary logging exception.
+        try:
+            diagnostic.error('PLATFORM_PREPARATION_FAILED')
+            code = getattr(error, 'code', None)
+            if type(code) is str and code in (*BOOTSTRAP_FAILURE_CODES, *PLATFORM_FAILURE_CODES):
+                diagnostic.error(code)
+            if code == 'PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID':
+                diagnostic.error('PLATFORM_PACKAGE_POLICY_INVALID')
+            result = getattr(error, 'command_result', None)
+            if result is not None and getattr(result, 'diagnostic_error', None):
+                diagnostic.error(result.diagnostic_error)
+                if result.observation is not None:
+                    diagnostic.event('APT', observation=result.observation)
+        except (DiagnosticError, OSError):
+            pass
 
 
 def _run_candidate_composition(args, request, composition, diagnostic) -> int:

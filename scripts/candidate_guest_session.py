@@ -21,6 +21,7 @@ from release.formal_windows_pretrust import (
 from scripts import candidate_vm_harness as h
 from scripts.guest_sudo_session import SessionSupervisor, ControllerFailure, _Grant, _read_observation
 from scripts import candidate_diagnostics as diagnostics
+from release.candidate_failure_policy import BUSINESS, business_failure_diagnostic
 
 
 from scripts.candidate_batch_session import BatchUse, CandidateBatch
@@ -233,7 +234,8 @@ class WorkloadFailure(ControllerFailure):
         super().__init__(code)
 
 
-def _read_receipt(process, *, operation, provider, profile, batch=None, timeout=WORKLOAD_SECONDS):
+def _read_receipt(process, *, operation, provider, profile, batch=None, timeout=WORKLOAD_SECONDS,
+                  platform_diagnostic=False):
     reader = diagnostics.DiagnosticReader(operation)
     results = queue.Queue(maxsize=1)
     def read():
@@ -274,15 +276,32 @@ def _read_receipt(process, *, operation, provider, profile, batch=None, timeout=
     if not observed['root_started']:
         raise WorkloadFailure('CANDIDATE_UNKNOWN_BEFORE_ROOT_START')
     if reader.receipt is None:
-        known_business_failure = (exits['SUDO'] not in (None, 0)
-            and exits['ROOT'] not in (None, 0) and exits['RUNTIME_RUNNER'] not in (None, 0)
-            and exits['INSTALLER'] not in (None, 0)
-            and 'PLATFORM_PREPARING' in stages
-            and bool(set(observed['errors']) & {'PLATFORM_PREPARATION_FAILED', 'INSTALLER_EXECUTION_FAILED'}))
-        if known_business_failure:
+        if business_failure_diagnostic(observed):
             raise WorkloadFailure('CANDIDATE_INSTALLER_REPORTED_FAILURE', revoke_batch=False)
         raise WorkloadFailure('CANDIDATE_SHARED_WORKLOAD_STARTUP_OR_RECEIPT_FAILURE')
-    if (observed['errors'] or any(exits[component] != 0 for component in diagnostics.COMPONENTS)
+    expected_exits = {component: (None if platform_diagnostic and component == 'INSTALLER' else 0)
+                      for component in diagnostics.COMPONENTS}
+    expected_errors = []
+    if platform_diagnostic:
+        try:
+            from scripts.development_platform_diagnostic import validate_platform_diagnostic_report
+            from scripts.development_guest_session import development_binding
+            from scripts.development_plan import is_development_plan
+            if batch is None or not is_development_plan(batch.plan) or not batch.plan.platform_diagnostic:
+                raise ValueError()
+            if stages & {'INSTALLER_STARTING', 'INSTALLER_RUNNING', 'INSTALLER_COMPLETED'}:
+                raise ValueError()
+            validate_platform_diagnostic_report(reader.receipt,
+                loaded=provider._candidate_material_authority.loaded,
+                expected_binding=development_binding(batch.plan),
+                expected_context=_profile_context(batch.plan, profile, h._initial_platform_state(profile.profile)))
+            if reader.receipt['result'] == 'FAIL':
+                expected_errors = ['PLATFORM_PREPARATION_FAILED', reader.receipt['error_code']]
+                if reader.receipt['error_code'] == 'PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID':
+                    expected_errors.append('PLATFORM_PACKAGE_POLICY_INVALID')
+        except Exception:
+            raise WorkloadFailure('DEVELOPMENT_PLATFORM_DIAGNOSTIC_REPORT_INVALID') from None
+    if (observed['errors'] != expected_errors or exits != expected_exits
             or not {'DRAFT_WRITTEN', 'DRAFT_RETURNED', 'RUNNER_STARTED', 'RUNTIME_READY'}.issubset(stages)):
         raise WorkloadFailure('CANDIDATE_WORKLOAD_RECEIPT_DIAGNOSTIC_CONFLICT')
     return reader.receipt
@@ -297,6 +316,7 @@ class _WorkloadSupervisor(SessionSupervisor):
         self._delivery_attempts = {self._role: 0}
         self._delivery_completed = {self._role: 0}
         self._state = self._role
+        self._pending_business_failure = None
 
     def _exchange_workload(self, process):
         try:
@@ -318,10 +338,18 @@ class _WorkloadSupervisor(SessionSupervisor):
         finally:
             self._clear_secret()
         # No secret or reusable grant is needed while the fixed process runs.
-        self.receipt = _read_receipt(process, operation=_diagnostic_operation(self._plan, self._profile),
-            provider=self._provider, profile=self._profile,
-            batch=self._batch_use._batch,
-            timeout=self._workload_deadline - time.monotonic())
+        try:
+            self.receipt = _read_receipt(process, operation=_diagnostic_operation(self._plan, self._profile),
+                provider=self._provider, profile=self._profile,
+                batch=self._batch_use._batch,
+                platform_diagnostic=getattr(self._plan, 'platform_diagnostic', False),
+                timeout=self._workload_deadline - time.monotonic())
+        except WorkloadFailure as error:
+            if error.revoke_batch:
+                raise
+            # Diagnostic EOF is not process completion. Let the owned SSH
+            # transport wait and close its process tree before classification.
+            self._pending_business_failure = error
 
     def _program(self):
         return _root_program(self._provider, self._plan, self._profile,
@@ -333,11 +361,25 @@ class _WorkloadSupervisor(SessionSupervisor):
         try:
             self._workload_deadline = time.monotonic() + WORKLOAD_SECONDS
             with hold_windows_private_file(self._authority.known_hosts_file):
-                self._provider._run(self._provider._ssh_argv(self._authority, command),
+                completed = self._provider._run(self._provider._ssh_argv(self._authority, command),
                     code='CANDIDATE_VM_PROFILE_EXECUTION_FAILED', timeout=WORKLOAD_SECONDS,
-                    openssh=True, guest_exchange=self._exchange_workload)
-            if self._delivery_completed[self._role] != 1:
+                    allowed=frozenset({0, 2}), openssh=True, guest_exchange=self._exchange_workload)
+            if (self._delivery_attempts[self._role] != 1 or self._delivery_completed[self._role] != 1
+                    or self._grant is None or not self._grant.used):
                 raise ControllerFailure('CANDIDATE_WORKLOAD_NOT_DELIVERED')
+            if self._pending_business_failure is not None:
+                if completed.returncode != 2:
+                    raise ControllerFailure('CANDIDATE_WORKLOAD_EXIT_CONFLICT')
+                _continuing_connection(self._provider, self._plan, self._profile, self._lease,
+                    self._preboot_disk, self._preboot_snapshot)
+                self._batch_use._batch.check_source()
+                operation = self._provider._profile_operation_results[self._profile.profile]
+                operation.update(failure_classification=BUSINESS,
+                    workload_process_completed=True, workload_delivery_completed=True,
+                    workload_identity_rechecked=True)
+                raise self._pending_business_failure
+            if completed.returncode != 0:
+                raise ControllerFailure('CANDIDATE_WORKLOAD_EXIT_CONFLICT')
             return self.receipt
         except WorkloadFailure as error:
             self.close(failed=error.revoke_batch)
@@ -345,6 +387,16 @@ class _WorkloadSupervisor(SessionSupervisor):
         except BaseException:
             self.close(failed=True)
             raise
+
+    def close(self, *, failed=False):
+        super().close(failed=failed)
+        if (self._grant is not None or self._secret is not None
+                or not self._batch_use._closed):
+            self._batch_use._batch.revoke('CANDIDATE_PROFILE_CLEANUP_FAILED')
+            raise ControllerFailure('CANDIDATE_WORKLOAD_SUPERVISOR_NOT_CLOSED')
+        operation = self._provider._profile_operation_results.get(self._profile.profile)
+        if operation is not None:
+            operation['workload_supervisor_closed'] = True
 
 
 def execute_candidate_workload(provider, plan, profile, lease, disk, snapshot,

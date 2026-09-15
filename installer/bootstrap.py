@@ -44,6 +44,7 @@ _REQUIRED_RUNTIME_MODULES = frozenset(
         "installer.bootstrap",
         "installer.cli",
         "installer.platform_bootstrap",
+        "installer.apt_diagnostics",
         "installer.production",
         "installer.runtime",
         "updater.offline",
