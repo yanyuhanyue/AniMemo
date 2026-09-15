@@ -63,7 +63,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ANIMEMO_RELEASE_ADMIN_READ_TOKEN: ${{ secrets.ANIMEMO_RELEASE_ADMIN_READ_TOKEN }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: release-recovery-inspection-${{ github.run_id }}
@@ -105,13 +105,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ANIMEMO_RELEASE_ADMIN_READ_TOKEN: ${{ secrets.ANIMEMO_RELEASE_ADMIN_READ_TOKEN }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release-publication-metadata-v2.0.0-rc.1
           path: ${{ runner.temp }}/animemo-existing-rc-recovery/metadata
           if-no-files-found: error
           retention-days: 90
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: release-recovery-execution-v2.0.0-rc.1
