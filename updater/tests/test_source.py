@@ -306,11 +306,18 @@ class FakeRunner:
                 "verificationResult": {
                     "signature": {
                         "certificate": {
-                            "extensions": {
-                                "sourceRepositoryDigest": source_commit,
-                                "buildSignerDigest": source_commit,
-                                "buildConfigDigest": source_commit,
-                            },
+                            "sourceRepositoryDigest": source_commit,
+                            "buildSignerDigest": source_commit,
+                            "buildConfigDigest": source_commit,
+                            "sourceRepositoryURI": f"https://github.com/{repository}",
+                            "sourceRepositoryIdentifier": "1327429673",
+                            "sourceRepositoryOwnerURI": "https://github.com/yanyuhanyue",
+                            "sourceRepositoryOwnerIdentifier": "111261350",
+                            "sourceRepositoryRef": "refs/heads/main",
+                            "issuer": "https://token.actions.githubusercontent.com",
+                            "subjectAlternativeName": expected_identity,
+                            "buildSignerURI": expected_identity,
+                            "buildConfigURI": expected_identity,
                         },
                     },
                     "statement": {

@@ -39,7 +39,12 @@ def _failure(error):
     return 'DEVELOPMENT_EXECUTION_INTERRUPTED_OR_UNCLASSIFIED'
 
 
-def run(args, *, session_owner=None):
+def run(args, *, session_owner=None, confirmed_owner_sink=None):
+    from scripts.guest_batch_scope import DEVELOPMENT_AUTHORIZATION, confirm_local_batch
+    from scripts.development_session_owner import acquire_confirmed_development_owner, _material
+    owns_session = False
+    if confirmed_owner_sink is not None and (type(confirmed_owner_sink) is not list or confirmed_owner_sink):
+        raise ControllerFailure('DEVELOPMENT_OWNER_RECEIVER_INVALID')
     result = {'schema': SCHEMA, 'purpose': 'LOCAL_INSTALLER_DEVELOPMENT', 'status': 'ERROR',
         'started_at': datetime.now(timezone.utc).isoformat(), 'all_profiles_pass': False,
         'candidate_acceptance_authority_granted': False, 'publish_authorized': False,
@@ -52,9 +57,9 @@ def run(args, *, session_owner=None):
             from scripts.development_session_owner import DevelopmentSessionOwner
             if type(session_owner) is not DevelopmentSessionOwner or session_owner.closed or not args.execute:
                 raise ControllerFailure('DEVELOPMENT_SESSION_OWNER_INVALID')
-        if args.authorization_id is not None and (not args.execute or args.authorization_id != AUTHORIZATION):
+        if args.authorization_id is not None and (not args.execute or args.authorization_id not in {AUTHORIZATION, DEVELOPMENT_AUTHORIZATION}):
             raise ControllerFailure('DEVELOPMENT_CAPTURE_AUTHORIZATION_INVALID')
-        if args.execute and (args.authorization_id != AUTHORIZATION or args.result is None):
+        if args.execute and (args.authorization_id not in {AUTHORIZATION, DEVELOPMENT_AUTHORIZATION} or args.result is None):
             raise ControllerFailure('DEVELOPMENT_EXECUTION_AUTHORIZATION_REQUIRED')
         _check_checkout(args.execution_source_sha, args.execution_source_tree)
         require_material_compatibility(args.material_source_sha, args.execution_source_sha)
@@ -85,6 +90,22 @@ def run(args, *, session_owner=None):
                         if not args.execute:
                             result['status'] = 'PLAN_ONLY'
                         else:
+                            if args.authorization_id == DEVELOPMENT_AUTHORIZATION and session_owner is None:
+                                _require_confirmation = getattr(args, 'confirm_batch', False)
+                                if not _require_confirmation:
+                                    raise ControllerFailure('DEVELOPMENT_LOCAL_CONFIRMATION_REQUIRED')
+                                authorization = confirm_local_batch(authorization_id=args.authorization_id,
+                                    purpose='LOCAL_INSTALLER_DEVELOPMENT', plan=plan)
+                                try:
+                                    session_owner = acquire_confirmed_development_owner(
+                                        authorization=authorization, material_identity=_material(plan))
+                                except BaseException:
+                                    authorization.close()
+                                    raise
+                                if confirmed_owner_sink is not None:
+                                    confirmed_owner_sink.append(session_owner)
+                                else:
+                                    owns_session = True
                             batch = CandidateBatch(provider, plan, authorization_id=args.authorization_id,
                                 development_owner=session_owner)
                             provider._candidate_batch = batch
@@ -161,6 +182,12 @@ def run(args, *, session_owner=None):
             result_bytes(result)
         except h.CandidateHarnessError as error:
             result.update(status='ERROR', all_profiles_pass=False, failure_code=error.code)
+    if owns_session:
+        try:
+            session_owner.finish_round(result)
+        finally:
+            session_owner.dispose()
+            result['memory_owner'] = session_owner.record
     return result
 
 
@@ -174,6 +201,7 @@ def main(argv=None):
     parser.add_argument('--execution-source-tree', required=True)
     parser.add_argument('--authorization-id')
     parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--confirm-batch', action='store_true')
     parser.add_argument('--result', type=Path)
     args = parser.parse_args(argv)
     # Reserve only the public result filename before any VM or capture work.

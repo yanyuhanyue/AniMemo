@@ -74,7 +74,6 @@ class BatchSessionTests(unittest.TestCase):
         self.provider._candidate_batch = self.batch
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(b, '_check_checkout').start()
-        mock.patch.object(c, '_check_checkout').start()
         self.console = mock.patch.object(b, 'WindowsConsoleCapture').start().return_value
         self.secret = bytearray(SENTINEL)
         self.console.capture.return_value = self.secret
@@ -341,7 +340,8 @@ class BatchSessionTests(unittest.TestCase):
         self.assertEqual(self.batch.record['revocation_code'], 'CANDIDATE_BATCH_OPERATION_EXPIRED')
 
     def test_human_capture_time_is_not_counted_as_credential_lifetime(self):
-        def capture():
+        def capture(*, cancelled):
+            self.assertIs(cancelled, self.batch.cancelled)
             self.time += 20 * 60
             return self.secret
         self.console.capture.side_effect = capture

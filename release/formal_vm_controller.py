@@ -286,7 +286,7 @@ class _QualifiedCandidateFormalRecord:
     loaded: LoadedVerifiedCandidate
     candidate_material_authority: object | None
     candidate_plan_digest: str
-    candidate_provider_execution_authority_receipt_digest: str
+    candidate_history_evidence_digest: str
     candidate_material_authority_identity: str
     candidate_material_tree_inventory_identity: str
     candidate_aggregate_receipt_digest: str
@@ -381,8 +381,8 @@ class QualifiedCandidateFormalAuthority:
         return self._record().candidate_plan_digest
 
     @property
-    def candidate_provider_execution_authority_receipt_digest(self) -> str:
-        return self._record().candidate_provider_execution_authority_receipt_digest
+    def candidate_history_evidence_digest(self) -> str:
+        return self._record().candidate_history_evidence_digest
 
     @property
     def candidate_material_authority_identity(self) -> str:
@@ -464,7 +464,7 @@ def _issue_qualified_candidate_formal_authority(
     loaded: LoadedVerifiedCandidate,
     candidate_material_authority: object | None = None,
     candidate_plan_digest: str,
-    candidate_provider_execution_authority_receipt_digest: str,
+    candidate_history_evidence_digest: str,
     candidate_aggregate_receipt_digest: str,
     candidate_profile_receipt_digests: Mapping[str, str],
     base_vm_identity: str,
@@ -492,7 +492,7 @@ def _issue_qualified_candidate_formal_authority(
         candidate_material_authority_identity = "sha256:" + "0" * 64
         candidate_material_tree_inventory_identity = "sha256:" + "0" * 64
     if not _is_digest(candidate_plan_digest) or not _is_digest(
-        candidate_provider_execution_authority_receipt_digest
+        candidate_history_evidence_digest
     ):
         _formal_reject("FORMAL_CANDIDATE_SOURCE_AUTHORITY_INVALID")
     candidate_source_vm_authority_identity = _candidate_source_vm_authority_identity(
@@ -510,8 +510,8 @@ def _issue_qualified_candidate_formal_authority(
         loaded=loaded,
         candidate_material_authority=candidate_material_authority,
         candidate_plan_digest=candidate_plan_digest,
-        candidate_provider_execution_authority_receipt_digest=(
-            candidate_provider_execution_authority_receipt_digest
+        candidate_history_evidence_digest=(
+            candidate_history_evidence_digest
         ),
         candidate_material_authority_identity=(
             candidate_material_authority_identity
@@ -866,7 +866,7 @@ def close_qualified_candidate_for_formal(
             loaded=loaded,
             candidate_material_authority=material_authority,
             candidate_plan_digest=candidate_plan.plan_digest,
-            candidate_provider_execution_authority_receipt_digest=(
+            candidate_history_evidence_digest=(
                 provider_execution_receipt.receipt_digest
             ),
             candidate_aggregate_receipt_digest=aggregate_digest,
@@ -924,7 +924,7 @@ class VerifiedFormalRcAuthority:
     candidate_aggregate_receipt_digest: str
     candidate_profile_receipt_digests: Mapping[str, str]
     candidate_plan_digest: str
-    candidate_provider_execution_authority_receipt_digest: str
+    candidate_history_evidence_digest: str
     candidate_material_authority_identity: str
     candidate_material_tree_inventory_identity: str
     candidate_base_vm_identity: str
@@ -955,7 +955,7 @@ class VerifiedFormalRcAuthority:
         candidate_aggregate_receipt_digest: str,
         candidate_profile_receipt_digests: Mapping[str, str],
         candidate_plan_digest: str,
-        candidate_provider_execution_authority_receipt_digest: str,
+        candidate_history_evidence_digest: str,
         candidate_base_vm_identity: str,
         candidate_original_vm_hashes: Mapping[str, str],
         candidate_snapshot_identities: Mapping[str, str],
@@ -978,7 +978,7 @@ class VerifiedFormalRcAuthority:
             or not _is_digest(candidate_aggregate_receipt_digest)
             or not _is_digest(candidate_plan_digest)
             or not _is_digest(
-                candidate_provider_execution_authority_receipt_digest
+                candidate_history_evidence_digest
             )
             or not _is_digest(candidate_material_authority_identity)
             or not _is_digest(candidate_material_tree_inventory_identity)
@@ -1070,8 +1070,8 @@ class VerifiedFormalRcAuthority:
             candidate_aggregate_receipt_digest=(candidate_aggregate_receipt_digest),
             candidate_profile_receipt_digests=(closed_candidate_profile_receipts),
             candidate_plan_digest=candidate_plan_digest,
-            candidate_provider_execution_authority_receipt_digest=(
-                candidate_provider_execution_authority_receipt_digest
+            candidate_history_evidence_digest=(
+                candidate_history_evidence_digest
             ),
             candidate_material_authority_identity=(
                 candidate_material_authority_identity
@@ -2109,7 +2109,10 @@ class ProductionFormalAuthorityVerifier:
         runner: VerifierRunner = _production_verifier_runner,
         _parent_path_authority: HeldWindowsPrivatePathAuthority | None = None,
     ) -> None:
-        if type(plan.qualified_candidate) is not QualifiedCandidateFormalAuthority:
+        from release.formal_candidate_history import PublishedCandidateFormalAuthority
+        if type(plan.qualified_candidate) not in {
+            QualifiedCandidateFormalAuthority, PublishedCandidateFormalAuthority,
+        }:
             _formal_reject("FORMAL_QUALIFIED_CANDIDATE_REQUIRED")
         if plan.private_work_root is None:
             _formal_reject("FORMAL_PRIVATE_WORK_ROOT_REQUIRED")
@@ -2695,9 +2698,9 @@ class ProductionFormalAuthorityVerifier:
             ),
             candidate_profile_receipt_digests=(self._candidate_profile_receipt_digests),
             candidate_plan_digest=self._candidate_plan_digest,
-            candidate_provider_execution_authority_receipt_digest=(
+            candidate_history_evidence_digest=(
                 self._qualified_candidate
-                .candidate_provider_execution_authority_receipt_digest
+                .candidate_history_evidence_digest
             ),
             candidate_material_authority_identity=(
                 self._qualified_candidate.candidate_material_authority_identity
@@ -2776,7 +2779,7 @@ def _validate_verified_authority(
         )
         or not _is_digest(authority.candidate_plan_digest)
         or not _is_digest(
-            authority.candidate_provider_execution_authority_receipt_digest
+            authority.candidate_history_evidence_digest
         )
         or not _is_digest(authority.candidate_material_authority_identity)
         or not _is_digest(
@@ -3165,8 +3168,8 @@ class FormalVmController:
             "candidate_source_vm_authority_identity": (
                 authority.candidate_source_vm_authority_identity
             ),
-            "candidate_provider_execution_authority_receipt_digest": (
-                authority.candidate_provider_execution_authority_receipt_digest
+            "candidate_history_evidence_digest": (
+                authority.candidate_history_evidence_digest
             ),
             "candidate_material_authority_identity": (
                 authority.candidate_material_authority_identity

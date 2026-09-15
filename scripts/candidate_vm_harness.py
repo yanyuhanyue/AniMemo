@@ -2613,7 +2613,11 @@ class ClosedVmwareProvider:
         harness_plan: CandidateHarnessPlan | ClosedVmProviderPlan,
     ) -> ProfileConnectionAuthority:
         from scripts.development_plan import is_development_plan
-        if is_development_plan(harness_plan):
+        from scripts.formal_plan import is_formal_plan
+        if is_formal_plan(harness_plan):
+            authority_digest = harness_plan.authority_digest
+            target_version = harness_plan.candidate_version
+        elif is_development_plan(harness_plan):
             authority_digest = harness_plan.plan_digest
             target_version = harness_plan.candidate_version
         elif type(harness_plan) is CandidateHarnessPlan:
@@ -4163,6 +4167,7 @@ class ClosedVmwareProvider:
         source: str,
         destination: str,
         recursive: bool,
+        bootstrap_identity: bool = False,
     ) -> tuple[str, ...]:
         recursion = ("-r",) if recursive else ()
         return (
@@ -4173,7 +4178,7 @@ class ClosedVmwareProvider:
             "-S",
             str(self._tool_path(SSH)),
             *recursion,
-            *self._openssh_closed_options(authority),
+            *self._openssh_closed_options(authority, bootstrap_identity=bootstrap_identity),
             "-o",
             "ConnectTimeout=10",
             "-o",
@@ -4650,20 +4655,7 @@ class ClosedVmwareProvider:
         return verified
 
     def _sudo_password(self) -> bytes:
-        value = self._environment.get(GUEST_SUDO_PASSWORD_ENV, "")
-        if (
-            type(value) is not str
-            or not value
-            or len(value) > 1024
-            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
-        ):
-            raise CandidateHarnessError("CANDIDATE_VM_GUEST_CREDENTIAL_UNAVAILABLE")
-        try:
-            return value.encode("utf-8") + b"\n"
-        except UnicodeEncodeError as error:
-            raise CandidateHarnessError(
-                "CANDIDATE_VM_GUEST_CREDENTIAL_UNAVAILABLE"
-            ) from error
+        raise CandidateHarnessError('GUEST_ENVIRONMENT_CREDENTIAL_CHANNEL_RETIRED')
 
     def _ssh_checked(
         self,
@@ -5116,6 +5108,7 @@ class ClosedVmwareProvider:
         _development: bool = False,
     ) -> Mapping[str, Any]:
         from scripts.development_plan import is_development_plan
+        from scripts.formal_plan import is_formal_plan
         if _development:
             from scripts.development_source import require_development_source
             require_development_source(self, harness_plan)
@@ -5124,6 +5117,12 @@ class ClosedVmwareProvider:
                     or Path(candidate_root) != self._candidate_material_authority.loaded.root):
                 raise CandidateHarnessError('DEVELOPMENT_PROFILE_MATERIAL_INVALID')
         if _formal_workload is not None:
+            from scripts.candidate_batch_session import CandidateBatch
+            if (type(self._candidate_batch) is not CandidateBatch
+                    or not self._candidate_batch._formal
+                    or self._candidate_batch.plan is not harness_plan):
+                raise CandidateHarnessError('FORMAL_CONFIRMED_BATCH_REQUIRED')
+            self._candidate_batch.require_active()
             self._validate_formal_workload(_formal_workload)
         candidate_plan_invalid = _formal_workload is None and (
             not (type(harness_plan) is CandidateHarnessPlan
@@ -5131,8 +5130,8 @@ class ClosedVmwareProvider:
             or type(plan) is not CandidateProfilePlan
         )
         formal_plan_invalid = _formal_workload is not None and (
-            type(harness_plan) is not ClosedVmProviderPlan
-            or type(plan) is not VmProviderProfilePlan
+            not is_formal_plan(harness_plan)
+            or type(plan) is not CandidateProfilePlan
             or harness_plan.purpose != "FORMAL_POSTPUBLICATION"
             or harness_plan.authority_digest != _formal_workload.authority_identity
             or harness_plan.source_tree != _formal_workload.runtime_source_tree
@@ -5272,17 +5271,16 @@ class ClosedVmwareProvider:
                     except (ControllerFailure, ConsoleCaptureError) as error:
                         raise CandidateHarnessError(getattr(error, "code", str(error))) from error
                 else:
-                    verified_connection = self._establish_clone_connection(
-                        authority, plan,
-                        preboot_disk_graph_digest=preboot_disk_graph_digest,
-                        preboot_snapshot_identity=preboot_snapshot_identity)
+                    from scripts.candidate_guest_session import bootstrap_candidate
+                    from scripts.formal_guest_session import execute_formal_workload
+                    verified_connection = bootstrap_candidate(self,harness_plan,plan,lease,
+                        preboot_disk_graph_digest,preboot_snapshot_identity)
                     operation["power_state"] = "RUNNING"
                     if self._execution is not None:
                         profile_authority_stack.enter_context(
                             hold_windows_private_file(authority.known_hosts_file))
-                    guest_root = self._stage_formal_workload(authority, _formal_workload)
-                    receipt = self._run_formal_profile_guest(
-                        authority=authority, workload=_formal_workload, guest_root=guest_root)
+                    receipt = execute_formal_workload(self,harness_plan,plan,lease,
+                        preboot_disk_graph_digest,preboot_snapshot_identity,_formal_workload)
             except CandidateHarnessError as error:
                 profile_failure = error
                 raise

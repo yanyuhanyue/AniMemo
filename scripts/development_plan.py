@@ -31,6 +31,9 @@ def is_development_plan(plan):
 
 
 def execution_source(plan):
+    from scripts.formal_plan import is_formal_plan
+    if is_formal_plan(plan):
+        return plan.execution_source_sha, plan.execution_source_tree
     if is_development_plan(plan):
         return plan.execution_source_sha, plan.execution_source_tree
     if type(plan) is h.CandidateHarnessPlan:

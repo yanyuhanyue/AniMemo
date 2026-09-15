@@ -46,7 +46,7 @@ def _candidate_source_evidence() -> dict[str, object]:
     original_vm_hashes = {"source.vmx": "sha256:" + "c" * 64}
     return {
         "candidate_plan_digest": "sha256:" + "a" * 64,
-        "candidate_provider_execution_authority_receipt_digest": (
+        "candidate_history_evidence_digest": (
             "sha256:" + "9" * 64
         ),
         "candidate_base_vm_identity": formal_provenance.sha256_bytes(
@@ -72,8 +72,8 @@ def _qualified_source_evidence() -> dict[str, object]:
     evidence = _candidate_source_evidence()
     return {
         "candidate_plan_digest": evidence["candidate_plan_digest"],
-        "candidate_provider_execution_authority_receipt_digest": evidence[
-            "candidate_provider_execution_authority_receipt_digest"
+        "candidate_history_evidence_digest": evidence[
+            "candidate_history_evidence_digest"
         ],
         "base_vm_identity": evidence["candidate_base_vm_identity"],
         "original_vm_hashes": evidence["candidate_original_vm_hashes"],

@@ -53,7 +53,7 @@ def _candidate_source_evidence() -> dict[str, object]:
     }
     return {
         "candidate_plan_digest": "sha256:" + "a" * 64,
-        "candidate_provider_execution_authority_receipt_digest": (
+        "candidate_history_evidence_digest": (
             "sha256:" + "9" * 64
         ),
         "candidate_base_vm_identity": harness.sha256_bytes(
@@ -79,8 +79,8 @@ def _qualified_source_evidence() -> dict[str, object]:
     evidence = _candidate_source_evidence()
     return {
         "candidate_plan_digest": evidence["candidate_plan_digest"],
-        "candidate_provider_execution_authority_receipt_digest": evidence[
-            "candidate_provider_execution_authority_receipt_digest"
+        "candidate_history_evidence_digest": evidence[
+            "candidate_history_evidence_digest"
         ],
         "base_vm_identity": evidence["candidate_base_vm_identity"],
         "original_vm_hashes": evidence["candidate_original_vm_hashes"],
@@ -1314,7 +1314,7 @@ class FormalVmHarnessTests(unittest.TestCase):
             self.assertEqual(harness.main(["--execute"]), 2)
         self.assertEqual(
             json.loads(error.getvalue()),
-            {"code": "FORMAL_PARENT_WORKER_CAPABILITY_REQUIRED"},
+            {"code": "FORMAL_PUBLISHED_INPUTS_REQUIRED"},
         )
 
     def test_closed_runtime_inventory_has_one_20gib_total_byte_contract(self):

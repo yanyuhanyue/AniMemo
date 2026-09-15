@@ -24,7 +24,7 @@ from scripts.development_session_owner import (
 )
 
 STABLE_MODULES = frozenset({'scripts.development_controller', 'scripts.development_session_owner',
-    'scripts.development_capture_scope'})
+    'scripts.development_capture_scope', 'scripts.guest_batch_scope', 'scripts.seams_development_controller'})
 STABLE_FILES = (
     'scripts/development_controller.py', 'scripts/development_session_owner.py',
     'scripts/development_capture_scope.py', 'scripts/candidate_batch_session.py',
@@ -33,6 +33,20 @@ STABLE_FILES = (
     'scripts/local_candidate_development.py', 'scripts/development_source.py',
     'scripts/candidate_vm_harness.py', 'scripts/isolated_guest_validation.py',
     'scripts/candidate_child_process.py', 'release/formal_windows_pretrust.py',
+    'scripts/guest_batch_scope.py', 'scripts/seams_development_controller.py',
+    'updater/source.py', 'installer/bootstrap.py', 'updater/offline.py',
+    'scripts/development_plan.py', 'scripts/formal_plan.py',
+    'scripts/candidate_diagnostics.py', 'scripts/closed_runtime_inventory.py',
+    'scripts/candidate_workload_root.py', 'scripts/development_workload_root.py',
+    'release/candidate.py', 'release/materials.py', 'release/trust_bootstrap.py',
+    'updater/authority.py', 'release/formal_candidate_history.py',
+    'release/formal_vm_controller.py',
+    'scripts/formal_guest_session.py', 'scripts/formal_workload_root.py',
+    'scripts/formal_runtime_entry.py', 'scripts/formal_vm_harness.py',
+    'installer/formal_bootstrap.py',
+    'release/formal_input_readback.py', 'scripts/published_formal_entry.py',
+    'scripts/formal_product_probe.py',
+    'scripts/linux_attestation_probe.py', 'scripts/development_linux_probe.py',
 )
 PROJECT_PACKAGES = ('scripts', 'installer', 'updater', 'durability', 'release')
 GIT = 'C:/Program Files/Git/cmd/git.exe'
@@ -188,7 +202,7 @@ def validate_request(value, *, owner_record, previous_digest, checkout_parent, s
     _require(set(value) == {'schema', 'owner_id', 'round_index', 'previous_result_sha256',
         'checkout', 'source_sha', 'source_tree'} and value['schema'] == 'animemo.local-development-round-request/v1')
     _require(value['owner_id'] == owner_record['owner_id'] and type(value['round_index']) is int
-        and value['round_index'] == owner_record['last_reserved_round'] + 1 <= owner_record['capture_limit']
+        and value['round_index'] == owner_record['last_reserved_round'] + 1 <= owner_record.get('round_limit', owner_record['capture_limit'])
         and value['previous_result_sha256'] == previous_digest
         and all(type(value[key]) is str and re.fullmatch('[0-9a-f]{40}', value[key])
                 for key in ('source_sha', 'source_tree')) and type(value['checkout']) is str)

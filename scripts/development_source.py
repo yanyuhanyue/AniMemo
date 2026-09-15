@@ -25,6 +25,7 @@ DEVELOPMENT_RUNTIME_FILES = (
     'scripts/development_profile_runner.py',
     'scripts/development_runtime_entry.py',
     'scripts/development_workload_root.py',
+    'scripts/linux_attestation_probe.py',
 )
 
 
@@ -39,9 +40,14 @@ def require_material_compatibility(material_source_sha, execution_source_sha):
         material_source_sha, execution_source_sha], timeout=30).decode('utf-8').split('\0')
     for name in filter(None, paths):
         path = PurePosixPath(name)
-        python_source = path.suffix == '.py' and path.parts[0] in {
+        projected_source = path.suffix in {'.py','.json','.md'} and path.parts[0] in {
             'scripts', 'installer', 'durability', 'release', 'updater'}
-        if not python_source and path.parts[0] != 'docs':
+        # CI and documentation are not qualified OCI or wheel bytes. Runtime
+        # source/schema deltas are copied into the separately identified DEV
+        # tree; the original Q/OCI/pretrust bytes remain independently bound.
+        non_runtime = path.parts[0] == 'docs' or (
+            path.parts[:2] == ('.github','workflows') and path.suffix in {'.yml','.yaml'})
+        if not projected_source and not non_runtime:
             raise h.CandidateHarnessError('DEVELOPMENT_LOCAL_MATERIAL_REBUILD_REQUIRED')
 
 
@@ -155,7 +161,7 @@ class HeldDevelopmentSource:
 
 
 @contextmanager
-def acquire_development_source(provider, *, source_sha, source_tree):
+def acquire_development_source(provider, *, source_sha, source_tree, attestation_probe_inputs=None):
     if os.name != 'nt' or type(provider) is not h.ClosedVmwareProvider:
         raise h.CandidateHarnessError('DEVELOPMENT_SOURCE_PROVIDER_INVALID')
     provider._require_active_execution_authority()
@@ -188,6 +194,13 @@ def acquire_development_source(provider, *, source_sha, source_tree):
         identities = project_execution_tree(code_root=code_root, code_identities=identities,
             material_root=loaded.root / 'installer-root', material_identities=material_ids,
             baseline_tracked_paths=tracked, destination=draft)
+        if attestation_probe_inputs is not None:
+            from scripts.linux_attestation_probe import prepare_probe_inputs
+            additions=prepare_probe_inputs(loaded=loaded,source_sha=source_sha,
+                execution_root=draft,**attestation_probe_inputs)
+            if set(additions)&set(identities):
+                raise h.CandidateHarnessError('DEVELOPMENT_PROBE_INPUT_COLLISION')
+            identities.update(additions)
         value._source_root = create_windows_private_named_directory(root,
             name=hashlib.sha256(h.canonical_json_bytes(identities)).hexdigest())
         value._holds.enter_context(hold_windows_private_tree_snapshot(draft,

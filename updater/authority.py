@@ -55,6 +55,18 @@ class VerifiedReleaseMaterials:
     def profile(self) -> str:
         return str(self.deployment_contract["profile"])
 
+    @property
+    def installer_archive_sha256(self) -> str:
+        """Archive bytes identity, distinct from the manifest/material-set key."""
+        archive = self.deployment_contract.get("archive")
+        deployment = self.manifest.get("deployment")
+        if (not isinstance(archive, dict) or not isinstance(deployment, dict)
+                or not isinstance(deployment.get("installerMaterials"), dict)
+                or archive.get("sha256") != self.verified.archive_sha256
+                or deployment["installerMaterials"].get("sha256") != self.verified.archive_sha256):
+            raise RequestRejected("Installer archive identity differs from verified materials")
+        return self.verified.archive_sha256
+
     def material(self, relative: str) -> Path:
         return self.verified.material(relative)
 

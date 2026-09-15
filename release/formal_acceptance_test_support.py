@@ -152,7 +152,7 @@ def build_test_formal_acceptance(
             )
         },
         candidate_plan_digest="sha256:" + "a" * 64,
-        candidate_provider_execution_authority_receipt_digest=(
+        candidate_history_evidence_digest=(
             "sha256:" + "9" * 64
         ),
         candidate_base_vm_identity=source_base_identity,

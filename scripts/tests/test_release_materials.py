@@ -171,6 +171,9 @@ class InstallerMaterialsTests(unittest.TestCase):
             self.assertIn("scripts/closed_runtime_inventory.py", names)
             self.assertIn("scripts/candidate_workload_root.py", names)
             self.assertIn("scripts/formal_profile_runner.py", names)
+            self.assertIn("scripts/formal_runtime_entry.py", names)
+            self.assertIn("scripts/formal_workload_root.py", names)
+            self.assertIn("installer/formal_bootstrap.py", names)
             self.assertIn("scripts/release_qualification.py", names)
             inventory_program = next(
                 item
@@ -280,6 +283,8 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "scripts/candidate_diagnostics.py",
                 "scripts/candidate_runtime_entry.py",
                 "scripts/formal_profile_runner.py",
+                "scripts/formal_runtime_entry.py",
+                "scripts/formal_workload_root.py",
                 "scripts/release_qualification.py",
             )
             for relative in fixed:
@@ -343,6 +348,8 @@ class InstallerMaterialsTests(unittest.TestCase):
                 "scripts/candidate_diagnostics.py",
                 "scripts/candidate_runtime_entry.py",
                 "scripts/formal_profile_runner.py",
+                "scripts/formal_runtime_entry.py",
+                "scripts/formal_workload_root.py",
                 "scripts/release_qualification.py",
             )
             for relative in fixed:

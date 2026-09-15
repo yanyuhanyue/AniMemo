@@ -1553,7 +1553,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
         self.assertNotIn(str(harness.OPENSSH_IDENTITY), generated_argv[0])
         self.assertTrue(authority.identity_file.is_file())
 
-    def test_bootstrap_is_one_time_then_session_key_owns_all_candidate_calls(self):
+    def test_environment_bootstrap_is_retired_and_session_keys_remain_distinct(self):
         _, _, authority, _, _, _ = self._connection_fixture()
         authority = self._temporary_authority(authority)
         authority.ssh_root.mkdir(parents=True)
@@ -1567,11 +1567,9 @@ class CandidateVmHarnessTests(unittest.TestCase):
             environment={harness.GUEST_SUDO_PASSWORD_ENV: "test-only-password"},
         )
         with mock.patch.object(provider, "_ssh_checked") as ssh_checked:
-            provider._provision_session_key_and_rotate_host_key(authority)
-        command = ssh_checked.call_args.args[1]
-        self.assertTrue(ssh_checked.call_args.kwargs["bootstrap_identity"])
-        self.assertIn(public_key, command)
-        self.assertNotIn(authority.connection_nonce, command)
+            with self.assertRaisesRegex(harness.CandidateHarnessError,'GUEST_ENVIRONMENT_CREDENTIAL_CHANNEL_RETIRED'):
+                provider._provision_session_key_and_rotate_host_key(authority)
+        ssh_checked.assert_not_called()
 
         session_argv = provider._ssh_argv(authority, "/usr/bin/true")
         bootstrap_argv = provider._ssh_argv(
@@ -2567,7 +2565,9 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 SECRET_KEY_ENV: "test-only-r2-secret",
             },
         )
-        password = provider._sudo_password()
+        with self.assertRaisesRegex(harness.CandidateHarnessError, 'GUEST_ENVIRONMENT_CREDENTIAL_CHANNEL_RETIRED'):
+            provider._sudo_password()
+        password = b'test-only-password\n'
         provider._ssh_checked(
             authority,
             "sudo -S -p '' -- /usr/bin/true",

@@ -4,3 +4,6 @@ plugins/**/*.json text eol=lf
 plugins/**/*.md text eol=lf
 plugins/**/*.mjs text eol=lf
 plugins/**/*.py text eol=lf
+
+# Preserve the original subprocess output bytes, including Windows CRLF.
+updater/tests/fixtures/gh-2.97.0-verified-manifest.json binary

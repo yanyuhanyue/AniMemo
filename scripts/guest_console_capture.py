@@ -77,6 +77,7 @@ class _ConsoleAPI:
                 (self.kernel32.GetConsoleProcessList, [LPDWORD, DWORD], DWORD),
                 (self.kernel32.GetCurrentProcessId, [], DWORD),
                 (self.user32.IsWindowVisible, [HANDLE], BOOL),
+                (self.user32.MessageBoxW, [HANDLE, ctypes.c_wchar_p, ctypes.c_wchar_p, DWORD], ctypes.c_int),
                 (self.kernel32.FlushConsoleInputBuffer, [HANDLE], BOOL),
                 (self.kernel32.ReadConsoleW, [HANDLE, LPWCHAR, DWORD, LPDWORD, ctypes.c_void_p], BOOL),
                 (self.kernel32.CancelIoEx, [HANDLE, ctypes.c_void_p], BOOL),
@@ -144,6 +145,20 @@ class WindowsConsoleCapture:
             raise
         except Exception:
             raise ConsoleCaptureError("CREDENTIAL_CHANNEL_UNAVAILABLE") from None
+
+    def confirm_batch(self, public_summary: str) -> None:
+        """Confirm the frozen public batch locally; this never reads a secret."""
+        if type(public_summary) is not str or not 1 <= len(public_summary) <= 12000:
+            raise ConsoleCaptureError("BATCH_CONFIRMATION_INVALID")
+        before = self._snapshot()
+        # YES/NO, default NO. Only the human in the exclusive native Console
+        # can confirm; stdin, a JSON file, and a process id are not consent.
+        answer = self._api.user32.MessageBoxW(
+            before[2], public_summary,
+            "AniMemo: confirm this isolated batch (no password here)", 0x00000124,
+        )
+        if self._snapshot() != before or answer != 6:
+            raise ConsoleCaptureError("BATCH_CONFIRMATION_CANCELLED")
 
     def _write_public(self, stdout, text: str) -> None:
         encoded = text.encode("utf-16-le")

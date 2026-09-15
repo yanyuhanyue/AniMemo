@@ -33,7 +33,7 @@ class WorkloadAuthorityTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(dir='E:/')
         self.addCleanup(temporary.cleanup)
         for patcher in (mock.patch.object(b, 'CAPTURE_LEDGERS', {b.AUTHORIZATION: Path(temporary.name) / ('d' * 64)}),
-                        mock.patch.object(b, '_check_checkout'), mock.patch.object(c, '_check_checkout'),
+                        mock.patch.object(b, '_check_checkout'),
                         mock.patch.object(c, '_root_program', return_value='pass')):
             patcher.start()
             self.addCleanup(patcher.stop)

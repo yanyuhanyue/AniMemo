@@ -23,6 +23,8 @@ from release.contract import (
     validate_deployment_contract,
     validate_manifest,
 )
+from release.materials import reject_duplicate_json_keys
+from release.publication_evidence import OWNER_ID, REPOSITORY_ID
 
 from . import __version__
 from .authority import (
@@ -564,11 +566,27 @@ class GitHubReleaseSource:
 
     @staticmethod
     def _verify_attestation_result(
-        output: str, expected_name: str, digest: str
+        output: str, expected_name: str, digest: str, *,
+        expected_workflow: str, expected_source_commit: str | None,
     ) -> tuple[str, str]:
+        """Consume fixed gh 2.97 JSON after its checked subprocess succeeds.
+
+        Sigstore's certificate summary flattens the X.509 extensions. Accept
+        that one format, and bind the summary again to the request sent to gh.
+        This parser is not a cryptographic verifier or a Release capability.
+        """
+        if (
+            type(output) is not str or not output or len(output) > MAX_GITHUB_JSON_BYTES
+            or expected_workflow not in {
+                ".github/workflows/release.yml", ".github/workflows/promote-release.yml"
+            }
+            or expected_source_commit is not None
+            and (type(expected_source_commit) is not str or GIT_SHA.fullmatch(expected_source_commit) is None)
+        ):
+            raise RequestRejected("Artifact attestation output contract is invalid")
         try:
-            payload = json.loads(output)
-        except json.JSONDecodeError as error:
+            payload = json.loads(output, object_pairs_hook=reject_duplicate_json_keys)
+        except ValueError as error:
             raise RequestRejected(
                 "Artifact attestation verification returned invalid JSON"
             ) from error
@@ -578,6 +596,18 @@ class GitHubReleaseSource:
                 "Artifact attestation verification returned no result"
             )
         matches: list[tuple[str, str]] = []
+        workflow_identity = f"https://github.com/{REPOSITORY}/{expected_workflow}@refs/heads/main"
+        expected_certificate = {
+            "sourceRepositoryURI": f"https://github.com/{REPOSITORY}",
+            "sourceRepositoryIdentifier": REPOSITORY_ID,
+            "sourceRepositoryOwnerURI": f"https://github.com/{REPOSITORY.split('/')[0]}",
+            "sourceRepositoryOwnerIdentifier": OWNER_ID,
+            "sourceRepositoryRef": "refs/heads/main",
+            "issuer": "https://token.actions.githubusercontent.com",
+            "subjectAlternativeName": workflow_identity,
+            "buildSignerURI": workflow_identity,
+            "buildConfigURI": workflow_identity,
+        }
         for item in payload:
             if not isinstance(item, dict):
                 continue
@@ -588,7 +618,8 @@ class GitHubReleaseSource:
                 else None
             )
             subjects = statement.get("subject") if isinstance(statement, dict) else None
-            if not isinstance(subjects, list):
+            if (not isinstance(subjects, list)
+                    or statement.get("predicateType") != "https://slsa.dev/provenance/v1"):
                 continue
             for subject in subjects:
                 subject_digest = (
@@ -605,16 +636,12 @@ class GitHubReleaseSource:
                         if isinstance(signature, dict)
                         else None
                     )
-                    extensions = (
-                        certificate.get("extensions")
-                        if isinstance(certificate, dict)
-                        else None
-                    )
-                    if not isinstance(extensions, dict):
+                    if (type(certificate) is not dict or "extensions" in certificate
+                            or any(certificate.get(key) != value for key, value in expected_certificate.items())):
                         continue
-                    source_commit = extensions.get("sourceRepositoryDigest")
-                    signer_digest = extensions.get("buildSignerDigest")
-                    build_config_digest = extensions.get("buildConfigDigest")
+                    source_commit = certificate.get("sourceRepositoryDigest")
+                    signer_digest = certificate.get("buildSignerDigest")
+                    build_config_digest = certificate.get("buildConfigDigest")
                     if (
                         not isinstance(source_commit, str)
                         or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
@@ -622,6 +649,8 @@ class GitHubReleaseSource:
                         or re.fullmatch(r"[0-9a-f]{40}", signer_digest) is None
                         or build_config_digest != signer_digest
                         or source_commit != signer_digest
+                        or expected_source_commit is not None
+                        and source_commit != expected_source_commit
                     ):
                         continue
                     matches.append((source_commit, signer_digest))
@@ -841,6 +870,8 @@ class GitHubReleaseSource:
                         result.stdout,
                         expected_name,
                         digest,
+                        expected_workflow=workflow,
+                        expected_source_commit=source_commit,
                     )
                 )
                 if (

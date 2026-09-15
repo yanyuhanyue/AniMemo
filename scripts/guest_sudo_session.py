@@ -148,12 +148,15 @@ class SessionSupervisor:
                  clock=time.monotonic, lifetime: float = 300):
         from scripts.candidate_batch_session import BatchUse
         from scripts.development_plan import is_development_plan
+        from scripts.formal_plan import is_formal_plan
         self._batch_use = secret if type(secret) is BatchUse else None
         if self._batch_use is None and (type(secret) is not bytearray or not 1 <= len(secret) <= 4096 or any(x < 32 or x == 127 for x in secret)):
             raise ControllerFailure("SUDO_VALUE_INVALID")
         development = (is_development_plan(plan) and self._batch_use is not None
                        and self._batch_use._batch.plan is plan)
-        if type(provider) is not h.ClosedVmwareProvider or not (type(plan) is h.CandidateHarnessPlan or development) or profile not in plan.profiles or profile.session_id != plan.session_id:
+        formal = (is_formal_plan(plan) and self._batch_use is not None
+                  and self._batch_use._batch.plan is plan and self._batch_use._batch._formal)
+        if type(provider) is not h.ClosedVmwareProvider or not (type(plan) is h.CandidateHarnessPlan or development or formal) or profile not in plan.profiles or profile.session_id != plan.session_id:
             raise ControllerFailure("SESSION_PLAN_INVALID")
         if h.sha256_bytes(h.canonical_json_bytes(plan.identity_body())) != plan.plan_digest:
             raise ControllerFailure("SESSION_PLAN_INVALID")
