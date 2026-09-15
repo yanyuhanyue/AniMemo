@@ -45,7 +45,7 @@ def require_material_compatibility(material_source_sha, execution_source_sha):
         # CI and documentation are not qualified OCI or wheel bytes. Runtime
         # source/schema deltas are copied into the separately identified DEV
         # tree; the original Q/OCI/pretrust bytes remain independently bound.
-        non_runtime = path.parts[0] == 'docs' or (
+        non_runtime = name == '.gitattributes' or path.parts[0] == 'docs' or (
             path.parts[:2] == ('.github','workflows') and path.suffix in {'.yml','.yaml'})
         if not projected_source and not non_runtime:
             raise h.CandidateHarnessError('DEVELOPMENT_LOCAL_MATERIAL_REBUILD_REQUIRED')
