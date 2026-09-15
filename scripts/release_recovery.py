@@ -61,6 +61,9 @@ def main() -> int:
         platform = RecoveryPlatform(remote, repository, os.environ, event)
         # Validate the trusted source before consuming any operator input.
         platform.execution()
+        (evidence / "initial-draft-read.json").write_bytes(
+            canonical_json_bytes(platform.initial_draft_reads())
+        )
         wire = event["inputs"]["candidate_acceptance_receipt_b64url"]
         require(
             isinstance(wire, str) and wire.isascii() and len(wire) <= 48 * 1024,

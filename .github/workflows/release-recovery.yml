@@ -32,12 +32,25 @@ permissions:
 
 jobs:
   inspect:
-    if: inputs.operation == 'inspect'
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      github.repository == 'yanyuhanyue/AniMemo' && github.actor_id == '111261350' &&
+      inputs.authorization_scope == 'ANIMEMO_V2_EXISTING_RC_SOURCE_BOUND_RECOVERY_API_FIX_V2' &&
+      inputs.operation == 'inspect'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # Draft visibility needs a write-capable token. The reviewed inspection
+    # transport rejects mutation methods and uses a read-only journal backend.
+    permissions:
+      contents: write
+      actions: read
+      packages: read
+      attestations: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
           fetch-depth: 0
       - run: bash scripts/mask-candidate-receipt.sh
@@ -60,7 +73,11 @@ jobs:
 
   recover:
     name: recover-existing-rc
-    if: inputs.operation == 'execute'
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      github.repository == 'yanyuhanyue/AniMemo' && github.actor_id == '111261350' &&
+      inputs.authorization_scope == 'ANIMEMO_V2_EXISTING_RC_SOURCE_BOUND_RECOVERY_API_FIX_V2' &&
+      inputs.operation == 'execute'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     permissions:
@@ -72,6 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
           fetch-depth: 0
       - run: bash scripts/mask-candidate-receipt.sh

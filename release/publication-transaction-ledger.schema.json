@@ -125,13 +125,14 @@
         "writeSteps",
         "previousTool",
         "parentTool",
-        "diagnosticTool",
+        "diagnosticTool", "draftReadTool",
         "supersededFailure"
       ],
       "properties": {
         "previousTool": {"type": "object"},
         "parentTool": {"type": "object"},
         "diagnosticTool": {"type": "object"},
+        "draftReadTool": {"type": "object"},
         "supersededFailure": {"type": "object"},
         "schema": {
           "type": "string"
