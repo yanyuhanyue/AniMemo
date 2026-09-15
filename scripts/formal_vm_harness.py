@@ -1079,7 +1079,7 @@ class ClosedFormalVmProfileExecutor:
                     temporary.cleanup()
         self._cleanup_done = True
 
-    def finalize_execution(self, execution):
+    def finalize_execution(self, execution, *, failure_code=None):
         """Close the real credential round before any successful evidence exists."""
         if type(self._provider) is not ClosedVmwareProvider:
             self.cleanup()
@@ -1088,8 +1088,7 @@ class ClosedFormalVmProfileExecutor:
             if self._local_authorization is not None else None)
         self.cleanup()
         if confirmation is None or self._batch is None:
-            raise FormalProducerError('FORMAL_PRODUCT_ATTESTATION_PREFLIGHT_REJECTED'
-                if self.product_preflight is not None else 'FORMAL_LOCAL_CONFIRMATION_REQUIRED')
+            raise FormalProducerError(failure_code or 'FORMAL_LOCAL_CONFIRMATION_REQUIRED')
         from dataclasses import replace
         from datetime import datetime, timezone
         self.credential_session = {'schema':'animemo.formal-credential-session/v1',
@@ -1135,10 +1134,15 @@ class ClosedFormalVmProfileExecutor:
                     loaded=self._provider._candidate_material_authority.loaded,
                     execution_source_sha=source.source_sha,execution_source_tree=source.source_tree,
                     execution_inventory_digest=source.inventory_digest)
-                self._local_authorization = confirm_local_batch(
-                    authorization_id=self._local_authorization_id,purpose='FORMAL_POSTPUBLICATION',plan=self._plan)
-                self._batch = CandidateBatch(self._provider,self._plan,
-                    authorization_id=self._local_authorization_id,local_authorization=self._local_authorization)
+                from scripts.guest_sudo_session import ControllerFailure
+                from scripts.guest_console_capture import ConsoleCaptureError
+                try:
+                    self._local_authorization = confirm_local_batch(
+                        authorization_id=self._local_authorization_id,purpose='FORMAL_POSTPUBLICATION',plan=self._plan)
+                    self._batch = CandidateBatch(self._provider,self._plan,
+                        authorization_id=self._local_authorization_id,local_authorization=self._local_authorization)
+                except (ControllerFailure,ConsoleCaptureError) as error:
+                    raise FormalProducerError(error.code) from error
                 self._provider._candidate_batch = self._batch
             self._authority_identity = authority.identity
         if self._authority_identity != authority.identity:
@@ -2454,7 +2458,7 @@ def execute_qualified_formal_production(
         candidate_material_tree_inventory_identity=(
             qualified_candidate.candidate_material_tree_inventory_identity
         ),
-        parent_path_authority=_parent_path_authority,
+        parent_path_authority=(None if _output_transaction_sink is not None else _parent_path_authority),
     )
     transferred = False
     try:

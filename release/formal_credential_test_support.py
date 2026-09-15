@@ -15,7 +15,7 @@ def with_test_credentials(delegate):
             self.observations[profile] = result
             return result
 
-        def finalize_execution(self, execution):
+        def finalize_execution(self, execution, *, failure_code=None):
             authority = self.authority
             digest = lambda text: sha256_bytes(text.encode())
             roles = ('BOOTSTRAP_ROTATION','VERIFIED_SUDO','FORMAL_WORKLOAD')

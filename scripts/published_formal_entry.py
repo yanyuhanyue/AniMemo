@@ -70,6 +70,7 @@ def run(args):
     try:
         with ExitStack() as stack:
             parent=stack.enter_context(hold_windows_private_path_authority(root,allow_leaf_child_writes=True))
+            work_root=create_windows_private_directory(root,prefix='execution-work')
             gh=root/'gh.exe'
             _copy_closed_asset(args.windows_gh,gh,maximum=64*1024*1024)
             rest=GitHubPublicRest(runner=_PinnedWindowsGh(gh))
@@ -97,10 +98,12 @@ def run(args):
                             expected_aggregate_digest=args.candidate_aggregate_digest)
                         try:
                             request=observe_qualified_formal_request(qualified_candidate=history,provenance_inputs=inputs,
-                                publication_input=publication,private_work_root=root,_parent_path_authority=parent)
+                                publication_input=publication,private_work_root=work_root,_parent_path_authority=parent)
                             report['published_subject']=request.identity_body()
                             report['history_evidence_digest']=history.candidate_history_evidence_digest
                             if args.execute:
+                                output_parent=create_windows_private_directory(Path('E:/'),prefix='animemo-formal-results')
+                                report['formal_output_root']=str(output_parent/'formal-output')
                                 with acquire_development_source(provider,source_sha=tool_sha,source_tree=tool_tree) as source:
                                     execution=FormalExecutionContext(accepted_at=now,observed_at=now,
                                         operator_identity=args.authorization_id,run_id='local-'+provider._execution.root.name,
@@ -111,7 +114,7 @@ def run(args):
                                         publication_identity=request.publication_identity,
                                         attestation_claim_identities=request.attestation_claim_identities,
                                         provenance_inputs=inputs,publication_input=publication,execution=execution,
-                                        publication_root=publication_root,private_work_root=root,output_root=root/'formal-output',
+                                        publication_root=publication_root,private_work_root=work_root,output_root=output_parent/'formal-output',
                                         provider=provider,_parent_path_authority=parent,
                                         local_authorization_id=args.authorization_id,linux_gh_package=args.linux_gh_package,
                                         windows_gh=gh,_output_transaction_sink=pending_output)

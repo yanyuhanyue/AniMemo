@@ -3189,7 +3189,7 @@ class FormalVmController:
         credential_session = None
         finalize = getattr(self._profile_executor, 'finalize_execution', None)
         if finalize is not None:
-            execution, credential_session = finalize(execution)
+            execution, credential_session = finalize(execution,failure_code=shared_blocker)
             if type(execution) is not FormalExecutionContext:
                 _formal_reject('FORMAL_CONTROLLER_INPUT_INVALID')
         all_profiles_pass = all(
