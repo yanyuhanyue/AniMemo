@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from scripts import candidate_guest_session as session
+from scripts.candidate_batch_session import WIRE_REPAIR_AUTHORIZATION
 from scripts import candidate_vm_harness as h
 from scripts.tests import test_candidate_vm_harness as fixtures
 
@@ -150,7 +151,7 @@ class ProfileCleanupTests(unittest.TestCase):
               mock.patch('scripts.guest_console_capture.WindowsConsoleCapture.preflight'),
               mock.patch('scripts.candidate_batch_session.CandidateBatch', return_value=mock.Mock(record={'profiles': {}})),
               redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO())):
-            code = h.main(['--execute', '--authorization-id', session.CAPTURE_AUTHORIZATION,
+            code = h.main(['--execute', '--authorization-id', WIRE_REPAIR_AUTHORIZATION,
                 '--r2-origin-transport', 's3', '--result', str(output),
                 '--verified-candidate-digest', self.plan.verified_candidate_digest,
                 '--expected-qualification-run-id', str(self.plan.qualification_run_id),

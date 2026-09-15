@@ -6267,6 +6267,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-source-sha", required=True)
     parser.add_argument("--expected-source-tree", required=True)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--confirm-batch", action="store_true")
     parser.add_argument("--accept-plan-digest")
     parser.add_argument("--authorization-id")
     parser.add_argument("--result", type=Path)
@@ -6314,8 +6315,9 @@ def main(argv: list[str] | None = None) -> int:
         from scripts.candidate_batch_session import CAPTURE_LEDGERS, CandidateBatch
         from scripts.guest_console_capture import WindowsConsoleCapture
         from scripts.isolated_guest_validation import _check_checkout
-        if ((args.execute and (args.authorization_id not in CAPTURE_LEDGERS or report is None))
-                or (not args.execute and args.authorization_id is not None)):
+        if ((args.execute and (report is None or not args.authorization_id
+                or (not args.confirm_batch and args.authorization_id not in CAPTURE_LEDGERS)))
+                or (not args.execute and (args.authorization_id is not None or args.confirm_batch))):
             raise CandidateHarnessError('CANDIDATE_CAPTURE_AUTHORIZATION_INVALID')
         if args.execute:
             _check_checkout(args.expected_source_sha, args.expected_source_tree)
@@ -6340,7 +6342,16 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     if not plan.plan_digest:
                         raise CandidateHarnessError('CANDIDATE_HARNESS_PLAN_CONFIRMATION_REQUIRED')
-                    batch = CandidateBatch(provider, plan, authorization_id=args.authorization_id)
+                    local_authorization = None
+                    if args.confirm_batch:
+                        from scripts.guest_batch_scope import confirm_local_batch
+                        local_authorization = confirm_local_batch(
+                            authorization_id=args.authorization_id,
+                            purpose='CANDIDATE_ACCEPTANCE', plan=plan)
+                        stack.callback(local_authorization.close)
+                        result['batch_confirmation'] = local_authorization.body
+                    batch = CandidateBatch(provider, plan, authorization_id=args.authorization_id,
+                        local_authorization=local_authorization)
                     provider._candidate_batch = batch
                     provider._candidate_credential_session = batch.record
                     provider._candidate_credential_results = batch.record['profiles']
