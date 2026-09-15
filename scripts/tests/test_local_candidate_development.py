@@ -81,8 +81,8 @@ class DevelopmentPlanTests(unittest.TestCase):
         parsed = ast.parse(command)
         encoded = next(ast.literal_eval(node.args[0]) for node in ast.walk(parsed)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'b64decode')
-        self.assertLessEqual(len(encoded), 20000)
         program = zlib.decompress(base64.b64decode(encoded)).decode()
+        self.assertLessEqual(len(program.encode('utf-8')), guest.c.MAX_ROOT_PROGRAM_BYTES)
         compile(program, '<development-root-test>', 'exec')
         self.assertIn("scope['run_fixed_development']", program)
         self.assertIn(self.plan.execution_inventory_digest, program)
@@ -150,7 +150,8 @@ class DevelopmentRunnerTests(unittest.TestCase):
             'verified_candidate_digest': self.loaded.verified_digest,
             'material_source_sha': self.loaded.candidate_input['source_sha'],
             'material_source_tree': self.loaded.candidate_input['source_tree'],
-            'qualification_run_id': self.loaded.candidate_input['qualification_run_id']}
+            'qualification_run_id': self.loaded.candidate_input['qualification_run_id'],
+            'workload_mode': 'CLEAN_PREACCEPTANCE'}
         service = self.root / 'service-source'
         for name in PACKAGES:
             path = service / name / '__init__.py'

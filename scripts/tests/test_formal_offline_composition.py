@@ -1,7 +1,8 @@
 """Local integration using qualified media; external process/host facts are synthetic.
 
-Set ANIMEMO_FORMAL_TEST_CANDIDATE, ANIMEMO_FORMAL_TEST_ASSETS and
-ANIMEMO_FORMAL_TEST_SIDECAR to existing read-only material paths. This never
+Use formal_test_materials.selected_materials() in a trusted local test launcher
+with independently selected roots and canonical member identities. Optional
+ANIMEMO_FORMAL_TEST_* selectors must match that selection. This never
 starts a VM, accesses Docker IPC, executes a plan, or emits a Formal receipt.
 """
 from contextlib import ExitStack
@@ -20,11 +21,11 @@ from installer.platform_bootstrap import PLATFORM_PACKAGE_POLICY
 from installer.runtime import InstallTransportSource, InstallerError, explicit_transport_policy
 from installer.tests.test_platform_bootstrap import qualified_existing_facts
 from release.candidate import canonical_json_bytes
-from release.formal_windows_pretrust import FORMAL_WINDOWS_PRETRUST_PREFIX
 from release.materials import INITIAL_TRUST_KIT_PREFIX
 from release.trust_bootstrap import validate_initial_trust_kit
 from scripts.formal_profile_runner import _install_request
 from scripts.tests.trust_kit_fixture import authority_test_namespace, simulated_test_root_ownership
+from scripts.tests.formal_test_materials import snapshot_selected_materials
 from updater import __version__
 from updater.offline import SigstoreGoEvidenceVerifier
 from updater.tests.test_offline import _actions_claim, _release_claim
@@ -60,9 +61,6 @@ class SyntheticVerifierProcess:
         return subprocess.CompletedProcess(argv,0,canonical_json_bytes(claim),b'')
 
 
-@unittest.skipUnless(all(os.environ.get(name) for name in (
-    'ANIMEMO_FORMAL_TEST_CANDIDATE','ANIMEMO_FORMAL_TEST_ASSETS','ANIMEMO_FORMAL_TEST_SIDECAR')),
-    'Requires existing qualified portable media for the local composition gate')
 class FormalOfflineCompositionTests(unittest.TestCase):
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory(prefix='animemo-formal-local-plan-')
@@ -70,18 +68,15 @@ class FormalOfflineCompositionTests(unittest.TestCase):
         self.assertEqual(self.root.parent,Path(tempfile.gettempdir()).resolve())
         self.addCleanup(self.temporary.cleanup)
         self.stack=self.enterContext(ExitStack())
-        self.source=Path(os.environ['ANIMEMO_FORMAL_TEST_CANDIDATE'])/'installer-root'
-        self.assets=Path(os.environ['ANIMEMO_FORMAL_TEST_ASSETS'])
-        manifest=json.loads((self.assets/'release-manifest.json').read_bytes())
         self.authority_root=self.root/'authority'
-        self.authority_root.mkdir(mode=0o700)
-        for prefix in (INITIAL_TRUST_KIT_PREFIX,FORMAL_WINDOWS_PRETRUST_PREFIX):
-            shutil.copytree(self.source/prefix,self.authority_root/prefix)
+        materials=snapshot_selected_materials(self.authority_root)
+        if materials is None:
+            self.skipTest('No qualified media selected for the optional local composition gate')
+        manifest=materials.manifest
         self.version=manifest['release']['version']
-        self.payload=self.authority_root/f'animemo-{self.version}-portable.tar'
-        self.sidecar=self.authority_root/'release-attestation.sigstore.json'
-        shutil.copyfile(self.assets/self.payload.name,self.payload)
-        shutil.copyfile(os.environ['ANIMEMO_FORMAL_TEST_SIDECAR'],self.sidecar)
+        self.payload=materials.payload
+        self.sidecar=materials.sidecar
+        self.installer_archive=materials.installer_archive
         self.external=SyntheticVerifierProcess()
         self.stack.enter_context(mock.patch.dict(SigstoreGoEvidenceVerifier.__init__.__kwdefaults__,runner=self.external))
         self.stack.enter_context(simulated_test_root_ownership())
@@ -115,7 +110,7 @@ class FormalOfflineCompositionTests(unittest.TestCase):
             temporary.cleanup()
         protected=self.root/'bootstrap';protected.mkdir(mode=0o700)
         archive=protected/bootstrap._MATERIALS_FILE
-        shutil.copyfile(self.assets/'installer-materials.tar',archive);archive.chmod(0o400)
+        shutil.copyfile(self.installer_archive,archive);archive.chmod(0o400)
         self.addCleanup(lambda: archive.chmod(0o600) if archive.exists() else None)
         with authority_test_namespace(protected),mock.patch.object(formal_bootstrap,'BOOTSTRAP_AUTHORITY_ROOT',protected),\
                 mock.patch.object(formal_bootstrap,'os',SimpleNamespace(name='posix',geteuid=lambda:0,fstat=os.fstat)):

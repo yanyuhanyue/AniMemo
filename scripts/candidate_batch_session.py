@@ -164,7 +164,8 @@ class CandidateBatch:
                 'source_tree', 'qualification_run_id', 'candidate_input_digest', 'verified_candidate_digest')},
             profiles={profile: {role: dict(delivery_attempts=0, delivery_completed=0,
                 target_verified=False, lease_verified=False, operation_result='NOT_RUN')
-                for role in self._roles} for profile in h.PROFILES})
+                for role in self._roles} for profile in (
+                    tuple(item.profile for item in plan.profiles) if self._development else h.PROFILES)})
         if self._formal:
             self._record['purpose'] = 'FORMAL_POSTPUBLICATION'
             self._record['binding'].update(formal_authority_identity=plan.authority_digest,

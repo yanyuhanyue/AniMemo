@@ -25,6 +25,7 @@ DEVELOPMENT_RUNTIME_FILES = (
     'scripts/development_profile_runner.py',
     'scripts/development_runtime_entry.py',
     'scripts/development_workload_root.py',
+    'scripts/development_platform_diagnostic.py',
     'scripts/linux_attestation_probe.py',
 )
 

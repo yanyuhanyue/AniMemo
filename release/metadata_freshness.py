@@ -656,6 +656,7 @@ def _load_candidate_acceptance_receipt(
     # metadata validator from this module.  The contract remains one-way at
     # runtime: Freshness consumes an already-created receipt and never mints it.
     from .candidate import (
+        AGGREGATE_RECEIPT_SCHEMA,
         CandidateContractError,
         canonical_json_bytes,
         validate_aggregate_receipt,
@@ -665,6 +666,7 @@ def _load_candidate_acceptance_receipt(
         path,
         label="candidate acceptance receipt",
     )
+    from .candidate_failure_policy import FAILURE_POLICY
     try:
         receipt = validate_aggregate_receipt(value)
     except CandidateContractError as error:
@@ -677,7 +679,9 @@ def _load_candidate_acceptance_receipt(
             "candidate acceptance receipt JSON is not canonical"
         )
     if (
-        receipt["result"] != "PASS"
+        receipt['schema'] != AGGREGATE_RECEIPT_SCHEMA
+        or receipt.get('failure_policy') != FAILURE_POLICY
+        or receipt["result"] != "PASS"
         or receipt["all_profiles_pass"] is not True
         or receipt["qualification_run_id"] != identity.qualification_run_id
         or receipt["qualification_run_attempt"] != 1

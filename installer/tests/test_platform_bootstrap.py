@@ -534,7 +534,7 @@ class PlatformBootstrapExecutionTests(unittest.TestCase):
                 bootstrap.execute(plan, accepted_plan_digest=plan.plan_digest)
             self.assertEqual(raised.exception.code, expected)
 
-    def test_fresh_install_retries_one_bounded_apt_timeout(self) -> None:
+    def test_fresh_install_never_retries_partial_timeout(self) -> None:
         class TimeoutOnceRunner(RunnerFixture):
             def __init__(self) -> None:
                 super().__init__()
@@ -549,17 +549,41 @@ class PlatformBootstrapExecutionTests(unittest.TestCase):
                     self.docker_install_attempts += 1
                     if self.docker_install_attempts == 1:
                         self.calls.append((tuple(argv), timeout, dict(environment)))
-                        return PlatformCommandResult(124, stderr=b"command timeout")
+                        return PlatformCommandResult(-9, outcome="TIMEOUT")
                 return super().run(argv, timeout=timeout, environment=environment)
 
         runner = TimeoutOnceRunner()
         bootstrap, plan, _ = self.fresh_execution(runner=runner)
 
-        receipt = bootstrap.execute(plan, accepted_plan_digest=plan.plan_digest)
+        with self.assertRaises(PlatformBootstrapError) as raised:
+            bootstrap.execute(plan, accepted_plan_digest=plan.plan_digest)
 
-        self.assertEqual(receipt.result, "PASS")
-        self.assertEqual(runner.docker_install_attempts, 2)
+        self.assertEqual(raised.exception.code, "PLATFORM_BOOTSTRAP_DOCKER_INSTALL_FAILED")
+        self.assertEqual(raised.exception.command_result.returncode, -9)
+        self.assertEqual(runner.docker_install_attempts, 1)
         self.assertTrue(all(call[1] <= 900 for call in runner.calls))
+
+    def test_zero_exit_with_partial_index_evidence_is_not_success(self) -> None:
+        from installer.tests.test_apt_diagnostics import AptDiagnosticsTests
+        from installer.apt_diagnostics import apt_observation
+
+        class PartialIndexRunner(RunnerFixture):
+            def run(self, argv, *, timeout, environment):
+                result = super().run(argv, timeout=timeout, environment=environment)
+                if 'update' in argv:
+                    process = AptDiagnosticsTests().fixture(code=0,
+                        stderr=b'Some index files failed to download. old ones used instead')
+                    return PlatformCommandResult(0, observation=apt_observation(argv, process, '2.8.3'))
+                return result
+
+        runner = PartialIndexRunner()
+        bootstrap, plan, _ = self.fresh_execution(runner=runner)
+        with self.assertRaises(PlatformBootstrapError) as raised:
+            bootstrap.execute(plan, accepted_plan_digest=plan.plan_digest)
+        self.assertEqual(raised.exception.code, 'PLATFORM_BOOTSTRAP_APT_UPDATE_FAILED')
+        self.assertEqual(raised.exception.command_result.returncode, 0)
+        self.assertEqual(len([call for call in runner.calls if 'update' in call[0]]), 1)
+        self.assertFalse(any('install' in call[0] for call in runner.calls))
 
     def test_fresh_install_does_not_retry_a_non_timeout_failure(self) -> None:
         runner = RunnerFixture(fail_token=" docker.io")
@@ -947,11 +971,13 @@ class PlatformBootstrapInvariantTests(unittest.TestCase):
             )
 
     def test_command_timeout_terminates_a_dedicated_process_group(self) -> None:
-        source = inspect.getsource(SubprocessPlatformCommandRunner.run)
-        self.assertIn('start_new_session=os.name == "posix"', source)
-        self.assertIn("os.killpg(process.pid, signal.SIGTERM)", source)
-        self.assertIn("os.killpg(process.pid, signal.SIGKILL)", source)
-        self.assertIn("process.communicate(timeout=5)", source)
+        from installer.apt_diagnostics import capture_process
+        source = inspect.getsource(capture_process)
+        self.assertIn("start_new_session=os.name == 'posix'", source)
+        self.assertIn("os.killpg(process.pid, sig)", source)
+        self.assertIn("terminate(signal.SIGTERM)", source)
+        self.assertIn("signal.SIGKILL", source)
+        self.assertNotIn("process.communicate(", source)
 
     @unittest.skipUnless(os.name == "posix", "production timeout is POSIX-only")
     def test_timeout_kills_descendant_that_ignores_term_and_closes_pipes(self) -> None:
@@ -973,7 +999,8 @@ class PlatformBootstrapInvariantTests(unittest.TestCase):
                 timeout=1,
                 environment={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
             )
-            self.assertEqual(result.returncode, 124)
+            self.assertEqual(result.outcome, "TIMEOUT")
+            self.assertLess(result.returncode, 0)
             descendant = int(pid_file.read_text(encoding="ascii"))
             state_path = Path(f"/proc/{descendant}/stat")
             for _ in range(100):

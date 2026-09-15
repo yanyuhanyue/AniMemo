@@ -84,7 +84,7 @@ VERIFICATION_EXECUTION_RECEIPT_SCHEMA = (
 )
 PROFILE_RECEIPT_SCHEMA = "animemo.prepublication-candidate-profile-receipt/v1"
 AGGREGATE_RECEIPT_SCHEMA = (
-    "animemo.prepublication-candidate-acceptance-receipt/v4"
+    "animemo.prepublication-candidate-acceptance-receipt/v5"
 )
 VERIFIER_CONTRACT_VERSION = "2"
 POSIX_VERIFIED_CANDIDATE_ROOT = PurePosixPath(
@@ -2227,10 +2227,13 @@ def validate_profile_receipt(value: object) -> dict[str, Any]:
 
 
 def validate_aggregate_receipt(value: object) -> dict[str, Any]:
+    schema = value.get('schema') if type(value) is dict else None
     receipt = _validate_schema(
         value,
-        ("prepublication-candidate-acceptance-receipt-v4.schema.json"
-         if type(value) is dict and value.get("schema") == AGGREGATE_RECEIPT_SCHEMA
+        ("prepublication-candidate-acceptance-receipt-v5.schema.json"
+         if schema == AGGREGATE_RECEIPT_SCHEMA
+         else "prepublication-candidate-acceptance-receipt-v4.schema.json"
+         if schema == 'animemo.prepublication-candidate-acceptance-receipt/v4'
          else "prepublication-candidate-acceptance-receipt.schema.json"),
         code="CANDIDATE_ACCEPTANCE_RECEIPT_INVALID",
     )
@@ -2244,7 +2247,7 @@ def validate_aggregate_receipt(value: object) -> dict[str, Any]:
         == receipt["r2_origin_poststate_observation_id"]
     ):
         _reject("CANDIDATE_R2_OBSERVATION_REUSED")
-    if receipt["schema"] == AGGREGATE_RECEIPT_SCHEMA:
+    if receipt["schema"] in (AGGREGATE_RECEIPT_SCHEMA, 'animemo.prepublication-candidate-acceptance-receipt/v4'):
         from release.r2_plugin_origin import validate_plugin_receipt, R2PluginOriginError
         try:
             for role in ("PRESTATE", "POSTSTATE"):

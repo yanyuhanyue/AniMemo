@@ -60,11 +60,12 @@ class PluginAcceptanceTests(unittest.TestCase):
                 provider=self.provider, plugin_origin=self.channel)
         self.receipt = self.result['aggregateReceipt']
 
-    def test_three_actual_producer_calls_close_v4_and_every_offline_consumer_accepts(self):
+    def test_three_actual_producer_calls_close_v5_and_every_offline_consumer_accepts(self):
         self.assertEqual(self.roles, ['PRESTATE', 'POSTSTATE'])
         self.assertEqual(self.provider.execute_calls, 3)
         self.assertEqual(self.result['status'], 'PASS')
-        self.assertEqual(self.receipt['version'], 4)
+        self.assertEqual(self.receipt['version'], 5)
+        self.assertEqual(self.receipt['failure_policy'], self.plan.identity_body()['failurePolicy'])
         self.assertEqual(len(self.receipt['profile_receipts']), 3)
         for detail in self.receipt['profile_receipts'].values():
             self.assertEqual(detail['session_id'], self.plan.session_id)
@@ -104,7 +105,7 @@ class PluginAcceptanceTests(unittest.TestCase):
             with self.assertRaises(PublicationInputError):
                 build_publish_candidate_plan(self.loaded, receipt)
 
-    def test_current_v4_fail_and_incomplete_receipts_decode_but_cannot_publish(self):
+    def test_current_v5_fail_and_incomplete_receipts_decode_but_cannot_publish(self):
         for only_one_pass in (False, True):
             receipt = copy.deepcopy(self.receipt)
             for profile in h.PROFILES:
@@ -117,7 +118,7 @@ class PluginAcceptanceTests(unittest.TestCase):
                     'receipt_digest': None}
             receipt.update(all_profiles_pass=False, result='FAIL')
             seal(receipt)
-            self.assertEqual(contract.validate_aggregate_receipt(receipt)['version'], 4)
+            self.assertEqual(contract.validate_aggregate_receipt(receipt)['version'], 5)
             wire = contract.encode_aggregate_receipt_b64url(receipt)
             self.assertEqual(contract.decode_aggregate_receipt_b64url(wire)[0], receipt)
             output = self.root / ('failed-' + str(only_one_pass) + '.json')
@@ -328,12 +329,14 @@ class PluginAcceptanceTests(unittest.TestCase):
                 'payload':base64.urlsafe_b64encode(compressed).decode().rstrip('=')}
             return base64.urlsafe_b64encode(h.canonical_json_bytes(envelope)).decode().rstrip('=')
         found = None
-        for fraction in range(1, 30):
+        for fraction in range(1, 100):
             receipt = copy.deepcopy(self.receipt)
             receipt['completed_at'] = '2026-08-25T12:04:00.' + str(fraction) + 'Z'
             seal(receipt)
             raw = h.canonical_json_bytes(contract.validate_aggregate_receipt(receipt))
-            compressed = zlib.compress(raw, 9)
+            # Compression level is also a valid transport degree of freedom;
+            # do not depend on one schema's compressed-byte residue modulo 5.
+            compressed = zlib.compress(raw, 1 + fraction % 9)
             def padded(count):
                 # Valid empty, non-final stored DEFLATE blocks. They change
                 # transport size without adding or removing any receipt byte.

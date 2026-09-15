@@ -42,12 +42,16 @@ def _seal_development_tree(stage, parent_path, leaf, inventory_digest):
 def run_fixed_development(*, profile, input_digest, material_inventory_digest,
                           execution_inventory_digest, binding, context, diagnostic):
     session_id = binding.get('session_id')
+    workload_mode = binding.get('workload_mode')
     if (os.geteuid() != 0 or type(session_id) is not str
             or re.fullmatch('[0-9a-f]{32}', session_id) is None
             or profile not in {'FRESH_BASE', 'DOCKER_BASE', 'RUNTIME_BASE_OFFLINE'}
             or any(type(value) is not str or re.fullmatch('sha256:[0-9a-f]{64}', value) is None
                    for value in (input_digest, material_inventory_digest, execution_inventory_digest))
             or binding.get('execution_inventory_digest') != execution_inventory_digest):
+        raise ValueError('DEVELOPMENT_ROOT_SCOPE_INVALID')
+    if (workload_mode not in {'CLEAN_PREACCEPTANCE', 'PLATFORM_DIAGNOSTIC'}
+            or workload_mode == 'PLATFORM_DIAGNOSTIC' and profile != 'FRESH_BASE'):
         raise ValueError('DEVELOPMENT_ROOT_SCOPE_INVALID')
     os.umask(0o077)
     os.chdir('/')
@@ -74,7 +78,7 @@ def run_fixed_development(*, profile, input_digest, material_inventory_digest,
             raise ValueError('DEVELOPMENT_REPORT_EXISTS')
         program = ('import sys;from pathlib import Path;sys.path.insert(0,' + repr(str(execution_root))
             + ');from scripts.development_runtime_entry import main;raise SystemExit(main(Path('
-            + repr(str(material_root)) + ')))')
+            + repr(str(material_root)) + '),workload_mode=' + repr(workload_mode) + '))')
         environment = dict(os.environ)
         environment['ANIMEMO_CANDIDATE_PROFILE_CONTEXT_B64URL'] = base64.urlsafe_b64encode(
             (json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n').encode()).decode().rstrip('=')

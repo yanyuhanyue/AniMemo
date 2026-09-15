@@ -47,6 +47,8 @@ STABLE_FILES = (
     'release/formal_input_readback.py', 'scripts/published_formal_entry.py',
     'scripts/formal_product_probe.py',
     'scripts/linux_attestation_probe.py', 'scripts/development_linux_probe.py',
+    'scripts/development_platform_diagnostic.py', 'release/candidate_failure_policy.py',
+    'installer/apt_diagnostics.py',
 )
 PROJECT_PACKAGES = ('scripts', 'installer', 'updater', 'durability', 'release')
 GIT = 'C:/Program Files/Git/cmd/git.exe'

@@ -45,6 +45,10 @@ def _build_plan(
     candidate = validate_candidate_input(dict(loaded.candidate_input))
     verified = validate_verified_candidate(dict(loaded.verified))
     receipt = validate_aggregate_receipt(dict(acceptance_receipt))
+    from .candidate import AGGREGATE_RECEIPT_SCHEMA
+    from .candidate_failure_policy import FAILURE_POLICY
+    if receipt['schema'] != AGGREGATE_RECEIPT_SCHEMA or receipt.get('failure_policy') != FAILURE_POLICY:
+        _reject()
 
     candidate_digest = sha256_bytes(canonical_json_bytes(candidate))
     verified_digest = sha256_bytes(canonical_json_bytes(verified))

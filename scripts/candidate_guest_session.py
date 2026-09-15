@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import queue
 import shlex
+import subprocess
 import threading
 import time
 import zlib
@@ -21,11 +22,41 @@ from release.formal_windows_pretrust import (
 from scripts import candidate_vm_harness as h
 from scripts.guest_sudo_session import SessionSupervisor, ControllerFailure, _Grant, _read_observation
 from scripts import candidate_diagnostics as diagnostics
+from release.candidate_failure_policy import BUSINESS, business_failure_diagnostic
 
 
 from scripts.candidate_batch_session import BatchUse, CandidateBatch
 MAX_RECEIPT_BYTES = 8 * 1024 * 1024
 WORKLOAD_SECONDS = 4 * 60 * 60 + 60 * 60
+MAX_ROOT_PROGRAM_BYTES = 128 * 1024
+MAX_REMOTE_PROGRAM_BYTES = 256 * 1024
+WINDOWS_COMMAND_MAXIMUM_UNITS = 32767
+WORKLOAD_CONSTRUCTION_FAILURE_CODES = frozenset({
+    'CANDIDATE_ROOT_PROGRAM_SIZE_INVALID', 'CANDIDATE_ROOT_PROGRAM_SOURCE_MISMATCH',
+    'DEVELOPMENT_ROOT_PROGRAM_SIZE_INVALID', 'DEVELOPMENT_ROOT_PROGRAM_SOURCE_MISMATCH',
+    'CANDIDATE_WORKLOAD_CONTEXT_INVALID', 'CANDIDATE_WORKLOAD_PROGRAM_SIZE_INVALID',
+    'CANDIDATE_WORKLOAD_COMMAND_LIMIT_EXCEEDED', 'CANDIDATE_WORKLOAD_COMMAND_INVALID',
+})
+
+
+def validate_workload_command_budget(resolved_argv):
+    """Bound the actual Windows CreateProcessW command, including its NUL."""
+    if (not resolved_argv or any(type(value) is not str or '\0' in value for value in resolved_argv)):
+        raise ControllerFailure('CANDIDATE_WORKLOAD_COMMAND_INVALID')
+    try:
+        units = len(subprocess.list2cmdline(resolved_argv).encode('utf-16-le')) // 2 + 1
+    except UnicodeEncodeError:
+        raise ControllerFailure('CANDIDATE_WORKLOAD_COMMAND_INVALID') from None
+    if units > WINDOWS_COMMAND_MAXIMUM_UNITS:
+        raise ControllerFailure('CANDIDATE_WORKLOAD_COMMAND_LIMIT_EXCEEDED')
+    return {'windows_command_utf16_units_including_nul': units,
+            'windows_command_maximum_units': WINDOWS_COMMAND_MAXIMUM_UNITS}
+
+
+def validate_workload_context(context):
+    from scripts.candidate_profile_runner import MAX_CONTEXT_BYTES
+    if len(h.canonical_json_bytes(context)) > MAX_CONTEXT_BYTES:
+        raise ControllerFailure('CANDIDATE_WORKLOAD_CONTEXT_INVALID')
 
 
 @dataclass(frozen=True)
@@ -138,6 +169,7 @@ def _root_program(provider, plan, profile, initial_platform_state):
             raise ControllerFailure('CANDIDATE_ROOT_PROGRAM_SOURCE_MISMATCH')
         programs.append(trusted.decode('utf-8'))
     context = _profile_context(plan, profile, initial_platform_state)
+    validate_workload_context(context)
     args = dict(session_id=plan.session_id, profile=profile.profile, input_digest=plan.candidate_input_digest,
         verified_digest=plan.verified_candidate_digest, inventory_digest=material.tree_inventory_identity,
         context=context)
@@ -151,9 +183,10 @@ def _root_program(provider, plan, profile, initial_platform_state):
         + " scope['run_fixed_candidate'](**" + repr(args) + ',diagnostic=diagnostic)\n'
         + "except BaseException:\n diagnostic.error('ROOT_EXECUTION_FAILED')\n diagnostic.exited('ROOT',2)\n raise SystemExit(2)\n"
         + "diagnostic.exited('ROOT',0)\n")
-    encoded = base64.b64encode(zlib.compress(program.encode('utf-8'), level=9)).decode('ascii')
-    if len(encoded) > 20000:
+    raw = program.encode('utf-8')
+    if len(raw) > MAX_ROOT_PROGRAM_BYTES:
         raise ControllerFailure('CANDIDATE_ROOT_PROGRAM_SIZE_INVALID')
+    encoded = base64.b64encode(zlib.compress(raw, level=9)).decode('ascii')
     return 'import base64,zlib;exec(compile(zlib.decompress(base64.b64decode(' + repr(encoded) + ")), '<fixed-candidate-root>', 'exec'))"
 
 
@@ -224,7 +257,20 @@ if not reader.public()['root_started']:
 diagnostic.exited('SUDO',code)
 sys.exit(code)
 '''
-    return '/usr/bin/python3 -I -B -c ' + shlex.quote(program)
+    raw = program.encode('utf-8')
+    if len(raw) > MAX_REMOTE_PROGRAM_BYTES:
+        raise ControllerFailure('CANDIDATE_WORKLOAD_PROGRAM_SIZE_INVALID')
+    encoded = base64.b64encode(zlib.compress(raw, 9)).decode('ascii')
+    # This is a fixed public program built from held source and exact context;
+    # no untrusted bytes can enter its compressed payload. Verify its decoded
+    # size too, while preserving the exact original program before execution.
+    wrapper = ('import base64,zlib;d=zlib.decompressobj();p=d.decompress(base64.b64decode('
+        + repr(encoded) + '),' + str(MAX_REMOTE_PROGRAM_BYTES + 1) + ')\n'
+        + 'if not (len(p)<=' + str(MAX_REMOTE_PROGRAM_BYTES)
+        + ' and d.eof and not d.unconsumed_tail and not d.unused_data):'
+        + " raise ValueError('CANDIDATE_WORKLOAD_PROGRAM_SIZE_INVALID')\n"
+        + "exec(compile(p,'<fixed-workload-transport>','exec'))")
+    return '/usr/bin/python3 -I -B -c ' + shlex.quote(wrapper)
 
 
 class WorkloadFailure(ControllerFailure):
@@ -233,7 +279,8 @@ class WorkloadFailure(ControllerFailure):
         super().__init__(code)
 
 
-def _read_receipt(process, *, operation, provider, profile, batch=None, timeout=WORKLOAD_SECONDS):
+def _read_receipt(process, *, operation, provider, profile, batch=None, timeout=WORKLOAD_SECONDS,
+                  platform_diagnostic=False):
     reader = diagnostics.DiagnosticReader(operation)
     results = queue.Queue(maxsize=1)
     def read():
@@ -274,15 +321,32 @@ def _read_receipt(process, *, operation, provider, profile, batch=None, timeout=
     if not observed['root_started']:
         raise WorkloadFailure('CANDIDATE_UNKNOWN_BEFORE_ROOT_START')
     if reader.receipt is None:
-        known_business_failure = (exits['SUDO'] not in (None, 0)
-            and exits['ROOT'] not in (None, 0) and exits['RUNTIME_RUNNER'] not in (None, 0)
-            and exits['INSTALLER'] not in (None, 0)
-            and 'PLATFORM_PREPARING' in stages
-            and bool(set(observed['errors']) & {'PLATFORM_PREPARATION_FAILED', 'INSTALLER_EXECUTION_FAILED'}))
-        if known_business_failure:
+        if business_failure_diagnostic(observed):
             raise WorkloadFailure('CANDIDATE_INSTALLER_REPORTED_FAILURE', revoke_batch=False)
         raise WorkloadFailure('CANDIDATE_SHARED_WORKLOAD_STARTUP_OR_RECEIPT_FAILURE')
-    if (observed['errors'] or any(exits[component] != 0 for component in diagnostics.COMPONENTS)
+    expected_exits = {component: (None if platform_diagnostic and component == 'INSTALLER' else 0)
+                      for component in diagnostics.COMPONENTS}
+    expected_errors = []
+    if platform_diagnostic:
+        try:
+            from scripts.development_platform_diagnostic import validate_platform_diagnostic_report
+            from scripts.development_guest_session import development_binding
+            from scripts.development_plan import is_development_plan
+            if batch is None or not is_development_plan(batch.plan) or not batch.plan.platform_diagnostic:
+                raise ValueError()
+            if stages & {'INSTALLER_STARTING', 'INSTALLER_RUNNING', 'INSTALLER_COMPLETED'}:
+                raise ValueError()
+            validate_platform_diagnostic_report(reader.receipt,
+                loaded=provider._candidate_material_authority.loaded,
+                expected_binding=development_binding(batch.plan),
+                expected_context=_profile_context(batch.plan, profile, h._initial_platform_state(profile.profile)))
+            if reader.receipt['result'] == 'FAIL':
+                expected_errors = ['PLATFORM_PREPARATION_FAILED', reader.receipt['error_code']]
+                if reader.receipt['error_code'] == 'PLATFORM_BOOTSTRAP_PACKAGE_POLICY_INVALID':
+                    expected_errors.append('PLATFORM_PACKAGE_POLICY_INVALID')
+        except Exception:
+            raise WorkloadFailure('DEVELOPMENT_PLATFORM_DIAGNOSTIC_REPORT_INVALID') from None
+    if (observed['errors'] != expected_errors or exits != expected_exits
             or not {'DRAFT_WRITTEN', 'DRAFT_RETURNED', 'RUNNER_STARTED', 'RUNTIME_READY'}.issubset(stages)):
         raise WorkloadFailure('CANDIDATE_WORKLOAD_RECEIPT_DIAGNOSTIC_CONFLICT')
     return reader.receipt
@@ -297,6 +361,7 @@ class _WorkloadSupervisor(SessionSupervisor):
         self._delivery_attempts = {self._role: 0}
         self._delivery_completed = {self._role: 0}
         self._state = self._role
+        self._pending_business_failure = None
 
     def _exchange_workload(self, process):
         try:
@@ -318,10 +383,18 @@ class _WorkloadSupervisor(SessionSupervisor):
         finally:
             self._clear_secret()
         # No secret or reusable grant is needed while the fixed process runs.
-        self.receipt = _read_receipt(process, operation=_diagnostic_operation(self._plan, self._profile),
-            provider=self._provider, profile=self._profile,
-            batch=self._batch_use._batch,
-            timeout=self._workload_deadline - time.monotonic())
+        try:
+            self.receipt = _read_receipt(process, operation=_diagnostic_operation(self._plan, self._profile),
+                provider=self._provider, profile=self._profile,
+                batch=self._batch_use._batch,
+                platform_diagnostic=getattr(self._plan, 'platform_diagnostic', False),
+                timeout=self._workload_deadline - time.monotonic())
+        except WorkloadFailure as error:
+            if error.revoke_batch:
+                raise
+            # Diagnostic EOF is not process completion. Let the owned SSH
+            # transport wait and close its process tree before classification.
+            self._pending_business_failure = error
 
     def _program(self):
         return _root_program(self._provider, self._plan, self._profile,
@@ -332,12 +405,28 @@ class _WorkloadSupervisor(SessionSupervisor):
             formal_ssh_context=self._role == 'FORMAL_WORKLOAD')
         try:
             self._workload_deadline = time.monotonic() + WORKLOAD_SECONDS
+            argv = self._provider._ssh_argv(self._authority, command)
+            validate_workload_command_budget((str(self._provider._tool_path(h.SSH)), *argv[1:]))
             with hold_windows_private_file(self._authority.known_hosts_file):
-                self._provider._run(self._provider._ssh_argv(self._authority, command),
+                completed = self._provider._run(argv,
                     code='CANDIDATE_VM_PROFILE_EXECUTION_FAILED', timeout=WORKLOAD_SECONDS,
-                    openssh=True, guest_exchange=self._exchange_workload)
-            if self._delivery_completed[self._role] != 1:
+                    allowed=frozenset({0, 2}), openssh=True, guest_exchange=self._exchange_workload)
+            if (self._delivery_attempts[self._role] != 1 or self._delivery_completed[self._role] != 1
+                    or self._grant is None or not self._grant.used):
                 raise ControllerFailure('CANDIDATE_WORKLOAD_NOT_DELIVERED')
+            if self._pending_business_failure is not None:
+                if completed.returncode != 2:
+                    raise ControllerFailure('CANDIDATE_WORKLOAD_EXIT_CONFLICT')
+                _continuing_connection(self._provider, self._plan, self._profile, self._lease,
+                    self._preboot_disk, self._preboot_snapshot)
+                self._batch_use._batch.check_source()
+                operation = self._provider._profile_operation_results[self._profile.profile]
+                operation.update(failure_classification=BUSINESS,
+                    workload_process_completed=True, workload_delivery_completed=True,
+                    workload_identity_rechecked=True)
+                raise self._pending_business_failure
+            if completed.returncode != 0:
+                raise ControllerFailure('CANDIDATE_WORKLOAD_EXIT_CONFLICT')
             return self.receipt
         except WorkloadFailure as error:
             self.close(failed=error.revoke_batch)
@@ -345,6 +434,16 @@ class _WorkloadSupervisor(SessionSupervisor):
         except BaseException:
             self.close(failed=True)
             raise
+
+    def close(self, *, failed=False):
+        super().close(failed=failed)
+        if (self._grant is not None or self._secret is not None
+                or not self._batch_use._closed):
+            self._batch_use._batch.revoke('CANDIDATE_PROFILE_CLEANUP_FAILED')
+            raise ControllerFailure('CANDIDATE_WORKLOAD_SUPERVISOR_NOT_CLOSED')
+        operation = self._provider._profile_operation_results.get(self._profile.profile)
+        if operation is not None:
+            operation['workload_supervisor_closed'] = True
 
 
 def execute_candidate_workload(provider, plan, profile, lease, disk, snapshot,

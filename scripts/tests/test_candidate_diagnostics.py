@@ -30,6 +30,24 @@ def event(operation, kind, **fields):
     return frame(b'D', dict(schema=d.SCHEMA, operation=operation, kind=kind, **fields))
 
 
+def business_failure_frames(operation=OPERATION):
+    raw = b''.join(event(operation, 'STAGE', stage=stage) for stage in d.STAGES[:12])
+    for code in ('PLATFORM_PREPARATION_FAILED', 'PLATFORM_BOOTSTRAP_DOCKER_DAEMON_FAILED',
+                 'INSTALLER_EXECUTION_FAILED', 'RUNNER_EXECUTION_FAILED', 'ROOT_EXECUTION_FAILED'):
+        raw += event(operation, 'ERROR', code=code)
+    for component in ('INSTALLER', 'RUNTIME_RUNNER', 'ROOT', 'SUDO'):
+        raw += event(operation, 'EXIT', component=component, exit_code=6 if component == 'INSTALLER' else 2)
+    return raw
+
+
+def business_failure_diagnostic():
+    reader = d.DiagnosticReader(OPERATION)
+    stream = io.BytesIO(business_failure_frames())
+    while item := d.read_frame(stream):
+        reader.accept(*item)
+    return reader.public()
+
+
 def successful_frames(operation=OPERATION, padding=None):
     value = {'result': 'PASS', 'synthetic_transport_only': True}
     if padding is not None:
@@ -157,12 +175,8 @@ class DiagnosticTests(unittest.TestCase):
         self.assertIsNone(self.provider._candidate_diagnostics['FRESH_BASE']['exit_codes']['INSTALLER'])
 
     def test_trusted_installer_failure_may_continue_after_external_cleanup(self):
-        raw = b''.join(event(OPERATION, 'STAGE', stage=stage) for stage in d.STAGES[:11])
-        raw += event(OPERATION, 'ERROR', code='PLATFORM_PREPARATION_FAILED')
-        raw += event(OPERATION, 'ERROR', code='INSTALLER_EXECUTION_FAILED')
-        raw += b''.join(event(OPERATION, 'EXIT', component=component, exit_code=2) for component in d.COMPONENTS)
         with self.assertRaises(c.WorkloadFailure) as caught:
-            self.consume(raw)
+            self.consume(business_failure_frames())
         self.assertFalse(caught.exception.revoke_batch)
 
     def test_malformed_truncated_large_duplicate_and_wrong_binding_do_not_escape(self):

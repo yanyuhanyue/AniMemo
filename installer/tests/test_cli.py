@@ -57,6 +57,30 @@ class _Runtime:
 
 
 class InstallerCliTests(unittest.TestCase):
+    def test_unknown_platform_failure_keeps_original_and_only_reports_closed_fault_location(self):
+        import json
+        from installer.cli import _run_candidate_composition
+        from scripts import candidate_diagnostics as diagnostics
+        sentinel = 'synthetic-private-platform-error'
+        scope = {'__name__': 'installer.production', 'sentinel': sentinel}
+        exec(compile('def fail(*args):\n raise TypeError(sentinel)\n',
+            'X:/synthetic-platform/installer/production.py', 'exec'), scope)
+        composition = SimpleNamespace(plan_platform=scope['fail'])
+        operation = 'sha256:' + 'a' * 64
+        with tempfile.TemporaryFile() as stream:
+            writer = diagnostics.DiagnosticWriter(stream.fileno(), operation)
+            with self.assertRaisesRegex(TypeError, sentinel):
+                _run_candidate_composition(SimpleNamespace(), object(), composition, writer)
+            stream.seek(0)
+            reader = diagnostics.DiagnosticReader(operation)
+            while frame := diagnostics.read_frame(stream):
+                reader.accept(*frame)
+            public = reader.public()
+        self.assertIn('PLATFORM_PREPARATION_FAILED', public['errors'])
+        self.assertTrue(any(event['kind'] == 'FAULT' and event['category'] == 'TypeError'
+            and event['module'] == 'installer.production' for event in public['events']))
+        self.assertNotIn(sentinel, json.dumps(public))
+
     def test_platform_failure_stops_before_installer_plan_and_instance_mutation(
         self,
     ) -> None:

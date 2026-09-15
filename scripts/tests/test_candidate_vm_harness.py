@@ -2028,6 +2028,10 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 quarantine_present=True,
                 continuation_safe=True,
             )
+            from scripts.tests.test_development_session_owner import cleaned_business_operation
+            self.provider._profile_operation_results = {profile.profile: {
+                **cleaned_business_operation(), 'continuation_receipt_digest': continuation.receipt_digest}}
+            self.provider._candidate_batch = SimpleNamespace(cancelled=SimpleNamespace(is_set=lambda: False))
             return harness.CandidateProfileExecutionError(
                 "CANDIDATE_PROFILE_LOCAL_FAILURE",
                 continuation,
@@ -2085,7 +2089,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
         plan = self._plan()
 
         def local_error(profile, harness_plan):
-            return harness.CandidateProfileExecutionError(
+            error = harness.CandidateProfileExecutionError(
                 "CANDIDATE_PROFILE_LOCAL_FAILURE",
                 harness.ProfileContinuationReceipt.issue(
                     profile=profile.profile,
@@ -2099,6 +2103,11 @@ class CandidateVmHarnessTests(unittest.TestCase):
                     continuation_safe=True,
                 ),
             )
+            from scripts.tests.test_development_session_owner import cleaned_business_operation
+            self.provider._profile_operation_results = {profile.profile: {
+                **cleaned_business_operation(), 'continuation_receipt_digest': error.continuation_receipt.receipt_digest}}
+            self.provider._candidate_batch = SimpleNamespace(cancelled=SimpleNamespace(is_set=lambda: False))
+            return error
 
         self.provider.profile_errors.update(
             {"FRESH_BASE": local_error, "DOCKER_BASE": local_error}
@@ -2128,7 +2137,7 @@ class CandidateVmHarnessTests(unittest.TestCase):
             self.provider.events.index("profile:RUNTIME_BASE_OFFLINE"),
         )
 
-    def test_receipt_binding_error_is_controlled_and_series_continues(self):
+    def test_receipt_binding_error_stops_series(self):
         plan = self._plan()
         original_execute = self.provider.execute_profile
 
@@ -2153,14 +2162,14 @@ class CandidateVmHarnessTests(unittest.TestCase):
                 environment=_r2_environment(),
                 r2_client=R2Client(),
             )
-        self.assertEqual(self.provider.execute_calls, 3)
+        self.assertEqual(self.provider.execute_calls, 1)
         results = result["aggregateReceipt"]["profile_results"]
         self.assertEqual(results["fresh_base"]["status"], "ERROR")
         self.assertEqual(
             results["fresh_base"]["failure_code"],
             "CANDIDATE_PROFILE_RECEIPT_BINDING_MISMATCH",
         )
-        self.assertEqual(results["docker_base"]["status"], "PASS")
+        self.assertEqual(results["docker_base"]["status"], "NOT_RUN_SHARED_BLOCKER")
 
     def test_unverified_containment_stops_remaining_profiles(self):
         plan = self._plan()

@@ -498,7 +498,7 @@ class CandidateInstallerCliTests(unittest.TestCase):
             ],
         ]
         platform_delegate = mock.Mock()
-        platform_delegate.run.return_value = SimpleNamespace(returncode=0)
+        platform_delegate.run.return_value = SimpleNamespace(returncode=0, outcome="EXITED")
         platform_observer = CandidatePlatformCommandObserver(platform_delegate)
         composition = ProductionInstallerComposition(
             runtime=object(),
@@ -713,8 +713,8 @@ class CandidateInstallerCliTests(unittest.TestCase):
         platform_observer._completed_commands.clear()
         packages = ("docker.io",)
         platform_delegate.run.side_effect = [
-            SimpleNamespace(returncode=124),
-            SimpleNamespace(returncode=0),
+            SimpleNamespace(returncode=124, outcome="EXITED"),
+            SimpleNamespace(returncode=0, outcome="EXITED"),
         ]
         platform_observer.run(
             _apt_argv("install", packages),

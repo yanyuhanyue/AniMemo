@@ -6,6 +6,7 @@ import json
 from contextlib import ExitStack, nullcontext, redirect_stdout, redirect_stderr
 from types import SimpleNamespace
 import unittest
+import threading
 from unittest import mock
 
 from scripts import candidate_guest_session as session
@@ -61,6 +62,84 @@ class ProfileCleanupTests(unittest.TestCase):
         self.assertFalse(self.authority.identity_file.exists())
         self.assertFalse(self.authority.identity_file.with_suffix('.pub').exists())
         self.assertFalse(self.authority.known_hosts_file.exists())
+
+    def business_pipeline(self, *, revoke=False):
+        self.bootstrap.side_effect = None
+        self.running.return_value = True
+        secret = bytearray(b'synthetic-owner-value')
+        batch = mock.Mock(cancelled=threading.Event())
+        batch.operation.side_effect = lambda *_: nullcontext()
+        def cancel(_code):
+            secret.clear()
+            batch.cancelled.set()
+        batch.revoke.side_effect = cancel
+        self.provider._candidate_batch = batch
+        def fail(*_args):
+            operation = self.provider._profile_operation_results[self.profile.profile]
+            operation.update(workload_process_completed=True, workload_delivery_completed=True,
+                workload_identity_rechecked=True, workload_supervisor_closed=True)
+            raise session.WorkloadFailure('CANDIDATE_INSTALLER_REPORTED_FAILURE', revoke_batch=revoke)
+        self.workload.side_effect = fail
+        continuation = h.ProfileContinuationReceipt.issue(profile=self.profile.profile,
+            session_id=self.plan.session_id, original_vm_hashes=dict(self.plan.original_vm_hashes),
+            active_profile_root_count=0, session_private_key_count=0, known_hosts_file_count=0,
+            running_vm_count=0, quarantine_present=True, continuation_safe=True)
+        def inspect(**_kwargs):
+            operation = self.provider._profile_operation_results[self.profile.profile]
+            self.assertTrue(operation['lease_released'])
+            self.assert_no_keys()
+            self.assertEqual(operation['power_state'], 'STOPPED')
+            self.release.assert_called_once()
+            return continuation
+        inspection = self.stack.enter_context(mock.patch.object(self.provider,
+            'inspect_profile_continuation', side_effect=inspect))
+        return batch, secret, inspection
+
+    def test_business_failure_continuation_is_issued_only_after_final_cleanup(self):
+        batch, secret, inspection = self.business_pipeline()
+        with self.assertRaises(h.CandidateProfileExecutionError) as caught:
+            self.execute()
+        inspection.assert_called_once()
+        batch.revoke.assert_not_called()
+        self.assertTrue(secret)
+        h.validate_business_continuation(self.provider, self.plan, self.profile, caught.exception)
+        operation = self.provider._profile_operation_results[self.profile.profile]
+        self.assertEqual(operation['result'], 'ERROR')
+        for field in ('lease_released', 'workload_supervisor_closed', 'workload_delivery_completed'):
+            with self.subTest(field=field), mock.patch.dict(operation, {field: False}):
+                with self.assertRaises(h.CandidateHarnessError):
+                    h.validate_business_continuation(self.provider, self.plan, self.profile, caught.exception)
+
+    def test_security_failure_never_gets_continuation_even_after_clean_containment(self):
+        batch, secret, inspection = self.business_pipeline(revoke=True)
+        with self.assertRaises(h.CandidateHarnessError) as caught:
+            self.execute()
+        self.assertNotIsInstance(caught.exception, h.CandidateProfileExecutionError)
+        inspection.assert_not_called()
+        self.assertEqual(secret, b'')
+        self.assertTrue(batch.cancelled.is_set())
+
+    def test_suspended_business_failure_revokes_before_further_profile(self):
+        batch, secret, inspection = self.business_pipeline()
+        self.contain.return_value = 'SUSPENDED'
+        with self.assertRaises(h.CandidateHarnessError) as caught:
+            self.execute()
+        self.assertNotIsInstance(caught.exception, h.CandidateProfileExecutionError)
+        inspection.assert_not_called()
+        self.assertEqual(secret, b'')
+
+    def test_business_failure_with_cleanup_failures_keeps_primary_and_all_errors(self):
+        batch, secret, inspection = self.business_pipeline()
+        self.release.side_effect = h.CandidateHarnessError('CANDIDATE_VM_PROVIDER_SESSION_RELEASE_FAILED')
+        with mock.patch.object(self.provider, '_destroy_session_key',
+                side_effect=h.CandidateHarnessError('CANDIDATE_VM_SESSION_KEY_DELETION_FAILED')):
+            with self.assertRaisesRegex(h.CandidateHarnessError, '^CANDIDATE_INSTALLER_REPORTED_FAILURE$') as caught:
+                self.execute()
+        self.assertNotIsInstance(caught.exception, h.CandidateProfileExecutionError)
+        self.assertEqual([x['step'] for x in self.provider._profile_operation_results[self.profile.profile]['cleanup_errors']],
+            ['session_key', 'lease'])
+        inspection.assert_not_called()
+        self.assertEqual(secret, b'')
 
     def test_hold_close_failure_preserves_initial_failure_and_still_clears_keys(self):
         def fail(**kwargs):
