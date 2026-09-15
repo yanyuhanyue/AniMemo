@@ -110,7 +110,8 @@ class CandidateProductionReportTests(unittest.TestCase):
         output['productionExecutionObservation']['doctorReceiptDigest'] = 'sha256:' + 'f' * 64
         sentinel = 'synthetic-private-report-value'
         output['productionExecutionObservation']['doctorReport']['checks'][0]['summary'] = sentinel
-        binding = {'plan_digest': 'sha256:' + '1' * 64, 'session_id': '2' * 32,
+        binding = {'workload_mode': 'CLEAN_PREACCEPTANCE',
+            'plan_digest': 'sha256:' + '1' * 64, 'session_id': '2' * 32,
             'execution_source_sha': '3' * 40, 'execution_source_tree': '4' * 40,
             'execution_inventory_digest': 'sha256:' + '5' * 64,
             'verified_candidate_digest': loaded.verified_digest,
