@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 
-def prepare_probe_inputs(*,loaded,source_sha,execution_root,linux_gh,sidecar):
+def prepare_probe_inputs(*,loaded,source_sha,execution_root,linux_gh,sidecar,published_subject=False):
     from installer.formal_bootstrap import GH_EXE_SHA256
     from release.candidate import canonical_json_bytes, reject_duplicate_json_keys
     from release.materials import read_bounded_release_file
@@ -18,6 +18,18 @@ def prepare_probe_inputs(*,loaded,source_sha,execution_root,linux_gh,sidecar):
     root=Path(execution_root)
     probe=root/'development-probe'
     probe.mkdir(mode=0o700)
+    additions={}
+    product_root=root
+    if published_subject:
+        product_root=probe/'published-product'
+        for item in loaded.materials.verified.files:
+            data=loaded.materials.material(item.path).read_bytes()
+            if len(data)!=item.size or 'sha256:'+hashlib.sha256(data).hexdigest()!=item.sha256:
+                raise ValueError('PUBLISHED_LINUX_PRODUCT_COPY_CHANGED')
+            target=product_root/item.path
+            target.parent.mkdir(parents=True,exist_ok=True)
+            with target.open('xb') as stream:stream.write(data)
+            additions[target.relative_to(root).as_posix()]=item.sha256
     gh=read_bounded_release_file(Path(linux_gh),subject='Fixed Linux gh',maximum=64*1024*1024)
     if hashlib.sha256(gh).hexdigest()!=GH_EXE_SHA256 or gh[:4]!=b'\x7fELF':
         raise ValueError('DEVELOPMENT_LINUX_GH_IDENTITY_MISMATCH')
@@ -44,14 +56,16 @@ def prepare_probe_inputs(*,loaded,source_sha,execution_root,linux_gh,sidecar):
         execution_source_sha=source_sha,subject_source_sha=candidate['source_sha'],
         subject_version=candidate['candidate_version'],gh_sha256=GH_EXE_SHA256,
         manifest_sha256=hashlib.sha256(manifest).hexdigest(),
-        parser_sha256=hashlib.sha256((root/'updater/source.py').read_bytes()).hexdigest(),
+        purpose='PUBLISHED_PRODUCT_PREFLIGHT_ONLY' if published_subject else 'DEVELOPMENT_ONLY',
+        published_subject=published_subject,
+        parser_sha256=hashlib.sha256((product_root/'updater/source.py').read_bytes()).hexdigest(),
         trusted_root_inputs=root_inputs,trusted_root_transport_sha256=hashlib.sha256(trusted_roots).hexdigest())
     values={'gh':gh,'release-manifest.json':manifest,
         'manifest.bundle.json':canonical_json_bytes(_extract_sigstore_bundle(encoded,'release-manifest')),
         'context.json':canonical_json_bytes(context),'trusted-roots.jsonl':trusted_roots}
     for name,data in values.items():
         with (probe/name).open('xb') as stream:stream.write(data)
-    return {'development-probe/'+name:'sha256:'+hashlib.sha256(data).hexdigest() for name,data in values.items()}
+    return {**additions,**{'development-probe/'+name:'sha256:'+hashlib.sha256(data).hexdigest() for name,data in values.items()}}
 
 
 def run():
@@ -60,20 +74,22 @@ def run():
     root=Path(__file__).resolve().parents[1]
     probe=root/'development-probe'
     context=json.loads((probe/'context.json').read_bytes())
+    product_root=probe/'published-product' if context['published_subject'] else root
     if sys.platform!='linux' or os.geteuid()==0:
         raise ValueError('DEVELOPMENT_UNPRIVILEGED_LINUX_REQUIRED')
-    for path,key in ((root/'updater/source.py','parser_sha256'),(probe/'gh','gh_sha256'),
+    for path,key in ((product_root/'updater/source.py','parser_sha256'),(probe/'gh','gh_sha256'),
         (probe/'release-manifest.json','manifest_sha256'),
         (probe/'trusted-roots.jsonl','trusted_root_transport_sha256')):
         if hashlib.sha256(path.read_bytes()).hexdigest()!=context[key]:
             raise ValueError('DEVELOPMENT_PROBE_INPUT_CHANGED')
+    sys.path.insert(0,str(product_root))
     from installer.offline_python_runtime import install_wheel_runtime
     runtime=probe/'python-runtime'
-    install_wheel_runtime(root/'wheelhouse',runtime)
+    install_wheel_runtime(product_root/'wheelhouse',runtime)
     sys.path.insert(1,str(runtime))
     from updater.source import GitHubReleaseSource
     imported=Path(sys.modules['updater.source'].__file__).resolve(strict=True)
-    if imported!=root/'updater/source.py':
+    if imported!=product_root/'updater/source.py':
         raise ValueError('DEVELOPMENT_PROBE_MODULE_SHADOWED')
     gh=probe/'gh'
     gh.chmod(0o700)
@@ -98,7 +114,7 @@ def run():
     completed=subprocess.run(command,env=environment,stdin=subprocess.DEVNULL,capture_output=True,timeout=90)
     if completed.returncode!=0 or not 0<len(completed.stdout)<=8*1024*1024:
         print(json.dumps({**context,'result':'FAIL','failure_code':'DEVELOPMENT_LINUX_GH_VERIFICATION_FAILED',
-            'purpose':'DEVELOPMENT_ONLY','gh_returncode':completed.returncode,
+            'purpose':context['purpose'],'gh_returncode':completed.returncode,
             'public_gh_error':completed.stderr.decode('utf-8',errors='replace')[:4096],
             'sudo_capture_attempts':0,'formal_authority_granted':False},sort_keys=True))
         return
@@ -107,7 +123,7 @@ def run():
         'sha256:'+context['manifest_sha256'],expected_workflow='.github/workflows/release.yml',expected_source_commit=sha)
     if parsed!=(sha,sha):
         raise ValueError('DEVELOPMENT_LINUX_PARSER_MISMATCH')
-    report={**context,'result':'PASS','purpose':'DEVELOPMENT_ONLY','platform':'linux/amd64',
+    report={**context,'result':'PASS','purpose':context['purpose'],'platform':'linux/amd64',
         'gh_returncode':completed.returncode,'gh_version_output':version.stdout.decode('utf-8'),
         'gh_output_sha256':hashlib.sha256(completed.stdout).hexdigest(),'gh_output':output,
         'module_path':str(imported),'sudo_capture_attempts':0,'formal_authority_granted':False}

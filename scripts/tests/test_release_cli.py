@@ -36,10 +36,11 @@ WEB_DIGEST = "sha256:" + "4" * 64
 class ReleaseCliTests(unittest.TestCase):
     def run_cli(self, *arguments, expected=0):
         completed = subprocess.run(
-            [sys.executable, "-m", "release.cli", *map(str, arguments)],
+            [sys.executable, "-X", "utf8", "-m", "release.cli", *map(str, arguments)],
             cwd=ROOT,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
         )
         self.assertEqual(completed.returncode, expected, completed.stderr or completed.stdout)

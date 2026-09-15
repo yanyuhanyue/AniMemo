@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -15,14 +16,18 @@ from scripts.isolated_guest_validation import _check_checkout, _controller_clone
 
 
 def run(args):
-    if args.authorization_id!=DEVELOPMENT_AUTHORIZATION or args.output.exists() or not args.output.is_absolute():
+    published=getattr(args,'published_subject',False)
+    valid_scope=(type(args.authorization_id) is str and re.fullmatch(r'ANIMEMO_PUBLISHED_LINUX_PROBE_[A-Z0-9_]{1,96}',args.authorization_id)
+        if published else args.authorization_id==DEVELOPMENT_AUTHORIZATION)
+    if not valid_scope or args.output.exists() or not args.output.is_absolute():
         raise h.CandidateHarnessError('DEVELOPMENT_LINUX_PROBE_SCOPE_INVALID')
     checkout=Path(__file__).resolve().parents[1]
     sha=subprocess.check_output(['git','-C',str(checkout),'rev-parse','HEAD'],timeout=30).decode().strip()
     tree=subprocess.check_output(['git','-C',str(checkout),'rev-parse','HEAD^{tree}'],timeout=30).decode().strip()
     _check_checkout(sha,tree)
     require_material_compatibility(args.material_source_sha,sha)
-    result={'purpose':'DEVELOPMENT_ONLY','operation':'LINUX_ATTESTATION_TOOL_PROBE',
+    purpose='PUBLISHED_PRODUCT_PREFLIGHT_ONLY' if published else 'DEVELOPMENT_ONLY'
+    result={'purpose':purpose,'operation':'LINUX_ATTESTATION_TOOL_PROBE',
         'execution_source_sha':sha,'execution_source_tree':tree,'sudo_capture_attempts':0,
         'installer_executions':0,'candidate_acceptance_authority_granted':False,'formal_authority_granted':False,
         'status':'ERROR'}
@@ -33,7 +38,7 @@ def run(args):
                 _state_root=args.candidate_state) as material:
                 with provider.bind_candidate_material_authority(material):
                     with acquire_development_source(provider,source_sha=sha,source_tree=tree,
-                        attestation_probe_inputs={'linux_gh':args.linux_gh,'sidecar':args.sidecar}) as source:
+                        attestation_probe_inputs={'linux_gh':args.linux_gh,'sidecar':args.sidecar,'published_subject':published}) as source:
                         base=h.build_harness_plan(verified_candidate_digest=args.verified_candidate_digest,
                             expected_qualification_run_id=args.qualification_run_id,
                             expected_source_sha=args.material_source_sha,expected_source_tree=args.material_source_tree,
@@ -41,6 +46,15 @@ def run(args):
                         plan=from_material_plan(base,execution_source_sha=sha,execution_source_tree=tree,
                             execution_inventory_digest=source.inventory_digest)
                         result['plan']=plan.as_dict()
+                        if published:
+                            from scripts.guest_console_capture import WindowsConsoleCapture
+                            WindowsConsoleCapture().confirm_batch(json.dumps(dict(
+                                purpose=purpose,authorization_id=args.authorization_id,
+                                sudo_capture_attempts=0,installer_executions=0,
+                                qualification_run_id=args.qualification_run_id,
+                                subject_source_sha=args.material_source_sha,tool_source_sha=sha,
+                                plan_digest=plan.plan_digest,profile=plan.profiles[0].as_dict()),sort_keys=True))
+                            result['local_tool_confirmation']='CONFIRMED_ZERO_CREDENTIAL_PROBE'
                         with _controller_clone(provider,plan,result) as (profile,lease,disk,snapshot):
                             authority=provider._active_profile_authority(profile,plan)
                             verified=provider._verify_bootstrap_connection(authority,profile,
@@ -70,7 +84,7 @@ def run(args):
                                 raise h.CandidateHarnessError('DEVELOPMENT_LINUX_PROBE_OUTPUT_INVALID')
                             report=json.loads(completed.stdout,object_pairs_hook=h.reject_duplicate_json_keys)
                             result['linux_attestation']=report
-                            if (report.get('result')!='PASS' or report.get('purpose')!='DEVELOPMENT_ONLY'
+                            if (report.get('result')!='PASS' or report.get('purpose')!=purpose
                                     or report.get('execution_source_sha')!=sha
                                     or report.get('subject_source_sha')!=args.material_source_sha
                                     or report.get('sudo_capture_attempts')!=0 or report.get('formal_authority_granted') is not False):
@@ -94,6 +108,8 @@ def run(args):
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--authorization-id',required=True)
+    parser.add_argument('--published-subject',action='store_true',
+        help='New locally confirmed zero-credential probe importing the exact Q product, before future Formal')
     parser.add_argument('--verified-candidate-digest',required=True)
     parser.add_argument('--qualification-run-id',required=True,type=int)
     parser.add_argument('--material-source-sha',required=True)

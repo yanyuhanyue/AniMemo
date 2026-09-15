@@ -1142,7 +1142,7 @@ class ClosedFormalVmProfileExecutor:
                     self._batch = CandidateBatch(self._provider,self._plan,
                         authorization_id=self._local_authorization_id,local_authorization=self._local_authorization)
                 except (ControllerFailure,ConsoleCaptureError) as error:
-                    raise FormalProducerError(error.code) from error
+                    raise FormalProducerError(getattr(error,'code',str(error))) from error
                 self._provider._candidate_batch = self._batch
             self._authority_identity = authority.identity
         if self._authority_identity != authority.identity:
