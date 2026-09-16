@@ -15,7 +15,8 @@ from scripts.guest_sudo_session import ControllerFailure
 
 class CandidateCliConfirmationTests(unittest.TestCase):
     def run_entry(self, *, confirm=True, authorization='ANIMEMO_NEW_CANDIDATE_TEST_SCOPE',
-                  confirmation_error=None, batch_error=None, cleanup_error=None, real_confirmation=False):
+                  confirmation_error=None, batch_error=None, cleanup_error=None, real_confirmation=False,
+                  command_preflight_error=None):
         temporary=tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         output=Path(temporary.name)/'result.json'
@@ -45,8 +46,11 @@ class CandidateCliConfirmationTests(unittest.TestCase):
         from contextlib import ExitStack
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(h.ClosedVmwareProvider,'execution_authority',return_value=nullcontext()))
+            stack.enter_context(mock.patch.object(h.ClosedVmwareProvider,'bind_candidate_material_authority',return_value=nullcontext()))
             stack.enter_context(mock.patch.object(h,'acquire_candidate_material_authority',return_value=nullcontext(object())))
             stack.enter_context(mock.patch.object(h,'build_harness_plan',return_value=plan))
+            stack.enter_context(mock.patch('scripts.candidate_guest_session.preflight_candidate_workload_commands',
+                return_value={'synthetic': True}, side_effect=command_preflight_error))
             executor=stack.enter_context(mock.patch.object(h,'execute_harness_plan',side_effect=execute))
             stack.enter_context(mock.patch('scripts.isolated_guest_validation._check_checkout'))
             preflight=stack.enter_context(mock.patch('scripts.guest_console_capture.WindowsConsoleCapture.preflight'))
@@ -67,6 +71,7 @@ class CandidateCliConfirmationTests(unittest.TestCase):
         self.assertEqual(code,0)
         self.assertEqual(events,['confirm','batch','execute','batch-close','scope-close'])
         self.assertEqual(result['batch_confirmation'],scope.body)
+        self.assertEqual(result['workload_command_preflight'],{'synthetic':True})
         scope.close.assert_called_once_with()
 
     def test_new_scope_without_native_confirmation_flag_rejects_before_preflight(self):
@@ -75,6 +80,14 @@ class CandidateCliConfirmationTests(unittest.TestCase):
         self.assertEqual(result['failure_code'],'CANDIDATE_CAPTURE_AUTHORIZATION_INVALID')
         self.assertEqual(events,[])
         factory.assert_not_called();executor.assert_not_called();preflight.assert_not_called()
+
+    def test_command_budget_failure_precedes_native_confirmation_and_batch(self):
+        code,result,events,scope,factory,executor,_=self.run_entry(
+            command_preflight_error=ControllerFailure('CANDIDATE_WORKLOAD_COMMAND_LIMIT_EXCEEDED'))
+        self.assertEqual(code,2)
+        self.assertEqual(result['failure_code'],'CANDIDATE_WORKLOAD_COMMAND_LIMIT_EXCEEDED')
+        self.assertEqual(events,[])
+        factory.assert_not_called();executor.assert_not_called();scope.close.assert_not_called()
 
     def test_native_cancel_never_constructs_batch_or_executes(self):
         code,result,events,scope,factory,executor,_=self.run_entry(

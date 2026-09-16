@@ -197,6 +197,21 @@ def _diagnostic_operation(plan, profile):
         profile=profile.profile, session_id=plan.session_id)))
 
 
+def preflight_candidate_workload_commands(provider, plan):
+    """Check each exact held-material command before consuming native consent."""
+    profiles = {}
+    for profile in plan.profiles:
+        root = _root_program(provider, plan, profile, h._initial_platform_state(profile.profile))
+        remote = _remote_workload_command(root, _diagnostic_operation(plan, profile))
+        authority = provider._active_profile_authority(profile, plan)
+        argv = provider._ssh_argv(authority, remote)
+        budget = validate_workload_command_budget((str(provider._tool_path(h.SSH)), *argv[1:]))
+        profiles[profile.profile] = dict(root_program_utf8_bytes=len(root.encode('utf-8')),
+            remote_command_utf8_bytes=len(remote.encode('utf-8')), **budget)
+    return dict(schema='animemo.candidate-workload-command-preflight/v1',
+        plan_digest=plan.plan_digest, profiles=profiles, secret_capture_required=False)
+
+
 def _remote_workload_command(root_program, operation, *, formal_ssh_context=False):
     # Only public identity and a bounded receipt reach stdout. The mutable
     # password is wiped immediately after one forwarding write, before wait.
