@@ -800,6 +800,10 @@ class CandidateVmHarnessTests(unittest.TestCase):
             harness.ClosedVmwareProvider,
             "execution_authority",
             return_value=nullcontext(),
+        ), mock.patch.object(
+            harness.ClosedVmwareProvider, "bind_candidate_material_authority", return_value=nullcontext(),
+        ), mock.patch(
+            "scripts.candidate_guest_session.preflight_candidate_workload_commands", return_value={'synthetic': True},
         ), mock.patch(
             "scripts.candidate_vm_harness.acquire_candidate_material_authority",
             return_value=nullcontext(SimpleNamespace()),

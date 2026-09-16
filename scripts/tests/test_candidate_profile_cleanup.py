@@ -223,7 +223,9 @@ class ProfileCleanupTests(unittest.TestCase):
             raise h.CandidateHarnessError('R2_PLUGIN_RESPONSE_TIMEOUT')
         with (mock.patch.object(h, 'ClosedVmwareProvider', return_value=self.provider),
               mock.patch.object(self.provider, 'execution_authority', return_value=nullcontext()) as authority,
+              mock.patch.object(self.provider, 'bind_candidate_material_authority', return_value=nullcontext()),
               mock.patch.object(h, 'build_harness_plan', return_value=plan),
+              mock.patch('scripts.candidate_guest_session.preflight_candidate_workload_commands', return_value={'synthetic': True}),
               mock.patch.object(h, 'execute_harness_plan', side_effect=failed),
               mock.patch.object(h, 'acquire_candidate_material_authority', return_value=nullcontext()),
               mock.patch('scripts.isolated_guest_validation._check_checkout'),

@@ -75,8 +75,10 @@ class CandidateResultTests(unittest.TestCase):
             return original(writer,value)
         stdout=io.StringIO() if stdout is None else stdout
         with (mock.patch.object(h.ClosedVmwareProvider,'execution_authority',side_effect=authority),
+              mock.patch.object(h.ClosedVmwareProvider,'bind_candidate_material_authority',return_value=nullcontext()),
               mock.patch.object(h,'acquire_candidate_material_authority',return_value=nullcontext(SimpleNamespace())),
               mock.patch.object(h,'build_harness_plan',return_value=plan),
+              mock.patch('scripts.candidate_guest_session.preflight_candidate_workload_commands',return_value={'synthetic':True}),
               mock.patch.object(h,'execute_harness_plan',side_effect=execute),
               mock.patch('scripts.isolated_guest_validation._check_checkout'),
               mock.patch('scripts.guest_console_capture.WindowsConsoleCapture.preflight'),

@@ -6381,6 +6381,9 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     if not plan.plan_digest:
                         raise CandidateHarnessError('CANDIDATE_HARNESS_PLAN_CONFIRMATION_REQUIRED')
+                    from scripts.candidate_guest_session import preflight_candidate_workload_commands
+                    with provider.bind_candidate_material_authority(material_authority):
+                        result['workload_command_preflight'] = preflight_candidate_workload_commands(provider, plan)
                     local_authorization = None
                     if args.confirm_batch:
                         from scripts.guest_batch_scope import confirm_local_batch
